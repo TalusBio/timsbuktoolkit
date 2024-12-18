@@ -4,7 +4,7 @@ interval: 100ms
 
 env:
   PGO_DATA_DIR: tmp/pgo-data
-  BIN_EXTRAS: "--features build-binary --bin timsquery"
+  BUILD_BIN: "cargo build --features build-binary --bin timsquery"
 
 tasks:
   default:
@@ -18,16 +18,24 @@ tasks:
       - task: fmt
       - task: clippy
 
+  build:
+    deps: [test, fmt, clippy]
+    sources:
+      - "src/**/*.rs"
+    cmds:
+      - task: bin-build
+      - task: lib-build
+
   bin-build:
     cmds:
-      - cargo build $BIN_EXTRAS
+      -  $BUILD_BIN
 
   bin-build-release:
     deps: [test, fmt]
     sources:
       - "src/**/*.rs"
     cmds:
-      - cargo b --release --features build-binary --bin timsquery
+      - $BUILD_BIN --release
 
   lib-build:
     cmds:
@@ -125,13 +133,13 @@ tasks:
       - mkdir -p $PGO_DATA_DIR
       - rm -rf $PGO_DATA_DIR/*
       - rm -f ./target/release/timsquery
-      - RUSTFLAGS="-Cprofile-generate=$PGO_DATA_DIR" cargo build --release $BIN_EXTRAS
+      - RUSTFLAGS="-Cprofile-generate=$PGO_DATA_DIR" $BIN_BUILD --release
       - ./target/release/timsquery query-index --raw-file-path $TIMS_DATA_FILE --tolerance-settings-path "templates/tolerance_settings.json" --elution-groups-path "templates/elution_groups.json" --output-path . --pretty --index transposed-quad-index --aggregator chromato-mobilogram-stat
       # TODO add more data/run types.
       # - ./target/release/timsquery mydata2.csv
       # - ./target/release/timsquery mydata3.csv
       - ls -lcth $PGO_DATA_DIR
       - $PROFDATA_EXE merge -o $PGO_DATA_DIR/merged.profdata $PGO_DATA_DIR && ls -lcth $PGO_DATA_DIR
-      - RUSTFLAGS="-Cprofile-use=${PWD}/${PGO_DATA_DIR}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo build $BIN_EXTRAS --release
+      - RUSTFLAGS="-Cprofile-use=${PWD}/${PGO_DATA_DIR}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" $BIN_BUILD --release
       - ./target/release/timsquery  query-index --raw-file-path $TIMS_DATA_FILE --tolerance-settings-path "templates/tolerance_settings.json" --elution-groups-path "templates/elution_groups.json" --output-path . --pretty --index transposed-quad-index --aggregator chromato-mobilogram-stat
       # TODO make this multi-platform

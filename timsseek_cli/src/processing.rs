@@ -1,27 +1,7 @@
-use crate::config::{
+use super::config::{
     AnalysisConfig,
     DigestionConfig,
     OutputConfig,
-};
-use crate::data_sources::speclib::Speclib;
-use crate::digest::digestion::{
-    DigestionEnd,
-    DigestionParameters,
-    DigestionPattern,
-};
-use crate::errors::TimsSeekError;
-use crate::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
-use crate::models::{
-    DigestSlice,
-    DigestedSequenceIterator,
-    NamedQueryChunk,
-    deduplicate_digests,
-};
-use crate::protein::fasta::ProteinSequenceCollection;
-use crate::scoring::search_results::{
-    IonSearchResults,
-    write_results_to_csv,
 };
 use indicatif::{
     ProgressIterator,
@@ -39,6 +19,26 @@ use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::DefaultTolerance;
+use timsseek::data_sources::speclib::Speclib;
+use timsseek::digest::digestion::{
+    DigestionEnd,
+    DigestionParameters,
+    DigestionPattern,
+};
+use timsseek::errors::TimsSeekError;
+use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
+use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
+use timsseek::models::{
+    DigestSlice,
+    DigestedSequenceIterator,
+    NamedQueryChunk,
+    deduplicate_digests,
+};
+use timsseek::protein::fasta::ProteinSequenceCollection;
+use timsseek::scoring::search_results::{
+    IonSearchResults,
+    write_results_to_csv,
+};
 
 pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
@@ -130,7 +130,7 @@ pub fn main_loop<'a>(
 
 pub fn process_fasta(
     path: PathBuf,
-    index: &QuadSplittedTransposedIndex,
+    index: &QuadSplittedTransposedIndex, // TODO: Make generic
     factory: &MultiCMGStatsFactory<SafePosition>,
     digestion: DigestionConfig,
     analysis: &AnalysisConfig,

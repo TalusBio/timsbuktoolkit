@@ -281,6 +281,7 @@ mod tests {
     fn test_deduplicate_digests() {
         let seq: Arc<str> = "PEPTIDEPINKTOMATOTOMATO".into();
         let seq2: Arc<str> = "PEPTIDEPINKTOMATO".into();
+        let seq2_rep: Arc<str> = "PEPTIDEPINKTOMATO".into();
         let digests: Vec<DigestSlice> = vec![
             DigestSlice {
                 ref_seq: seq.clone(),
@@ -295,6 +296,11 @@ mod tests {
             DigestSlice {
                 ref_seq: seq2.clone(),
                 range: 0..seq2.as_ref().len(),
+                decoy: DecoyMarking::Target,
+            },
+            DigestSlice {
+                ref_seq: seq2_rep.clone(),
+                range: 0..seq2_rep.as_ref().len(),
                 decoy: DecoyMarking::Target,
             },
         ];

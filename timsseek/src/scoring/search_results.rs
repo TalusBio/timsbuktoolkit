@@ -1,13 +1,18 @@
-use serde::Serialize;
 use crate::errors::TimsSeekError;
-use crate::models::DigestSlice;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::multi_chromatogram_agg::{NaturalFinalizedMultiCMGStatsArrays, ApexScores};
-use timsquery::ElutionGroup;
-use std::path::Path;
+use crate::models::{
+    DecoyMarking,
+    DigestSlice,
+};
 use csv::Writer;
+use serde::Serialize;
+use std::path::Path;
 use std::time::Instant;
-use crate::models::DecoyMarking;
+use timsquery::ElutionGroup;
+use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::{
+    ApexScores,
+    NaturalFinalizedMultiCMGStatsArrays,
+};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct PrecursorData {

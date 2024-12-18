@@ -1,14 +1,18 @@
+mod cli;
+mod config;
+mod processing;
+
 use clap::Parser;
 use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsseek::cli::Cli;
-use timsseek::config::{
+use timsseek::errors::TimsSeekError;
+use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
+
+use cli::Cli;
+use config::{
     Config,
     InputConfig,
 };
-use timsseek::errors::TimsSeekError;
-use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
-use timsseek::processing;
 
 fn main() -> std::result::Result<(), TimsSeekError> {
     // Initialize logging

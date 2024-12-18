@@ -256,8 +256,6 @@ mod tests {
 
     #[test]
     fn test_converter() {
-        let seq = "PEPTIDEPINK/2";
-        let fragment_mass_builder = FragmentMassBuilder::default();
         let converter = SequenceToElutionGroupConverter {
             precursor_charge_range: 2..=3,
             fragment_buildder: FragmentMassBuilder {

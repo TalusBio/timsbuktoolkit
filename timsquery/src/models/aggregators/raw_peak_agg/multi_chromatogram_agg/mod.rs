@@ -5,6 +5,8 @@ pub mod multi_chromatogram_agg;
 pub mod scored_arrays;
 
 pub use multi_chromatogram_agg::{
+    ApexScores,
     MultiCMGStatsAgg,
     MultiCMGStatsFactory,
+    NaturalFinalizedMultiCMGStatsArrays,
 };
