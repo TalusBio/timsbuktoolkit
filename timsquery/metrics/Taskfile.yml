@@ -1,0 +1,15 @@
+version: "3"
+
+interval: 100ms
+
+env:
+  PGO_DATA_DIR: tmp/pgo-data
+  BIN_EXTRAS: "--features build-binary --bin timsquery"
+
+dotenv: [".env"]
+
+tasks:
+  build:
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - cargo build $BIN_EXTRAS

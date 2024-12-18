@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "timsseek",
+    "timsquery"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Sebastian Paez"]
+license = "MIT"
+
+[workspace.dependencies]
+# Add shared dependencies here if needed
+
+[profile.release]
+lto = 'thin'
+codegen-units = 1
+panic = 'abort'
+opt-level = 3

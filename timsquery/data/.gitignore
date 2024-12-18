@@ -1,0 +1,4 @@
+*.d/
+*.d.zip
+*.d.tar
+benchmark_results_*.json

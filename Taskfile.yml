@@ -1,0 +1,29 @@
+version: "3"
+
+interval: 100ms
+
+# Include child Taskfiles
+includes:
+  timsquery: ./timsquery
+  timsseek: ./timsseek
+
+tasks:
+  license_check:
+    cmds:
+      - cargo deny check
+
+  test:
+    cmds:
+      - cargo test
+
+  fmt:
+    cmds:
+      - cargo +nightly fmt
+
+  clippy:
+    cmds:
+      - cargo clippy {{.CLI_ARGS}}
+
+  bench:
+    cmds:
+      - task: timsquery:bench
