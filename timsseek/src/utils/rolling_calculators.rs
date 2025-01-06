@@ -1,8 +1,7 @@
-use crate::utils::math::lnfact;
-// Rolling median calculator
-
 pub struct RollingMedianCalculator<T: PartialOrd + Copy + Clone> {
     window_size: usize,
+    // TODO: Evaluate if using a different data structure
+    // is better. (heap? fixed size array?)
     data: Vec<(T, usize)>,
     index: usize,
 }
@@ -55,17 +54,6 @@ pub fn rolling_median<T: PartialOrd + Copy + Clone>(
         }
     }
     out
-}
-
-pub fn calculate_lazy_hyperscore(npeaks: &[u8], summed_intensity: &[u64]) -> Vec<f64> {
-    let mut scores = vec![0.0; npeaks.len()];
-    for i in 0..npeaks.len() {
-        let npeaks_i = npeaks[i];
-        let summed_intensity_i = summed_intensity[i];
-        let log1p_intensities_i = (summed_intensity_i as f64 + 1.0).ln();
-        scores[i] = lnfact(npeaks_i as u16) + (2.0 * log1p_intensities_i);
-    }
-    scores
 }
 
 pub fn calculate_value_vs_baseline(vals: &[f64], baseline_window_size: usize) -> Vec<f64> {

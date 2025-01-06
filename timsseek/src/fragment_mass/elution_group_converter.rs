@@ -1,4 +1,8 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
+use crate::data_sources::speclib::{
+    ExpectedIntensities,
+    ReferenceEG,
+};
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
@@ -101,7 +105,14 @@ impl SequenceToElutionGroupConverter {
         &self,
         sequence: &str,
         id: u64,
-    ) -> Result<(Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
+    ) -> Result<
+        (
+            Vec<ElutionGroup<SafePosition>>,
+            Vec<ExpectedIntensities>,
+            Vec<u8>,
+        ),
+        CustomError,
+    > {
         let mut peptide = LinearPeptide::pro_forma(sequence)?;
         let pep_formulas = peptide.formulas();
         let (pep_mono_mass, pep_formula) = if pep_formulas.len() > 1 {
@@ -123,7 +134,8 @@ impl SequenceToElutionGroupConverter {
             expected_prec_inten[1 + ii] = *isot
         }
 
-        let mut out = Vec::new();
+        let mut out_eg = Vec::new();
+        let mut out_exp_int = Vec::new();
         let mut out_charges = Vec::new();
 
         for charge in self.precursor_charge_range.clone() {
@@ -153,21 +165,25 @@ impl SequenceToElutionGroupConverter {
             let fragment_expect_inten =
                 HashMap::from_iter(fragment_mzs.iter().map(|(k, _, v)| (*k, *v)));
             let fragment_mzs = HashMap::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
-
-            out.push(ElutionGroup {
+            let eg = ElutionGroup {
                 id,
                 precursor_mzs,
                 mobility: mobility as f32,
                 rt_seconds: 0.0f32,
                 // precursor_charge: charge,
                 fragment_mzs,
-                expected_fragment_intensity: Some(fragment_expect_inten),
-                expected_precursor_intensity: Some(expected_prec_inten.clone()),
-            });
+            };
+            let ei = ExpectedIntensities {
+                fragment_intensities: fragment_expect_inten,
+                precursor_intensities: expected_prec_inten.clone(),
+            };
+
+            out_eg.push(eg);
+            out_exp_int.push(ei);
             out_charges.push(charge);
         }
 
-        Ok((out, out_charges))
+        Ok((out_eg, out_exp_int, out_charges))
     }
 
     pub fn convert_sequences<'a>(
@@ -177,11 +193,12 @@ impl SequenceToElutionGroupConverter {
         (
             Vec<&'a DigestSlice>,
             Vec<ElutionGroup<SafePosition>>,
+            Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
         CustomError,
     > {
-        let (seqs, (eg, crg)) = sequences
+        let (seqs, (eg, (ei, crg))) = sequences
             .par_iter()
             .enumerate()
             .flat_map(|(id, dig_slice)| {
@@ -191,7 +208,7 @@ impl SequenceToElutionGroupConverter {
                     Ok(x) => {
                         let expanded_sequence: Vec<&DigestSlice> =
                             (0..(x.0.len())).map(|_x| dig_slice).collect();
-                        Some((expanded_sequence, (x.0, x.1)))
+                        Some((expanded_sequence, (x.0, (x.1, x.2))))
                     }
                     Err(e) => {
                         warn!("Error converting sequence {:?}, err: {:?}", sequence, e);
@@ -201,7 +218,7 @@ impl SequenceToElutionGroupConverter {
             })
             .flatten()
             .collect();
-        Ok((seqs, eg, crg))
+        Ok((seqs, eg, ei, crg))
     }
 
     pub fn convert_enumerated_sequences<'a>(
@@ -211,11 +228,12 @@ impl SequenceToElutionGroupConverter {
         (
             Vec<&'a DigestSlice>,
             Vec<ElutionGroup<SafePosition>>,
+            Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
         CustomError,
     > {
-        let (seqs, (eg, crg)) = enum_sequences
+        let (seqs, (eg, (ei, crg))) = enum_sequences
             .par_iter()
             .flat_map(|(i, s)| {
                 let sequence: String = s.clone().into();
@@ -224,7 +242,7 @@ impl SequenceToElutionGroupConverter {
                     Ok(x) => {
                         let expanded_sequence: Vec<&DigestSlice> =
                             (0..(x.0.len())).map(|_x| s).collect();
-                        Some((expanded_sequence, (x.0, x.1)))
+                        Some((expanded_sequence, (x.0, (x.1, x.2))))
                     }
                     Err(e) => {
                         error!("Error converting sequence {:?}, err: {:?}", s, e);
@@ -234,7 +252,7 @@ impl SequenceToElutionGroupConverter {
             })
             .flatten()
             .collect();
-        Ok((seqs, eg, crg))
+        Ok((seqs, eg, ei, crg))
     }
 }
 

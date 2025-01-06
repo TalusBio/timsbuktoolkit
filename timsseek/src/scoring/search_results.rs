@@ -1,198 +1,214 @@
-use crate::errors::TimsSeekError;
+use super::calculate_scores::{
+    LocalizedPreScore,
+    MainScore,
+    PreScore,
+    SortedErrors,
+};
+use crate::errors::{
+    DataProcessingError,
+    Result,
+    TimsSeekError,
+};
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
 };
-use csv::Writer;
+use csv::WriterBuilder;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 use timsquery::ElutionGroup;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::{
-    ApexScores,
-    NaturalFinalizedMultiCMGStatsArrays,
-};
+use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::arrays::PartitionedCMGArrayStats;
 
-#[derive(Debug, Serialize, Clone)]
-pub struct PrecursorData {
-    pub charge: u8,
-    pub mz: f64,
-    pub mobility: f32,
-    pub rt: f32,
+#[derive(Debug, Default)]
+pub struct SearchResultBuilder<'q> {
+    digest_slice: Option<&'q DigestSlice>,
+    ref_eg: Option<&'q ElutionGroup<SafePosition>>,
+    decoy_marking: Option<DecoyMarking>,
+    charge: Option<u8>,
+
+    main_score: Option<f32>,
+    rt_seconds: Option<f32>,
+    observed_mobility: Option<f32>,
+
+    npeaks: Option<u8>,
+    lazyerscore: Option<f32>,
+    // lazyerscore_vs_baseline: Option<f32>,
+    // norm_lazyerscore_vs_baseline: Option<f32>,
+    ms2_cosine_ref_similarity: Option<f32>,
+    ms2_coelution_score: Option<f32>,
+    ms2_summed_transition_intensity: Option<f32>,
+
+    ms2_mz_errors: Option<[f32; 7]>,
+    ms2_mobility_errors: Option<[f32; 7]>,
+
+    ms1_cosine_ref_similarity: Option<f32>,
+    ms1_coelution_score: Option<f32>,
+    ms1_summed_precursor_intensity: Option<f32>,
+
+    ms1_mz_errors: Option<[f32; 3]>,
+    ms1_mobility_errors: Option<[f32; 3]>,
+}
+
+impl<'q> SearchResultBuilder<'q> {
+    pub fn with_localized_pre_score(self, pre_score: &'q LocalizedPreScore) -> Self {
+        self.with_pre_score(&pre_score.pre_score)
+            .with_sorted_errors(&pre_score.inten_sorted_errors())
+            .with_main_score(pre_score.main_score)
+    }
+
+    fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
+        self.digest_slice = Some(pre_score.digest);
+        self.ref_eg = Some(&pre_score.reference);
+        self.decoy_marking = Some(pre_score.decoy);
+        self.charge = Some(pre_score.charge);
+        self
+    }
+
+    fn with_sorted_errors(mut self, sorted_errors: &SortedErrors) -> Self {
+        self.ms1_mz_errors = Some(sorted_errors.ms1_mz_errors);
+        self.ms1_mobility_errors = Some(sorted_errors.ms1_mobility_errors);
+        self.ms2_mz_errors = Some(sorted_errors.ms2_mz_errors);
+        self.ms2_mobility_errors = Some(sorted_errors.ms2_mobility_errors);
+        self
+    }
+
+    fn with_main_score(mut self, main_score: MainScore) -> Self {
+        self.main_score = Some(main_score.score);
+        self.observed_mobility = Some(main_score.observed_mobility);
+        self.rt_seconds = Some(main_score.retention_time_ms as f32 / 1000.0);
+        self.ms2_cosine_ref_similarity = Some(main_score.ms2_cosine_ref_sim);
+        self.ms2_coelution_score = Some(main_score.ms2_coelution_score);
+        self.ms1_coelution_score = Some(main_score.ms1_coelution_score);
+        self.ms1_cosine_ref_similarity = Some(main_score.ms1_cosine_ref_sim);
+        self.lazyerscore = Some(main_score.lazyscore);
+        self.npeaks = Some(main_score.npeaks);
+        self.ms1_summed_precursor_intensity = Some(main_score.ms1_summed_intensity);
+        self.ms2_summed_transition_intensity = Some(main_score.ms2_summed_intensity);
+
+        self
+    }
+
+    pub fn finalize(self) -> Result<IonSearchResults> {
+        let [mz1_e0, mz1_e1, mz1_e2] = self.ms1_mz_errors.unwrap();
+        let [mz2_e0, mz2_e1, mz2_e2, mz2_e3, mz2_e4, mz2_e5, mz2_e6] = self.ms2_mz_errors.unwrap();
+
+        let [mob1_e0, mob1_e1, mob1_e2] = self.ms1_mobility_errors.unwrap();
+        let [
+            mob2_e0,
+            mob2_e1,
+            mob2_e2,
+            mob2_e3,
+            mob2_e4,
+            mob2_e5,
+            mob2_e6,
+        ] = self.ms2_mobility_errors.unwrap();
+
+        let ref_eg = self.ref_eg.unwrap();
+        // TODO replace this with exhaustive unpacking.
+
+        let results = IonSearchResults {
+            sequence: String::from(self.digest_slice.unwrap().clone()),
+            precursor_mz: ref_eg.precursor_mzs[1],
+            precursor_charge: self.charge.unwrap(),
+            precursor_mobility_query: ref_eg.mobility,
+            precursor_rt_query_seconds: ref_eg.rt_seconds,
+            is_target: self.decoy_marking.unwrap().is_target(),
+            main_score: self.main_score.unwrap(),
+            obs_rt_seconds: self.rt_seconds.unwrap(),
+            obs_mobility: self.observed_mobility.unwrap(),
+            npeaks: self.npeaks.unwrap(),
+            lazyerscore: self.lazyerscore.unwrap(),
+            // lazyerscore_vs_baseline: self.lazyerscore_vs_baseline.unwrap(),
+            // norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.unwrap(),
+            ms2_cosine_ref_similarity: self.ms2_cosine_ref_similarity.unwrap(),
+            ms2_summed_transition_intensity: self.ms2_summed_transition_intensity.unwrap(),
+            ms2_mz_error_0: mz2_e0,
+            ms2_mz_error_1: mz2_e1,
+            ms2_mz_error_2: mz2_e2,
+            ms2_mz_error_3: mz2_e3,
+            ms2_mz_error_4: mz2_e4,
+            ms2_mz_error_5: mz2_e5,
+            ms2_mz_error_6: mz2_e6,
+            ms2_mobility_error_0: mob2_e0,
+            ms2_mobility_error_1: mob2_e1,
+            ms2_mobility_error_2: mob2_e2,
+            ms2_mobility_error_3: mob2_e3,
+            ms2_mobility_error_4: mob2_e4,
+            ms2_mobility_error_5: mob2_e5,
+            ms2_mobility_error_6: mob2_e6,
+            ms2_coelution_score: self.ms2_coelution_score.unwrap(),
+            ms1_cosine_ref_similarity: self.ms1_cosine_ref_similarity.unwrap(),
+            ms1_summed_precursor_intensity: self.ms1_summed_precursor_intensity.unwrap(),
+            ms1_mz_error_0: mz1_e0,
+            ms1_mz_error_1: mz1_e1,
+            ms1_mz_error_2: mz1_e2,
+            ms1_coelution_score: self.ms1_coelution_score.unwrap(),
+            ms1_mobility_error_0: mob1_e0,
+            ms1_mobility_error_1: mob1_e1,
+            ms1_mobility_error_2: mob1_e2,
+        };
+
+        Ok(results)
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct IonSearchResults {
-    pub sequence: DigestSlice,
-    pub score_data: ApexScores,
-    pub precursor_data: PrecursorData,
-    pub decoy: DecoyMarking,
-}
+    sequence: String,
+    precursor_mz: f64,
+    precursor_charge: u8,
+    precursor_mobility_query: f32,
+    precursor_rt_query_seconds: f32,
+    is_target: bool,
 
-impl IonSearchResults {
-    pub fn new(
-        digest_sequence: DigestSlice,
-        charge: u8,
-        elution_group: &ElutionGroup<SafePosition>,
-        finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
-        decoy: DecoyMarking,
-    ) -> Result<Self, TimsSeekError> {
-        // let score_data = ScoreData::new(finalized_scores, elution_group);
-        let score_data = finalized_scores.finalized_score()?;
-        let precursor_data = PrecursorData {
-            charge,
-            mz: elution_group.precursor_mzs[0],
-            mobility: elution_group.mobility,
-            rt: elution_group.rt_seconds,
-        };
+    // Combined
+    pub main_score: f32,
+    obs_rt_seconds: f32,
+    obs_mobility: f32,
 
-        Ok(Self {
-            sequence: digest_sequence,
-            score_data,
-            precursor_data,
-            decoy,
-        })
-    }
+    // MS2
+    npeaks: u8,
+    lazyerscore: f32,
+    // lazyerscore_vs_baseline: f32,
+    // norm_lazyerscore_vs_baseline: f32,
+    ms2_cosine_ref_similarity: f32,
+    ms2_coelution_score: f32,
+    ms2_summed_transition_intensity: f32,
 
-    pub fn get_csv_labels() -> [&'static str; 22] {
-        let out = {
-            let mut whole: [&'static str; 22] = [""; 22];
-            let (id_sec, score_sec) = whole.split_at_mut(6);
-            id_sec.copy_from_slice(&Self::get_info_labels());
-            score_sec.copy_from_slice(&Self::get_scoring_labels());
-            whole
-        };
-        out
-    }
+    // MS2 - Split
+    // Flattening manually bc serde(flatten)
+    // is not supported by csv ...
+    // https://github.com/BurntSushi/rust-csv/pull/223
+    ms2_mz_error_0: f32,
+    ms2_mz_error_1: f32,
+    ms2_mz_error_2: f32,
+    ms2_mz_error_3: f32,
+    ms2_mz_error_4: f32,
+    ms2_mz_error_5: f32,
+    ms2_mz_error_6: f32,
+    ms2_mobility_error_0: f32,
+    ms2_mobility_error_1: f32,
+    ms2_mobility_error_2: f32,
+    ms2_mobility_error_3: f32,
+    ms2_mobility_error_4: f32,
+    ms2_mobility_error_5: f32,
+    ms2_mobility_error_6: f32,
 
-    pub fn as_csv_record(&self) -> [String; 22] {
-        let mut out: [String; 22] = core::array::from_fn(|_| "".to_string());
-        let lab_sec = self.get_csv_record_lab_sec();
-        let mut offset = 0;
-        for x in lab_sec.into_iter() {
-            out[offset] = x;
-            offset += 1;
-        }
+    // MS1
+    ms1_cosine_ref_similarity: f32,
+    ms1_coelution_score: f32,
+    ms1_summed_precursor_intensity: f32,
 
-        let ms1_sec = self.get_csv_record_ms1_score_sec();
-        for x in ms1_sec.into_iter() {
-            out[offset] = x;
-            offset += 1;
-        }
-
-        let ms2_sec = self.get_csv_record_ms2_score_sec();
-        for x in ms2_sec.into_iter() {
-            out[offset] = x;
-            offset += 1;
-        }
-
-        assert!(offset == 22);
-        out
-    }
-
-    fn get_info_labels() -> [&'static str; 6] {
-        [
-            "sequence",
-            "precursor_mz",
-            "precursor_charge",
-            "precursor_mobility_query",
-            "precursor_rt_query",
-            "decoy",
-        ]
-    }
-
-    fn get_csv_record_lab_sec(&self) -> [String; 6] {
-        [
-            self.sequence.clone().into(),
-            self.precursor_data.mz.to_string(),
-            self.precursor_data.charge.to_string(),
-            self.precursor_data.mobility.to_string(),
-            self.precursor_data.rt.to_string(),
-            self.decoy.as_str().to_string(),
-        ]
-    }
-
-    fn get_ms2_scoring_labels() -> [&'static str; 11] {
-        [
-            // Combined
-            "lazyerscore",
-            "lazyerscore_vs_baseline",
-            "norm_lazyerscore_vs_baseline",
-            "cosine_similarity",
-            "npeaks",
-            "summed_transition_intensity",
-            "rt_ms",
-            // MS2 - Split
-            "ms2_mz_errors",
-            "ms2_mobility_errors",
-            "ms2_intensity",
-            "main_score",
-        ]
-    }
-
-    fn get_csv_record_ms2_score_sec(&self) -> [String; 11] {
-        let fmt_mz_errors = format!("{:?}", self.score_data.ms2_scores.mz_errors.clone());
-        let fmt_mobility_errors =
-            format!("{:?}", self.score_data.ms2_scores.mobility_errors.clone());
-        let fmt_intensity = format!("{:?}", self.score_data.ms2_scores.transition_intensities);
-
-        [
-            self.score_data.ms2_scores.lazyerscore.to_string(),
-            self.score_data
-                .ms2_scores
-                .lazyerscore_vs_baseline
-                .to_string(),
-            self.score_data
-                .ms2_scores
-                .norm_lazyerscore_vs_baseline
-                .to_string(),
-            self.score_data.ms2_scores.cosine_similarity.to_string(),
-            self.score_data.ms2_scores.npeaks.to_string(),
-            self.score_data.ms2_scores.summed_intensity.to_string(),
-            self.score_data
-                .ms2_scores
-                .retention_time_miliseconds
-                .to_string(),
-            fmt_mz_errors,
-            fmt_mobility_errors,
-            fmt_intensity,
-            self.score_data.main_score.to_string(),
-        ]
-    }
-
-    fn get_ms1_scoring_labels() -> [&'static str; 5] {
-        [
-            "ms1_cosine_similarity",
-            "ms1_summed_precursor_intensity",
-            "ms1_mz_errors",
-            "ms1_mobility_errors",
-            "ms1_intensity",
-        ]
-    }
-
-    fn get_scoring_labels() -> [&'static str; 16] {
-        let mut out: [&'static str; 16] = [""; 16];
-        let (id_sec, score_sec) = out.split_at_mut(5);
-        id_sec.copy_from_slice(&Self::get_ms1_scoring_labels());
-        score_sec.copy_from_slice(&Self::get_ms2_scoring_labels());
-        out
-    }
-
-    fn get_csv_record_ms1_score_sec(&self) -> [String; 5] {
-        let fmt_mz_errors = format!("{:?}", self.score_data.ms1_scores.mz_errors.clone());
-        let fmt_mobility_errors =
-            format!("{:?}", self.score_data.ms1_scores.mobility_errors.clone());
-        let fmt_intensity = format!("{:?}", self.score_data.ms1_scores.transition_intensities);
-
-        [
-            self.score_data.ms1_scores.cosine_similarity.to_string(),
-            self.score_data.ms1_scores.summed_intensity.to_string(),
-            fmt_mz_errors,
-            fmt_mobility_errors,
-            fmt_intensity,
-        ]
-    }
+    // MS1 Split
+    ms1_mz_error_0: f32,
+    ms1_mz_error_1: f32,
+    ms1_mz_error_2: f32,
+    ms1_mobility_error_0: f32,
+    ms1_mobility_error_1: f32,
+    ms1_mobility_error_2: f32,
 }
 
 pub fn write_results_to_csv<P: AsRef<Path>>(
@@ -200,14 +216,12 @@ pub fn write_results_to_csv<P: AsRef<Path>>(
     out_path: P,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
-    let mut writer = Writer::from_path(out_path.as_ref())?;
-
-    // Write the headers
-    writer.write_record(IonSearchResults::get_csv_labels())?;
+    let mut writer = WriterBuilder::default()
+        .has_headers(true)
+        .from_path(out_path.as_ref())?;
 
     for result in results {
-        let record = result.as_csv_record();
-        writer.write_record(&record)?;
+        writer.serialize(result).unwrap();
     }
     writer.flush()?;
     log::info!(

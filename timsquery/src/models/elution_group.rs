@@ -17,8 +17,6 @@ pub struct ElutionGroup<T: Clone + Eq + Serialize + Hash + Send + Sync + std::fm
     pub rt_seconds: f32,
     pub precursor_mzs: Vec<f64>,
     pub fragment_mzs: HashMap<T, f64>,
-    pub expected_fragment_intensity: Option<HashMap<T, f32>>,
-    pub expected_precursor_intensity: Option<Vec<f32>>,
 }
 
 impl<T: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> ElutionGroup<T> {

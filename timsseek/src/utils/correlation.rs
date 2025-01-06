@@ -1,39 +1,46 @@
-use std::f64;
+use std::f32;
 
 use crate::errors::{
     DataProcessingError,
     Result,
 };
 
+// TODO: benchmark how much faster is f32
+
 /// Calculates the cosine similarity between two vectors of the same size.
 ///
 /// # Example
 ///
 /// ```
-/// use timsquery::utils::correlation::cosine_similarity;
+/// use timsseek::utils::correlation::cosine_similarity;
 ///
 /// let a = vec![1.0, 2.0, 3.0];
 /// let b = vec![4.0, 5.0, 6.0];
 /// let result = cosine_similarity(&a, &b).unwrap();
 /// assert_eq!(result, 0.9746318461970762);
 /// ```
-pub fn cosine_similarity(a: &[f64], b: &[f64]) -> Result<f64> {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // Check if vectors have the same length and are not empty
     if a.len() != b.len() || a.is_empty() {
-        return Err(DataProcessingError::ExpectedVectorSameLength(a.len(), b.len()).into());
+        return Err(DataProcessingError::ExpectedSlicesSameLength {
+            expected: a.len(),
+            other: b.len(),
+            context: "cosine_similarity".to_string(),
+        }
+        .into());
     }
 
     // Calculate dot product (numerator)
-    let dot_product: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
 
     // Calculate magnitudes (denominator)
-    let magnitude_a: f64 = a.iter().map(|&x| x * x).sum::<f64>().sqrt();
+    let magnitude_a: f32 = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
 
-    let magnitude_b: f64 = b.iter().map(|&x| x * x).sum::<f64>().sqrt();
+    let magnitude_b: f32 = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
 
     // Avoid division by zero
     if magnitude_a == 0.0 || magnitude_b == 0.0 {
-        return Ok(f64::NAN);
+        return Ok(f32::NAN);
     }
 
     // Calculate cosine similarity
@@ -43,18 +50,18 @@ pub fn cosine_similarity(a: &[f64], b: &[f64]) -> Result<f64> {
 /// Calculates the cosine similarity at every window for two vectors.
 ///
 /// This means that for every window of size `window_size` the cosine similarity
-/// is calculated between the two vectors. (and is padded with f64::NAN)
+/// is calculated between the two vectors. (and is padded with f32::NAN)
 /// The output is a vector of the same length as the input.
 ///
 /// # Example
 ///
 /// ```
-/// use timsquery::utils::correlation::rolling_cosine_similarity;
+/// use timsseek::utils::correlation::rolling_cosine_similarity;
 ///
 /// let a = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
 /// let b = vec![4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0];
-/// let expect_res: [f64; 9] = [
-///     f64::NAN,
+/// let expect_res: [f32; 9] = [
+///     f32::NAN,
 ///     0.97463184, // Note that this is the same as above
 ///     0.97823,
 ///     0.95065,
@@ -62,26 +69,30 @@ pub fn cosine_similarity(a: &[f64], b: &[f64]) -> Result<f64> {
 ///     0.97823,
 ///     0.95065,
 ///     0.97463184,
-///     f64::NAN,
+///     f32::NAN,
 /// ];
 /// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
 /// assert_eq!(results.len(), expect_res.len());
 /// ```
-pub fn rolling_cosine_similarity(a: &[f64], b: &[f64], window_size: usize) -> Result<Vec<f64>> {
+pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Result<Vec<f32>> {
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
-        return Err(DataProcessingError::ExpectedVectorSameLength(a.len(), b.len()).into());
+        return Err(DataProcessingError::ExpectedSlicesSameLength {
+            expected: a.len(),
+            other: b.len(),
+            context: "cosine_similarity".to_string(),
+        }
+        .into());
     }
     if a.len() < window_size {
-        return Err(DataProcessingError::InsufficientData {
-            real: a.len(),
-            expected: window_size,
+        return Err(DataProcessingError::ExpectedNonEmptyData {
+            context: "cosine_similarity".to_string(),
         }
         .into());
     }
 
     let offset = window_size / 2;
-    let mut results = vec![f64::NAN; a.len()];
+    let mut results = vec![f32::NAN; a.len()];
 
     // Initialize the first window
     let mut dot_product = 0.0;
@@ -119,7 +130,7 @@ pub fn rolling_cosine_similarity(a: &[f64], b: &[f64], window_size: usize) -> Re
 }
 
 #[inline(always)]
-fn calculate_similarity(dot_product: f64, sum_a_squared: f64, sum_b_squared: f64) -> f64 {
+fn calculate_similarity(dot_product: f32, sum_a_squared: f32, sum_b_squared: f32) -> f32 {
     let magnitude_a = sum_a_squared.sqrt();
     let magnitude_b = sum_b_squared.sqrt();
 
@@ -151,8 +162,8 @@ mod tests {
 
     #[test]
     fn test_empty_vectors() {
-        let a: Vec<f64> = vec![];
-        let b: Vec<f64> = vec![];
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
         assert!(cosine_similarity(&a, &b).is_err());
     }
 
@@ -172,10 +183,10 @@ mod tests {
 
     #[test]
     fn test_rolling_cosine_similarity() {
-        let a = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
-        let b = vec![4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0];
-        let expect_res: [f64; 9] = [
-            f64::NAN,
+        let a: Vec<f32> = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
+        let b: Vec<f32> = vec![4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0];
+        let expect_res: [f32; 9] = [
+            f32::NAN,
             0.97463184, // Note that this is the same as above
             0.97823,
             0.95065,
@@ -183,7 +194,7 @@ mod tests {
             0.97823,
             0.95065,
             0.97463184,
-            f64::NAN,
+            f32::NAN,
         ];
         let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
         assert_eq!(results.len(), expect_res.len());
@@ -206,7 +217,7 @@ mod tests {
     fn test_rolling_basic() {
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let expect_res: [f64; 4] = [f64::NAN, 1.0, 1.0, f64::NAN];
+        let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, f32::NAN];
         let results = rolling_cosine_similarity(&a, &b, 2).unwrap();
         assert_eq!(results.len(), 4);
         for result in results.iter().zip(expect_res.iter()) {
@@ -249,5 +260,15 @@ mod tests {
         assert!(results[3].is_nan());
         assert_eq!(results[1], 0.0, "{:?}", results);
         assert_eq!(results[2], 1.0, "{:?}", results);
+    }
+
+    #[test]
+    fn test_rolling_zeros_window() {
+        let a = vec![0.0; 20];
+        let b = vec![0.0; 20];
+        let results = rolling_cosine_similarity(&a, &b, 5).unwrap();
+        assert_eq!(results.len(), 20);
+        let expect = vec![f32::NAN, f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::NAN, f32::NAN];
+        assert_eq!(results, expect);
     }
 }

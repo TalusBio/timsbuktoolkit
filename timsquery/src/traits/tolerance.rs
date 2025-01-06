@@ -6,13 +6,17 @@ use serde::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MzToleramce {
+    #[serde(rename = "da")]
     Absolute((f64, f64)),
+    #[serde(rename = "ppm")]
     Ppm((f64, f64)),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RtTolerance {
-    Absolute((f32, f32)),
+    #[serde(rename = "minutes")]
+    Minutes((f32, f32)),
+    #[serde(rename = "percent")]
     Pct((f32, f32)),
     #[default]
     None,
@@ -20,13 +24,16 @@ pub enum RtTolerance {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MobilityTolerance {
+    #[serde(rename = "absolute")]
     Absolute((f32, f32)),
+    #[serde(rename = "percent")]
     Pct((f32, f32)),
     None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QuadTolerance {
+    #[serde(rename = "absolute")]
     Absolute((f32, f32)),
 }
 
@@ -44,7 +51,7 @@ impl Default for DefaultTolerance {
     fn default() -> Self {
         DefaultTolerance {
             ms: MzToleramce::Ppm((20.0, 20.0)),
-            rt: RtTolerance::Absolute((5.0, 5.0)),
+            rt: RtTolerance::Minutes((5.0, 5.0)),
             mobility: MobilityTolerance::Pct((3.0, 3.0)),
             quad: QuadTolerance::Absolute((0.1, 0.1)),
         }
@@ -71,13 +78,13 @@ impl Tolerance for DefaultTolerance {
     }
 
     // TODO add an unit ...
-    fn rt_range(&self, rt: f32) -> Option<(f32, f32)> {
+    fn rt_range(&self, rt_minutes: f32) -> Option<(f32, f32)> {
         match self.rt {
-            RtTolerance::Absolute((low, high)) => Some((rt - low, rt + high)),
+            RtTolerance::Minutes((low, high)) => Some((rt_minutes - low, rt_minutes + high)),
             RtTolerance::Pct((low, high)) => {
-                let low = rt * low / 100.0;
-                let high = rt * high / 100.0;
-                Some((rt - low, rt + high))
+                let low = rt_minutes * low / 100.0;
+                let high = rt_minutes * high / 100.0;
+                Some((rt_minutes - low, rt_minutes + high))
             }
             RtTolerance::None => None,
         }

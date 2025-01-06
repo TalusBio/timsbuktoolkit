@@ -22,12 +22,25 @@ use serde::{
     Serialize,
 };
 use std::fmt::Display;
+use std::hash::Hash;
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SafePosition {
     pub series_id: u8,
     pub series_number: u16,
     pub charge: u8,
+}
+
+impl Hash for SafePosition {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Pack into a single u32
+        // This prevents the no-hash hasher from generating collisions
+        let mut value: u32 = 0;
+        value |= self.series_number as u32;
+        value |= (self.series_id as u32) << 16;
+        value |= (self.charge as u32) << 24;
+        value.hash(state);
+    }
 }
 
 impl Serialize for SafePosition {

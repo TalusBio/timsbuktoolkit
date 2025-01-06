@@ -3,11 +3,32 @@ use timsquery::TimsqueryError;
 use timsrust::TimsRustError;
 
 #[derive(Debug)]
+pub enum DataProcessingError {
+    ExpectedSlicesSameLength {
+        expected: usize,
+        other: usize,
+        context: String,
+    },
+    ExpectedNonEmptyData {
+        context: String,
+    },
+    ExpectedFiniteNonNanData {
+        context: String,
+    },
+}
+
+#[derive(Debug)]
 pub enum TimsSeekError {
     TimsRust(TimsRustError),
     Timsquery(TimsqueryError),
-    Io(std::io::Error),
-    ParseError { msg: String },
+    Io {
+        source: std::io::Error,
+        path: Option<std::path::PathBuf>,
+    },
+    ParseError {
+        msg: String,
+    },
+    DataProcessingError(DataProcessingError),
 }
 
 impl std::fmt::Display for TimsSeekError {
@@ -16,13 +37,7 @@ impl std::fmt::Display for TimsSeekError {
     }
 }
 
-type Result<T> = std::result::Result<T, TimsSeekError>;
-
-impl From<std::io::Error> for TimsSeekError {
-    fn from(x: std::io::Error) -> Self {
-        Self::Io(x)
-    }
-}
+pub type Result<T> = std::result::Result<T, TimsSeekError>;
 
 impl From<TimsRustError> for TimsSeekError {
     fn from(x: TimsRustError) -> Self {
@@ -47,5 +62,11 @@ impl Into<TimsSeekError> for serde_json::Error {
         TimsSeekError::ParseError {
             msg: self.to_string(),
         }
+    }
+}
+
+impl From<DataProcessingError> for TimsSeekError {
+    fn from(x: DataProcessingError) -> Self {
+        Self::DataProcessingError(x)
     }
 }

@@ -6,3 +6,4 @@ pub mod isotopes;
 pub mod models;
 pub mod protein;
 pub mod scoring;
+pub mod utils;

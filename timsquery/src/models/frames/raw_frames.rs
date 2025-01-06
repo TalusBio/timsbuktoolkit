@@ -72,7 +72,7 @@ pub fn frame_elems_matching(
         }
     };
 
-    let retention_time = frame.rt as f32;
+    let retention_time = frame.rt_in_seconds as f32;
 
     scan_range_use.flat_map(move |scan_index| {
         let scan_is = frame.scan_offsets[scan_index];

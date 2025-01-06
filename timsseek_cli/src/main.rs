@@ -7,6 +7,7 @@ use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsseek::errors::TimsSeekError;
 use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
+use timsseek::utils::tdf::get_ms1_frame_times_ms;
 
 use cli::Cli;
 use config::{
@@ -22,7 +23,16 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     let args = Cli::parse();
 
     // Load and parse configuration
-    let config: Result<Config, _> = serde_json::from_reader(std::fs::File::open(args.config)?);
+    let conf = match std::fs::File::open(args.config) {
+        Ok(x) => x,
+        Err(e) => {
+            return Err(TimsSeekError::Io {
+                source: e,
+                path: None,
+            });
+        }
+    };
+    let config: Result<Config, _> = serde_json::from_reader(conf);
     let mut config = match config {
         Ok(x) => x,
         Err(e) => {
@@ -41,10 +51,18 @@ fn main() -> std::result::Result<(), TimsSeekError> {
         config.output.directory = output_dir;
     }
 
-    println!("{:?}", config);
+    println!("{:#?}", config);
 
-    // Create output directory
-    std::fs::create_dir_all(&config.output.directory)?;
+    // Create output director
+    match std::fs::create_dir_all(&config.output.directory) {
+        Ok(_) => println!("Created output directory"),
+        Err(e) => {
+            return Err(TimsSeekError::Io {
+                source: e,
+                path: None,
+            });
+        }
+    };
 
     let dotd_file_location = &config.analysis.dotd_file;
     let index = QuadSplittedTransposedIndex::from_path_centroided(
@@ -54,6 +72,9 @@ fn main() -> std::result::Result<(), TimsSeekError> {
             .to_str()
             .expect("Path is not convertable to string"),
     )?;
+
+    let tdf_path = &dotd_file_location.clone().unwrap().join("analysis.tdf");
+    let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
 
     let factory = MultiCMGStatsFactory {
         converters: (index.mz_converter, index.im_converter),
@@ -66,6 +87,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
             processing::process_fasta(
                 path,
                 &index,
+                ref_time_ms.clone(),
                 &factory,
                 digestion,
                 &config.analysis,
@@ -73,7 +95,14 @@ fn main() -> std::result::Result<(), TimsSeekError> {
             )?;
         }
         InputConfig::Speclib { path } => {
-            processing::process_speclib(path, &index, &factory, &config.analysis, &config.output)?;
+            processing::process_speclib(
+                path,
+                &index,
+                ref_time_ms.clone(),
+                &factory,
+                &config.analysis,
+                &config.output,
+            )?;
         }
     }
 

@@ -11,15 +11,31 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::collections::HashMap;
 use std::path;
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedIntensities {
+    pub fragment_intensities: HashMap<SafePosition, f32>,
+    pub precursor_intensities: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceEG {
+    #[serde(flatten)]
+    pub elution_group: ElutionGroup<SafePosition>,
+    #[serde(flatten)]
+    pub expected_intensities: ExpectedIntensities,
+}
 
 #[derive(Debug, Clone)]
 pub struct Speclib {
     digests: Vec<DigestSlice>,
     charges: Vec<u8>,
     queries: Vec<ElutionGroup<SafePosition>>,
+    expected_intensities: Vec<ExpectedIntensities>,
 }
 
 pub struct SpeclibIterator {
@@ -64,16 +80,17 @@ impl Speclib {
     pub fn from_json(json: &str) -> Self {
         let speclib: Vec<SpeclibElement> = serde_json::from_str(json).unwrap();
 
-        let (queries, (charges, digests)): (
-            Vec<ElutionGroup<SafePosition>>,
-            (Vec<u8>, Vec<DigestSlice>),
+        let (exp_int, (queries, (charges, digests))): (
+            Vec<ExpectedIntensities>,
+            (Vec<ElutionGroup<SafePosition>>, (Vec<u8>, Vec<DigestSlice>)),
         ) = speclib
             .into_par_iter()
             .map(|x| {
                 let charge = x.precursor.charge;
-                let elution_group = x.elution_group;
+                let elution_group = x.elution_group.elution_group;
+                let expected_intensities = x.elution_group.expected_intensities;
                 let digest = x.precursor.into();
-                (elution_group, (charge, digest))
+                (expected_intensities, (elution_group, (charge, digest)))
             })
             .unzip();
 
@@ -81,6 +98,7 @@ impl Speclib {
             digests,
             charges,
             queries,
+            expected_intensities: exp_int,
         }
     }
 
@@ -90,6 +108,7 @@ impl Speclib {
         let mut digests = Vec::new();
         let mut charges = Vec::new();
         let mut queries = Vec::new();
+        let mut expected_intensities = Vec::new();
 
         let mut num_show = 10;
         for line in lines {
@@ -111,7 +130,8 @@ impl Speclib {
             }
             charges.push(elem.precursor.charge);
             digests.push(elem.precursor.into());
-            queries.push(elem.elution_group);
+            queries.push(elem.elution_group.elution_group);
+            expected_intensities.push(elem.elution_group.expected_intensities);
         }
 
         if digests.is_empty() {
@@ -122,12 +142,19 @@ impl Speclib {
             digests,
             charges,
             queries,
+            expected_intensities,
         }
     }
 
     pub fn from_ndjson_file(path: &path::Path) -> Result<Self, TimsSeekError> {
-        let json = std::fs::read_to_string(path)?;
-        Ok(Self::from_ndjson(&json))
+        let json = std::fs::read_to_string(path);
+        match json {
+            Ok(x) => Ok(Self::from_ndjson(&x)),
+            Err(e) => Err(TimsSeekError::Io {
+                source: e,
+                path: Some(path.to_path_buf()),
+            }),
+        }
     }
 
     fn get_chunk(&self, chunk_index: usize, chunk_size: usize) -> Option<NamedQueryChunk> {
@@ -144,10 +171,12 @@ impl Speclib {
         let digests = &self.digests[start..end];
         let charges = &self.charges[start..end];
         let queries = &self.queries[start..end];
+        let expected_intensities = &self.expected_intensities[start..end];
         Some(NamedQueryChunk::new(
             digests.to_vec(),
             charges.to_vec(),
             queries.to_vec(),
+            expected_intensities.to_vec(),
         ))
     }
 
@@ -159,7 +188,7 @@ impl Speclib {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SpeclibElement {
     precursor: PrecursorEntry,
-    elution_group: ElutionGroup<SafePosition>,
+    elution_group: ReferenceEG,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,7 +258,7 @@ mod tests {
         println!("{:?}", speclib);
 
         assert_eq!(speclib.digests[0].decoy, DecoyMarking::Target);
-        assert_eq!(speclib.digests[0].len(), 11);
+        assert_eq!(speclib.digests[0].len(), "PEPTIDEPINK".len());
         assert_eq!(speclib.queries[0].fragment_mzs.len(), 3);
     }
 }

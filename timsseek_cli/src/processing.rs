@@ -35,8 +35,13 @@ use timsseek::models::{
     deduplicate_digests,
 };
 use timsseek::protein::fasta::ProteinSequenceCollection;
+use timsseek::scoring::calculate_scores::{
+    LocalizedPreScore,
+    PreScore,
+};
 use timsseek::scoring::search_results::{
     IonSearchResults,
+    SearchResultBuilder,
     write_results_to_csv,
 };
 
@@ -45,6 +50,7 @@ pub fn process_chunk<'a>(
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<SafePosition>,
     tolerance: &'a DefaultTolerance,
+    ref_time_ms: Arc<[u32]>,
 ) -> Vec<IonSearchResults> {
     let start = Instant::now();
     let num_queries = queries.len();
@@ -56,25 +62,40 @@ pub fn process_chunk<'a>(
 
     let start = Instant::now();
 
-    let tmp: Vec<(IonSearchResults, f64)> = res
+    let tmp: Vec<(IonSearchResults, f32)> = res
         .into_par_iter()
         .zip(queries.into_zip_par_iter())
-        .map(|(res_elem, (eg_elem, (digest, charge_elem)))| {
-            let decoy = digest.decoy;
-            let res = IonSearchResults::new(digest.clone(), charge_elem, &eg_elem, res_elem, decoy);
-            if res.is_err() {
-                log::error!(
-                    "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
-                    digest,
-                    eg_elem,
-                    res,
-                );
-                return None;
-            }
-            let res = res.unwrap();
-            let main_score = res.score_data.main_score;
-            Some((res, main_score))
-        })
+        .map(
+            |(res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
+                let decoy = digest.decoy;
+                let builder = SearchResultBuilder::default();
+                let prescore = PreScore {
+                    charge: charge_elem,
+                    digest: &digest,
+                    reference: &eg_elem,
+                    expected_intensities: &expect_inten,
+                    decoy: decoy,
+                    query_values: &res_elem,
+                    ref_time_ms: ref_time_ms.clone(),
+                };
+
+                let res = builder
+                    .with_localized_pre_score(&prescore.localize())
+                    .finalize();
+                if res.is_err() {
+                    log::error!(
+                        "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
+                        digest,
+                        eg_elem,
+                        res,
+                    );
+                    return None;
+                }
+                let res = res.unwrap();
+                let main_score = res.main_score;
+                Some((res, main_score))
+            },
+        )
         .flatten()
         .collect();
 
@@ -83,9 +104,9 @@ pub fn process_chunk<'a>(
         panic!("No results found");
     }
 
-    let (out, main_scores): (Vec<IonSearchResults>, Vec<f64>) = tmp.into_iter().unzip();
+    let (out, main_scores): (Vec<IonSearchResults>, Vec<f32>) = tmp.into_iter().unzip();
 
-    let avg_main_scores = main_scores.iter().sum::<f64>() / main_scores.len() as f64;
+    let avg_main_scores = main_scores.iter().sum::<f32>() / main_scores.len() as f32;
 
     assert!(!avg_main_scores.is_nan());
     let elapsed = start.elapsed();
@@ -104,6 +125,7 @@ pub fn main_loop<'a>(
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<SafePosition>,
     tolerance: &'a DefaultTolerance,
+    ref_time_ms: Arc<[u32]>,
     out_path: &Path,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
@@ -117,7 +139,7 @@ pub fn main_loop<'a>(
     chunked_query_iterator
         .progress_with_style(style)
         .for_each(|chunk| {
-            let out = process_chunk(chunk, &index, &factory, &tolerance);
+            let out = process_chunk(chunk, &index, &factory, &tolerance, ref_time_ms.clone());
             nqueries += out.len();
             let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
             write_results_to_csv(&out, out_path).unwrap();
@@ -131,6 +153,7 @@ pub fn main_loop<'a>(
 pub fn process_fasta(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex, // TODO: Make generic
+    ref_time_ms: Arc<[u32]>,
     factory: &MultiCMGStatsFactory<SafePosition>,
     digestion: DigestionConfig,
     analysis: &AnalysisConfig,
@@ -150,7 +173,15 @@ pub fn process_fasta(
         digestion_params
     );
 
-    let fasta_proteins = ProteinSequenceCollection::from_fasta_file(&path)?;
+    let fasta_proteins = match ProteinSequenceCollection::from_fasta_file(&path) {
+        Ok(x) => x,
+        Err(e) => {
+            return Err(TimsSeekError::Io {
+                source: e,
+                path: Some(path),
+            });
+        }
+    };
     let sequences: Vec<Arc<str>> = fasta_proteins
         .sequences
         .iter()
@@ -173,6 +204,7 @@ pub fn process_fasta(
         &index,
         &factory,
         &analysis.tolerance,
+        ref_time_ms.clone(),
         &output.directory,
     )?;
     Ok(())
@@ -181,6 +213,7 @@ pub fn process_fasta(
 pub fn process_speclib(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex,
+    ref_time_ms: Arc<[u32]>,
     factory: &MultiCMGStatsFactory<SafePosition>,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
@@ -193,6 +226,7 @@ pub fn process_speclib(
         index,
         &factory,
         &analysis.tolerance,
+        ref_time_ms.clone(),
         &output.directory,
     )?;
     Ok(())

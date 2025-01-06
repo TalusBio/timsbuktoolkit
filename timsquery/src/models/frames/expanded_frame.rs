@@ -200,7 +200,7 @@ fn expand_unfragmented_frame(frame: Frame) -> ExpandedFrameSlice<SortedState> {
         scan_numbers,
         intensities,
         frame_index: frame.index,
-        rt: frame.rt,
+        rt: frame.rt_in_seconds,
         acquisition_type: frame.acquisition_type,
         ms_level: frame.ms_level,
         quadrupole_settings: None,
@@ -239,7 +239,7 @@ fn expand_fragmented_frame(
             scan_numbers: slice_scan_numbers,
             intensities: slice_intensities,
             frame_index: frame.index,
-            rt: frame.rt,
+            rt: frame.rt_in_seconds,
             acquisition_type: frame.acquisition_type,
             ms_level: frame.ms_level,
             quadrupole_settings: Some(qs),
@@ -279,7 +279,7 @@ impl ExpandedFrame {
             scan_numbers,
             intensities,
             frame_index: frame.index,
-            rt: frame.rt,
+            rt: frame.rt_in_seconds,
             acquisition_type: frame.acquisition_type,
             ms_level: frame.ms_level,
             quadrupole_settings: frame.quadrupole_settings,
@@ -400,7 +400,8 @@ pub fn warn_and_skip_badframes(
     skip(frame_reader),
     fields(
         num_frames = %frame_reader.len(),
-        path = frame_reader.get_path().to_str(),
+        // get_path was removed in timsrust 0.4.2
+        // path = frame_reader.get_path().to_str(),
     )
 )]
 pub fn par_read_and_expand_frames(
@@ -848,7 +849,7 @@ mod tests {
             scan_offsets: vec![0, 2, 4, 6],
             intensities: vec![10, 20, 30, 40, 50, 60],
             index: 0,
-            rt: 0.0,
+            rt_in_seconds: 0.0,
             acquisition_type: AcquisitionType::DIAPASEF,
             ms_level: MSLevel::MS1,
             quadrupole_settings: Arc::new(QuadrupoleSettings::default()),

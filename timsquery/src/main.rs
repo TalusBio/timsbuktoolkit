@@ -106,8 +106,6 @@ fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
             mobility,
             precursor_mzs: vec![mz],
             fragment_mzs,
-            expected_fragment_intensity: None,
-            expected_precursor_intensity: None,
         });
     }
     egs

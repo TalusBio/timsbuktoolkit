@@ -1,7 +1,7 @@
 {
     "input": {
         "type": "fasta",
-        "path": "./data/HeLa_cannonical_proteins.fasta",
+        "path": "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta",
         "digestion": {
             "min_length": 6,
             "max_length": 20,
@@ -10,15 +10,15 @@
         }
     },
     "analysis": {
-        "dotd_file": "./data/240402_PRTC_01_S1-A1_1_11342.d",
+        "dotd_file": "/Users/sebastianpaez/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d",
         "chunk_size": 1000,
         "tolerance": {
-            "ms_ppm": [15.0, 15.0],
-            "mobility_pct": [10.0, 10.0],
-            "quad_absolute": [0.1, 0.1]
+            "ms": {"ppm":  [15.0, 15.0]},
+            "mobility": {"percent": [10.0, 10.0]},
+            "quad": {"absolute": [0.1, 0.1]}
         }
     },
     "output": {
-        "directory": "./results/"
+        "directory": "./results_canon_fasta/"
     }
 }
