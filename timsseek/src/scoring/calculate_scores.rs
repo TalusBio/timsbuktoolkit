@@ -29,89 +29,146 @@ pub struct PreScore<'a> {
     pub charge: u8,
     pub reference: &'a ElutionGroup<SafePosition>,
     pub expected_intensities: &'a ExpectedIntensities,
-    pub decoy: DecoyMarking,
     pub query_values: &'a NaturalFinalizedMultiCMGArrays<SafePosition>,
     pub ref_time_ms: Arc<[u32]>,
 }
 
-impl<'a> PreScore<'a> {
-    fn calc_main_score(&self) -> MainScore {
-        let ms1_order: Vec<usize> = self
-            .expected_intensities
+#[derive(Debug, Serialize, Clone)]
+pub struct LongitudinalMainScoreElements {
+    pub ms1_cosine_ref_sim: Vec<f32>,
+    pub ms1_coelution_score: Vec<f32>,
+    pub ms2_cosine_ref_sim: Vec<f32>,
+    pub ms2_coelution_score: Vec<f32>,
+    pub ms2_lazyscore: Vec<f32>,
+    pub ref_time_ms: Arc<[u32]>,
+}
+
+#[derive(Debug)]
+pub struct IntensityArrays {
+    pub ms1_rtmajor: RTMajorIntensityArray,
+    pub ms1_mzmajor: MzMajorIntensityArray,
+    pub ms2_rtmajor: RTMajorIntensityArray,
+    pub ms2_mzmajor: MzMajorIntensityArray,
+    pub ms1_expected_intensities: Vec<f32>,
+    pub ms2_expected_intensities: Vec<f32>,
+}
+
+impl IntensityArrays {
+    pub fn new(query_values: &NaturalFinalizedMultiCMGArrays<SafePosition>, expected_intensities: &ExpectedIntensities) -> Self {
+        let ms1_order: Vec<usize> = expected_intensities
             .precursor_intensities
             .iter()
             .enumerate()
             .map(|x| x.0)
             .collect();
-        let (ms2_order, ms2_ref_vec): (Vec<SafePosition>, Vec<f32>) = self
-            .expected_intensities
+        let (ms2_order, ms2_ref_vec): (Vec<SafePosition>, Vec<f32>) = expected_intensities
             .fragment_intensities
             .iter()
             .map(|(pos, intensity)| (*pos, *intensity as f32))
             .unzip();
 
         let ms1_rtmajor_arr =
-            RTMajorIntensityArray::new(&self.query_values.ms1_arrays, Some(&ms1_order));
+            RTMajorIntensityArray::new(&query_values.ms1_arrays, Some(&ms1_order));
         let ms1_mzmajor_arr =
-            MzMajorIntensityArray::new(&self.query_values.ms1_arrays, Some(&ms1_order));
+            MzMajorIntensityArray::new(&query_values.ms1_arrays, Some(&ms1_order));
         let ms2_rtmajor_arr =
-            RTMajorIntensityArray::new(&self.query_values.ms2_arrays, Some(&ms2_order));
+            RTMajorIntensityArray::new(&query_values.ms2_arrays, Some(&ms2_order));
         let ms2_mzmajor_arr =
-            MzMajorIntensityArray::new(&self.query_values.ms2_arrays, Some(&ms2_order));
+            MzMajorIntensityArray::new(&query_values.ms2_arrays, Some(&ms2_order));
+        
+        Self {
+            ms1_rtmajor: ms1_rtmajor_arr,
+            ms1_mzmajor: ms1_mzmajor_arr,
+            ms2_rtmajor: ms2_rtmajor_arr,
+            ms2_mzmajor: ms2_mzmajor_arr,
+            ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
+            ms2_expected_intensities: ms2_ref_vec,
+        }
+    }
+}
 
+impl LongitudinalMainScoreElements {
+    pub fn new(intensity_arrays: &IntensityArrays, ref_time_ms: Arc<[u32]>, ms1_rts: &[u32], ms2_rts: &[u32]) -> Self {
+        let ms1_cosine_ref_sim = snap_to_reference(
+            &corr_v_ref::calculate_cosine_with_ref(
+                &intensity_arrays.ms1_rtmajor,
+                &intensity_arrays.ms1_expected_intensities,
+            )
+            .unwrap(),
+            &ms1_rts,
+            &ref_time_ms,
+        )
+        .unwrap();
+        let ms2_cosine_ref_sim = snap_to_reference(
+            &corr_v_ref::calculate_cosine_with_ref(&intensity_arrays.ms2_rtmajor, &intensity_arrays.ms2_expected_intensities).unwrap(),
+            &ms2_rts,
+            &ref_time_ms,
+        )
+        .unwrap();
+
+        let ms2_coelution_score = snap_to_reference(
+            &coelution_score::coelution_score(&intensity_arrays.ms2_mzmajor, 7),
+            &ms2_rts,
+            &ref_time_ms,
+        )
+        .unwrap();
+        let ms1_coelution_score = snap_to_reference(
+            &coelution_score::coelution_score(&intensity_arrays.ms1_mzmajor, 7),
+            &ms1_rts,
+            &ref_time_ms,
+        )
+        .unwrap();
+        let lazyscore = snap_to_reference(
+            &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
+            &ms2_rts,
+            &ref_time_ms,
+        )
+        .unwrap();
+
+        Self {
+            ms1_cosine_ref_sim,
+            ms1_coelution_score,
+            ms2_cosine_ref_sim,
+            ms2_coelution_score,
+            ms2_lazyscore: lazyscore,
+            ref_time_ms,
+        }
+    }
+
+    fn find_apex(&self) -> (usize, f32) {
         // IN THEORY all scores could be iterator and snapped on the fly,
         // Will do that later ... feels like a lot of work.
         // I would love to have this abstracted where multiple accumulators can be used
         // so I could have a top N accumulator that preserves the best locations, but could
         // also have an accumulator that keeps the score across the the full chromatogram
-        let ms1_cosine_ref_sim = snap_to_reference(
-            &corr_v_ref::calculate_cosine_with_ref(
-                &ms1_rtmajor_arr,
-                &self.expected_intensities.precursor_intensities,
-            )
-            .unwrap(),
-            &self.query_values.ms1_arrays.retention_time_miliseconds,
-            &self.ref_time_ms,
-        )
-        .unwrap();
-        let ms2_cosine_ref_sim = snap_to_reference(
-            &corr_v_ref::calculate_cosine_with_ref(&ms2_rtmajor_arr, &ms2_ref_vec).unwrap(),
-            &self.query_values.ms2_arrays.retention_time_miliseconds,
-            &self.ref_time_ms,
-        )
-        .unwrap();
-
-        let ms2_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score(&ms2_mzmajor_arr, 7),
-            &self.query_values.ms2_arrays.retention_time_miliseconds,
-            &self.ref_time_ms,
-        )
-        .unwrap();
-        let ms1_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score(&ms1_mzmajor_arr, 7),
-            &self.query_values.ms1_arrays.retention_time_miliseconds,
-            &self.ref_time_ms,
-        )
-        .unwrap();
-        let lazyscore = snap_to_reference(
-            &hyperscore::lazyscore(&ms2_rtmajor_arr),
-            &self.query_values.ms2_arrays.retention_time_miliseconds,
-            &self.ref_time_ms,
-        )
-        .unwrap();
-
         let mut max_loc = 0;
         let mut max_val: f32 = 0.0;
         for i in 0..self.ref_time_ms.len() {
-            let ms1_cos_score = 0.5 + (0.5 * ms1_cosine_ref_sim[i]);
+            let ms1_cos_score = 0.5 + (0.5 * self.ms1_cosine_ref_sim[i]);
             let loc_score =
-                ms1_cos_score * ms2_cosine_ref_sim[i] * ms2_coelution_score[i] * lazyscore[i];
+                ms1_cos_score * self.ms2_cosine_ref_sim[i] * self.ms2_coelution_score[i] * self.ms2_lazyscore[i];
             if loc_score > max_val {
                 max_val = loc_score;
                 max_loc = i;
             }
         }
 
+        (max_loc, max_val)
+    }
+}
+
+impl<'a> PreScore<'a> {
+    fn calc_main_score(&self) -> MainScore {
+        let intensity_arrays = IntensityArrays::new(self.query_values, self.expected_intensities);
+        let longitudinal_main_score_elements = LongitudinalMainScoreElements::new(
+            &intensity_arrays,
+            self.ref_time_ms.clone(),
+            &self.query_values.ms1_arrays.retention_time_miliseconds,
+            &self.query_values.ms2_arrays.retention_time_miliseconds,
+        );
+
+        let (max_loc, max_val) = longitudinal_main_score_elements.find_apex();
+        
         let ms2_loc = self
             .query_values
             .ms2_arrays
@@ -124,14 +181,9 @@ impl<'a> PreScore<'a> {
             .retention_time_miliseconds
             .partition_point(|&x| x < self.ref_time_ms[max_loc]);
 
-        let summed_ms1_int: f32 = ms1_rtmajor_arr.arr.get_row(ms1_loc).iter().sum();
-        let summed_ms2_int: f32 = ms2_rtmajor_arr.arr.get_row(ms2_loc).iter().sum();
-        let npeak_ms2 = ms2_rtmajor_arr
-            .arr
-            .get_row(ms2_loc)
-            .iter()
-            .filter(|&x| *x > 10.0)
-            .count();
+        let summed_ms1_int: f32 = intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc).iter().sum();
+        let summed_ms2_int: f32 = intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc).iter().sum();
+        let npeak_ms2 = intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc).iter().filter(|&x| *x > 10.0).count();
 
         let ims = self.query_values.ms2_arrays.weighted_ims_mean[ms2_loc];
         MainScore {
@@ -139,14 +191,14 @@ impl<'a> PreScore<'a> {
             observed_mobility: ims as f32,
             retention_time_ms: self.ref_time_ms[max_loc],
 
-            ms2_cosine_ref_sim: ms2_cosine_ref_sim[max_loc],
-            ms2_coelution_score: ms2_coelution_score[max_loc],
+            ms2_cosine_ref_sim: longitudinal_main_score_elements.ms2_cosine_ref_sim[max_loc],
+            ms2_coelution_score: longitudinal_main_score_elements.ms2_coelution_score[max_loc],
             ms2_summed_intensity: summed_ms2_int,
             npeaks: npeak_ms2 as u8,
-            lazyscore: lazyscore[max_loc],
+            lazyscore: longitudinal_main_score_elements.ms2_lazyscore[max_loc],
 
-            ms1_cosine_ref_sim: ms1_cosine_ref_sim[max_loc],
-            ms1_coelution_score: ms1_coelution_score[max_loc],
+            ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
+            ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
 
             ref_ms1_idx: ms1_loc,

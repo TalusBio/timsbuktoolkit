@@ -219,6 +219,7 @@ impl<T: Clone + Copy> Array2D<T> {
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same retention time
 /// are adjacent in memory.
+#[derive(Debug, Clone)]
 pub struct RTMajorIntensityArray {
     pub arr: Array2D<f32>,
 }
@@ -226,6 +227,7 @@ pub struct RTMajorIntensityArray {
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same m/z
 /// are adjacent in memory.
+#[derive(Debug, Clone)]
 pub struct MzMajorIntensityArray {
     pub arr: Array2D<f32>,
 }

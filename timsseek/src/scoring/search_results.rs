@@ -17,10 +17,8 @@ use crate::models::{
 use csv::WriterBuilder;
 use serde::Serialize;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 use timsquery::ElutionGroup;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::arrays::PartitionedCMGArrayStats;
 
 #[derive(Debug, Default)]
 pub struct SearchResultBuilder<'q> {
@@ -62,7 +60,7 @@ impl<'q> SearchResultBuilder<'q> {
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = Some(pre_score.digest);
         self.ref_eg = Some(&pre_score.reference);
-        self.decoy_marking = Some(pre_score.decoy);
+        self.decoy_marking = Some(pre_score.digest.decoy);
         self.charge = Some(pre_score.charge);
         self
     }

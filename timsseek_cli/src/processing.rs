@@ -67,14 +67,12 @@ pub fn process_chunk<'a>(
         .zip(queries.into_zip_par_iter())
         .map(
             |(res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
-                let decoy = digest.decoy;
                 let builder = SearchResultBuilder::default();
                 let prescore = PreScore {
                     charge: charge_elem,
                     digest: &digest,
                     reference: &eg_elem,
                     expected_intensities: &expect_inten,
-                    decoy: decoy,
                     query_values: &res_elem,
                     ref_time_ms: ref_time_ms.clone(),
                 };
