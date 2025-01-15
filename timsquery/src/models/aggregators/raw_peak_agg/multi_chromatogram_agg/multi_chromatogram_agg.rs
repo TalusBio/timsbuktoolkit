@@ -4,8 +4,6 @@ use super::arrays::{
     PartitionedCMGArrayStats,
     PartitionedCMGArrays,
 };
-use crate::TimsqueryError;
-use crate::errors::Result;
 use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::raw_peak::RawPeak;
 use crate::models::queries::MsLevelContext;

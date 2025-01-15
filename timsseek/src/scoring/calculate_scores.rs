@@ -3,10 +3,7 @@ use super::{
     corr_v_ref,
     hyperscore,
 };
-use crate::data_sources::speclib::{
-    ExpectedIntensities,
-    ReferenceEG,
-};
+use crate::data_sources::speclib::ExpectedIntensities;
 use crate::errors::{
     DataProcessingError,
     Result,
@@ -75,7 +72,7 @@ impl IntensityArrays {
         let (ms2_order, ms2_ref_vec): (Vec<SafePosition>, Vec<f32>) = expected_intensities
             .fragment_intensities
             .iter()
-            .map(|(pos, intensity)| (*pos, *intensity as f32))
+            .map(|(pos, intensity)| (*pos, { *intensity }))
             .unzip();
 
         let ms1_rtmajor_arr =
@@ -109,12 +106,12 @@ impl IntensityArrays {
             (Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _, _, _)
             | (_, Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _, _) => {
                 context.push_str("Failed to create IntensityArrays for MS1, ");
-                return Err(DataProcessingError::ExpectedNonEmptyData { context }.into());
+                Err(DataProcessingError::ExpectedNonEmptyData { context }.into())
             }
             (_, _, Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _)
             | (_, _, _, Err(DataProcessingError::ExpectedNonEmptyData { mut context })) => {
                 context.push_str("Failed to create IntensityArrays for MS2, ");
-                return Err(DataProcessingError::ExpectedNonEmptyData { context }.into());
+                Err(DataProcessingError::ExpectedNonEmptyData { context }.into())
             }
             _ => unreachable!(),
         }
@@ -134,7 +131,7 @@ impl LongitudinalMainScoreElements {
                 &intensity_arrays.ms1_expected_intensities,
             )
             .unwrap(),
-            &ms1_rts,
+            ms1_rts,
             &ref_time_ms,
         )
         .unwrap();
@@ -144,26 +141,26 @@ impl LongitudinalMainScoreElements {
                 &intensity_arrays.ms2_expected_intensities,
             )
             .unwrap(),
-            &ms2_rts,
+            ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
 
         let ms2_coelution_score = snap_to_reference(
             &coelution_score::coelution_score(&intensity_arrays.ms2_mzmajor, 7),
-            &ms2_rts,
+            ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
         let ms1_coelution_score = snap_to_reference(
             &coelution_score::coelution_score(&intensity_arrays.ms1_mzmajor, 7),
-            &ms1_rts,
+            ms1_rts,
             &ref_time_ms,
         )
         .unwrap();
         let lazyscore = snap_to_reference(
             &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
-            &ms2_rts,
+            ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
@@ -303,7 +300,7 @@ impl<'a> PreScore<'a> {
         let ims = self.query_values.ms2_arrays.weighted_ims_mean[ms2_loc];
         Ok(MainScore {
             score: max_val,
-            delta_next: delta_next,
+            delta_next,
             observed_mobility: ims as f32,
             retention_time_ms: self.ref_time_ms[max_loc],
 
@@ -329,7 +326,7 @@ impl<'a> PreScore<'a> {
         let main_score = self.calc_main_score()?;
         Ok(LocalizedPreScore {
             pre_score: self,
-            main_score: main_score,
+            main_score,
         })
     }
 }
@@ -366,13 +363,13 @@ pub struct LocalizedPreScore<'a> {
     pub main_score: MainScore,
 }
 
-impl<'a> LocalizedPreScore<'a> {
+impl LocalizedPreScore<'_> {
     pub fn inten_sorted_errors(&self) -> SortedErrors {
         sorted_err_at_idx(
             self.main_score.ref_ms1_idx,
             self.main_score.ref_ms2_idx,
-            &self.pre_score.query_values,
-            &self.pre_score.reference,
+            self.pre_score.query_values,
+            self.pre_score.reference,
         )
     }
 }
@@ -439,7 +436,7 @@ fn sorted_err_at_idx(
     for (k, v) in cmgs.ms2_arrays.intensities.iter() {
         let expect_mz = elution_group.fragment_mzs.get(k);
         let mz_err = if let Some(mz) = expect_mz {
-            (mz - cmgs.ms2_arrays.mz_means[&k][ms2_idx]) as f32
+            (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
         } else {
             continue;
         };
@@ -448,12 +445,12 @@ fn sorted_err_at_idx(
         if mz_err.abs() > 1.0 {
             println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
             println!("Expected mz: {}", expect_mz.unwrap());
-            println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[&k][ms2_idx]);
+            println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
             println!("EG: {:#?}", elution_group);
             println!("CMGS: {:#?}", cmgs);
             panic!();
         }
-        let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[&k][ms2_idx]) as f32;
+        let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
 
         let tmp = SortableError {
             intensity: v[ms2_idx],
@@ -477,8 +474,8 @@ fn sorted_err_at_idx(
             ms1_out_mz_err[i] = val.mz_err;
             ms1_out_ims_err[i] = val.ims_err;
         } else {
-            ms1_out_mz_err[i] = (val.mz_err - ms1_elems[i - 1].mz_err) as f32;
-            ms1_out_ims_err[i] = (val.ims_err - ms1_elems[i - 1].ims_err) as f32;
+            ms1_out_mz_err[i] = val.mz_err - ms1_elems[i - 1].mz_err;
+            ms1_out_ims_err[i] = val.ims_err - ms1_elems[i - 1].ims_err;
         }
     }
 
@@ -487,8 +484,8 @@ fn sorted_err_at_idx(
             ms2_out_mz_err[i] = val.mz_err;
             ms2_out_ims_err[i] = val.ims_err;
         } else {
-            ms2_out_mz_err[i] = (val.mz_err - ms2_elems[i - 1].mz_err) as f32;
-            ms2_out_ims_err[i] = (val.ims_err - ms2_elems[i - 1].ims_err) as f32;
+            ms2_out_mz_err[i] = val.mz_err - ms2_elems[i - 1].mz_err;
+            ms2_out_ims_err[i] = val.ims_err - ms2_elems[i - 1].ims_err;
         }
     }
 

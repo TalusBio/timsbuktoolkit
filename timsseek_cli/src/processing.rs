@@ -35,10 +35,7 @@ use timsseek::models::{
     deduplicate_digests,
 };
 use timsseek::protein::fasta::ProteinSequenceCollection;
-use timsseek::scoring::calculate_scores::{
-    LocalizedPreScore,
-    PreScore,
-};
+use timsseek::scoring::calculate_scores::PreScore;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     SearchResultBuilder,
@@ -149,7 +146,7 @@ pub fn main_loop<'a>(
     chunked_query_iterator
         .progress_with_style(style)
         .for_each(|chunk| {
-            let out = process_chunk(chunk, &index, &factory, &tolerance, ref_time_ms.clone());
+            let out = process_chunk(chunk, index, factory, tolerance, ref_time_ms.clone());
             nqueries += out.len();
             let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
             write_results_to_csv(&out, out_path).unwrap();
@@ -211,8 +208,8 @@ pub fn process_fasta(
 
     main_loop(
         chunked_query_iterator,
-        &index,
-        &factory,
+        index,
+        factory,
         &analysis.tolerance,
         ref_time_ms.clone(),
         &output.directory,
@@ -234,7 +231,7 @@ pub fn process_speclib(
     main_loop(
         speclib_iter,
         index,
-        &factory,
+        factory,
         &analysis.tolerance,
         ref_time_ms.clone(),
         &output.directory,

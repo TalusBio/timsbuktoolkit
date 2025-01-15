@@ -36,11 +36,7 @@ use tracing_bunyan_formatter::{
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::{
-    EnvFilter,
-    Layer,
-    fmt,
-};
+use tracing_subscriber::EnvFilter;
 
 const NUM_ELUTION_GROUPS: usize = 1000;
 const NUM_ITERATIONS: usize = 1;
@@ -183,8 +179,6 @@ fn build_elution_groups() -> Vec<ElutionGroup<u64>> {
             mobility,
             precursor_mzs: vec![mz],
             fragment_mzs,
-            expected_fragment_intensity: None,
-            expected_precursor_intensity: None,
         });
     }
     out_egs
@@ -341,7 +335,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
     let query_groups = build_elution_groups();
     let tolerance_with_rt = DefaultTolerance {
         ms: MzToleramce::Ppm((20.0, 20.0)),
-        rt: RtTolerance::Absolute((5.0, 5.0)),
+        rt: RtTolerance::Minutes((5.0, 5.0)),
         mobility: MobilityTolerance::Pct((3.0, 3.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
     };

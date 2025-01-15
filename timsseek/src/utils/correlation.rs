@@ -161,7 +161,7 @@ impl CosineSimilarityCircularBuffer {
         let curr_elem = RollingElem {
             a_sq: a * a,
             b_sq: b * b,
-            prod: prod,
+            prod,
         };
 
         self.a_sum_sq += curr_elem.a_sq - self.buffer[self.curr_index].a_sq;
@@ -251,7 +251,7 @@ mod tests {
         let a = vec![1.0, 2.0, 3.0];
         let b = vec![4.0, 5.0, 6.0];
         let result = cosine_similarity(&a, &b).unwrap();
-        assert!((result - 0.974631846).abs() < 1e-8);
+        assert!((result - 0.974_631_85).abs() < 1e-8);
     }
 
     #[test]

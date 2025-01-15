@@ -155,7 +155,7 @@ impl BundledDotDIndex {
         );
         let builder = SearchResultBuilder::default();
         let prescore = PreScore {
-            charge: queries.charge.clone(),
+            charge: queries.charge,
             digest: &queries.digest,
             reference: &queries.elution_group,
             expected_intensities: &queries.expected_intensities,

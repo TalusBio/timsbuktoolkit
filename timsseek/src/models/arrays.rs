@@ -6,14 +6,13 @@ use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::arrays
 use crate::errors::{
     DataProcessingError,
     Result,
-    TimsSeekError,
 };
 
 /// Implements a way to represent an array of
 /// dimensions x-y that will be later used to
 /// implement an mz-major and a rt-major array
 /// representation.
-
+///
 /// Simple 2D array
 ///
 /// `values` is a flattened array of values
@@ -52,8 +51,7 @@ impl<T: Clone + Copy> Array2D<T> {
         let values: Vec<T> = values
             .as_ref()
             .iter()
-            .map(|x| x.as_ref())
-            .flatten()
+            .flat_map(|x| x.as_ref())
             .cloned()
             .collect();
 
@@ -103,7 +101,7 @@ impl<T: Clone + Copy> Array2D<T> {
             }
             for (ri, val) in col.as_ref().iter().enumerate() {
                 let idx = ri * ncols + ci; // Changed indexing for row-major order
-                out_values[idx] = Some(val.clone());
+                out_values[idx] = Some(*val);
             }
         }
 
@@ -145,10 +143,10 @@ impl<T: Clone + Copy> Array2D<T> {
     /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum());
     /// assert_eq!(result, vec![5, 7, 9]);
     /// ```
-    pub fn row_apply<W, F: FnMut(&[T]) -> W>(&self, mut f: F) -> Vec<W> {
+    pub fn row_apply<W, F: FnMut(&[T]) -> W>(&self, f: F) -> Vec<W> {
         self.values
             .chunks(self.major_dim)
-            .map(|x| f(x))
+            .map(f)
             .collect::<Vec<W>>()
     }
 
@@ -247,8 +245,7 @@ impl MzMajorIntensityArray {
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
                 context: "Cannot create array with zero rows".to_string(),
-            }
-            .into());
+            });
         }
         let mut vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
         match order {
@@ -303,14 +300,12 @@ impl RTMajorIntensityArray {
         if major_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
                 context: "Cannot create array with zero columns".to_string(),
-            }
-            .into());
+            });
         }
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
                 context: "Cannot create array with zero rows".to_string(),
-            }
-            .into());
+            });
         }
 
         let mut vals: Vec<f32> = vec![0.0; minor_dim * major_dim];

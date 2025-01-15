@@ -5,7 +5,7 @@ use crate::models::{
     DigestSlice,
     NamedQueryChunk,
 };
-use log::debug;
+use tracing::debug;
 use rayon::prelude::*;
 use serde::{
     Deserialize,

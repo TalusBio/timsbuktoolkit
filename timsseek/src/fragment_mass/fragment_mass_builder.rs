@@ -94,6 +94,7 @@ impl SafePosition {
     }
 
     pub fn from_str(s: &str) -> Result<Self, TimsSeekError> {
+        // TODO: reimplement as TryFrom<&str>
         let (rest, charge) = match s.split_once('^') {
             Some((rest, charge)) => {
                 let charge = charge.parse::<u8>()?;
@@ -103,16 +104,15 @@ impl SafePosition {
         };
 
         // "b12" split into "b" and "12"
-        let (series, ordinal) = match rest.split_at(1) {
-            (series_chunk, series_ordinal) => {
-                let series_id = series_chunk.chars().next();
-                let series_ordinal = series_ordinal.parse::<u16>();
+        let (series_chunk, ordinal_chunk) = rest.split_at(1);
+        let (series, ordinal) = {
+            let series_id = series_chunk.chars().next();
+            let series_ordinal = ordinal_chunk.parse::<u16>();
 
-                match (series_id, series_ordinal) {
-                    (Some(x), Ok(y)) => (x as u8, y),
-                    _ => {
-                        return Err(TimsSeekError::ParseError { msg: s.to_string() });
-                    }
+            match (series_id, series_ordinal) {
+                (Some(x), Ok(y)) => (x as u8, y),
+                _ => {
+                    return Err(TimsSeekError::ParseError { msg: s.to_string() });
                 }
             }
         };
@@ -172,13 +172,11 @@ impl FragmentMassBuilder {
     ) -> Result<Vec<(SafePosition, f64, f32)>, CustomError> {
         // NOTE: I have to add this retain bc it generates precursor ions even if they are not
         // defined.
+        // TODO: return a different error ... this one is very loaded.
         let ions: Vec<Fragment> = peptide
             .generate_theoretical_fragments(self.max_charge, &self.model)
             .into_iter()
-            .filter(|x| match x.ion {
-                FragmentType::precursor => false,
-                _ => true,
-            })
+            .filter(|x| matches!(x.ion, FragmentType::precursor))
             .collect();
 
         // Does this generate ions above the charge of the precursor?

@@ -1,16 +1,9 @@
 use super::digest::DigestSlice;
-use crate::data_sources::speclib::{
-    ExpectedIntensities,
-    ReferenceEG,
-};
+use crate::data_sources::speclib::ExpectedIntensities;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use rayon::iter::Zip as RayonZip;
 use rayon::prelude::*;
 use rayon::vec::IntoIter as RayonVecIntoIter;
-use serde::{
-    Deserialize,
-    Serialize,
-};
 use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone)]

@@ -68,7 +68,7 @@ impl DaemonServer {
 fn handle_connection(
     mut stream: TcpStream,
     index: Arc<index::BundledDotDIndex>,
-    running: &std::sync::atomic::AtomicBool,
+    _running: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut buffer = String::new();
@@ -146,7 +146,7 @@ fn main() -> Result<()> {
     );
 
     let st = std::time::Instant::now();
-    let check_out = match index.query(sample.into()) {
+    let _check_out = match index.query(sample.into()) {
         Ok(q) => {
             println!("Query OK");
             q

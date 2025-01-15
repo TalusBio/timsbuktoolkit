@@ -49,11 +49,8 @@ pub fn snap_to_reference<R: PartialOrd, V: Copy + Default + PartialOrd>(
         }
         // Replace only if its larger
         let cmp = out[ref_i].partial_cmp(vv);
-        match cmp {
-            Some(std::cmp::Ordering::Less) => {
-                out[ref_i] = *vv;
-            }
-            _ => {}
+        if let Some(std::cmp::Ordering::Less) = cmp {
+            out[ref_i] = *vv;
         }
     }
     Ok(out)

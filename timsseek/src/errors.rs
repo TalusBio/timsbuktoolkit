@@ -81,10 +81,10 @@ impl From<std::num::ParseIntError> for TimsSeekError {
     }
 }
 
-impl Into<TimsSeekError> for serde_json::Error {
-    fn into(self) -> TimsSeekError {
+impl From<serde_json::Error> for TimsSeekError {
+    fn from(val: serde_json::Error) -> Self {
         TimsSeekError::ParseError {
-            msg: self.to_string(),
+            msg: val.to_string(),
         }
     }
 }

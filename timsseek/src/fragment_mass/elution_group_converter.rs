@@ -1,12 +1,9 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
-use crate::data_sources::speclib::{
-    ExpectedIntensities,
-    ReferenceEG,
-};
+use crate::data_sources::speclib::ExpectedIntensities;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
-use log::{
+use tracing::{
     error,
     warn,
 };

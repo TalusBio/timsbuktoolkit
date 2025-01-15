@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Define the binaries to package
+  RELEASE_BINARIES: timsseek timsquery timsseek_rts
 
 jobs:
   create-release:
@@ -25,22 +27,16 @@ jobs:
           draft: false
           prerelease: false
 
-  build-and-upload:
+  linux-builds:
     needs: create-release
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            suffix: ''
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            suffix: '.exe'
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            suffix: ''
-
-    runs-on: ${{ matrix.os }}
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
 
@@ -49,17 +45,39 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build
-        run: |
-          cargo build --release --target ${{ matrix.target }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      # Gather all binaries from the workspace
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools clang gcc-aarch64-linux-gnu
+          sudo ln -s /usr/bin/musl-gcc /usr/bin/x86_64-linux-musl-gcc
+          sudo ln -s /usr/bin/musl-gcc /usr/bin/aarch64-linux-musl-gcc
+
+      - name: Configure cargo
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [target.${{ matrix.target }}]
+          EOF
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            echo 'linker = "rust-lld"' >> .cargo/config.toml
+          fi
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+          fi
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
       - name: Prepare binaries
-        shell: bash
         run: |
           mkdir artifacts
-          for binary in $(cargo metadata --format-version=1 | jq -r '.workspace_members[] | split(" ") | .[0]'); do
-            cp target/${{ matrix.target }}/release/$binary${{ matrix.suffix }} artifacts/
+          for binary in $RELEASE_BINARIES; do
+            cp "target/${{ matrix.target }}/release/$binary" artifacts/
           done
           cd artifacts
           tar czf ../${{ matrix.target }}.tar.gz *
@@ -72,4 +90,86 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ matrix.target }}.tar.gz
           asset_name: ${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
+  macos-builds:
+    needs: create-release
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binaries
+        run: |
+          mkdir artifacts
+          for binary in $RELEASE_BINARIES; do
+            cp "target/${{ matrix.target }}/release/$binary" artifacts/
+          done
+          cd artifacts
+          tar czf ../${{ matrix.target }}.tar.gz *
+
+      - name: Upload Release Assets
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ matrix.target }}.tar.gz
+          asset_name: ${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
+
+  windows-builds:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Prepare binaries
+        shell: bash
+        run: |
+          mkdir artifacts
+          for binary in $RELEASE_BINARIES; do
+            cp "target/x86_64-pc-windows-msvc/release/$binary.exe" artifacts/
+          done
+          cd artifacts
+          tar czf ../x86_64-pc-windows-msvc.tar.gz *
+
+      - name: Upload Release Assets
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: x86_64-pc-windows-msvc.tar.gz
+          asset_name: x86_64-pc-windows-msvc.tar.gz
           asset_content_type: application/gzip

@@ -26,6 +26,12 @@ pub struct TopNArray<const N: usize, T: Clone + Copy + PartialOrd + Default> {
     len: usize,
 }
 
+impl<const N: usize, T: Clone + Copy + PartialOrd + Default> Default for TopNArray<N, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize, T: Clone + Copy + PartialOrd + Default> TopNArray<N, T> {
     pub fn new() -> Self {
         Self {

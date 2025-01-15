@@ -4,11 +4,7 @@ use super::calculate_scores::{
     PreScore,
     SortedErrors,
 };
-use crate::errors::{
-    DataProcessingError,
-    Result,
-    TimsSeekError,
-};
+use crate::errors::Result;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::models::{
     DecoyMarking,
@@ -61,7 +57,7 @@ impl<'q> SearchResultBuilder<'q> {
 
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = Some(pre_score.digest);
-        self.ref_eg = Some(&pre_score.reference);
+        self.ref_eg = Some(pre_score.reference);
         self.nqueries = Some(pre_score.reference.fragment_mzs.len() as u8);
         self.decoy_marking = Some(pre_score.digest.decoy);
         self.charge = Some(pre_score.charge);
@@ -79,8 +75,7 @@ impl<'q> SearchResultBuilder<'q> {
     fn with_main_score(mut self, main_score: MainScore) -> Self {
         // TODO use exhaustive unpacking to make more explicit any values
         // I Might be ignoring.
-        match main_score {
-            MainScore {
+        let MainScore {
                 score,
                 delta_next,
                 observed_mobility,
@@ -96,22 +91,22 @@ impl<'q> SearchResultBuilder<'q> {
                 ms2_summed_intensity,
                 retention_time_ms,
                 ..
-            } => {
-                self.main_score = Some(score);
-                self.delta_next = Some(delta_next);
-                self.observed_mobility = Some(observed_mobility);
-                self.rt_seconds = Some(retention_time_ms as f32 / 1000.0);
-                self.ms2_cosine_ref_similarity = Some(ms2_cosine_ref_sim);
-                self.ms2_coelution_score = Some(ms2_coelution_score);
-                self.ms1_coelution_score = Some(ms1_coelution_score);
-                self.ms1_cosine_ref_similarity = Some(ms1_cosine_ref_sim);
-                self.lazyerscore = Some(lazyscore);
-                self.lazyerscore_vs_baseline = Some(lazyscore_vs_baseline);
-                self.norm_lazyerscore_vs_baseline = Some(lazyscore_z);
-                self.npeaks = Some(npeaks);
-                self.ms1_summed_precursor_intensity = Some(ms1_summed_intensity);
-                self.ms2_summed_transition_intensity = Some(ms2_summed_intensity);
-            }
+            } = main_score;
+        {
+            self.main_score = Some(score);
+            self.delta_next = Some(delta_next);
+            self.observed_mobility = Some(observed_mobility);
+            self.rt_seconds = Some(retention_time_ms as f32 / 1000.0);
+            self.ms2_cosine_ref_similarity = Some(ms2_cosine_ref_sim);
+            self.ms2_coelution_score = Some(ms2_coelution_score);
+            self.ms1_coelution_score = Some(ms1_coelution_score);
+            self.ms1_cosine_ref_similarity = Some(ms1_cosine_ref_sim);
+            self.lazyerscore = Some(lazyscore);
+            self.lazyerscore_vs_baseline = Some(lazyscore_vs_baseline);
+            self.norm_lazyerscore_vs_baseline = Some(lazyscore_z);
+            self.npeaks = Some(npeaks);
+            self.ms1_summed_precursor_intensity = Some(ms1_summed_intensity);
+            self.ms2_summed_transition_intensity = Some(ms2_summed_intensity);
         }
 
         self
@@ -254,7 +249,7 @@ pub fn write_results_to_csv<P: AsRef<Path>>(
         writer.serialize(result).unwrap();
     }
     writer.flush()?;
-    log::info!(
+    tracing::info!(
         "Writing took {:?} -> {:?}",
         start.elapsed(),
         out_path.as_ref()
