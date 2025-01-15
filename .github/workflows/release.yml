@@ -73,6 +73,7 @@ jobs:
 
       - name: Build
         run: |
+            rustup target add ${{ matrix.target }}
             for binary in $RELEASE_BINARIES; do
                 cargo build --release --bin $binary --target ${{ matrix.target }}
             done
@@ -119,6 +120,7 @@ jobs:
 
       - name: Build
         run: |
+            rustup target add ${{ matrix.target }}
             for binary in $RELEASE_BINARIES; do
                 cargo build --release --bin $binary --target ${{ matrix.target }}
             done
@@ -160,6 +162,7 @@ jobs:
 
       - name: Build
         run: |
+            rustup target add x86_64-pc-windows-msvc
             for binary in $RELEASE_BINARIES; do
                 cargo build --release --bin $binary --target x86_64-pc-windows-msvc
             done
