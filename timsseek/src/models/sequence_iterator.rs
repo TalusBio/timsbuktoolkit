@@ -5,7 +5,6 @@ use crate::fragment_mass::elution_group_converter::SequenceToElutionGroupConvert
 pub struct DigestedSequenceIterator {
     digest_sequences: Vec<DigestSlice>,
     chunk_size: usize,
-    max_iterations: usize,
     iteration_index: usize,
     converter: SequenceToElutionGroupConverter,
     build_decoys: bool,
@@ -18,11 +17,9 @@ impl DigestedSequenceIterator {
         converter: SequenceToElutionGroupConverter,
         build_decoys: bool,
     ) -> Self {
-        let max_iterations = digest_sequences.len() / chunk_size;
         Self {
             digest_sequences,
             chunk_size,
-            max_iterations,
             converter,
             iteration_index: 0,
             build_decoys,

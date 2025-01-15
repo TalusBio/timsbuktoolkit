@@ -119,7 +119,8 @@ impl Speclib {
             let elem: SpeclibElement = match serde_json::from_str(line) {
                 Ok(x) => x,
                 Err(e) => {
-                    panic!("Error parsing line: {:?}", line);
+                    panic!("Error parsing line: {:?}; error: {:?}", line, e);
+                    // TODO: Make this a proper error
                     // return Err(TimsSeekError::TimsRust(TimsRustError::Serde(e)));
                 }
             };

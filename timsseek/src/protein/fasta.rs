@@ -94,13 +94,6 @@ impl ProteinSequenceNmerIndex {
         }
     }
 
-    fn get_sequence(&self, id: usize) -> Option<&ProteinSequence> {
-        self.sequences.get(id)
-    }
-
-    fn len(&self) -> usize {
-        self.sequences.len()
-    }
 }
 
 impl ProteinSequenceCollection {
