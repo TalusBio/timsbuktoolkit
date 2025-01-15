@@ -115,41 +115,41 @@ jobs:
           asset_name: ${{ matrix.target }}.tar.gz
           asset_content_type: application/gzip
 
-  windows-builds:
-    needs: create-release
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
+  # windows-builds:
+  #   needs: create-release
+  #   runs-on: windows-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-msvc
-          cache: true
+  #     - name: Install Rust
+  #       uses: actions-rust-lang/setup-rust-toolchain@v1
+  #       with:
+  #         target: x86_64-pc-windows-msvc
+  #         cache: true
 
-      - name: Build
-        run: |
-            rustup target add x86_64-pc-windows-msvc
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --features="build-binary" --target x86_64-pc-windows-msvc
-            done
+  #     - name: Build
+  #       run: |
+  #           rustup target add x86_64-pc-windows-msvc
+  #           for binary in $RELEASE_BINARIES; do
+  #               cargo build --release --bin $binary --features="build-binary" --target x86_64-pc-windows-msvc
+  #           done
 
-      - name: Prepare binaries
-        shell: bash
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/x86_64-pc-windows-msvc/release/$binary.exe" artifacts/
-          done
-          cd artifacts
-          tar czf ../x86_64-pc-windows-msvc.tar.gz *
+  #     - name: Prepare binaries
+  #       shell: bash
+  #       run: |
+  #         mkdir artifacts
+  #         for binary in $RELEASE_BINARIES; do
+  #           cp "target/x86_64-pc-windows-msvc/release/$binary.exe" artifacts/
+  #         done
+  #         cd artifacts
+  #         tar czf ../x86_64-pc-windows-msvc.tar.gz *
 
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: x86_64-pc-windows-msvc.tar.gz
-          asset_name: x86_64-pc-windows-msvc.tar.gz
-          asset_content_type: application/gzip
+  #     - name: Upload Release Assets
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ needs.create-release.outputs.upload_url }}
+  #         asset_path: x86_64-pc-windows-msvc.tar.gz
+  #         asset_name: x86_64-pc-windows-msvc.tar.gz
+  #         asset_content_type: application/gzip
