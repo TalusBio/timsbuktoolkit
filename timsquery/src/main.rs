@@ -184,7 +184,6 @@ pub enum SerializationFormat {
     #[default]
     PrettyJson,
     Json,
-    Msgpack,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -281,16 +280,6 @@ pub fn execute_query(
                     let serialized = serde_json::to_string(&out).unwrap();
                     let put_path = std::path::Path::new(&output_path).join("results.json");
                     std::fs::write(put_path.clone(), serialized).unwrap();
-                    put_path
-                }
-                SerializationFormat::Msgpack => {
-                    let mut msgpack_data = Vec::new();
-                    let mut serializer = rmp_serde::Serializer::new(&mut msgpack_data)
-                        .with_struct_map()
-                        .with_bytes(rmp_serde::config::BytesMode::ForceAll);
-                    out.serialize(&mut serializer).unwrap();
-                    let put_path = std::path::Path::new(&output_path).join("results.msgpack");
-                    std::fs::write(put_path.clone(), msgpack_data).unwrap();
                     put_path
                 }
             };
