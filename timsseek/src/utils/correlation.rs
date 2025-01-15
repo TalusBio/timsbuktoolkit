@@ -286,7 +286,17 @@ mod tests {
     fn test_rolling_cosine_similarity() {
         let a: Vec<f32> = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
         let b: Vec<f32> = vec![4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0];
-        let expect_res: [f32; 9] = [f32::NAN, 0.97463185, 0.97463185, 0.97463185, 0.97463185, 0.97463185, 0.97463185, 0.97463185, f32::NAN];
+        let expect_res: [f32; 9] = [
+            f32::NAN,
+            0.97463185,
+            0.97463185,
+            0.97463185,
+            0.97463185,
+            0.97463185,
+            0.97463185,
+            0.97463185,
+            f32::NAN,
+        ];
         let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
         assert_eq!(results.len(), expect_res.len());
 

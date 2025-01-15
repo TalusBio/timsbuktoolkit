@@ -7,7 +7,6 @@ use indicatif::{
     ProgressIterator,
     ProgressStyle,
 };
-use log::info;
 use rayon::prelude::*;
 use std::path::{
     Path,
@@ -41,6 +40,7 @@ use timsseek::scoring::search_results::{
     SearchResultBuilder,
     write_results_to_csv,
 };
+use tracing::info;
 
 pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
@@ -79,7 +79,7 @@ pub fn process_chunk<'a>(
                     // TODO: Implement filtering out queries that cannot match the data
                     // So we dont get here, to a point where queries can be empty bc no data
                     // can match them.
-                    log::debug!(
+                    tracing::debug!(
                         "Error localizing pre score: id={:} eg: {:#?}, because of: {:#?}",
                         res_elem.id,
                         eg_elem,
@@ -90,7 +90,7 @@ pub fn process_chunk<'a>(
                 let loc = loc.unwrap();
                 let res = builder.with_localized_pre_score(&loc).finalize();
                 if res.is_err() {
-                    log::error!(
+                    tracing::error!(
                         "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
                         digest,
                         eg_elem,
@@ -117,12 +117,12 @@ pub fn process_chunk<'a>(
 
     assert!(!avg_main_scores.is_nan());
     let elapsed = start.elapsed();
-    log::info!(
+    tracing::info!(
         "Bundling took {:?} for {} elution_groups",
         elapsed,
         num_queries,
     );
-    log::info!("Avg main score: {:?}", avg_main_scores);
+    tracing::info!("Avg main score: {:?}", avg_main_scores);
 
     out
 }

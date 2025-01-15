@@ -24,7 +24,10 @@ use tracing::warn;
 /// let scores = coelution_score::coelution_score_arr::<3>(&slices, window);
 /// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
 /// ```
-pub fn coelution_score_arr<const TOP_N: usize>(slices: &Array2D<f32>, window_size: usize) -> Vec<f32> {
+pub fn coelution_score_arr<const TOP_N: usize>(
+    slices: &Array2D<f32>,
+    window_size: usize,
+) -> Vec<f32> {
     if slices.ncols() < window_size {
         warn!("Not enough data to calculate coelution score");
         return vec![0.0; slices.ncols()];
@@ -58,7 +61,12 @@ pub fn coelution_score_arr<const TOP_N: usize>(slices: &Array2D<f32>, window_siz
         .map(|x| {
             let curr_vals = x.get_values();
             let out = curr_vals.iter().sum::<f32>() / x.capacity() as f32;
-            assert!(out <= 1.0, "Coelution score greater than 1.0, vals: {:?}, out: {}", curr_vals, out);
+            assert!(
+                out <= 1.0,
+                "Coelution score greater than 1.0, vals: {:?}, out: {}",
+                curr_vals,
+                out
+            );
             out
         })
         .collect::<Vec<f32>>();
@@ -73,7 +81,10 @@ pub fn coelution_score_arr<const TOP_N: usize>(slices: &Array2D<f32>, window_siz
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score<const TOP_N: usize>(slices: &MzMajorIntensityArray, window: usize) -> Vec<f32> {
+pub fn coelution_score<const TOP_N: usize>(
+    slices: &MzMajorIntensityArray,
+    window: usize,
+) -> Vec<f32> {
     coelution_score_arr::<TOP_N>(&slices.arr, window)
 }
 

@@ -76,22 +76,22 @@ impl<'q> SearchResultBuilder<'q> {
         // TODO use exhaustive unpacking to make more explicit any values
         // I Might be ignoring.
         let MainScore {
-                score,
-                delta_next,
-                observed_mobility,
-                ms2_cosine_ref_sim,
-                ms2_coelution_score,
-                ms1_coelution_score,
-                ms1_cosine_ref_sim,
-                lazyscore,
-                lazyscore_vs_baseline,
-                lazyscore_z,
-                npeaks,
-                ms1_summed_intensity,
-                ms2_summed_intensity,
-                retention_time_ms,
-                ..
-            } = main_score;
+            score,
+            delta_next,
+            observed_mobility,
+            ms2_cosine_ref_sim,
+            ms2_coelution_score,
+            ms1_coelution_score,
+            ms1_cosine_ref_sim,
+            lazyscore,
+            lazyscore_vs_baseline,
+            lazyscore_z,
+            npeaks,
+            ms1_summed_intensity,
+            ms2_summed_intensity,
+            retention_time_ms,
+            ..
+        } = main_score;
         {
             self.main_score = Some(score);
             self.delta_next = Some(delta_next);

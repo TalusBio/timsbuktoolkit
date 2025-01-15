@@ -34,9 +34,9 @@ use tracing_bunyan_formatter::{
     JsonStorageLayer,
 };
 use tracing_chrome::ChromeLayerBuilder;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::EnvFilter;
 
 const NUM_ELUTION_GROUPS: usize = 1000;
 const NUM_ITERATIONS: usize = 1;

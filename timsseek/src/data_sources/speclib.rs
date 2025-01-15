@@ -5,7 +5,6 @@ use crate::models::{
     DigestSlice,
     NamedQueryChunk,
 };
-use tracing::debug;
 use rayon::prelude::*;
 use serde::{
     Deserialize,
@@ -15,6 +14,7 @@ use std::collections::HashMap;
 use std::path;
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities {

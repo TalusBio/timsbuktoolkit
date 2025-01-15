@@ -8,6 +8,8 @@ use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedInd
 use timsseek::errors::TimsSeekError;
 use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
 use config::{
@@ -18,7 +20,13 @@ use config::{
 
 fn main() -> std::result::Result<(), TimsSeekError> {
     // Initialize logging
-    env_logger::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        ) // This uses RUST_LOG environment variable
+        .init();
 
     // Parse command line arguments
     let args = Cli::parse();

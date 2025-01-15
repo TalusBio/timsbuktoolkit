@@ -3,10 +3,6 @@ use crate::data_sources::speclib::ExpectedIntensities;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
-use tracing::{
-    error,
-    warn,
-};
 use rayon::prelude::*;
 use rustyms::error::{
     Context,
@@ -21,6 +17,10 @@ use rustyms::{
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use timsquery::models::elution_group::ElutionGroup;
+use tracing::{
+    error,
+    warn,
+};
 
 /// Super simple 1/k0 prediction.
 ///
