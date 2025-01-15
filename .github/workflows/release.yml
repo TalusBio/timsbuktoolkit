@@ -7,151 +7,50 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
   # Define the binaries to package
   # TODO: use our taskfile to centralize the build
   RELEASE_BINARIES: timsseek timsquery timsseek_rts
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
-  linux-builds:
-    needs: create-release
-    runs-on: ubuntu-latest
+  release:
+    name: Release - ${{ matrix.platform.os-name }}
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+        platform:
+          - os-name: Linux-x86_64
+            runs-on: ubuntu-20.04
+            target: x86_64-unknown-linux-musl
+
+          - os-name: Linux-aarch64
+            runs-on: ubuntu-20.04
+            target: aarch64-unknown-linux-musl
+
+          - os-name: Windows-x86_64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+
+          - os-name: macOS-x86_64
+            runs-on: macOS-latest
+            target: x86_64-apple-darwin
+
+          - os-name: macOS-aarch64
+            runs-on: macOS-latest
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform.runs-on }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@v1
         with:
-          target: ${{ matrix.target }}
-          cache: true
-
-      - name: Build
-        run: |
-            rustup target add ${{ matrix.target }}
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --target ${{ matrix.target }}
-            done
-
-      - name: Prepare binaries
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/${{ matrix.target }}/release/$binary" artifacts/
-          done
-          cd artifacts
-          tar czf ../${{ matrix.target }}.tar.gz *
-
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          command: ${{ matrix.platform.command }}
+          target: ${{ matrix.platform.target }}
+          args: "--locked --release"
+          strip: true
+      - name: Publish artifacts and release
+        uses: houseabsolute/actions-rust-release@v0
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ matrix.target }}.tar.gz
-          asset_name: ${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
-
-  macos-builds:
-    needs: create-release
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: ${{ matrix.target }}
-          cache: true
-
-
-      - name: Build
-        run: |
-            rustup target add ${{ matrix.target }}
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --target ${{ matrix.target }}
-            done
-
-      - name: Prepare binaries
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/${{ matrix.target }}/release/$binary" artifacts/
-          done
-          cd artifacts
-          tar czf ../${{ matrix.target }}.tar.gz *
-
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ matrix.target }}.tar.gz
-          asset_name: ${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
-
-  windows-builds:
-    needs: create-release
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-msvc
-          cache: true
-
-      - name: Build
-        run: |
-            rustup target add x86_64-pc-windows-msvc
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --target x86_64-pc-windows-msvc
-            done
-
-      - name: Prepare binaries
-        shell: bash
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/x86_64-pc-windows-msvc/release/$binary.exe" artifacts/
-          done
-          cd artifacts
-          tar czf ../x86_64-pc-windows-msvc.tar.gz *
-
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: x86_64-pc-windows-msvc.tar.gz
-          asset_name: x86_64-pc-windows-msvc.tar.gz
-          asset_content_type: application/gzip
+          executable-name: timsseek
+          target: ${{ matrix.platform.target }}
