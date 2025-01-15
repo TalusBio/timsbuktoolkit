@@ -8,6 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # Define the binaries to package
+  # TODO: use our taskfile to centralize the build
   RELEASE_BINARIES: timsseek timsquery timsseek_rts
 
 jobs:
@@ -71,7 +72,10 @@ jobs:
           fi
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+            for binary in $RELEASE_BINARIES; do
+                cargo build --release --bin $binary --target ${{ matrix.target }}
+            done
 
       - name: Prepare binaries
         run: |
@@ -114,7 +118,10 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+            for binary in $RELEASE_BINARIES; do
+                cargo build --release --bin $binary --target ${{ matrix.target }}
+            done
 
       - name: Prepare binaries
         run: |
@@ -152,7 +159,10 @@ jobs:
           key: x86_64-pc-windows-msvc
 
       - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: |
+            for binary in $RELEASE_BINARIES; do
+                cargo build --release --bin $binary --target x86_64-pc-windows-msvc
+            done
 
       - name: Prepare binaries
         shell: bash
