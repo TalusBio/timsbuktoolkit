@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   # Define the binaries to package
   # TODO: use our taskfile to centralize the build
-  RELEASE_BINARIES: timsseek timsquery timsseek_rts
+  RELEASE_BINARIES: timsseek # timsquery timsseek_rts
 
 jobs:
   create-release:
