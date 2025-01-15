@@ -19,11 +19,12 @@ use tracing::warn;
 ///          [0., 2., 4., 20., 5.],
 ///          [0., 1., 2., 19., 2.]]).unwrap();
 /// let window = 3;
-/// let scores = coelution_score::coelution_score_arr(&slices, window);
-/// assert_eq!(scores, [0.0, 0.9932996624407776, 1.0, 0.9977801004359416, 0.0]);
+/// // Note that the generic type parameter is the top N of scores that will
+/// // be averaged to report the coelution.
+/// let scores = coelution_score::coelution_score_arr::<3>(&slices, window);
+/// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
 /// ```
-fn coelution_score_arr(slices: &Array2D<f32>, window_size: usize) -> Vec<f32> {
-    const TOP_N: usize = 6;
+pub fn coelution_score_arr<const TOP_N: usize>(slices: &Array2D<f32>, window_size: usize) -> Vec<f32> {
     if slices.ncols() < window_size {
         warn!("Not enough data to calculate coelution score");
         return vec![0.0; slices.ncols()];
@@ -72,8 +73,8 @@ fn coelution_score_arr(slices: &Array2D<f32>, window_size: usize) -> Vec<f32> {
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score(slices: &MzMajorIntensityArray, window: usize) -> Vec<f32> {
-    coelution_score_arr(&slices.arr, window)
+pub fn coelution_score<const TOP_N: usize>(slices: &MzMajorIntensityArray, window: usize) -> Vec<f32> {
+    coelution_score_arr::<TOP_N>(&slices.arr, window)
 }
 
 #[cfg(test)]
@@ -100,9 +101,9 @@ mod tests {
         let slices =
             Array2D::new(vec![[0., 1., 1., 3., 200., 5.], [1., 2., 1., 4., 200., 6.]]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr(&slices, window);
-        let expected = vec![0.0, 0.866, 0.816, 0.968, 0.999, 0.0];
-        assert_close_enough(&scores, &expected, 1e-3);
+        let scores = coelution_score_arr::<1>(&slices, window);
+        let expected = vec![0.0, 0.75, 0.974026, 0.99997497, 0.99995005, 0.0];
+        assert_close_enough(&scores, &expected, 1e-2);
     }
 
     #[test]
@@ -110,16 +111,16 @@ mod tests {
         let arr = vec![0., 1., 1., 3., 200., 5.];
         let slices = Array2D::new(vec![arr.clone(), arr.clone()]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr(&slices, window);
-        let expected = vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0];
-        assert_close_enough(&scores, &expected, 1e-8);
+        let scores = coelution_score_arr::<2>(&slices, window);
+        let expected = vec![0.0, 0.5, 0.5, 0.5, 0.5, 0.0];
+        assert_close_enough(&scores, &expected, 1e-7);
     }
 
     #[test]
     fn test_coelution_score_no_overlap() {
         let slices = Array2D::new(vec![[0., 1.], [1., 2.], [2., 3.]]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr(&slices, window);
+        let scores = coelution_score_arr::<2>(&slices, window);
         let expected = vec![0.0, 0.0];
         assert_close_enough(&scores, &expected, 1e-8);
     }

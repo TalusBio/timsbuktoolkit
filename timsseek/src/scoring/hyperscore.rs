@@ -29,7 +29,7 @@ pub fn peak_count(slices: &RTMajorIntensityArray, count_threshold: f32) -> Vec<u
 /// let score = single_hyperscore(&slice, Some(&grouping), count_threshold);
 /// assert_eq!(score, 8.747712863479158);
 /// ```
-fn single_hyperscore(slice: &[f32], grouping: Option<&[u8]>, count_threshold: f32) -> f32 {
+pub fn single_hyperscore(slice: &[f32], grouping: Option<&[u8]>, count_threshold: f32) -> f32 {
     let mut score = 0.0;
     let min_grouping: u8 = grouping.map_or(0, |x| *x.iter().min().unwrap_or(&0));
     let max_grouping: u8 = grouping.map_or(0, |x| *x.iter().max().unwrap_or(&0));

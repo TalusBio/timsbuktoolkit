@@ -147,13 +147,13 @@ impl LongitudinalMainScoreElements {
         .unwrap();
 
         let ms2_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score(&intensity_arrays.ms2_mzmajor, 7),
+            &coelution_score::coelution_score::<10>(&intensity_arrays.ms2_mzmajor, 7),
             ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
         let ms1_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score(&intensity_arrays.ms1_mzmajor, 7),
+            &coelution_score::coelution_score::<6>(&intensity_arrays.ms1_mzmajor, 7),
             ms1_rts,
             &ref_time_ms,
         )

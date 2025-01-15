@@ -238,12 +238,11 @@ mod tests {
                     "precursor_charge": 2,
                     "mobility": 0.8,
                     "rt_seconds": 0.0,
-                    "decoy": false,
-                    "expected_precursor_intensity": [
+                    "precursor_intensities": [
                         1.0,
                         1.0
                     ],
-                    "expected_fragment_intensity": {
+                    "fragment_intensities": {
                         "a1": 1.0,
                         "b1": 1.0,
                         "c1^2": 1.0
