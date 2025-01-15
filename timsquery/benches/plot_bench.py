@@ -6,11 +6,11 @@
 # ]
 # ///
 
-from pathlib import Path
-import polars as pl
-import altair as alt
 import argparse
+from pathlib import Path
 
+import altair as alt
+import polars as pl
 
 parser = argparse.ArgumentParser()
 parser.add_argument("benchmark_file")

@@ -26,15 +26,17 @@ pub struct SearchResultBuilder<'q> {
     ref_eg: Option<&'q ElutionGroup<SafePosition>>,
     decoy_marking: Option<DecoyMarking>,
     charge: Option<u8>,
+    nqueries: Option<u8>,
 
     main_score: Option<f32>,
+    delta_next: Option<f32>,
     rt_seconds: Option<f32>,
     observed_mobility: Option<f32>,
 
     npeaks: Option<u8>,
     lazyerscore: Option<f32>,
-    // lazyerscore_vs_baseline: Option<f32>,
-    // norm_lazyerscore_vs_baseline: Option<f32>,
+    lazyerscore_vs_baseline: Option<f32>,
+    norm_lazyerscore_vs_baseline: Option<f32>,
     ms2_cosine_ref_similarity: Option<f32>,
     ms2_coelution_score: Option<f32>,
     ms2_summed_transition_intensity: Option<f32>,
@@ -60,6 +62,7 @@ impl<'q> SearchResultBuilder<'q> {
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = Some(pre_score.digest);
         self.ref_eg = Some(&pre_score.reference);
+        self.nqueries = Some(pre_score.reference.fragment_mzs.len() as u8);
         self.decoy_marking = Some(pre_score.digest.decoy);
         self.charge = Some(pre_score.charge);
         self
@@ -74,17 +77,42 @@ impl<'q> SearchResultBuilder<'q> {
     }
 
     fn with_main_score(mut self, main_score: MainScore) -> Self {
-        self.main_score = Some(main_score.score);
-        self.observed_mobility = Some(main_score.observed_mobility);
-        self.rt_seconds = Some(main_score.retention_time_ms as f32 / 1000.0);
-        self.ms2_cosine_ref_similarity = Some(main_score.ms2_cosine_ref_sim);
-        self.ms2_coelution_score = Some(main_score.ms2_coelution_score);
-        self.ms1_coelution_score = Some(main_score.ms1_coelution_score);
-        self.ms1_cosine_ref_similarity = Some(main_score.ms1_cosine_ref_sim);
-        self.lazyerscore = Some(main_score.lazyscore);
-        self.npeaks = Some(main_score.npeaks);
-        self.ms1_summed_precursor_intensity = Some(main_score.ms1_summed_intensity);
-        self.ms2_summed_transition_intensity = Some(main_score.ms2_summed_intensity);
+        // TODO use exhaustive unpacking to make more explicit any values
+        // I Might be ignoring.
+        match main_score {
+            MainScore {
+                score,
+                delta_next,
+                observed_mobility,
+                ms2_cosine_ref_sim,
+                ms2_coelution_score,
+                ms1_coelution_score,
+                ms1_cosine_ref_sim,
+                lazyscore,
+                lazyscore_vs_baseline,
+                lazyscore_z,
+                npeaks,
+                ms1_summed_intensity,
+                ms2_summed_intensity,
+                retention_time_ms,
+                ..
+            } => {
+                self.main_score = Some(score);
+                self.delta_next = Some(delta_next);
+                self.observed_mobility = Some(observed_mobility);
+                self.rt_seconds = Some(retention_time_ms as f32 / 1000.0);
+                self.ms2_cosine_ref_similarity = Some(ms2_cosine_ref_sim);
+                self.ms2_coelution_score = Some(ms2_coelution_score);
+                self.ms1_coelution_score = Some(ms1_coelution_score);
+                self.ms1_cosine_ref_similarity = Some(ms1_cosine_ref_sim);
+                self.lazyerscore = Some(lazyscore);
+                self.lazyerscore_vs_baseline = Some(lazyscore_vs_baseline);
+                self.norm_lazyerscore_vs_baseline = Some(lazyscore_z);
+                self.npeaks = Some(npeaks);
+                self.ms1_summed_precursor_intensity = Some(ms1_summed_intensity);
+                self.ms2_summed_transition_intensity = Some(ms2_summed_intensity);
+            }
+        }
 
         self
     }
@@ -113,14 +141,16 @@ impl<'q> SearchResultBuilder<'q> {
             precursor_charge: self.charge.unwrap(),
             precursor_mobility_query: ref_eg.mobility,
             precursor_rt_query_seconds: ref_eg.rt_seconds,
+            nqueries: self.nqueries.unwrap(),
             is_target: self.decoy_marking.unwrap().is_target(),
             main_score: self.main_score.unwrap(),
+            delta_next: self.delta_next.unwrap(),
             obs_rt_seconds: self.rt_seconds.unwrap(),
             obs_mobility: self.observed_mobility.unwrap(),
             npeaks: self.npeaks.unwrap(),
             lazyerscore: self.lazyerscore.unwrap(),
-            // lazyerscore_vs_baseline: self.lazyerscore_vs_baseline.unwrap(),
-            // norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.unwrap(),
+            lazyerscore_vs_baseline: self.lazyerscore_vs_baseline.unwrap(),
+            norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.unwrap(),
             ms2_cosine_ref_similarity: self.ms2_cosine_ref_similarity.unwrap(),
             ms2_summed_transition_intensity: self.ms2_summed_transition_intensity.unwrap(),
             ms2_mz_error_0: mz2_e0,
@@ -160,18 +190,20 @@ pub struct IonSearchResults {
     precursor_charge: u8,
     precursor_mobility_query: f32,
     precursor_rt_query_seconds: f32,
+    nqueries: u8,
     is_target: bool,
 
     // Combined
     pub main_score: f32,
+    pub delta_next: f32,
     obs_rt_seconds: f32,
     obs_mobility: f32,
 
     // MS2
     npeaks: u8,
     lazyerscore: f32,
-    // lazyerscore_vs_baseline: f32,
-    // norm_lazyerscore_vs_baseline: f32,
+    lazyerscore_vs_baseline: f32,
+    norm_lazyerscore_vs_baseline: f32,
     ms2_cosine_ref_similarity: f32,
     ms2_coelution_score: f32,
     ms2_summed_transition_intensity: f32,

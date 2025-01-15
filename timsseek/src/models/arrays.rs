@@ -6,6 +6,7 @@ use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::arrays
 use crate::errors::{
     DataProcessingError,
     Result,
+    TimsSeekError,
 };
 
 /// Implements a way to represent an array of
@@ -236,13 +237,19 @@ impl MzMajorIntensityArray {
     pub fn new<FH: Clone + Eq + Serialize + Hash + Send + Sync + Debug>(
         array: &PartitionedCMGArrayStats<FH>,
         order: Option<&[FH]>,
-    ) -> Self {
+    ) -> std::result::Result<Self, DataProcessingError> {
         // TODO: Do I need to check if the order has no duplicates?
         let major_dim = match order {
             Some(order) => order.len(),
             None => array.intensities.len(),
         };
         let minor_dim = array.retention_time_miliseconds.len();
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: "Cannot create array with zero rows".to_string(),
+            }
+            .into());
+        }
         let mut vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
         match order {
             Some(order) => {
@@ -275,7 +282,7 @@ impl MzMajorIntensityArray {
         // in this implementation.
         assert!(array.intensities.len() <= out_arr.nrows());
 
-        Self { arr: out_arr }
+        Ok(Self { arr: out_arr })
     }
 }
 
@@ -287,12 +294,24 @@ impl RTMajorIntensityArray {
     pub fn new<FH: Clone + Eq + Serialize + Hash + Send + Sync>(
         array: &PartitionedCMGArrayStats<FH>,
         order: Option<&[FH]>,
-    ) -> Self {
+    ) -> core::result::Result<Self, DataProcessingError> {
         let major_dim = match order {
             Some(order) => order.len(),
             None => array.intensities.len(),
         };
         let minor_dim = array.retention_time_miliseconds.len();
+        if major_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: "Cannot create array with zero columns".to_string(),
+            }
+            .into());
+        }
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: "Cannot create array with zero rows".to_string(),
+            }
+            .into());
+        }
 
         let mut vals: Vec<f32> = vec![0.0; minor_dim * major_dim];
         match order {
@@ -325,9 +344,9 @@ impl RTMajorIntensityArray {
 
         // This assertion just makes sure I did not mix up rows and columns
         // in this implementation.
-        assert_eq!(out_arr.nrows(), array.retention_time_miliseconds.len());
+        assert_eq!(out_arr.values.len(), minor_dim * major_dim);
 
-        Self { arr: out_arr }
+        Ok(Self { arr: out_arr })
     }
 }
 
@@ -469,7 +488,7 @@ mod tests {
     #[test]
     fn test_array2d_from_cmg_int_mz_major() {
         let array = sample_cmg_array();
-        let arr = MzMajorIntensityArray::new(&array, Some(&[0, 1]));
+        let arr = MzMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let first_row = arr.arr.get_row(0);
         assert_eq!(first_row, &[1.0, 2.0, 3.0]);
@@ -480,7 +499,7 @@ mod tests {
     #[test]
     fn test_array2d_from_cmg_int_rt_major() {
         let array = sample_cmg_array();
-        let arr = RTMajorIntensityArray::new(&array, Some(&[0, 1]));
+        let arr = RTMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
         let first_row = arr.arr.get_row(0);
         assert_eq!(first_row, &[1.0, 4.0]);

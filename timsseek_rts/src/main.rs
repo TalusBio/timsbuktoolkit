@@ -1,14 +1,27 @@
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use clap::Parser;
+use index::InputQuery;
+use serde_json::{
+    Value,
+    json,
+};
+use std::io::{
+    BufReader,
+    Read,
+    Write,
+};
+use std::net::{
+    TcpListener,
+    TcpStream,
+};
 use std::sync::Arc;
 use std::thread;
-use index::InputQuery;
-use serde_json::{json, Value};
-use clap::Parser;
-use timsseek::errors::{Result, TimsSeekError};
+use timsseek::errors::{
+    Result,
+    TimsSeekError,
+};
 
-mod index;
 mod cli;
+mod index;
 
 struct DaemonServer {
     index: Arc<index::BundledDotDIndex>,
@@ -28,8 +41,8 @@ impl DaemonServer {
         println!("Listening on {}", addr);
 
         while self.running.load(std::sync::atomic::Ordering::Relaxed) {
-            listener.set_nonblocking(true)?;
-            
+            // listener.set_nonblocking(true)?;
+
             match listener.accept() {
                 Ok((stream, _)) => {
                     let index = Arc::clone(&self.index);
@@ -127,7 +140,10 @@ fn main() -> Result<()> {
     let index = index::BundledDotDIndex::new(conf.dotd_file, tol)?;
 
     println!("Starting server");
-    println!("Sample query: \n{}", serde_json::to_string_pretty(&sample).unwrap());
+    println!(
+        "Sample query: \n{}",
+        serde_json::to_string_pretty(&sample).unwrap()
+    );
 
     let st = std::time::Instant::now();
     let check_out = match index.query(sample.into()) {
@@ -141,7 +157,7 @@ fn main() -> Result<()> {
         }
     };
     let elap_time = st.elapsed();
-    println!("Querying took {:#?} for query", elap_time);
+    println!("Querying took {:#?} for sample query", elap_time);
 
     // println!("Query result: \n{}", serde_json::to_string_pretty(&check_out).unwrap());
 
@@ -156,24 +172,22 @@ fn main() -> Result<()> {
     };
     match server.run(&conf.address) {
         Ok(_) => Ok(()),
-        Err(e) => {
-            Err(TimsSeekError::Io {
-                source: e,
-                path: None,
-            })
-        }
+        Err(e) => Err(TimsSeekError::Io {
+            source: e,
+            path: None,
+        }),
     }
 }
 
 // Example client code
 // fn example_client() -> Result<()> {
 //     let mut stream = TcpStream::connect("127.0.0.1:8080")?;
-//     
+//
 //     let query = json!({
 //         "type": "search",
 //         "term": "example"
 //     });
-//     
+//
 //     match stream.write_all(query.to_string().as_bytes()) {
 //         Ok(_) => (),
 //         Err(e) => {
@@ -192,13 +206,13 @@ fn main() -> Result<()> {
 //             });
 //         }
 //     };
-// 
+//
 //     let mut reader = BufReader::new(stream);
 //     let mut response = String::new();
 //     reader.read_line(&mut response)?;
-//     
+//
 //     let response_json: Value = serde_json::from_str(&response).unwrap();
 //     println!("Response: {}", response_json);
-// 
+//
 //     Ok(())
 // }

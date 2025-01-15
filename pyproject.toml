@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timsseek-workspace"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "speclib_builder[ml]",
+]
+
+[dependency-groups]
+dev = [
+  "pre-commit>=4.0.1",
+  "ruff>=0.9.0",
+  "pytest",
+  "uv",
+]
+
+[tool.uv.sources]
+speclib_builder = { workspace = true }
+
+[tool.uv.workspace]
+members = ["speclib_builder"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.format]
+docstring-code-format = true
+preview = true
+
+[tool.ruff.lint]
+select = ["E", "F", "T20", "I"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["speclib_builder"]

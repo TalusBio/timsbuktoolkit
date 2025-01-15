@@ -13,6 +13,7 @@ use cli::Cli;
 use config::{
     Config,
     InputConfig,
+    OutputConfig,
 };
 
 fn main() -> std::result::Result<(), TimsSeekError> {
@@ -48,13 +49,23 @@ fn main() -> std::result::Result<(), TimsSeekError> {
         config.input = InputConfig::Speclib { path: speclib_file };
     }
     if let Some(output_dir) = args.output_dir {
-        config.output.directory = output_dir;
+        config.output = Some(OutputConfig {
+            directory: output_dir,
+        });
     }
 
-    println!("{:#?}", config);
+    let output_config = match config.output {
+        Some(ref x) => x.clone(),
+        None => {
+            panic!(
+                "No output directory provided, please provide one in either the config file or with the --output-dir flag"
+            );
+        }
+    };
+    println!("{:#?}", config.clone());
 
     // Create output director
-    match std::fs::create_dir_all(&config.output.directory) {
+    match std::fs::create_dir_all(&output_config.directory) {
         Ok(_) => println!("Created output directory"),
         Err(e) => {
             return Err(TimsSeekError::Io {
@@ -91,7 +102,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
                 &factory,
                 digestion,
                 &config.analysis,
-                &config.output,
+                &output_config,
             )?;
         }
         InputConfig::Speclib { path } => {
@@ -101,7 +112,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
                 ref_time_ms.clone(),
                 &factory,
                 &config.analysis,
-                &config.output,
+                &output_config,
             )?;
         }
     }

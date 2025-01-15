@@ -19,6 +19,7 @@ tasks:
   fmt:
     cmds:
       - cargo +nightly fmt
+      - uv run ruff format
 
   clippy:
     cmds:

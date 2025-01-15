@@ -1601,6 +1601,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "timsseek_rts"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "csv",
+ "indicatif",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "timsquery",
+ "timsrust",
+ "timsseek",
+ "tracing",
+ "tracing-bunyan-formatter",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tiny-keccak"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

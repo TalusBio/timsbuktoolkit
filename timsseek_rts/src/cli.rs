@@ -1,7 +1,10 @@
 use clap::Parser;
-use timsquery::traits::tolerance::DefaultTolerance;
 use std::path::PathBuf;
-use timsseek::errors::{Result, TimsSeekError};
+use timsquery::traits::tolerance::DefaultTolerance;
+use timsseek::errors::{
+    Result,
+    TimsSeekError,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

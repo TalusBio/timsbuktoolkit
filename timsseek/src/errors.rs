@@ -17,6 +17,30 @@ pub enum DataProcessingError {
     },
 }
 
+impl DataProcessingError {
+    pub fn append_to_context(mut self, context: &str) -> Self {
+        match &mut self {
+            DataProcessingError::ExpectedSlicesSameLength {
+                context: owned_context,
+                ..
+            } => {
+                owned_context.push_str(context);
+            }
+            DataProcessingError::ExpectedNonEmptyData {
+                context: owned_context,
+            } => {
+                owned_context.push_str(context);
+            }
+            DataProcessingError::ExpectedFiniteNonNanData {
+                context: owned_context,
+            } => {
+                owned_context.push_str(context);
+            }
+        }
+        self
+    }
+}
+
 #[derive(Debug)]
 pub enum TimsSeekError {
     TimsRust(TimsRustError),

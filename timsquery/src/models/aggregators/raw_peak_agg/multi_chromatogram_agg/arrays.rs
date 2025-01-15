@@ -41,12 +41,7 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
 {
     fn from(item: ParitionedCMGAggregator<FH>) -> Self {
         let mut transition_stats = Vec::with_capacity(item.keys.len());
-        let mut uniq_rts: Vec<u32> = item
-            .scan_tof_calc
-            .iter()
-            .flatten()
-            .map(|x| *x.0)
-            .collect();
+        let mut uniq_rts: Vec<u32> = item.scan_tof_calc.iter().flatten().map(|x| *x.0).collect();
         uniq_rts.sort_unstable();
         uniq_rts.dedup();
         let mut out_expected_tof_indices: Vec<u32> = Vec::with_capacity(item.keys.len());

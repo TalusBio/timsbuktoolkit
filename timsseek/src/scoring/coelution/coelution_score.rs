@@ -40,16 +40,26 @@ fn coelution_score_arr(slices: &Array2D<f32>, window_size: usize) -> Vec<f32> {
                 .expect("The passed array should already be checked for length and non-emptyness");
 
             for (si, score) in cosine_similarities.into_iter().enumerate() {
+                // Q: Should this raise an error or warn?
+                // Q: SHould I weight on the expected intensity?
                 if !score.is_nan() && score > 0.0 {
-                    scores[si].push(score);
+                    scores[si].push(score.powi(2));
                 }
             }
         }
     }
 
+    // TODO: Make this a single pass
+    // In theory I could make the calculation of the rolling similarities an iterator
+    // and then do a single pass over the iterators.
     let mut out = scores
         .iter()
-        .map(|x| x.get_values().iter().sum::<f32>() / x.capacity() as f32)
+        .map(|x| {
+            let curr_vals = x.get_values();
+            let out = curr_vals.iter().sum::<f32>() / x.capacity() as f32;
+            assert!(out <= 1.0, "Coelution score greater than 1.0, vals: {:?}, out: {}", curr_vals, out);
+            out
+        })
         .collect::<Vec<f32>>();
 
     let last_ind = out.len() - 1;

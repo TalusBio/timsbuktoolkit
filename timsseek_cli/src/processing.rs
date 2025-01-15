@@ -58,7 +58,7 @@ pub fn process_chunk<'a>(
         factory.build_with_elution_group(x)
     });
     let elap_time = start.elapsed();
-    info!("Querying + Aggregation took {:?}", elap_time);
+    info!("Querying took {:?}", elap_time);
 
     let start = Instant::now();
 
@@ -77,9 +77,21 @@ pub fn process_chunk<'a>(
                     ref_time_ms: ref_time_ms.clone(),
                 };
 
-                let res = builder
-                    .with_localized_pre_score(&prescore.localize())
-                    .finalize();
+                let loc = prescore.localize();
+                if loc.is_err() {
+                    // TODO: Implement filtering out queries that cannot match the data
+                    // So we dont get here, to a point where queries can be empty bc no data
+                    // can match them.
+                    log::debug!(
+                        "Error localizing pre score: id={:} eg: {:#?}, because of: {:#?}",
+                        res_elem.id,
+                        eg_elem,
+                        loc
+                    );
+                    return None;
+                }
+                let loc = loc.unwrap();
+                let res = builder.with_localized_pre_score(&loc).finalize();
                 if res.is_err() {
                     log::error!(
                         "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
@@ -131,7 +143,7 @@ pub fn main_loop<'a>(
     let start = Instant::now();
 
     let style = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {eta})",
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )
     .unwrap();
     chunked_query_iterator

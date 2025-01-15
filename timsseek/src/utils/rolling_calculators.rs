@@ -56,13 +56,28 @@ pub fn rolling_median<T: PartialOrd + Copy + Clone>(
     out
 }
 
-pub fn calculate_value_vs_baseline(vals: &[f64], baseline_window_size: usize) -> Vec<f64> {
-    let baseline = rolling_median(vals, baseline_window_size, f64::NAN);
+pub fn calculate_value_vs_baseline(vals: &[f32], baseline_window_size: usize) -> Vec<f32> {
+    let baseline = rolling_median(vals, baseline_window_size, f32::NAN);
     vals.iter()
         .zip(baseline.iter())
         .map(|(x, y)| x - y)
         .collect()
 }
+
+/// Calculate the centered standard deviation
+///
+/// This is a standard deviation for a slice, where we can assume
+/// the mean is 0.
+pub fn calculate_centered_std(vals: &[f32]) -> f32 {
+    let sqsum = vals
+        .iter()
+        .filter(|x| !x.is_nan())
+        .map(|x| x.powi(2))
+        .sum::<f32>();
+    let variance = sqsum / vals.len() as f32;
+    variance.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,11 +125,11 @@ mod tests {
 
     #[test]
     fn test_value_vs_baseline() {
-        let vals = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let vals: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let baseline_window_size = 3;
-        let _baseline = rolling_median(&vals, baseline_window_size, f64::NAN);
+        let _baseline = rolling_median(&vals, baseline_window_size, f32::NAN);
         let out = calculate_value_vs_baseline(&vals, baseline_window_size);
-        let expect_val = vec![f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f64::NAN];
+        let expect_val = vec![f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::NAN];
         let all_close = out
             .iter()
             .zip(expect_val.iter())

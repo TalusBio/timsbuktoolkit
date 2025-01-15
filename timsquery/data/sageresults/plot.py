@@ -5,10 +5,11 @@
 # ]
 # ///
 
-import json
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
+import json
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 def ms_to_mins(x):

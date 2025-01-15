@@ -5,7 +5,7 @@ use serde::{
 use std::path::PathBuf;
 use timsquery::traits::tolerance::DefaultTolerance;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Input configuration
     pub input: InputConfig,
@@ -14,10 +14,10 @@ pub struct Config {
     pub analysis: AnalysisConfig,
 
     /// Output configuration
-    pub output: OutputConfig,
+    pub output: Option<OutputConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum InputConfig {
     #[serde(rename = "fasta")]
@@ -29,7 +29,7 @@ pub enum InputConfig {
     Speclib { path: PathBuf },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AnalysisConfig {
     /// Path to the .d file
     pub dotd_file: Option<PathBuf>,
@@ -41,13 +41,13 @@ pub struct AnalysisConfig {
     pub tolerance: DefaultTolerance,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OutputConfig {
     /// Directory for results
     pub directory: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DigestionConfig {
     pub min_length: u32,
     pub max_length: u32,
