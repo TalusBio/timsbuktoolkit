@@ -420,7 +420,7 @@ fn sorted_err_at_idx(
     let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
     let ref_ims = elution_group.mobility;
 
-    if ms1_idx <= cmgs.ms1_arrays.intensities.len() {
+    if ms1_idx <= cmgs.ms1_arrays.retention_time_miliseconds.len() {
         for i in 0..3 {
             let expect_mz = elution_group.precursor_mzs.get(i);
             let mz_err = if let Some(mz) = expect_mz {
@@ -439,7 +439,8 @@ fn sorted_err_at_idx(
         }
     }
 
-    if ms2_idx <= cmgs.ms2_arrays.intensities.len() {
+    // TODO: make an impl to get the length on the RT axis.
+    if ms2_idx <= cmgs.ms2_arrays.retention_time_miliseconds.len() {
         for (k, v) in cmgs.ms2_arrays.intensities.iter() {
             let expect_mz = elution_group.fragment_mzs.get(k);
             let mz_err = if let Some(mz) = expect_mz {
