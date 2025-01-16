@@ -218,7 +218,7 @@ pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Re
     }
     if a.len() < window_size {
         return Err(DataProcessingError::ExpectedNonEmptyData {
-            context: "cosine_similarity".to_string(),
+            context: Some("cosine_similarity".to_string()),
         }
         .into());
     }

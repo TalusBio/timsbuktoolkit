@@ -18,6 +18,12 @@ use config::{
     OutputConfig,
 };
 
+// TODO: Check if this is faster in linux
+// use mimalloc::MiMalloc;
+// 
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() -> std::result::Result<(), TimsSeekError> {
     // Initialize logging
     tracing_subscriber::fmt()

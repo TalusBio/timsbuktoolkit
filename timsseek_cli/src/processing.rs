@@ -91,7 +91,7 @@ pub fn process_chunk<'a>(
                 let res = builder.with_localized_pre_score(&loc).finalize();
                 if res.is_err() {
                     tracing::error!(
-                        "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
+                        "Error creating search result for Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
                         digest,
                         eg_elem,
                         res,

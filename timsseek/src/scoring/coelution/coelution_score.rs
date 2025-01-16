@@ -1,3 +1,4 @@
+use crate::errors::DataProcessingError;
 use crate::models::{
     Array2D,
     MzMajorIntensityArray,
@@ -27,10 +28,10 @@ use tracing::warn;
 pub fn coelution_score_arr<const TOP_N: usize>(
     slices: &Array2D<f32>,
     window_size: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, DataProcessingError> {
     if slices.ncols() < window_size {
         warn!("Not enough data to calculate coelution score");
-        return vec![0.0; slices.ncols()];
+        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
     }
     let mut scores = vec![TopNArray::<TOP_N, f32>::new(); slices.ncols()];
     for i in 0..slices.nrows() {
@@ -77,14 +78,14 @@ pub fn coelution_score_arr<const TOP_N: usize>(
         out[last_ind - i] = 0.0;
     }
 
-    out
+    Ok(out)
 }
 
 /// See the docs for [`coelution_score_arr`].
 pub fn coelution_score<const TOP_N: usize>(
     slices: &MzMajorIntensityArray,
     window: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, DataProcessingError> {
     coelution_score_arr::<TOP_N>(&slices.arr, window)
 }
 
@@ -114,7 +115,7 @@ mod tests {
         let window = 3;
         let scores = coelution_score_arr::<1>(&slices, window);
         let expected = vec![0.0, 0.75, 0.974026, 0.99997497, 0.99995005, 0.0];
-        assert_close_enough(&scores, &expected, 1e-2);
+        assert_close_enough(&scores.unwrap(), &expected, 1e-2);
     }
 
     #[test]
@@ -124,7 +125,7 @@ mod tests {
         let window = 3;
         let scores = coelution_score_arr::<2>(&slices, window);
         let expected = vec![0.0, 0.5, 0.5, 0.5, 0.5, 0.0];
-        assert_close_enough(&scores, &expected, 1e-7);
+        assert_close_enough(&scores.unwrap(), &expected, 1e-7);
     }
 
     #[test]
@@ -133,6 +134,6 @@ mod tests {
         let window = 3;
         let scores = coelution_score_arr::<2>(&slices, window);
         let expected = vec![0.0, 0.0];
-        assert_close_enough(&scores, &expected, 1e-8);
+        assert_close_enough(&scores.unwrap(), &expected, 1e-8);
     }
 }

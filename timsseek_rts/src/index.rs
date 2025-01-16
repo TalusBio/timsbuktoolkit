@@ -169,7 +169,7 @@ impl BundledDotDIndex {
             self.ref_time_ms.clone(),
             &res[0].ms1_arrays.retention_time_miliseconds,
             &res[0].ms2_arrays.retention_time_miliseconds,
-        );
+        )?;
 
         let res2 = builder
             .with_localized_pre_score(&prescore.localize()?)

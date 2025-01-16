@@ -10,7 +10,7 @@ pub enum DataProcessingError {
         context: String,
     },
     ExpectedNonEmptyData {
-        context: String,
+        context: Option<String>,
     },
     ExpectedFiniteNonNanData {
         context: String,
@@ -28,9 +28,10 @@ impl DataProcessingError {
             }
             DataProcessingError::ExpectedNonEmptyData {
                 context: owned_context,
-            } => {
-                owned_context.push_str(context);
-            }
+            } => match owned_context {
+                Some(x) => x.push_str(context),
+                None => *owned_context = Some(context.to_string()),
+            },
             DataProcessingError::ExpectedFiniteNonNanData {
                 context: owned_context,
             } => {

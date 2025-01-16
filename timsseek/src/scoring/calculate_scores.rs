@@ -103,17 +103,14 @@ impl IntensityArrays {
                 ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
                 ms2_expected_intensities: ms2_ref_vec,
             }),
-            (Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _, _, _)
-            | (_, Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _, _) => {
-                context.push_str("Failed to create IntensityArrays for MS1, ");
-                Err(DataProcessingError::ExpectedNonEmptyData { context }.into())
+            (Err(e), _, _, _) | (_, Err(e), _, _) => {
+                let e = e.append_to_context("Failed to create IntensityArrays for MS1, ");
+                Err(e.into())
             }
-            (_, _, Err(DataProcessingError::ExpectedNonEmptyData { mut context }), _)
-            | (_, _, _, Err(DataProcessingError::ExpectedNonEmptyData { mut context })) => {
-                context.push_str("Failed to create IntensityArrays for MS2, ");
-                Err(DataProcessingError::ExpectedNonEmptyData { context }.into())
+            (_, _, Err(e), _) | (_, _, _, Err(e)) => {
+                let e = e.append_to_context("Failed to create IntensityArrays for MS2, ");
+                Err(e.into())
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -124,7 +121,7 @@ impl LongitudinalMainScoreElements {
         ref_time_ms: Arc<[u32]>,
         ms1_rts: &[u32],
         ms2_rts: &[u32],
-    ) -> Self {
+    ) -> Result<Self> {
         let ms1_cosine_ref_sim = snap_to_reference(
             &corr_v_ref::calculate_cosine_with_ref(
                 &intensity_arrays.ms1_rtmajor,
@@ -146,18 +143,22 @@ impl LongitudinalMainScoreElements {
         )
         .unwrap();
 
-        let ms2_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score::<10>(&intensity_arrays.ms2_mzmajor, 7),
-            ms2_rts,
-            &ref_time_ms,
-        )
-        .unwrap();
-        let ms1_coelution_score = snap_to_reference(
-            &coelution_score::coelution_score::<6>(&intensity_arrays.ms1_mzmajor, 7),
-            ms1_rts,
-            &ref_time_ms,
-        )
-        .unwrap();
+        // In this section a "insufficient data error" will be returned if not enough
+        // data exists to calculate a score.
+        let ms2_coe_scores =
+            coelution_score::coelution_score::<10>(&intensity_arrays.ms2_mzmajor, 7);
+        if let Err(e) = ms2_coe_scores {
+            let e = e.append_to_context("Failed to calculate coelution score for MS2, ".into());
+            return Err(crate::errors::TimsSeekError::DataProcessingError(e));
+        }
+        let ms2_coelution_score =
+            snap_to_reference(&ms2_coe_scores.unwrap(), ms2_rts, &ref_time_ms).unwrap();
+
+        let tmp = coelution_score::coelution_score::<6>(&intensity_arrays.ms1_mzmajor, 7);
+        let ms1_coelution_score = match tmp {
+            Ok(scores) => snap_to_reference(&scores, ms1_rts, &ref_time_ms).unwrap(),
+            Err(_) => vec![0.0; ref_time_ms.len()],
+        };
         let lazyscore = snap_to_reference(
             &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
             ms2_rts,
@@ -168,7 +169,7 @@ impl LongitudinalMainScoreElements {
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
         let lzb_std = calculate_centered_std(&lazyscore_vs_baseline);
 
-        Self {
+        Ok(Self {
             ms1_cosine_ref_sim,
             ms1_coelution_score,
             ms2_cosine_ref_sim,
@@ -177,7 +178,7 @@ impl LongitudinalMainScoreElements {
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
-        }
+        })
     }
 
     fn find_apex_candidates(&self) -> [ScoreInTime; 20] {
@@ -244,7 +245,7 @@ impl<'a> PreScore<'a> {
             self.ref_time_ms.clone(),
             &self.query_values.ms1_arrays.retention_time_miliseconds,
             &self.query_values.ms2_arrays.retention_time_miliseconds,
-        );
+        )?;
 
         let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
         let norm_lazy_std =

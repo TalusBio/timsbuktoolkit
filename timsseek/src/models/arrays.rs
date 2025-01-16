@@ -35,14 +35,14 @@ impl<T: Clone + Copy> Array2D<T> {
         let nrows = values.as_ref().len();
         if nrows == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero rows".to_string(),
+                context: Some("Cannot create array with zero rows".to_string()),
             }
             .into());
         }
         let ncols = values.as_ref()[0].as_ref().len();
         if ncols == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero columns".to_string(),
+                context: Some("Cannot create array with zero columns".to_string()),
             }
             .into());
         }
@@ -75,14 +75,14 @@ impl<T: Clone + Copy> Array2D<T> {
         let ncols = values.as_ref().len();
         if ncols == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero columns".to_string(),
+                context: Some("Cannot create array with zero columns".to_string()),
             }
             .into());
         }
         let nrows = values.as_ref()[0].as_ref().len();
         if nrows == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero rows".to_string(),
+                context: Some("Cannot create array with zero rows".to_string()),
             }
             .into());
         }
@@ -247,7 +247,7 @@ impl MzMajorIntensityArray {
         let minor_dim = array.retention_time_miliseconds.len();
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero rows".to_string(),
+                context: Some("Cannot create array with zero rows".to_string()),
             });
         }
         let mut vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
@@ -302,12 +302,12 @@ impl RTMajorIntensityArray {
         let minor_dim = array.retention_time_miliseconds.len();
         if major_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero columns".to_string(),
+                context: Some("Cannot create array with zero columns".to_string()),
             });
         }
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: "Cannot create array with zero rows".to_string(),
+                context: Some("Cannot create array with zero rows".to_string()),
             });
         }
 
