@@ -117,6 +117,7 @@ impl Speclib {
             (Vec<_>, Vec<_>),
         ) = lines
             .into_par_iter()
+            .filter(|line| !line.is_empty())
             .map(|line| {
                 let elem: SpeclibElement = match serde_json::from_str(line) {
                     Ok(x) => x,
