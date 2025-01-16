@@ -277,25 +277,26 @@ impl<'a> PreScore<'a> {
             .retention_time_miliseconds
             .partition_point(|&x| x < self.ref_time_ms[max_loc]);
 
-        let summed_ms1_int: f32 = intensity_arrays
-            .ms1_rtmajor
-            .arr
-            .get_row(ms1_loc)
-            .iter()
-            .sum();
-        let summed_ms2_int: f32 = intensity_arrays
-            .ms2_rtmajor
-            .arr
-            .get_row(ms2_loc)
-            .iter()
-            .sum();
-        let npeak_ms2 = intensity_arrays
-            .ms2_rtmajor
-            .arr
-            .get_row(ms2_loc)
-            .iter()
-            .filter(|&x| *x > 10.0)
-            .count();
+        let summed_ms1_int: f32 = match intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
+            Some(row) => row.iter().sum(),
+            None => 0.0,
+        };
+        let summed_ms2_int: f32 = match intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
+            Some(row) => row.iter().sum(),
+            None => 0.0,
+        };
+        let npeak_ms2 = match intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
+            Some(row) => {
+                let mut count = 0;
+                for x in row {
+                    if *x > 10.0f32 {
+                        count += 1;
+                    }
+                }
+                count
+            }
+            None => 0,
+        };
 
         let ims = self.query_values.ms2_arrays.weighted_ims_mean[ms2_loc];
         Ok(MainScore {

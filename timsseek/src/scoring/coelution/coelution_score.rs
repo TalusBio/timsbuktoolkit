@@ -34,12 +34,12 @@ pub fn coelution_score_arr<const TOP_N: usize>(
     }
     let mut scores = vec![TopNArray::<TOP_N, f32>::new(); slices.ncols()];
     for i in 0..slices.nrows() {
-        let slice1 = slices.get_row(i);
+        let slice1 = slices.get_row(i).expect("Using nrows to check length");
         for j in 0..slices.nrows() {
             if j >= i {
                 continue;
             }
-            let slice2 = slices.get_row(j);
+            let slice2 = slices.get_row(j).expect("Using nrows to check length");
             let cosine_similarities = rolling_cosine_similarity(slice1, slice2, window_size)
                 .expect("The passed array should already be checked for length and non-emptyness");
 

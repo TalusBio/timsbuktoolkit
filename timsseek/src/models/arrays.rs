@@ -167,22 +167,25 @@ impl<T: Clone + Copy> Array2D<T> {
     pub fn outer_row_apply<W, F: FnMut(&[T], &[T]) -> W>(&self, mut f: F) -> Vec<W> {
         let mut result = Vec::new();
         for i in 0..self.minor_dim {
-            let row = self.get_row(i);
+            let row = self.get_row(i).expect("Failed to get row, malformed array");
             for j in 0..self.minor_dim {
                 if j >= i {
                     continue;
                 }
-                let other_row = self.get_row(j);
+                let other_row = self.get_row(j).expect("Failed to get row, malformed array");
                 result.push(f(row, other_row));
             }
         }
         result
     }
 
-    pub fn get_row(&self, index: usize) -> &[T] {
+    pub fn get_row(&self, index: usize) -> Option<&[T]> {
         let start = index * self.major_dim;
         let end = start + self.major_dim;
-        &self.values[start..end]
+        if end > self.values.len() || start >= self.values.len() {
+            return None;
+        }
+        Some(&self.values[start..end])
     }
 
     pub fn nrows(&self) -> usize {
@@ -485,7 +488,7 @@ mod tests {
         let array = sample_cmg_array();
         let arr = MzMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let first_row = arr.arr.get_row(0);
+        let first_row = arr.arr.get_row(0).unwrap();
         assert_eq!(first_row, &[1.0, 2.0, 3.0]);
         assert_eq!(arr.arr.major_dim, 3);
         assert_eq!(arr.arr.minor_dim, 2);
@@ -496,7 +499,7 @@ mod tests {
         let array = sample_cmg_array();
         let arr = RTMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
-        let first_row = arr.arr.get_row(0);
+        let first_row = arr.arr.get_row(0).unwrap();
         assert_eq!(first_row, &[1.0, 4.0]);
         assert_eq!(arr.arr.major_dim, 2);
         assert_eq!(arr.arr.minor_dim, 3);
