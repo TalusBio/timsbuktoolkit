@@ -419,50 +419,56 @@ fn sorted_err_at_idx(
     let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
     let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
     let ref_ims = elution_group.mobility;
-    for i in 0..3 {
-        let expect_mz = elution_group.precursor_mzs.get(i);
-        let mz_err = if let Some(mz) = expect_mz {
-            (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
-        } else {
-            continue;
-        };
-        let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
 
-        let tmp = SortableError {
-            intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
-            mz_err,
-            ims_err,
-        };
-        ms1_elems.push(tmp);
-    }
+    if ms1_idx <= cmgs.ms1_arrays.intensities.len() {
+        for i in 0..3 {
+            let expect_mz = elution_group.precursor_mzs.get(i);
+            let mz_err = if let Some(mz) = expect_mz {
+                (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
+            } else {
+                continue;
+            };
+            let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
 
-    for (k, v) in cmgs.ms2_arrays.intensities.iter() {
-        let expect_mz = elution_group.fragment_mzs.get(k);
-        let mz_err = if let Some(mz) = expect_mz {
-            (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
-        } else {
-            continue;
-        };
-
-        // TODO: figure out why this happens
-        if mz_err.abs() > 1.0 {
-            println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
-            println!("Expected mz: {}", expect_mz.unwrap());
-            println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
-            println!("EG: {:#?}", elution_group);
-            println!("CMGS: {:#?}", cmgs);
-            panic!();
+            let tmp = SortableError {
+                intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
+                mz_err,
+                ims_err,
+            };
+            ms1_elems.push(tmp);
         }
-        let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
-
-        let tmp = SortableError {
-            intensity: v[ms2_idx],
-            mz_err,
-            ims_err,
-        };
-        ms2_elems.push(tmp);
     }
 
+    if ms2_idx <= cmgs.ms2_arrays.intensities.len() {
+        for (k, v) in cmgs.ms2_arrays.intensities.iter() {
+            let expect_mz = elution_group.fragment_mzs.get(k);
+            let mz_err = if let Some(mz) = expect_mz {
+                (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
+            } else {
+                continue;
+            };
+
+            // TODO: figure out why this happens
+            if mz_err.abs() > 1.0 {
+                println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
+                println!("Expected mz: {}", expect_mz.unwrap());
+                println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
+                println!("EG: {:#?}", elution_group);
+                println!("CMGS: {:#?}", cmgs);
+                panic!();
+            }
+            let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
+
+            let tmp = SortableError {
+                intensity: v[ms2_idx],
+                mz_err,
+                ims_err,
+            };
+            ms2_elems.push(tmp);
+        }
+    }
+
+    // TODO: refactor and make a fast pass here.
     // Sort them by decreasing intensity
     let ms1_elems = ms1_elems.get_values();
     let ms2_elems = ms2_elems.get_values();

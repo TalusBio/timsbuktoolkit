@@ -201,4 +201,12 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrayStats<F
             summed_intensity,
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.retention_time_miliseconds.len()
+    }
+
+    // pub fn is_empty(&self) -> bool {
+    //     self.retention_time_miliseconds.is_empty()
+    // }
 }
