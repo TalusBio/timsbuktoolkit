@@ -252,6 +252,8 @@ impl<'a> PreScore<'a> {
         let max_val = apex_candidates[0].score;
         let max_loc = apex_candidates[0].index;
 
+        // TODO: Branch here if the results are empty.
+
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
         let ten_pct_index = self.ref_time_ms.len() / 10;
@@ -298,7 +300,7 @@ impl<'a> PreScore<'a> {
             None => 0,
         };
 
-        let ims = self.query_values.ms2_arrays.weighted_ims_mean[ms2_loc];
+        let ims = self.query_values.ms2_arrays.weighted_ims_mean.get(ms2_loc).copied().unwrap_or(f64::NAN);
         Ok(MainScore {
             score: max_val,
             delta_next,
