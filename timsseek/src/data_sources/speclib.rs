@@ -11,10 +11,13 @@ use serde::{
     Serialize,
 };
 use std::collections::HashMap;
+use std::io::{
+    BufRead,
+    BufReader,
+};
 use std::path;
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
-use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities {
@@ -105,35 +108,34 @@ impl Speclib {
     pub fn from_ndjson(json: &str) -> Self {
         // Split on newlines and parse each ...
         let lines: Vec<&str> = json.split('\n').collect();
-        let mut digests = Vec::new();
-        let mut charges = Vec::new();
-        let mut queries = Vec::new();
-        let mut expected_intensities = Vec::new();
+        Self::from_ndjson_elems(&lines)
+    }
 
-        let mut num_show = 10;
-        for line in lines {
-            // Continue if the line is empty.
-            if line.is_empty() {
-                continue;
-            }
-            let elem: SpeclibElement = match serde_json::from_str(line) {
-                Ok(x) => x,
-                Err(e) => {
-                    panic!("Error parsing line: {:?}; error: {:?}", line, e);
-                    // TODO: Make this a proper error
-                    // return Err(TimsSeekError::TimsRust(TimsRustError::Serde(e)));
-                }
-            };
+    fn from_ndjson_elems(lines: &[&str]) -> Self {
+        let ((charges, digests), (queries, expected_intensities)): (
+            (Vec<_>, Vec<_>),
+            (Vec<_>, Vec<_>),
+        ) = lines
+            .into_par_iter()
+            .map(|line| {
+                let elem: SpeclibElement = match serde_json::from_str(line) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        panic!("Error parsing line: {:?}; error: {:?}", line, e);
+                        // TODO: Make this a proper error
+                        // return Err(TimsSeekError::TimsRust(TimsRustError::Serde(e)));
+                    }
+                };
 
-            if num_show > 0 {
-                num_show -= 1;
-                debug!("{:?}", elem);
-            }
-            charges.push(elem.precursor.charge);
-            digests.push(elem.precursor.into());
-            queries.push(elem.elution_group.elution_group);
-            expected_intensities.push(elem.elution_group.expected_intensities);
-        }
+                (
+                    (elem.precursor.charge, elem.precursor.into()),
+                    (
+                        elem.elution_group.elution_group,
+                        elem.elution_group.expected_intensities,
+                    ),
+                )
+            })
+            .unzip();
 
         if digests.is_empty() {
             panic!("No digests found in speclib file");
@@ -148,14 +150,42 @@ impl Speclib {
     }
 
     pub fn from_ndjson_file(path: &path::Path) -> Result<Self, TimsSeekError> {
-        let json = std::fs::read_to_string(path);
-        match json {
-            Ok(x) => Ok(Self::from_ndjson(&x)),
-            Err(e) => Err(TimsSeekError::Io {
-                source: e,
-                path: Some(path.to_path_buf()),
-            }),
+        let file = std::fs::File::open(path).map_err(|e| TimsSeekError::Io {
+            source: e,
+            path: Some(path.to_path_buf()),
+        })?;
+
+        let mut reader = BufReader::new(file);
+        let mut current_chunk = String::new();
+        let mut curr_nlines = 0;
+        let mut results = Self {
+            digests: Vec::with_capacity(100_001),
+            charges: Vec::with_capacity(100_001),
+            queries: Vec::with_capacity(100_001),
+            expected_intensities: Vec::with_capacity(100_001),
+        };
+
+        while let Ok(len) = reader.read_line(&mut current_chunk) {
+            curr_nlines += 1;
+            if len == 0 {
+                break;
+            }
+
+            if curr_nlines % 100_000 == 0 {
+                let chunk_result = Self::from_ndjson(&current_chunk);
+                results = results.fold(chunk_result);
+                current_chunk.clear();
+                curr_nlines = 0;
+            }
         }
+
+        // Process remaining lines
+        if !current_chunk.is_empty() {
+            let chunk_result = Self::from_ndjson(&current_chunk);
+            results = results.fold(chunk_result);
+        }
+
+        Ok(results)
     }
 
     fn get_chunk(&self, chunk_index: usize, chunk_size: usize) -> Option<NamedQueryChunk> {
@@ -181,8 +211,30 @@ impl Speclib {
         ))
     }
 
+    fn fold(self, other: Self) -> Self {
+        let mut digests = self.digests;
+        digests.extend(other.digests);
+        let mut charges = self.charges;
+        charges.extend(other.charges);
+        let mut queries = self.queries;
+        queries.extend(other.queries);
+        let mut expected_intensities = self.expected_intensities;
+        expected_intensities.extend(other.expected_intensities);
+        Self {
+            digests,
+            charges,
+            queries,
+            expected_intensities,
+        }
+    }
+
     pub fn as_iterator(self, chunk_size: usize) -> SpeclibIterator {
+        // TODO make an iterable version of this where the file can be "read" lazily
         SpeclibIterator::new(self, chunk_size)
+    }
+
+    pub fn len(&self) -> usize {
+        self.digests.len()
     }
 }
 

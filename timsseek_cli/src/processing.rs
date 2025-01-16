@@ -225,7 +225,16 @@ pub fn process_speclib(
     analysis: &AnalysisConfig,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
+    tracing::info!("Building database from speclib file {:?}", path);
+    let st = std::time::Instant::now();
     let speclib = Speclib::from_ndjson_file(&path)?;
+    let elap_time = st.elapsed();
+    println!(
+        "Loading speclib of length {} took: {:?} for {}",
+        speclib.len(),
+        elap_time,
+        path.display()
+    );
     let speclib_iter = speclib.as_iterator(analysis.chunk_size);
 
     main_loop(
