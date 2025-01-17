@@ -22,7 +22,7 @@ use tracing::warn;
 /// let window = 3;
 /// // Note that the generic type parameter is the top N of scores that will
 /// // be averaged to report the coelution.
-/// let scores = coelution_score::coelution_score_arr::<3>(&slices, window);
+/// let scores = coelution_score::coelution_score_arr::<3>(&slices, window).unwrap();
 /// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
 /// ```
 pub fn coelution_score_arr<const TOP_N: usize>(
@@ -131,9 +131,9 @@ mod tests {
     #[test]
     fn test_coelution_score_no_overlap() {
         let slices = Array2D::new(vec![[0., 1.], [1., 2.], [2., 3.]]).unwrap();
+        // Since the window is larger than the size of the slices, we should get an error.
         let window = 3;
         let scores = coelution_score_arr::<2>(&slices, window);
-        let expected = vec![0.0, 0.0];
-        assert_close_enough(&scores.unwrap(), &expected, 1e-8);
+        assert!(scores.is_err());
     }
 }

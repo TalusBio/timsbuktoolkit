@@ -56,8 +56,8 @@ impl<'q> SearchResultBuilder<'q> {
     }
 
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
-        self.digest_slice = Some(pre_score.digest);
-        self.ref_eg = Some(pre_score.reference);
+        self.digest_slice = Some(&pre_score.digest);
+        self.ref_eg = Some(&pre_score.reference);
         self.nqueries = Some(pre_score.reference.fragment_mzs.len() as u8);
         self.decoy_marking = Some(pre_score.digest.decoy);
         self.charge = Some(pre_score.charge);

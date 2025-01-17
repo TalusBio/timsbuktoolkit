@@ -20,7 +20,7 @@ use config::{
 
 // TODO: Check if this is faster in linux
 // use mimalloc::MiMalloc;
-// 
+//
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
 

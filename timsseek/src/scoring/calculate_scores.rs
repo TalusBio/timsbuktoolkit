@@ -27,12 +27,12 @@ use timsquery::ElutionGroup;
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::NaturalFinalizedMultiCMGArrays;
 
 #[derive(Debug)]
-pub struct PreScore<'a> {
-    pub digest: &'a DigestSlice,
+pub struct PreScore {
+    pub digest: DigestSlice,
     pub charge: u8,
-    pub reference: &'a ElutionGroup<SafePosition>,
-    pub expected_intensities: &'a ExpectedIntensities,
-    pub query_values: &'a NaturalFinalizedMultiCMGArrays<SafePosition>,
+    pub reference: ElutionGroup<SafePosition>,
+    pub expected_intensities: ExpectedIntensities,
+    pub query_values: NaturalFinalizedMultiCMGArrays<SafePosition>,
     pub ref_time_ms: Arc<[u32]>,
 }
 
@@ -237,9 +237,10 @@ impl PartialOrd for ScoreInTime {
     }
 }
 
-impl<'a> PreScore<'a> {
+impl PreScore {
     fn calc_main_score(&self) -> Result<MainScore> {
-        let intensity_arrays = IntensityArrays::new(self.query_values, self.expected_intensities)?;
+        let intensity_arrays =
+            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
         let longitudinal_main_score_elements = LongitudinalMainScoreElements::new(
             &intensity_arrays,
             self.ref_time_ms.clone(),
@@ -332,7 +333,7 @@ impl<'a> PreScore<'a> {
         })
     }
 
-    pub fn localize(self) -> Result<LocalizedPreScore<'a>> {
+    pub fn localize(self) -> Result<LocalizedPreScore> {
         let main_score = self.calc_main_score()?;
         Ok(LocalizedPreScore {
             pre_score: self,
@@ -368,18 +369,18 @@ pub struct MainScore {
 }
 
 #[derive(Debug)]
-pub struct LocalizedPreScore<'a> {
-    pub pre_score: PreScore<'a>,
+pub struct LocalizedPreScore {
+    pub pre_score: PreScore,
     pub main_score: MainScore,
 }
 
-impl LocalizedPreScore<'_> {
+impl LocalizedPreScore {
     pub fn inten_sorted_errors(&self) -> SortedErrors {
         sorted_err_at_idx(
             self.main_score.ref_ms1_idx,
             self.main_score.ref_ms2_idx,
-            self.pre_score.query_values,
-            self.pre_score.reference,
+            &self.pre_score.query_values,
+            &self.pre_score.reference,
         )
     }
 }

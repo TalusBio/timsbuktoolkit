@@ -154,16 +154,16 @@ impl BundledDotDIndex {
             &|x| self.factory.build_with_elution_group(x),
         );
         let builder = SearchResultBuilder::default();
+        let int_arrs = IntensityArrays::new(&res[0], &queries.expected_intensities)?;
         let prescore = PreScore {
             charge: queries.charge,
-            digest: &queries.digest,
-            reference: &queries.elution_group,
-            expected_intensities: &queries.expected_intensities,
-            query_values: &res[0],
+            digest: queries.digest,
+            reference: queries.elution_group,
+            expected_intensities: queries.expected_intensities,
+            query_values: res[0].clone(),
             ref_time_ms: self.ref_time_ms.clone(),
         };
 
-        let int_arrs = IntensityArrays::new(&res[0], &queries.expected_intensities)?;
         let longitudinal_main_score_elements = LongitudinalMainScoreElements::new(
             &int_arrs,
             self.ref_time_ms.clone(),
