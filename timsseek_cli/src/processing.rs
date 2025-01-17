@@ -140,7 +140,7 @@ pub fn process_chunk<'a>(
                 let id = res_elem.id;
                 let prescore = PreScore {
                     charge: charge_elem,
-                    digest: digest,
+                    digest,
                     reference: eg_elem,
                     expected_intensities: expect_inten,
                     query_values: res_elem,
@@ -156,7 +156,7 @@ pub fn process_chunk<'a>(
                             id,
                             e
                         );
-                        return None;
+                        None
                     }
                 }
             },

@@ -145,7 +145,7 @@ impl LongitudinalMainScoreElements {
         let ms2_coe_scores =
             coelution_score::coelution_score::<10>(&intensity_arrays.ms2_mzmajor, 7);
         if let Err(e) = ms2_coe_scores {
-            let e = e.append_to_context("Failed to calculate coelution score for MS2, ".into());
+            let e = e.append_to_context("Failed to calculate coelution score for MS2, ");
             return Err(crate::errors::TimsSeekError::DataProcessingError(e));
         }
         let ms2_coelution_score =

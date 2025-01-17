@@ -371,7 +371,7 @@ mod tests {
         let b = vec![0.0; 20];
         let results = rolling_cosine_similarity(&a, &b, 5).unwrap();
         assert_eq!(results.len(), 20);
-        let expect = vec![
+        let expect = [
             f32::NAN,
             f32::NAN,
             0.0,
