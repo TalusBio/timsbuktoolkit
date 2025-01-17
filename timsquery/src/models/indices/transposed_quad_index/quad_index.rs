@@ -261,12 +261,13 @@ impl TransposedQuadIndexBuilder {
             .collect();
 
         let bbe = bb_st.elapsed();
-        info!(
+        // TODO: Q: Should I move this to trace level?
+        debug!(
             "TransposedQuadIndex::add_frame_slice adding peaks took {:#?} for {} peaks",
             aps.elapsed(),
             tot_peaks
         );
-        info!(
+        debug!(
             "TransposedQuadIndex::add_frame_slice building buckets took {:#?}",
             bbe
         );
@@ -365,8 +366,8 @@ impl TransposedQuadIndexBuilder {
         mut peak_buckets: HashMap<u32, PeakBucketBuilder>,
         tot_peaks: u64,
     ) -> HashMap<u32, PeakBucketBuilder> {
-        let info_prefix = format!("BatchedBuild: quad_settings={:?} ", self.quad_settings);
-        info!("{} start", info_prefix);
+        // let info_prefix = format!("BatchedBuild: quad_settings={:?} ", self.quad_settings);
+        // info!("{} start", info_prefix);
         let num_slices = self.frame_indices.len();
         let mut added_peaks = 0;
 

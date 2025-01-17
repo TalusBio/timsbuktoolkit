@@ -175,7 +175,7 @@ impl Display for QuadSplittedTransposedIndex {
 }
 
 impl QuadSplittedTransposedIndex {
-    #[instrument(name = "QuadSplittedTransposedIndex::from_path")]
+    #[instrument(name = "QuadSplittedTransposedIndex::from_path", level = "debug")]
     pub fn from_path(path: &str) -> Result<Self> {
         let st = Instant::now();
         info!("Building transposed quad index from path {}", path);
@@ -187,7 +187,10 @@ impl QuadSplittedTransposedIndex {
         Ok(out)
     }
 
-    #[instrument(name = "QuadSplittedTransposedIndex::from_path_centroided")]
+    #[instrument(
+        name = "QuadSplittedTransposedIndex::from_path_centroided",
+        level = "debug"
+    )]
     pub fn from_path_centroided(path: &str) -> Result<Self> {
         let st = Instant::now();
         info!(
@@ -235,12 +238,18 @@ impl QuadSplittedTransposedIndexBuilder {
             .add_frame_slice(frame_slice);
     }
 
-    #[instrument(name = "QuadSplittedTransposedIndexBuilder::from_path")]
+    #[instrument(
+        name = "QuadSplittedTransposedIndexBuilder::from_path",
+        level = "debug"
+    )]
     fn from_path(path: &str) -> Result<Self> {
         Self::from_path_base(path, FrameProcessingConfig::NotCentroided)
     }
 
-    #[instrument(name = "QuadSplittedTransposedIndexBuilder::from_path_centroided")]
+    #[instrument(
+        name = "QuadSplittedTransposedIndexBuilder::from_path_centroided",
+        level = "debug"
+    )]
     fn from_path_centroided(path: &str) -> Result<Self> {
         let config = FrameProcessingConfig::default_centroided();
         Self::from_path_base(path, config)
@@ -249,7 +258,10 @@ impl QuadSplittedTransposedIndexBuilder {
     // TODO: I think i should split this into two functions, one that starts the builder
     // and one that adds the frameslices, maybe even have a config struct that dispatches
     // the right preprocessing steps.
-    #[instrument(name = "QuadSplittedTransposedIndexBuilder::from_path_base")]
+    #[instrument(
+        name = "QuadSplittedTransposedIndexBuilder::from_path_base",
+        level = "debug"
+    )]
     fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self> {
         let file_reader = FrameReader::new(path)?;
 

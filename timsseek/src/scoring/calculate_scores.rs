@@ -4,10 +4,7 @@ use super::{
     hyperscore,
 };
 use crate::data_sources::speclib::ExpectedIntensities;
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+use crate::errors::Result;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::models::{
     DigestSlice,
