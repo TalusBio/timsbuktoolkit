@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "timsseek-workspace"
-version = "0.1.0"
+version = "0.10.1"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "speclib_builder[ml]",
@@ -16,6 +16,7 @@ dev = [
   "ruff>=0.9.0",
   "pytest",
   "uv",
+  "bumpver",
 ]
 
 [tool.uv.sources]
@@ -36,3 +37,13 @@ select = ["E", "F", "T20", "I"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["speclib_builder"]
+
+[tool.bumpver]
+current_version = "0.10.1"
+version_pattern = "MAJOR.MINOR.PATCH"
+
+[tool.bumpver.file_patterns]
+"*/pyproject.toml" = ['version = "{version}"$']
+"pyproject.toml" = ['version = "{version}"$']
+"Cargo.toml" = ['version = "{version}"$']
+"*/Cargo.toml" = ['version = "{version}"$']

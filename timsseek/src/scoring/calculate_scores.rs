@@ -199,7 +199,7 @@ impl LongitudinalMainScoreElements {
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
         (0..self.ref_time_ms.len()).map(|i| {
-            let ms1_cos_score = 0.5 + (0.5 * self.ms1_cosine_ref_sim[i]);
+            let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i]);
             let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
             loc_score *= ms1_cos_score;
@@ -270,13 +270,13 @@ impl PreScore {
             .query_values
             .ms2_arrays
             .retention_time_miliseconds
-            .partition_point(|&x| x < self.ref_time_ms[max_loc]);
+            .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
 
         let ms1_loc = self
             .query_values
             .ms1_arrays
             .retention_time_miliseconds
-            .partition_point(|&x| x < self.ref_time_ms[max_loc]);
+            .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
 
         let summed_ms1_int: f32 = match intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
             Some(row) => row.iter().sum(),

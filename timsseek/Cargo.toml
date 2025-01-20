@@ -1,6 +1,6 @@
 [package]
 name = "timsseek"
-version = "0.2.0"
+version = "0.10.1"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -9,7 +9,7 @@ rustyms = "0.8.3"
 timsquery = { path = "../timsquery" }
 regex = "1.10.6"
 csv = "1.3.0"
-rusqlite = "0.32.0"
+rusqlite = "0.33.0"
 indicatif = "0.17.9"
 
 # Workspace-inherited deps

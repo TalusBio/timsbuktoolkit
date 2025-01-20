@@ -15,6 +15,7 @@ from speclib_builder.onxx_predictor import OnnxPeptideTransformerAnnotator
 
 sample_data = "../../sample_out.json"
 
+st.set_page_config(layout="wide")
 
 YOUR_PORT = 3724
 
@@ -114,11 +115,12 @@ class MainScoreElements:
     ms2_lazyscore: list[float]
     ms2_lazyscore_vs_baseline: list[float]
     ref_time_ms: list[int]
+    ms2_lazyscore_vs_baseline_std: float
 
     def plot(self, min_rt_ms, max_rt_ms, vlines_ms: list[int] | None = None):
         # Make a plot grid, where each row is a different score element
         # but all share the same retention time axis
-        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(10, 8))
+        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(10, 12))
 
         rt_use = np.array(self.ref_time_ms)
         ranges = np.searchsorted(rt_use, [min_rt_ms, max_rt_ms])
@@ -130,12 +132,16 @@ class MainScoreElements:
         ax[0, 1].set_title("MS1 Cosine Ref Sim")
         ax[0, 2].plot(rt_plot, self.ms2_lazyscore_vs_baseline[ranges[0] : ranges[1]])
         ax[0, 2].set_title("MS2 LazyScore Baseline")
+
         ax[1, 0].plot(rt_plot, self.ms2_coelution_score[ranges[0] : ranges[1]])
         ax[1, 0].set_title("MS2 Coelution Score")
         ax[1, 1].plot(rt_plot, self.ms2_cosine_ref_sim[ranges[0] : ranges[1]])
         ax[1, 1].set_title("MS2 Cosine Ref Sim")
         ax[1, 2].plot(rt_plot, self.ms2_lazyscore[ranges[0] : ranges[1]])
         ax[1, 2].set_title("MS2 LazyScore")
+
+        #  ax[2, 0].plot(rt_plot, self.ms2_lazyscore_vs_baseline_std[ranges[0] : ranges[1]])
+        #  ax[2, 0].set_title("MS2 LazyScore Baseline STD")
 
         if vlines_ms is not None:
             vlines_minutes = np.array(vlines_ms) / 1000 / 60
@@ -249,30 +255,54 @@ class Response:
     data: ResponseData
 
 
+@dataclass
+class TargetDecoyPair:
+    target: PeptideElement
+    decoy: PeptideElement
+
 def input_compoinent() -> PeptideElement:
     options = ["Sequence", "Examples"]
     option = st.selectbox("Input", options)
     if option == "Sequence":
-        peptide = PeptideElement(
-            peptide=st.text_input("Peptide", "TLSDYNIQK"),
-            charge=st.slider("Charge", 2, 5, 2),
-            nce=st.slider("NCE", 10, 50, 35),
-            decoy=st.checkbox("Decoy"),
+        st.subheader("Sequence")
+        cols = st.columns(2)
+        target = PeptideElement(
+            peptide=cols[0].text_input("Peptide", "TLSDYNIQK"),
+            charge=cols[0].slider("Charge", 2, 5, 2),
+            nce=cols[0].slider("NCE", 10, 50, 35),
+            decoy=cols[0].checkbox("Decoy"),
         )
-        return peptide
+        decoy = PeptideElement(
+            peptide=cols[1].text_input("Peptide", "TQINYDSLK"),
+            charge=cols[1].slider("Charge", 2, 5, 2, key="decoy_charge"),
+            nce=cols[1].slider("NCE", 10, 50, 35, key="decoy_nce"),
+            decoy=cols[1].checkbox("Decoy", key="decoy_decoy"),
+        )
+        return TargetDecoyPair(target, decoy)
     if option == "Examples":
-        examples = [("TLSDYNIQK", 2), ("ESTLHLVLR", 2), ("DIKPENLLLGSAGELK", 3)]
-        edict = {k: (k, v) for k, v in examples}
+        st.subheader("Examples")
+        examples = [
+            ("TLSDYNIQK", 2, "TLSDYNIQK"),
+            ("ESTLHLVLR", 2, "ELVLHLTSR"),
+            ("DIKPENLLLGSAGELK", 3,"DLEGASGLLLNEPKIK")
+        ]
+        edict = {f"{k} - {w}": (k, v, w) for k, v, w in examples}
         picked = st.selectbox("Example", list(edict.keys()))
 
-        picked, charge = edict[picked]
-        peptide = PeptideElement(
+        picked, charge, decoy = edict[picked]
+        target = PeptideElement(
             peptide=picked,
+            charge=charge,
+            nce=35,
+            decoy=False,
+        )
+        decoy = PeptideElement(
+            peptide=decoy,
             charge=charge,
             nce=35,
             decoy=True,
         )
-        return peptide
+        return TargetDecoyPair(target, decoy)
 
     raise NotImplementedError()
 
@@ -303,18 +333,27 @@ def main():
     else:
         st.warning("Using dummy annotator")
 
-    query_data = entry_builder.build_entry(annotator.model(peptide)).as_rt_entry()
-    with st.expander("Query data"):
-        st.write(query_data)
+    query_data_target = entry_builder.build_entry(annotator.model(peptide.target)).as_rt_entry()
+    query_data_decoy = entry_builder.build_entry(annotator.model(peptide.decoy)).as_rt_entry()
+    with st.expander("Query data - target"):
+        st.write(query_data_target)
+    with st.expander("Query data - decoy"):
+        st.write(query_data_decoy)
 
     stime = time.monotonic()
-    data = query_server(host, int(port), query_data)
-    if isinstance(data, str):
-        st.error(f"Query failed: {data}")
-        st.write(data)
+    data_target = query_server(host, int(port), query_data_target)
+    data_decoy = query_server(host, int(port), query_data_decoy)
+
+    if isinstance(data_target, str):
+        st.error(f"Query failed: {data_target}")
+        st.write(data_target)
+
+    if isinstance(data_decoy, str):
+        st.error(f"Query failed: {data_decoy}")
+        st.write(data_decoy)
 
     etime = time.monotonic()
-    st.write(f"Query took {etime - stime} seconds")
+    # st.write(f"Query took {etime - stime} seconds")
 
     # with open(sample_data) as f:
     #     stime = time.monotonic()
@@ -322,44 +361,53 @@ def main():
     #     etime = time.monotonic()
     #     st.write(f"Loaded data in {etime-stime} seconds")
 
+    cols = st.columns(2)
+    show_results(data_target, subtitle="Target results", key_prefix="target_", column=cols[0])
+    show_results(data_decoy, subtitle="Decoy results", key_prefix="decoy_", column=cols[1])
+
+
+def show_results(data, column, subtitle=None, key_prefix=""):
+    if subtitle is not None:
+        column.subheader(subtitle)
+
     if data["status"] != "success":
-        st.write(str(data))
-        st.stop()
+        column.write(str(data))
+        column.stop()
 
     res: Response = dataclass_from_dict(Response, data)
     main_score = res.data.search_results.main_score
-    st.subheader("Main Score: " + str(main_score))
+    column.subheader("Main Score: " + str(main_score))
 
-    st.dataframe(res.data.search_results.as_table(), use_container_width=True)
+    column.dataframe(res.data.search_results.as_table(), use_container_width=True)
 
     best_rt = res.data.search_results.obs_rt_seconds / 60
     min_rt = (res.data.main_score_elements.min_rt() / 1000) / 60
     max_rt = (res.data.main_score_elements.max_rt() / 1000) / 60
-    min_rt_show = st.slider("Minimum retention time (minutes)", min_rt, max_rt, min_rt)
-    max_rt_show = st.slider("Maximum retention time (minutes)", min_rt, max_rt, max_rt)
+    min_rt_show = column.slider("Minimum retention time (minutes)", min_rt, max_rt, min_rt, key=key_prefix + "min_rt")
+    max_rt_show = column.slider("Maximum retention time (minutes)", min_rt, max_rt, max_rt, key=key_prefix + "max_rt")
 
     fig = res.data.plot_main_score(min_rt_show * 1000 * 60, max_rt_show * 1000 * 60)
     plt.axvline(x=best_rt, color="red", alpha=0.5)
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
 
     fig = res.data.main_score_elements.plot(
         min_rt_show * 1000 * 60,
         max_rt_show * 1000 * 60,
         vlines_ms=[best_rt * 1000 * 60],
     )
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
 
     fig = res.data.extractions.ms1_arrays.plot_transition(
         min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
     )
     plt.axvline(x=best_rt, color="red", alpha=0.5)
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
 
     fig = res.data.extractions.ms2_arrays.plot_transition(
         min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
     )
     plt.axvline(x=best_rt, color="red", alpha=0.5)
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
 
 
 if __name__ == "__main__":

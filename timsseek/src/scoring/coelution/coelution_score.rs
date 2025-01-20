@@ -5,7 +5,7 @@ use crate::models::{
 };
 use crate::utils::correlation::rolling_cosine_similarity;
 use crate::utils::top_n_array::TopNArray;
-use tracing::warn;
+use tracing::debug;
 
 /// Calculates the coelution score of a set of chromatograms.
 ///
@@ -30,7 +30,7 @@ pub fn coelution_score_arr<const TOP_N: usize>(
     window_size: usize,
 ) -> Result<Vec<f32>, DataProcessingError> {
     if slices.ncols() < window_size {
-        warn!("Not enough data to calculate coelution score");
+        debug!("Not enough data to calculate coelution score");
         return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
     }
     let mut scores = vec![TopNArray::<TOP_N, f32>::new(); slices.ncols()];
