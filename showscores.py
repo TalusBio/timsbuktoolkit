@@ -39,6 +39,9 @@ def build_parser():
         nargs="+",
         help="Path to the directories containing the results.csv files",
     )
+    parser.add_argument(
+        "-o", "--output_dir", type=str, default=".", help="Output directory"
+    )
     return parser
 
 
@@ -110,6 +113,16 @@ def cast_f32(df: pl.LazyFrame, cols: list[str]) -> pl.LazyFrame:
     return df.with_columns(exprs)
 
 
+def calculate_delta_rt(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.with_columns(
+        delta_rt=(pl.col("obs_rt_seconds") - pl.col("precursor_rt_query_seconds")),
+    ).with_columns(
+        abs_delta_rt=(
+            pl.col("obs_rt_seconds") - pl.col("precursor_rt_query_seconds")
+        ).abs(),
+    )
+
+
 def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     pprint("Starting to_mokapot")
     loggable_cols = (
@@ -145,6 +158,10 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "ms1_mobility_error_1",
         "ms1_mobility_error_2",
     )
+    engineered_cols = (
+        "delta_rt",
+        "abs_delta_rt",
+    )
     feat_cols = (
         (
             "precursor_charge",
@@ -161,9 +178,11 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         )
         + loggable_cols
         + imputable_cols
+        + engineered_cols
     )
     df_use = log_cols(df, loggable_cols)
     df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
+    df_use = calculate_delta_rt(df_use)
     df_use = cast_f32(df_use, feat_cols)
     pprint("Collecting")
     df_use = add_id(df_use).collect(streaming=True)
@@ -249,7 +268,12 @@ def to_mokapot(df: pl.LazyFrame) -> mokapot.LinearPsmDataset:
 #     return xgb.DMatrix(X, y, feature_names=cols.feature_columns)
 
 
-def to_folds_xgb(*, shuffled_df: pd.DataFrame, cols: ColumnGroups, num_folds: int) -> list[xgb.DMatrix]:
+def to_folds_xgb(
+    *,
+    shuffled_df: pd.DataFrame,
+    cols: ColumnGroups,
+    num_folds: int,
+) -> list[xgb.DMatrix]:
     out = np.array_split(shuffled_df, num_folds)
     out = [
         xgb.DMatrix(
@@ -262,7 +286,7 @@ def to_folds_xgb(*, shuffled_df: pd.DataFrame, cols: ColumnGroups, num_folds: in
     return out
 
 
-def xgboost_stuff(df: pl.LazyFrame):
+def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     df_use, cols = to_mokapot_df(df)
     pprint("Shuffling")
     df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
@@ -277,7 +301,7 @@ def xgboost_stuff(df: pl.LazyFrame):
     df_use["rescore_score"] = cscores
     df_use["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
     df_use = df_use.sort_values("rescore_score", ascending=False)
-    df_use.to_parquet("rescored_values.parquet", index=False)
+    df_use.to_parquet(output_dir / "rescored_values.parquet", index=False)
     pprint("Wrote ten_perc_qval.csv")
     order = np.argsort(-cscores)
     ctargs = ctargs[order]
@@ -289,7 +313,7 @@ def xgboost_stuff(df: pl.LazyFrame):
     qvals = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
     for ct in [0.01, 0.05, 0.1, 0.5, 1.0]:
         num_at_thresh = np.sum(ctargs[qvals < ct])
-        ssc =cscores[qvals < ct]
+        ssc = cscores[qvals < ct]
         if len(ssc) == 0:
             pprint(f"No scores at {ct}")
             continue
@@ -303,7 +327,7 @@ def xgboost_stuff(df: pl.LazyFrame):
         targets_at_10=np.sum(ctargs[qvals < 0.1]).item(),
     )
     pprint(report)
-    report.save_to_toml("report.toml")
+    report.save_to_toml(output_dir / "report.toml")
 
     # plt.plot(qvals, cumtargs, label="All Scores")
 
@@ -312,7 +336,7 @@ def xgboost_stuff(df: pl.LazyFrame):
     plt.legend(loc="upper right")
     plt.xlim(0, 0.1)
     plt.title("Cumulative number of accepted peptides.")
-    plt.savefig("plot_qvalues.png")
+    plt.savefig(output_dir / "plot_qvalues.png")
     plt.close()
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 4))
@@ -327,11 +351,11 @@ def xgboost_stuff(df: pl.LazyFrame):
     ax[1].set_yscale("log")
     ax[1].legend()
     plt.title("Histogram of 'rescoring' score.")
-    plt.savefig("plot_hist.png")
+    plt.savefig(output_dir / "plot_hist.png")
     plt.close()
 
 
-def main_score_hist(df: pl.LazyFrame):
+def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     pprint("Plotting main scores")
     scores_df = df.select(["is_target", "main_score"]).collect()
     target_scores = scores_df.filter(pl.col("is_target") == "true")["main_score"]
@@ -369,7 +393,7 @@ def main_score_hist(df: pl.LazyFrame):
     target_file = "plot_mainscores.png"
     pprint(f"Saving plot to {target_file}")
     plt.title("Histogram of 'main_score' scores.")
-    plt.savefig(target_file)
+    plt.savefig(output_dir / target_file)
     plt.close()
 
 
@@ -381,8 +405,12 @@ def main(args):
     data = read_files(paths)
     data = data.filter(pl.col("obs_mobility").is_not_nan())
 
-    main_score_hist(data)
-    xgboost_stuff(data)
+    outdir = Path(args.output_dir)
+    if not outdir.exists():
+        outdir.mkdir(parents=True)
+
+    main_score_hist(data, outdir)
+    xgboost_stuff(data, outdir)
 
     ds = to_mokapot(data)
     pprint("Brewing Mokapot")

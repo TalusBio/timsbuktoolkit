@@ -61,11 +61,19 @@ class EntryBuilder:
     min_ions: int = 3
 
     def build_entry(self, elem: EntryElements) -> dict | None:
-        return self.as_entry(elem.peptide, elem.ion_dict, elem.decoy, elem.id)
+        return self.as_entry(
+            peptide=elem.peptide,
+            rt_seconds=elem.rt_seconds,
+            ion_dict=elem.ion_dict,
+            decoy=elem.decoy,
+            id=elem.id,
+        )
 
     def as_entry(
         self,
+        *,
         peptide: LinearPeptide,
+        rt_seconds: float,
         ion_dict: dict[str, MzIntPair],
         decoy: bool,
         id: int,
@@ -117,7 +125,7 @@ class EntryBuilder:
         elution_group = {
             "id": id,
             "mobility": ims,
-            "rt_seconds": 0.0,
+            "rt_seconds": rt_seconds,
             "precursor_mzs": precursor_mzs,
             "fragment_mzs": ion_mzs,
         }

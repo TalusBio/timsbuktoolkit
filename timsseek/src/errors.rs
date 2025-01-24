@@ -18,7 +18,7 @@ pub enum DataProcessingError {
     ExpectedSetField {
         field: String,
         context: String,
-    }
+    },
 }
 
 impl DataProcessingError {

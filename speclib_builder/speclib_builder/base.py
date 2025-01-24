@@ -158,5 +158,6 @@ class SpeclibElement:
 class EntryElements:
     peptide: LinearPeptide
     ion_dict: dict[str, MzIntPair]
+    rt_seconds: float
     decoy: bool
     id: int

@@ -12,6 +12,7 @@ from typing import Generator, Iterable
 
 from .base import MzIntPair, PeptideElement
 from .builder import EntryElements, PeptideAnnotator
+from .ml.simplertmodel import SimpleRTModel, default_rt_model
 
 MOD_REGEX = re.compile(r"(\[[A-Z:0-9]*?\])")
 
@@ -19,6 +20,7 @@ MOD_REGEX = re.compile(r"(\[[A-Z:0-9]*?\])")
 @dataclass(slots=True)
 class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
     inference_model: OnnxPeptideTransformer
+    rt_model: SimpleRTModel
     min_ordinal: int
     max_ordinal: int
     min_intensity: float
@@ -71,8 +73,15 @@ class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
                 continue
             pep, ion_dict = elem
             ion_dict = {k: MzIntPair(v[0], v[1]) for k, v in ion_dict.items()}
+            try:
+                rt_seconds = self.rt_model.predict_peptide(pep)
+            except ValueError as e:
+                if "Invalid residue U" in str(e):
+                    print(f"Skipping peptide {pep} due to invalid residue U")
+                    continue
             yield EntryElements(
                 pep,
+                rt_seconds=rt_seconds,
                 ion_dict=ion_dict,
                 decoy=pe.decoy,
                 id=self.num_yielded,
@@ -85,8 +94,10 @@ class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
             raise ImportError(
                 "Could not import the OnnxPeptideTransformer, ML prediction will not work"
             )
+        rt_model = default_rt_model()
         return OnnxPeptideTransformerAnnotator(
             inference_model=OnnxPeptideTransformer.default_model(),
+            rt_model=rt_model,
             min_ordinal=2,
             max_ordinal=1000,
             min_intensity=0.001,

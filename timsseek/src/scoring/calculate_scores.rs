@@ -122,22 +122,21 @@ fn gaussblur(x: &mut [f32]) {
     // Using fixed kernel weights [0.5, 1.0, 0.5]
     // Note: These weights are already normalized (sum = 2)
     let mut temp = vec![0.0; len];
-    
+
     // Handle first element
     temp[0] = (x[0] * 1.5 + x[1] * 0.5) / 2.0;
-    
+
     // Main convolution loop
-    for i in 1..len-1 {
-        temp[i] = (x[i-1] * 0.5 + x[i] * 1.0 + x[i+1] * 0.5) / 2.0;
+    for i in 1..len - 1 {
+        temp[i] = (x[i - 1] * 0.5 + x[i] * 1.0 + x[i + 1] * 0.5) / 2.0;
     }
-    
+
     // Handle last element
-    temp[len-1] = (x[len-1] * 1.5 + x[len-2] * 0.5) / 2.0;
+    temp[len - 1] = (x[len - 1] * 1.5 + x[len - 2] * 0.5) / 2.0;
 
     // Copy results back
     x.copy_from_slice(&temp);
 }
-
 
 impl LongitudinalMainScoreElements {
     pub fn new(
@@ -199,7 +198,10 @@ impl LongitudinalMainScoreElements {
         let five_pct_index = ref_time_ms.len() * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
-        let lzb_std = calculate_centered_std(&lazyscore_vs_baseline[(half_five_pct_idnex)..(&lazyscore_vs_baseline.len() - half_five_pct_idnex)]);
+        let lzb_std = calculate_centered_std(
+            &lazyscore_vs_baseline
+                [(half_five_pct_idnex)..(&lazyscore_vs_baseline.len() - half_five_pct_idnex)],
+        );
 
         Ok(Self {
             ms1_cosine_ref_sim,

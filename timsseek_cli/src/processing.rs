@@ -42,7 +42,10 @@ use timsseek::scoring::calculate_scores::{
     PreScore,
 };
 use timsseek::scoring::search_results::{
-    write_results_to_csv, write_results_to_parquet, IonSearchResults, SearchResultBuilder
+    IonSearchResults,
+    SearchResultBuilder,
+    write_results_to_csv,
+    write_results_to_parquet,
 };
 use tracing::info;
 

@@ -58,16 +58,23 @@ pub enum SetField<T> {
     None,
 }
 
-impl <T>SetField<T> {
+impl<T> SetField<T> {
     pub fn is_some(&self) -> bool {
         matches!(self, Self::Some(_))
     }
 
-    pub fn expect_some(self, field_name: impl ToString, msg: impl ToString) -> Result<T, DataProcessingError> {
+    pub fn expect_some(
+        self,
+        field_name: impl ToString,
+        msg: impl ToString,
+    ) -> Result<T, DataProcessingError> {
         match self {
             Self::Some(v) => Ok(v),
             Self::None => {
-                return Err(DataProcessingError::ExpectedSetField { field: field_name.to_string(), context: msg.to_string() })
+                return Err(DataProcessingError::ExpectedSetField {
+                    field: field_name.to_string(),
+                    context: msg.to_string(),
+                });
             }
         }
     }
@@ -164,31 +171,42 @@ impl<'q> SearchResultBuilder<'q> {
         // TODO replace this with exhaustive unpacking.
 
         let results = IonSearchResults {
-            sequence: String::from(self.digest_slice.expect_some("digest_slice", "digest_slice")?.clone()),
+            sequence: String::from(
+                self.digest_slice
+                    .expect_some("digest_slice", "digest_slice")?
+                    .clone(),
+            ),
             precursor_mz: ref_eg.precursor_mzs[1],
             precursor_charge: self.charge.expect_some("charge", "charge")?,
             precursor_mobility_query: ref_eg.mobility,
             precursor_rt_query_seconds: ref_eg.rt_seconds,
             nqueries: self.nqueries.expect_some("nqueries", "nqueries")?,
-            is_target: self.decoy_marking.expect_some("decoy_marking", "decoy_marking")?.is_target(),
+            is_target: self
+                .decoy_marking
+                .expect_some("decoy_marking", "decoy_marking")?
+                .is_target(),
             main_score: self.main_score.expect_some("main_score", "main_score")?,
             delta_next: self.delta_next.expect_some("delta_next", "delta_next")?,
             obs_rt_seconds: self.rt_seconds.expect_some("rt_seconds", "rt_seconds")?,
-            obs_mobility: self.observed_mobility.expect_some("observed_mobility", "observed_mobility")?,
+            obs_mobility: self
+                .observed_mobility
+                .expect_some("observed_mobility", "observed_mobility")?,
             npeaks: self.npeaks.expect_some("npeaks", "npeaks")?,
             lazyerscore: self.lazyerscore.expect_some("lazyerscore", "lazyerscore")?,
             lazyerscore_vs_baseline: self
                 .lazyerscore_vs_baseline
                 .expect_some("lazyerscore_vs_baseline", "lazyerscore_vs_baseline")?,
-            norm_lazyerscore_vs_baseline: self
-                .norm_lazyerscore_vs_baseline
-                .expect_some("norm_lazyerscore_vs_baseline", "norm_lazyerscore_vs_baseline")?,
+            norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.expect_some(
+                "norm_lazyerscore_vs_baseline",
+                "norm_lazyerscore_vs_baseline",
+            )?,
             ms2_cosine_ref_similarity: self
                 .ms2_cosine_ref_similarity
                 .expect_some("ms2_cosine_ref_similarity", "ms2_cosine_ref_similarity")?,
-            ms2_summed_transition_intensity: self
-                .ms2_summed_transition_intensity
-                .expect_some("ms2_summed_transition_intensity", "ms2_summed_transition_intensity")?,
+            ms2_summed_transition_intensity: self.ms2_summed_transition_intensity.expect_some(
+                "ms2_summed_transition_intensity",
+                "ms2_summed_transition_intensity",
+            )?,
             ms2_mz_error_0: mz2_e0,
             ms2_mz_error_1: mz2_e1,
             ms2_mz_error_2: mz2_e2,
@@ -203,17 +221,22 @@ impl<'q> SearchResultBuilder<'q> {
             ms2_mobility_error_4: mob2_e4,
             ms2_mobility_error_5: mob2_e5,
             ms2_mobility_error_6: mob2_e6,
-            ms2_coelution_score: self.ms2_coelution_score.expect_some("ms2_coelution_score", "ms2_coelution_score")?,
+            ms2_coelution_score: self
+                .ms2_coelution_score
+                .expect_some("ms2_coelution_score", "ms2_coelution_score")?,
             ms1_cosine_ref_similarity: self
                 .ms1_cosine_ref_similarity
                 .expect_some("ms1_cosine_ref_similarity", "ms1_cosine_ref_similarity")?,
-            ms1_summed_precursor_intensity: self
-                .ms1_summed_precursor_intensity
-                .expect_some("ms1_summed_precursor_intensity", "ms1_summed_precursor_intensity")?,
+            ms1_summed_precursor_intensity: self.ms1_summed_precursor_intensity.expect_some(
+                "ms1_summed_precursor_intensity",
+                "ms1_summed_precursor_intensity",
+            )?,
             ms1_mz_error_0: mz1_e0,
             ms1_mz_error_1: mz1_e1,
             ms1_mz_error_2: mz1_e2,
-            ms1_coelution_score: self.ms1_coelution_score.expect_some("ms1_coelution_score", "ms1_coelution_score")?,
+            ms1_coelution_score: self
+                .ms1_coelution_score
+                .expect_some("ms1_coelution_score", "ms1_coelution_score")?,
             ms1_mobility_error_0: mob1_e0,
             ms1_mobility_error_1: mob1_e1,
             ms1_mobility_error_2: mob1_e2,
@@ -289,7 +312,11 @@ pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(
     let file = match File::create_new(out_path.clone()) {
         Ok(file) => file,
         Err(err) => {
-            tracing::error!("Failed to open file {:?} with error: {}", out_path.as_ref(), err);
+            tracing::error!(
+                "Failed to open file {:?} with error: {}",
+                out_path.as_ref(),
+                err
+            );
             return Err(Box::new(err));
         }
     };

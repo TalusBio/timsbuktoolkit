@@ -83,7 +83,7 @@ def main():
     peptide_builder = PeptideBuilder(
         fasta_file=fasta_file,
         min_charge=2,
-        max_charge=3,
+        max_charge=4,
         decoy_strategy=decoy_strategy,
     )
 
@@ -113,7 +113,13 @@ def main():
             total=len(targ_use),
         ):
             id += 1
-            elem = entry_builder.as_entry(x.peptide, x.ion_dict, False, id)
+            elem = entry_builder.as_entry(
+                peptide=x.peptide,
+                decoy=False,
+                id=id,
+                ion_dict=x.ion_dict,
+                rt_seconds=x.rt_seconds,
+            )
             if elem is None:
                 continue
             if is_first_n > 0:
@@ -133,7 +139,13 @@ def main():
             total=len(decoys),
         ):
             id += 1
-            elem = entry_builder.as_entry(x.peptide, x.ion_dict, True, id)
+            elem = entry_builder.as_entry(
+                peptide=x.peptide,
+                ion_dict=x.ion_dict,
+                decoy=True,
+                id=id,
+                rt_seconds=x.rt_seconds,
+            )
             if elem is None:
                 continue
             if is_first_n > 0:

@@ -269,11 +269,13 @@ NRLCVLHEKTPVSEKVTKCCTESLVNRRPCFSALTPDETYVPKAFDEKLFTFHADICTLP
 DTEKQIKKQTALVELLKHKPKATEEQLKTVMENFVAFVDKCCAADDKEACFAVEGPKLVV
 STQTALA"""
 
+
 def digest(sequence: str) -> set[str]:
     unique_peptides = set()
-    new_peptides = pyteomics_parser.cleave(sequence, 'trypsin')
+    new_peptides = pyteomics_parser.cleave(sequence, "trypsin")
     unique_peptides.update(new_peptides)
     return unique_peptides
+
 
 def digest_maybe_fasta(sequence: str) -> list[str]:
     splits = sequence.split("\n")
@@ -283,10 +285,12 @@ def digest_maybe_fasta(sequence: str) -> list[str]:
     digests = digest("".join(splits))
     return [x for x in digests if len(x) > 5 and len(x) < 30]
 
+
 @dataclass
 class TargetDecoyPair:
     target: PeptideElement
     decoy: PeptideElement
+
 
 def input_compoinent() -> PeptideElement:
     options = ["Sequence", "Examples", "Digest"]
@@ -313,7 +317,7 @@ def input_compoinent() -> PeptideElement:
         elems = list(digest_maybe_fasta(fasta))
         target_seq = st.selectbox("Peptide", elems, key="target_peptide_dg")
         decoy_seq = target_seq[0] + target_seq[::-1][1:-1] + target_seq[-1]
-        target_charge = st.slider("Charge", 2, 5, 2 , key="target_charge_dg")
+        target_charge = st.slider("Charge", 2, 5, 2, key="target_charge_dg")
         target_nce = st.slider("NCE", 10, 50, 35, key="target_nce_dg")
         target = PeptideElement(
             peptide=target_seq,
@@ -334,7 +338,7 @@ def input_compoinent() -> PeptideElement:
         examples = [
             ("TLSDYNIQK", 2, "TLSDYNIQK"),
             ("ESTLHLVLR", 2, "ELVLHLTSR"),
-            ("DIKPENLLLGSAGELK", 3,"DLEGASGLLLNEPKIK")
+            ("DIKPENLLLGSAGELK", 3, "DLEGASGLLLNEPKIK"),
         ]
         edict = {f"{k} - {w}": (k, v, w) for k, v, w in examples}
         picked = st.selectbox("Example", list(edict.keys()))
@@ -383,8 +387,12 @@ def main():
     else:
         st.warning("Using dummy annotator")
 
-    query_data_target = entry_builder.build_entry(annotator.model(peptide.target)).as_rt_entry()
-    query_data_decoy = entry_builder.build_entry(annotator.model(peptide.decoy)).as_rt_entry()
+    query_data_target = entry_builder.build_entry(
+        annotator.model(peptide.target)
+    ).as_rt_entry()
+    query_data_decoy = entry_builder.build_entry(
+        annotator.model(peptide.decoy)
+    ).as_rt_entry()
     with st.expander("Query data - target"):
         st.write(query_data_target)
     with st.expander("Query data - decoy"):
@@ -412,8 +420,12 @@ def main():
     #     st.write(f"Loaded data in {etime-stime} seconds")
 
     cols = st.columns(2)
-    show_results(data_target, subtitle="Target results", key_prefix="target_", column=cols[0])
-    show_results(data_decoy, subtitle="Decoy results", key_prefix="decoy_", column=cols[1])
+    show_results(
+        data_target, subtitle="Target results", key_prefix="target_", column=cols[0]
+    )
+    show_results(
+        data_decoy, subtitle="Decoy results", key_prefix="decoy_", column=cols[1]
+    )
 
 
 def show_results(data, column, subtitle=None, key_prefix=""):
@@ -433,8 +445,20 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     best_rt = res.data.search_results.obs_rt_seconds / 60
     min_rt = (res.data.main_score_elements.min_rt() / 1000) / 60
     max_rt = (res.data.main_score_elements.max_rt() / 1000) / 60
-    min_rt_show = column.slider("Minimum retention time (minutes)", min_rt, max_rt, min_rt, key=key_prefix + "min_rt")
-    max_rt_show = column.slider("Maximum retention time (minutes)", min_rt, max_rt, max_rt, key=key_prefix + "max_rt")
+    min_rt_show = column.slider(
+        "Minimum retention time (minutes)",
+        min_rt,
+        max_rt,
+        min_rt,
+        key=key_prefix + "min_rt",
+    )
+    max_rt_show = column.slider(
+        "Maximum retention time (minutes)",
+        min_rt,
+        max_rt,
+        max_rt,
+        key=key_prefix + "max_rt",
+    )
 
     fig = res.data.plot_main_score(min_rt_show * 1000 * 60, max_rt_show * 1000 * 60)
     plt.axvline(x=best_rt, color="red", alpha=0.5)
