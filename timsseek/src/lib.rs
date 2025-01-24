@@ -7,3 +7,5 @@ pub mod models;
 pub mod protein;
 pub mod scoring;
 pub mod utils;
+extern crate parquet;
+#[macro_use] extern crate parquet_derive;

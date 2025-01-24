@@ -20,3 +20,4 @@ results*/*.json
 results*/*.parquet
 
 *human*/*.csv
+*human*/*.parquet

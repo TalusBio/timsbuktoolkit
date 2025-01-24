@@ -112,6 +112,33 @@ impl IntensityArrays {
     }
 }
 
+fn gaussblur(x: &mut [f32]) {
+    // Temp implementation ... shoudl make something nicer in the future.
+    let len = x.len();
+    if len < 3 {
+        return;
+    }
+
+    // Using fixed kernel weights [0.5, 1.0, 0.5]
+    // Note: These weights are already normalized (sum = 2)
+    let mut temp = vec![0.0; len];
+    
+    // Handle first element
+    temp[0] = (x[0] * 1.5 + x[1] * 0.5) / 2.0;
+    
+    // Main convolution loop
+    for i in 1..len-1 {
+        temp[i] = (x[i-1] * 0.5 + x[i] * 1.0 + x[i+1] * 0.5) / 2.0;
+    }
+    
+    // Handle last element
+    temp[len-1] = (x[len-1] * 1.5 + x[len-2] * 0.5) / 2.0;
+
+    // Copy results back
+    x.copy_from_slice(&temp);
+}
+
+
 impl LongitudinalMainScoreElements {
     pub fn new(
         intensity_arrays: &IntensityArrays,
@@ -119,7 +146,7 @@ impl LongitudinalMainScoreElements {
         ms1_rts: &[u32],
         ms2_rts: &[u32],
     ) -> Result<Self> {
-        let ms1_cosine_ref_sim = snap_to_reference(
+        let mut ms1_cosine_ref_sim = snap_to_reference(
             &corr_v_ref::calculate_cosine_with_ref(
                 &intensity_arrays.ms1_rtmajor,
                 &intensity_arrays.ms1_expected_intensities,
@@ -129,7 +156,7 @@ impl LongitudinalMainScoreElements {
             &ref_time_ms,
         )
         .unwrap();
-        let ms2_cosine_ref_sim = snap_to_reference(
+        let mut ms2_cosine_ref_sim = snap_to_reference(
             &corr_v_ref::calculate_cosine_with_ref(
                 &intensity_arrays.ms2_rtmajor,
                 &intensity_arrays.ms2_expected_intensities,
@@ -148,23 +175,31 @@ impl LongitudinalMainScoreElements {
             let e = e.append_to_context("Failed to calculate coelution score for MS2, ");
             return Err(crate::errors::TimsSeekError::DataProcessingError(e));
         }
-        let ms2_coelution_score =
+        let mut ms2_coelution_score =
             snap_to_reference(&ms2_coe_scores.unwrap(), ms2_rts, &ref_time_ms).unwrap();
 
         let tmp = coelution_score::coelution_score::<6>(&intensity_arrays.ms1_mzmajor, 7);
-        let ms1_coelution_score = match tmp {
+        let mut ms1_coelution_score = match tmp {
             Ok(scores) => snap_to_reference(&scores, ms1_rts, &ref_time_ms).unwrap(),
             Err(_) => vec![0.0; ref_time_ms.len()],
         };
-        let lazyscore = snap_to_reference(
+        let mut lazyscore = snap_to_reference(
             &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
             ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
+
+        gaussblur(&mut lazyscore);
+        gaussblur(&mut ms1_coelution_score);
+        gaussblur(&mut ms2_coelution_score);
+        gaussblur(&mut ms2_cosine_ref_sim);
+        gaussblur(&mut ms1_cosine_ref_sim);
+
         let five_pct_index = ref_time_ms.len() * 5 / 100;
+        let half_five_pct_idnex = five_pct_index / 2;
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
-        let lzb_std = calculate_centered_std(&lazyscore_vs_baseline);
+        let lzb_std = calculate_centered_std(&lazyscore_vs_baseline[(half_five_pct_idnex)..(&lazyscore_vs_baseline.len() - half_five_pct_idnex)]);
 
         Ok(Self {
             ms1_cosine_ref_sim,
@@ -199,7 +234,7 @@ impl LongitudinalMainScoreElements {
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
         (0..self.ref_time_ms.len()).map(|i| {
-            let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i]);
+            let ms1_cos_score = 0.50 + (0.50 * self.ms1_cosine_ref_sim[i]);
             let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
             loc_score *= ms1_cos_score;

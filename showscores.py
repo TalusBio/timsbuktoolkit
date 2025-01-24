@@ -36,13 +36,18 @@ def build_parser():
     parser.add_argument(
         "--results_dir",
         type=str,
-        help="Path to the directory containing the results.csv files",
+        nargs="+",
+        help="Path to the directories containing the results.csv files",
     )
     return parser
 
 
-def read_files(results_dir: Path) -> pl.LazyFrame:
-    files = list(results_dir.glob("*.csv"))
+def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
+    files = set()
+    for results_dir in results_dirs:
+        files.update(results_dir.glob("*.csv"))
+
+    files = list(files)
     pprint(f"Scanning {len(files)} files")
     data = pl.scan_csv(files)
     pprint("Done scanning")
@@ -244,12 +249,8 @@ def to_mokapot(df: pl.LazyFrame) -> mokapot.LinearPsmDataset:
 #     return xgb.DMatrix(X, y, feature_names=cols.feature_columns)
 
 
-def to_folds_xgb(df: pl.LazyFrame, num_folds: int) -> list[xgb.DMatrix]:
-    df_use, cols = to_mokapot_df(df)
-    pprint("Shuffling")
-    df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
-    fold_assign = np.arange(len(df_use)) % num_folds
-    out = [df_use.iloc[fold_assign == i] for i in range(num_folds)]
+def to_folds_xgb(*, shuffled_df: pd.DataFrame, cols: ColumnGroups, num_folds: int) -> list[xgb.DMatrix]:
+    out = np.array_split(shuffled_df, num_folds)
     out = [
         xgb.DMatrix(
             x.loc[:, cols.feature_columns].to_numpy(),
@@ -262,7 +263,10 @@ def to_folds_xgb(df: pl.LazyFrame, num_folds: int) -> list[xgb.DMatrix]:
 
 
 def xgboost_stuff(df: pl.LazyFrame):
-    folds = to_folds_xgb(df, num_folds=5)
+    df_use, cols = to_mokapot_df(df)
+    pprint("Shuffling")
+    df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
+    folds = to_folds_xgb(shuffled_df=df_use, num_folds=5, cols=cols)
     fold_model = KFoldModel.from_folds(folds)
     fold_model.train()
     fold_model.score()
@@ -270,6 +274,11 @@ def xgboost_stuff(df: pl.LazyFrame):
 
     ctargs = fold_model.concat_targets()
     cscores = fold_model.concat_scores()
+    df_use["rescore_score"] = cscores
+    df_use["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
+    df_use = df_use.sort_values("rescore_score", ascending=False)
+    df_use.to_parquet("rescored_values.parquet", index=False)
+    pprint("Wrote ten_perc_qval.csv")
     order = np.argsort(-cscores)
     ctargs = ctargs[order]
     cscores = cscores[order]
@@ -302,6 +311,7 @@ def xgboost_stuff(df: pl.LazyFrame):
     plt.plot(qvals[mask], cumtargs[mask], label="QValues < 0.1")
     plt.legend(loc="upper right")
     plt.xlim(0, 0.1)
+    plt.title("Cumulative number of accepted peptides.")
     plt.savefig("plot_qvalues.png")
     plt.close()
 
@@ -316,6 +326,7 @@ def xgboost_stuff(df: pl.LazyFrame):
     # ax[1].axvline(x=score_at_onepct, color="k", linestyle="--", alpha=0.5)
     ax[1].set_yscale("log")
     ax[1].legend()
+    plt.title("Histogram of 'rescoring' score.")
     plt.savefig("plot_hist.png")
     plt.close()
 
@@ -357,12 +368,17 @@ def main_score_hist(df: pl.LazyFrame):
 
     target_file = "plot_mainscores.png"
     pprint(f"Saving plot to {target_file}")
+    plt.title("Histogram of 'main_score' scores.")
     plt.savefig(target_file)
     plt.close()
 
 
 def main(args):
-    data = read_files(Path(args.results_dir))
+    paths = [Path(p) for p in args.results_dir]
+    for p in paths:
+        if not p.exists():
+            raise FileNotFoundError(f"Path {p} does not exist")
+    data = read_files(paths)
     data = data.filter(pl.col("obs_mobility").is_not_nan())
 
     main_score_hist(data)
@@ -451,6 +467,8 @@ class KFoldModel:
         return out
 
     def concat_scores(self):
+        if self.scores[0] is None:
+            raise ValueError("Scores not computed")
         return np.concatenate(self.scores)
 
     def concat_targets(self):

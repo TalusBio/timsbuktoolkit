@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from matplotlib import pyplot as plt
+from pyteomics import parser as pyteomics_parser
 
 from speclib_builder.base import PeptideElement
 from speclib_builder.builder import DummyAnnotator, EntryBuilder
@@ -255,13 +256,40 @@ class Response:
     data: ResponseData
 
 
+BSA_FASTA_ENTRY = """>sp|P02769|ALBU_BOVIN Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4
+MKWVTFISLLLLFSSAYSRGVFRRDTHKSEIAHRFKDLGEEHFKGLVLIAFSQYLQQCPF
+DEHVKLVNELTEFAKTCVADESHAGCEKSLHTLFGDELCKVASLRETYGDMADCCEKQEP
+ERNECFLSHKDDSPDLPKLKPDPNTLCDEFKADEKKFWGKYLYEIARRHPYFYAPELLYY
+ANKYNGVFQECCQAEDKGACLLPKIETMREKVLASSARQRLRCASIQKFGERALKAWSVA
+RLSQKFPKAEFVEVTKLVTDLTKVHKECCHGDLLECADDRADLAKYICDNQDTISSKLKE
+CCDKPLLEKSHCIAEVEKDAIPENLPPLTADFAEDKDVCKNYQEAKDAFLGSFLYEYSRR
+HPEYAVSVLLRLAKEYEATLEECCAKDDPHACYSTVFDKLKHLVDEPQNLIKQNCDQFEK
+LGEYGFQNALIVRYTRKVPQVSTPTLVEVSRSLGKVGTRCCTKPESERMPCTEDYLSLIL
+NRLCVLHEKTPVSEKVTKCCTESLVNRRPCFSALTPDETYVPKAFDEKLFTFHADICTLP
+DTEKQIKKQTALVELLKHKPKATEEQLKTVMENFVAFVDKCCAADDKEACFAVEGPKLVV
+STQTALA"""
+
+def digest(sequence: str) -> set[str]:
+    unique_peptides = set()
+    new_peptides = pyteomics_parser.cleave(sequence, 'trypsin')
+    unique_peptides.update(new_peptides)
+    return unique_peptides
+
+def digest_maybe_fasta(sequence: str) -> list[str]:
+    splits = sequence.split("\n")
+    splits = [x.strip() for x in splits]
+    if splits[0].startswith(">"):
+        splits = splits[1:]
+    digests = digest("".join(splits))
+    return [x for x in digests if len(x) > 5 and len(x) < 30]
+
 @dataclass
 class TargetDecoyPair:
     target: PeptideElement
     decoy: PeptideElement
 
 def input_compoinent() -> PeptideElement:
-    options = ["Sequence", "Examples"]
+    options = ["Sequence", "Examples", "Digest"]
     option = st.selectbox("Input", options)
     if option == "Sequence":
         st.subheader("Sequence")
@@ -279,6 +307,28 @@ def input_compoinent() -> PeptideElement:
             decoy=cols[1].checkbox("Decoy", key="decoy_decoy"),
         )
         return TargetDecoyPair(target, decoy)
+    if option == "Digest":
+        st.subheader("Digest")
+        fasta = st.text_area("Fasta", BSA_FASTA_ENTRY)
+        elems = list(digest_maybe_fasta(fasta))
+        target_seq = st.selectbox("Peptide", elems, key="target_peptide_dg")
+        decoy_seq = target_seq[0] + target_seq[::-1][1:-1] + target_seq[-1]
+        target_charge = st.slider("Charge", 2, 5, 2 , key="target_charge_dg")
+        target_nce = st.slider("NCE", 10, 50, 35, key="target_nce_dg")
+        target = PeptideElement(
+            peptide=target_seq,
+            charge=target_charge,
+            nce=target_nce,
+            decoy=False,
+        )
+        decoy = PeptideElement(
+            peptide=decoy_seq,
+            charge=target_charge,
+            nce=target_nce,
+            decoy=True,
+        )
+        return TargetDecoyPair(target, decoy)
+
     if option == "Examples":
         st.subheader("Examples")
         examples = [

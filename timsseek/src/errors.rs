@@ -15,6 +15,10 @@ pub enum DataProcessingError {
     ExpectedFiniteNonNanData {
         context: String,
     },
+    ExpectedSetField {
+        field: String,
+        context: String,
+    }
 }
 
 impl DataProcessingError {
@@ -33,6 +37,12 @@ impl DataProcessingError {
                 None => *owned_context = Some(context.to_string()),
             },
             DataProcessingError::ExpectedFiniteNonNanData {
+                context: owned_context,
+            } => {
+                owned_context.push_str(context);
+            }
+            DataProcessingError::ExpectedSetField {
+                field: _owned_field,
                 context: owned_context,
             } => {
                 owned_context.push_str(context);

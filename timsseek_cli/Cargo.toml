@@ -7,9 +7,6 @@ edition = "2021"
 timsseek = { path = "../timsseek" }
 timsquery = { path = "../timsquery" }
 clap = { version = "4.5.17", features = ["derive"] }
-rayon = "1.5"
-serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.122"
 
 regex = "1.10.6"
 csv = "1.3.0"
@@ -20,6 +17,9 @@ indicatif = "0.17.9"
 # Workspace-inherited deps
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
 
 [[bin]]
 name = "timsseek"
