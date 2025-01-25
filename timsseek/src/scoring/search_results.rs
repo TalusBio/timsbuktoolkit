@@ -31,6 +31,7 @@ pub struct SearchResultBuilder<'q> {
     delta_next: SetField<f32>,
     rt_seconds: SetField<f32>,
     observed_mobility: SetField<f32>,
+    delta_ms1_ms2_mobility: SetField<f32>,
 
     npeaks: SetField<u8>,
     lazyerscore: SetField<f32>,
@@ -111,6 +112,8 @@ impl<'q> SearchResultBuilder<'q> {
             score,
             delta_next,
             observed_mobility,
+            observed_mobility_ms1,
+            observed_mobility_ms2,
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms1_coelution_score,
@@ -125,9 +128,12 @@ impl<'q> SearchResultBuilder<'q> {
             ..
         } = main_score;
         {
+            let delta_ms1_ms2_mobility = observed_mobility_ms1 - observed_mobility_ms2;
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
             self.observed_mobility = SetField::Some(observed_mobility);
+            self.delta_ms1_ms2_mobility = SetField::Some(delta_ms1_ms2_mobility);
+
             self.rt_seconds = SetField::Some(retention_time_ms as f32 / 1000.0);
             self.ms2_cosine_ref_similarity = SetField::Some(ms2_cosine_ref_sim);
             self.ms2_coelution_score = SetField::Some(ms2_coelution_score);
@@ -168,7 +174,16 @@ impl<'q> SearchResultBuilder<'q> {
             .expect_some("ms2_mobility_errors", "ms2_mobility_errors")?;
 
         let ref_eg = self.ref_eg.expect_some("ref_eg", "ref_eg")?;
+        // let delta_theo_rt = self.asdad
         // TODO replace this with exhaustive unpacking.
+        let obs_rt_seconds = self.rt_seconds.expect_some("rt_seconds", "rt_seconds")?;
+        let delta_theo_rt = obs_rt_seconds - ref_eg.rt_seconds;
+        let sq_delta_theo_rt = delta_theo_rt * delta_theo_rt;
+
+        let delta_ms1_ms2_mobility = self
+            .delta_ms1_ms2_mobility
+            .expect_some("delta_ms1_ms2_mobility", "delta_ms1_ms2_mobility")?;
+        let sq_delta_ms1_ms2_mobility = delta_ms1_ms2_mobility * delta_ms1_ms2_mobility;
 
         let results = IonSearchResults {
             sequence: String::from(
@@ -187,10 +202,14 @@ impl<'q> SearchResultBuilder<'q> {
                 .is_target(),
             main_score: self.main_score.expect_some("main_score", "main_score")?,
             delta_next: self.delta_next.expect_some("delta_next", "delta_next")?,
-            obs_rt_seconds: self.rt_seconds.expect_some("rt_seconds", "rt_seconds")?,
+            delta_theo_rt,
+            sq_delta_theo_rt,
+            obs_rt_seconds,
             obs_mobility: self
                 .observed_mobility
                 .expect_some("observed_mobility", "observed_mobility")?,
+            delta_ms1_ms2_mobility,
+            sq_delta_ms1_ms2_mobility,
             npeaks: self.npeaks.expect_some("npeaks", "npeaks")?,
             lazyerscore: self.lazyerscore.expect_some("lazyerscore", "lazyerscore")?,
             lazyerscore_vs_baseline: self
@@ -261,6 +280,10 @@ pub struct IonSearchResults {
     pub delta_next: f32,
     obs_rt_seconds: f32,
     obs_mobility: f32,
+    delta_theo_rt: f32,
+    sq_delta_theo_rt: f32,
+    delta_ms1_ms2_mobility: f32,
+    sq_delta_ms1_ms2_mobility: f32,
 
     // MS2
     npeaks: u8,

@@ -336,17 +336,35 @@ impl PreScore {
             None => 0,
         };
 
-        let ims = self
+        let ims_ms2 = self
             .query_values
             .ms2_arrays
             .weighted_ims_mean
             .get(ms2_loc)
             .copied()
             .unwrap_or(f64::NAN);
+
+        let ims_ms1 = self
+            .query_values
+            .ms1_arrays
+            .weighted_ims_mean
+            .get(ms1_loc)
+            .copied()
+            .unwrap_or(f64::NAN);
+
+        let ims = match (ims_ms1, ims_ms2) {
+            (x, y) if !x.is_nan() && y.is_nan() => x,
+            (x, y) if x.is_nan() && !y.is_nan() => y,
+            (x, y) if x.is_nan() && y.is_nan() => f64::NAN,
+            (x, y) => (x + y) / 2.0,
+        };
+
         Ok(MainScore {
             score: max_val,
             delta_next,
             observed_mobility: ims as f32,
+            observed_mobility_ms1: ims_ms1 as f32,
+            observed_mobility_ms2: ims_ms2 as f32,
             retention_time_ms: self.ref_time_ms[max_loc],
 
             ms2_cosine_ref_sim: longitudinal_main_score_elements.ms2_cosine_ref_sim[max_loc],
@@ -384,6 +402,8 @@ pub struct MainScore {
     pub score: f32,
     pub delta_next: f32,
     pub observed_mobility: f32,
+    pub observed_mobility_ms1: f32,
+    pub observed_mobility_ms2: f32,
     pub retention_time_ms: u32,
 
     pub ms2_cosine_ref_sim: f32,
