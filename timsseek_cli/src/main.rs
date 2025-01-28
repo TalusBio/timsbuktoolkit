@@ -1,11 +1,11 @@
 mod cli;
 mod config;
+mod errors;
 mod processing;
 
 use clap::Parser;
 use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsseek::errors::TimsSeekError;
 use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
 use tracing::level_filters::LevelFilter;
@@ -24,7 +24,7 @@ use config::{
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
 
-fn main() -> std::result::Result<(), TimsSeekError> {
+fn main() -> std::result::Result<(), errors::CliError> {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -38,12 +38,12 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     let args = Cli::parse();
 
     // Load and parse configuration
-    let conf = match std::fs::File::open(args.config) {
+    let conf = match std::fs::File::open(args.config.clone()) {
         Ok(x) => x,
         Err(e) => {
-            return Err(TimsSeekError::Io {
-                source: e,
-                path: None,
+            return Err(errors::CliError::Io {
+                source: e.to_string(),
+                path: Some(args.config.to_string_lossy().to_string()),
             });
         }
     };
@@ -51,7 +51,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     let mut config = match config {
         Ok(x) => x,
         Err(e) => {
-            return Err(TimsSeekError::ParseError { msg: e.to_string() });
+            return Err(errors::CliError::ParseError { msg: e.to_string() });
         }
     };
 
@@ -60,7 +60,12 @@ fn main() -> std::result::Result<(), TimsSeekError> {
         config.analysis.dotd_file = Some(dotd_file);
     }
     if let Some(speclib_file) = args.speclib_file {
-        config.input = InputConfig::Speclib { path: speclib_file };
+        config.input = Some(InputConfig::Speclib { path: speclib_file });
+    }
+    if config.input.is_none() {
+        return Err(errors::CliError::Config {
+            source: "No input provided, please provide one in either the config file or with the --speclib-file flag".to_string(),
+        });
     }
     if let Some(output_dir) = args.output_dir {
         config.output = Some(OutputConfig {
@@ -82,9 +87,9 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     match std::fs::create_dir_all(&output_config.directory) {
         Ok(_) => println!("Created output directory"),
         Err(e) => {
-            return Err(TimsSeekError::Io {
-                source: e,
-                path: None,
+            return Err(errors::CliError::Io {
+                source: e.to_string(),
+                path: Some(output_config.directory.to_string_lossy().to_string()),
             });
         }
     };
@@ -96,7 +101,8 @@ fn main() -> std::result::Result<(), TimsSeekError> {
             .unwrap() // TODO: Error handling
             .to_str()
             .expect("Path is not convertable to string"),
-    )?;
+    )
+    .unwrap();
 
     let tdf_path = &dotd_file_location.clone().unwrap().join("analysis.tdf");
     let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
@@ -108,7 +114,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
 
     // Process based on input type
     match config.input {
-        InputConfig::Fasta { path, digestion } => {
+        Some(InputConfig::Fasta { path, digestion }) => {
             processing::process_fasta(
                 path,
                 &index,
@@ -117,9 +123,10 @@ fn main() -> std::result::Result<(), TimsSeekError> {
                 digestion,
                 &config.analysis,
                 &output_config,
-            )?;
+            )
+            .unwrap();
         }
-        InputConfig::Speclib { path } => {
+        Some(InputConfig::Speclib { path }) => {
             processing::process_speclib(
                 path,
                 &index,
@@ -127,7 +134,13 @@ fn main() -> std::result::Result<(), TimsSeekError> {
                 &factory,
                 &config.analysis,
                 &output_config,
-            )?;
+            )
+            .unwrap();
+        }
+        None => {
+            return Err(errors::CliError::Config {
+                source: "No input specified".to_string(),
+            });
         }
     }
 

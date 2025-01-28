@@ -23,14 +23,21 @@ use crate::errors::{
 ///
 /// Values that belong to the same row are adjacent
 /// in memory.
-#[derive(Debug, Clone)]
-pub struct Array2D<T: Clone + Copy> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Array2D<T: Clone + Copy + std::ops::Mul> {
     values: Vec<T>,
     major_dim: usize,
     minor_dim: usize,
 }
 
-impl<T: Clone + Copy> Array2D<T> {
+impl<
+    T: Clone
+        + Copy
+        + std::ops::Mul<T, Output = T>
+        + std::ops::Add<T, Output = T>
+        + std::ops::AddAssign<T>,
+> Array2D<T>
+{
     pub fn new<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>> {
         let nrows = values.as_ref().len();
         if nrows == 0 {
@@ -148,6 +155,55 @@ impl<T: Clone + Copy> Array2D<T> {
             .chunks(self.major_dim)
             .map(f)
             .collect::<Vec<W>>()
+    }
+
+    /// RowConvolve
+    /// Apply a a convolution on each row of the array separately.
+    /// It is equivalent to applying the passed kernel on each row of the array.
+    /// and padding with zeros.
+    pub fn row_convolve(&self, kernel: &[T], default_value: T) -> Array2D<T> {
+        let mut result = vec![default_value; self.minor_dim * self.major_dim];
+        let offset_size = (kernel.len() - 1) / 2;
+
+        for i in 0..self.minor_dim {
+            let row_offset = i * (self.major_dim);
+            let row = self.get_row(i).expect("Failed to get row, malformed array");
+            row.windows(kernel.len())
+                .enumerate()
+                .for_each(|(ii, window)| {
+                    window
+                        .iter()
+                        .zip(kernel.iter())
+                        .map(|(&a, &b)| a * b)
+                        .for_each(|prod| {
+                            result[ii + offset_size + row_offset] += prod;
+                        });
+                })
+        }
+
+        Array2D::from_flat_vector(result, self.nrows(), self.ncols()).unwrap()
+    }
+
+    pub fn convolve_fold(&self, kernel: &[T], default_value: T, fold_func: impl Fn(T, T) -> T) -> Vec<T> {
+        let mut result = vec![default_value; self.major_dim];
+        let offset_size = (kernel.len() - 1) / 2;
+
+        for i in 0..self.minor_dim {
+            let row = self.get_row(i).expect("Failed to get row, malformed array");
+            row.windows(kernel.len())
+                .enumerate()
+                .for_each(|(ii, window)| {
+                    window
+                        .iter()
+                        .zip(kernel.iter())
+                        .map(|(&a, &b)| a * b)
+                        .for_each(|prod| {
+                            result[ii + offset_size] = fold_func(result[ii + offset_size], prod);
+                        });
+                })
+        }
+
+        result
     }
 
     /// Apply a function to each pair of rows of the array
@@ -454,6 +510,47 @@ mod tests {
         assert_eq!(transposed.values, vec![1, 4, 2, 5, 3, 6]);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_convolve() {
+        let values = vec![vec![1, 2, 3, 4, 5, 6], vec![4, 5, 6, 7, 8, 9]];
+        let array = Array2D::new(&values).unwrap();
+        let array2 = Array2D {
+            values: vec![1, 2, 3, 4, 5, 6, 4, 5, 6, 7, 8, 9],
+            major_dim: 6,
+            minor_dim: 2,
+        };
+        assert_eq!(array, array2);
+
+        let convolved = array.row_convolve(&[1, 1, 1], 0);
+
+        // 6 = 1 + 2 + 3
+        // 9 = 2 + 3 + 4
+        let expect = Array2D {
+            values: vec![0, 6, 9, 12, 15, 0, 0, 15, 18, 21, 24, 0],
+            major_dim: 6,
+            minor_dim: 2,
+        };
+        assert_eq!(convolved, expect);
+    }
+
+    #[test]
+    fn test_convolve_reduce() {
+        let values = vec![vec![1, 2, 3, 4, 5, 6], vec![4, 5, 6, 7, 8, 9]];
+        let array = Array2D::new(&values).unwrap();
+        let array2 = Array2D {
+            values: vec![1, 2, 3, 4, 5, 6, 4, 5, 6, 7, 8, 9],
+            major_dim: 6,
+            minor_dim: 2,
+        };
+        assert_eq!(array, array2);
+
+        let convolved = array.convolve_fold(&[1, 1, 1], 0, |a,b| {a+b});
+
+        // 21 = 1 + 2 + 3 + 4 + 5 + 6
+        let expect = vec![0, 21, 27, 33, 39, 0];
+        assert_eq!(convolved, expect);
     }
 
     fn sample_cmg_array() -> PartitionedCMGArrayStats<u8> {

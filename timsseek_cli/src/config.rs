@@ -5,10 +5,13 @@ use serde::{
 use std::path::PathBuf;
 use timsquery::traits::tolerance::DefaultTolerance;
 
+use crate::cli::Cli;
+use crate::errors;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Input configuration
-    pub input: InputConfig,
+    pub input: Option<InputConfig>,
 
     /// Analysis parameters
     pub analysis: AnalysisConfig,
@@ -80,5 +83,11 @@ impl Default for ToleranceConfig {
             mobility_pct: (0.015, 0.025),
             quad_absolute: (0.05, 0.1),
         }
+    }
+}
+
+impl Config {
+    pub fn with_cli_args(config: Cli) -> Result<Self, errors::CliError> {
+        todo!()
     }
 }

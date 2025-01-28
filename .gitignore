@@ -14,10 +14,18 @@ results.json
 **/*.pyc
 **/*.egg-info
 
+# Speclib stuff
+*.ndjson
+*.pretty.json
+
 # Test runs stuff
-results*/*.csv
-results*/*.json
-results*/*.parquet
+*results*/*.csv
+*results*/*.json
+*results*/*.parquet
 
 *human*/*.csv
 *human*/*.parquet
+*human*/*.png
+*hela*/*.parquet
+*hela*/*.csv
+*hela*/*.png

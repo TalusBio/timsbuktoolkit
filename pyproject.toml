@@ -18,6 +18,12 @@ dev = [
   "uv",
   "bumpver",
 ]
+interactive = [
+  "pandas",
+  "polars",
+  "matplotlib",
+  "ipykernel",
+]
 
 [tool.uv.sources]
 speclib_builder = { workspace = true }

@@ -2,6 +2,7 @@ use super::calculate_scores::{
     LocalizedPreScore,
     MainScore,
     PreScore,
+    RelativeIntensities,
     SortedErrors,
 };
 use crate::errors::DataProcessingError;
@@ -32,6 +33,8 @@ pub struct SearchResultBuilder<'q> {
     rt_seconds: SetField<f32>,
     observed_mobility: SetField<f32>,
     delta_ms1_ms2_mobility: SetField<f32>,
+    // ms1_ms2_correlation: SetField<f32>,
+    cocoscore: SetField<f32>,
 
     npeaks: SetField<u8>,
     lazyerscore: SetField<f32>,
@@ -50,6 +53,8 @@ pub struct SearchResultBuilder<'q> {
 
     ms1_mz_errors: SetField<[f32; 3]>,
     ms1_mobility_errors: SetField<[f32; 3]>,
+
+    relative_intensities: SetField<RelativeIntensities>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -84,7 +89,8 @@ impl<T> SetField<T> {
 impl<'q> SearchResultBuilder<'q> {
     pub fn with_localized_pre_score(self, pre_score: &'q LocalizedPreScore) -> Self {
         self.with_pre_score(&pre_score.pre_score)
-            .with_sorted_errors(&pre_score.inten_sorted_errors())
+            .with_sorted_errors(pre_score.inten_sorted_errors())
+            .with_relative_intensities(pre_score.relative_intensities())
             .with_main_score(pre_score.main_score)
     }
 
@@ -97,11 +103,16 @@ impl<'q> SearchResultBuilder<'q> {
         self
     }
 
-    fn with_sorted_errors(mut self, sorted_errors: &SortedErrors) -> Self {
+    fn with_sorted_errors(mut self, sorted_errors: SortedErrors) -> Self {
         self.ms1_mz_errors = SetField::Some(sorted_errors.ms1_mz_errors);
         self.ms1_mobility_errors = SetField::Some(sorted_errors.ms1_mobility_errors);
         self.ms2_mz_errors = SetField::Some(sorted_errors.ms2_mz_errors);
         self.ms2_mobility_errors = SetField::Some(sorted_errors.ms2_mobility_errors);
+        self
+    }
+
+    fn with_relative_intensities(mut self, relative_intensities: RelativeIntensities) -> Self {
+        self.relative_intensities = SetField::Some(relative_intensities);
         self
     }
 
@@ -125,6 +136,8 @@ impl<'q> SearchResultBuilder<'q> {
             ms1_summed_intensity,
             ms2_summed_intensity,
             retention_time_ms,
+            // ms1_ms2_correlation,
+            cocoscore,
             ..
         } = main_score;
         {
@@ -141,6 +154,8 @@ impl<'q> SearchResultBuilder<'q> {
             self.ms1_cosine_ref_similarity = SetField::Some(ms1_cosine_ref_sim);
             self.lazyerscore = SetField::Some(lazyscore);
             self.lazyerscore_vs_baseline = SetField::Some(lazyscore_vs_baseline);
+            // self.ms1_ms2_correlation = SetField::Some(ms1_ms2_correlation);
+            self.cocoscore = SetField::Some(cocoscore);
             self.norm_lazyerscore_vs_baseline = SetField::Some(lazyscore_z);
             self.npeaks = SetField::Some(npeaks);
             self.ms1_summed_precursor_intensity = SetField::Some(ms1_summed_intensity);
@@ -172,6 +187,23 @@ impl<'q> SearchResultBuilder<'q> {
         ] = self
             .ms2_mobility_errors
             .expect_some("ms2_mobility_errors", "ms2_mobility_errors")?;
+
+        let [int1_e0, int1_e1, int1_e2] = self
+            .relative_intensities
+            .expect_some("ms1_intensity_errors", "ms1_intensity_errors")?
+            .ms1;
+        let [
+            int2_e0,
+            int2_e1,
+            int2_e2,
+            int2_e3,
+            int2_e4,
+            int2_e5,
+            int2_e6,
+        ] = self
+            .relative_intensities
+            .expect_some("ms2_intensity_errors", "ms2_intensity_errors")?
+            .ms2;
 
         let ref_eg = self.ref_eg.expect_some("ref_eg", "ref_eg")?;
         // let delta_theo_rt = self.asdad
@@ -215,6 +247,10 @@ impl<'q> SearchResultBuilder<'q> {
             lazyerscore_vs_baseline: self
                 .lazyerscore_vs_baseline
                 .expect_some("lazyerscore_vs_baseline", "lazyerscore_vs_baseline")?,
+            // ms1_ms2_correlation: self
+            //     .ms1_ms2_correlation
+            //     .expect_some("ms1_ms2_correlation", "ms1_ms2_correlation")?,
+            cocoscore: self.cocoscore.expect_some("cocoscore", "cocoscore")?,
             norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.expect_some(
                 "norm_lazyerscore_vs_baseline",
                 "norm_lazyerscore_vs_baseline",
@@ -259,6 +295,18 @@ impl<'q> SearchResultBuilder<'q> {
             ms1_mobility_error_0: mob1_e0,
             ms1_mobility_error_1: mob1_e1,
             ms1_mobility_error_2: mob1_e2,
+
+            ms1_inten_ratio_0: int1_e0,
+            ms1_inten_ratio_1: int1_e1,
+            ms1_inten_ratio_2: int1_e2,
+
+            ms2_inten_ratio_0: int2_e0,
+            ms2_inten_ratio_1: int2_e1,
+            ms2_inten_ratio_2: int2_e2,
+            ms2_inten_ratio_3: int2_e3,
+            ms2_inten_ratio_4: int2_e4,
+            ms2_inten_ratio_5: int2_e5,
+            ms2_inten_ratio_6: int2_e6,
         };
 
         Ok(results)
@@ -283,6 +331,8 @@ pub struct IonSearchResults {
     delta_theo_rt: f32,
     sq_delta_theo_rt: f32,
     delta_ms1_ms2_mobility: f32,
+    // ms1_ms2_correlation: f32,
+    cocoscore: f32,
     sq_delta_ms1_ms2_mobility: f32,
 
     // MS2
@@ -325,6 +375,19 @@ pub struct IonSearchResults {
     ms1_mobility_error_0: f32,
     ms1_mobility_error_1: f32,
     ms1_mobility_error_2: f32,
+
+    // Relative Intensities
+    ms1_inten_ratio_0: f32,
+    ms1_inten_ratio_1: f32,
+    ms1_inten_ratio_2: f32,
+
+    ms2_inten_ratio_0: f32,
+    ms2_inten_ratio_1: f32,
+    ms2_inten_ratio_2: f32,
+    ms2_inten_ratio_3: f32,
+    ms2_inten_ratio_4: f32,
+    ms2_inten_ratio_5: f32,
+    ms2_inten_ratio_6: f32,
 }
 
 pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(

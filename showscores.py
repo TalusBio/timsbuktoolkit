@@ -14,6 +14,8 @@ import argparse
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from xgboost import XGBClassifier
+from sklearn.model_selection import GridSearchCV
 
 import matplotlib.pyplot as plt
 import mokapot
@@ -48,11 +50,11 @@ def build_parser():
 def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
     files = set()
     for results_dir in results_dirs:
-        files.update(results_dir.glob("*.csv"))
+        files.update(results_dir.glob("*.parquet"))
 
     files = list(files)
     pprint(f"Scanning {len(files)} files")
-    data = pl.scan_csv(files)
+    data = pl.scan_parquet(files)
     pprint("Done scanning")
     return data
 
@@ -157,10 +159,8 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "ms1_mobility_error_0",
         "ms1_mobility_error_1",
         "ms1_mobility_error_2",
-    )
-    engineered_cols = (
-        "delta_rt",
-        "abs_delta_rt",
+        'sq_delta_ms1_ms2_mobility',
+        'delta_ms1_ms2_mobility',
     )
     feat_cols = (
         (
@@ -175,14 +175,26 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             "ms2_summed_transition_intensity",
             "ms1_cosine_ref_similarity",
             "ms1_coelution_score",
+            "nqueries",
+            'delta_theo_rt',
+            'sq_delta_theo_rt',
+            'ms1_inten_ratio_2',
+            'ms2_inten_ratio_4',
+            'ms2_inten_ratio_6',
+            'ms1_inten_ratio_1',
+            'ms2_inten_ratio_2',
+            'ms2_inten_ratio_1',
+            'ms2_inten_ratio_3',
+            'ms1_inten_ratio_0',
+            'ms2_inten_ratio_5',
+            'ms2_inten_ratio_0',
+            'ms1_ms2_correlation',
         )
         + loggable_cols
         + imputable_cols
-        + engineered_cols
     )
     df_use = log_cols(df, loggable_cols)
     df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
-    df_use = calculate_delta_rt(df_use)
     df_use = cast_f32(df_use, feat_cols)
     pprint("Collecting")
     df_use = add_id(df_use).collect(streaming=True)
@@ -230,6 +242,8 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             protein=None,
         ),
     )
+    nonfeat_cols = set(cols.columns) - set(cols.feature_columns)
+    pprint(f"Non-feature columns: {nonfeat_cols}")
     return df_use, cols
 
 
@@ -286,6 +300,30 @@ def to_folds_xgb(
     return out
 
 
+def plot_importances(importances: dict[str, list[float]]):
+    # Lollipop plot showing the importance of each feature
+    fig, ax = plt.subplots(figsize=(6, 8))
+    rev_imps = [(k, v) for k, v in importances.items()]
+    rev_imps = rev_imps[::-1]
+    for feature, importance in rev_imps:
+        expanded_feat = [feature] * len(importance)
+        # Stem of the lollipop
+        ax.hlines(expanded_feat, 0, importance)
+
+        # Dot at the top of the lollipop
+        ax.scatter(importance, expanded_feat, c="k", marker="o")
+
+    # Rotate the labels
+    ax.tick_params(axis="x", rotation=45)
+
+    ax.set_ylabel("Importance ('gain' as defined by xgboost)")
+    ax.set_xlabel("Feature")
+    # square root scale the x axis
+    ax.set_xscale("log")
+    fig.tight_layout()
+    return fig
+
+
 def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     df_use, cols = to_mokapot_df(df)
     pprint("Shuffling")
@@ -294,15 +332,22 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     fold_model = KFoldModel.from_folds(folds)
     fold_model.train()
     fold_model.score()
-    pprint(fold_model.get_importances())
+    importances = fold_model.get_importances()
+    pprint(importances)
+    fig = plot_importances(importances)
+    outfile = output_dir / "importances.png"
+    fig.savefig(outfile)
+    pprint(f"Wrote {outfile}")
+    plt.close()
 
     ctargs = fold_model.concat_targets()
     cscores = fold_model.concat_scores()
     df_use["rescore_score"] = cscores
     df_use["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
     df_use = df_use.sort_values("rescore_score", ascending=False)
-    df_use.to_parquet(output_dir / "rescored_values.parquet", index=False)
-    pprint("Wrote ten_perc_qval.csv")
+    outfile = output_dir / "rescored_values.parquet"
+    df_use.to_parquet(outfile, index=False)
+    pprint(f"Wrote {outfile}")
     order = np.argsort(-cscores)
     ctargs = ctargs[order]
     cscores = cscores[order]
@@ -312,7 +357,7 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     decoy_preds = cscores[ctargs == 0]
     qvals = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
     for ct in [0.01, 0.05, 0.1, 0.5, 1.0]:
-        num_at_thresh = np.sum(ctargs[qvals < ct])
+        num_at_thresh = int(np.sum(ctargs[qvals < ct]))
         ssc = cscores[qvals < ct]
         if len(ssc) == 0:
             pprint(f"No scores at {ct}")
@@ -327,7 +372,9 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
         targets_at_10=np.sum(ctargs[qvals < 0.1]).item(),
     )
     pprint(report)
-    report.save_to_toml(output_dir / "report.toml")
+    outfile = output_dir / "report.toml"
+    report.save_to_toml(outfile)
+    pprint(f"Wrote {outfile}")
 
     # plt.plot(qvals, cumtargs, label="All Scores")
 
@@ -336,7 +383,9 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     plt.legend(loc="upper right")
     plt.xlim(0, 0.1)
     plt.title("Cumulative number of accepted peptides.")
-    plt.savefig(output_dir / "plot_qvalues.png")
+    outfile = output_dir / "plot_qvalues.png"
+    plt.savefig(outfile)
+    pprint(f"Wrote {outfile}")
     plt.close()
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 4))
@@ -351,7 +400,9 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
     ax[1].set_yscale("log")
     ax[1].legend()
     plt.title("Histogram of 'rescoring' score.")
-    plt.savefig(output_dir / "plot_hist.png")
+    outfile = output_dir / "plot_hist.png"
+    plt.savefig(outfile)
+    pprint(f"Wrote {outfile}")
     plt.close()
 
 
@@ -390,10 +441,10 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     ax[1].set_ylabel("Count")
     ax[1].legend(loc="upper right")
 
-    target_file = "plot_mainscores.png"
+    target_file = output_dir / "plot_mainscores.png"
     pprint(f"Saving plot to {target_file}")
     plt.title("Histogram of 'main_score' scores.")
-    plt.savefig(output_dir / target_file)
+    plt.savefig(target_file)
     plt.close()
 
 
@@ -465,7 +516,7 @@ class KFoldModel:
             train = self.folds[i]
             early_stop = self.folds[(i + 1) % len(self.folds)]
             model = xgb.train(
-                {"objective": "binary:logistic"},
+                {"objective": "binary:logistic", "scale_pos_weight": 0.2},
                 train,
                 num_boost_round=200,
                 evals=[
@@ -506,5 +557,8 @@ class KFoldModel:
 
 if __name__ == "__main__":
     parser = build_parser()
-    args = parser.parse_args()
+    args, unkargs = parser.parse_known_args()
+    if unkargs:
+        raise ValueError(f"Unknown arguments: {unkargs}")
+
     main(args)

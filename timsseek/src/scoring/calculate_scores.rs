@@ -12,6 +12,7 @@ use crate::models::{
     RTMajorIntensityArray,
 };
 use crate::utils::aligning::snap_to_reference;
+use crate::utils::correlation::rolling_cosine_similarity;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
     calculate_value_vs_baseline,
@@ -41,6 +42,8 @@ pub struct LongitudinalMainScoreElements {
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
+    // pub ms1_ms2_correlation: Vec<f32>,
+    pub cocoscore: Vec<f32>,
     pub ref_time_ms: Arc<[u32]>,
     ms2_lazyscore_vs_baseline_std: f32,
 }
@@ -182,12 +185,18 @@ impl LongitudinalMainScoreElements {
             Ok(scores) => snap_to_reference(&scores, ms1_rts, &ref_time_ms).unwrap(),
             Err(_) => vec![0.0; ref_time_ms.len()],
         };
+        let ms1_ms2_correlation =
+            rolling_cosine_similarity(&ms1_coelution_score, &ms2_coelution_score, 7).unwrap();
         let mut lazyscore = snap_to_reference(
             &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
             ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
+
+        let cocoscore = intensity_arrays.ms2_mzmajor.arr.convolve_fold(&[1.,2.,-1.,-2.,-1.,2.,1.], 1.0, |x, new| { x + (-new).max(0.0).ln_1p() });
+        // let cocoscore = intensity_arrays.ms2_mzmajor.arr.convolve_fold(&[1.,2.,-1.,-2.,-1.,2.,1.], 1.0, |x, new| { x * ((-new).max(1.0).log10() + 1.0) });
+        let cocoscore = snap_to_reference(&cocoscore, ms2_rts, &ref_time_ms).unwrap();
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
@@ -210,13 +219,15 @@ impl LongitudinalMainScoreElements {
             ms2_coelution_score,
             ms2_lazyscore: lazyscore,
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
+            // ms1_ms2_correlation,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
+            cocoscore,
         })
     }
 
     fn find_apex_candidates(&self) -> [ScoreInTime; 20] {
-        let mut candidate_groups: [TopNArray<2, ScoreInTime>; 20] = [TopNArray::new(); 20];
+        let mut candidate_groups: [TopNArray<2, ScoreInTime>; 21] = [TopNArray::new(); 21];
         let five_pct_index = self.ref_time_ms.len() * 5 / 100;
         for (i, score) in self.main_score_iter().enumerate() {
             if score.is_nan() {
@@ -236,9 +247,10 @@ impl LongitudinalMainScoreElements {
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
         (0..self.ref_time_ms.len()).map(|i| {
-            let ms1_cos_score = 0.50 + (0.50 * self.ms1_cosine_ref_sim[i]);
-            let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
+            let ms1_cos_score = 0.25 + (0.75 * self.ms1_cosine_ref_sim[i]);
+            // let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
+            let mut loc_score = self.cocoscore[i];
             loc_score *= ms1_cos_score;
             loc_score *= self.ms2_cosine_ref_sim[i].powi(2);
             loc_score *= self.ms2_coelution_score[i];
@@ -375,10 +387,12 @@ impl PreScore {
             lazyscore_vs_baseline: longitudinal_main_score_elements.ms2_lazyscore_vs_baseline
                 [max_loc],
             lazyscore_z: longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std,
+            // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
 
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
+            cocoscore: longitudinal_main_score_elements.cocoscore[max_loc],
 
             ref_ms1_idx: ms1_loc,
             ref_ms2_idx: ms2_loc,
@@ -387,10 +401,7 @@ impl PreScore {
 
     pub fn localize(self) -> Result<LocalizedPreScore> {
         let main_score = self.calc_main_score()?;
-        Ok(LocalizedPreScore {
-            pre_score: self,
-            main_score,
-        })
+        Ok(LocalizedPreScore::new(self, main_score))
     }
 }
 
@@ -405,6 +416,8 @@ pub struct MainScore {
     pub observed_mobility_ms1: f32,
     pub observed_mobility_ms2: f32,
     pub retention_time_ms: u32,
+    // pub ms1_ms2_correlation: f32,
+    pub cocoscore: f32,
 
     pub ms2_cosine_ref_sim: f32,
     pub ms2_coelution_score: f32,
@@ -426,16 +439,32 @@ pub struct MainScore {
 pub struct LocalizedPreScore {
     pub pre_score: PreScore,
     pub main_score: MainScore,
+    ints_at_apex: SortedIntElemAtIndex,
 }
 
 impl LocalizedPreScore {
     pub fn inten_sorted_errors(&self) -> SortedErrors {
-        sorted_err_at_idx(
-            self.main_score.ref_ms1_idx,
-            self.main_score.ref_ms2_idx,
-            &self.pre_score.query_values,
-            &self.pre_score.reference,
-        )
+        sorted_err_at_idx(&self.ints_at_apex)
+    }
+
+    pub fn relative_intensities(&self) -> RelativeIntensities {
+        RelativeIntensities::new(&self.ints_at_apex)
+    }
+}
+
+impl LocalizedPreScore {
+    fn new(pre_score: PreScore, main_score: MainScore) -> Self {
+        let ints_at_apex = SortedIntElemAtIndex::new(
+            main_score.ref_ms1_idx,
+            main_score.ref_ms2_idx,
+            &pre_score.query_values,
+            &pre_score.reference,
+        );
+        Self {
+            pre_score,
+            main_score,
+            ints_at_apex,
+        }
     }
 }
 
@@ -445,6 +474,81 @@ pub struct SortedErrors {
     pub ms2_mz_errors: [f32; 7],
     pub ms1_mobility_errors: [f32; 3],
     pub ms2_mobility_errors: [f32; 7],
+}
+
+#[derive(Debug)]
+pub struct SortedIntElemAtIndex {
+    ms1: [SortableError; 3],
+    ms2: [SortableError; 7],
+}
+
+impl SortedIntElemAtIndex {
+    fn new(
+        ms1_idx: usize,
+        ms2_idx: usize,
+        cmgs: &NaturalFinalizedMultiCMGArrays<SafePosition>,
+        elution_group: &ElutionGroup<SafePosition>,
+    ) -> Self {
+        // Get the elements at every index and sort them by intensity.
+        // Once sorted calculate the pairwise diff.
+        let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
+        let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
+        let ref_ims = elution_group.mobility;
+
+        if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
+            for i in 0..3 {
+                let expect_mz = elution_group.precursor_mzs.get(i);
+                let mz_err = if let Some(mz) = expect_mz {
+                    (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
+                } else {
+                    continue;
+                };
+                let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
+
+                let tmp = SortableError {
+                    intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
+                    mz_err,
+                    ims_err,
+                };
+                ms1_elems.push(tmp);
+            }
+        }
+
+        // TODO: make an impl to get the length on the RT axis.
+        if ms2_idx < cmgs.ms2_arrays.retention_time_miliseconds.len() {
+            for (k, v) in cmgs.ms2_arrays.intensities.iter() {
+                let expect_mz = elution_group.fragment_mzs.get(k);
+                let mz_err = if let Some(mz) = expect_mz {
+                    (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
+                } else {
+                    continue;
+                };
+
+                // TODO: figure out why this happens
+                if mz_err.abs() > 1.0 {
+                    println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
+                    println!("Expected mz: {}", expect_mz.unwrap());
+                    println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
+                    println!("EG: {:#?}", elution_group);
+                    println!("CMGS: {:#?}", cmgs);
+                    panic!();
+                }
+                let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
+
+                let tmp = SortableError {
+                    intensity: v[ms2_idx],
+                    mz_err,
+                    ims_err,
+                };
+                ms2_elems.push(tmp);
+            }
+        }
+
+        SortedIntElemAtIndex {
+            ms1: ms1_elems.get_values(),
+            ms2: ms2_elems.get_values(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -470,76 +574,14 @@ impl Default for SortableError {
     }
 }
 
-fn sorted_err_at_idx(
-    ms1_idx: usize,
-    ms2_idx: usize,
-    cmgs: &NaturalFinalizedMultiCMGArrays<SafePosition>,
-    elution_group: &ElutionGroup<SafePosition>,
-) -> SortedErrors {
-    // Get the elements at every index and sort them by intensity.
-    // Once sorted calculate the pairwise diff.
-    let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
-    let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
-    let ref_ims = elution_group.mobility;
-
-    if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
-        for i in 0..3 {
-            let expect_mz = elution_group.precursor_mzs.get(i);
-            let mz_err = if let Some(mz) = expect_mz {
-                (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
-            } else {
-                continue;
-            };
-            let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
-
-            let tmp = SortableError {
-                intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
-                mz_err,
-                ims_err,
-            };
-            ms1_elems.push(tmp);
-        }
-    }
-
-    // TODO: make an impl to get the length on the RT axis.
-    if ms2_idx < cmgs.ms2_arrays.retention_time_miliseconds.len() {
-        for (k, v) in cmgs.ms2_arrays.intensities.iter() {
-            let expect_mz = elution_group.fragment_mzs.get(k);
-            let mz_err = if let Some(mz) = expect_mz {
-                (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
-            } else {
-                continue;
-            };
-
-            // TODO: figure out why this happens
-            if mz_err.abs() > 1.0 {
-                println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
-                println!("Expected mz: {}", expect_mz.unwrap());
-                println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
-                println!("EG: {:#?}", elution_group);
-                println!("CMGS: {:#?}", cmgs);
-                panic!();
-            }
-            let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
-
-            let tmp = SortableError {
-                intensity: v[ms2_idx],
-                mz_err,
-                ims_err,
-            };
-            ms2_elems.push(tmp);
-        }
-    }
-
-    // TODO: refactor and make a fast pass here.
-    // Sort them by decreasing intensity
-    let ms1_elems = ms1_elems.get_values();
-    let ms2_elems = ms2_elems.get_values();
-
+fn sorted_err_at_idx(ints_at_apex: &SortedIntElemAtIndex) -> SortedErrors {
     let mut ms1_out_mz_err = [0.0; 3];
     let mut ms2_out_mz_err = [0.0; 7];
     let mut ms1_out_ims_err = [0.0; 3];
     let mut ms2_out_ims_err = [0.0; 7];
+
+    let ms1_elems = ints_at_apex.ms1;
+    let ms2_elems = ints_at_apex.ms2;
 
     for (i, val) in ms1_elems.iter().enumerate() {
         if i == 0 {
@@ -566,5 +608,32 @@ fn sorted_err_at_idx(
         ms2_mz_errors: ms2_out_mz_err,
         ms1_mobility_errors: ms1_out_ims_err,
         ms2_mobility_errors: ms2_out_ims_err,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RelativeIntensities {
+    pub ms1: [f32; 3],
+    pub ms2: [f32; 7],
+}
+
+impl RelativeIntensities {
+    pub fn new(ints_at_apex: &SortedIntElemAtIndex) -> Self {
+        let tot_ms1: u64 = ints_at_apex.ms1.iter().map(|x| x.intensity).sum();
+        let tot_ms2: u64 = ints_at_apex.ms2.iter().map(|x| x.intensity).sum();
+        let mut ms1: [f32; 3] = [0.0; 3];
+        let mut ms2: [f32; 7] = [0.0; 7];
+        ints_at_apex
+            .ms1
+            .iter()
+            .enumerate()
+            .for_each(|(i, x)| ms1[i] = (x.intensity as f32).ln_1p() - (tot_ms1 as f32).ln_1p());
+        ints_at_apex
+            .ms2
+            .iter()
+            .enumerate()
+            .for_each(|(i, x)| ms2[i] = (x.intensity as f32).ln_1p() - (tot_ms2 as f32).ln_1p());
+
+        Self { ms1, ms2 }
     }
 }

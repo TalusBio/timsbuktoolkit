@@ -2,7 +2,7 @@ import dataclasses
 import json
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import numpy as np
 import pandas as pd
@@ -99,6 +99,40 @@ class ArrayResponse:
         fig.tight_layout()
         return fig
 
+    def plot_transition_derivatives(self, min_rt, max_rt):
+        rt_use = np.array(self.retention_time_miliseconds)
+        ranges = np.searchsorted(rt_use, [min_rt, max_rt])
+        rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
+
+        fig, ax = plt.subplots()
+        for k, v in self.intensities.items():
+            ax.plot(
+                rt_plot,
+                np.gradient(v[ranges[0] : ranges[1]], 1.0),
+                label=k,
+            )
+
+        ax.set_xlabel("Retention Time (min)")
+        ax.set_ylabel("Intensity Derivative")
+        return fig
+
+    def plot_second_derivatives(self, min_rt, max_rt):
+        rt_use = np.array(self.retention_time_miliseconds)
+        ranges = np.searchsorted(rt_use, [min_rt, max_rt])
+        rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
+
+        fig, ax = plt.subplots()
+        for k, v in self.intensities.items():
+            ax.plot(
+                rt_plot,
+                np.gradient(np.gradient(v[ranges[0] : ranges[1]], 1.0), 1.0),
+                label=k,
+            )
+
+        ax.set_xlabel("Retention Time (min)")
+        ax.set_ylabel("Second Derivative")
+        return fig
+
 
 @dataclass
 class Extractions:
@@ -116,12 +150,14 @@ class MainScoreElements:
     ms2_lazyscore: list[float]
     ms2_lazyscore_vs_baseline: list[float]
     ref_time_ms: list[int]
+    # ms1_ms2_correlation: list[float]
+    cocoscore: list[float]
     ms2_lazyscore_vs_baseline_std: float
 
     def plot(self, min_rt_ms, max_rt_ms, vlines_ms: list[int] | None = None):
         # Make a plot grid, where each row is a different score element
         # but all share the same retention time axis
-        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(10, 12))
+        fig, ax = plt.subplots(nrows=3, ncols=3, figsize=(10, 12))
 
         rt_use = np.array(self.ref_time_ms)
         ranges = np.searchsorted(rt_use, [min_rt_ms, max_rt_ms])
@@ -140,6 +176,9 @@ class MainScoreElements:
         ax[1, 1].set_title("MS2 Cosine Ref Sim")
         ax[1, 2].plot(rt_plot, self.ms2_lazyscore[ranges[0] : ranges[1]])
         ax[1, 2].set_title("MS2 LazyScore")
+
+        ax[2, 0].plot(rt_plot, self.cocoscore[ranges[0] : ranges[1]])
+        ax[2, 0].set_title("CoCoScore")
 
         #  ax[2, 0].plot(rt_plot, self.ms2_lazyscore_vs_baseline_std[ranges[0] : ranges[1]])
         #  ax[2, 0].set_title("MS2 LazyScore Baseline STD")
@@ -163,6 +202,9 @@ class MainScoreElements:
                     x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
                 )
                 ax[1, 2].axvline(
+                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
+                )
+                ax[2, 0].axvline(
                     x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
                 )
 
@@ -214,6 +256,27 @@ class SearchResults:
     ms2_mz_error_4: float
     ms2_mz_error_5: float
     ms2_mz_error_6: float
+
+    ms1_inten_ratio_0: float
+    ms1_inten_ratio_1: float
+    ms1_inten_ratio_2: float
+    ms2_inten_ratio_0: float
+    ms2_inten_ratio_1: float
+    ms2_inten_ratio_2: float
+    ms2_inten_ratio_3: float
+    ms2_inten_ratio_4: float
+    ms2_inten_ratio_5: float
+    ms2_inten_ratio_6: float
+
+    # ms1_ms2_correlation: float
+    cocoscore: float
+
+    delta_ms1_ms2_mobility: float
+    sq_delta_ms1_ms2_mobility: float
+
+    delta_theo_rt: float
+    sq_delta_theo_rt: float
+
     ms2_summed_transition_intensity: float
     npeaks: int
     obs_mobility: float
@@ -482,6 +545,29 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     )
     plt.axvline(x=best_rt, color="red", alpha=0.5)
     column.pyplot(fig, clear_figure=True, use_container_width=True)
+
+    fig = res.data.extractions.ms2_arrays.plot_transition_derivatives(
+        min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
+    )
+    plt.axvline(x=best_rt, color="red", alpha=0.5)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
+
+    fig = res.data.extractions.ms2_arrays.plot_second_derivatives(
+        min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
+    )
+    plt.axvline(x=best_rt, color="red", alpha=0.5)
+    column.pyplot(fig, clear_figure=True, use_container_width=True)
+
+    # Button to download data
+    data_dict = asdict(res.data)
+    data_json = json.dumps(data_dict)
+    column.download_button(
+        label="Download data",
+        data=data_json,
+        file_name="data.json",
+        mime="application/json",
+        key=key_prefix + "download_button",
+    )
 
 
 if __name__ == "__main__":
