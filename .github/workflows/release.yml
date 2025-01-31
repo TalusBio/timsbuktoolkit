@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.*' # Trigger on version tags
+      - 'v?[0-9]+.*' # Trigger on version tags
 
 env:
   CARGO_TERM_COLOR: always
