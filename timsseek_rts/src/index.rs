@@ -8,7 +8,6 @@ use serde::{
 };
 use timsquery::ElutionGroup;
 use timsquery::models::aggregators::MultiCMGStatsFactory;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::NaturalFinalizedMultiCMGArrays;
 use timsquery::models::indices::ExpandedRawFrameIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::DefaultTolerance;
@@ -22,9 +21,9 @@ use timsseek::scoring::calculate_scores::{
     PreScore,
 };
 use timsseek::scoring::search_results::{
-    IonSearchResults,
     SearchResultBuilder,
 };
+use timsseek::scoring::full_results::FullQueryResult;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
 
 // TODO: replace with a trait ... This works for now though
@@ -102,13 +101,6 @@ pub struct NamedQuery {
     pub expected_intensities: ExpectedIntensities,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct QueryResult {
-    pub main_score_elements: LongitudinalMainScoreElements,
-    pub longitudinal_main_score: Vec<f32>,
-    pub extractions: NaturalFinalizedMultiCMGArrays<SafePosition>,
-    pub search_results: IonSearchResults,
-}
 
 impl BundledDotDIndex {
     pub fn new(
@@ -146,7 +138,7 @@ impl BundledDotDIndex {
         })
     }
 
-    pub fn query(&self, queries: NamedQuery) -> Result<QueryResult> {
+    pub fn query(&self, queries: NamedQuery) -> Result<FullQueryResult> {
         let res = query_multi_group(
             &self.index,
             &self.tolerance,
@@ -176,7 +168,7 @@ impl BundledDotDIndex {
             .finalize()?;
         let longitudinal_main_score = longitudinal_main_score_elements.main_score_iter().collect();
 
-        Ok(QueryResult {
+        Ok(FullQueryResult {
             main_score_elements: longitudinal_main_score_elements,
             longitudinal_main_score,
             extractions: res[0].clone(),

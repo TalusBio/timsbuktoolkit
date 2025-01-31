@@ -8,8 +8,8 @@ use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone)]
 pub struct NamedQueryChunk {
-    digests: Vec<DigestSlice>,
-    charges: Vec<u8>,
+    pub digests: Vec<DigestSlice>,
+    pub charges: Vec<u8>,
     pub queries: Vec<ElutionGroup<SafePosition>>,
     pub expected_intensities: Vec<ExpectedIntensities>,
 }

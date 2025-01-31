@@ -19,6 +19,7 @@ use timsseek::errors::{
     Result,
     TimsSeekError,
 };
+use timsseek::scoring::full_results::FullQueryResult;
 
 mod cli;
 mod index;
@@ -107,7 +108,7 @@ fn handle_connection(
         };
 
         let start = std::time::Instant::now();
-        let query_res: Result<index::QueryResult> = index.query(query.into());
+        let query_res: Result<FullQueryResult> = index.query(query.into());
         let elap_time = start.elapsed();
         println!("Querying took {:#?} for query", elap_time);
         let response = match query_res {

@@ -19,4 +19,8 @@ pub struct Cli {
     /// Path to the output directory
     #[arg(short, long)]
     pub output_dir: Option<PathBuf>,
+
+    /// Whether to enable the full output mode
+    #[arg(short, long)]
+    pub full_output: bool,
 }

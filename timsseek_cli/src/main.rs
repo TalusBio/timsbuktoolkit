@@ -70,10 +70,11 @@ fn main() -> std::result::Result<(), errors::CliError> {
     if let Some(output_dir) = args.output_dir {
         config.output = Some(OutputConfig {
             directory: output_dir,
+            full_output: args.full_output,
         });
     }
 
-    let output_config = match config.output {
+    let mut output_config = match config.output {
         Some(ref x) => x.clone(),
         None => {
             panic!(
@@ -82,6 +83,9 @@ fn main() -> std::result::Result<(), errors::CliError> {
         }
     };
     println!("{:#?}", config.clone());
+    if args.full_output {
+        output_config.full_output = true;
+    }
 
     // Create output director
     match std::fs::create_dir_all(&output_config.directory) {

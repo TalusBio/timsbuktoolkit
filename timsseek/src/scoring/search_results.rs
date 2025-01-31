@@ -34,7 +34,6 @@ pub struct SearchResultBuilder<'q> {
     observed_mobility: SetField<f32>,
     delta_ms1_ms2_mobility: SetField<f32>,
     // ms1_ms2_correlation: SetField<f32>,
-    cocoscore: SetField<f32>,
 
     npeaks: SetField<u8>,
     lazyerscore: SetField<f32>,
@@ -136,8 +135,6 @@ impl<'q> SearchResultBuilder<'q> {
             ms1_summed_intensity,
             ms2_summed_intensity,
             retention_time_ms,
-            // ms1_ms2_correlation,
-            cocoscore,
             ..
         } = main_score;
         {
@@ -154,8 +151,6 @@ impl<'q> SearchResultBuilder<'q> {
             self.ms1_cosine_ref_similarity = SetField::Some(ms1_cosine_ref_sim);
             self.lazyerscore = SetField::Some(lazyscore);
             self.lazyerscore_vs_baseline = SetField::Some(lazyscore_vs_baseline);
-            // self.ms1_ms2_correlation = SetField::Some(ms1_ms2_correlation);
-            self.cocoscore = SetField::Some(cocoscore);
             self.norm_lazyerscore_vs_baseline = SetField::Some(lazyscore_z);
             self.npeaks = SetField::Some(npeaks);
             self.ms1_summed_precursor_intensity = SetField::Some(ms1_summed_intensity);
@@ -206,7 +201,6 @@ impl<'q> SearchResultBuilder<'q> {
             .ms2;
 
         let ref_eg = self.ref_eg.expect_some("ref_eg", "ref_eg")?;
-        // let delta_theo_rt = self.asdad
         // TODO replace this with exhaustive unpacking.
         let obs_rt_seconds = self.rt_seconds.expect_some("rt_seconds", "rt_seconds")?;
         let delta_theo_rt = obs_rt_seconds - ref_eg.rt_seconds;
@@ -250,7 +244,6 @@ impl<'q> SearchResultBuilder<'q> {
             // ms1_ms2_correlation: self
             //     .ms1_ms2_correlation
             //     .expect_some("ms1_ms2_correlation", "ms1_ms2_correlation")?,
-            cocoscore: self.cocoscore.expect_some("cocoscore", "cocoscore")?,
             norm_lazyerscore_vs_baseline: self.norm_lazyerscore_vs_baseline.expect_some(
                 "norm_lazyerscore_vs_baseline",
                 "norm_lazyerscore_vs_baseline",
@@ -332,7 +325,6 @@ pub struct IonSearchResults {
     sq_delta_theo_rt: f32,
     delta_ms1_ms2_mobility: f32,
     // ms1_ms2_correlation: f32,
-    cocoscore: f32,
     sq_delta_ms1_ms2_mobility: f32,
 
     // MS2

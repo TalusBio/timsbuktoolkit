@@ -69,6 +69,13 @@ def lazy_abs_and_maxfill(df: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
     return df.with_columns(exprs_first).with_columns(exprs_later)
 
 
+def lazy_zero_fill(df: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
+    exprs = []
+    for column in columns:
+        exprs.append(pl.col(column).fill_nan(0))
+    return df.with_columns(exprs)
+
+
 def log_cols(df: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
     exprs = []
     for col in columns:
@@ -97,15 +104,15 @@ def check_noninf(df: pl.DataFrame, columns: list[str]):
 
 def check_nonnan(df: pl.LazyFrame, columns: list[str]):
     pprint("Checking for NaN values")
-    any_nan = False
+    nan_cols = []
     df_nan = df.select(columns).filter(pl.any_horizontal(pl.all().is_nan()))
     pprint(df_nan)
     for col in columns:
         if df_nan[col].is_nan().any():
             pprint(f"Column {col} has NaN values")
-            any_nan = True
-    if any_nan:
-        raise ValueError("Data contains NaN values")
+            nan_cols.append(col)
+    if nan_cols:
+        raise ValueError(f"Data contains NaN values: {nan_cols}")
 
 
 def cast_f32(df: pl.LazyFrame, cols: list[str]) -> pl.LazyFrame:
@@ -159,9 +166,11 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "ms1_mobility_error_0",
         "ms1_mobility_error_1",
         "ms1_mobility_error_2",
-        'sq_delta_ms1_ms2_mobility',
-        'delta_ms1_ms2_mobility',
+        "sq_delta_ms1_ms2_mobility",
+        "delta_ms1_ms2_mobility",
     )
+    # zero_imputable_cols = ("ms1_ms2_correlation",)
+    zero_imputable_cols = ()
     feat_cols = (
         (
             "precursor_charge",
@@ -176,25 +185,26 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             "ms1_cosine_ref_similarity",
             "ms1_coelution_score",
             "nqueries",
-            'delta_theo_rt',
-            'sq_delta_theo_rt',
-            'ms1_inten_ratio_2',
-            'ms2_inten_ratio_4',
-            'ms2_inten_ratio_6',
-            'ms1_inten_ratio_1',
-            'ms2_inten_ratio_2',
-            'ms2_inten_ratio_1',
-            'ms2_inten_ratio_3',
-            'ms1_inten_ratio_0',
-            'ms2_inten_ratio_5',
-            'ms2_inten_ratio_0',
-            'ms1_ms2_correlation',
+            "delta_theo_rt",
+            "sq_delta_theo_rt",
+            "ms1_inten_ratio_2",
+            "ms2_inten_ratio_4",
+            "ms2_inten_ratio_6",
+            "ms1_inten_ratio_1",
+            "ms2_inten_ratio_2",
+            "ms2_inten_ratio_1",
+            "ms2_inten_ratio_3",
+            "ms1_inten_ratio_0",
+            "ms2_inten_ratio_5",
+            "ms2_inten_ratio_0",
         )
         + loggable_cols
         + imputable_cols
+        + zero_imputable_cols
     )
     df_use = log_cols(df, loggable_cols)
     df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
+    df_use = lazy_zero_fill(df_use, zero_imputable_cols)
     df_use = cast_f32(df_use, feat_cols)
     pprint("Collecting")
     df_use = add_id(df_use).collect(streaming=True)

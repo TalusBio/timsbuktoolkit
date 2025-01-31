@@ -42,8 +42,6 @@ pub struct LongitudinalMainScoreElements {
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
-    // pub ms1_ms2_correlation: Vec<f32>,
-    pub cocoscore: Vec<f32>,
     pub ref_time_ms: Arc<[u32]>,
     ms2_lazyscore_vs_baseline_std: f32,
 }
@@ -185,18 +183,12 @@ impl LongitudinalMainScoreElements {
             Ok(scores) => snap_to_reference(&scores, ms1_rts, &ref_time_ms).unwrap(),
             Err(_) => vec![0.0; ref_time_ms.len()],
         };
-        let ms1_ms2_correlation =
-            rolling_cosine_similarity(&ms1_coelution_score, &ms2_coelution_score, 7).unwrap();
         let mut lazyscore = snap_to_reference(
             &hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor),
             ms2_rts,
             &ref_time_ms,
         )
         .unwrap();
-
-        let cocoscore = intensity_arrays.ms2_mzmajor.arr.convolve_fold(&[1.,2.,-1.,-2.,-1.,2.,1.], 1.0, |x, new| { x + (-new).max(0.0).ln_1p() });
-        // let cocoscore = intensity_arrays.ms2_mzmajor.arr.convolve_fold(&[1.,2.,-1.,-2.,-1.,2.,1.], 1.0, |x, new| { x * ((-new).max(1.0).log10() + 1.0) });
-        let cocoscore = snap_to_reference(&cocoscore, ms2_rts, &ref_time_ms).unwrap();
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
@@ -219,10 +211,8 @@ impl LongitudinalMainScoreElements {
             ms2_coelution_score,
             ms2_lazyscore: lazyscore,
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
-            // ms1_ms2_correlation,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
-            cocoscore,
         })
     }
 
@@ -242,15 +232,16 @@ impl LongitudinalMainScoreElements {
                 candidates.push(*val);
             }
         }
+        // println!("Candidates: {:?}", candidates);
         candidates.get_values()
     }
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
         (0..self.ref_time_ms.len()).map(|i| {
-            let ms1_cos_score = 0.25 + (0.75 * self.ms1_cosine_ref_sim[i]);
-            // let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
+            // let ms1_cos_score = 0.25 + (0.75 * self.ms1_cosine_ref_sim[i].powi(2));
+            let ms1_cos_score = self.ms1_cosine_ref_sim[i].powi(2);
+            let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
-            let mut loc_score = self.cocoscore[i];
             loc_score *= ms1_cos_score;
             loc_score *= self.ms2_cosine_ref_sim[i].powi(2);
             loc_score *= self.ms2_coelution_score[i];
@@ -277,7 +268,7 @@ impl Default for ScoreInTime {
 impl PartialOrd for ScoreInTime {
     fn partial_cmp(&self, other: &ScoreInTime) -> Option<std::cmp::Ordering> {
         if self.score.is_nan() {
-            return Some(std::cmp::Ordering::Greater);
+            return Some(std::cmp::Ordering::Less);
         }
         self.score.partial_cmp(&other.score)
     }
@@ -392,7 +383,6 @@ impl PreScore {
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
-            cocoscore: longitudinal_main_score_elements.cocoscore[max_loc],
 
             ref_ms1_idx: ms1_loc,
             ref_ms2_idx: ms2_loc,
@@ -416,8 +406,6 @@ pub struct MainScore {
     pub observed_mobility_ms1: f32,
     pub observed_mobility_ms2: f32,
     pub retention_time_ms: u32,
-    // pub ms1_ms2_correlation: f32,
-    pub cocoscore: f32,
 
     pub ms2_cosine_ref_sim: f32,
     pub ms2_coelution_score: f32,

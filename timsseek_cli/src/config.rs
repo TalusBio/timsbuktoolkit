@@ -48,6 +48,8 @@ pub struct AnalysisConfig {
 pub struct OutputConfig {
     /// Directory for results
     pub directory: PathBuf,
+    /// Whether to enable the full output mode
+    pub full_output: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
