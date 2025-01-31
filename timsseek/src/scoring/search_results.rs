@@ -34,7 +34,6 @@ pub struct SearchResultBuilder<'q> {
     observed_mobility: SetField<f32>,
     delta_ms1_ms2_mobility: SetField<f32>,
     // ms1_ms2_correlation: SetField<f32>,
-
     npeaks: SetField<u8>,
     lazyerscore: SetField<f32>,
     lazyerscore_vs_baseline: SetField<f32>,

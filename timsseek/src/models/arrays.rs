@@ -184,7 +184,12 @@ impl<
         Array2D::from_flat_vector(result, self.nrows(), self.ncols()).unwrap()
     }
 
-    pub fn convolve_fold(&self, kernel: &[T], default_value: T, fold_func: impl Fn(T, T) -> T) -> Vec<T> {
+    pub fn convolve_fold(
+        &self,
+        kernel: &[T],
+        default_value: T,
+        fold_func: impl Fn(T, T) -> T,
+    ) -> Vec<T> {
         let mut result = vec![default_value; self.major_dim];
         let offset_size = (kernel.len() - 1) / 2;
 
@@ -546,7 +551,7 @@ mod tests {
         };
         assert_eq!(array, array2);
 
-        let convolved = array.convolve_fold(&[1, 1, 1], 0, |a,b| {a+b});
+        let convolved = array.convolve_fold(&[1, 1, 1], 0, |a, b| a + b);
 
         // 21 = 1 + 2 + 3 + 4 + 5 + 6
         let expect = vec![0, 21, 27, 33, 39, 0];

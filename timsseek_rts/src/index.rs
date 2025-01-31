@@ -20,10 +20,8 @@ use timsseek::scoring::calculate_scores::{
     LongitudinalMainScoreElements,
     PreScore,
 };
-use timsseek::scoring::search_results::{
-    SearchResultBuilder,
-};
 use timsseek::scoring::full_results::FullQueryResult;
+use timsseek::scoring::search_results::SearchResultBuilder;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
 
 // TODO: replace with a trait ... This works for now though
@@ -100,7 +98,6 @@ pub struct NamedQuery {
     pub elution_group: ElutionGroup<SafePosition>,
     pub expected_intensities: ExpectedIntensities,
 }
-
 
 impl BundledDotDIndex {
     pub fn new(

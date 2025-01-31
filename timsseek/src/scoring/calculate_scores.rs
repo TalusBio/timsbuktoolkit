@@ -379,7 +379,6 @@ impl PreScore {
                 [max_loc],
             lazyscore_z: longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std,
             // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
-
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,

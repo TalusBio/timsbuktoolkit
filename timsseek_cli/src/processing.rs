@@ -38,7 +38,9 @@ use timsseek::models::{
 };
 use timsseek::protein::fasta::ProteinSequenceCollection;
 use timsseek::scoring::calculate_scores::{
+    IntensityArrays,
     LocalizedPreScore,
+    LongitudinalMainScoreElements,
     PreScore,
 };
 use timsseek::scoring::full_results::FullQueryResult;
@@ -48,9 +50,6 @@ use timsseek::scoring::search_results::{
     write_results_to_csv,
     write_results_to_parquet,
 };
-use timsseek::scoring::calculate_scores::{
-    IntensityArrays,};
-use timsseek::scoring::calculate_scores::LongitudinalMainScoreElements;
 use tracing::info;
 
 #[derive(Debug, Clone, Default, Copy)]
@@ -128,116 +127,127 @@ pub fn process_chunk_full<'a>(
     tolerance: &'a DefaultTolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
-        
-        let query_start = Instant::now();
-        let res = query_multi_group(
-            index,
-            tolerance,
-            &queries.queries,
-            &|x| factory.build_with_elution_group(x),
-        );
-        let query_time = query_start.elapsed();
-        let mut builders: Vec<SearchResultBuilder> = (0..res.len()).into_iter().map(|_|SearchResultBuilder::default()).collect();
-        let int_arrs: Vec<Result<IntensityArrays, TimsSeekError>> = res.iter().zip(queries.expected_intensities.iter()).map(|(x, ei)| IntensityArrays::new(x, ei)).collect();
-        let mut prescores = Vec::with_capacity(queries.queries.len());
+    let query_start = Instant::now();
+    let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
+        factory.build_with_elution_group(x)
+    });
+    let query_time = query_start.elapsed();
+    let mut builders: Vec<SearchResultBuilder> = (0..res.len())
+        .into_iter()
+        .map(|_| SearchResultBuilder::default())
+        .collect();
+    let int_arrs: Vec<Result<IntensityArrays, TimsSeekError>> = res
+        .iter()
+        .zip(queries.expected_intensities.iter())
+        .map(|(x, ei)| IntensityArrays::new(x, ei))
+        .collect();
+    let mut prescores = Vec::with_capacity(queries.queries.len());
 
-        let prescore_start = Instant::now();
-        for i in 0..queries.queries.len() {
-            prescores.push(PreScore {
-                charge: queries.charges[i],
-                digest: queries.digests[i].clone(),
-                reference: queries.queries[i].clone(),
-                expected_intensities: queries.expected_intensities[i].clone(),
-                query_values: res[i].clone(),
-                ref_time_ms: ref_time_ms.clone(),
-            });
-        }
-        let prescore_time = prescore_start.elapsed();
+    let prescore_start = Instant::now();
+    for i in 0..queries.queries.len() {
+        prescores.push(PreScore {
+            charge: queries.charges[i],
+            digest: queries.digests[i].clone(),
+            reference: queries.queries[i].clone(),
+            expected_intensities: queries.expected_intensities[i].clone(),
+            query_values: res[i].clone(),
+            ref_time_ms: ref_time_ms.clone(),
+        });
+    }
+    let prescore_time = prescore_start.elapsed();
 
-
-        let localizing_start = Instant::now();
-        let mut longitudinal_main_score_elements = Vec::with_capacity(queries.queries.len());
-        for i in 0..queries.queries.len() {
-            match int_arrs[i].as_ref() {
-                Ok(int_arrs) => longitudinal_main_score_elements.push(Some(LongitudinalMainScoreElements::new(
+    let localizing_start = Instant::now();
+    let mut longitudinal_main_score_elements = Vec::with_capacity(queries.queries.len());
+    for i in 0..queries.queries.len() {
+        match int_arrs[i].as_ref() {
+            Ok(int_arrs) => {
+                longitudinal_main_score_elements.push(Some(LongitudinalMainScoreElements::new(
                     int_arrs,
                     ref_time_ms.clone(),
                     &res[i].ms1_arrays.retention_time_miliseconds,
                     &res[i].ms2_arrays.retention_time_miliseconds,
-                ))),
-                Err(e) => longitudinal_main_score_elements.push(None),
+                )))
             }
+            Err(e) => longitudinal_main_score_elements.push(None),
         }
+    }
 
-        let mut res2: Vec<Result<IonSearchResults, TimsSeekError>> = Vec::with_capacity(queries.queries.len());
-        prescores.into_iter().zip(builders.into_iter()).for_each(|(prescore, builder)| {
-            match prescore.localize() {
-                Ok(prescore) => {
-                    match builder.with_localized_pre_score(&prescore).finalize() {
-                        Ok(res) => res2.push(Ok(res)),
-                        Err(e) => res2.push(Err(TimsSeekError::DataProcessingError(e))),
-                    }
-                },
-                Err(e) => res2.push(Err(e)),
-            }
+    let mut res2: Vec<Result<IonSearchResults, TimsSeekError>> =
+        Vec::with_capacity(queries.queries.len());
+    prescores
+        .into_iter()
+        .zip(builders.into_iter())
+        .for_each(|(prescore, builder)| match prescore.localize() {
+            Ok(prescore) => match builder.with_localized_pre_score(&prescore).finalize() {
+                Ok(res) => res2.push(Ok(res)),
+                Err(e) => res2.push(Err(TimsSeekError::DataProcessingError(e))),
+            },
+            Err(e) => res2.push(Err(e)),
         });
-        let localizing_time = localizing_start.elapsed();
-        // }
-        //     match prescores[i].localize() {
-        //         Ok(prescore) => {
-        //             match builders[i].with_localized_pre_score(&prescore).finalize() {
-        //                 Ok(res) => res2.push(Ok(res)),
-        //                 Err(e) => res2.push(Err(TimsSeekError::DataProcessingError(e))),
-        //             }
-        //         },
-        //         Err(e) => res2.push(Err(e)),
-        //     }
-        // }
+    let localizing_time = localizing_start.elapsed();
+    // }
+    //     match prescores[i].localize() {
+    //         Ok(prescore) => {
+    //             match builders[i].with_localized_pre_score(&prescore).finalize() {
+    //                 Ok(res) => res2.push(Ok(res)),
+    //                 Err(e) => res2.push(Err(TimsSeekError::DataProcessingError(e))),
+    //             }
+    //         },
+    //         Err(e) => res2.push(Err(e)),
+    //     }
+    // }
 
-        let mut out: Vec<Result<FullQueryResult, TimsSeekError>> = Vec::with_capacity(queries.queries.len());
-        longitudinal_main_score_elements.into_iter().zip(res.into_iter()).zip(res2.into_iter()).for_each(|((lmse, extracts), search_res)| {
-            match (lmse, search_res) {
-                (Some(Ok(lmse)), Ok(search_res)) => {
-                    let main_score = lmse.main_score_iter().collect();
-            out.push(Ok(FullQueryResult {
+    let mut out: Vec<Result<FullQueryResult, TimsSeekError>> =
+        Vec::with_capacity(queries.queries.len());
+    longitudinal_main_score_elements
+        .into_iter()
+        .zip(res.into_iter())
+        .zip(res2.into_iter())
+        .for_each(|((lmse, extracts), search_res)| match (lmse, search_res) {
+            (Some(Ok(lmse)), Ok(search_res)) => {
+                let main_score = lmse.main_score_iter().collect();
+                out.push(Ok(FullQueryResult {
                     main_score_elements: lmse,
                     longitudinal_main_score: main_score,
                     extractions: extracts,
                     search_results: search_res,
-                }))},
-                (None, _) => out.push(Err(TimsSeekError::DataProcessingError(timsseek::errors::DataProcessingError::ExpectedNonEmptyData { context: Some("longitudinal_main_score_elements".to_string()) }))),
-                (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
+                }))
             }
+            (None, _) => out.push(Err(TimsSeekError::DataProcessingError(
+                timsseek::errors::DataProcessingError::ExpectedNonEmptyData {
+                    context: Some("longitudinal_main_score_elements".to_string()),
+                },
+            ))),
+            (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
         });
 
-        // for i in 0..queries.queries.len() {
-        //     let lmse = longitudinal_main_score_elements[i];
-        //     let extracts = res[i];
-        //     let search_res = res2[i];
+    // for i in 0..queries.queries.len() {
+    //     let lmse = longitudinal_main_score_elements[i];
+    //     let extracts = res[i];
+    //     let search_res = res2[i];
 
-        //     match (lmse, search_res) {
-        //         (Some(Ok(lmse)), Ok(search_res)) => out.push(Ok(FullQueryResult {
-        //             main_score_elements: lmse,
-        //             longitudinal_main_score: lmse.main_score_iter().collect(),
-        //             extractions: extracts,
-        //             search_results: search_res,
-        //         })),
-        //         (None, _) => out.push(Err(TimsSeekError::DataProcessingError(timsseek::errors::DataProcessingError::ExpectedNonEmptyData { context: Some("longitudinal_main_score_elements".to_string()) }))),
-        //         (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
-        //     }
-        // }
+    //     match (lmse, search_res) {
+    //         (Some(Ok(lmse)), Ok(search_res)) => out.push(Ok(FullQueryResult {
+    //             main_score_elements: lmse,
+    //             longitudinal_main_score: lmse.main_score_iter().collect(),
+    //             extractions: extracts,
+    //             search_results: search_res,
+    //         })),
+    //         (None, _) => out.push(Err(TimsSeekError::DataProcessingError(timsseek::errors::DataProcessingError::ExpectedNonEmptyData { context: Some("longitudinal_main_score_elements".to_string()) }))),
+    //         (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
+    //     }
+    // }
 
-        let metrics = RuntimeMetrics {
-            num_queries: queries.len(),
-            query_time,
-            total_time: query_start.elapsed(),
-            time_localizing: localizing_time,
-            time_scoring: prescore_time,
-            num_skipped: 0,
-        };
+    let metrics = RuntimeMetrics {
+        num_queries: queries.len(),
+        query_time,
+        total_time: query_start.elapsed(),
+        time_localizing: localizing_time,
+        time_scoring: prescore_time,
+        num_skipped: 0,
+    };
 
-        (out, metrics)
-
+    (out, metrics)
 }
 
 pub fn process_chunk<'a>(
@@ -360,18 +370,24 @@ pub fn main_loop<'a>(
         .for_each(|chunk| {
             let out: (Vec<IonSearchResults>, RuntimeMetrics) = if out_path.full_output {
                 let tmp = process_chunk_full(chunk, index, factory, tolerance, ref_time_ms.clone());
-                let res_full: Vec<FullQueryResult> = tmp.0.into_iter().filter_map(
-                    |res| {
-                        match res {
-                            Ok(res) => Some(res),
-                            Err(e) => {
-                                tracing::error!("Error processing chunk: {:#?} because of: {:#?}", chunk_num, e);
-                                None
-                            }
-                        }}
-                ).collect();
+                let res_full: Vec<FullQueryResult> = tmp
+                    .0
+                    .into_iter()
+                    .filter_map(|res| match res {
+                        Ok(res) => Some(res),
+                        Err(e) => {
+                            tracing::error!(
+                                "Error processing chunk: {:#?} because of: {:#?}",
+                                chunk_num,
+                                e
+                            );
+                            None
+                        }
+                    })
+                    .collect();
 
-                let full_chunk_outpath = out_path.directory.join(format!("full_{}.json", chunk_num));
+                let full_chunk_outpath =
+                    out_path.directory.join(format!("full_{}.json", chunk_num));
                 let target_file = match std::fs::File::create(full_chunk_outpath.clone()) {
                     Ok(file) => file,
                     Err(e) => {
@@ -382,15 +398,18 @@ pub fn main_loop<'a>(
                 let mut chunk_writer = std::io::BufWriter::new(target_file);
                 match serde_json::to_writer(&mut chunk_writer, &res_full) {
                     Ok(_) => {
-                        tracing::info!("Wrote full chunk to file: {}", full_chunk_outpath.display());
+                        tracing::info!(
+                            "Wrote full chunk to file: {}",
+                            full_chunk_outpath.display()
+                        );
                     }
                     Err(e) => {
                         tracing::error!("Error writing full chunk to file: {:#?}", e);
                         panic!();
                     }
                 };
-                
-                let res = res_full.into_iter().map(|x|x.search_results).collect();
+
+                let res = res_full.into_iter().map(|x| x.search_results).collect();
                 (res, tmp.1)
             } else {
                 process_chunk(chunk, index, factory, tolerance, ref_time_ms.clone())
@@ -399,7 +418,9 @@ pub fn main_loop<'a>(
             metrics = metrics.fold(out.1);
             let out_path_csv = &out_path.directory.join(format!("chunk_{}.csv", chunk_num));
             write_results_to_csv(&out.0, out_path_csv).unwrap();
-            let out_path_pq = &out_path.directory.join(format!("chunk_{}.parquet", chunk_num));
+            let out_path_pq = &out_path
+                .directory
+                .join(format!("chunk_{}.parquet", chunk_num));
             write_results_to_parquet(&out.0, out_path_pq).unwrap();
             chunk_num += 1;
         });

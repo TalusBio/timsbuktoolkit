@@ -1,10 +1,8 @@
-
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::scoring::calculate_scores::LongitudinalMainScoreElements;
 use crate::scoring::search_results::IonSearchResults;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::NaturalFinalizedMultiCMGArrays;
 use serde::Serialize;
-
+use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::NaturalFinalizedMultiCMGArrays;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FullQueryResult {
