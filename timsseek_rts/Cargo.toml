@@ -1,6 +1,6 @@
 [package]
 name = "timsseek_rts"
-version = "0.10.3-b4"
+version = "0.10.3-b5"
 edition = "2021"
 
 [dependencies]
