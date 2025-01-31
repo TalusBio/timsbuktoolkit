@@ -74,12 +74,10 @@ impl<T> SetField<T> {
     ) -> Result<T, DataProcessingError> {
         match self {
             Self::Some(v) => Ok(v),
-            Self::None => {
-                return Err(DataProcessingError::ExpectedSetField {
-                    field: field_name.to_string(),
-                    context: msg.to_string(),
-                });
-            }
+            Self::None => Err(DataProcessingError::ExpectedSetField {
+                field: field_name.to_string(),
+                context: msg.to_string(),
+            }),
         }
     }
 }

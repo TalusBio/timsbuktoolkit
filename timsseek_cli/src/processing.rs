@@ -8,10 +8,7 @@ use indicatif::{
     ProgressStyle,
 };
 use rayon::prelude::*;
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{
     Duration,
@@ -132,8 +129,7 @@ pub fn process_chunk_full<'a>(
         factory.build_with_elution_group(x)
     });
     let query_time = query_start.elapsed();
-    let mut builders: Vec<SearchResultBuilder> = (0..res.len())
-        .into_iter()
+    let builders: Vec<SearchResultBuilder> = (0..res.len())
         .map(|_| SearchResultBuilder::default())
         .collect();
     let int_arrs: Vec<Result<IntensityArrays, TimsSeekError>> = res
@@ -144,11 +140,11 @@ pub fn process_chunk_full<'a>(
     let mut prescores = Vec::with_capacity(queries.queries.len());
 
     let prescore_start = Instant::now();
-    for i in 0..queries.queries.len() {
+    for (i, q) in queries.queries.iter().enumerate() {
         prescores.push(PreScore {
             charge: queries.charges[i],
             digest: queries.digests[i].clone(),
-            reference: queries.queries[i].clone(),
+            reference: q.clone(),
             expected_intensities: queries.expected_intensities[i].clone(),
             query_values: res[i].clone(),
             ref_time_ms: ref_time_ms.clone(),
@@ -176,7 +172,7 @@ pub fn process_chunk_full<'a>(
         Vec::with_capacity(queries.queries.len());
     prescores
         .into_iter()
-        .zip(builders.into_iter())
+        .zip(builders)
         .for_each(|(prescore, builder)| match prescore.localize() {
             Ok(prescore) => match builder.with_localized_pre_score(&prescore).finalize() {
                 Ok(res) => res2.push(Ok(res)),
@@ -201,8 +197,8 @@ pub fn process_chunk_full<'a>(
         Vec::with_capacity(queries.queries.len());
     longitudinal_main_score_elements
         .into_iter()
-        .zip(res.into_iter())
-        .zip(res2.into_iter())
+        .zip(res)
+        .zip(res2)
         .for_each(|((lmse, extracts), search_res)| match (lmse, search_res) {
             (Some(Ok(lmse)), Ok(search_res)) => {
                 let main_score = lmse.main_score_iter().collect();

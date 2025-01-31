@@ -12,7 +12,6 @@ use crate::models::{
     RTMajorIntensityArray,
 };
 use crate::utils::aligning::snap_to_reference;
-use crate::utils::correlation::rolling_cosine_similarity;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
     calculate_value_vs_baseline,

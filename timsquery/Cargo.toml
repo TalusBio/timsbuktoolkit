@@ -25,12 +25,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
 
-
-
 [features]
 clap = ["dep:clap"]
 build-binary = ["clap"]
 bench = ["dep:rand", "dep:rand_chacha"]
+
+[lib]
 
 [[bin]]
 name = "timsquery"
