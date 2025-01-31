@@ -1,6 +1,6 @@
 [package]
 name = "timsseek_cli"
-version = "0.10.2-b0"
+version = "0.10.3-b0"
 edition = "2021"
 
 [dependencies]
