@@ -23,6 +23,8 @@ results.json
 *results*/*.json
 *results*/*.parquet
 
+*summary*/*.png
+*summary*/*.toml
 *human*/*.csv
 *human*/*.parquet
 *human*/*.png

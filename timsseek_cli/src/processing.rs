@@ -164,7 +164,7 @@ pub fn process_chunk_full<'a>(
                     &res[i].ms2_arrays.retention_time_miliseconds,
                 )))
             }
-            Err(e) => longitudinal_main_score_elements.push(None),
+            Err(_e) => longitudinal_main_score_elements.push(None),
         }
     }
 

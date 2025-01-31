@@ -89,7 +89,8 @@ impl Default for ToleranceConfig {
 }
 
 impl Config {
-    pub fn with_cli_args(config: Cli) -> Result<Self, errors::CliError> {
-        todo!()
+    #![allow(dead_code)]
+    pub fn with_cli_args(_config: Cli) -> Result<Self, errors::CliError> {
+        unimplemented!()
     }
 }
