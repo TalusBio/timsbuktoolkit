@@ -7,7 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 nohash-hasher = "=0.2.0"
 indicatif = { version = "0.17.9", features = ["rayon"] }
-clap = { version = "4.5.17", features = ["derive"], optional = true }
+clap = { version = "4.5.27", features = ["derive"], optional = true }
 tabled = "0.17.0"
 
 tracing-bunyan-formatter = "0.3.10"
