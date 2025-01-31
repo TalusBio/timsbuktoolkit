@@ -1,6 +1,6 @@
 [package]
 name = "timsquery"
-version = "0.10.3-b1"
+version = "0.10.3-b2"
 edition = "2021"
 license = "Apache-2.0"
 

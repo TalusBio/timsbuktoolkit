@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "timsseek-workspace"
-version = "0.10.3-b1"
+version = "0.10.3-b2"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "speclib_builder[ml]",
@@ -45,8 +45,13 @@ select = ["E", "F", "T20", "I"]
 packages = ["speclib_builder"]
 
 [tool.bumpver]
-current_version = "0.10.3-b1"
+current_version = "0.10.3-b2"
 version_pattern = "MAJOR.MINOR.PATCH[-PYTAGNUM]"
+tag_message = "v{new_version}"
+commit_message = "chore: bump version to {new_version}"
+commit = true
+tag = true
+push = true
 
 [tool.bumpver.file_patterns]
 "*/pyproject.toml" = ['version = "{version}"$']
