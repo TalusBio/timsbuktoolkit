@@ -316,7 +316,7 @@ pub struct IonSearchResults {
     // Combined
     pub main_score: f32,
     pub delta_next: f32,
-    obs_rt_seconds: f32,
+    pub obs_rt_seconds: f32,
     obs_mobility: f32,
     delta_theo_rt: f32,
     sq_delta_theo_rt: f32,

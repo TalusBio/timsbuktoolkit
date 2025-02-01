@@ -37,8 +37,8 @@ use timsrust::readers::{
     MetadataReader,
 };
 use tracing::{
-    info,
     error,
+    info,
     instrument,
 };
 
@@ -159,11 +159,7 @@ impl ExpandedRawFrameIndex {
         let file_reader = match FrameReader::new(path) {
             Ok(x) => x,
             Err(e) => {
-                error!(
-                    "Failed to open file reader for path {}. Error: {}",
-                    path,
-                    e
-                );
+                error!("Failed to open file reader for path {}. Error: {}", path, e);
                 return Err(e.into());
             }
         };
