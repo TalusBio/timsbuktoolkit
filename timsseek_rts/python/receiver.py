@@ -68,6 +68,7 @@ def dataclass_from_dict(klass, d):
 
     return klass(**{f: dataclass_from_dict(fieldtypes[f], d[f]) for f in d})
 
+
 def infinite_colour_loop():
     options = ["#ff0000", "#00ff00", "#0000ff"]
     i = 0

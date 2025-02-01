@@ -1,6 +1,10 @@
 #!/bin/bash
 
 RAW_FILE=$1
+if [ -z "$RAW_FILE" ]; then
+    echo "Please provide a raw file"
+    exit 1
+fi
 
 cargo run --bin timsseek_rts --release -- \
     --config ./tolconfig.json \
