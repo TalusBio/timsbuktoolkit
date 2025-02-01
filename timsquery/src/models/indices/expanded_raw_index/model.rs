@@ -38,6 +38,7 @@ use timsrust::readers::{
 };
 use tracing::{
     info,
+    error,
     instrument,
 };
 
@@ -155,10 +156,30 @@ impl ExpandedRawFrameIndex {
             "Building ExpandedRawFrameIndex from path {} config {:?}",
             path, centroid_config,
         );
-        let file_reader = FrameReader::new(path)?;
+        let file_reader = match FrameReader::new(path) {
+            Ok(x) => x,
+            Err(e) => {
+                error!(
+                    "Failed to open file reader for path {}. Error: {}",
+                    path,
+                    e
+                );
+                return Err(e.into());
+            }
+        };
 
         let sql_path = std::path::Path::new(path).join("analysis.tdf");
-        let meta_converters = MetadataReader::new(&sql_path)?;
+        let meta_converters = match MetadataReader::new(&sql_path) {
+            Ok(x) => x,
+            Err(e) => {
+                error!(
+                    "Failed to open metadata reader for path {}. Error: {}",
+                    sql_path.display(),
+                    e
+                );
+                return Err(e.into());
+            }
+        };
         let centroid_config = centroid_config
             .with_converters(meta_converters.im_converter, meta_converters.mz_converter);
 

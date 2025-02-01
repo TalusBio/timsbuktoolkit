@@ -56,13 +56,17 @@ def dataclass_from_dict(klass, d):
     # from: https://stackoverflow.com/a/54769644/4295016
     try:
         fieldtypes = {f.name: f.type for f in dataclasses.fields(klass)}
-        return klass(**{f: dataclass_from_dict(fieldtypes[f], d[f]) for f in d})
     except TypeError as e:
+        ALLOWED_PASSTHROUGH_TYPES = (int, float, str, bool)
+        if type(d) in ALLOWED_PASSTHROUGH_TYPES:
+            return d
+
         if "must be called with a dataclass type or instance" in str(e):
             return d
     except Exception as e:
         raise KeyError(f"Could not convert to {klass} because {e}") from e
 
+    return klass(**{f: dataclass_from_dict(fieldtypes[f], d[f]) for f in d})
 
 def infinite_colour_loop():
     options = ["#ff0000", "#00ff00", "#0000ff"]
@@ -150,14 +154,12 @@ class MainScoreElements:
     ms2_lazyscore: list[float]
     ms2_lazyscore_vs_baseline: list[float]
     ref_time_ms: list[int]
-    # ms1_ms2_correlation: list[float]
-    cocoscore: list[float]
     ms2_lazyscore_vs_baseline_std: float
 
     def plot(self, min_rt_ms, max_rt_ms, vlines_ms: list[int] | None = None):
         # Make a plot grid, where each row is a different score element
         # but all share the same retention time axis
-        fig, ax = plt.subplots(nrows=3, ncols=3, figsize=(10, 12))
+        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(10, 12))
 
         rt_use = np.array(self.ref_time_ms)
         ranges = np.searchsorted(rt_use, [min_rt_ms, max_rt_ms])
@@ -176,9 +178,6 @@ class MainScoreElements:
         ax[1, 1].set_title("MS2 Cosine Ref Sim")
         ax[1, 2].plot(rt_plot, self.ms2_lazyscore[ranges[0] : ranges[1]])
         ax[1, 2].set_title("MS2 LazyScore")
-
-        ax[2, 0].plot(rt_plot, self.cocoscore[ranges[0] : ranges[1]])
-        ax[2, 0].set_title("CoCoScore")
 
         #  ax[2, 0].plot(rt_plot, self.ms2_lazyscore_vs_baseline_std[ranges[0] : ranges[1]])
         #  ax[2, 0].set_title("MS2 LazyScore Baseline STD")
@@ -202,9 +201,6 @@ class MainScoreElements:
                     x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
                 )
                 ax[1, 2].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[2, 0].axvline(
                     x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
                 )
 
@@ -267,9 +263,6 @@ class SearchResults:
     ms2_inten_ratio_4: float
     ms2_inten_ratio_5: float
     ms2_inten_ratio_6: float
-
-    # ms1_ms2_correlation: float
-    cocoscore: float
 
     delta_ms1_ms2_mobility: float
     sq_delta_ms1_ms2_mobility: float
