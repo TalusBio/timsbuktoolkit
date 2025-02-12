@@ -36,11 +36,18 @@ bench = ["dep:rand", "dep:rand_chacha"]
 name = "timsquery"
 required-features = ["build-binary"]
 
-[[bin]]
+[[bench]]
+bench = true
 name = "benchmark_indices"
 path = "benches/benchmark_indices.rs"
 required-features = ["bench"]
 
-[[bin]]
+[[bench]]
+bench = true
 name = "benchmark_centroiding"
 path = "benches/benchmark_centroiding.rs"
+
+[[bin]]
+bench = true
+name = "benchmark_aggregators"
+path = "benches/benchmark_aggregators.rs"

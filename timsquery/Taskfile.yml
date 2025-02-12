@@ -77,7 +77,7 @@ tasks:
       - "benches/plot_bench.py"
 
     cmds:
-      - SKIP_SLOW=1 SKIP_BUILD=1 RUST_BACKTRACE=full TIMS_DATA_FILE=./data/230510_PRTC_13_S1-B1_1_12817.d ./target/release/benchmark_indices
+      - SKIP_SLOW=1 SKIP_BUILD=1 RUST_BACKTRACE=full TIMS_DATA_FILE=./data/230510_PRTC_13_S1-B1_1_12817.d ../target/release/benchmark_indices
       - uv run benches/plot_bench.py data/benchmark_results_230510_PRTC_13_S1-B1_1_12817.json
 
   bench-large-data:

@@ -23,6 +23,7 @@ interactive = [
   "polars",
   "matplotlib",
   "ipykernel",
+  "vizta",
 ]
 
 [tool.uv.sources]
