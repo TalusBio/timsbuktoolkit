@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 nohash-hasher = "=0.2.0"
-indicatif = { version = "0.17.9", features = ["rayon"] }
+indicatif = { version = "0.17.11", features = ["rayon"] }
 tabled = "0.17.0"
 
 tracing-bunyan-formatter = "0.3.10"
