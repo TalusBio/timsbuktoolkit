@@ -5,7 +5,7 @@ use super::{
 };
 use crate::data_sources::speclib::ExpectedIntensities;
 use crate::errors::Result;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DigestSlice,
     MzMajorIntensityArray,
@@ -27,9 +27,9 @@ use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::Natura
 pub struct PreScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub reference: ElutionGroup<SafePosition>,
+    pub reference: ElutionGroup<IonAnnot>,
     pub expected_intensities: ExpectedIntensities,
-    pub query_values: NaturalFinalizedMultiCMGArrays<SafePosition>,
+    pub query_values: NaturalFinalizedMultiCMGArrays<IonAnnot>,
     pub ref_time_ms: Arc<[u32]>,
 }
 
@@ -57,7 +57,7 @@ pub struct IntensityArrays {
 
 impl IntensityArrays {
     pub fn new(
-        query_values: &NaturalFinalizedMultiCMGArrays<SafePosition>,
+        query_values: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self> {
         let ms1_order: Vec<usize> = expected_intensities
@@ -66,7 +66,7 @@ impl IntensityArrays {
             .enumerate()
             .map(|x| x.0)
             .collect();
-        let (ms2_order, ms2_ref_vec): (Vec<SafePosition>, Vec<f32>) = expected_intensities
+        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
             .fragment_intensities
             .iter()
             .map(|(pos, intensity)| (*pos, { *intensity }))
@@ -472,8 +472,8 @@ impl SortedIntElemAtIndex {
     fn new(
         ms1_idx: usize,
         ms2_idx: usize,
-        cmgs: &NaturalFinalizedMultiCMGArrays<SafePosition>,
-        elution_group: &ElutionGroup<SafePosition>,
+        cmgs: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        elution_group: &ElutionGroup<IonAnnot>,
     ) -> Self {
         // Get the elements at every index and sort them by intensity.
         // Once sorted calculate the pairwise diff.

@@ -5,15 +5,18 @@ use crate::utils::math::{
 };
 
 pub fn peak_count(slices: &RTMajorIntensityArray, count_threshold: f32) -> Vec<u8> {
-    slices.arr.row_apply(|slice| {
-        let mut count: u8 = 0;
-        for intensity in slice {
-            if *intensity > count_threshold {
-                count += 1;
+    slices
+        .arr
+        .row_apply(|slice| {
+            let mut count: u8 = 0;
+            for intensity in slice {
+                if *intensity > count_threshold {
+                    count += 1;
+                }
             }
-        }
-        count
-    })
+            count
+        })
+        .collect()
 }
 
 /// From: PMC5409104
@@ -62,6 +65,7 @@ pub fn hyperscore(
     slices
         .arr
         .row_apply(|slice| single_hyperscore(slice, grouping, 10.0))
+        .collect()
 }
 
 pub fn calculate_lazy_hyperscore(npeaks: &[u8], summed_intensity: &[u64]) -> Vec<f32> {
@@ -80,5 +84,5 @@ fn single_lazyscore(slc: &[f32]) -> f32 {
 }
 
 pub fn lazyscore(slices: &RTMajorIntensityArray) -> Vec<f32> {
-    slices.arr.row_apply(single_lazyscore)
+    slices.arr.row_apply(single_lazyscore).collect()
 }

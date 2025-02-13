@@ -1,6 +1,6 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
 use crate::data_sources::speclib::ExpectedIntensities;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
 use rayon::prelude::*;
@@ -104,7 +104,7 @@ impl SequenceToElutionGroupConverter {
         id: u64,
     ) -> Result<
         (
-            Vec<ElutionGroup<SafePosition>>,
+            Vec<ElutionGroup<IonAnnot>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -149,7 +149,8 @@ impl SequenceToElutionGroupConverter {
 
             let mut fragment_mzs = self
                 .fragment_buildder
-                .fragment_mzs_from_linear_peptide(&peptide)?;
+                .fragment_mzs_from_linear_peptide(&peptide)
+                .unwrap();
             fragment_mzs
                 .retain(|(_pos, mz, _)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
 
@@ -189,7 +190,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<SafePosition>>,
+            Vec<ElutionGroup<IonAnnot>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -224,7 +225,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<SafePosition>>,
+            Vec<ElutionGroup<IonAnnot>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),

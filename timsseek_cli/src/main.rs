@@ -6,7 +6,7 @@ mod processing;
 use clap::Parser;
 use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
+use timsseek::fragment_mass::IonAnnot;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
@@ -113,7 +113,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
     let factory = MultiCMGStatsFactory {
         converters: (index.mz_converter, index.im_converter),
-        _phantom: std::marker::PhantomData::<SafePosition>,
+        _phantom: std::marker::PhantomData::<IonAnnot>,
     };
 
     // Process based on input type

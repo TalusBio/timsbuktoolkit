@@ -6,7 +6,7 @@ use super::calculate_scores::{
     SortedErrors,
 };
 use crate::errors::DataProcessingError;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -23,7 +23,7 @@ use timsquery::ElutionGroup;
 #[derive(Debug, Default)]
 pub struct SearchResultBuilder<'q> {
     digest_slice: SetField<&'q DigestSlice>,
-    ref_eg: SetField<&'q ElutionGroup<SafePosition>>,
+    ref_eg: SetField<&'q ElutionGroup<IonAnnot>>,
     decoy_marking: SetField<DecoyMarking>,
     charge: SetField<u8>,
     nqueries: SetField<u8>,

@@ -13,7 +13,7 @@ use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::DefaultTolerance;
 use timsseek::data_sources::speclib::ExpectedIntensities;
 use timsseek::errors::Result;
-use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
+use timsseek::fragment_mass::IonAnnot;
 use timsseek::models::DigestSlice;
 use timsseek::scoring::calculate_scores::{
     IntensityArrays,
@@ -30,7 +30,7 @@ type IndexUse = ExpandedRawFrameIndex;
 pub struct BundledDotDIndex {
     index: IndexUse,
     ref_time_ms: Arc<[u32]>,
-    factory: MultiCMGStatsFactory<SafePosition>,
+    factory: MultiCMGStatsFactory<IonAnnot>,
     tolerance: DefaultTolerance,
 }
 
@@ -38,7 +38,7 @@ pub struct BundledDotDIndex {
 pub struct InputQuery {
     pub sequence: String,
     pub charge: u8,
-    pub elution_group: ElutionGroup<SafePosition>,
+    pub elution_group: ElutionGroup<IonAnnot>,
     pub expected_intensities: ExpectedIntensities,
 }
 
@@ -54,10 +54,10 @@ impl InputQuery {
                 precursor_mzs: vec![450.0, 450.5, 451.0, 451.5],
                 fragment_mzs: HashMap::from_iter(
                     [
-                        (SafePosition::from_str("a1").unwrap(), 450.0),
-                        (SafePosition::from_str("a2").unwrap(), 450.5),
-                        (SafePosition::from_str("a3").unwrap(), 451.0),
-                        (SafePosition::from_str("a4").unwrap(), 451.5),
+                        (IonAnnot::try_from("a1").unwrap(), 450.0),
+                        (IonAnnot::try_from("a2").unwrap(), 450.5),
+                        (IonAnnot::try_from("a3").unwrap(), 451.0),
+                        (IonAnnot::try_from("a4").unwrap(), 451.5),
                     ]
                     .iter()
                     .cloned(),
@@ -67,10 +67,10 @@ impl InputQuery {
                 precursor_intensities: vec![1.0, 1.0, 1.0, 1.0],
                 fragment_intensities: HashMap::from_iter(
                     [
-                        (SafePosition::from_str("a1").unwrap(), 1.0),
-                        (SafePosition::from_str("a2").unwrap(), 1.0),
-                        (SafePosition::from_str("a3").unwrap(), 1.0),
-                        (SafePosition::from_str("a4").unwrap(), 1.0),
+                        (IonAnnot::try_from("a1").unwrap(), 1.0),
+                        (IonAnnot::try_from("a2").unwrap(), 1.0),
+                        (IonAnnot::try_from("a3").unwrap(), 1.0),
+                        (IonAnnot::try_from("a4").unwrap(), 1.0),
                     ]
                     .iter()
                     .cloned(),
@@ -95,7 +95,7 @@ impl From<InputQuery> for NamedQuery {
 pub struct NamedQuery {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub elution_group: ElutionGroup<SafePosition>,
+    pub elution_group: ElutionGroup<IonAnnot>,
     pub expected_intensities: ExpectedIntensities,
 }
 
@@ -124,7 +124,7 @@ impl BundledDotDIndex {
 
         let factory = MultiCMGStatsFactory {
             converters: (index.mz_converter, index.im_converter),
-            _phantom: std::marker::PhantomData::<SafePosition>,
+            _phantom: std::marker::PhantomData::<IonAnnot>,
         };
 
         Ok(BundledDotDIndex {

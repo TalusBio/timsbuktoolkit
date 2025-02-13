@@ -25,8 +25,8 @@ use timsseek::digest::digestion::{
     DigestionPattern,
 };
 use timsseek::errors::TimsSeekError;
+use timsseek::fragment_mass::IonAnnot;
 use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
-use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::models::{
     DigestSlice,
     DigestedSequenceIterator,
@@ -120,7 +120,7 @@ impl std::fmt::Display for RuntimeMetrics {
 pub fn process_chunk_full<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<SafePosition>,
+    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a DefaultTolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
@@ -249,7 +249,7 @@ pub fn process_chunk_full<'a>(
 pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<SafePosition>,
+    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a DefaultTolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<IonSearchResults>, RuntimeMetrics) {
@@ -348,7 +348,7 @@ pub fn process_chunk<'a>(
 pub fn main_loop<'a>(
     chunked_query_iterator: impl ExactSizeIterator<Item = NamedQueryChunk>,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<SafePosition>,
+    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a DefaultTolerance,
     ref_time_ms: Arc<[u32]>,
     out_path: &OutputConfig,
@@ -433,7 +433,7 @@ pub fn process_fasta(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex, // TODO: Make generic
     ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<SafePosition>,
+    factory: &MultiCMGStatsFactory<IonAnnot>,
     digestion: DigestionConfig,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
@@ -493,7 +493,7 @@ pub fn process_speclib(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex,
     ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<SafePosition>,
+    factory: &MultiCMGStatsFactory<IonAnnot>,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {

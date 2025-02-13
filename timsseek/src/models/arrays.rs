@@ -143,18 +143,18 @@ impl<
     /// ```
     /// use timsseek::models::Array2D;
     /// let array = Array2D::new(vec![vec![1, 2, 3], vec![4, 5, 6]]).unwrap();
-    /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum());
+    /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum()).collect();
     /// assert_eq!(result, vec![6, 15]);
     ///
     /// let array = Array2D::new_transposed(vec![vec![1, 2, 3], vec![4, 5, 6]]).unwrap();
-    /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum());
+    /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum()).collect();
     /// assert_eq!(result, vec![5, 7, 9]);
     /// ```
-    pub fn row_apply<W, F: FnMut(&[T]) -> W>(&self, f: F) -> Vec<W> {
-        self.values
-            .chunks(self.major_dim)
-            .map(f)
-            .collect::<Vec<W>>()
+    pub fn row_apply<'a: 'b, 'b, W, F: FnMut(&[T]) -> W + 'b>(
+        &'a self,
+        f: F,
+    ) -> impl Iterator<Item = W> + 'b {
+        self.values.chunks(self.major_dim).map(f)
     }
 
     /// RowConvolve

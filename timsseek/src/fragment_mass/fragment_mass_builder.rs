@@ -1,8 +1,3 @@
-use crate::errors::TimsSeekError;
-use rustyms::error::{
-    Context,
-    CustomError,
-};
 use rustyms::fragment::FragmentType;
 use rustyms::model::Location;
 use rustyms::spectrum::MassMode;
@@ -17,123 +12,11 @@ use rustyms::{
     LinearPeptide,
     Model,
 };
-use serde::{
-    Deserialize,
-    Serialize,
+
+use super::{
+    IonAnnot,
+    IonParsingError,
 };
-use std::fmt::Display;
-use std::hash::Hash;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SafePosition {
-    pub series_id: u8,
-    pub series_number: u16,
-    pub charge: u8,
-}
-
-impl Hash for SafePosition {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Pack into a single u32
-        // This prevents the no-hash hasher from generating collisions
-        let mut value: u32 = 0;
-        value |= self.series_number as u32;
-        value |= (self.series_id as u32) << 16;
-        value |= (self.charge as u32) << 24;
-        value.hash(state);
-    }
-}
-
-impl Serialize for SafePosition {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&format!("{}", self))
-    }
-}
-
-/// Deserializes simple annotations for fragments.
-///
-/// b12^3 -> b12 charge 3
-/// b13 -> b13 charge 1
-impl<'de> Deserialize<'de> for SafePosition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl SafePosition {
-    fn new(x: FragmentType, charge: u8) -> Result<Self, CustomError> {
-        let (series_id, series_number) = match x {
-            FragmentType::a(position) => (b'a', position.series_number as u16),
-            FragmentType::b(position) => (b'b', position.series_number as u16),
-            FragmentType::c(position) => (b'c', position.series_number as u16),
-            FragmentType::d(position) => (b'd', position.series_number as u16),
-            FragmentType::x(position) => (b'x', position.series_number as u16),
-            FragmentType::y(position) => (b'y', position.series_number as u16),
-            FragmentType::z(position) => (b'z', position.series_number as u16),
-            FragmentType::precursor => (0, 0),
-            _ => {
-                return Err(CustomError::error(
-                    "Invalid fragment type",
-                    x.to_string(),
-                    Context::none(),
-                ));
-            }
-        };
-
-        Ok(Self {
-            series_id,
-            series_number,
-            charge,
-        })
-    }
-
-    pub fn from_str(s: &str) -> Result<Self, TimsSeekError> {
-        // TODO: reimplement as TryFrom<&str>
-        let (rest, charge) = match s.split_once('^') {
-            Some((rest, charge)) => {
-                let charge = charge.parse::<u8>()?;
-                (rest, charge)
-            }
-            None => (s, 1),
-        };
-
-        // "b12" split into "b" and "12"
-        let (series_chunk, ordinal_chunk) = rest.split_at(1);
-        let (series, ordinal) = {
-            let series_id = series_chunk.chars().next();
-            let series_ordinal = ordinal_chunk.parse::<u16>();
-
-            match (series_id, series_ordinal) {
-                (Some(x), Ok(y)) => (x as u8, y),
-                _ => {
-                    return Err(TimsSeekError::ParseError { msg: s.to_string() });
-                }
-            }
-        };
-
-        Ok(Self {
-            series_id: series,
-            series_number: ordinal,
-            charge,
-        })
-    }
-}
-
-impl Display for SafePosition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}{}^{}",
-            self.series_id as char, self.series_number, self.charge
-        )
-    }
-}
 
 #[derive(Debug)]
 pub struct FragmentMassBuilder {
@@ -154,6 +37,7 @@ impl Default for FragmentMassBuilder {
             y: (Location::SkipNC(2, 2), vec![]),
             z: (Location::None, Vec::new()),
             precursor: vec![],
+            // TODO: Fix this hard-coded value
             ppm: MassOverCharge::new::<mz>(20.0),
             glycan_fragmentation: None,
         };
@@ -169,14 +53,13 @@ impl FragmentMassBuilder {
     pub fn fragment_mzs_from_linear_peptide(
         &self,
         peptide: &LinearPeptide,
-    ) -> Result<Vec<(SafePosition, f64, f32)>, CustomError> {
+    ) -> Result<Vec<(IonAnnot, f64, f32)>, IonParsingError> {
         // NOTE: I have to add this retain bc it generates precursor ions even if they are not
         // defined.
         // TODO: return a different error ... this one is very loaded.
         let ions: Vec<Fragment> = peptide
             .generate_theoretical_fragments(self.max_charge, &self.model)
             .into_iter()
-            .filter(|x| matches!(x.ion, FragmentType::precursor))
             .collect();
 
         // Does this generate ions above the charge of the precursor?
@@ -188,26 +71,12 @@ impl FragmentMassBuilder {
                     _ => 0.01,
                 };
                 Ok((
-                    SafePosition::new(x.ion.clone(), x.charge.abs().value as u8)?,
+                    IonAnnot::from_fragment(x.ion.clone(), x.charge.value as i8, 0)?,
+                    // IonAnnot::new(x.ion.clone(), x.charge.abs().value as u8, 0)?,
                     x.mz(MassMode::Monoisotopic).value,
                     intensity,
                 ))
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_deserialize() {
-        let ser = "b12^3";
-        let deser = SafePosition::from_str(ser).unwrap();
-
-        assert_eq!(deser.series_id, b'b');
-        assert_eq!(deser.series_number, 12);
-        assert_eq!(deser.charge, 3);
     }
 }
