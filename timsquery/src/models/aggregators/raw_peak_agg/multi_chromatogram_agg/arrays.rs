@@ -1,5 +1,10 @@
 use super::super::chromatogram_agg::ChromatomobilogramStatsArrays;
-use super::aggregator::ParitionedCMGAggregator;
+use super::aggregator::{
+    DenseRTCollection,
+    ParallelTracks,
+    ParitionedCMGAggregator,
+    SparseRTCollection,
+};
 use crate::models::aggregators::streaming_aggregator::RunningStatsCalculator;
 use serde::Serialize;
 use std::collections::{
@@ -9,6 +14,7 @@ use std::collections::{
 };
 use std::f64;
 use std::hash::Hash;
+use std::sync::Arc;
 use timsrust::converters::{
     ConvertableDomain,
     Scan2ImConverter,
@@ -18,9 +24,8 @@ use tracing::warn;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PartitionedCMGArrayStats<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
-    pub retention_time_miliseconds: Vec<u32>,
+    pub retention_time_miliseconds: Arc<[u32]>,
     pub weighted_ims_mean: Vec<f64>,
-    pub summed_intensity: Vec<u64>,
     pub ims_means: HashMap<FH, Vec<f64>>,
     pub mz_means: HashMap<FH, Vec<f64>>,
     // TODO consider if I want to add the standard deviations ... RN they dont
@@ -32,29 +37,32 @@ pub struct PartitionedCMGArrayStats<FH: Clone + Eq + Serialize + Hash + Send + S
 pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
     pub transition_stats: Vec<ChromatomobilogramStatsArrays>,
     pub transition_keys: Vec<FH>,
+    pub retention_times_ms: Arc<[u32]>,
     pub expected_scan_index: usize,
     pub expected_tof_indices: Vec<u32>,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
-    From<ParitionedCMGAggregator<FH>> for PartitionedCMGArrays<FH>
-{
-    fn from(item: ParitionedCMGAggregator<FH>) -> Self {
-        let mut transition_stats = Vec::with_capacity(item.keys.len());
-        let mut uniq_rts: Vec<u32> = item.scan_tof_calc.iter().flatten().map(|x| *x.0).collect();
+impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
+    pub fn new_with_sparse(
+        collections: Vec<SparseRTCollection>,
+        keys: Vec<FH>,
+        expected_scan_index: usize,
+        expected_tof_indices: Vec<u32>,
+    ) -> Self {
+        let mut transition_stats = Vec::with_capacity(keys.len());
+        let mut uniq_rts: Vec<u32> = collections.iter().flatten().map(|x| *x.0).collect();
         uniq_rts.sort_unstable();
         uniq_rts.dedup();
-        let mut out_expected_tof_indices: Vec<u32> = Vec::with_capacity(item.keys.len());
+        let uniq_rts: Arc<[u32]> = uniq_rts.into();
 
-        for (id_ind, _id_key) in item.keys.iter().enumerate() {
+        for (id_ind, _id_key) in keys.iter().enumerate() {
             let mut id_cmgs = ChromatomobilogramStatsArrays::new();
-            let local_id_mapping = &item.scan_tof_calc[id_ind];
-            out_expected_tof_indices.push(item.expected_tof_indices[id_ind]);
+            id_cmgs.retention_time_miliseconds = uniq_rts.clone();
+            let local_id_mapping = &collections[id_ind];
 
             for rt_key in uniq_rts.iter() {
                 let scan_tof_mapping = local_id_mapping.get(rt_key);
                 if let Some(scan_tof_mapping) = scan_tof_mapping {
-                    id_cmgs.retention_time_miliseconds.push(*rt_key);
                     id_cmgs
                         .scan_index_means
                         .push(scan_tof_mapping.scan.mean().unwrap());
@@ -70,135 +78,171 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
                     id_cmgs.intensities.push(scan_tof_mapping.tof.weight());
                 }
             }
-            id_cmgs.sort_by_rt();
             transition_stats.push(id_cmgs);
         }
 
         Self {
+            retention_times_ms: uniq_rts,
             transition_stats,
-            transition_keys: item.keys,
-            expected_tof_indices: out_expected_tof_indices,
-            expected_scan_index: item.expected_scan_index,
+            transition_keys: keys,
+            expected_tof_indices: expected_tof_indices,
+            expected_scan_index: expected_scan_index,
+        }
+    }
+
+    pub fn new_with_dense(
+        collections: Vec<DenseRTCollection>,
+        keys: Vec<FH>,
+        expected_scan_index: usize,
+        expected_tof_indices: Vec<u32>,
+    ) -> Self {
+        let mut transition_stats = Vec::with_capacity(keys.len());
+        let uniq_rts = collections.first().unwrap().reference_rt_ms.clone();
+        // Q: Does this test pointer equality or values directly?
+        assert!(
+            collections
+                .iter()
+                .all(|x| Arc::ptr_eq(&x.reference_rt_ms, &uniq_rts)),
+            "Expected all rts to come from the same Arc"
+        );
+
+        for (id_ind, _id_key) in keys.iter().enumerate() {
+            let mut id_cmgs = ChromatomobilogramStatsArrays::empty_with_rts(
+                uniq_rts.clone(),
+                expected_tof_indices[id_ind],
+                expected_scan_index,
+            );
+            let local_id_mapping = &collections[id_ind];
+
+            local_id_mapping.scan_tof_calc.iter().enumerate().for_each(
+                |(rt_key, scan_tof_mapping)| match scan_tof_mapping {
+                    None => {}
+                    Some(sts) => {
+                        let scan_mean = sts.scan.mean().unwrap();
+                        let tof_mean = sts.tof.mean().unwrap();
+                        let scan_sd = sts.scan.standard_deviation().unwrap();
+                        let tof_sd = sts.tof.standard_deviation().unwrap();
+                        let inten = sts.tof.weight();
+
+                        id_cmgs.intensities[rt_key] = inten;
+                        id_cmgs.scan_index_means[rt_key] = scan_mean;
+                        id_cmgs.scan_index_sds[rt_key] = scan_sd;
+                        id_cmgs.tof_index_means[rt_key] = tof_mean;
+                        id_cmgs.tof_index_sds[rt_key] = tof_sd;
+                    }
+                },
+            );
+
+            transition_stats.push(id_cmgs);
+        }
+
+        Self {
+            retention_times_ms: uniq_rts,
+            transition_stats,
+            transition_keys: keys,
+            expected_tof_indices: expected_tof_indices,
+            expected_scan_index: expected_scan_index,
+        }
+    }
+}
+
+impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
+    From<ParitionedCMGAggregator<FH>> for PartitionedCMGArrays<FH>
+{
+    fn from(item: ParitionedCMGAggregator<FH>) -> Self {
+        // The main idea here is to "fill" the gaps in all XICs with 0s
+        // If a transition was not observed at a specific retention time, it would not have
+        // an entry if the storage is sparse.
+        let keys = item.keys;
+        match item.scan_tof_calc {
+            ParallelTracks::Dense(scan_tof_calc) => Self::new_with_dense(
+                scan_tof_calc,
+                keys,
+                item.expected_scan_index,
+                item.expected_tof_indices,
+            ),
+            ParallelTracks::Sparse(scan_tof_calc) => Self::new_with_sparse(
+                scan_tof_calc,
+                keys,
+                item.expected_scan_index,
+                item.expected_tof_indices,
+            ),
         }
     }
 }
 
 impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrayStats<FH> {
+    /// This step in essence converts the tof/scan indices to
+    /// mz/ims units.
     pub fn new(
         other: PartitionedCMGArrays<FH>,
         mz_converter: &Tof2MzConverter,
         ims_converter: &Scan2ImConverter,
     ) -> Self {
+        // Q: Why am I converting this to a hashmap and then re-converting it
+        //    into a vec(array)
         // TODO: make a constructor to make sure everything here
         // Is actually getting added and is the right size/shape.
         let mut ims_means = HashMap::new();
         let mut mz_means = HashMap::new();
+        let mut intensities_out = HashMap::new();
 
-        let unique_rts = other
-            .transition_stats
-            .iter()
-            .flat_map(|v| v.retention_time_miliseconds.clone())
-            // This is quite a bit of cloning ... I should re-write it to something more
-            // performant.
-            .collect::<HashSet<u32>>();
-        let mut unique_rts = unique_rts.into_iter().collect::<Vec<u32>>();
-        unique_rts.sort();
+        let unique_rts = other.retention_times_ms.clone();
 
+        // Products are used to calculate the weighted mean
+        let mut tof_products: Vec<u64> = vec![0; unique_rts.len()];
+        let mut scan_products: Vec<u64> = vec![0; unique_rts.len()];
         let mut summed_intensity_vec: Vec<u64> = vec![0; unique_rts.len()];
-        let mut intensity_logsums_vec: Vec<f64> = vec![0.0; unique_rts.len()];
-        let mut npeaks_tree: Vec<u8> = vec![0; unique_rts.len()];
-        let mut weighted_scan_index_mean_vec: Vec<Option<RunningStatsCalculator>> =
-            vec![None; unique_rts.len()];
-
-        let mut tmp_transition_intensities: Vec<Vec<u64>> = Vec::new();
 
         for (v, k) in other
             .transition_stats
             .into_iter()
             .zip(other.transition_keys.iter())
         {
-            type ScanTofIntensityTuple = (f64, f64, u64);
-            type ScanTofIntensityVecs = (Vec<f64>, (Vec<f64>, Vec<u64>));
-            // TODO: replace with a vec ...
-            let mut tmp_tree: BTreeMap<u32, ScanTofIntensityTuple> = BTreeMap::new();
-
             for i in 0..v.retention_time_miliseconds.len() {
-                let rt = v.retention_time_miliseconds[i];
-                let final_index = unique_rts
-                    .binary_search(&rt)
-                    .expect("All RTs should be registered above.");
-
-                let scan = v.scan_index_means[i];
-                let tof = v.tof_index_means[i];
-                let inten = v.intensities[i];
-
-                if inten > 100 {
-                    npeaks_tree[final_index] += 1;
-                }
-                tmp_tree.entry(rt).or_insert((scan, tof, inten));
-                summed_intensity_vec[final_index] += inten;
-                if inten > 10 {
-                    intensity_logsums_vec[final_index] += (inten as f64).ln();
-                }
-
-                if let Some(mut x) = weighted_scan_index_mean_vec[final_index] {
-                    x.add(scan, inten);
-                } else {
-                    weighted_scan_index_mean_vec[final_index] =
-                        Some(RunningStatsCalculator::new(inten, scan));
-                }
+                tof_products[i] += v.tof_index_means[i] as u64 * v.intensities[i];
+                scan_products[i] += v.scan_index_means[i] as u64 * v.intensities[i];
+                summed_intensity_vec[i] += v.intensities[i];
             }
 
-            // Now we fill with nans the missing values.
-            // Q: Do I really need to do this here?
-            for rt in unique_rts.iter() {
-                tmp_tree.entry(*rt).or_insert((f64::NAN, f64::NAN, 0));
-            }
-
-            let (out_scans, (out_tofs, out_intens)): ScanTofIntensityVecs = tmp_tree
+            let intensities = v.intensities;
+            let imss = v
+                .scan_index_means
                 .into_iter()
-                .map(|(_, (scan, tof, inten))| {
-                    (
-                        ims_converter.convert(scan),
-                        (mz_converter.convert(tof), inten),
-                    )
-                })
-                .unzip();
-            ims_means.insert(k.clone(), out_scans);
-            mz_means.insert(k.clone(), out_tofs);
-            tmp_transition_intensities.push(out_intens);
+                .map(|x| ims_converter.convert(x))
+                .collect();
+            let mzs = v
+                .tof_index_means
+                .into_iter()
+                .map(|x| mz_converter.convert(x))
+                .collect();
+
+            ims_means.insert(k.clone(), imss);
+            mz_means.insert(k.clone(), mzs);
+            intensities_out.insert(k.clone(), intensities);
         }
 
-        let retention_time_miliseconds = unique_rts;
-        let summed_intensity = summed_intensity_vec;
-
-        let weighted_ims_mean = weighted_scan_index_mean_vec
+        let weighted_ims_mean = scan_products
             .into_iter()
-            .map(|x| {
-                let out = x
-                    .expect("At least one value should be given for every RT")
-                    .mean()
-                    .expect("At least one value should be present");
-                if !(0.0..=1000.0).contains(&out) {
+            .zip(summed_intensity_vec.iter())
+            .map(|(x, y)| {
+                if *y < 10 {
+                    return f64::NAN;
+                }
+                let out = (x / y) as f64;
+                if !(0.0..=1100.0).contains(&out) {
                     warn!("Bad mobility value: {:?}, input was {:?}", out, x);
                 }
-
                 ims_converter.convert(out)
             })
             .collect();
-        let intensities = other
-            .transition_keys
-            .into_iter()
-            .zip(tmp_transition_intensities)
-            .collect();
 
         PartitionedCMGArrayStats {
-            retention_time_miliseconds,
+            retention_time_miliseconds: unique_rts,
             ims_means,
             mz_means,
             weighted_ims_mean,
-            intensities,
-            summed_intensity,
+            intensities: intensities_out,
         }
     }
 

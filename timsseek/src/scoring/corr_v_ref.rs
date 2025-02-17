@@ -1,9 +1,11 @@
 use crate::errors::Result;
 use crate::models::RTMajorIntensityArray;
 use crate::utils::correlation::cosine_similarity;
+use serde::Serialize;
+use std::hash::Hash;
 
-pub fn calculate_cosine_with_ref(
-    slices: &RTMajorIntensityArray,
+pub fn calculate_cosine_with_ref<FH: Clone + Eq + Serialize + Hash + Send + Sync>(
+    slices: &RTMajorIntensityArray<FH>,
     ref_slice: &[f32],
 ) -> Result<Vec<f32>> {
     slices

@@ -126,7 +126,7 @@ pub fn process_chunk_full<'a>(
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
     let query_start = Instant::now();
     let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
-        factory.build_with_elution_group(x)
+        factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
     });
     let query_time = query_start.elapsed();
     let builders: Vec<SearchResultBuilder> = (0..res.len())
@@ -156,14 +156,9 @@ pub fn process_chunk_full<'a>(
     let mut longitudinal_main_score_elements = Vec::with_capacity(queries.queries.len());
     for i in 0..queries.queries.len() {
         match int_arrs[i].as_ref() {
-            Ok(int_arrs) => {
-                longitudinal_main_score_elements.push(Some(LongitudinalMainScoreElements::new(
-                    int_arrs,
-                    ref_time_ms.clone(),
-                    &res[i].ms1_arrays.retention_time_miliseconds,
-                    &res[i].ms2_arrays.retention_time_miliseconds,
-                )))
-            }
+            Ok(int_arrs) => longitudinal_main_score_elements.push(Some(
+                LongitudinalMainScoreElements::new(int_arrs, ref_time_ms.clone()),
+            )),
             Err(_e) => longitudinal_main_score_elements.push(None),
         }
     }
@@ -256,7 +251,7 @@ pub fn process_chunk<'a>(
     let start = Instant::now();
     let num_queries = queries.len();
     let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
-        factory.build_with_elution_group(x)
+        factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
     });
     let elap_time_querying = start.elapsed();
     info!("Querying took {:?}", elap_time_querying);
@@ -320,9 +315,9 @@ pub fn process_chunk<'a>(
     let num_skipped = num_queries - tmp.len();
     let elap_scoring = start_scoring.elapsed();
 
-    if tmp.is_empty() {
+    if (num_skipped != 0) && (num_skipped == num_queries) {
         // TODO: Remove this and check the error elsewhere.
-        panic!("No results found");
+        panic!("Failed to generate all scores");
     }
 
     let (out, main_scores): (Vec<IonSearchResults>, Vec<f32>) = tmp.into_iter().unzip();

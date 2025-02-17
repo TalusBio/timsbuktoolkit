@@ -140,7 +140,10 @@ impl BundledDotDIndex {
             &self.index,
             &self.tolerance,
             &[queries.elution_group.clone()],
-            &|x| self.factory.build_with_elution_group(x),
+            &|x| {
+                self.factory
+                    .build_with_elution_group(x, Some(self.ref_time_ms.clone()))
+            },
         );
         let builder = SearchResultBuilder::default();
         let int_arrs = IntensityArrays::new(&res[0], &queries.expected_intensities)?;
@@ -153,12 +156,8 @@ impl BundledDotDIndex {
             ref_time_ms: self.ref_time_ms.clone(),
         };
 
-        let longitudinal_main_score_elements = LongitudinalMainScoreElements::new(
-            &int_arrs,
-            self.ref_time_ms.clone(),
-            &res[0].ms1_arrays.retention_time_miliseconds,
-            &res[0].ms2_arrays.retention_time_miliseconds,
-        )?;
+        let longitudinal_main_score_elements =
+            LongitudinalMainScoreElements::new(&int_arrs, self.ref_time_ms.clone())?;
 
         let res2 = builder
             .with_localized_pre_score(&prescore.localize()?)

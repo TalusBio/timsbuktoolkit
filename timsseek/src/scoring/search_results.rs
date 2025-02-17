@@ -30,6 +30,7 @@ pub struct SearchResultBuilder<'q> {
 
     main_score: SetField<f32>,
     delta_next: SetField<f32>,
+    delta_second_next: SetField<f32>,
     rt_seconds: SetField<f32>,
     observed_mobility: SetField<f32>,
     delta_ms1_ms2_mobility: SetField<f32>,
@@ -118,6 +119,7 @@ impl<'q> SearchResultBuilder<'q> {
         let MainScore {
             score,
             delta_next,
+            delta_second_next,
             observed_mobility,
             observed_mobility_ms1,
             observed_mobility_ms2,
@@ -138,6 +140,7 @@ impl<'q> SearchResultBuilder<'q> {
             let delta_ms1_ms2_mobility = observed_mobility_ms1 - observed_mobility_ms2;
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
+            self.delta_second_next = SetField::Some(delta_second_next);
             self.observed_mobility = SetField::Some(observed_mobility);
             self.delta_ms1_ms2_mobility = SetField::Some(delta_ms1_ms2_mobility);
 
@@ -225,6 +228,9 @@ impl<'q> SearchResultBuilder<'q> {
                 .is_target(),
             main_score: self.main_score.expect_some("main_score", "main_score")?,
             delta_next: self.delta_next.expect_some("delta_next", "delta_next")?,
+            delta_second_next: self
+                .delta_second_next
+                .expect_some("delta_second_next", "delta_second_next")?,
             delta_theo_rt,
             sq_delta_theo_rt,
             obs_rt_seconds,
@@ -316,6 +322,7 @@ pub struct IonSearchResults {
     // Combined
     pub main_score: f32,
     pub delta_next: f32,
+    pub delta_second_next: f32,
     pub obs_rt_seconds: f32,
     obs_mobility: f32,
     delta_theo_rt: f32,

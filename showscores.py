@@ -132,17 +132,72 @@ def calculate_delta_rt(df: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
+def ohe_charges(df: pl.LazyFrame, charges: list[int]) -> tuple[pl.LazyFrame, list[str]]:
+    exprs = []
+    colnames = []
+    for charge in charges:
+        colname = f"charge_{charge}"
+        colnames.append(colname)
+        exprs.append((pl.col("precursor_charge") == charge).alias(colname))
+    return df.with_columns(exprs), tuple(colnames)
+
+
+def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
+    pprint("Stripping sequences")
+    stripped_seqs = (
+        df_use["sequence"].str.replace_all("\/\d+", "").str.replace_all("\[.*?\]", "")
+    )
+    mods = [
+        tuple(x)
+        for x in df_use["sequence"]
+        .str.replace_all("\/\d+", "")
+        .str.extract_all("\[.*?\]")
+        .list.sort()
+        .to_list()
+    ]
+    df_use = df_use.with_columns(
+        td_id=pl.Series(
+            derive_td_pair(
+                stripped_seqs.to_list(),
+                mods,
+                charges=df_use["precursor_charge"].to_list(),
+            )
+        )
+    )
+    df_use = df_use.with_columns(
+        delta_td_score=pl.when(pl.col("main_score").count() > 1)
+        .then(
+            pl.col("main_score")
+            - pl.col("main_score").min().over(["td_id", "precursor_charge"])
+        )
+        .otherwise(pl.col("main_score")),
+    )
+
+    pprint("Initial T/D competition")
+    init_nrow = len(df_use)
+    df_use = df_use.filter(
+        pl.col("main_score")
+        == pl.col("main_score").max().over(["td_id", "precursor_charge"])
+    )
+    pprint(
+        f"T/D competition Removed {init_nrow - len(df_use)} rows (kept {len(df_use)})"
+    )
+
+    return df_use
+
+
 def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     pprint("Starting to_mokapot")
     loggable_cols = (
         # Log
         "npeaks",
         "lazyerscore",
-        "ms1_summed_precursor_intensity",
         "main_score",
         "delta_next",
+        "delta_second_next",
         "lazyerscore_vs_baseline",
         "norm_lazyerscore_vs_baseline",
+        "ms1_summed_precursor_intensity",
     )
     imputable_cols = (
         # Abs impute
@@ -171,6 +226,19 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     )
     # zero_imputable_cols = ("ms1_ms2_correlation",)
     zero_imputable_cols = ()
+    generated_cols = [
+        "delta_td_score",
+    ]
+
+    df_use = log_cols(df, loggable_cols)
+    df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
+    df_use = lazy_zero_fill(df_use, zero_imputable_cols)
+    pprint("Collecting")
+    df_use, ohe_cols = ohe_charges(df_use, charges=[1, 2, 3, 4])
+    generated_cols += ohe_cols
+    df_use = add_id(df_use).collect(streaming=True)
+    df_use = td_compete(df_use)
+
     feat_cols = (
         (
             "precursor_charge",
@@ -201,36 +269,15 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         + loggable_cols
         + imputable_cols
         + zero_imputable_cols
+        + tuple(generated_cols)
     )
-    df_use = log_cols(df, loggable_cols)
-    df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
-    df_use = lazy_zero_fill(df_use, zero_imputable_cols)
+
+    # This requires all columns to exist, so we do it after all preprocessing
     df_use = cast_f32(df_use, feat_cols)
-    pprint("Collecting")
-    df_use = add_id(df_use).collect(streaming=True)
     check_noninf(df_use, feat_cols)
     check_nonnan(df_use, feat_cols)
-    pprint("Stripping sequences")
-    stripped_seqs = (
-        df_use["sequence"].str.replace_all("\/\d+", "").str.replace_all("\[.*?\]", "")
-    )
-    df_use = df_use.with_columns(
-        td_id=pl.Series(
-            derive_td_pair(
-                stripped_seqs.to_list(), charges=df_use["precursor_charge"].to_list()
-            )
-        )
-    )
-    pprint("Initial T/D competition")
-    init_nrow = len(df_use)
-    df_use = df_use.filter(
-        pl.col("main_score")
-        == pl.col("main_score").max().over(["td_id", "precursor_charge"])
-    )
-    pprint(
-        f"T/D competition Removed {init_nrow - len(df_use)} rows (kept {len(df_use)})"
-    )
     pprint("Converting to pandas")
+    df_use = df_use.filter(pl.col("main_score") > 1)
     df_use = df_use.to_pandas()
     cols = ColumnGroups(
         columns=df_use.columns,
@@ -257,19 +304,23 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     return df_use, cols
 
 
-def derive_td_pair(sequences: list[str], charges: list[int]) -> list[int]:
+def derive_td_pair(
+    sequences: list[str], mods: list[tuple[str, ...]], charges: list[int]
+) -> list[int]:
     pprint("Deriving TD pairs")
     td_pairs = {}
     max_id = 0
 
     out = []
-    for seq, charge in tqdm(zip(sequences, charges, strict=True), total=len(sequences)):
-        if (seq, charge) in td_pairs:
-            out.append(td_pairs[(seq, charge)])
+    for seq, mod, charge in tqdm(
+        zip(sequences, mods, charges, strict=True), total=len(sequences)
+    ):
+        if (seq, mod, charge) in td_pairs:
+            out.append(td_pairs[(seq, mod, charge)])
             continue
 
-        dec = seq[0] + seq[1:-1][::-1] + seq[-1]
-        td_pairs[(seq, charge)] = td_pairs[(dec, charge)] = max_id
+        dec_seq = seq[0] + seq[1:-1][::-1] + seq[-1]
+        td_pairs[(seq, mod, charge)] = td_pairs[(dec_seq, mod, charge)] = max_id
         out.append(max_id)
         max_id += 1
 
@@ -418,9 +469,15 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
 
 def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     pprint("Plotting main scores")
-    scores_df = df.select(["is_target", "main_score"]).collect()
-    target_scores = scores_df.filter(pl.col("is_target") == "true")["main_score"]
-    decoy_scores = scores_df.filter(pl.col("is_target") == "false")["main_score"]
+    scores_df = df.select(["is_target", "main_score", "precursor_charge"]).collect()
+    target_scores = scores_df.filter(pl.col("is_target") == "true")[
+        "main_score"
+    ].to_numpy()
+    target_charges = scores_df.filter(pl.col("is_target") == "true")["precursor_charge"]
+    decoy_scores = scores_df.filter(pl.col("is_target") == "false")[
+        "main_score"
+    ].to_numpy()
+    decoy_charges = scores_df.filter(pl.col("is_target") == "false")["precursor_charge"]
 
     pprint("Number of targets: {}".format(len(target_scores)))
     pprint("Number of decoys: {}".format(len(decoy_scores)))
@@ -428,25 +485,21 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
         raise ValueError("Error filtering targets and decoys")
 
     scores = np.log1p(np.concatenate((target_scores, decoy_scores)))
-    bins = np.histogram_bin_edges(scores, bins=50)
+    bins = np.histogram_bin_edges(scores[~np.isnan(scores)], bins=50)
 
     fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(10, 8), sharex=True)
 
     ax[0].hist(scores, bins, alpha=0.5, label="All Scores")
-    ax[0].hist(
-        np.log1p(target_scores.to_numpy()), bins, alpha=0.5, label="Target Scores"
-    )
-    ax[0].hist(np.log1p(decoy_scores.to_numpy()), bins, alpha=0.5, label="Decoy Scores")
+    ax[0].hist(np.log1p(target_scores), bins, alpha=0.5, label="Target Scores")
+    ax[0].hist(np.log1p(decoy_scores), bins, alpha=0.5, label="Decoy Scores")
     ax[0].set_xlabel("Main Score (log1p)")
     ax[0].set_ylabel("Count")
     ax[0].legend(loc="upper right")
     ax[0].set_yscale("log")
 
     ax[1].hist(scores, bins, alpha=0.5, label="All Scores")
-    ax[1].hist(
-        np.log1p(target_scores.to_numpy()), bins, alpha=0.5, label="Target Scores"
-    )
-    ax[1].hist(np.log1p(decoy_scores.to_numpy()), bins, alpha=0.5, label="Decoy Scores")
+    ax[1].hist(np.log1p(target_scores), bins, alpha=0.5, label="Target Scores")
+    ax[1].hist(np.log1p(decoy_scores), bins, alpha=0.5, label="Decoy Scores")
     ax[1].set_xlabel("Main Score (log1p)")
     ax[1].set_ylabel("Count")
     ax[1].legend(loc="upper right")
@@ -454,6 +507,33 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     target_file = output_dir / "plot_mainscores.png"
     pprint(f"Saving plot to {target_file}")
     plt.title("Histogram of 'main_score' scores.")
+    plt.savefig(target_file)
+    plt.close()
+
+    ## Re-make the same plot but filtering for charge states
+    uniq_charges = np.unique(np.concatenate((target_charges, decoy_charges)))
+    pprint(uniq_charges)
+
+    fig, ax = plt.subplots(
+        nrows=len(uniq_charges), ncols=1, figsize=(10, 8), sharex=True
+    )
+
+    for i, charge in enumerate(uniq_charges):
+        target_scores_loc = target_scores[target_charges == charge]
+        decoy_scores_loc = decoy_scores[decoy_charges == charge]
+        loc_scores = np.log1p(np.concatenate((target_scores_loc, decoy_scores_loc)))
+
+        ax[i].hist(loc_scores, bins, alpha=0.5, label="All Scores")
+        ax[i].hist(np.log1p(target_scores_loc), bins, alpha=0.5, label="Target Scores")
+        ax[i].hist(np.log1p(decoy_scores_loc), bins, alpha=0.5, label="Decoy Scores")
+        ax[i].set_xlabel(f"Main Score (log1p); charge={charge}")
+        ax[i].set_ylabel("Count")
+        ax[i].legend(loc="upper right")
+        ax[i].set_yscale("log")
+
+    target_file = output_dir / "plot_mainscores_by_charge.png"
+    pprint(f"Saving plot to {target_file}")
+    # plt.title("Histogram of 'main_score' scores.")
     plt.savefig(target_file)
     plt.close()
 
@@ -472,7 +552,10 @@ def main(args):
 
     main_score_hist(data, outdir)
     xgboost_stuff(data, outdir)
+    mokapot_stuff(data, outdir)
 
+
+def mokapot_stuff(data, outdir):
     ds = to_mokapot(data)
     pprint("Brewing Mokapot")
     models, scores = mokapot.brew([ds])

@@ -1,10 +1,17 @@
+use crate::fragment_mass::{
+    IonAnnot,
+    IonSeriesTerminality,
+};
 use crate::models::RTMajorIntensityArray;
 use crate::utils::math::{
     lnfact,
     lnfact_f32,
 };
 
-pub fn peak_count(slices: &RTMajorIntensityArray, count_threshold: f32) -> Vec<u8> {
+pub fn peak_count<FH: Clone + Eq + Send + Sync>(
+    slices: &RTMajorIntensityArray<FH>,
+    count_threshold: f32,
+) -> Vec<u8> {
     slices
         .arr
         .row_apply(|slice| {
@@ -54,17 +61,42 @@ pub fn single_hyperscore(slice: &[f32], grouping: Option<&[u8]>, count_threshold
     score
 }
 
-pub fn hyperscore(
-    slices: &RTMajorIntensityArray,
-    grouping: Option<&[u8]>,
-    peak_count_cache: Option<&[u8]>,
-) -> Vec<f32> {
-    if peak_count_cache.is_some() {
-        todo!("Implement peak count cache usage.")
-    }
+pub fn single_hyperscore_labeled(slice: &[f32], labels: &[IonAnnot], count_threshold: f32) -> f32 {
+    let mut nt_count = 0;
+    let mut ct_count = 0;
+
+    let mut nt_sum = 0.0;
+    let mut ct_sum = 0.0;
+
+    slice.iter().zip(labels).for_each(|(inten, lab)| {
+        // Not smaller is diff than bigger because of Nans
+        if !(inten > &count_threshold) {
+            return;
+        }
+
+        match lab.terminality() {
+            IonSeriesTerminality::CTerm => {
+                ct_count += 1;
+                ct_sum += inten;
+            }
+            IonSeriesTerminality::NTerm => {
+                nt_count += 1;
+                nt_sum += inten;
+            }
+            // Unfragmented precursors dont get added to the score
+            IonSeriesTerminality::None => {}
+        }
+    });
+
+    let score =
+        (nt_sum + ct_sum).ln_1p() + lnfact(ct_count as u16) as f32 + lnfact(nt_count as u16) as f32;
+    if score.is_finite() { score } else { 255.0 }
+}
+
+pub fn hyperscore(slices: &RTMajorIntensityArray<IonAnnot>) -> Vec<f32> {
     slices
         .arr
-        .row_apply(|slice| single_hyperscore(slice, grouping, 10.0))
+        .row_apply(|slice| single_hyperscore_labeled(slice, &slices.order, 10.0))
         .collect()
 }
 
@@ -83,6 +115,33 @@ fn single_lazyscore(slc: &[f32]) -> f32 {
     lnfact_f32(slc.iter().map(|&x| x.max(1.0).ln()).sum())
 }
 
-pub fn lazyscore(slices: &RTMajorIntensityArray) -> Vec<f32> {
+fn single_split_ion_lazyscore(slc: &[f32], labels: &[IonAnnot]) -> f32 {
+    let mut ct_lnsum = 0.0;
+    let mut nt_lnsum = 0.0;
+
+    for (i, label) in labels.iter().enumerate() {
+        match label.terminality() {
+            IonSeriesTerminality::CTerm => {
+                ct_lnsum += slc[i].max(1.0).ln();
+            }
+            IonSeriesTerminality::NTerm => {
+                nt_lnsum += slc[i].max(1.0).ln();
+            }
+            // Unfragmented precursors dont get added to the score
+            IonSeriesTerminality::None => {}
+        }
+    }
+
+    lnfact_f32(ct_lnsum) + lnfact_f32(nt_lnsum)
+}
+
+pub fn lazyscore<K: Clone>(slices: &RTMajorIntensityArray<K>) -> Vec<f32> {
     slices.arr.row_apply(single_lazyscore).collect()
+}
+
+pub fn split_ion_lazyscore(slices: &RTMajorIntensityArray<IonAnnot>) -> Vec<f32> {
+    slices
+        .arr
+        .row_apply(|slc| single_split_ion_lazyscore(slc, &slices.order))
+        .collect()
 }

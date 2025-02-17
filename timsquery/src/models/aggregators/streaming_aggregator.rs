@@ -56,6 +56,9 @@ pub struct RunningStatsCalculator {
 
 impl RunningStatsCalculator {
     pub fn new(weight: u64, mean: f64) -> Self {
+        if weight == 0 {
+            panic!("Weight must be > 0, initializing");
+        }
         Self {
             weight,
             mean_n: mean,
@@ -68,10 +71,10 @@ impl RunningStatsCalculator {
 
     /// Add a new value to the running stats calculator.
     pub fn add(&mut self, value: f64, weight: u64) {
+        if weight == 0 {
+            panic!("Weight must be > 0, adding");
+        }
         // Update the mean
-        // I am using a default weight of 1 for now ... not 100% sure how much
-        // tha treally matters but it would fix the division by zero.
-        debug_assert!(weight >= 1, "Weight must be >= 1");
         let weight_ratio = weight as f64 / self.weight as f64;
         let delta = value - self.mean_n;
         let last_mean_n = self.mean_n;
@@ -96,19 +99,19 @@ impl RunningStatsCalculator {
 
         assert!(
             self.mean_n <= self.max,
-            "high mean_n: {} max: {} curr_sd: {} weight_ratio: {} {:?}",
+            "high mean_n: {} max: {} curr_sd: {:?} weight_ratio: {} {:?}",
             self.mean_n,
             self.max,
-            self.standard_deviation().unwrap(),
+            self.standard_deviation(),
             weight_ratio,
             self
         );
         assert!(
             self.mean_n >= self.min,
-            "low mean_n: {} min: {} curr_sd: {} weight_ratio: {} {:?}",
+            "low mean_n: {} min: {} curr_sd: {:?} weight_ratio: {} {:?}",
             self.mean_n,
             self.min,
-            self.standard_deviation().unwrap(),
+            self.standard_deviation(),
             weight_ratio,
             self
         );

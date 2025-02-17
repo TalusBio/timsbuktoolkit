@@ -260,6 +260,10 @@ impl IonAnnot {
             isotope,
         })
     }
+
+    pub fn terminality(&self) -> IonSeriesTerminality {
+        self.series_ordinal.terminality()
+    }
 }
 
 impl TryFrom<&str> for IonAnnot {

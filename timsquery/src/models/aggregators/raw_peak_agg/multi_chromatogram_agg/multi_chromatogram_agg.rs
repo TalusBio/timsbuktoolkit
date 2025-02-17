@@ -10,6 +10,7 @@ use crate::models::queries::MsLevelContext;
 use crate::traits::aggregator::Aggregator;
 use serde::Serialize;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use timsrust::converters::{
     ConvertableDomain,
@@ -39,6 +40,7 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> MultiCMG
     pub fn build_with_elution_group(
         &self,
         elution_group: &ElutionGroup<FH>,
+        reference_rt_ms: Option<Arc<[u32]>>,
     ) -> MultiCMGStatsAgg<FH> {
         // TODO: RN this is a super hacky ... IDEALLY we would either keep a reference OR
         // preserve only the expected intensities.
@@ -68,8 +70,14 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> MultiCMG
                 precursor_keys,
                 expect_scan_index,
                 precursor_tof,
+                reference_rt_ms.clone(),
             ),
-            ms2_stats: ParitionedCMGAggregator::new(fragment_keys, expect_scan_index, fragment_tof),
+            ms2_stats: ParitionedCMGAggregator::new(
+                fragment_keys,
+                expect_scan_index,
+                fragment_tof,
+                reference_rt_ms,
+            ),
             id: elution_group.id,
             context: None,
             buffer: None,

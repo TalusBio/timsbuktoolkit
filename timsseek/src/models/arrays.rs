@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::arrays::PartitionedCMGArrayStats;
 
 use crate::errors::{
@@ -283,28 +284,29 @@ impl<
 /// In this representation all elements with the same retention time
 /// are adjacent in memory.
 #[derive(Debug, Clone)]
-pub struct RTMajorIntensityArray {
+pub struct RTMajorIntensityArray<K: Clone> {
     pub arr: Array2D<f32>,
+    pub order: Arc<[K]>,
+    pub rts_ms: Arc<[u32]>,
 }
 
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same m/z
 /// are adjacent in memory.
 #[derive(Debug, Clone)]
-pub struct MzMajorIntensityArray {
+pub struct MzMajorIntensityArray<K: Clone> {
     pub arr: Array2D<f32>,
+    pub order: Arc<[K]>,
+    pub rts_ms: Arc<[u32]>,
 }
 
-impl MzMajorIntensityArray {
-    pub fn new<FH: Clone + Eq + Serialize + Hash + Send + Sync + Debug>(
-        array: &PartitionedCMGArrayStats<FH>,
-        order: Option<&[FH]>,
+impl<'a, K: Clone + Eq + Serialize + Hash + Send + Sync + Debug> MzMajorIntensityArray<K> {
+    pub fn new(
+        array: &PartitionedCMGArrayStats<K>,
+        order: Arc<[K]>,
     ) -> std::result::Result<Self, DataProcessingError> {
         // TODO: Do I need to check if the order has no duplicates?
-        let major_dim = match order {
-            Some(order) => order.len(),
-            None => array.intensities.len(),
-        };
+        let major_dim = order.len();
         let minor_dim = array.retention_time_miliseconds.len();
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
@@ -312,27 +314,15 @@ impl MzMajorIntensityArray {
             });
         }
         let mut vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
-        match order {
-            Some(order) => {
-                for (j, fh) in order.iter().enumerate() {
-                    let tmp = array.intensities.get(fh);
-                    if tmp.is_none() {
-                        continue;
-                    }
-                    let inten_vec = tmp.unwrap();
-                    for (i, inten) in inten_vec.iter().enumerate() {
-                        let idx = j * minor_dim + i;
-                        vals[idx] = *inten as f32;
-                    }
-                }
+        for (j, fh) in order.iter().enumerate() {
+            let tmp = array.intensities.get(fh);
+            if tmp.is_none() {
+                continue;
             }
-            None => {
-                for (j, inten_vec) in array.intensities.values().enumerate() {
-                    for (i, inten) in inten_vec.iter().enumerate() {
-                        let idx = j * minor_dim + i;
-                        vals[idx] = *inten as f32;
-                    }
-                }
+            let inten_vec = tmp.unwrap();
+            for (i, inten) in inten_vec.iter().enumerate() {
+                let idx = j * minor_dim + i;
+                vals[idx] = *inten as f32;
             }
         }
 
@@ -343,7 +333,11 @@ impl MzMajorIntensityArray {
         // in this implementation.
         assert!(array.intensities.len() <= out_arr.nrows());
 
-        Ok(Self { arr: out_arr })
+        Ok(Self {
+            arr: out_arr,
+            order,
+            rts_ms: array.retention_time_miliseconds.clone(),
+        })
     }
 }
 
@@ -351,15 +345,12 @@ impl MzMajorIntensityArray {
 //       mz-major array. and implement the serialization so it preserves the
 //       output (I like the current serialization but its not great as a mem
 //       layout)
-impl RTMajorIntensityArray {
-    pub fn new<FH: Clone + Eq + Serialize + Hash + Send + Sync>(
+impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> RTMajorIntensityArray<FH> {
+    pub fn new(
         array: &PartitionedCMGArrayStats<FH>,
-        order: Option<&[FH]>,
+        order: Arc<[FH]>,
     ) -> core::result::Result<Self, DataProcessingError> {
-        let major_dim = match order {
-            Some(order) => order.len(),
-            None => array.intensities.len(),
-        };
+        let major_dim = order.len();
         let minor_dim = array.retention_time_miliseconds.len();
         if major_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
@@ -373,28 +364,16 @@ impl RTMajorIntensityArray {
         }
 
         let mut vals: Vec<f32> = vec![0.0; minor_dim * major_dim];
-        match order {
-            Some(order) => {
-                for (j, fh) in order.iter().enumerate() {
-                    let tmp = array.intensities.get(fh);
-                    if tmp.is_none() {
-                        // This in theory can happen if there are no peaks
-                        // that match that specific transition.
-                        continue;
-                    }
-                    for (i, inten) in tmp.unwrap().iter().enumerate() {
-                        let idx = i * major_dim + j;
-                        vals[idx] = *inten as f32;
-                    }
-                }
+        for (j, fh) in order.iter().enumerate() {
+            let tmp = array.intensities.get(fh);
+            if tmp.is_none() {
+                // This in theory can happen if there are no peaks
+                // that match that specific transition.
+                continue;
             }
-            None => {
-                for (j, inten_vec) in array.intensities.values().enumerate() {
-                    for (i, inten) in inten_vec.iter().enumerate() {
-                        let idx = i * major_dim + j;
-                        vals[idx] = *inten as f32;
-                    }
-                }
+            for (i, inten) in tmp.unwrap().iter().enumerate() {
+                let idx = i * major_dim + j;
+                vals[idx] = *inten as f32;
             }
         }
 
@@ -405,7 +384,11 @@ impl RTMajorIntensityArray {
         // in this implementation.
         assert_eq!(out_arr.values.len(), minor_dim * major_dim);
 
-        Ok(Self { arr: out_arr })
+        Ok(Self {
+            arr: out_arr,
+            order: order,
+            rts_ms: array.retention_time_miliseconds.clone(),
+        })
     }
 }
 
@@ -559,7 +542,7 @@ mod tests {
     }
 
     fn sample_cmg_array() -> PartitionedCMGArrayStats<u8> {
-        let retention_time_miliseconds = vec![0, 1, 2];
+        let retention_time_miliseconds: Arc<[u32]> = vec![0, 1, 2].into();
         let mut intensities: HashMap<u8, Vec<u64>> = HashMap::new();
         intensities.insert(0, vec![1, 2, 3]);
         intensities.insert(1, vec![4, 5, 6]);
@@ -576,7 +559,6 @@ mod tests {
         let weighted_ims_mean = vec![2.0, 4.0, 5.0];
 
         PartitionedCMGArrayStats {
-            summed_intensity: summed_intensity_vec,
             intensities,
             weighted_ims_mean,
             retention_time_miliseconds,
@@ -588,7 +570,7 @@ mod tests {
     #[test]
     fn test_array2d_from_cmg_int_mz_major() {
         let array = sample_cmg_array();
-        let arr = MzMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
+        let arr = MzMajorIntensityArray::new(&array, [0, 1].into()).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let first_row = arr.arr.get_row(0).unwrap();
         assert_eq!(first_row, &[1.0, 2.0, 3.0]);
@@ -599,7 +581,7 @@ mod tests {
     #[test]
     fn test_array2d_from_cmg_int_rt_major() {
         let array = sample_cmg_array();
-        let arr = RTMajorIntensityArray::new(&array, Some(&[0, 1])).unwrap();
+        let arr = RTMajorIntensityArray::new(&array, [0, 1].into()).unwrap();
         assert_eq!(arr.arr.values, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
         let first_row = arr.arr.get_row(0).unwrap();
         assert_eq!(first_row, &[1.0, 4.0]);
