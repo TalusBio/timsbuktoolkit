@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3.18", features = [
 timsrust = "=0.4.2"
 rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
+indicatif = { version = "0.17.9", features = ["rayon"] }
 
 [profile.release]
 lto = 'thin'

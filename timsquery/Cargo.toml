@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 nohash-hasher = "=0.2.0"
-indicatif = { version = "0.17.9", features = ["rayon"] }
 tabled = "0.17.0"
 
 tracing-bunyan-formatter = "0.3.10"
@@ -24,6 +23,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
+indicatif = { workspace = true, features = ["rayon"] }
 
 [features]
 clap = ["dep:clap"]
