@@ -7,25 +7,37 @@
 #   "tqdm",
 #   "mokapot @ git+https://github.com/jspaezp/mokapot.git@feat/re_add_compound_index_spec",
 #   "xgboost",
+#   "torch",
+#   "uniplot",
 # ]
 # ///
 
 import argparse
 import logging
+import math
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from xgboost import XGBClassifier
-from sklearn.model_selection import GridSearchCV
+from turtle import forward
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import mokapot
 import numpy as np
 import pandas as pd
 import polars as pl
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import xgboost as xgb
 from mokapot.column_defs import ColumnGroups, OptionalColumns
 from rich.pretty import pprint
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
+from uniplot import histogram
+
+# from sklearn.model_selection import GridSearchCV
+# from xgboost import XGBClassifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,21 +127,39 @@ def check_nonnan(df: pl.LazyFrame, columns: list[str]):
         raise ValueError(f"Data contains NaN values: {nan_cols}")
 
 
+def check_nonexp(df: pl.DataFrame, columns: list[str]):
+    # checks that things are not exponential
+    # The heuristic here is that stuff that is log transformed
+    # should only span 3 orders of magnitude
+
+    norders = {}
+    failing_cols = []
+    df = df.select(columns)
+    for col in columns:
+        try:
+            mag_diff = df[col].abs().max() - df[col].abs().min()
+            nmags = math.log10(mag_diff)
+        except ValueError as e:
+            if "math domain error" in str(e):
+                raise ValueError(f"Column {col} has 0 variance values")
+        norders[col] = nmags
+        if nmags > 3:
+            failing_cols.append(col)
+    pprint(norders)
+    if failing_cols:
+        ranges = [
+            f"{col}: min={df[col].min()}, max={df[col].max()} norders={norders[col]}"
+            for col in failing_cols
+        ]
+        pprint(ranges)
+        raise ValueError(f"Data contains exponential values: {failing_cols}")
+
+
 def cast_f32(df: pl.LazyFrame, cols: list[str]) -> pl.LazyFrame:
     exprs = []
     for col in cols:
         exprs.append(pl.col(col).cast(pl.Float32))
     return df.with_columns(exprs)
-
-
-def calculate_delta_rt(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.with_columns(
-        delta_rt=(pl.col("obs_rt_seconds") - pl.col("precursor_rt_query_seconds")),
-    ).with_columns(
-        abs_delta_rt=(
-            pl.col("obs_rt_seconds") - pl.col("precursor_rt_query_seconds")
-        ).abs(),
-    )
 
 
 def ohe_charges(df: pl.LazyFrame, charges: list[int]) -> tuple[pl.LazyFrame, list[str]]:
@@ -140,6 +170,17 @@ def ohe_charges(df: pl.LazyFrame, charges: list[int]) -> tuple[pl.LazyFrame, lis
         colnames.append(colname)
         exprs.append((pl.col("precursor_charge") == charge).alias(colname))
     return df.with_columns(exprs), tuple(colnames)
+
+
+def scale_columns(
+    df: pl.LazyFrame, cols: list[tuple[str, float]]
+) -> tuple[pl.LazyFrame, tuple[str, ...]]:
+    exprs = []
+    cols_out = []
+    for col, factor in cols:
+        exprs.append(pl.col(col).cast(pl.Float32) / factor)
+        cols_out.append(col)
+    return df.with_columns(exprs), tuple(cols_out)
 
 
 def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
@@ -198,6 +239,9 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "lazyerscore_vs_baseline",
         "norm_lazyerscore_vs_baseline",
         "ms1_summed_precursor_intensity",
+        "ms2_summed_transition_intensity",
+        # TODO: consider clamping instead of logging here.
+        "sq_delta_theo_rt",
     )
     imputable_cols = (
         # Abs impute
@@ -224,6 +268,11 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "sq_delta_ms1_ms2_mobility",
         "delta_ms1_ms2_mobility",
     )
+    scaling_cols = (
+        ("precursor_rt_query_seconds", 60),
+        ("obs_rt_seconds", 60),
+        ("delta_theo_rt", 60),
+    )
     # zero_imputable_cols = ("ms1_ms2_correlation",)
     zero_imputable_cols = ()
     generated_cols = [
@@ -233,8 +282,9 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     df_use = log_cols(df, loggable_cols)
     df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
     df_use = lazy_zero_fill(df_use, zero_imputable_cols)
+    df_use, scaling_cols = scale_columns(df_use, scaling_cols)
     pprint("Collecting")
-    df_use, ohe_cols = ohe_charges(df_use, charges=[1, 2, 3, 4])
+    df_use, ohe_cols = ohe_charges(df_use, charges=[2, 3, 4])
     generated_cols += ohe_cols
     df_use = add_id(df_use).collect(streaming=True)
     df_use = td_compete(df_use)
@@ -244,17 +294,12 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             "precursor_charge",
             "precursor_mz",
             "precursor_mobility_query",
-            "precursor_rt_query_seconds",
-            "obs_rt_seconds",
             "obs_mobility",
             "ms2_cosine_ref_similarity",
             "ms2_coelution_score",
-            "ms2_summed_transition_intensity",
             "ms1_cosine_ref_similarity",
             "ms1_coelution_score",
             "nqueries",
-            "delta_theo_rt",
-            "sq_delta_theo_rt",
             "ms1_inten_ratio_2",
             "ms2_inten_ratio_4",
             "ms2_inten_ratio_6",
@@ -270,12 +315,14 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         + imputable_cols
         + zero_imputable_cols
         + tuple(generated_cols)
+        + scaling_cols
     )
 
     # This requires all columns to exist, so we do it after all preprocessing
     df_use = cast_f32(df_use, feat_cols)
     check_noninf(df_use, feat_cols)
     check_nonnan(df_use, feat_cols)
+    check_nonexp(df_use, feat_cols)
     pprint("Converting to pandas")
     df_use = df_use.filter(pl.col("main_score") > 1)
     df_use = df_use.to_pandas()
@@ -336,25 +383,36 @@ def to_mokapot(df: pl.LazyFrame) -> mokapot.LinearPsmDataset:
     )
 
 
-# def to_xgb(df: pl.LazyFrame) -> xgb.DMatrix:
-#     df_use, cols = to_mokapot_df(df)
-#     X = df_use.loc[:, cols.feature_columns].to_numpy()
-#     y = df_use.loc[:, cols.target_column].to_numpy()
-#     return xgb.DMatrix(X, y, feature_names=cols.feature_columns)
-
-
 def to_folds_xgb(
     *,
     shuffled_df: pd.DataFrame,
     cols: ColumnGroups,
     num_folds: int,
 ) -> list[xgb.DMatrix]:
-    out = np.array_split(shuffled_df, num_folds)
+    tmp = to_folds(shuffled_df=shuffled_df, cols=cols, num_folds=num_folds)
     out = [
         xgb.DMatrix(
+            x[0],
+            label=x[1],
+            feature_names=cols.feature_columns,
+        )
+        for x in tmp
+    ]
+    return out
+
+
+def to_folds(
+    *,
+    shuffled_df: pd.DataFrame,
+    cols: ColumnGroups,
+    num_folds: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    out = np.array_split(shuffled_df, num_folds)
+
+    out = [
+        (
             x.loc[:, cols.feature_columns].to_numpy(),
             np.where(x.loc[:, cols.target_column].to_numpy(), 1, 0),
-            feature_names=cols.feature_columns,
         )
         for x in out
     ]
@@ -416,6 +474,10 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
 
     target_preds = cscores[ctargs == 1]
     decoy_preds = cscores[ctargs == 0]
+
+    histogram(target_preds, title="Target scores")
+    histogram(decoy_preds, title="Decoy scores")
+
     qvals = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
     for ct in [0.01, 0.05, 0.1, 0.5, 1.0]:
         num_at_thresh = int(np.sum(ctargs[qvals < ct]))
@@ -538,23 +600,6 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     plt.close()
 
 
-def main(args):
-    paths = [Path(p) for p in args.results_dir]
-    for p in paths:
-        if not p.exists():
-            raise FileNotFoundError(f"Path {p} does not exist")
-    data = read_files(paths)
-    data = data.filter(pl.col("obs_mobility").is_not_nan())
-
-    outdir = Path(args.output_dir)
-    if not outdir.exists():
-        outdir.mkdir(parents=True)
-
-    main_score_hist(data, outdir)
-    xgboost_stuff(data, outdir)
-    mokapot_stuff(data, outdir)
-
-
 def mokapot_stuff(data, outdir):
     ds = to_mokapot(data)
     pprint("Brewing Mokapot")
@@ -646,6 +691,537 @@ class KFoldModel:
     def concat_targets(self):
         targets = [x.get_label() for x in self.folds]
         return np.concatenate(targets)
+
+
+######## Neural network based rescoring ########
+
+
+class AsymmetricMarginBCELoss(nn.Module):
+    def __init__(self, *, margin_0=0.1, margin_1=0.4):
+        """
+        margin_0: margin for negative class (0s)
+        margin_1: margin for positive class (1s)
+
+        This loss pushes negative predictions further from decision boundary
+
+        Larger margin_0 makes the model more conservative about predicting 1s
+            (reduces false positives)
+        Smaller margin_1 means we're more lenient about false negatives
+        Both margins are clamped to keep predictions in [0,1] range
+        """
+        super().__init__()
+        self.margin_0 = margin_0
+        self.margin_1 = margin_1
+
+    def forward(self, predictions, targets):
+        # Add margins to predictions based on true class
+        adjusted_preds = torch.where(
+            targets == 1, predictions + self.margin_1, predictions - self.margin_0
+        )
+
+        # Clamp to valid probability range
+        adjusted_preds = torch.clamp(adjusted_preds, 0, 1)
+
+        # Compute BCE loss
+        loss = F.binary_cross_entropy(adjusted_preds, targets, reduction="mean")
+
+        return loss
+
+
+class WeightedBCELoss(nn.Module):
+    def __init__(self, pos_weight=0.2, neg_weight=1.0):
+        """
+        pos_weight: weight for positive class (1s)
+        neg_weight: weight for negative class (0s)
+        """
+        super().__init__()
+        self.pos_weight = pos_weight
+        self.neg_weight = neg_weight
+
+    def forward(self, predictions, targets):
+        # Create weight tensor based on targets
+        weights = torch.where(
+            targets == 1,
+            torch.tensor(self.pos_weight, device=targets.device),
+            torch.tensor(self.neg_weight, device=targets.device),
+        )
+
+        # Standard BCE loss
+        bce_loss = F.binary_cross_entropy(predictions, targets, reduction="none")
+
+        # Apply weights
+        weighted_loss = weights * bce_loss
+
+        return weighted_loss.mean()
+
+
+class FocalLoss3(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduce=True):
+        """
+        Focal Loss: (1 - p)^gamma * log(p) for positive class
+                   p^gamma * log(1-p) for negative class
+
+        alpha: weighing factor for positive class
+        gamma: focusing parameter that reduces the loss contribution from easy examples
+        """
+        super().__init__()
+        if alpha < 0 or alpha > 1:
+            raise ValueError("Alpha must be in [0, 1]")
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduce = reduce
+
+    def forward(self, predictions, targets):
+        # BCE loss
+        bce_loss = F.binary_cross_entropy(predictions, targets, reduction="none")
+
+        # Focal term
+        pt = torch.where(targets == 1, predictions, 1 - predictions)
+        focal_term = (1 - pt) ** self.gamma
+
+        # Alpha weighing
+        alpha_weight = torch.where(
+            targets == 1,
+            torch.tensor(self.alpha, device=targets.device),
+            torch.tensor(1 - self.alpha, device=targets.device),
+        )
+
+        loss = alpha_weight * focal_term * bce_loss
+        if self.reduce:
+            return loss.mean()
+        else:
+            return loss
+
+
+class BinaryClassifier(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        nhidden_layers: int = 4,
+        hidden_dims: int = 64,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+
+        # ACTIVATION = nn.ReLU
+        # Selu seems to be critical to train deeper networks.
+        ACTIVATION = nn.SELU
+
+        layers = []
+        layers.append(nn.BatchNorm1d(input_dim))
+        layers.append(nn.Linear(input_dim, hidden_dims))
+        layers.append(ACTIVATION())
+        self.input_layer = nn.Sequential(*layers)
+
+        layers = []
+        for _ in range(nhidden_layers):
+            layers.append(nn.Linear(hidden_dims, hidden_dims))
+            layers.append(ACTIVATION())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
+
+        self.hidden_layers = nn.ModuleList(layers)
+
+        layers = []
+        layers.append(nn.Linear(hidden_dims, 1))
+        layers.append(nn.Sigmoid())
+        self.output_layer = nn.Sequential(*layers)
+
+        pprint(self)
+
+    def forward(self, x):
+        x = self.input_layer(x)
+        for layer in self.hidden_layers:
+            # x = x + layer(layer_norm(x))
+            x = layer(x)
+
+        return self.output_layer(x)
+
+
+@dataclass
+class MLPKFoldModel:
+    """
+    PyTorch implementation of K-Fold cross validation.
+    Each fold contains:
+    1. One fold for training
+    2. One fold for validation (early stopping)
+    3. Remaining folds for inference
+    """
+
+    folds: List[tuple[torch.Tensor, torch.Tensor]]  # List of (features, targets) tuples
+    models: List[Optional[BinaryClassifier]]
+    scores: List[Optional[torch.Tensor]]
+    device: torch.device
+
+    @staticmethod
+    def from_folds(
+        folds: List[tuple[torch.Tensor, torch.Tensor]], device: torch.device
+    ):
+        return MLPKFoldModel(
+            folds=folds,
+            models=[None] * len(folds),
+            scores=[None] * len(folds),
+            device=device,
+        )
+
+    def train(
+        self,
+        batch_size: int = 124,
+        epochs: int = 20,
+        learning_rate: float = 1e-4,
+        pos_weight: float = 0.2,
+        **kwargs,
+    ):
+        for i in range(len(self.folds)):
+            print(f"Training model {i}/{len(self.folds)}")
+
+            # Prepare data
+            train_data = self.folds[i]
+            val_data = self.folds[(i + 1) % len(self.folds)]
+
+            train_dataset = TensorDataset(train_data[0], train_data[1])
+            val_dataset = TensorDataset(val_data[0], val_data[1])
+
+            train_loader = DataLoader(
+                train_dataset, batch_size=batch_size, shuffle=True
+            )
+            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+            # Initialize model
+            model = BinaryClassifier(input_dim=train_data[0].shape[1], **kwargs).to(
+                self.device
+            )
+            optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+            # Choose one of the following loss functions based on your needs:
+            # criterion = WeightedBCELoss(pos_weight=pos_weight, neg_weight=1.0)
+            # criterion = AsymmetricMarginBCELoss(margin_0=0.5, margin_1=0.2)
+            # criterion = WeightedBCELoss2(fneg_weight=pos_weight)
+
+            # Usually gamma is positive bc the desire is to emphasize well classified
+            # Examples, whilst we actually want to focus in misclassified examples
+            # Where they are kind of "hard" to distinguish
+            criterion = FocalLoss3(alpha=pos_weight, gamma=0.5)
+
+            # Training loop
+            best_val_loss = float("inf")
+            patience = 5
+            patience_counter = 0
+            best_model = None
+
+            for epoch in range(epochs):
+                # Training
+                model.train()
+                train_losses = []
+                for x_batch, y_batch in train_loader:
+                    x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
+
+                    optimizer.zero_grad()
+                    y_pred = model(x_batch)
+                    loss = criterion(y_pred, y_batch.view(-1, 1))
+                    loss.backward()
+                    optimizer.step()
+
+                    train_losses.append(loss.item())
+
+                # Validation
+                model.eval()
+                val_losses = []
+                with torch.no_grad():
+                    for x_batch, y_batch in val_loader:
+                        x_batch, y_batch = (
+                            x_batch.to(self.device),
+                            y_batch.to(self.device),
+                        )
+                        y_pred = model(x_batch)
+                        val_loss = criterion(y_pred, y_batch.view(-1, 1))
+                        val_losses.append(val_loss.item())
+
+                avg_val_loss = np.mean(val_losses)
+
+                # Early stopping
+                print(
+                    f"Epoch {epoch}: train_loss = {np.mean(train_losses):.4f}, val_loss = {avg_val_loss:.4f}"
+                )
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    best_model = model.state_dict()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(
+                            f"Early stopping at epoch {epoch}. Best validation loss: {best_val_loss:.4f}"
+                        )
+                        break
+
+
+            # Save best model
+            model.load_state_dict(best_model)
+            self.models[i] = model
+
+    def score(self, batch_size: int = 32):
+        for i in range(len(self.folds)):
+            print(f"Scoring fold {i}/{len(self.folds)}")
+            fold_data = self.folds[i]
+            dataset = TensorDataset(fold_data[0], fold_data[1])
+            loader = DataLoader(dataset, batch_size=batch_size)
+
+            scores_list = []
+
+            for j, model in enumerate(self.models):
+                if j == i or j == (i + 1) % len(self.folds):
+                    continue
+
+                model.eval()
+                fold_scores = []
+
+                with torch.no_grad():
+                    for x_batch, _ in loader:
+                        x_batch = x_batch.to(self.device)
+                        predictions = model(x_batch)
+                        fold_scores.append(predictions.cpu())
+
+                scores_list.append(torch.cat(fold_scores))
+
+            self.scores[i] = torch.stack(scores_list).mean(dim=0)
+
+    def get_importances(self, feat_names: list[str] | None = None):
+        # Note: Feature importance is not as straightforward in neural networks
+        # This is a simple implementation using gradient-based importance
+        importances = []
+
+        for model in self.models:
+            importance_dict = {}
+
+            # Compute average gradient magnitude for each feature
+            for i, (features, targets) in enumerate(self.folds):
+                features.requires_grad_(True)
+                output = model(features.to(self.device))
+                output.sum().backward()
+
+                grad_magnitude = features.grad.abs().mean(dim=0)
+                importance_dict = {}
+                for j in range(features.shape[1]):
+                    feat_name = (
+                        feat_names[j] if feat_names is not None else f"feature_{j}"
+                    )
+                    importance_dict[feat_name] = grad_magnitude[j].item()
+
+                features.requires_grad_(False)
+                model.zero_grad()
+
+            importances.append(importance_dict)
+
+        # Format similar to original
+        imps_order = sorted(importances[0].items(), key=lambda x: x[1], reverse=True)
+        out = {k[0]: [w.get(k[0], 0) for w in importances] for k in imps_order}
+        return out
+
+    def get_importances2(self, feat_names: list[str] | None = None):
+        """
+        Calculate feature importance using gradients after BatchNorm layer.
+        Uses hooks to capture intermediate gradients.
+        """
+        importances = []
+
+        for model in self.models:
+            importance_dict = {}
+            post_bn_gradients = []
+
+            # Register hook to capture gradients after BatchNorm
+            def hook_fn(module, grad_input, grad_output):
+                # post_bn_gradients.append(grad_input[0].detach().cpu())
+                post_bn_gradients.append(grad_output[0].detach().cpu())
+
+            # Get the BatchNorm layer
+            bn_layer = model.input_layer[0]  # First layer is BatchNorm
+            hook = bn_layer.register_backward_hook(hook_fn)
+
+            # Compute gradients for each fold
+            for i, (features, targets) in enumerate(self.folds):
+                features = features.to(self.device)
+                features.requires_grad_(True)
+                post_bn_gradients = []  # Reset for each batch
+
+                # Forward and backward pass
+                output = model(features)
+                output.sum().backward()
+
+                # Average gradients across samples in the fold
+                fold_grads = post_bn_gradients[0].abs().mean(dim=0)
+
+                # Update importance dictionary
+                if not importance_dict:
+                    if feat_names is None:
+                        feat_names = [f"feature_{j}" for j in range(features.shape[1])]
+                    importance_dict = {
+                        k: fold_grads[j].item() for j, k in enumerate(feat_names)
+                    }
+                else:
+                    for j, k in enumerate(feat_names):
+                        importance_dict[k] += fold_grads[j].item()
+
+                features.requires_grad_(False)
+                model.zero_grad()
+
+            # Average importance across folds
+            for key in importance_dict:
+                importance_dict[key] /= len(self.folds)
+
+            importances.append(importance_dict)
+
+            # Remove the hook
+            hook.remove()
+
+        # Format similar to original
+        imps_order = sorted(importances[0].items(), key=lambda x: x[1], reverse=True)
+        out = {k[0]: [w.get(k[0], 0) for w in importances] for k in imps_order}
+        return out
+
+    def concat_scores(self):
+        if self.scores[0] is None:
+            raise ValueError("Scores not computed")
+        return torch.cat(self.scores)
+
+    def concat_targets(self):
+        return torch.cat([fold[1] for fold in self.folds])
+
+
+def to_torch_folds(shuffled_df: pl.LazyFrame, num_folds: int, cols):
+    tmp = to_folds(shuffled_df=shuffled_df, cols=cols, num_folds=num_folds)
+    out = [
+        (torch.from_numpy(x[0]).float(), torch.from_numpy(x[1]).float()) for x in tmp
+    ]
+    return out
+
+
+def mlp_stuff(
+    df_use: pl.LazyFrame, cols, output_dir: Path, pos_weight: float = 0.05, **kwargs
+):
+    pprint("Shuffling")
+    df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
+    folds = to_torch_folds(shuffled_df=df_use, num_folds=5, cols=cols)
+    fold_model = MLPKFoldModel.from_folds(folds, device="cpu")
+    fold_model.train(pos_weight=pos_weight, **kwargs)
+    fold_model.score()
+    # importances = fold_model.get_importances(feat_names=cols.feature_columns)
+    importances = fold_model.get_importances2(feat_names=cols.feature_columns)
+    pprint(importances)
+    fig = plot_importances(importances)
+    outfile = output_dir / "importances_nn.png"
+    fig.savefig(outfile)
+    pprint(f"Wrote {outfile}")
+    plt.close()
+
+    ctargs = fold_model.concat_targets().numpy().flatten()
+    cscores = fold_model.concat_scores().numpy().flatten()
+    df_use["rescore_score"] = cscores
+    df_use["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
+    df_use = df_use.sort_values("rescore_score", ascending=False)
+    outfile = output_dir / "rescored_values_nn.parquet"
+    df_use.to_parquet(outfile, index=False)
+    pprint(f"Wrote {outfile}")
+    order = np.argsort(-cscores)
+    ctargs = ctargs[order]
+    cscores = cscores[order]
+    qvals = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
+    for ct in [0.01, 0.05, 0.1, 0.5, 1.0]:
+        num_at_thresh = int(np.sum(ctargs[qvals < ct]))
+        ssc = cscores[qvals < ct]
+        if len(ssc) == 0:
+            pprint(f"No scores at {ct}")
+            continue
+        score_at_thresh = np.min(ssc)
+        pprint(f"Score at {ct}: {score_at_thresh}")
+        pprint(f"Number of targets at {ct}: {num_at_thresh}")
+
+    target_preds = cscores[ctargs == 1]
+    decoy_preds = cscores[ctargs == 0]
+    histogram(target_preds, title="Target scores")
+    histogram(decoy_preds, title="Decoy scores")
+
+    report = Report(
+        targets_at_1=np.sum(ctargs[qvals < 0.01]).item(),
+        targets_at_5=np.sum(ctargs[qvals < 0.05]).item(),
+        targets_at_10=np.sum(ctargs[qvals < 0.1]).item(),
+    )
+    pprint(report)
+    outfile = output_dir / "report_nn.toml"
+    report.save_to_toml(outfile)
+    pprint(f"Wrote {outfile}")
+    return np.sum(ctargs[qvals < 0.01]).item()
+
+
+####### End neural network based rescoring #######
+
+
+def main(args):
+    paths = [Path(p) for p in args.results_dir]
+    for p in paths:
+        if not p.exists():
+            raise FileNotFoundError(f"Path {p} does not exist")
+    data = read_files(paths)
+    data = data.filter(pl.col("obs_mobility").is_not_nan())
+
+    outdir = Path(args.output_dir)
+    if not outdir.exists():
+        outdir.mkdir(parents=True)
+
+    main_score_hist(data, outdir)
+    xgboost_stuff(data, outdir)
+    mokapot_stuff(data, outdir)
+    data, cols = to_mokapot_df(data)
+    score = mlp_stuff(data, cols=cols, output_dir=outdir)
+
+    exit()
+    # Leaving the code I used for hparam tuning of the MLP
+    # (0.2, 4, 512, 0)
+    # (0.05, 3, 64, 0.1)
+    scores = {}
+    best_score = score
+    best_params = None
+    combs = []
+    for pw in [0.05, 0.2, 0.5, 0.8]:
+        # for do in [0, 0.05, 0.1, 0.2, 0.5]:
+        for do in [0, 0.05, 0.1]:
+            for hl in [3, 4, 5]:
+                for hd in [64, 128]:
+                    combs.append((hl, hd, pw, do))
+            for hl in [1, 2, 3, 4, 5]:
+                for hd in [256, 512]:
+                    combs.append((hl, hd, pw, do))
+
+    # shuffle combs
+    import random
+
+    random.shuffle(combs)
+    for hl, hd, pw, do in combs:
+        tmp_outdir = outdir / f"hl-{hl}_hd-{hd}-pw-{pw}-do-{do}"
+        tmp_outdir.mkdir(parents=True, exist_ok=True)
+        score = mlp_stuff(
+            data,
+            cols=cols,
+            output_dir=tmp_outdir,
+            pos_weight=pw,
+            nhidden_layers=hl,
+            hidden_dims=hd,
+            dropout=do,
+        )
+        scores[(hl, hd, do)] = score
+        if score > best_score:
+            pprint(f"New best score: {score} at {pw} {hl} {hd} {do}")
+            best_score = score
+            best_params = (pw, hl, hd, do)
+        else:
+            pprint("Keeping old score")
+            pprint(f"Current score {score}")
+            pprint(
+                f"Old best score: {best_score} at {best_params if best_params is not None else 'BASELINE'}"
+            )
+
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    pprint(sorted_scores)
+    pprint(best_params)
 
 
 if __name__ == "__main__":

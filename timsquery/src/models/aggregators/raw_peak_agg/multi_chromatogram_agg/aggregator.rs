@@ -95,6 +95,11 @@ impl DenseRTCollection {
                 pos = pos - 1;
             }
         }
+        // ~ This version is only ~5% faster (which I personally find surprising),
+        // leaving here as a reference. I am keeping the exact solution for now.
+        // let stride_ms = (self.reference_rt_ms.last().unwrap() - self.reference_rt_ms.first().unwrap()) / (self.scan_tof_calc.len() as u32 - 1);
+        // let pos = (rt_ms - self.reference_rt_ms.first().unwrap()) / stride_ms;
+        // let pos = usize::try_from(pos).unwrap().min(self.scan_tof_calc.len() - 1);
 
         match self.scan_tof_calc.get_mut(pos) {
             Some(x) => match x {

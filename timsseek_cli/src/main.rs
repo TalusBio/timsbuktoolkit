@@ -100,6 +100,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
     let dotd_file_location = &config.analysis.dotd_file;
     let index = QuadSplittedTransposedIndex::from_path_centroided(
+    // let index = QuadSplittedTransposedIndex::from_path(
         dotd_file_location
             .clone()
             .unwrap() // TODO: Error handling

@@ -5,13 +5,8 @@ use super::aggregator::{
     ParitionedCMGAggregator,
     SparseRTCollection,
 };
-use crate::models::aggregators::streaming_aggregator::RunningStatsCalculator;
 use serde::Serialize;
-use std::collections::{
-    BTreeMap,
-    HashMap,
-    HashSet,
-};
+use std::collections::HashMap;
 use std::f64;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -66,15 +61,15 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
                     id_cmgs
                         .scan_index_means
                         .push(scan_tof_mapping.scan.mean().unwrap());
-                    id_cmgs
-                        .scan_index_sds
-                        .push(scan_tof_mapping.scan.standard_deviation().unwrap());
+                    // id_cmgs
+                    //     .scan_index_sds
+                    //     .push(scan_tof_mapping.scan.standard_deviation().unwrap());
                     id_cmgs
                         .tof_index_means
                         .push(scan_tof_mapping.tof.mean().unwrap());
-                    id_cmgs
-                        .tof_index_sds
-                        .push(scan_tof_mapping.tof.standard_deviation().unwrap());
+                    // id_cmgs
+                    //     .tof_index_sds
+                    //     .push(scan_tof_mapping.tof.standard_deviation().unwrap());
                     id_cmgs.intensities.push(scan_tof_mapping.tof.weight());
                 }
             }
@@ -120,15 +115,15 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
                     Some(sts) => {
                         let scan_mean = sts.scan.mean().unwrap();
                         let tof_mean = sts.tof.mean().unwrap();
-                        let scan_sd = sts.scan.standard_deviation().unwrap();
-                        let tof_sd = sts.tof.standard_deviation().unwrap();
+                        // let scan_sd = sts.scan.standard_deviation().unwrap();
+                        // let tof_sd = sts.tof.standard_deviation().unwrap();
                         let inten = sts.tof.weight();
 
                         id_cmgs.intensities[rt_key] = inten;
-                        id_cmgs.scan_index_means[rt_key] = scan_mean;
-                        id_cmgs.scan_index_sds[rt_key] = scan_sd;
                         id_cmgs.tof_index_means[rt_key] = tof_mean;
-                        id_cmgs.tof_index_sds[rt_key] = tof_sd;
+                        id_cmgs.scan_index_means[rt_key] = scan_mean;
+                        // id_cmgs.scan_index_sds[rt_key] = scan_sd;
+                        // id_cmgs.tof_index_sds[rt_key] = tof_sd;
                     }
                 },
             );

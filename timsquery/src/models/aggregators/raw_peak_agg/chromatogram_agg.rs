@@ -65,9 +65,9 @@ impl ChromatomobilogramStats {
 pub struct ChromatomobilogramStatsArrays {
     pub retention_time_miliseconds: Arc<[u32]>,
     pub tof_index_means: Vec<f64>,
-    pub tof_index_sds: Vec<f64>,
+    // pub tof_index_sds: Vec<f64>,
     pub scan_index_means: Vec<f64>,
-    pub scan_index_sds: Vec<f64>,
+    // pub scan_index_sds: Vec<f64>,
     pub intensities: Vec<u64>,
     pub expected_tof_index: u32,
     pub expected_scan_index: usize,
@@ -88,9 +88,9 @@ impl ChromatomobilogramStatsArrays {
         Self {
             retention_time_miliseconds: rts,
             tof_index_means: vec![f64::NAN; lens],
-            tof_index_sds: vec![f64::NAN; lens],
+            // tof_index_sds: vec![f64::NAN; lens],
             scan_index_means: vec![f64::NAN; lens],
-            scan_index_sds: vec![f64::NAN; lens],
+            // scan_index_sds: vec![f64::NAN; lens],
             intensities: vec![0; lens],
             expected_tof_index,
             expected_scan_index,

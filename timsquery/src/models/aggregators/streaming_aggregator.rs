@@ -5,6 +5,8 @@ use tracing::debug;
 // to calculate the total, mean and variance.
 
 // TODO: move this to the general errors.
+// TODO2: I am not 100% sure whether this file should be here ... happy to get
+// feedback on code organization.
 #[derive(Debug, Clone, Copy)]
 pub enum StreamingAggregatorError {
     DivisionByZero,
@@ -74,14 +76,15 @@ impl RunningStatsCalculator {
         if weight == 0 {
             panic!("Weight must be > 0, adding");
         }
+        let f64_weight = weight as f64;
         // Update the mean
-        let weight_ratio = weight as f64 / self.weight as f64;
+        let weight_ratio = f64_weight / self.weight as f64;
         let delta = value - self.mean_n;
         let last_mean_n = self.mean_n;
         self.mean_n += delta * weight_ratio;
 
         // Update the variance
-        let to_add = weight as f64 * (value - self.mean_n) * (value - last_mean_n);
+        let to_add = f64_weight * (value - self.mean_n) * (value - last_mean_n);
         self.d_ += to_add;
 
         // Update the weight
@@ -96,25 +99,6 @@ impl RunningStatsCalculator {
         self.max = self.max.max(value);
 
         self.mean_n = self.mean_n.min(self.max).max(self.min);
-
-        assert!(
-            self.mean_n <= self.max,
-            "high mean_n: {} max: {} curr_sd: {:?} weight_ratio: {} {:?}",
-            self.mean_n,
-            self.max,
-            self.standard_deviation(),
-            weight_ratio,
-            self
-        );
-        assert!(
-            self.mean_n >= self.min,
-            "low mean_n: {} min: {} curr_sd: {:?} weight_ratio: {} {:?}",
-            self.mean_n,
-            self.min,
-            self.standard_deviation(),
-            weight_ratio,
-            self
-        );
     }
 
     pub fn mean(&self) -> Result<f64> {
