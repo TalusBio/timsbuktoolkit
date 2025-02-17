@@ -12,7 +12,7 @@ csv = "1.3.0"
 rusqlite = "0.32.0" # Timsrust constrains this dep
 indicatif = "0.17.9"
 parquet_derive = "54.0.0"
-parquet = "54.0.0"
+parquet = "54.2.0"
 
 # Workspace-inherited deps
 timsrust = { workspace = true }
