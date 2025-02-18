@@ -119,6 +119,7 @@ class MainScoreElements:
     ms2_cosine_ref_sim: list[float]
     ms2_lazyscore: list[float]
     ms2_lazyscore_vs_baseline: list[float]
+    ms2_corr_v_gauss: list[float]
     # TODO: REMOVE
     hyperscore: list[float]
     split_lazyscore: list[float]
@@ -153,6 +154,7 @@ class MainScoreElements:
             ("MS2 LazyScore Baseline", self.ms2_lazyscore_vs_baseline),
             ("Hyperscore", self.hyperscore),
             ("Split LazyScore", self.split_lazyscore),
+            ("MS2 Corr v Gauss", self.ms2_corr_v_gauss),
         ]
 
         for i, (name, score) in enumerate(score_name_pairs):
@@ -207,6 +209,7 @@ class SearchResults:
     lazyerscore: float
     norm_lazyerscore_vs_baseline: float
     lazyerscore_vs_baseline: float
+    ms2_corr_v_gauss: float
     main_score: float
     delta_next: float
     delta_second_next: float

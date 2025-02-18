@@ -42,6 +42,7 @@ pub struct SearchResultBuilder<'q> {
     ms2_cosine_ref_similarity: SetField<f32>,
     ms2_coelution_score: SetField<f32>,
     ms2_summed_transition_intensity: SetField<f32>,
+    ms2_corr_v_gauss: SetField<f32>,
 
     ms2_mz_errors: SetField<[f32; 7]>,
     ms2_mobility_errors: SetField<[f32; 7]>,
@@ -130,6 +131,7 @@ impl<'q> SearchResultBuilder<'q> {
             lazyscore,
             lazyscore_vs_baseline,
             lazyscore_z,
+            ms2_corr_v_gauss,
             npeaks,
             ms1_summed_intensity,
             ms2_summed_intensity,
@@ -155,6 +157,7 @@ impl<'q> SearchResultBuilder<'q> {
             self.npeaks = SetField::Some(npeaks);
             self.ms1_summed_precursor_intensity = SetField::Some(ms1_summed_intensity);
             self.ms2_summed_transition_intensity = SetField::Some(ms2_summed_intensity);
+            self.ms2_corr_v_gauss = SetField::Some(ms2_corr_v_gauss);
         }
 
         self
@@ -254,6 +257,9 @@ impl<'q> SearchResultBuilder<'q> {
             ms2_cosine_ref_similarity: self
                 .ms2_cosine_ref_similarity
                 .expect_some("ms2_cosine_ref_similarity", "ms2_cosine_ref_similarity")?,
+            ms2_corr_v_gauss: self
+                .ms2_corr_v_gauss
+                .expect_some("ms2_corr_v_gauss", "ms2_corr_v_gauss")?,
             ms2_summed_transition_intensity: self.ms2_summed_transition_intensity.expect_some(
                 "ms2_summed_transition_intensity",
                 "ms2_summed_transition_intensity",
@@ -338,6 +344,7 @@ pub struct IonSearchResults {
     norm_lazyerscore_vs_baseline: f32,
     ms2_cosine_ref_similarity: f32,
     ms2_coelution_score: f32,
+    ms2_corr_v_gauss: f32,
     ms2_summed_transition_intensity: f32,
 
     // MS2 - Split

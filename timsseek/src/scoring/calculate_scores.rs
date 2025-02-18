@@ -14,6 +14,7 @@ use crate::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
+use crate::scoring::corr_v_ref::calculate_cosine_with_ref_gaussian;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
     calculate_value_vs_baseline,
@@ -43,6 +44,7 @@ pub struct LongitudinalMainScoreElements {
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
+    pub ms2_corr_v_gauss: Vec<f32>,
     // TODO: REMOVE
     pub hyperscore: Vec<f32>,
     pub split_lazyscore: Vec<f32>,
@@ -158,6 +160,9 @@ impl LongitudinalMainScoreElements {
             &intensity_arrays.ms2_expected_intensities,
         )
         .unwrap();
+        // Fill missing
+        ms1_cosine_ref_sim.iter_mut().for_each(|x| if x.is_nan() { *x = 1e-3 });
+        ms2_cosine_ref_sim.iter_mut().for_each(|x| if x.is_nan() { *x = 1e-3 });
 
         // In this section a "insufficient data error" will be returned if not enough
         // data exists to calculate a score.
@@ -178,6 +183,14 @@ impl LongitudinalMainScoreElements {
 
         let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
+
+        let ms2_corr_v_gauss = match calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor) {
+            Ok(corr) => corr,
+            Err(e) => {
+                // TODO: Add context to this error ... if needed
+                return Err(e);
+            }
+        };
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
@@ -204,6 +217,7 @@ impl LongitudinalMainScoreElements {
             hyperscore,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
+            ms2_corr_v_gauss,
         })
     }
 
@@ -238,8 +252,9 @@ impl LongitudinalMainScoreElements {
             let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
             loc_score *= ms1_cos_score;
-            loc_score *= self.ms2_cosine_ref_sim[i].powi(2);
-            loc_score *= self.ms2_coelution_score[i].powi(2);
+            loc_score *= self.ms2_cosine_ref_sim[i].max(1e-3).powi(2);
+            loc_score *= self.ms2_coelution_score[i].max(1e-3).powi(2);
+            loc_score *= self.ms2_corr_v_gauss[i].max(1e-3).powi(2);
             loc_score
         })
     }
@@ -385,6 +400,7 @@ impl PreScore {
             lazyscore_vs_baseline: longitudinal_main_score_elements.ms2_lazyscore_vs_baseline
                 [max_loc],
             lazyscore_z: longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std,
+            ms2_corr_v_gauss: longitudinal_main_score_elements.ms2_corr_v_gauss[max_loc],
             // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
@@ -425,6 +441,7 @@ pub struct MainScore {
     pub lazyscore: f32,
     pub lazyscore_vs_baseline: f32,
     pub lazyscore_z: f32,
+    pub ms2_corr_v_gauss: f32,
 
     pub ms1_cosine_ref_sim: f32,
     pub ms1_coelution_score: f32,
