@@ -25,9 +25,11 @@ results.json
 
 *summary*/*.png
 *summary*/*.toml
+*summary*/*.parquet
 *human*/*.csv
 *human*/*.parquet
 *human*/*.png
 *hela*/*.parquet
 *hela*/*.csv
 *hela*/*.png
+*search_results*/*

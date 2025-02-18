@@ -1,5 +1,5 @@
 use crate::errors::TimsSeekError;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -21,14 +21,14 @@ use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities {
-    pub fragment_intensities: HashMap<SafePosition, f32>,
+    pub fragment_intensities: HashMap<IonAnnot, f32>,
     pub precursor_intensities: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
     #[serde(flatten)]
-    pub elution_group: ElutionGroup<SafePosition>,
+    pub elution_group: ElutionGroup<IonAnnot>,
     #[serde(flatten)]
     pub expected_intensities: ExpectedIntensities,
 }
@@ -37,7 +37,7 @@ pub struct ReferenceEG {
 pub struct Speclib {
     digests: Vec<DigestSlice>,
     charges: Vec<u8>,
-    queries: Vec<ElutionGroup<SafePosition>>,
+    queries: Vec<ElutionGroup<IonAnnot>>,
     expected_intensities: Vec<ExpectedIntensities>,
 }
 
@@ -85,7 +85,7 @@ impl Speclib {
 
         let (exp_int, (queries, (charges, digests))): (
             Vec<ExpectedIntensities>,
-            (Vec<ElutionGroup<SafePosition>>, (Vec<u8>, Vec<DigestSlice>)),
+            (Vec<ElutionGroup<IonAnnot>>, (Vec<u8>, Vec<DigestSlice>)),
         ) = speclib
             .into_par_iter()
             .map(|x| {

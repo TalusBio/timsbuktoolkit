@@ -1,57 +1,27 @@
-from .linear_regression import LinearRegression
-from dataclasses import dataclass, field
 import numpy as np
 from rustyms import LinearPeptide
-import math
 
-# Model pretty much translating the implementation from sage
-
-VALID_AA: str = "ACDEFGHIKLMNPQRSTVWY"
-FEATURES: int = len(VALID_AA) * 3 + 2
-N_TERMINAL: int = len(VALID_AA)
-C_TERMINAL: int = len(VALID_AA) * 2
-PEPTIDE_LEN: int = FEATURES - 3
-PEPTIDE_MASS_LN: int = FEATURES - 2
-INTERCEPT: int = FEATURES - 1
+from .linear_regression import LinearRegression
+from .ohe_peptide_embed import FEATURES, PeptideOHEEmbedder
 
 
 class SimpleRTModel(LinearRegression):
-    def embed(self, peptide: LinearPeptide) -> np.ndarray:
-        stripped_seq = peptide.stripped_sequence
-        mass = peptide.formula()[0].monoisotopic_mass()
-        return self.embed_stripped_sequence(stripped_seq, mass)
-
-    def embed_stripped_sequence(self, stripped_seq: str, mass: float) -> np.ndarray:
-        embedding = [0.0] * FEATURES
-        for aa_idx, residue in enumerate(stripped_seq):
-            try:
-                idx = VALID_AA.index(residue)
-            except ValueError:
-                raise ValueError(f"Invalid residue {residue} at position {aa_idx}")
-            embedding[idx] += 1.0
-            # Embed N- and C-terminal AA's (2 on each end, excluding K/R)
-            if aa_idx <= 1:
-                embedding[N_TERMINAL + idx] += 1.0
-            elif aa_idx >= len(stripped_seq) - 2:
-                embedding[C_TERMINAL + idx] += 1.0
-        embedding[PEPTIDE_LEN] = len(stripped_seq)
-        embedding[PEPTIDE_MASS_LN] = math.log1p(mass)
-        embedding[INTERCEPT] = 1.0
-
-        return np.array(embedding)
+    def __init__(self, weights: np.ndarray | None = None, bias: float | None = None):
+        super().__init__(weights, bias)
+        self.embedder = PeptideOHEEmbedder()
 
     def predict_peptide(self, peptide: LinearPeptide) -> float:
-        return self.predict(self.embed(peptide)).item()
+        return self.predict(self.embedder.embed(peptide)).item()
 
     def preict_peptides(self, peptides: list[LinearPeptide]) -> np.ndarray:
-        embeddings = np.stack([self.embed(peptide) for peptide in peptides], axis=0)
+        embeddings = np.stack([self.embedder.embed(peptide) for peptide in peptides], axis=0)
         assert embeddings.shape[0] == len(peptides)
         assert embeddings.shape[1] == FEATURES
         assert len(embeddings.shape) == 2
         return self.predict(embeddings)
 
     def fit_peptides(self, peptides: list[LinearPeptide], rts: np.ndarray):
-        embeddings = np.stack([self.embed(peptide) for peptide in peptides], axis=0)
+        embeddings = np.stack([self.embedder.embed(peptide) for peptide in peptides], axis=0)
         assert embeddings.shape[0] == len(peptides)
         assert embeddings.shape[1] == FEATURES
         assert len(embeddings.shape) == 2
@@ -62,7 +32,7 @@ class SimpleRTModel(LinearRegression):
     ):
         embeddings = np.stack(
             [
-                self.embed_stripped_sequence(peptide, mass)
+                self.embedder.embed_stripped_sequence(peptide, mass)
                 for peptide, mass in zip(peptides, masses, strict=True)
             ],
             axis=0,

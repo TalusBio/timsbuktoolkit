@@ -14,8 +14,8 @@ from .base import (
     PrecursorEntry,
     SpeclibElement,
 )
-from .ims import supersimpleprediction
 from .isotopes import peptide_formula_dist
+from .ml.ims import supersimpleprediction
 
 
 @dataclass

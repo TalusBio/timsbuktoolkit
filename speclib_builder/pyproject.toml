@@ -30,5 +30,5 @@ ml = [
 
 [tool.uv.sources]
 # TODO: publish this package ... maybe ...
-elfragmentadonnx = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.22.0-py3-none-any.whl" }
-elfragmentador_core = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.22.0-py3-none-any.whl" }
+elfragmentadonnx = { url = "https://github.com/TalusBio/2024_dev_talus_prospect/releases/download/v0.23.0/elfragmentadonnx-0.23.0-py3-none-any.whl" }
+elfragmentador_core = { url = "https://github.com/TalusBio/2024_dev_talus_prospect/releases/download/v0.23.0/elfragmentador_core-0.23.0-py3-none-any.whl" }

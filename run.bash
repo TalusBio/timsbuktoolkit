@@ -42,6 +42,13 @@ else
     EXTRAS=""
 fi
 
+# Stop if the results dir already exists
+if [ -d "$RESULTS_DIR" ]; then
+    echo "Results dir already exists ${RESULTS_DIR}"
+    exit 1
+fi
+
+
 cat << EOF > config_use.json
 {
     "analysis": {

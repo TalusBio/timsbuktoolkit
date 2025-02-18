@@ -6,7 +6,7 @@ use super::calculate_scores::{
     SortedErrors,
 };
 use crate::errors::DataProcessingError;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -23,13 +23,14 @@ use timsquery::ElutionGroup;
 #[derive(Debug, Default)]
 pub struct SearchResultBuilder<'q> {
     digest_slice: SetField<&'q DigestSlice>,
-    ref_eg: SetField<&'q ElutionGroup<SafePosition>>,
+    ref_eg: SetField<&'q ElutionGroup<IonAnnot>>,
     decoy_marking: SetField<DecoyMarking>,
     charge: SetField<u8>,
     nqueries: SetField<u8>,
 
     main_score: SetField<f32>,
     delta_next: SetField<f32>,
+    delta_second_next: SetField<f32>,
     rt_seconds: SetField<f32>,
     observed_mobility: SetField<f32>,
     delta_ms1_ms2_mobility: SetField<f32>,
@@ -41,6 +42,7 @@ pub struct SearchResultBuilder<'q> {
     ms2_cosine_ref_similarity: SetField<f32>,
     ms2_coelution_score: SetField<f32>,
     ms2_summed_transition_intensity: SetField<f32>,
+    ms2_corr_v_gauss: SetField<f32>,
 
     ms2_mz_errors: SetField<[f32; 7]>,
     ms2_mobility_errors: SetField<[f32; 7]>,
@@ -118,6 +120,7 @@ impl<'q> SearchResultBuilder<'q> {
         let MainScore {
             score,
             delta_next,
+            delta_second_next,
             observed_mobility,
             observed_mobility_ms1,
             observed_mobility_ms2,
@@ -128,6 +131,7 @@ impl<'q> SearchResultBuilder<'q> {
             lazyscore,
             lazyscore_vs_baseline,
             lazyscore_z,
+            ms2_corr_v_gauss,
             npeaks,
             ms1_summed_intensity,
             ms2_summed_intensity,
@@ -138,6 +142,7 @@ impl<'q> SearchResultBuilder<'q> {
             let delta_ms1_ms2_mobility = observed_mobility_ms1 - observed_mobility_ms2;
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
+            self.delta_second_next = SetField::Some(delta_second_next);
             self.observed_mobility = SetField::Some(observed_mobility);
             self.delta_ms1_ms2_mobility = SetField::Some(delta_ms1_ms2_mobility);
 
@@ -152,6 +157,7 @@ impl<'q> SearchResultBuilder<'q> {
             self.npeaks = SetField::Some(npeaks);
             self.ms1_summed_precursor_intensity = SetField::Some(ms1_summed_intensity);
             self.ms2_summed_transition_intensity = SetField::Some(ms2_summed_intensity);
+            self.ms2_corr_v_gauss = SetField::Some(ms2_corr_v_gauss);
         }
 
         self
@@ -225,6 +231,9 @@ impl<'q> SearchResultBuilder<'q> {
                 .is_target(),
             main_score: self.main_score.expect_some("main_score", "main_score")?,
             delta_next: self.delta_next.expect_some("delta_next", "delta_next")?,
+            delta_second_next: self
+                .delta_second_next
+                .expect_some("delta_second_next", "delta_second_next")?,
             delta_theo_rt,
             sq_delta_theo_rt,
             obs_rt_seconds,
@@ -248,6 +257,9 @@ impl<'q> SearchResultBuilder<'q> {
             ms2_cosine_ref_similarity: self
                 .ms2_cosine_ref_similarity
                 .expect_some("ms2_cosine_ref_similarity", "ms2_cosine_ref_similarity")?,
+            ms2_corr_v_gauss: self
+                .ms2_corr_v_gauss
+                .expect_some("ms2_corr_v_gauss", "ms2_corr_v_gauss")?,
             ms2_summed_transition_intensity: self.ms2_summed_transition_intensity.expect_some(
                 "ms2_summed_transition_intensity",
                 "ms2_summed_transition_intensity",
@@ -316,6 +328,7 @@ pub struct IonSearchResults {
     // Combined
     pub main_score: f32,
     pub delta_next: f32,
+    pub delta_second_next: f32,
     pub obs_rt_seconds: f32,
     obs_mobility: f32,
     delta_theo_rt: f32,
@@ -331,6 +344,7 @@ pub struct IonSearchResults {
     norm_lazyerscore_vs_baseline: f32,
     ms2_cosine_ref_similarity: f32,
     ms2_coelution_score: f32,
+    ms2_corr_v_gauss: f32,
     ms2_summed_transition_intensity: f32,
 
     // MS2 - Split

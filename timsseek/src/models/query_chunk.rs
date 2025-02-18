@@ -1,6 +1,6 @@
 use super::digest::DigestSlice;
 use crate::data_sources::speclib::ExpectedIntensities;
-use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::fragment_mass::IonAnnot;
 use rayon::iter::Zip as RayonZip;
 use rayon::prelude::*;
 use rayon::vec::IntoIter as RayonVecIntoIter;
@@ -10,7 +10,7 @@ use timsquery::models::elution_group::ElutionGroup;
 pub struct NamedQueryChunk {
     pub digests: Vec<DigestSlice>,
     pub charges: Vec<u8>,
-    pub queries: Vec<ElutionGroup<SafePosition>>,
+    pub queries: Vec<ElutionGroup<IonAnnot>>,
     pub expected_intensities: Vec<ExpectedIntensities>,
 }
 
@@ -18,7 +18,7 @@ impl NamedQueryChunk {
     pub fn new(
         digests: Vec<DigestSlice>,
         charges: Vec<u8>,
-        queries: Vec<ElutionGroup<SafePosition>>,
+        queries: Vec<ElutionGroup<IonAnnot>>,
         expected_intensities: Vec<ExpectedIntensities>,
     ) -> Self {
         assert_eq!(digests.len(), charges.len());
@@ -37,7 +37,7 @@ impl NamedQueryChunk {
     ) -> RayonZip<
         RayonVecIntoIter<ExpectedIntensities>,
         RayonZip<
-            RayonVecIntoIter<ElutionGroup<SafePosition>>,
+            RayonVecIntoIter<ElutionGroup<IonAnnot>>,
             RayonZip<RayonVecIntoIter<DigestSlice>, RayonVecIntoIter<u8>>,
         >,
     > {
