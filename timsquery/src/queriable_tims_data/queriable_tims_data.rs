@@ -1,4 +1,5 @@
 use crate::traits::aggregator::ProvidesContext;
+use crate::traits::key_like::KeyLike;
 use crate::{
     Aggregator,
     ElutionGroup,
@@ -7,8 +8,6 @@ use crate::{
     ToleranceAdapter,
 };
 use rayon::prelude::*;
-use serde::Serialize;
-use std::hash::Hash;
 use std::time::Instant;
 use tracing::{
     debug,
@@ -63,7 +62,7 @@ where
     QD: QueriableData<QF, AE1, CTX1> + ToleranceAdapter<QF, ElutionGroup<FH>>,
     TL: Tolerance,
     OE: Send + Sync,
-    FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug,
+    FH: KeyLike,
     QF: Send + Sync + ProvidesContext<Context = CTX1>,
     AE1: Into<AE2> + Send + Sync + Clone + Copy,
     AE2: Send + Sync + Clone + From<AE1> + Copy,

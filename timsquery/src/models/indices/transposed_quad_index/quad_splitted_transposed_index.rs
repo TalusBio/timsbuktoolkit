@@ -25,6 +25,7 @@ use crate::models::queries::{
     MsLevelContext,
 };
 use crate::traits::aggregator::Aggregator;
+use crate::traits::key_like::KeyLike;
 use crate::traits::queriable_data::QueriableData;
 use crate::utils::display::{
     GlimpseConfig,
@@ -353,8 +354,7 @@ impl QuadSplittedTransposedIndexBuilder {
     }
 }
 
-impl<FH: Eq + Hash + Clone + Serialize + Send + Sync>
-    QueriableData<FragmentGroupIndexQuery<FH>, RawPeak, MsLevelContext<usize, FH>>
+impl<FH: KeyLike> QueriableData<FragmentGroupIndexQuery<FH>, RawPeak, MsLevelContext<usize, FH>>
     for QuadSplittedTransposedIndex
 {
     fn query(&self, fragment_query: &FragmentGroupIndexQuery<FH>) -> Vec<RawPeak> {

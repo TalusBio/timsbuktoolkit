@@ -1,10 +1,10 @@
 use super::super::streaming_aggregator::RunningStatsCalculator;
-use crate::sort_vecs_by_first;
 
 use nohash_hasher::BuildNoHashHasher;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
+use std::sync::Arc;
 
 /// A struct that can be used to calculate the mean and variance
 /// of a stream of weighted tof and scan numbers.
@@ -62,13 +62,12 @@ impl ChromatomobilogramStats {
 /// across the chromatogram.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ChromatomobilogramStatsArrays {
-    pub retention_time_miliseconds: Vec<u32>,
+    pub retention_time_miliseconds: Arc<[u32]>,
     pub tof_index_means: Vec<f64>,
-    pub tof_index_sds: Vec<f64>,
+    // pub tof_index_sds: Vec<f64>,
     pub scan_index_means: Vec<f64>,
-    pub scan_index_sds: Vec<f64>,
+    // pub scan_index_sds: Vec<f64>,
     pub intensities: Vec<u64>,
-    pub expected_intensity: Option<f64>,
     pub expected_tof_index: u32,
     pub expected_scan_index: usize,
 }
@@ -79,27 +78,26 @@ impl ChromatomobilogramStatsArrays {
         Self::default()
     }
 
-    pub fn sort_by_rt(&mut self) {
-        let x = sort_vecs_by_first!(
-            &mut self.retention_time_miliseconds,
-            &mut self.tof_index_means,
-            &mut self.tof_index_sds,
-            &mut self.scan_index_means,
-            &mut self.scan_index_sds,
-            &mut self.intensities
-        );
-        self.retention_time_miliseconds = x.0;
-        self.tof_index_means = x.1;
-        self.tof_index_sds = x.2;
-        self.scan_index_means = x.3;
-        self.scan_index_sds = x.4;
-        self.intensities = x.5;
+    pub fn empty_with_rts(
+        rts: Arc<[u32]>,
+        expected_tof_index: u32,
+        expected_scan_index: usize,
+    ) -> Self {
+        let lens = rts.len();
+        Self {
+            retention_time_miliseconds: rts,
+            tof_index_means: vec![f64::NAN; lens],
+            // tof_index_sds: vec![f64::NAN; lens],
+            scan_index_means: vec![f64::NAN; lens],
+            // scan_index_sds: vec![f64::NAN; lens],
+            intensities: vec![0; lens],
+            expected_tof_index,
+            expected_scan_index,
+        }
     }
 
     pub fn is_sorted(&self) -> bool {
-        self.retention_time_miliseconds
-            .windows(2)
-            .all(|x| x[0] <= x[1])
+        self.retention_time_miliseconds.is_sorted()
     }
 
     pub fn len(&self) -> usize {

@@ -28,3 +28,7 @@ tasks:
   bench:
     cmds:
       - task: timsquery:bench
+
+  todos:
+    cmds:
+      - grep -H -R TODO tims*/src

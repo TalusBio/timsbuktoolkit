@@ -307,7 +307,7 @@ pub fn execute_query(
                         converters: (index.mz_converter, index.im_converter),
                         _phantom: std::marker::PhantomData::<String>,
                     };
-                    execute_query_inner!(index, |x| factory.build_with_elution_group(x));
+                    execute_query_inner!(index, |x| factory.build_with_elution_group(x, None));
                 }
             }
         }
@@ -327,7 +327,7 @@ pub fn execute_query(
                         converters: (index.mz_converter, index.im_converter),
                         _phantom: std::marker::PhantomData::<String>,
                     };
-                    execute_query_inner!(index, |x| factory.build_with_elution_group(x));
+                    execute_query_inner!(index, |x| factory.build_with_elution_group(x, None));
                 }
             }
         }

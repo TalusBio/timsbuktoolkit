@@ -43,7 +43,7 @@ def query_server(host="localhost", port: int = YOUR_PORT, query_data: dict = {})
         except socket.timeout:
             pass  # It's okay if we timeout after receiving data
 
-        print(chunks)
+        # print(chunks)
         response = b"".join(chunks).decode("utf-8")
 
         try:
@@ -85,7 +85,6 @@ class ArrayResponse:
     intensities: dict[str, list]
     mz_means: dict[str, list]
     retention_time_miliseconds: list[int]
-    summed_intensity: list[int]
     weighted_ims_mean: list[float]
 
     def plot_transition(self, min_rt, max_rt):
@@ -104,40 +103,6 @@ class ArrayResponse:
         fig.tight_layout()
         return fig
 
-    def plot_transition_derivatives(self, min_rt, max_rt):
-        rt_use = np.array(self.retention_time_miliseconds)
-        ranges = np.searchsorted(rt_use, [min_rt, max_rt])
-        rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
-
-        fig, ax = plt.subplots()
-        for k, v in self.intensities.items():
-            ax.plot(
-                rt_plot,
-                np.gradient(v[ranges[0] : ranges[1]], 1.0),
-                label=k,
-            )
-
-        ax.set_xlabel("Retention Time (min)")
-        ax.set_ylabel("Intensity Derivative")
-        return fig
-
-    def plot_second_derivatives(self, min_rt, max_rt):
-        rt_use = np.array(self.retention_time_miliseconds)
-        ranges = np.searchsorted(rt_use, [min_rt, max_rt])
-        rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
-
-        fig, ax = plt.subplots()
-        for k, v in self.intensities.items():
-            ax.plot(
-                rt_plot,
-                np.gradient(np.gradient(v[ranges[0] : ranges[1]], 1.0), 1.0),
-                label=k,
-            )
-
-        ax.set_xlabel("Retention Time (min)")
-        ax.set_ylabel("Second Derivative")
-        return fig
-
 
 @dataclass
 class Extractions:
@@ -154,59 +119,78 @@ class MainScoreElements:
     ms2_cosine_ref_sim: list[float]
     ms2_lazyscore: list[float]
     ms2_lazyscore_vs_baseline: list[float]
+    ms2_corr_v_gauss: list[float]
+    # TODO: REMOVE
+    hyperscore: list[float]
+    split_lazyscore: list[float]
+    # END
+
     ref_time_ms: list[int]
     ms2_lazyscore_vs_baseline_std: float
 
     def plot(self, min_rt_ms, max_rt_ms, vlines_ms: list[int] | None = None):
         # Make a plot grid, where each row is a different score element
         # but all share the same retention time axis
-        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(10, 12))
+        ncol = 3
+        nrow = 3
+        fig, ax = plt.subplots(nrows=nrow, ncols=ncol, figsize=(10, 12))
 
         rt_use = np.array(self.ref_time_ms)
         ranges = np.searchsorted(rt_use, [min_rt_ms, max_rt_ms])
         rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
 
-        ax[0, 0].plot(rt_plot, self.ms1_coelution_score[ranges[0] : ranges[1]])
-        ax[0, 0].set_title("MS1 Coelution Score")
-        ax[0, 1].plot(rt_plot, self.ms1_cosine_ref_sim[ranges[0] : ranges[1]])
-        ax[0, 1].set_title("MS1 Cosine Ref Sim")
-        ax[0, 2].plot(rt_plot, self.ms2_lazyscore_vs_baseline[ranges[0] : ranges[1]])
-        ax[0, 2].set_title("MS2 LazyScore Baseline")
+        mask_label = np.zeros(len(self.ref_time_ms), dtype=bool)
+        if vlines_ms is not None:
+            for vline in vlines_ms:
+                local_range = np.searchsorted(rt_use, [vline - 5_000, vline + 5_000])
+                mask_label[local_range[0] : local_range[1]] = True
 
-        ax[1, 0].plot(rt_plot, self.ms2_coelution_score[ranges[0] : ranges[1]])
-        ax[1, 0].set_title("MS2 Coelution Score")
-        ax[1, 1].plot(rt_plot, self.ms2_cosine_ref_sim[ranges[0] : ranges[1]])
-        ax[1, 1].set_title("MS2 Cosine Ref Sim")
-        ax[1, 2].plot(rt_plot, self.ms2_lazyscore[ranges[0] : ranges[1]])
-        ax[1, 2].set_title("MS2 LazyScore")
+        score_name_pairs = [
+            ("MS1 Coelution Score", self.ms1_coelution_score),
+            ("MS1 Cosine Ref Sim", self.ms1_cosine_ref_sim),
+            ("MS2 Coelution Score", self.ms2_coelution_score),
+            ("MS2 Cosine Ref Sim", self.ms2_cosine_ref_sim),
+            ("MS2 LazyScore", self.ms2_lazyscore),
+            ("MS2 LazyScore Baseline", self.ms2_lazyscore_vs_baseline),
+            ("Hyperscore", self.hyperscore),
+            ("Split LazyScore", self.split_lazyscore),
+            ("MS2 Corr v Gauss", self.ms2_corr_v_gauss),
+        ]
 
-        #  ax[2, 0].plot(rt_plot, self.ms2_lazyscore_vs_baseline_std[ranges[0] : ranges[1]])
-        #  ax[2, 0].set_title("MS2 LazyScore Baseline STD")
+        for i, (name, score) in enumerate(score_name_pairs):
+            local_score = np.array(score).astype(float)
+            score_ir = local_score[mask_label]
+            score_or = local_score[~mask_label]
+
+            # Signal to noise ratio would be (max(ir) - max(or))/std(or)
+            max_ir = np.nanmax(score_ir) if len(score_ir) > 0 else 0
+            max_or = np.nanmax(score_or) if len(score_or) > 0 else 0
+            std_or = np.nanstd(score_or) if len(score_or) > 0 else 1e-3
+            snr = (max_ir - max_or) / std_or
+
+            ax[i // ncol, i % ncol].plot(rt_plot, score[ranges[0] : ranges[1]])
+            ax[i // ncol, i % ncol].set_title(name)
+
+            ax[i // ncol, i % ncol].text(
+                0.95,
+                0.95,
+                f"SNR: {np.round(snr, 2)}",
+                transform=ax[i // ncol, i % ncol].transAxes,
+                ha="right",
+                va="top",
+            )
 
         if vlines_ms is not None:
             vlines_minutes = np.array(vlines_ms) / 1000 / 60
-            for i in range(len(vlines_minutes)):
-                ax[0, 0].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[0, 1].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[0, 2].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[1, 0].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[1, 1].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
-                ax[1, 2].axvline(
-                    x=vlines_minutes[i], color="k", linestyle="--", alpha=0.5
-                )
+            for li in range(len(vlines_minutes)):
+                for r in range(nrow):
+                    for c in range(ncol):
+                        ax[r, c].axvline(
+                            x=vlines_minutes[li], color="k", linestyle="--", alpha=0.5
+                        )
 
-        for i in range(2):
-            for j in range(3):
+        for i in range(nrow):
+            for j in range(ncol):
                 ax[i, j].set_xlabel("Retention Time (min)")
 
         fig.tight_layout()
@@ -225,8 +209,10 @@ class SearchResults:
     lazyerscore: float
     norm_lazyerscore_vs_baseline: float
     lazyerscore_vs_baseline: float
+    ms2_corr_v_gauss: float
     main_score: float
     delta_next: float
+    delta_second_next: float
     nqueries: int
     ms1_coelution_score: float
     ms1_cosine_ref_similarity: float
@@ -396,6 +382,10 @@ def input_compoinent() -> PeptideElement:
             ("TLSDYNIQK", 2, "TLSDYNIQK"),
             ("ESTLHLVLR", 2, "ELVLHLTSR"),
             ("DIKPENLLLGSAGELK", 3, "DLEGASGLLLNEPKIK"),
+            ("VTEGLTDVILYHQPDDK", 3, "KFEEFQTDMAAHEER"),
+            ("IAQDLEMYGVNYFSIK", 2, "STGNFLTLTQAIDK"),
+            ("TFEMSDFIVDTR", 2, "MTGLVDEAIDTK"),
+            ("VIVDFSSPNIAK", 2, "ELLGQGLLLR"),
         ]
         edict = {f"{k} - {w}": (k, v, w) for k, v, w in examples}
         picked = st.selectbox("Example", list(edict.keys()))
@@ -489,9 +479,13 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     if subtitle is not None:
         column.subheader(subtitle)
 
+    if isinstance(data, str):
+        column.error(data)
+        st.stop()
+
     if data["status"] != "success":
         column.write(str(data))
-        column.stop()
+        st.stop()
 
     res: Response = dataclass_from_dict(Response, data)
     main_score = res.data.search_results.main_score
@@ -502,18 +496,20 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     best_rt = res.data.search_results.obs_rt_seconds / 60
     min_rt = (res.data.main_score_elements.min_rt() / 1000) / 60
     max_rt = (res.data.main_score_elements.max_rt() / 1000) / 60
+    default_min = best_rt - 0.5
+    default_max = best_rt + 0.5
     min_rt_show = column.slider(
         "Minimum retention time (minutes)",
-        min_rt,
-        max_rt,
-        min_rt,
+        min_value=min_rt,
+        max_value=max_rt,
+        value=default_min,
         key=key_prefix + "min_rt",
     )
     max_rt_show = column.slider(
         "Maximum retention time (minutes)",
-        min_rt,
-        max_rt,
-        max_rt,
+        max_value=max_rt,
+        min_value=min_rt,
+        value=default_max,
         key=key_prefix + "max_rt",
     )
 
@@ -535,18 +531,6 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     column.pyplot(fig, clear_figure=True, use_container_width=True)
 
     fig = res.data.extractions.ms2_arrays.plot_transition(
-        min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
-    )
-    plt.axvline(x=best_rt, color="red", alpha=0.5)
-    column.pyplot(fig, clear_figure=True, use_container_width=True)
-
-    fig = res.data.extractions.ms2_arrays.plot_transition_derivatives(
-        min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
-    )
-    plt.axvline(x=best_rt, color="red", alpha=0.5)
-    column.pyplot(fig, clear_figure=True, use_container_width=True)
-
-    fig = res.data.extractions.ms2_arrays.plot_second_derivatives(
         min_rt_show * 1000 * 60, max_rt_show * 1000 * 60
     )
     plt.axvline(x=best_rt, color="red", alpha=0.5)

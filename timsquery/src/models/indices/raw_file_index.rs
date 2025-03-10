@@ -6,15 +6,13 @@ use crate::models::queries::{
     MsLevelContext,
 };
 use crate::traits::aggregator::Aggregator;
+use crate::traits::key_like::KeyLike;
 use crate::traits::queriable_data::QueriableData;
 use crate::{
     ElutionGroup,
     ToleranceAdapter,
 };
 use rayon::iter::ParallelIterator;
-use serde::Serialize;
-use std::fmt::Debug;
-use std::hash::Hash;
 use timsrust::readers::{
     FrameReader,
     FrameReaderError,
@@ -44,12 +42,7 @@ impl RawFileIndex {
         })
     }
 
-    fn apply_on_query<
-        'c,
-        'b: 'c,
-        'a: 'b,
-        FH: Clone + Eq + Serialize + Hash + Debug + Send + Sync + Copy,
-    >(
+    fn apply_on_query<'c, 'b: 'c, 'a: 'b, FH: KeyLike>(
         &'a self,
         fqs: &'b FragmentGroupIndexQuery<FH>,
         fun: &'c mut dyn for<'r> FnMut(RawPeak),
@@ -88,9 +81,7 @@ impl RawFileIndex {
         self.file_reader.parallel_filter(lambda_use)
     }
 
-    fn queries_from_elution_elements_impl<
-        FH: Clone + Eq + Serialize + Hash + Send + Sync + Copy + std::fmt::Debug,
-    >(
+    fn queries_from_elution_elements_impl<FH: KeyLike>(
         &self,
         tol: &dyn crate::traits::tolerance::Tolerance,
         elution_elements: &crate::models::elution_group::ElutionGroup<FH>,
@@ -99,8 +90,7 @@ impl RawFileIndex {
     }
 }
 
-impl<FH: Hash + Copy + Clone + Serialize + Eq + Debug + Send + Sync>
-    QueriableData<FragmentGroupIndexQuery<FH>, RawPeak, MsLevelContext<usize, FH>>
+impl<FH: KeyLike> QueriableData<FragmentGroupIndexQuery<FH>, RawPeak, MsLevelContext<usize, FH>>
     for RawFileIndex
 {
     fn query(&self, fragment_query: &FragmentGroupIndexQuery<FH>) -> Vec<RawPeak> {
@@ -137,9 +127,7 @@ impl<FH: Hash + Copy + Clone + Serialize + Eq + Debug + Send + Sync>
     }
 }
 
-impl<FH: Hash + Serialize + Eq + Clone + Send + Sync + Copy + std::fmt::Debug>
-    ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>> for RawFileIndex
-{
+impl<FH: KeyLike> ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>> for RawFileIndex {
     fn query_from_elution_group(
         &self,
         tol: &dyn crate::traits::tolerance::Tolerance,

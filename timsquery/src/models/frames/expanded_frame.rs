@@ -815,14 +815,11 @@ pub fn par_lazy_centroid_frameslices(
     mz_converter: &Tof2MzConverter,
 ) -> Vec<ExpandedFrameSlice<SortedState>> {
     assert!(
-        frameslices
-            .windows(2)
-            .map(|window| {
-                let a = &window[0];
-                let b = &window[1];
-                a.rt < b.rt && a.quadrupole_settings == b.quadrupole_settings
-            })
-            .all(|x| x),
+        frameslices.windows(2).all(|window| {
+            let a = &window[0];
+            let b = &window[1];
+            a.rt < b.rt && a.quadrupole_settings == b.quadrupole_settings
+        }),
         "All frames should be sorted by rt and have the same quad settings"
     );
 

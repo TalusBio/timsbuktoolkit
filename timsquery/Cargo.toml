@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 nohash-hasher = "=0.2.0"
-indicatif = { version = "0.17.9", features = ["rayon"] }
 tabled = "0.17.0"
 
 tracing-bunyan-formatter = "0.3.10"
@@ -19,11 +18,12 @@ rand_chacha = { version = "0.3.1", optional = true }
 # Workspace-inherited deps
 clap = { workspace = true, features = ["derive"], optional = true }
 timsrust = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
+indicatif = { workspace = true, features = ["rayon"] }
 
 [features]
 clap = ["dep:clap"]
