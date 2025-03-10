@@ -1,18 +1,19 @@
 use crate::errors::Result;
-use crate::models::{RTMajorIntensityArray, MzMajorIntensityArray};
+use crate::models::{
+    MzMajorIntensityArray,
+    RTMajorIntensityArray,
+};
 use crate::utils::correlation::cosine_similarity;
-use serde::Serialize;
-use std::hash::Hash;
+use timsquery::traits::key_like::KeyLike;
 
-pub fn calculate_cosine_with_ref<FH: Clone + Eq + Serialize + Hash + Send + Sync>(
+pub fn calculate_cosine_with_ref<FH: KeyLike>(
     slices: &RTMajorIntensityArray<FH>,
     ref_slice: &[f32],
 ) -> Result<Vec<f32>> {
     slices
         .arr
         .row_apply(|slice| cosine_similarity(slice, ref_slice))
-        .into_iter()
-        .collect::<Result<Vec<f32>>>()
+        .collect()
 }
 
 // From https://doi.org/10.1101/2024.11.19.624419
@@ -20,10 +21,12 @@ const REF_GAUSSIAN: [f32; 7] = [0.0044, 0.054, 0.242, 0.399, 0.242, 0.054, 0.004
 const REF_GAUSS_OFFSET: usize = 4;
 
 fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32>> + '_ {
-    slice.windows(7).map(|window| cosine_similarity(window, &REF_GAUSSIAN))
+    slice
+        .windows(7)
+        .map(|window| cosine_similarity(window, &REF_GAUSSIAN))
 }
 
-pub fn calculate_cosine_with_ref_gaussian<FH: Clone + Eq + Serialize + Hash + Send + Sync>(
+pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
     slices: &MzMajorIntensityArray<FH>,
 ) -> Result<Vec<f32>> {
     let mut result = vec![0.0; slices.arr.ncols()];
@@ -38,7 +41,7 @@ pub fn calculate_cosine_with_ref_gaussian<FH: Clone + Eq + Serialize + Hash + Se
                             continue;
                         }
                         result[i + REF_GAUSS_OFFSET] += v.max(0.0);
-                    } 
+                    }
                 }
             }
             Ok(())
@@ -53,9 +56,29 @@ pub fn calculate_cosine_with_ref_gaussian<FH: Clone + Eq + Serialize + Hash + Se
 
 #[test]
 fn test_calculate_cosine_with_ref_gaussian() {
-    let test_vec = (0..3).into_iter().map(|_| REF_GAUSSIAN).flatten().collect::<Vec<f32>>();
+    let test_vec = (0..3)
+        .into_iter()
+        .map(|_| REF_GAUSSIAN)
+        .flatten()
+        .collect::<Vec<f32>>();
     let out = slide_cosine_v_gaussian(&test_vec).collect::<Result<Vec<f32>>>();
-    let expect_out = [1.0000001, 0.7786916, 0.36945745, 0.122937046, 0.122937046, 0.3694575, 0.77869165, 1.0000001, 0.7786916, 0.36945745, 0.122937046, 0.122937046, 0.3694575, 0.77869165, 1.0000001];
+    let expect_out = [
+        1.0000001,
+        0.7786916,
+        0.36945745,
+        0.122937046,
+        0.122937046,
+        0.3694575,
+        0.77869165,
+        1.0000001,
+        0.7786916,
+        0.36945745,
+        0.122937046,
+        0.122937046,
+        0.3694575,
+        0.77869165,
+        1.0000001,
+    ];
     assert!(out.is_ok());
 
     let out = out.unwrap();

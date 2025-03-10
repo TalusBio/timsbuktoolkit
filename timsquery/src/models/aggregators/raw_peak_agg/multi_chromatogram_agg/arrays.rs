@@ -80,8 +80,8 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
             retention_times_ms: uniq_rts,
             transition_stats,
             transition_keys: keys,
-            expected_tof_indices: expected_tof_indices,
-            expected_scan_index: expected_scan_index,
+            expected_tof_indices,
+            expected_scan_index,
         }
     }
 
@@ -135,8 +135,8 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
             retention_times_ms: uniq_rts,
             transition_stats,
             transition_keys: keys,
-            expected_tof_indices: expected_tof_indices,
-            expected_scan_index: expected_scan_index,
+            expected_tof_indices,
+            expected_scan_index,
         }
     }
 }

@@ -2,9 +2,9 @@ use crate::traits::aggregator::{
     NoContext,
     ProvidesContext,
 };
+use crate::traits::key_like::KeyLike;
 use crate::utils::tolerance_ranges::IncludedRange;
 use std::collections::HashMap;
-use std::hash::Hash;
 use timsrust::converters::{
     ConvertableDomain,
     Scan2ImConverter,
@@ -34,12 +34,12 @@ pub enum MsLevelContext<T1, T2> {
 }
 
 #[derive(Debug, Clone)]
-pub struct FragmentGroupIndexQuery<FH: Clone + Eq + Hash + Send + Sync> {
+pub struct FragmentGroupIndexQuery<FH: KeyLike> {
     pub mz_index_ranges: HashMap<FH, IncludedRange<u32>>,
     pub precursor_query: PrecursorIndexQuery,
 }
 
-impl<FH: Clone + Eq + Hash + Send + Sync> ProvidesContext for FragmentGroupIndexQuery<FH> {
+impl<FH: KeyLike> ProvidesContext for FragmentGroupIndexQuery<FH> {
     type Context = MsLevelContext<usize, FH>;
 }
 
@@ -64,7 +64,7 @@ impl Into<NoContext> for MsLevelContext<usize, String> {
     }
 }
 
-impl<FH: Clone + Eq + Hash + Send + Sync> FragmentGroupIndexQuery<FH> {
+impl<FH: KeyLike> FragmentGroupIndexQuery<FH> {
     // TODO find if there is a good way to specify in the type that the
     // Only a specific context is returned from each function.
 

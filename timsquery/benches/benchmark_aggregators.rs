@@ -6,7 +6,6 @@ use std::time::{
 use timsquery::Aggregator;
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::aggregator::ParitionedCMGAggregator;
 use timsquery::models::aggregators::{
-    MultiCMGStatsAgg,
     RawPeakIntensityAggregator,
     RawPeakVectorAggregator,
 };
@@ -30,13 +29,7 @@ fn bench_paritioned_cmg_agg(referenced: bool) -> Duration {
     let mut tot = Duration::from_millis(0);
 
     let ref_rt: Option<Arc<[u32]>> = if referenced {
-        Some(
-            (0..=2000)
-                .map(|x| x * 10)
-                .into_iter()
-                .collect::<Vec<u32>>()
-                .into(),
-        )
+        Some((0..=2000).map(|x| x * 10).collect::<Vec<u32>>().into())
     } else {
         None
     };

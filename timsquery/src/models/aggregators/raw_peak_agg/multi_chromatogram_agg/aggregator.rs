@@ -8,7 +8,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
-use tracing::error;
 
 pub type SparseRTCollection = HashMap<u32, ScanTofStatsCalculatorPair, BuildNoHashHasher<u32>>;
 
@@ -92,7 +91,7 @@ impl DenseRTCollection {
             // If we are less than 1 second above the end, we can just subtract 1.
             let diff = rt_ms - self.reference_rt_ms[pos - 1];
             if diff < 1_000 {
-                pos = pos - 1;
+                pos -= 1;
             }
         }
         // ~ This version is only ~5% faster (which I personally find surprising),

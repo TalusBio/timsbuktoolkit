@@ -7,13 +7,14 @@ import numpy as np
 # from rustyms import LinearPeptide
 # from .ohe_peptide_embed import PeptideOHEEmbedder, FEATURES
 
-@overload
-def supersimpleprediction(mz: np.ndarray, charge: np.ndarray) -> np.ndarray:
-    ...
 
 @overload
-def supersimpleprediction(mz: float, charge: int) -> float:
-    ...
+def supersimpleprediction(mz: np.ndarray, charge: np.ndarray) -> np.ndarray: ...
+
+
+@overload
+def supersimpleprediction(mz: float, charge: int) -> float: ...
+
 
 def supersimpleprediction(mz: float | np.ndarray, charge: int | np.ndarray):
     intercept_ = -1.660e00

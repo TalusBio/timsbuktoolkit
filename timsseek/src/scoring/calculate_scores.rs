@@ -161,8 +161,16 @@ impl LongitudinalMainScoreElements {
         )
         .unwrap();
         // Fill missing
-        ms1_cosine_ref_sim.iter_mut().for_each(|x| if x.is_nan() { *x = 1e-3 });
-        ms2_cosine_ref_sim.iter_mut().for_each(|x| if x.is_nan() { *x = 1e-3 });
+        ms1_cosine_ref_sim.iter_mut().for_each(|x| {
+            if x.is_nan() {
+                *x = 1e-3
+            }
+        });
+        ms2_cosine_ref_sim.iter_mut().for_each(|x| {
+            if x.is_nan() {
+                *x = 1e-3
+            }
+        });
 
         // In this section a "insufficient data error" will be returned if not enough
         // data exists to calculate a score.
@@ -184,26 +192,30 @@ impl LongitudinalMainScoreElements {
         let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
 
-        let ms2_corr_v_gauss = match calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor) {
-            Ok(corr) => corr,
-            Err(e) => {
-                // TODO: Add context to this error ... if needed
-                return Err(e);
-            }
-        };
+        let mut ms2_corr_v_gauss =
+            match calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor) {
+                Ok(corr) => corr,
+                Err(e) => {
+                    // TODO: Add context to this error ... if needed
+                    return Err(e);
+                }
+            };
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
         gaussblur(&mut ms2_coelution_score);
         gaussblur(&mut ms2_cosine_ref_sim);
         gaussblur(&mut ms1_cosine_ref_sim);
+        gaussblur(&mut ms2_corr_v_gauss);
+        gaussblur(&mut hyperscore);
+        gaussblur(&mut split_lazyscore);
 
         let five_pct_index = ref_time_ms.len() * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
         let lzb_std = calculate_centered_std(
             &lazyscore_vs_baseline
-                [(half_five_pct_idnex)..(&lazyscore_vs_baseline.len() - half_five_pct_idnex)],
+                [(half_five_pct_idnex)..(lazyscore_vs_baseline.len() - half_five_pct_idnex)],
         );
 
         Ok(Self {
@@ -246,10 +258,11 @@ impl LongitudinalMainScoreElements {
             // since the similarity is in the 0-1 range; even if the precursor has
             // similarity of 0, we still have a scoring value.
 
-            let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i].powi(2));
+            let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i].max(1e-3).powi(2));
             // let ms1_cos_score = self.ms1_cosine_ref_sim[i].powi(2);
-            // let mut loc_score = self.ms2_lazyscore[i];
-            let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
+            let mut loc_score = self.ms2_lazyscore[i];
+            // let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
+            // let mut loc_score = self.split_lazyscore[i];
             // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
             loc_score *= ms1_cos_score;
             loc_score *= self.ms2_cosine_ref_sim[i].max(1e-3).powi(2);

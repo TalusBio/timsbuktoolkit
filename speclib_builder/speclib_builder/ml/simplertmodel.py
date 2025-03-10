@@ -14,14 +14,18 @@ class SimpleRTModel(LinearRegression):
         return self.predict(self.embedder.embed(peptide)).item()
 
     def preict_peptides(self, peptides: list[LinearPeptide]) -> np.ndarray:
-        embeddings = np.stack([self.embedder.embed(peptide) for peptide in peptides], axis=0)
+        embeddings = np.stack(
+            [self.embedder.embed(peptide) for peptide in peptides], axis=0
+        )
         assert embeddings.shape[0] == len(peptides)
         assert embeddings.shape[1] == FEATURES
         assert len(embeddings.shape) == 2
         return self.predict(embeddings)
 
     def fit_peptides(self, peptides: list[LinearPeptide], rts: np.ndarray):
-        embeddings = np.stack([self.embedder.embed(peptide) for peptide in peptides], axis=0)
+        embeddings = np.stack(
+            [self.embedder.embed(peptide) for peptide in peptides], axis=0
+        )
         assert embeddings.shape[0] == len(peptides)
         assert embeddings.shape[1] == FEATURES
         assert len(embeddings.shape) == 2

@@ -954,7 +954,6 @@ class MLPKFoldModel:
                         )
                         break
 
-
             # Save best model
             model.load_state_dict(best_model)
             self.models[i] = model

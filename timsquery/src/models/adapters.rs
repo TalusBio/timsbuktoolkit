@@ -4,9 +4,8 @@ use crate::models::queries::{
     FragmentGroupIndexQuery,
     PrecursorIndexQuery,
 };
+use crate::traits::key_like::KeyLike;
 use crate::utils::tolerance_ranges::IncludedRange;
-use serde::Serialize;
-use std::hash::Hash;
 use timsrust::Metadata;
 use timsrust::converters::ConvertableDomain;
 
@@ -21,8 +20,8 @@ impl From<Metadata> for FragmentIndexAdapter {
     }
 }
 
-impl<FH: Clone + Serialize + Eq + Hash + Send + Sync + std::fmt::Debug>
-    ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>> for FragmentIndexAdapter
+impl<FH: KeyLike> ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>>
+    for FragmentIndexAdapter
 {
     fn query_from_elution_group(
         &self,

@@ -382,6 +382,10 @@ def input_compoinent() -> PeptideElement:
             ("TLSDYNIQK", 2, "TLSDYNIQK"),
             ("ESTLHLVLR", 2, "ELVLHLTSR"),
             ("DIKPENLLLGSAGELK", 3, "DLEGASGLLLNEPKIK"),
+            ("VTEGLTDVILYHQPDDK", 3, "KFEEFQTDMAAHEER"),
+            ("IAQDLEMYGVNYFSIK", 2, "STGNFLTLTQAIDK"),
+            ("TFEMSDFIVDTR", 2, "MTGLVDEAIDTK"),
+            ("VIVDFSSPNIAK", 2, "ELLGQGLLLR"),
         ]
         edict = {f"{k} - {w}": (k, v, w) for k, v, w in examples}
         picked = st.selectbox("Example", list(edict.keys()))

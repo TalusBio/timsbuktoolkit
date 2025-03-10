@@ -9,6 +9,8 @@ use crate::errors::{
     Result,
 };
 
+use timsquery::traits::key_like::KeyLike;
+
 /// Implements a way to represent an array of
 /// dimensions x-y that will be later used to
 /// implement an mz-major and a rt-major array
@@ -300,7 +302,7 @@ pub struct MzMajorIntensityArray<K: Clone> {
     pub rts_ms: Arc<[u32]>,
 }
 
-impl<'a, K: Clone + Eq + Serialize + Hash + Send + Sync + Debug> MzMajorIntensityArray<K> {
+impl<K: Clone + Eq + Serialize + Hash + Send + Sync + Debug> MzMajorIntensityArray<K> {
     pub fn new(
         array: &PartitionedCMGArrayStats<K>,
         order: Arc<[K]>,
@@ -345,7 +347,7 @@ impl<'a, K: Clone + Eq + Serialize + Hash + Send + Sync + Debug> MzMajorIntensit
 //       mz-major array. and implement the serialization so it preserves the
 //       output (I like the current serialization but its not great as a mem
 //       layout)
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> RTMajorIntensityArray<FH> {
+impl<FH: KeyLike> RTMajorIntensityArray<FH> {
     pub fn new(
         array: &PartitionedCMGArrayStats<FH>,
         order: Arc<[FH]>,
@@ -386,7 +388,7 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> RTMajorIntensityArray<FH> 
 
         Ok(Self {
             arr: out_arr,
-            order: order,
+            order,
             rts_ms: array.retention_time_miliseconds.clone(),
         })
     }

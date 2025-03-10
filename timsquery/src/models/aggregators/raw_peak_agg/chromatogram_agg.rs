@@ -1,5 +1,4 @@
 use super::super::streaming_aggregator::RunningStatsCalculator;
-use crate::sort_vecs_by_first;
 
 use nohash_hasher::BuildNoHashHasher;
 use serde::Serialize;

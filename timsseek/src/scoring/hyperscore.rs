@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::fragment_mass::{
     IonAnnot,
     IonSeriesTerminality,
@@ -7,8 +9,9 @@ use crate::utils::math::{
     lnfact,
     lnfact_f32,
 };
+use timsquery::traits::key_like::KeyLike;
 
-pub fn peak_count<FH: Clone + Eq + Send + Sync>(
+pub fn peak_count<FH: KeyLike>(
     slices: &RTMajorIntensityArray<FH>,
     count_threshold: f32,
 ) -> Vec<u8> {
@@ -70,8 +73,11 @@ pub fn single_hyperscore_labeled(slice: &[f32], labels: &[IonAnnot], count_thres
 
     slice.iter().zip(labels).for_each(|(inten, lab)| {
         // Not smaller is diff than bigger because of Nans
-        if !(inten > &count_threshold) {
-            return;
+        match inten.partial_cmp(&count_threshold) {
+            Some(Ordering::Less) => return,
+            Some(Ordering::Equal) => return,
+            Some(Ordering::Greater) => {}
+            None => return,
         }
 
         match lab.terminality() {
