@@ -69,19 +69,7 @@ impl IntensityArrays {
         query_values: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self> {
-        let ms1_order: Arc<[usize]> = expected_intensities
-            .precursor_intensities
-            .iter()
-            .enumerate()
-            .map(|x| x.0)
-            .collect();
-        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
-            .fragment_intensities
-            .iter()
-            .map(|(pos, intensity)| (*pos, { *intensity }))
-            .unzip();
-        let ms2_order: Arc<[IonAnnot]> = ms2_order.into();
-
+        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
         let ms1_rtmajor_arr =
             RTMajorIntensityArray::new(&query_values.ms1_arrays, ms1_order.clone());
         let ms1_mzmajor_arr =
@@ -119,6 +107,44 @@ impl IntensityArrays {
                 Err(e.into())
             }
         }
+    }
+
+    fn get_orders(
+        expected_intensities: &ExpectedIntensities,
+    ) -> (Arc<[usize]>, Arc<[IonAnnot]>, Vec<f32>) {
+        let ms1_order: Arc<[usize]> = expected_intensities
+            .precursor_intensities
+            .iter()
+            .enumerate()
+            .map(|x| x.0)
+            .collect();
+        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
+            .fragment_intensities
+            .iter()
+            .map(|(pos, intensity)| (*pos, { *intensity }))
+            .unzip();
+        let ms2_order: Arc<[IonAnnot]> = ms2_order.into();
+
+        (ms1_order, ms2_order, ms2_ref_vec)
+    }
+
+    pub fn reset_with(
+        &mut self,
+        intensity_arrays: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        expected_intensities: &ExpectedIntensities,
+    ) -> Result<()> {
+        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
+        self.ms1_rtmajor
+            .reset_with(&intensity_arrays.ms1_arrays, ms1_order.clone())?;
+        self.ms1_mzmajor
+            .reset_with(&intensity_arrays.ms1_arrays, ms1_order)?;
+        self.ms2_rtmajor
+            .reset_with(&intensity_arrays.ms2_arrays, ms2_order.clone())?;
+        self.ms2_mzmajor
+            .reset_with(&intensity_arrays.ms2_arrays, ms2_order)?;
+        self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
+        self.ms2_expected_intensities = ms2_ref_vec;
+        Ok(())
     }
 }
 
@@ -298,9 +324,7 @@ impl PartialOrd for ScoreInTime {
 }
 
 impl PreScore {
-    fn calc_main_score(&self) -> Result<MainScore> {
-        let intensity_arrays =
-            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
+    fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore> {
         let longitudinal_main_score_elements =
             LongitudinalMainScoreElements::new(&intensity_arrays, self.ref_time_ms.clone())?;
 
@@ -424,8 +448,31 @@ impl PreScore {
         })
     }
 
+    fn calc_main_score(&self) -> Result<MainScore> {
+        let intensity_arrays =
+            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
+        self.calc_with_intensities(&intensity_arrays)
+    }
+
+    fn calc_with_inten_buffer(&self, intensity_arrays: &mut IntensityArrays) -> Result<MainScore> {
+        intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
+        self.calc_with_intensities(intensity_arrays)
+    }
+
     pub fn localize(self) -> Result<LocalizedPreScore> {
         let main_score = self.calc_main_score()?;
+        if main_score.score.is_nan() {
+            // TODO find a way to nicely log the reason why some are nan.
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());
+        }
+        Ok(LocalizedPreScore::new(self, main_score))
+    }
+
+    pub fn localize_with_buffer(
+        self,
+        intensity_arrays: &mut IntensityArrays,
+    ) -> Result<LocalizedPreScore> {
+        let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
             return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());
