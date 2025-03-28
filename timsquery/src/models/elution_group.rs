@@ -1,10 +1,10 @@
+use crate::traits::KeyLike;
 use serde::{
     Deserialize,
     Serialize,
 };
 use std::collections::HashMap;
 use std::hash::Hash;
-use crate::traits::KeyLike;
 
 /// A struct that represents an elution group.
 ///

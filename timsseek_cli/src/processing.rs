@@ -234,7 +234,8 @@ pub fn process_chunk<'a>(
     let loc_scores: Vec<LocalizedPreScore> = res
         .into_par_iter()
         .zip(queries.into_zip_par_iter())
-        .map_init(init_fn,
+        .map_init(
+            init_fn,
             |buff, (res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
                 let id = res_elem.id;
                 let prescore = PreScore {
@@ -260,7 +261,8 @@ pub fn process_chunk<'a>(
                     }
                 }
             },
-        ).flatten()
+        )
+        .flatten()
         .collect();
     let elap_localizing = loc_start.elapsed();
 
