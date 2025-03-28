@@ -50,6 +50,24 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
         Ok(out)
     }
 
+    pub fn new_empty(order: Arc<[K]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+        let major_dim = order.len();
+        let minor_dim = rts_ms.len();
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("Cannot create array with zero rows".to_string()),
+            });
+        }
+        let vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
+        let out_arr = Array2D::from_flat_vector(vals, major_dim, minor_dim)
+            .expect("CMG array should already be size checked");
+        Ok(Self {
+            arr: out_arr,
+            order: order.clone(),
+            rts_ms: rts_ms.clone(),
+        })
+    }
+
     // The main purpose of this function is to preserve the allocation
     // of the array but replace the data contained in it.
     pub fn reset_with(
@@ -119,6 +137,29 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
         out.fill_with(array, order);
 
         Ok(out)
+    }
+
+    pub fn new_empty(order: Arc<[FH]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+        let minor_dim = rts_ms.len();
+        let major_dim = order.len();
+        if major_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("Cannot create array with zero columns".to_string()),
+            });
+        }
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("Cannot create array with zero rows".to_string()),
+            });
+        }
+        let vals: Vec<f32> = vec![0.0; minor_dim * major_dim];
+        let out_arr = Array2D::from_flat_vector(vals, minor_dim, major_dim)
+            .expect("CMG array should already be size checked");
+        Ok(Self {
+            arr: out_arr,
+            order: order.clone(),
+            rts_ms: rts_ms.clone(),
+        })
     }
 
     pub fn reset_with(
