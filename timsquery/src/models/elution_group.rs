@@ -4,6 +4,7 @@ use serde::{
 };
 use std::collections::HashMap;
 use std::hash::Hash;
+use crate::traits::KeyLike;
 
 /// A struct that represents an elution group.
 ///
@@ -11,7 +12,7 @@ use std::hash::Hash;
 /// The fragments m/z values are stored in a hashmap where the key is
 /// the generic type `T` and the value is the fragment m/z.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ElutionGroup<T: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> {
+pub struct ElutionGroup<T: KeyLike> {
     pub id: u64,
     pub mobility: f32,
     pub rt_seconds: f32,

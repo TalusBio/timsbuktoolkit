@@ -109,6 +109,24 @@ impl IntensityArrays {
         }
     }
 
+    pub fn new_empty(
+        num_ms1: usize,
+        num_ms2: usize,
+        ref_time_ms: Arc<[u32]>,
+    ) -> Result<Self> {
+        let ms1_order: Arc<[usize]> = (0..=num_ms1).collect();
+        let ms2_order: Arc<[IonAnnot]> = (0..=num_ms2).map(|_| IonAnnot::new('b', None, 1, 0).unwrap()).collect();
+        let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
+        Ok(Self {
+            ms1_rtmajor: RTMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms1_mzmajor: MzMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms2_rtmajor: RTMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms2_mzmajor: MzMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms1_expected_intensities: vec![],
+            ms2_expected_intensities: ms2_ref_vec,
+        })
+    }
+
     fn get_orders(
         expected_intensities: &ExpectedIntensities,
     ) -> (Arc<[usize]>, Arc<[IonAnnot]>, Vec<f32>) {
