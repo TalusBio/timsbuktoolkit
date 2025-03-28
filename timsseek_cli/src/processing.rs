@@ -176,17 +176,6 @@ pub fn process_chunk_full<'a>(
             Err(e) => res2.push(Err(e)),
         });
     let localizing_time = localizing_start.elapsed();
-    // }
-    //     match prescores[i].localize() {
-    //         Ok(prescore) => {
-    //             match builders[i].with_localized_pre_score(&prescore).finalize() {
-    //                 Ok(res) => res2.push(Ok(res)),
-    //                 Err(e) => res2.push(Err(TimsSeekError::DataProcessingError(e))),
-    //             }
-    //         },
-    //         Err(e) => res2.push(Err(e)),
-    //     }
-    // }
 
     let mut out: Vec<Result<FullQueryResult, TimsSeekError>> =
         Vec::with_capacity(queries.queries.len());
@@ -211,23 +200,6 @@ pub fn process_chunk_full<'a>(
             ))),
             (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
         });
-
-    // for i in 0..queries.queries.len() {
-    //     let lmse = longitudinal_main_score_elements[i];
-    //     let extracts = res[i];
-    //     let search_res = res2[i];
-
-    //     match (lmse, search_res) {
-    //         (Some(Ok(lmse)), Ok(search_res)) => out.push(Ok(FullQueryResult {
-    //             main_score_elements: lmse,
-    //             longitudinal_main_score: lmse.main_score_iter().collect(),
-    //             extractions: extracts,
-    //             search_results: search_res,
-    //         })),
-    //         (None, _) => out.push(Err(TimsSeekError::DataProcessingError(timsseek::errors::DataProcessingError::ExpectedNonEmptyData { context: Some("longitudinal_main_score_elements".to_string()) }))),
-    //         (Some(Err(e)), _) | (_, Err(e)) => out.push(Err(e)),
-    //     }
-    // }
 
     let metrics = RuntimeMetrics {
         num_queries: queries.len(),
@@ -256,12 +228,15 @@ pub fn process_chunk<'a>(
     let elap_time_querying = start.elapsed();
     info!("Querying took {:?}", elap_time_querying);
 
+    let init_fn = || IntensityArrays::new_empty(5, 10, ref_time_ms.clone()).unwrap();
+
     let loc_start = Instant::now();
     let loc_scores: Vec<LocalizedPreScore> = res
         .into_par_iter()
         .zip(queries.into_zip_par_iter())
-        .filter_map(
-            |(res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
+        .map_init(
+            init_fn,
+            |buff, (res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
                 let id = res_elem.id;
                 let prescore = PreScore {
                     charge: charge_elem,
@@ -272,7 +247,8 @@ pub fn process_chunk<'a>(
                     ref_time_ms: ref_time_ms.clone(),
                 };
 
-                let loc = prescore.localize();
+                // let loc = prescore.localize();
+                let loc = prescore.localize_with_buffer(buff);
                 match loc {
                     Ok(loc) => Some(loc),
                     Err(e) => {
@@ -286,6 +262,7 @@ pub fn process_chunk<'a>(
                 }
             },
         )
+        .flatten()
         .collect();
     let elap_localizing = loc_start.elapsed();
 
@@ -359,6 +336,10 @@ pub fn main_loop<'a>(
     chunked_query_iterator
         .progress_with_style(style)
         .for_each(|chunk| {
+            // Here I am branching whether I want the 'full output', which is
+            // which writes to disk both the search results and the extractions
+            // to disk. If that is not requested, the (hypothetically) more
+            // efficient version is used.
             let out: (Vec<IonSearchResults>, RuntimeMetrics) = if out_path.full_output {
                 let tmp = process_chunk_full(chunk, index, factory, tolerance, ref_time_ms.clone());
                 let res_full: Vec<FullQueryResult> = tmp

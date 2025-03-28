@@ -1,4 +1,5 @@
 # /// script
+# requires-python = ">=3.12"
 # dependencies = [
 #   "polars",
 #   "rich",
@@ -18,7 +19,6 @@ import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from turtle import forward
 from typing import List, Optional
 
 import matplotlib.pyplot as plt
@@ -186,13 +186,13 @@ def scale_columns(
 def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
     pprint("Stripping sequences")
     stripped_seqs = (
-        df_use["sequence"].str.replace_all("\/\d+", "").str.replace_all("\[.*?\]", "")
+        df_use["sequence"].str.replace_all(r"\/\d+", "").str.replace_all(r"\[.*?\]", "")
     )
     mods = [
         tuple(x)
         for x in df_use["sequence"]
-        .str.replace_all("\/\d+", "")
-        .str.extract_all("\[.*?\]")
+        .str.replace_all(r"\/\d+", "")
+        .str.extract_all(r"\[.*?\]")
         .list.sort()
         .to_list()
     ]
