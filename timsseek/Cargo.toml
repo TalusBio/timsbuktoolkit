@@ -11,7 +11,7 @@ regex = "1.10.6"
 csv = "1.3.0"
 rusqlite = "0.32.0" # Timsrust constrains this dep
 parquet_derive = "54.2.0"
-parquet = "54.2.0"
+parquet = "54.3.1"
 
 # Workspace-inherited deps
 timsrust = { workspace = true }
