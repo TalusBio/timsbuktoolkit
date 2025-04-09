@@ -94,6 +94,7 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
         let mut transition_stats = Vec::with_capacity(keys.len());
         let uniq_rts = collections.first().unwrap().reference_rt_ms.clone();
         // Q: Does this test pointer equality or values directly?
+        // A: Pointer equality now that I changed eq to prt_eq
         assert!(
             collections
                 .iter()
@@ -185,9 +186,9 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrayStats<F
         let unique_rts = other.retention_times_ms.clone();
 
         // Products are used to calculate the weighted mean
-        let mut tof_products: Vec<u64> = vec![0; unique_rts.len()];
-        let mut scan_products: Vec<u64> = vec![0; unique_rts.len()];
-        let mut summed_intensity_vec: Vec<u64> = vec![0; unique_rts.len()];
+        let mut tof_products: Vec<u64> = vec![0; unique_rts.len() + 1];
+        let mut scan_products: Vec<u64> = vec![0; unique_rts.len() + 1];
+        let mut summed_intensity_vec: Vec<u64> = vec![0; unique_rts.len() + 1];
 
         for (v, k) in other
             .transition_stats

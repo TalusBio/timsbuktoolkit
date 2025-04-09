@@ -45,8 +45,6 @@ pub struct LongitudinalMainScoreElements {
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
-    // TODO: REMOVE
-    pub hyperscore: Vec<f32>,
     pub split_lazyscore: Vec<f32>,
 
     /// END
@@ -231,7 +229,7 @@ impl LongitudinalMainScoreElements {
         };
         let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
 
-        let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
+        // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
 
         let mut ms2_corr_v_gauss =
@@ -249,7 +247,7 @@ impl LongitudinalMainScoreElements {
         gaussblur(&mut ms2_cosine_ref_sim);
         gaussblur(&mut ms1_cosine_ref_sim);
         gaussblur(&mut ms2_corr_v_gauss);
-        gaussblur(&mut hyperscore);
+        // gaussblur(&mut hyperscore);
         gaussblur(&mut split_lazyscore);
 
         let five_pct_index = ref_time_ms.len() * 5 / 100;
@@ -268,7 +266,7 @@ impl LongitudinalMainScoreElements {
             ms2_lazyscore: lazyscore,
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
             split_lazyscore,
-            hyperscore,
+            // hyperscore,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
             ms2_corr_v_gauss,
