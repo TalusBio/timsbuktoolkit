@@ -11,6 +11,6 @@ cargo run --bin timsseek_rts --release -- \
     --dotd-file $RAW_FILE &
 SERVER_PID=$!
 
-uv run --offline --project timsseek_rts/python/ --verbose streamlit run timsseek_rts/python/receiver.py
+uv run --verbose python -m streamlit run python/timsseek_rts_receiver/timsseek_rts_receiver/receiver.py
 kill $SERVER_PID
 wait
