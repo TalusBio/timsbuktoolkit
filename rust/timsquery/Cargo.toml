@@ -1,0 +1,53 @@
+[package]
+name = "timsquery"
+version = "0.11.0-b0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+nohash-hasher = "=0.2.0"
+tabled = "0.17.0"
+
+tracing-bunyan-formatter = "0.3.10"
+tracing-chrome = "0.7.2"
+
+# These are only used for benchmarks
+rand = { version = "0.8.5", optional = true }
+rand_chacha = { version = "0.3.1", optional = true }
+
+# Workspace-inherited deps
+clap = { workspace = true, features = ["derive"], optional = true }
+timsrust = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rayon = { workspace = true }
+indicatif = { workspace = true, features = ["rayon"] }
+
+[features]
+clap = ["dep:clap"]
+build-binary = ["clap"]
+bench = ["dep:rand", "dep:rand_chacha"]
+
+[lib]
+
+[[bin]]
+name = "timsquery"
+required-features = ["build-binary"]
+
+[[bench]]
+bench = true
+name = "benchmark_indices"
+path = "benches/benchmark_indices.rs"
+required-features = ["bench"]
+
+[[bench]]
+bench = true
+name = "benchmark_centroiding"
+path = "benches/benchmark_centroiding.rs"
+
+[[bin]]
+bench = true
+name = "benchmark_aggregators"
+path = "benches/benchmark_aggregators.rs"

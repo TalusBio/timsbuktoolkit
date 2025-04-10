@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timsseek_rescore"
+version = "0.11.0-b0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "polars",
+  "rich",
+  "matplotlib",
+  "numpy",
+  "tqdm",
+  "mokapot",
+  "xgboost",
+  "torch",
+  "uniplot",
+]
+
+[tool.hatch.build.targets.wheel]
+only-packages = true
+
+[tool.uv.sources]
+# TODO: publish this package ... maybe ...
+mokapot = { git = "https://github.com/jspaezp/mokapot.git", branch = "feat/re_add_confidence_api" }

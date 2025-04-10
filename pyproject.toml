@@ -1,13 +1,11 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "timsseek-workspace"
-version = "0.10.3-b6"
+version = "0.11.0-b0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "speclib_builder[ml]",
+    "timsseek_rescore",
+    "timsseek_rts_receiver",
 ]
 
 [dependency-groups]
@@ -28,9 +26,15 @@ interactive = [
 
 [tool.uv.sources]
 speclib_builder = { workspace = true }
+timsseek_rescore = { workspace = true }
+timsseek_rts_receiver = { workspace = true }
 
 [tool.uv.workspace]
-members = ["speclib_builder"]
+members = [
+  "python/speclib_builder",
+  "python/timsseek_rescore",
+  "python/timsseek_rts_receiver",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -43,10 +47,13 @@ preview = true
 select = ["E", "F", "T20", "I"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["speclib_builder"]
+packages = [
+  "python/speclib_builder",
+  "python/timsseek_rescore",
+]
 
 [tool.bumpver]
-current_version = "0.10.3-b6"
+current_version = "0.11.0-b0"
 version_pattern = "MAJOR.MINOR.PATCH[-PYTAGNUM]"
 tag_message = "v{new_version}"
 commit_message = "chore: bump version to {new_version}"
@@ -55,7 +62,7 @@ tag = true
 push = true
 
 [tool.bumpver.file_patterns]
-"*/pyproject.toml" = ['version = "{version}"$']
+"python/*/pyproject.toml" = ['version = "{version}"$']
 "pyproject.toml" = ['version = "{version}"$']
 "Cargo.toml" = ['version = "{version}"$']
-"*/Cargo.toml" = ['version = "{version}"$']
+"rust/*/Cargo.toml" = ['version = "{version}"$']

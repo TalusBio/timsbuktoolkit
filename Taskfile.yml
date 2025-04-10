@@ -4,8 +4,8 @@ interval: 100ms
 
 # Include child Taskfiles
 includes:
-  timsquery: ./timsquery
-  timsseek: ./timsseek
+  timsquery: ./rust/timsquery
+  timsseek: ./rust/timsseek
 
 tasks:
   license_check:
@@ -32,3 +32,11 @@ tasks:
   todos:
     cmds:
       - grep -H -R TODO tims*/src
+
+  build_python:
+    cmds:
+      - uv build --all-packages --verbose
+
+  bumpver:
+    cmds:
+      - uv run --dev  bumpver update --minor --allow-dirty --no-commit

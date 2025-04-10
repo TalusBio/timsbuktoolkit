@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "timsseek",
-    "timsseek_cli",
-    "timsseek_rts",
-    "timsquery"
+    "rust/timsseek",
+    "rust/timsseek_cli",
+    "rust/timsseek_rts",
+    "rust/timsquery"
 ]
 
 [workspace.package]
-version = "0.10.3-b6"
+version = "0.11.0-b0"
 edition = "2021"
 authors = ["Sebastian Paez"]
 license = "MIT"
