@@ -2,6 +2,7 @@
 /target
 /templates
 /tmp
+/data_ignore
 .env
 .task/
 results.json

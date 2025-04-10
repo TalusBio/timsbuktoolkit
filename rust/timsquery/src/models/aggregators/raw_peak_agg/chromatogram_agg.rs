@@ -87,9 +87,7 @@ impl ChromatomobilogramStatsArrays {
         Self {
             retention_time_miliseconds: rts,
             tof_index_means: vec![f64::NAN; lens],
-            // tof_index_sds: vec![f64::NAN; lens],
             scan_index_means: vec![f64::NAN; lens],
-            // scan_index_sds: vec![f64::NAN; lens],
             intensities: vec![0; lens],
             expected_tof_index,
             expected_scan_index,

@@ -45,8 +45,6 @@ pub struct LongitudinalMainScoreElements {
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
-    // TODO: REMOVE
-    pub hyperscore: Vec<f32>,
     pub split_lazyscore: Vec<f32>,
 
     /// END
@@ -69,19 +67,7 @@ impl IntensityArrays {
         query_values: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self> {
-        let ms1_order: Arc<[usize]> = expected_intensities
-            .precursor_intensities
-            .iter()
-            .enumerate()
-            .map(|x| x.0)
-            .collect();
-        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
-            .fragment_intensities
-            .iter()
-            .map(|(pos, intensity)| (*pos, { *intensity }))
-            .unzip();
-        let ms2_order: Arc<[IonAnnot]> = ms2_order.into();
-
+        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
         let ms1_rtmajor_arr =
             RTMajorIntensityArray::new(&query_values.ms1_arrays, ms1_order.clone());
         let ms1_mzmajor_arr =
@@ -119,6 +105,60 @@ impl IntensityArrays {
                 Err(e.into())
             }
         }
+    }
+
+    pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self> {
+        let ms1_order: Arc<[usize]> = (0..=num_ms1).collect();
+        let ms2_order: Arc<[IonAnnot]> = (0..=num_ms2)
+            .map(|o| IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap())
+            .collect();
+        let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
+        Ok(Self {
+            ms1_rtmajor: RTMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms1_mzmajor: MzMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms2_rtmajor: RTMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms2_mzmajor: MzMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms1_expected_intensities: vec![],
+            ms2_expected_intensities: ms2_ref_vec,
+        })
+    }
+
+    fn get_orders(
+        expected_intensities: &ExpectedIntensities,
+    ) -> (Arc<[usize]>, Arc<[IonAnnot]>, Vec<f32>) {
+        let ms1_order: Arc<[usize]> = expected_intensities
+            .precursor_intensities
+            .iter()
+            .enumerate()
+            .map(|x| x.0)
+            .collect();
+        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
+            .fragment_intensities
+            .iter()
+            .map(|(pos, intensity)| (*pos, { *intensity }))
+            .unzip();
+        let ms2_order: Arc<[IonAnnot]> = ms2_order.into();
+
+        (ms1_order, ms2_order, ms2_ref_vec)
+    }
+
+    pub fn reset_with(
+        &mut self,
+        intensity_arrays: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        expected_intensities: &ExpectedIntensities,
+    ) -> Result<()> {
+        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
+        self.ms1_rtmajor
+            .reset_with(&intensity_arrays.ms1_arrays, ms1_order.clone())?;
+        self.ms1_mzmajor
+            .reset_with(&intensity_arrays.ms1_arrays, ms1_order)?;
+        self.ms2_rtmajor
+            .reset_with(&intensity_arrays.ms2_arrays, ms2_order.clone())?;
+        self.ms2_mzmajor
+            .reset_with(&intensity_arrays.ms2_arrays, ms2_order)?;
+        self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
+        self.ms2_expected_intensities = ms2_ref_vec;
+        Ok(())
     }
 }
 
@@ -189,7 +229,7 @@ impl LongitudinalMainScoreElements {
         };
         let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
 
-        let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
+        // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
 
         let mut ms2_corr_v_gauss =
@@ -207,7 +247,7 @@ impl LongitudinalMainScoreElements {
         gaussblur(&mut ms2_cosine_ref_sim);
         gaussblur(&mut ms1_cosine_ref_sim);
         gaussblur(&mut ms2_corr_v_gauss);
-        gaussblur(&mut hyperscore);
+        // gaussblur(&mut hyperscore);
         gaussblur(&mut split_lazyscore);
 
         let five_pct_index = ref_time_ms.len() * 5 / 100;
@@ -226,7 +266,7 @@ impl LongitudinalMainScoreElements {
             ms2_lazyscore: lazyscore,
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
             split_lazyscore,
-            hyperscore,
+            // hyperscore,
             ref_time_ms,
             ms2_lazyscore_vs_baseline_std: lzb_std,
             ms2_corr_v_gauss,
@@ -298,9 +338,7 @@ impl PartialOrd for ScoreInTime {
 }
 
 impl PreScore {
-    fn calc_main_score(&self) -> Result<MainScore> {
-        let intensity_arrays =
-            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
+    fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore> {
         let longitudinal_main_score_elements =
             LongitudinalMainScoreElements::new(&intensity_arrays, self.ref_time_ms.clone())?;
 
@@ -424,8 +462,31 @@ impl PreScore {
         })
     }
 
+    fn calc_main_score(&self) -> Result<MainScore> {
+        let intensity_arrays =
+            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
+        self.calc_with_intensities(&intensity_arrays)
+    }
+
+    fn calc_with_inten_buffer(&self, intensity_arrays: &mut IntensityArrays) -> Result<MainScore> {
+        intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
+        self.calc_with_intensities(intensity_arrays)
+    }
+
     pub fn localize(self) -> Result<LocalizedPreScore> {
         let main_score = self.calc_main_score()?;
+        if main_score.score.is_nan() {
+            // TODO find a way to nicely log the reason why some are nan.
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());
+        }
+        Ok(LocalizedPreScore::new(self, main_score))
+    }
+
+    pub fn localize_with_buffer(
+        self,
+        intensity_arrays: &mut IntensityArrays,
+    ) -> Result<LocalizedPreScore> {
+        let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
             return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());

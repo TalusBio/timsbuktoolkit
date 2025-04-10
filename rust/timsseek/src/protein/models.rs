@@ -7,6 +7,18 @@ pub struct ProteinSequence {
     pub sequence: Arc<str>,
 }
 
+
+/// Essentially a builder for the `ProteinSequence` struct.
+///
+/// Usage is meant to be:
+/// 
+/// ```
+/// // let id = 0;
+/// // let description = "sp|ASDAD|ASDADSAD2";
+/// // let seq_part1 = "MYPEPTIDEK";
+/// // let seq_part2 = "MYPEPTIDEPINK";
+/// // ProteinSequenceBuilder::new(id).with_description(description).append_sequence(seq_part2).append_sequence(seq_part1).build()
+/// ```
 #[derive(Debug)]
 pub struct ProteinSequenceBuilder {
     pub id: u32,
