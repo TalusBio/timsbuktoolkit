@@ -3,20 +3,41 @@ use super::super::chromatogram_agg::{
     ScanTofStatsCalculatorPair,
 };
 use crate::errors::Result;
+use crate::traits::KeyLike;
 use nohash_hasher::BuildNoHashHasher;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
+    pub transition_stats: HashMap<FH, ChromatomobilogramStatsArrays>,
+}
+
+/// Hashmap that represents a series of scan+tof values
+/// that are grouped by retention time represented in ms (u32)
 pub type SparseRTCollection = HashMap<u32, ScanTofStatsCalculatorPair, BuildNoHashHasher<u32>>;
 
-// TODO: Consider using a typestate instead of an enum here...
+/// Represents "there is a value at each positions in theretention time"
+#[derive(Debug, Clone)]
+pub struct DenseRTCollection {
+    pub reference_rt_ms: Arc<[u32]>,
+    pub scan_tof_calc: Vec<Option<ScanTofStatsCalculatorPair>>,
+}
+
+/// Represents "there is a value at each positions in theretention time"
+/// BUT the sparse version uses a hashmap as a backend, whilst the dense version uses a vector
+/// (so ... if the accumulation is sparse, use the sparse version, if you know beforehand
+/// what the retention time values are + most of them are non-0, use the dense version)
 pub enum RTCollection {
     Sparse(SparseRTCollection),
     Dense(DenseRTCollection),
 }
 
+
+/// Represents a series of scan+tof values that are grouped by retention time represented in ms (u32)
+/// Each element in the vec is an independent 'track' (each is a precursor/transition)
 #[derive(Debug, Clone)]
 pub enum ParallelTracks {
     Sparse(Vec<SparseRTCollection>),
@@ -63,15 +84,12 @@ impl ParallelTracks {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DenseRTCollection {
-    pub reference_rt_ms: Arc<[u32]>,
-    pub scan_tof_calc: Vec<Option<ScanTofStatsCalculatorPair>>,
-}
 
 impl DenseRTCollection {
     fn new(reference_rt_ms: Arc<[u32]>) -> Self {
         // Check that its sorted ... let make it panic for now
+        // Since I am not using this anywhere where this would be a recoverable
+        // error.
         assert!(
             reference_rt_ms.is_sorted(),
             "DenseRTCollection::new reference_rt_ms must be sorted"
@@ -124,9 +142,7 @@ impl DenseRTCollection {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParitionedCMGAggregator<
-    FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug,
-> {
+pub struct ParitionedCMGAggregator<FH: KeyLike> {
     pub scan_tof_calc: ParallelTracks,
     pub keys: Vec<FH>,
     pub context_key_num: usize,
@@ -134,8 +150,7 @@ pub struct ParitionedCMGAggregator<
     pub expected_tof_indices: Vec<u32>,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
-    ParitionedCMGAggregator<FH>
+impl<FH: KeyLike> ParitionedCMGAggregator<FH>
 {
     pub fn new(
         keys: Vec<FH>,
@@ -181,7 +196,3 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
-    pub transition_stats: HashMap<FH, ChromatomobilogramStatsArrays>,
-}
