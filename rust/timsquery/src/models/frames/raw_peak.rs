@@ -9,8 +9,3 @@ pub struct RawPeak {
     pub retention_time: f32,
 }
 
-impl<T> From<(RawPeak, T)> for RawPeak {
-    fn from(x: (RawPeak, T)) -> Self {
-        x.0
-    }
-}

@@ -3,12 +3,8 @@ pub use crate::models::elution_group::ElutionGroup;
 pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 
 // Re-export traits
-pub use crate::traits::aggregator::Aggregator;
 pub use crate::traits::queriable_data::QueriableData;
-pub use crate::traits::tolerance::{
-    Tolerance,
-    ToleranceAdapter,
-};
+pub use crate::models::Tolerance;
 
 // Declare modules
 pub mod errors;

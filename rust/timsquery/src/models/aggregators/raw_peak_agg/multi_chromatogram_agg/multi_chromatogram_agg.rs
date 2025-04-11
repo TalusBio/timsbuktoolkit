@@ -7,10 +7,10 @@ use super::arrays::{
 use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::raw_peak::RawPeak;
 use crate::models::queries::MsLevelContext;
-use crate::traits::aggregator::Aggregator;
 use serde::Serialize;
 use std::hash::Hash;
 use std::sync::Arc;
+use crate::traits::key_like::KeyLike;
 
 use timsrust::converters::{
     ConvertableDomain,
@@ -95,14 +95,13 @@ pub struct NaturalFinalizedMultiCMGArrays<FH: Clone + Eq + Serialize + Hash + Se
     pub id: u64,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> Aggregator
-    for MultiCMGStatsAgg<FH>
-{
-    type Context = MsLevelContext<usize, FH>;
-    type Item = RawPeak;
-    type Output = NaturalFinalizedMultiCMGArrays<FH>;
+impl MultiCMGStatsAgg<FH: KeyLike> {
 
-    fn add(&mut self, peak: impl Into<Self::Item>) {
+}
+
+impl<FH: KeyLike> MultiCMGStatsAgg<FH> {
+
+    fn add(&mut self, peak: RawPeak) {
         let peak = peak.into();
         let u64_intensity = peak.intensity as u64;
         let rt_miliseconds = (peak.retention_time * 1000.0) as u32;
