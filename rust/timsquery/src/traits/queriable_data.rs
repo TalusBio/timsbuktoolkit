@@ -1,31 +1,31 @@
-use crate::traits::aggregator::{
-    Aggregator,
-    ProvidesContext,
-};
 use rayon::prelude::*;
 
-pub trait QueriableData<QF, I, C>
+
+/// Trait meant to signal that some form of data is
+/// queriable using a specific aggregator.
+///
+/// Since each aggregator can optimized in very specific ways
+/// and mean very different things it makes sense to have
+/// an implementation for each aggregator + index combination.
+///
+/// Note that its necessary to implement either `add_query` or
+/// `add_query_multi_group` (or both), since the default implementation
+/// the default implementations rely on each other. (and not implementing
+/// any will result in infinite recursion)
+///
+pub trait QueriableData<QA>
 where
-    QF: Send + Sync + ProvidesContext<Context = C>,
-    I: Send + Sync + Clone + Copy,
+    QA: Send + Sync,
     Self: Send + Sync,
 {
-    fn query(&self, fragment_query: &QF) -> Vec<I>;
-    fn add_query<A, O, AG, C2>(&self, fragment_query: &QF, aggregator: &mut AG)
-    where
-        A: From<I> + Send + Sync + Clone + Copy,
-        AG: Aggregator<Item = A, Output = O, Context = C2>,
-        C: Into<C2>;
+    fn add_query(&self, queriable_aggregator: &mut QA) {
+        self.add_query_multi_group(&mut [queriable_aggregator]);
+    }
 
-    fn add_query_multi_group<A, O, AG, C2>(&self, fragment_queries: &[QF], aggregator: &mut [AG])
-    where
-        A: From<I> + Send + Sync + Clone + Copy,
-        AG: Aggregator<Item = A, Output = O, Context = C2>,
-        C: Into<C2>,
+    fn par_add_query_multi(&self, queriable_aggregators: &mut [QA])
     {
-        fragment_queries
-            .par_iter()
-            .zip(aggregator.par_iter_mut())
-            .for_each(|(query, agg)| self.add_query(query, agg));
+        queriable_aggregators
+            .par_iter_mut()
+            .map(|queriable_aggregator| self.add_query(queriable_aggregator));
     }
 }

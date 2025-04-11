@@ -1,4 +1,3 @@
-use crate::ToleranceAdapter;
 use crate::models::elution_group::ElutionGroup;
 use crate::models::queries::{
     FragmentGroupIndexQuery,
@@ -8,6 +7,7 @@ use crate::traits::key_like::KeyLike;
 use crate::utils::tolerance_ranges::IncludedRange;
 use timsrust::Metadata;
 use timsrust::converters::ConvertableDomain;
+use crate::Tolerance;
 
 #[derive(Debug, Default)]
 pub struct FragmentIndexAdapter {
@@ -20,12 +20,11 @@ impl From<Metadata> for FragmentIndexAdapter {
     }
 }
 
-impl<FH: KeyLike> ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>>
-    for FragmentIndexAdapter
-{
-    fn query_from_elution_group(
+impl FragmentIndexAdapter {
+    // <FH: KeyLike> ToleranceAdapter<FragmentGroupIndexQuery<FH>, ElutionGroup<FH>
+    fn query_from_elution_group<FH: KeyLike>(
         &self,
-        tol: &dyn crate::traits::tolerance::Tolerance,
+        tol: &Tolerance,
         elution_group: &ElutionGroup<FH>,
     ) -> FragmentGroupIndexQuery<FH> {
         let rt_range = tol.rt_range(elution_group.rt_seconds);

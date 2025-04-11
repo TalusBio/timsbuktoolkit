@@ -37,9 +37,8 @@ pub enum QuadTolerance {
     Absolute((f32, f32)),
 }
 
-// TODO: Rename to something that does not use the 'Default'
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DefaultTolerance {
+pub struct Tolerance {
     pub ms: MzToleramce,
     #[serde(default)]
     pub rt: RtTolerance,
@@ -47,9 +46,9 @@ pub struct DefaultTolerance {
     pub quad: QuadTolerance,
 }
 
-impl Default for DefaultTolerance {
+impl Default for Tolerance {
     fn default() -> Self {
-        DefaultTolerance {
+        Tolerance {
             ms: MzToleramce::Ppm((20.0, 20.0)),
             rt: RtTolerance::Minutes((5.0, 5.0)),
             mobility: MobilityTolerance::Pct((3.0, 3.0)),
@@ -58,15 +57,8 @@ impl Default for DefaultTolerance {
     }
 }
 
-pub trait Tolerance {
-    fn mz_range(&self, mz: f64) -> (f64, f64);
-    fn rt_range(&self, rt: f32) -> Option<(f32, f32)>;
-    fn mobility_range(&self, mobility: f32) -> Option<(f32, f32)>;
-    fn quad_range(&self, precursor_mz_range: (f64, f64)) -> (f32, f32);
-}
-
-impl Tolerance for DefaultTolerance {
-    fn mz_range(&self, mz: f64) -> (f64, f64) {
+impl Tolerance {
+    pub fn mz_range(&self, mz: f64) -> (f64, f64) {
         match self.ms {
             MzToleramce::Absolute((low, high)) => (mz - low, mz + high),
             MzToleramce::Ppm((low, high)) => {
@@ -78,7 +70,7 @@ impl Tolerance for DefaultTolerance {
     }
 
     // TODO add an unit ...
-    fn rt_range(&self, rt_minutes: f32) -> Option<(f32, f32)> {
+    pub fn rt_range(&self, rt_minutes: f32) -> Option<(f32, f32)> {
         match self.rt {
             RtTolerance::Minutes((low, high)) => Some((rt_minutes - low, rt_minutes + high)),
             RtTolerance::Pct((low, high)) => {
@@ -90,7 +82,7 @@ impl Tolerance for DefaultTolerance {
         }
     }
 
-    fn mobility_range(&self, mobility: f32) -> Option<(f32, f32)> {
+    pub fn mobility_range(&self, mobility: f32) -> Option<(f32, f32)> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => Some((mobility - low, mobility + high)),
             MobilityTolerance::Pct((low, high)) => {
@@ -102,7 +94,7 @@ impl Tolerance for DefaultTolerance {
         }
     }
 
-    fn quad_range(&self, precursor_mz_range: (f64, f64)) -> (f32, f32) {
+    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> (f32, f32) {
         match self.quad {
             QuadTolerance::Absolute((low, high)) => {
                 let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) as f32 - low;
@@ -120,11 +112,3 @@ impl Tolerance for DefaultTolerance {
     }
 }
 
-/// A trait that can be implemented by types that can convert
-/// elution groups into queries.
-///
-/// The elution group here is generic but most regularly it will be
-/// an `ElutionGroup` struct.
-pub trait ToleranceAdapter<QF, T> {
-    fn query_from_elution_group(&self, tol: &dyn Tolerance, elution_group: &T) -> QF;
-}
