@@ -19,7 +19,7 @@ use timsrust::converters::{
 };
 
 #[derive(Debug, Clone)]
-pub struct MultiCMGStatsAgg<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> {
+pub struct MultiCMGStatsAgg<FH: KeyLike> {
     pub converters: (Tof2MzConverter, Scan2ImConverter),
     pub ms1_stats: ParitionedCMGAggregator<usize>,
     pub ms2_stats: ParitionedCMGAggregator<FH>,
@@ -31,12 +31,12 @@ pub struct MultiCMGStatsAgg<FH: Clone + Eq + Serialize + Hash + Send + Sync + st
 }
 
 #[derive(Debug, Clone)]
-pub struct MultiCMGStatsFactory<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> {
+pub struct MultiCMGStatsFactory<FH: KeyLike> {
     pub converters: (Tof2MzConverter, Scan2ImConverter),
     pub _phantom: std::marker::PhantomData<FH>,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> MultiCMGStatsFactory<FH> {
+impl<FH: KeyLike> MultiCMGStatsFactory<FH> {
     pub fn build_with_elution_group(
         &self,
         elution_group: &ElutionGroup<FH>,
@@ -95,7 +95,10 @@ pub struct NaturalFinalizedMultiCMGArrays<FH: Clone + Eq + Serialize + Hash + Se
     pub id: u64,
 }
 
-impl MultiCMGStatsAgg<FH: KeyLike> {
+impl <FH: KeyLike>MultiCMGStatsAgg {
+    pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = &mut usize> {
+        self.ms1_stats.iter_mut_keys()
+    }
 
 }
 

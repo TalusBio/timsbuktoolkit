@@ -3,7 +3,7 @@ use serde::{
     Serialize,
 };
 use std::path::PathBuf;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::traits::tolerance::Tolerance;
 
 use crate::cli::Cli;
 use crate::errors;
@@ -41,7 +41,7 @@ pub struct AnalysisConfig {
     pub chunk_size: usize,
 
     /// Tolerance settings
-    pub tolerance: DefaultTolerance,
+    pub tolerance: Tolerance,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

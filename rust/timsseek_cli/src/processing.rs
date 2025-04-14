@@ -17,7 +17,7 @@ use std::time::{
 use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::traits::tolerance::Tolerance;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::digest::digestion::{
     DigestionEnd,
@@ -121,7 +121,7 @@ pub fn process_chunk_full<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
+    tolerance: &'a Tolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
     let query_start = Instant::now();
@@ -217,7 +217,7 @@ pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
+    tolerance: &'a Tolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<IonSearchResults>, RuntimeMetrics) {
     let start = Instant::now();
@@ -321,7 +321,7 @@ pub fn main_loop<'a>(
     chunked_query_iterator: impl ExactSizeIterator<Item = NamedQueryChunk>,
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
+    tolerance: &'a Tolerance,
     ref_time_ms: Arc<[u32]>,
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {

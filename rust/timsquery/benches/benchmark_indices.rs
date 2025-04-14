@@ -22,7 +22,7 @@ use timsquery::models::indices::raw_file_index::RawFileIndex;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::{
-    DefaultTolerance,
+    Tolerance,
     MobilityTolerance,
     MzToleramce,
     QuadTolerance,
@@ -333,13 +333,13 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
     let raw_file_path = raw_file_path.to_str().unwrap();
     let mut out = vec![];
     let query_groups = build_elution_groups();
-    let tolerance_with_rt = DefaultTolerance {
+    let tolerance_with_rt = Tolerance {
         ms: MzToleramce::Ppm((20.0, 20.0)),
         rt: RtTolerance::Minutes((5.0, 5.0)),
         mobility: MobilityTolerance::Pct((3.0, 3.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
     };
-    let tolerance_with_nort = DefaultTolerance {
+    let tolerance_with_nort = Tolerance {
         ms: MzToleramce::Ppm((20.0, 20.0)),
         rt: RtTolerance::None,
         mobility: MobilityTolerance::Pct((3.0, 3.0)),

@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::traits::tolerance::Tolerance;
 use timsseek::errors::{
     Result,
     TimsSeekError,
@@ -24,7 +24,7 @@ pub struct Cli {
 }
 
 impl Cli {
-    pub fn read_config(&self) -> Result<DefaultTolerance> {
+    pub fn read_config(&self) -> Result<Tolerance> {
         let conf = match std::fs::File::open(&self.config) {
             Ok(x) => x,
             Err(e) => {
@@ -34,7 +34,7 @@ impl Cli {
                 });
             }
         };
-        let config: core::result::Result<DefaultTolerance, _> = serde_json::from_reader(conf);
+        let config: core::result::Result<Tolerance, _> = serde_json::from_reader(conf);
         let config = match config {
             Ok(x) => x,
             Err(e) => {
