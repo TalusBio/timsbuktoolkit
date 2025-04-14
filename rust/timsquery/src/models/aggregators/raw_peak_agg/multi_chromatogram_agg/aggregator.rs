@@ -1,38 +1,101 @@
-use super::super::chromatogram_agg::{
-    ChromatomobilogramStatsArrays,
-    ScanTofStatsCalculatorPair,
-};
+use crate::utils::streaming_calculators::RunningStatsCalculator;
 use crate::errors::Result;
 use crate::traits::KeyLike;
 use nohash_hasher::BuildNoHashHasher;
-use serde::Serialize;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
-    pub transition_stats: HashMap<FH, ChromatomobilogramStatsArrays>,
+
+pub struct ImsMzRollingCalculator {
+    pub mobility: RunningStatsCalculator,
+    pub mz: RunningStatsCalculator,
+}
+
+impl ImsMzRollingCalculator {
+    fn new(intensity: u64, mobility: f32, mz: f32) -> Self {
+        Self {
+            mobility: RunningStatsCalculator::new(intensity, mobility),
+            mz: RunningStatsCalculator::new(intensity, mz),
+        }
+    }
+    fn add(&mut self, intensity: u64, mobility: f32, mz: f32) {
+        self.mobility.add(intensity, mobility);
+        self.mz.add(intensity, mz);
+    }
 }
 
 /// Hashmap that represents a series of scan+tof values
 /// that are grouped by retention time represented in ms (u32)
-pub type SparseRTCollection = HashMap<u32, ScanTofStatsCalculatorPair, BuildNoHashHasher<u32>>;
+pub struct SparseRTCollection {
+    inner:HashMap<u32, ImsMzRollingCalculator, BuildNoHashHasher<u32>>,
+} 
+
+impl SparseRTCollection {
+    fn add(&mut self, rt_ms: u32, mobility: f32, mz: f32, intensity: u64) {
+        self.inner.entry(rt_ms)
+            .and_modify(|curr| {
+                curr.add(intensity, mobility, mz);
+            })
+            .or_insert(ImsMzRollingCalculator::new(
+                intensity, mobility, mz,
+            ));
+    }
+}
 
 /// Represents "there is a value at each positions in theretention time"
 #[derive(Debug, Clone)]
 pub struct DenseRTCollection {
     pub reference_rt_ms: Arc<[u32]>,
-    pub scan_tof_calc: Vec<Option<ScanTofStatsCalculatorPair>>,
+    pub scan_tof_calc: Vec<Option<ImsMzRollingCalculator>>,
 }
 
-/// Represents "there is a value at each positions in theretention time"
-/// BUT the sparse version uses a hashmap as a backend, whilst the dense version uses a vector
-/// (so ... if the accumulation is sparse, use the sparse version, if you know beforehand
-/// what the retention time values are + most of them are non-0, use the dense version)
-pub enum RTCollection {
-    Sparse(SparseRTCollection),
-    Dense(DenseRTCollection),
+impl DenseRTCollection {
+    fn new(reference_rt_ms: Arc<[u32]>) -> Self {
+        // Check that its sorted ... let make it panic for now
+        // Since I am not using this anywhere where this would be a recoverable
+        // error.
+        assert!(
+            reference_rt_ms.is_sorted(),
+            "DenseRTCollection::new reference_rt_ms must be sorted"
+        );
+
+        let num_frames = reference_rt_ms.len();
+        Self {
+            reference_rt_ms,
+            scan_tof_calc: vec![None; num_frames],
+        }
+    }
+    fn add(&mut self, rt_ms: u32, mobility: f32, mz: f32, intensity: u64) {
+        let mut pos = self.reference_rt_ms.partition_point(|&x| x <= rt_ms);
+        if pos == self.reference_rt_ms.len() {
+            // If we are less than 1 second above the end, we can just subtract 1.
+            let diff = rt_ms - self.reference_rt_ms[pos - 1];
+            if diff < 1_000 {
+                pos -= 1;
+            }
+        }
+        match self.scan_tof_calc.get_mut(pos) {
+            Some(x) => match x {
+                Some(x) => {
+                    x.add(intensity, mobility, mz);
+                }
+                None => {
+                    self.scan_tof_calc[pos] = Some(ImsMzRollingCalculator::new(
+                        intensity, mobility, mz,
+                    ))
+                }
+            },
+            None => {
+                let max_pos = self.scan_tof_calc.len() - 1;
+                println!(
+                    "DenseRTCollection::add out of bounds {:?} > {:?}",
+                    pos, max_pos
+                );
+                // TODO: Decide if this is really the behavior I want.
+                panic!()
+            }
+        }
+    }
 }
 
 
@@ -65,81 +128,14 @@ impl ParallelTracks {
         }
     }
 
-    fn add(&mut self, idx: usize, rt_ms: u32, scan_index: usize, tof_index: u32, intensity: u64) {
+    fn add(&mut self, idx: usize, rt_ms: u32, mobility: f32, tof_index: f32, intensity: u64) {
         match self {
-            Self::Sparse(scan_tof_calc) => {
-                scan_tof_calc[idx]
-                    .entry(rt_ms)
-                    .and_modify(|curr| {
-                        curr.add(intensity, scan_index, tof_index);
-                    })
-                    .or_insert(ScanTofStatsCalculatorPair::new(
-                        intensity, scan_index, tof_index,
-                    ));
-            }
-            Self::Dense(scan_tof_calc) => {
-                scan_tof_calc[idx].add(rt_ms, scan_index, tof_index, intensity);
-            }
+            Self::Sparse(sparse) => sparse[idx].add(rt_ms, mobility, tof_index, intensity),
+            Self::Dense(dense) => dense[idx].add(rt_ms, mobility, tof_index, intensity),
         }
     }
 }
 
-
-impl DenseRTCollection {
-    fn new(reference_rt_ms: Arc<[u32]>) -> Self {
-        // Check that its sorted ... let make it panic for now
-        // Since I am not using this anywhere where this would be a recoverable
-        // error.
-        assert!(
-            reference_rt_ms.is_sorted(),
-            "DenseRTCollection::new reference_rt_ms must be sorted"
-        );
-
-        let num_frames = reference_rt_ms.len();
-        Self {
-            reference_rt_ms,
-            scan_tof_calc: vec![None; num_frames],
-        }
-    }
-
-    fn add(&mut self, rt_ms: u32, scan_index: usize, tof_index: u32, intensity: u64) {
-        // Not the biggest fan of how branchy this code is ...
-        let mut pos = self.reference_rt_ms.partition_point(|&x| x <= rt_ms);
-        if pos == self.reference_rt_ms.len() {
-            // If we are less than 1 second above the end, we can just subtract 1.
-            let diff = rt_ms - self.reference_rt_ms[pos - 1];
-            if diff < 1_000 {
-                pos -= 1;
-            }
-        }
-        // ~ This version is only ~5% faster (which I personally find surprising),
-        // leaving here as a reference. I am keeping the exact solution for now.
-        // let stride_ms = (self.reference_rt_ms.last().unwrap() - self.reference_rt_ms.first().unwrap()) / (self.scan_tof_calc.len() as u32 - 1);
-        // let pos = (rt_ms - self.reference_rt_ms.first().unwrap()) / stride_ms;
-        // let pos = usize::try_from(pos).unwrap().min(self.scan_tof_calc.len() - 1);
-
-        match self.scan_tof_calc.get_mut(pos) {
-            Some(x) => match x {
-                Some(x) => {
-                    x.add(intensity, scan_index, tof_index);
-                }
-                None => {
-                    self.scan_tof_calc[pos] = Some(ScanTofStatsCalculatorPair::new(
-                        intensity, scan_index, tof_index,
-                    ))
-                }
-            },
-            None => {
-                let max_pos = self.scan_tof_calc.len() - 1;
-                println!(
-                    "DenseRTCollection::add out of bounds {:?} > {:?}",
-                    pos, max_pos
-                );
-                panic!()
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ParitionedCMGAggregator<FH: KeyLike> {
@@ -194,5 +190,6 @@ impl<FH: KeyLike> ParitionedCMGAggregator<FH>
             intensity,
         );
     }
+
 }
 

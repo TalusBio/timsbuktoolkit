@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use crate::Tolerance;
 
 
 /// Trait meant to signal that some form of data is
@@ -18,14 +19,14 @@ where
     QA: Send + Sync,
     Self: Send + Sync,
 {
-    fn add_query(&self, queriable_aggregator: &mut QA) {
-        self.add_query_multi_group(&mut [queriable_aggregator]);
+    fn add_query(&self, queriable_aggregator: &mut QA, tolerance: &Tolerance) {
+        self.add_query_multi_group(&mut [queriable_aggregator], tolerance);
     }
 
-    fn par_add_query_multi(&self, queriable_aggregators: &mut [QA])
+    fn par_add_query_multi(&self, queriable_aggregators: &mut [QA], tolerance: &Tolerance)
     {
         queriable_aggregators
             .par_iter_mut()
-            .map(|queriable_aggregator| self.add_query(queriable_aggregator));
+            .map(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
     }
 }

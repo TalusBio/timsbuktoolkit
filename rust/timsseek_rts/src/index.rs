@@ -10,7 +10,7 @@ use timsquery::ElutionGroup;
 use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::ExpandedRawFrameIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::traits::tolerance::Tolerance;
 use timsseek::data_sources::speclib::ExpectedIntensities;
 use timsseek::errors::Result;
 use timsseek::fragment_mass::IonAnnot;
@@ -31,7 +31,7 @@ pub struct BundledDotDIndex {
     index: IndexUse,
     ref_time_ms: Arc<[u32]>,
     factory: MultiCMGStatsFactory<IonAnnot>,
-    tolerance: DefaultTolerance,
+    tolerance: Tolerance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +102,7 @@ pub struct NamedQuery {
 impl BundledDotDIndex {
     pub fn new(
         dotd_file_location: std::path::PathBuf,
-        tolerance: DefaultTolerance,
+        tolerance: Tolerance,
     ) -> Result<BundledDotDIndex> {
         let st = Instant::now();
         // Can use centroided for faster queries ...

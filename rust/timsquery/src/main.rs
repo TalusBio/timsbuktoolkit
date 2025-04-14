@@ -20,7 +20,7 @@ use timsquery::models::indices::{
 };
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::{
-    DefaultTolerance,
+    Tolerance,
     MobilityTolerance,
     MzToleramce,
     QuadTolerance,
@@ -121,7 +121,7 @@ fn main_query_index(args: QueryIndexArgs) {
     let index_use = args.index;
     let aggregator_use = args.aggregator;
 
-    let tolerance_settings: DefaultTolerance =
+    let tolerance_settings: Tolerance =
         serde_json::from_str(&std::fs::read_to_string(&tolerance_settings_path).unwrap()).unwrap();
     let elution_groups: Vec<ElutionGroup<String>> =
         serde_json::from_str(&std::fs::read_to_string(&elution_groups_path).unwrap()).unwrap();
@@ -146,8 +146,8 @@ fn main_query_index(args: QueryIndexArgs) {
     );
 }
 
-fn template_tolerance_settings() -> DefaultTolerance {
-    DefaultTolerance {
+fn template_tolerance_settings() -> Tolerance {
+    Tolerance {
         ms: MzToleramce::Ppm((15.0, 15.0)),
         // rt: RtTolerance::Absolute((120.0, 120.0)),
         rt: RtTolerance::None,
@@ -245,7 +245,7 @@ pub fn execute_query(
     index: PossibleIndex,
     aggregator: PossibleAggregator,
     raw_file_path: String,
-    tolerance: DefaultTolerance,
+    tolerance: Tolerance,
     elution_groups: Vec<ElutionGroup<String>>,
     args: QueryIndexArgs,
 ) {

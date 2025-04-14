@@ -1,4 +1,3 @@
-use super::super::chromatogram_agg::ChromatomobilogramStatsArrays;
 use super::aggregator::{
     DenseRTCollection,
     ParallelTracks,
@@ -16,9 +15,10 @@ use timsrust::converters::{
     Tof2MzConverter,
 };
 use tracing::warn;
+use crate::KeyLike;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PartitionedCMGArrayStats<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
+pub struct PartitionedCMGArrayStats<FH: KeyLike> {
     pub retention_time_miliseconds: Arc<[u32]>,
     pub weighted_ims_mean: Vec<f64>,
     pub ims_means: HashMap<FH, Vec<f64>>,
@@ -28,8 +28,13 @@ pub struct PartitionedCMGArrayStats<FH: Clone + Eq + Serialize + Hash + Send + S
     pub intensities: HashMap<FH, Vec<u64>>,
 }
 
+
+impl <FH: KeyLike> PartitionedCMGArrayStats<FH> {
+
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
+pub struct PartitionedCMGArrays<FH: KeyLike> {
     pub transition_stats: Vec<ChromatomobilogramStatsArrays>,
     pub transition_keys: Vec<FH>,
     pub retention_times_ms: Arc<[u32]>,
@@ -37,7 +42,7 @@ pub struct PartitionedCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync>
     pub expected_tof_indices: Vec<u32>,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrays<FH> {
+impl<FH: KeyLike> PartitionedCMGArrays<FH> {
     pub fn new_with_sparse(
         collections: Vec<SparseRTCollection>,
         keys: Vec<FH>,
@@ -167,7 +172,7 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug>
     }
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync> PartitionedCMGArrayStats<FH> {
+impl<FH: KeyLike> PartitionedCMGArrayStats<FH> {
     /// This step in essence converts the tof/scan indices to
     /// mz/ims units.
     pub fn new(
