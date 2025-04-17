@@ -1,11 +1,14 @@
-pub mod raw_peak_agg;
 pub mod point_agg;
+pub mod chromatogram_agg;
+pub mod spectrum_agg;
 
 pub use point_agg::RawPeakIntensityAggregator;
+pub use chromatogram_agg::EGCAggregator;
+pub use spectrum_agg::EGSAggregator;
 
-pub use raw_peak_agg::{
-    MultiCMGStatsAgg,
-    MultiCMGStatsFactory,
-    RawPeakIntensityAggregator,
-    RawPeakVectorAggregator,
-};
+// pub use raw_peak_agg::{
+//     MultiCMGStatsAgg,
+//     MultiCMGStatsFactory,
+//     RawPeakIntensityAggregator,
+//     RawPeakVectorAggregator,
+// };

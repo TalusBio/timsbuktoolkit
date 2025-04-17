@@ -19,13 +19,27 @@ pub struct RTMajorIntensityArray<K: Clone> {
 #[derive(Debug, Clone)]
 pub struct MzMajorIntensityArray<K: Clone> {
     pub arr: Array2D<f32>,
-    pub order: Arc<[K]>,
+    pub order_mz: Arc<[(K, f64)]>,
     pub rts_ms: Arc<[u32]>,
 }
 
+#[derive(Debug)]
+pub struct MutableChromatogram<'a> {
+    slc: &'a mut [f32], 
+    rts: &'a [u32],
+}
+
+impl<'a> MutableChromatogram<'a> {
+    pub fn add_at_close_rt(&mut self, rt_ms: u32, intensity: f32) {
+        let loc = self.rts.partition_point(|&rt| rt < rt_ms);
+        self.slc[loc] += intensity;
+    }
+}
+
+
 impl<K: KeyLike> MzMajorIntensityArray<K> {
-    pub fn new_empty(order: Arc<[K]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
-        let major_dim = order.len();
+    pub fn try_new_empty(order_mz: Arc<[(K, f64)]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+        let major_dim = order_mz.len();
         let minor_dim = rts_ms.len();
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData );
@@ -35,14 +49,14 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
             .expect("CMG array should already be size checked");
         Ok(Self {
             arr: out_arr,
-            order: order.clone(),
+            order_mz,
             rts_ms: rts_ms.clone(),
         })
     }
 
-    pub fn iter_mut_mzs(&mut self) -> impl Iterator<Item = (&K, &mut[f32])> {
-        assert_eq!(self.arr.nrows(), self.order.len());
-        self.order.iter().zip(self.arr.iter_mut_rows())
+    pub fn iter_mut_mzs(&mut self) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_>)> {
+        assert_eq!(self.arr.nrows(), self.order_mz.len());
+        self.order_mz.iter().zip(self.arr.iter_mut_rows().map(|slc| MutableChromatogram{slc, rts: &self.rts_ms}))
     }
 
     // // The main purpose of this function is to preserve the allocation

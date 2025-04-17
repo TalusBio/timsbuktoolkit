@@ -5,7 +5,7 @@ use timsrust::converters::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IncludedRange<T: Copy + PartialOrd>(pub T, pub T);
+pub struct IncludedRange<T: Copy + PartialOrd>(T, T);
 
 // TODO: Implement overlaps ...
 
@@ -14,7 +14,7 @@ where
     T: Copy + PartialOrd,
 {
     pub fn new(left: T, right: T) -> Self {
-        // Swao if left > right
+        // Swap if left > right
         if left > right {
             Self(right, left)
         } else {
