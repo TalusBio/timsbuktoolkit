@@ -85,11 +85,7 @@ pub fn dtw_with_strategy<
 ) -> Result<Vec<f64>> {
     // Check if vectors have the same length and are not empty
     if target_vals.len() != target_x.len() {
-        return Err(DataProcessingError::ExpectedVectorSameLength(
-            target_vals.len(),
-            target_x.len(),
-        )
-        .into());
+        return Err(DataProcessingError::ExpectedVectorSameLength.into());
     }
 
     // Initialize output with strategy's initial value

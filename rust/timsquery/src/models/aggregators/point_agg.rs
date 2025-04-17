@@ -1,16 +1,17 @@
 use crate::models::elution_group::ElutionGroup;
 use crate::KeyLike;
 use serde::Serialize;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy)]
-pub struct RawPeakIntensityAggregator<'a, T: KeyLike> {
-    pub query: &'a ElutionGroup<T>,
+#[derive(Debug, Clone)]
+pub struct RawPeakIntensityAggregator<T: KeyLike> {
+    pub query: Arc<ElutionGroup<T>>,
     pub intensity: u64,
 }
 
-impl <'a, T: KeyLike>RawPeakIntensityAggregator<'_, T> {
+impl <T: KeyLike>RawPeakIntensityAggregator<T> {
     pub fn new_with_elution_group(
-        elution_group: &ElutionGroup<T>,
+        elution_group: Arc<ElutionGroup<T>>,
     ) -> Self {
         Self {
             query: elution_group,
@@ -20,14 +21,14 @@ impl <'a, T: KeyLike>RawPeakIntensityAggregator<'_, T> {
 }
 
 #[derive(Debug, Clone)]
-pub struct RawPeakVectorAggregator<'a,T: KeyLike> {
-    pub query: &'a ElutionGroup<T>,
+pub struct RawPeakVectorAggregator<T: KeyLike> {
+    pub query: Arc<ElutionGroup<T>>,
     pub peaks: RawPeakVectorArrays,
 }
 
-impl <'a, T: KeyLike>RawPeakVectorAggregator<'_ , T> {
+impl <T: KeyLike>RawPeakVectorAggregator<T> {
     pub fn new_with_elution_group(
-        elution_group: &ElutionGroup<T>,
+        elution_group: Arc<ElutionGroup<T>>,
     ) -> Self {
         Self {
             query: elution_group,
