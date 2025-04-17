@@ -42,9 +42,12 @@ impl SparseRTCollection {
     }
 }
 
-/// Represents "there is a value at each positions in theretention time"
+/// Represents "there is a value at each positions in the retention time"
 #[derive(Debug, Clone)]
 pub struct DenseRTCollection {
+    // QUESTION: should I keep this an arc and do the binary search myself or
+    // abstract to some `rt_to_index_mapper`?
+    // 2025-Apr-16 JSPP
     pub reference_rt_ms: Arc<[u32]>,
     pub scan_tof_calc: Vec<Option<ImsMzRollingCalculator>>,
 }
@@ -102,9 +105,9 @@ impl DenseRTCollection {
 /// Represents a series of scan+tof values that are grouped by retention time represented in ms (u32)
 /// Each element in the vec is an independent 'track' (each is a precursor/transition)
 #[derive(Debug, Clone)]
-pub enum ParallelTracks {
-    Sparse(Vec<SparseRTCollection>),
-    Dense(Vec<DenseRTCollection>),
+pub struct ParallelTracks {
+    // Sparse(Vec<SparseRTCollection>),
+    tracks: Vec<DenseRTCollection>
 }
 
 impl ParallelTracks {
@@ -132,6 +135,13 @@ impl ParallelTracks {
         match self {
             Self::Sparse(sparse) => sparse[idx].add(rt_ms, mobility, tof_index, intensity),
             Self::Dense(dense) => dense[idx].add(rt_ms, mobility, tof_index, intensity),
+        }
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut SparseRTCollection> {
+        match self {
+            Self::Sparse(sparse) => sparse.iter_mut(),
+            Self::Dense(dense) => dense.iter_mut(),
         }
     }
 }

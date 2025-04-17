@@ -89,7 +89,7 @@ impl<FH: KeyLike> MultiCMGStatsFactory<FH> {
 // TODO: I hate this name ... I need to find something
 // better - JSPP - 2024-12-20
 #[derive(Debug, Clone, Serialize)]
-pub struct NaturalFinalizedMultiCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
+pub struct NaturalFinalizedMultiCMGArrays<FH: KeyLike> {
     pub ms1_arrays: PartitionedCMGArrayStats<usize>,
     pub ms2_arrays: PartitionedCMGArrayStats<FH>,
     pub id: u64,

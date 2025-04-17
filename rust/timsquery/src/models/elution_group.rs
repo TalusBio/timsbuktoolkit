@@ -4,7 +4,6 @@ use serde::{
     Serialize,
 };
 use std::collections::HashMap;
-use std::hash::Hash;
 
 /// A struct that represents an elution group.
 ///
@@ -16,11 +15,15 @@ pub struct ElutionGroup<T: KeyLike> {
     pub id: u64,
     pub mobility: f32,
     pub rt_seconds: f32,
-    pub precursor_mzs: Vec<f64>,
-    pub fragment_mzs: HashMap<T, f64>,
+    // TODO: Find a way to replace the vec ... since most are
+    // small I can probably use something like a tinyvec ...
+    //
+    // Also .. thei8 might not be the best for performance due to alignment ...
+    pub precursor_mzs: Vec<(i8, f64)>,
+    pub fragment_mzs: Vec<(T, f64)>,
 }
 
-impl<T: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> ElutionGroup<T> {
+impl<T: KeyLike> ElutionGroup<T> {
     pub fn get_precursor_mz_limits(&self) -> (f64, f64) {
         let mut min_precursor_mz = f64::MAX;
         let mut max_precursor_mz = f64::MIN;
@@ -33,5 +36,13 @@ impl<T: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> ElutionGr
             }
         }
         (min_precursor_mz, max_precursor_mz)
+    }
+
+    pub fn iter_precursors(&self) -> impl Iterator<Item = (i8, &f64)> {
+        self.precursor_mzs.iter()
+    }
+
+    pub fn iter_fragments(&self) -> impl Iterator<Item = (&T, &f64)> {
+        self.fragment_mzs.iter()
     }
 }
