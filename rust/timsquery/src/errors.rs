@@ -46,7 +46,7 @@ pub enum DataProcessingError {
     ExpectedVectorLength { real: usize, expected: usize },
     ExpectedNonEmptyData,
     InsufficientData { real: usize, expected: usize },
-    ExpectedVectorSameLength(usize, usize),
+    ExpectedVectorSameLength,
     UnexpectedInfiniteError(usize),
     UnexpectedInfiniteErrors(Vec<(usize, f64)>),
 }

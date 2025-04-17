@@ -38,17 +38,12 @@ impl<
     pub fn new<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>> {
         let nrows = values.as_ref().len();
         if nrows == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: Some("Cannot create array with zero rows".to_string()),
-            }
+            return Err(DataProcessingError::ExpectedNonEmptyData 
             .into());
         }
         let ncols = values.as_ref()[0].as_ref().len();
         if ncols == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: Some("Cannot create array with zero columns".to_string()),
-            }
-            .into());
+            return Err(DataProcessingError::ExpectedNonEmptyData  .into());
         }
 
         let expected_size = nrows * ncols;
@@ -60,11 +55,7 @@ impl<
             .collect();
 
         if values.len() != expected_size {
-            return Err(DataProcessingError::ExpectedSlicesSameLength {
-                expected: expected_size,
-                other: values.len(),
-                context: "Expected array with nrows * ncols values, got different size".to_string(),
-            }
+            return Err(DataProcessingError::ExpectedVectorSameLength 
             .into());
         }
 
@@ -78,16 +69,12 @@ impl<
     pub fn new_transposed<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>> {
         let ncols = values.as_ref().len();
         if ncols == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: Some("Cannot create array with zero columns".to_string()),
-            }
+            return Err(DataProcessingError::ExpectedNonEmptyData 
             .into());
         }
         let nrows = values.as_ref()[0].as_ref().len();
         if nrows == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: Some("Cannot create array with zero rows".to_string()),
-            }
+            return Err(DataProcessingError::ExpectedNonEmptyData 
             .into());
         }
 
@@ -96,12 +83,7 @@ impl<
 
         for (ci, col) in values.as_ref().iter().enumerate() {
             if col.as_ref().len() != nrows {
-                return Err(DataProcessingError::ExpectedSlicesSameLength {
-                    expected: nrows,
-                    other: col.as_ref().len(),
-                    context: "All columns must have the same length".to_string(),
-                }
-                .into());
+                return Err(DataProcessingError::ExpectedVectorSameLength .into());
             }
             for (ri, val) in col.as_ref().iter().enumerate() {
                 let idx = ri * ncols + ci; // Changed indexing for row-major order
@@ -120,12 +102,7 @@ impl<
 
     pub fn from_flat_vector(values: Vec<T>, nrows: usize, ncols: usize) -> Result<Array2D<T>> {
         if values.len() != nrows * ncols {
-            return Err(DataProcessingError::ExpectedSlicesSameLength {
-                expected: nrows * ncols,
-                other: values.len(),
-                context: "Expected array with nrows * ncols values, got different size".to_string(),
-            }
-            .into());
+            return Err(DataProcessingError::ExpectedVectorSameLength.into());
         }
         Ok(Array2D {
             values,
@@ -152,6 +129,10 @@ impl<
         f: F,
     ) -> impl Iterator<Item = W> + 'b {
         self.values.chunks(self.major_dim).map(f)
+    }
+
+    pub fn iter_mut_rows(&mut self) -> impl Iterator<Item = &mut [T]> {
+        self.values.chunks_mut(self.major_dim)
     }
 
     /// RowConvolve
