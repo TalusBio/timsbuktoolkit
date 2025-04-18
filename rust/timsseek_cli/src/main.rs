@@ -4,7 +4,7 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use timsquery::models::aggregators::MultiCMGStatsFactory;
+use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsseek::fragment_mass::IonAnnot;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
@@ -112,19 +112,12 @@ fn main() -> std::result::Result<(), errors::CliError> {
     let tdf_path = &dotd_file_location.clone().unwrap().join("analysis.tdf");
     let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
 
-    let factory = MultiCMGStatsFactory {
-        converters: (index.mz_converter, index.im_converter),
-        _phantom: std::marker::PhantomData::<IonAnnot>,
-    };
-
     // Process based on input type
     match config.input {
         Some(InputConfig::Fasta { path, digestion }) => {
             processing::process_fasta(
                 path,
                 &index,
-                ref_time_ms.clone(),
-                &factory,
                 digestion,
                 &config.analysis,
                 &output_config,
@@ -135,8 +128,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
             processing::process_speclib(
                 path,
                 &index,
-                ref_time_ms.clone(),
-                &factory,
                 &config.analysis,
                 &output_config,
             )

@@ -3,7 +3,7 @@ use serde::{
     Serialize,
 };
 use std::path::PathBuf;
-use timsquery::traits::tolerance::Tolerance;
+use timsquery::Tolerance;
 
 use crate::cli::Cli;
 use crate::errors;
