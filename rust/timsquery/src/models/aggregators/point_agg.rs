@@ -4,12 +4,12 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub struct RawPeakIntensityAggregator<T: KeyLike> {
+pub struct PointIntensityAggregator<T: KeyLike> {
     pub query: Arc<ElutionGroup<T>>,
     pub intensity: u64,
 }
 
-impl <T: KeyLike>RawPeakIntensityAggregator<T> {
+impl <T: KeyLike>PointIntensityAggregator<T> {
     pub fn new_with_elution_group(
         elution_group: Arc<ElutionGroup<T>>,
     ) -> Self {

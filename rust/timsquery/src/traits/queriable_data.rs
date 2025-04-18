@@ -1,5 +1,7 @@
 use rayon::prelude::*;
 use crate::Tolerance;
+use crate::models::aggregators::{PointIntensityAggregator, EGSAggregator, EGCAggregator};
+use crate::KeyLike;
 
 
 /// Trait meant to signal that some form of data is
@@ -23,6 +25,10 @@ where
     {
         queriable_aggregators
             .par_iter_mut()
-            .map(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
+            .for_each(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
     }
 }
+
+// Blanket trait implementation meaning that the index can be queried with any aggregator.
+pub trait GenerallyQueriable<T: KeyLike>: QueriableData<EGSAggregator<T>> + QueriableData<EGSAggregator<T>> + QueriableData<PointIntensityAggregator<T>> {}
+impl <T: KeyLike, I: QueriableData<EGSAggregator<T>> + QueriableData<EGSAggregator<T>> + QueriableData<PointIntensityAggregator<T>>> GenerallyQueriable<T> for I {}
