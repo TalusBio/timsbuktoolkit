@@ -1,4 +1,3 @@
-use crate::errors::Result;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
     FrameProcessingConfig,
@@ -28,6 +27,7 @@ use tracing::{
     instrument,
 };
 use std::sync::Arc;
+use crate::errors::TimsqueryError;
 
 #[derive(Debug)]
 pub struct ExpandedRawFrameIndex {
@@ -127,18 +127,18 @@ impl ExpandedRawFrameIndex {
     }
 
     #[instrument(name = "ExpandedRawFrameIndex::from_path_centroided")]
-    pub fn from_path_centroided(path: &str) -> Result<Self> {
+    pub fn from_path_centroided(path: &str) -> Result<Self, TimsqueryError> {
         let config = FrameProcessingConfig::default_centroided();
         Self::from_path_base(path, config)
     }
 
     #[instrument(name = "ExpandedRawFrameIndex::from_path")]
-    pub fn from_path(path: &str) -> Result<Self> {
+    pub fn from_path(path: &str) -> Result<Self, TimsqueryError> {
         Self::from_path_base(path, FrameProcessingConfig::NotCentroided)
     }
 
     #[instrument(name = "ExpandedRawFrameIndex::from_path_base")]
-    pub fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self> {
+    pub fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self, TimsqueryError> {
         info!(
             "Building ExpandedRawFrameIndex from path {} config {:?}",
             path, centroid_config,

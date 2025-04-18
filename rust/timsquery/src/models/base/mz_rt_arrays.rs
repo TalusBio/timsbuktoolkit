@@ -1,5 +1,5 @@
 use super::Array2D;
-use crate::errors::DataProcessingError;
+use crate::{errors::DataProcessingError, models::aggregators::EGCAggregator};
 use std::sync::Arc;
 use crate::KeyLike;
 use serde::ser::{Serialize, Serializer, SerializeStruct};
@@ -10,7 +10,7 @@ use serde::ser::{Serialize, Serializer, SerializeStruct};
 #[derive(Debug, Clone)]
 pub struct RTMajorIntensityArray<K: Clone> {
     pub arr: Array2D<f32>,
-    pub order: Arc<[K]>,
+    pub order: Arc<[(K, f64)]>,
     pub rts_ms: Arc<[u32]>,
 }
 
@@ -18,7 +18,7 @@ pub struct RTMajorIntensityArray<K: Clone> {
 /// In this representation all elements with the same m/z
 /// are adjacent in memory.
 #[derive(Debug, Clone)]
-pub struct MzMajorIntensityArray<K: Clone> {
+pub struct MzMajorIntensityArray<K: Clone + Eq> {
     pub arr: Array2D<f32>,
     pub order_mz: Arc<[(K, f64)]>,
     pub rts_ms: Arc<[u32]>,
@@ -71,49 +71,84 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
         })
     }
 
+
+    // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
+    pub fn get_row(&self, key: &K) -> Option<&[f32]> {
+        let idx = self.order_mz.iter().position(|(k, _)| k == key)?;
+        self.arr.get_row(idx)
+    }
+
     pub fn iter_mut_mzs(&mut self) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_>)> {
         assert_eq!(self.arr.nrows(), self.order_mz.len());
         self.order_mz.iter().zip(self.arr.iter_mut_rows().map(|slc| MutableChromatogram{slc, rts: &self.rts_ms}))
     }
 
-    // // The main purpose of this function is to preserve the allocation
-    // // of the array but replace the data contained in it.
-    // pub fn reset_with(
-    //     &mut self,
-    //     array: &PartitionedCMGArrayStats<K>,
-    //     order: Arc<[K]>,
-    // ) -> Result<(), DataProcessingError> {
-    //     // TODO consider if its worth abstracting these 5 lines ...
-    //     let major_dim = order.len();
-    //     let minor_dim = array.retention_time_miliseconds.len();
-    //     if minor_dim == 0 {
-    //         return Err(DataProcessingError::ExpectedNonEmptyData {
-    //             context: Some("Cannot create array with zero rows".to_string()),
-    //         });
-    //     }
-    //     self.arr.reset_with_default(minor_dim, major_dim, 0.0);
-    //     self.fill_with(array, order);
-    //     Ok(())
-    // }
+    pub fn transpose_clone(&self) -> RTMajorIntensityArray<K> {
+        RTMajorIntensityArray {
+            arr: self.arr.transpose_clone(),
+            order: self.order_mz.clone(),
+            rts_ms: self.rts_ms.clone(),
+        }
+    }
 
-    // fn fill_with(&mut self, array: &PartitionedCMGArrayStats<K>, order: Arc<[K]>) {
-    //     for (j, fh) in order.iter().enumerate() {
-    //         let tmp = array.intensities.get(fh);
-    //         if tmp.is_none() {
-    //             continue;
-    //         }
-    //         let inten_vec = tmp.unwrap();
-    //         for (i, inten) in inten_vec.iter().enumerate() {
-    //             self.arr.insert(j, i, *inten as f32);
-    //         }
-    //     }
-    //     self.order = order;
-    //     self.rts_ms = array.retention_time_miliseconds.clone();
-    // }
+    pub fn reorder_with(&mut self, order: Arc<[(K, f64)]>) {
+        // This is essentially bubble sort ...
+        assert_eq!(self.arr.nrows(), self.order_mz.len());
+        // Should I check there are no dupes?
+        //
+        let mut local_order: Vec<_> = self.order_mz.iter().cloned().collect();
+        for (i, (k, _mz)) in order.iter().enumerate() {
+            let j = local_order.iter().position(|(k2, _)| k2 == k).unwrap();
+            if i != j {
+                local_order.swap(i, j);
+                self.arr.try_swap_rows(i, j).expect("Array in bounds");
+            }
+        }
+
+        for (l, r) in local_order.iter().zip(order.iter()) {
+            assert_eq!(l, r);
+        }
+        self.order_mz = order;
+    }
+
+    // The main purpose of this function is to preserve the allocation
+    // of the array but replace the data contained in it.
+    pub fn try_reset_with(
+        &mut self,
+        array: &MzMajorIntensityArray<K>,
+    ) -> Result<(), DataProcessingError> {
+        // TODO consider if its worth abstracting these 5 lines ...
+        let major_dim = array.order_mz.len();
+        let minor_dim = array.rts_ms.len();
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+        self.arr.reset_with_default(minor_dim, major_dim, 0.0);
+        self.fill_with(array);
+        Ok(())
+    }
+
+    fn fill_with(&mut self, array: &MzMajorIntensityArray<K>) {
+        let order = array.order_mz.clone();
+
+        for (j, (fh, fh_mz)) in order.iter().enumerate() {
+            let tmp = array.get_row(fh);
+            if tmp.is_none() {
+                panic!("No row for..."); // , fh, fh_mz);
+                continue;
+            }
+            let inten_slc = tmp.unwrap();
+            self.arr.try_replace_row_with(j, inten_slc).expect("Sufficient Capacity");
+        }
+        self.order_mz = order;
+        // I am pretty sure this is not needed ...
+        // Should I be checking for it??
+        self.rts_ms = array.rts_ms.clone();
+    }
 }
 
 impl<FH: KeyLike> RTMajorIntensityArray<FH> {
-    pub fn new_empty(order: Arc<[FH]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+    pub fn try_new_empty(order: Arc<[(FH, f64)]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
         let minor_dim = rts_ms.len();
         let major_dim = order.len();
         if major_dim == 0 {
@@ -132,28 +167,39 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
         })
     }
 
-    // pub fn reset_with(
-    //     &mut self,
-    //     array: &PartitionedCMGArrayStats<FH>,
-    //     order: Arc<[FH]>,
-    // ) -> Result<(), DataProcessingError> {
-    //     // TODO consider if its worth abstracting these 5 lines ...
-    //     let minor_dim = order.len();
-    //     let major_dim = array.retention_time_miliseconds.len();
-    //     if major_dim == 0 {
-    //         return Err(DataProcessingError::ExpectedNonEmptyData {
-    //             context: Some("Cannot create array with zero columns".to_string()),
-    //         });
-    //     }
-    //     if minor_dim == 0 {
-    //         return Err(DataProcessingError::ExpectedNonEmptyData {
-    //             context: Some("Cannot create array with zero rows".to_string()),
-    //         });
-    //     }
-    //     self.arr.reset_with_default(minor_dim, major_dim, 0.0);
-    //     self.fill_with(array, order);
-    //     Ok(())
-    // }
+    pub fn try_reset_with(
+        &mut self,
+        array: &MzMajorIntensityArray<FH>,
+    ) -> Result<(), DataProcessingError> {
+        // TODO consider if its worth abstracting these 5 lines ...
+        let minor_dim = array.order_mz.len();
+        let major_dim = array.rts_ms.len();
+        if major_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+        if minor_dim == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData); 
+        }
+        self.arr.reset_with_default(minor_dim, major_dim, 0.0);
+        self.fill_with(array);
+        Ok(())
+    }
+
+    fn fill_with(&mut self, array: &MzMajorIntensityArray<FH>) {
+        let order = array.order_mz.clone();
+        for (j, (fh, _mz)) in order.iter().enumerate() {
+            let tmp = array.get_row(fh);
+            if tmp.is_none() {
+                continue;
+            }
+            let inten_slc = tmp.unwrap();
+            for (i, _) in inten_slc.iter().enumerate() {
+                self.arr.insert(i, j, inten_slc[i]);
+            }
+        }
+        self.order = order;
+        self.rts_ms = array.rts_ms.clone();
+    }
 
 }
 

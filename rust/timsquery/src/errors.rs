@@ -9,8 +9,6 @@ pub enum TimsqueryError {
     Other(String),
 }
 
-pub type Result<T> = std::result::Result<T, TimsqueryError>;
-
 impl Display for TimsqueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -47,6 +45,7 @@ pub enum DataProcessingError {
     ExpectedNonEmptyData,
     InsufficientData { real: usize, expected: usize },
     ExpectedVectorSameLength,
+    IndexOutOfBoundsError(usize),
     UnexpectedInfiniteError(usize),
     UnexpectedInfiniteErrors(Vec<(usize, f64)>),
 }

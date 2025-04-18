@@ -1,5 +1,5 @@
 use crate::errors::Result;
-use crate::models::{
+use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };

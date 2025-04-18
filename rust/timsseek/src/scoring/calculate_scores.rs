@@ -54,8 +54,8 @@ pub struct LongitudinalMainScoreElements {
 
 #[derive(Debug)]
 pub struct IntensityArrays {
-    pub ms1_rtmajor: RTMajorIntensityArray<usize>,
-    pub ms1_mzmajor: MzMajorIntensityArray<usize>,
+    pub ms1_rtmajor: RTMajorIntensityArray<i8>,
+    pub ms1_mzmajor: MzMajorIntensityArray<i8>,
     pub ms2_rtmajor: RTMajorIntensityArray<IonAnnot>,
     pub ms2_mzmajor: MzMajorIntensityArray<IonAnnot>,
     pub ms1_expected_intensities: Vec<f32>,
@@ -67,96 +67,53 @@ impl IntensityArrays {
         query_values: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self> {
-        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
-        let ms1_rtmajor_arr =
-            RTMajorIntensityArray::new(&query_values.ms1_arrays, ms1_order.clone());
-        let ms1_mzmajor_arr =
-            MzMajorIntensityArray::new(&query_values.ms1_arrays, ms1_order.clone());
-        let ms2_rtmajor_arr =
-            RTMajorIntensityArray::new(&query_values.ms2_arrays, ms2_order.clone());
-        let ms2_mzmajor_arr =
-            MzMajorIntensityArray::new(&query_values.ms2_arrays, ms2_order.clone());
+        let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
+        let ms1_rtmajor_arr = ms1_mzmajor_arr.transpose_clone();
+        let ms2_rtmajor_arr = ms2_mzmajor_arr.transpose_clone();
+        let ms2_ref_vec: Vec<_> = ms2_mzmajor_arr.order_mz.iter().map(|&(k, _)| *expected_intensities.fragment_intensities.get(&k).expect("Failed to find expected intensity for fragment")).collect();
 
-        match (
-            ms1_rtmajor_arr,
-            ms1_mzmajor_arr,
-            ms2_rtmajor_arr,
-            ms2_mzmajor_arr,
-        ) {
-            (
-                Ok(ms1_rtmajor_arr),
-                Ok(ms1_mzmajor_arr),
-                Ok(ms2_rtmajor_arr),
-                Ok(ms2_mzmajor_arr),
-            ) => Ok(Self {
+        Ok(Self {
                 ms1_rtmajor: ms1_rtmajor_arr,
                 ms1_mzmajor: ms1_mzmajor_arr,
                 ms2_rtmajor: ms2_rtmajor_arr,
                 ms2_mzmajor: ms2_mzmajor_arr,
                 ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
                 ms2_expected_intensities: ms2_ref_vec,
-            }),
-            (Err(e), _, _, _) | (_, Err(e), _, _) => {
-                let e = e.append_to_context("Failed to create IntensityArrays for MS1, ");
-                Err(e.into())
-            }
-            (_, _, Err(e), _) | (_, _, _, Err(e)) => {
-                let e = e.append_to_context("Failed to create IntensityArrays for MS2, ");
-                Err(e.into())
-            }
-        }
+            })
     }
 
     pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self> {
-        let ms1_order: Arc<[usize]> = (0..=num_ms1).collect();
-        let ms2_order: Arc<[IonAnnot]> = (0..=num_ms2)
-            .map(|o| IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap())
+        // This is mainly used to pre-allocated the memory that will be used later by several.
+        // runs.
+        let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|o| (o as i8, 867.8309)).collect();
+        let ms2_order: Arc<[(IonAnnot, f64)]> = (0..=num_ms2)
+            .map(|o| (IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap(), 867.8309))
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
         Ok(Self {
-            ms1_rtmajor: RTMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
-            ms1_mzmajor: MzMajorIntensityArray::new_empty(ms1_order.clone(), ref_time_ms.clone())?,
-            ms2_rtmajor: RTMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
-            ms2_mzmajor: MzMajorIntensityArray::new_empty(ms2_order.clone(), ref_time_ms.clone())?,
-            ms1_expected_intensities: vec![],
+            ms1_rtmajor: RTMajorIntensityArray::try_new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms1_mzmajor: MzMajorIntensityArray::try_new_empty(ms1_order.clone(), ref_time_ms.clone())?,
+            ms2_rtmajor: RTMajorIntensityArray::try_new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms2_mzmajor: MzMajorIntensityArray::try_new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms1_expected_intensities: vec![0.5; num_ms1],
             ms2_expected_intensities: ms2_ref_vec,
         })
     }
 
-    fn get_orders(
-        expected_intensities: &ExpectedIntensities,
-    ) -> (Arc<[usize]>, Arc<[IonAnnot]>, Vec<f32>) {
-        let ms1_order: Arc<[usize]> = expected_intensities
-            .precursor_intensities
-            .iter()
-            .enumerate()
-            .map(|x| x.0)
-            .collect();
-        let (ms2_order, ms2_ref_vec): (Vec<IonAnnot>, Vec<f32>) = expected_intensities
-            .fragment_intensities
-            .iter()
-            .map(|(pos, intensity)| (*pos, { *intensity }))
-            .unzip();
-        let ms2_order: Arc<[IonAnnot]> = ms2_order.into();
-
-        (ms1_order, ms2_order, ms2_ref_vec)
-    }
-
+    // Right now I KNOW this is an icredibly dumb operation
+    // and I should move this upstream BUT I want to finish the other
+    // refactor changes first ... JSPP Apr-18-2025
     pub fn reset_with(
         &mut self,
-        intensity_arrays: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        intensity_arrays: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<()> {
-        let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
-        self.ms1_rtmajor
-            .reset_with(&intensity_arrays.ms1_arrays, ms1_order.clone())?;
-        self.ms1_mzmajor
-            .reset_with(&intensity_arrays.ms1_arrays, ms1_order)?;
-        self.ms2_rtmajor
-            .reset_with(&intensity_arrays.ms2_arrays, ms2_order.clone())?;
-        self.ms2_mzmajor
-            .reset_with(&intensity_arrays.ms2_arrays, ms2_order)?;
+        self.ms1_rtmajor.try_reset_with(&intensity_arrays.precursors)?;
+        self.ms1_mzmajor.try_reset_with(&intensity_arrays.precursors)?;
+        self.ms2_rtmajor.try_reset_with(&intensity_arrays.fragments)?;
+        self.ms2_mzmajor.try_reset_with(&intensity_arrays.fragments)?;
         self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
+        let ms2_ref_vec: Vec<_> = self.ms2_mzmajor.order_mz.iter().map(|&(k, _)| *expected_intensities.fragment_intensities.get(&k).expect("Failed to find expected intensity for fragment")).collect();
         self.ms2_expected_intensities = ms2_ref_vec;
         Ok(())
     }
@@ -222,7 +179,7 @@ impl LongitudinalMainScoreElements {
         }
         let mut ms2_coelution_score = ms2_coe_scores.unwrap();
 
-        let tmp = coelution_score::coelution_score::<6, usize>(&intensity_arrays.ms1_mzmajor, 7);
+        let tmp = coelution_score::coelution_score::<6, i8>(&intensity_arrays.ms1_mzmajor, 7);
         let mut ms1_coelution_score = match tmp {
             Ok(scores) => scores,
             Err(_) => vec![0.0; ref_time_ms.len()],
@@ -376,14 +333,14 @@ impl PreScore {
 
         let ms2_loc = self
             .query_values
-            .ms2_arrays
-            .retention_time_miliseconds
+            .fragments
+            .rts_ms
             .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
 
         let ms1_loc = self
             .query_values
-            .ms1_arrays
-            .retention_time_miliseconds
+            .precursors
+            .rts_ms
             .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
 
         let summed_ms1_int: f32 = match intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
@@ -407,21 +364,22 @@ impl PreScore {
             None => 0,
         };
 
-        let ims_ms2 = self
-            .query_values
-            .ms2_arrays
-            .weighted_ims_mean
-            .get(ms2_loc)
-            .copied()
-            .unwrap_or(f64::NAN);
+        // let ims_ms2 = self
+        //     .query_values
+        //     .ms2_arrays
+        //     .weighted_ims_mean
+        //     .get(ms2_loc)
+        //     .copied()
+        //     .unwrap_or(f64::NAN);
 
-        let ims_ms1 = self
-            .query_values
-            .ms1_arrays
-            .weighted_ims_mean
-            .get(ms1_loc)
-            .copied()
-            .unwrap_or(f64::NAN);
+        // let ims_ms1 = self
+        //     .query_values
+        //     .ms1_arrays
+        //     .weighted_ims_mean
+        //     .get(ms1_loc)
+        //     .copied()
+        //     .unwrap_or(f64::NAN);
+        let (ims_ms1, ims_ms2): (f64, f64) = (0.0, 0.0);
 
         let ims = match (ims_ms1, ims_ms2) {
             (x, y) if !x.is_nan() && y.is_nan() => x,

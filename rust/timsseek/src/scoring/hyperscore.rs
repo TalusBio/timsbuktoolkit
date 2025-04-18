@@ -4,7 +4,7 @@ use crate::fragment_mass::{
     IonAnnot,
     IonSeriesTerminality,
 };
-use crate::models::RTMajorIntensityArray;
+use timsquery::models::RTMajorIntensityArray;
 use crate::utils::math::{
     lnfact,
     lnfact_f32,

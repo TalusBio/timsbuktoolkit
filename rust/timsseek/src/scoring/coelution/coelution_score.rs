@@ -1,5 +1,5 @@
 use crate::errors::DataProcessingError;
-use crate::models::{
+use timsquery::models::{
     Array2D,
     MzMajorIntensityArray,
 };

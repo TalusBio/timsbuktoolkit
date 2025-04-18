@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+use crate::errors::DataProcessingError;
+
+use std::ops::Range;
 
 /// Implements a way to represent an array of
 /// dimensions x-y that will be later used to
@@ -35,15 +34,14 @@ impl<
         + std::ops::AddAssign<T>,
 > Array2D<T>
 {
-    pub fn new<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>> {
+    pub fn new<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>, DataProcessingError> {
         let nrows = values.as_ref().len();
         if nrows == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData 
-            .into());
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         let ncols = values.as_ref()[0].as_ref().len();
         if ncols == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData  .into());
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
         let expected_size = nrows * ncols;
@@ -55,8 +53,7 @@ impl<
             .collect();
 
         if values.len() != expected_size {
-            return Err(DataProcessingError::ExpectedVectorSameLength 
-            .into());
+            return Err(DataProcessingError::ExpectedVectorSameLength);
         }
 
         Ok(Array2D {
@@ -66,16 +63,16 @@ impl<
         })
     }
 
-    pub fn new_transposed<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>> {
+    pub fn new_transposed<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>, DataProcessingError> {
         let ncols = values.as_ref().len();
         if ncols == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData 
-            .into());
+            );
         }
         let nrows = values.as_ref()[0].as_ref().len();
         if nrows == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData 
-            .into());
+            );
         }
 
         let expected_size = nrows * ncols;
@@ -83,7 +80,7 @@ impl<
 
         for (ci, col) in values.as_ref().iter().enumerate() {
             if col.as_ref().len() != nrows {
-                return Err(DataProcessingError::ExpectedVectorSameLength .into());
+                return Err(DataProcessingError::ExpectedVectorSameLength );
             }
             for (ri, val) in col.as_ref().iter().enumerate() {
                 let idx = ri * ncols + ci; // Changed indexing for row-major order
@@ -100,9 +97,9 @@ impl<
         })
     }
 
-    pub fn from_flat_vector(values: Vec<T>, nrows: usize, ncols: usize) -> Result<Array2D<T>> {
+    pub fn from_flat_vector(values: Vec<T>, nrows: usize, ncols: usize) -> Result<Array2D<T>, DataProcessingError> {
         if values.len() != nrows * ncols {
-            return Err(DataProcessingError::ExpectedVectorSameLength.into());
+            return Err(DataProcessingError::ExpectedVectorSameLength);
         }
         Ok(Array2D {
             values,
@@ -223,13 +220,37 @@ impl<
         self.values[idx] = value;
     }
 
-    pub fn get_row(&self, index: usize) -> Option<&[T]> {
+    fn get_row_limits(&self, index: usize) -> Option<Range<usize>> {
         let start = index * self.major_dim;
         let end = start + self.major_dim;
         if end > self.values.len() || start >= self.values.len() {
             return None;
         }
-        Some(&self.values[start..end])
+        Some(start..end)
+    }
+
+    pub fn get_row(&self, index: usize) -> Option<&[T]> {
+        Some(&self.values[self.get_row_limits(index)?])
+    }
+
+    pub fn get_row_mut(&mut self, index: usize) -> Result<&mut [T], DataProcessingError> {
+        let range = self.get_row_limits(index).ok_or(DataProcessingError::IndexOutOfBoundsError(index))?;
+        Ok(&mut self.values[range])
+    }
+
+    pub fn try_swap_rows(&mut self, row1: usize, row2: usize) -> Result<(), DataProcessingError> {
+        let range_1 = self.get_row_limits(row1).ok_or(DataProcessingError::IndexOutOfBoundsError(row1))?;
+        let range_2 = self.get_row_limits(row2).ok_or(DataProcessingError::IndexOutOfBoundsError(row2))?;
+        for (i, j) in range_1.zip(range_2) {
+            self.values.swap(i, j);
+        }
+        Ok(())
+    }
+
+    pub fn try_replace_row_with(&mut self, row_idx: usize, row: &[T]) -> Result<(), DataProcessingError> {
+        let range = self.get_row_limits(row_idx).ok_or(DataProcessingError::IndexOutOfBoundsError(row_idx))?;
+        self.values[range].copy_from_slice(row);
+        Ok(())
     }
 
     pub fn nrows(&self) -> usize {
@@ -240,17 +261,16 @@ impl<
         self.major_dim
     }
 
-    pub fn transpose(self) -> Array2D<T> {
+    pub fn transpose_clone(&self) -> Array2D<T> {
         // Swap major_dim and minor_dim
         let col_dim = self.major_dim;
         let row_dim = self.minor_dim;
-        let vals = self.values;
 
-        let mut result = vec![vals[0]; row_dim * col_dim];
+        let mut result = vec![self.values[0]; row_dim * col_dim];
 
         for i in 0..row_dim {
             for j in 0..col_dim {
-                result[j * row_dim + i] = vals[i * col_dim + j];
+                result[j * row_dim + i] = self.values[i * col_dim + j];
             }
         }
 
@@ -273,10 +293,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_array2d_new() -> Result<()> {
+    fn test_array2d_new() {
         // Test creating a 2x3 array
         let values = vec![vec![1, 2, 3], vec![4, 5, 6]];
-        let array = Array2D::new(&values)?;
+        let array = Array2D::new(&values).unwrap();
 
         // Check dimensions
         assert_eq!(array.major_dim, 3); // columns
@@ -284,19 +304,17 @@ mod tests {
 
         // Check memory layout - values in same row should be adjacent
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
-
-        Ok(())
     }
 
     #[test]
-    fn test_array2d_new_transposed() -> Result<()> {
+    fn test_array2d_new_transposed()  {
         // Test creating a 3x2 array from columns
         let columns = vec![
             vec![1, 4], // first column
             vec![2, 5], // second column
             vec![3, 6], // third column
         ];
-        let array = Array2D::new_transposed(&columns)?;
+        let array = Array2D::new_transposed(&columns).unwrap();
 
         // Check dimensions
         assert_eq!(array.major_dim, 3); // columns
@@ -304,8 +322,6 @@ mod tests {
 
         // Check memory layout - values should be arranged row-major
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
-
-        Ok(())
     }
 
     #[test]
@@ -331,14 +347,14 @@ mod tests {
     }
 
     #[test]
-    fn test_array2d_large() -> Result<()> {
+    fn test_array2d_large() {
         // Test with a larger array to verify memory efficiency
         let size = 1000;
         let values: Vec<Vec<f64>> = (0..size)
             .map(|i| (0..size).map(|j| (i * size + j) as f64).collect())
             .collect();
 
-        let array = Array2D::new(&values)?;
+        let array = Array2D::new(&values).unwrap();
 
         // Verify dimensions
         assert_eq!(array.major_dim, size);
@@ -347,14 +363,12 @@ mod tests {
         // Verify first and last values
         assert_eq!(array.values[0], 0.0);
         assert_eq!(array.values[size * size - 1], (size * size - 1) as f64);
-
-        Ok(())
     }
 
     #[test]
-    fn test_array2d_transpose() -> Result<()> {
+    fn test_array2d_transpose()  {
         let values = vec![vec![1, 2, 3], vec![4, 5, 6]];
-        let array = Array2D::new(&values)?;
+        let array = Array2D::new(&values).unwrap();
 
         // Check dimensions
         assert_eq!(array.major_dim, 3); // columns
@@ -363,7 +377,7 @@ mod tests {
         // Check memory layout - values in same row should be adjacent
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
 
-        let transposed = array.transpose();
+        let transposed = array.transpose_clone();
 
         // Check dimensions
         assert_eq!(transposed.major_dim, 2); // columns
@@ -371,8 +385,6 @@ mod tests {
 
         // Check memory layout - values should be arranged row-major
         assert_eq!(transposed.values, vec![1, 4, 2, 5, 3, 6]);
-
-        Ok(())
     }
 
     #[test]
@@ -438,5 +450,14 @@ mod tests {
         assert_eq!(array.values, vec![7, 2, 3, 4, 5, 6]);
         array.insert(1, 2, 8);
         assert_eq!(array.values, vec![7, 2, 3, 4, 5, 8,]);
+    }
+
+    #[test]
+    fn test_swap_rows() {
+        let mut array = Array2D::new(vec![vec![1, 2, 3], vec![4, 5, 6]]).unwrap();
+        assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
+        array.try_swap_rows(0, 1).unwrap();
+        assert_eq!(array.values, vec![4, 5, 6, 1, 2, 3]);
+        if array.try_swap_rows(1, 2).is_ok() { panic!("Should not have succeeded") };
     }
 }

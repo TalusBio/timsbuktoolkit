@@ -1,7 +1,5 @@
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+
+use crate::errors::DataProcessingError;
 use std::ops::{
     Add,
     Sub,
@@ -82,10 +80,10 @@ pub fn dtw_with_strategy<
     target_x: &[T],
     target_vals: &[f64],
     strategy: &S,
-) -> Result<Vec<f64>> {
+) -> Result<Vec<f64>, DataProcessingError> {
     // Check if vectors have the same length and are not empty
     if target_vals.len() != target_x.len() {
-        return Err(DataProcessingError::ExpectedVectorSameLength.into());
+        return Err(DataProcessingError::ExpectedVectorSameLength);
     }
 
     // Initialize output with strategy's initial value
@@ -152,7 +150,7 @@ pub fn dtw_max<T: WarpingX<T> + PartialOrd + Copy + Clone + Sub<Output = T> + Ad
     ref_x: &[T],
     target_x: &[T],
     target_vals: &[f64],
-) -> Result<Vec<f64>> {
+) -> Result<Vec<f64>, DataProcessingError> {
     dtw_with_strategy(ref_x, target_x, target_vals, &MaxWarping)
 }
 
@@ -188,7 +186,7 @@ pub fn dtw_add<T: WarpingX<T> + PartialOrd + Copy + Clone + Sub<Output = T> + Ad
     ref_x: &[T],
     target_x: &[T],
     target_vals: &[f64],
-) -> Result<Vec<f64>> {
+) -> Result<Vec<f64>, DataProcessingError> {
     dtw_with_strategy(ref_x, target_x, target_vals, &AddWarping)
 }
 
