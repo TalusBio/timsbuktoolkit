@@ -7,4 +7,3 @@ pub struct RawPeak {
     pub intensity: u32,
     pub retention_time: f32,
 }
-

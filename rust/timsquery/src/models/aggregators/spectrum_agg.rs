@@ -1,7 +1,9 @@
 use serde::Serialize;
 
-use crate::ElutionGroup;
-use crate::KeyLike;
+use crate::{
+    ElutionGroup,
+    KeyLike,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
@@ -11,7 +13,7 @@ pub struct EGSAggregator<T: KeyLike> {
     fragments: Vec<f32>,
 }
 
-impl <'a, T: KeyLike> EGSAggregator<T> {
+impl<'a, T: KeyLike> EGSAggregator<T> {
     pub fn new(eg: Arc<ElutionGroup<T>>) -> Self {
         let precursors = vec![0.0; eg.precursors.len()];
         let fragments = vec![0.0; eg.fragments.len()];
@@ -29,6 +31,4 @@ impl <'a, T: KeyLike> EGSAggregator<T> {
     pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = (&(T, f64), &mut f32)> {
         self.eg.fragments.iter().zip(self.fragments.iter_mut())
     }
-
-
 }

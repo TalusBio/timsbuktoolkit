@@ -9,10 +9,6 @@ use crate::errors::{
     Result,
 };
 use crate::fragment_mass::IonAnnot;
-use timsquery::models::{
-    MzMajorIntensityArray,
-    RTMajorIntensityArray,
-};
 use crate::models::DigestSlice;
 use crate::scoring::corr_v_ref::calculate_cosine_with_ref_gaussian;
 use crate::utils::rolling_calculators::{
@@ -25,6 +21,10 @@ use serde::Serialize;
 use std::sync::Arc;
 use timsquery::ElutionGroup;
 use timsquery::models::aggregators::EGCAggregator;
+use timsquery::models::{
+    MzMajorIntensityArray,
+    RTMajorIntensityArray,
+};
 
 #[derive(Debug)]
 pub struct PreScore {
@@ -70,16 +70,25 @@ impl IntensityArrays {
         let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
         let ms1_rtmajor_arr = ms1_mzmajor_arr.transpose_clone();
         let ms2_rtmajor_arr = ms2_mzmajor_arr.transpose_clone();
-        let ms2_ref_vec: Vec<_> = ms2_mzmajor_arr.order_mz.iter().map(|&(k, _)| *expected_intensities.fragment_intensities.get(&k).expect("Failed to find expected intensity for fragment")).collect();
+        let ms2_ref_vec: Vec<_> = ms2_mzmajor_arr
+            .order_mz
+            .iter()
+            .map(|&(k, _)| {
+                *expected_intensities
+                    .fragment_intensities
+                    .get(&k)
+                    .expect("Failed to find expected intensity for fragment")
+            })
+            .collect();
 
         Ok(Self {
-                ms1_rtmajor: ms1_rtmajor_arr,
-                ms1_mzmajor: ms1_mzmajor_arr,
-                ms2_rtmajor: ms2_rtmajor_arr,
-                ms2_mzmajor: ms2_mzmajor_arr,
-                ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
-                ms2_expected_intensities: ms2_ref_vec,
-            })
+            ms1_rtmajor: ms1_rtmajor_arr,
+            ms1_mzmajor: ms1_mzmajor_arr,
+            ms2_rtmajor: ms2_rtmajor_arr,
+            ms2_mzmajor: ms2_mzmajor_arr,
+            ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
+            ms2_expected_intensities: ms2_ref_vec,
+        })
     }
 
     pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self> {
@@ -87,14 +96,31 @@ impl IntensityArrays {
         // runs.
         let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|o| (o as i8, 867.8309)).collect();
         let ms2_order: Arc<[(IonAnnot, f64)]> = (0..=num_ms2)
-            .map(|o| (IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap(), 867.8309))
+            .map(|o| {
+                (
+                    IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap(),
+                    867.8309,
+                )
+            })
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
         Ok(Self {
-            ms1_rtmajor: RTMajorIntensityArray::try_new_empty(ms1_order.clone(), ref_time_ms.clone())?,
-            ms1_mzmajor: MzMajorIntensityArray::try_new_empty(ms1_order.clone(), ref_time_ms.clone())?,
-            ms2_rtmajor: RTMajorIntensityArray::try_new_empty(ms2_order.clone(), ref_time_ms.clone())?,
-            ms2_mzmajor: MzMajorIntensityArray::try_new_empty(ms2_order.clone(), ref_time_ms.clone())?,
+            ms1_rtmajor: RTMajorIntensityArray::try_new_empty(
+                ms1_order.clone(),
+                ref_time_ms.clone(),
+            )?,
+            ms1_mzmajor: MzMajorIntensityArray::try_new_empty(
+                ms1_order.clone(),
+                ref_time_ms.clone(),
+            )?,
+            ms2_rtmajor: RTMajorIntensityArray::try_new_empty(
+                ms2_order.clone(),
+                ref_time_ms.clone(),
+            )?,
+            ms2_mzmajor: MzMajorIntensityArray::try_new_empty(
+                ms2_order.clone(),
+                ref_time_ms.clone(),
+            )?,
             ms1_expected_intensities: vec![0.5; num_ms1],
             ms2_expected_intensities: ms2_ref_vec,
         })
@@ -108,12 +134,26 @@ impl IntensityArrays {
         intensity_arrays: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<()> {
-        self.ms1_rtmajor.try_reset_with(&intensity_arrays.precursors)?;
-        self.ms1_mzmajor.try_reset_with(&intensity_arrays.precursors)?;
-        self.ms2_rtmajor.try_reset_with(&intensity_arrays.fragments)?;
-        self.ms2_mzmajor.try_reset_with(&intensity_arrays.fragments)?;
+        self.ms1_rtmajor
+            .try_reset_with(&intensity_arrays.precursors)?;
+        self.ms1_mzmajor
+            .try_reset_with(&intensity_arrays.precursors)?;
+        self.ms2_rtmajor
+            .try_reset_with(&intensity_arrays.fragments)?;
+        self.ms2_mzmajor
+            .try_reset_with(&intensity_arrays.fragments)?;
         self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
-        let ms2_ref_vec: Vec<_> = self.ms2_mzmajor.order_mz.iter().map(|&(k, _)| *expected_intensities.fragment_intensities.get(&k).expect("Failed to find expected intensity for fragment")).collect();
+        let ms2_ref_vec: Vec<_> = self
+            .ms2_mzmajor
+            .order_mz
+            .iter()
+            .map(|&(k, _)| {
+                *expected_intensities
+                    .fragment_intensities
+                    .get(&k)
+                    .expect("Failed to find expected intensity for fragment")
+            })
+            .collect();
         self.ms2_expected_intensities = ms2_ref_vec;
         Ok(())
     }

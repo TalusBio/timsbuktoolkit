@@ -1,9 +1,9 @@
 use crate::errors::Result;
+use crate::utils::correlation::cosine_similarity;
 use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
-use crate::utils::correlation::cosine_similarity;
 use timsquery::traits::key_like::KeyLike;
 
 pub fn calculate_cosine_with_ref<FH: KeyLike>(

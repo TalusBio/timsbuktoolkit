@@ -1,11 +1,15 @@
-
 use serde::Serialize;
 
-use crate::ElutionGroup;
-use crate::KeyLike;
-use crate::models::base::{MzMajorIntensityArray, MutableChromatogram};
-use std::sync::Arc;
 use crate::errors::DataProcessingError;
+use crate::models::base::{
+    MutableChromatogram,
+    MzMajorIntensityArray,
+};
+use crate::{
+    ElutionGroup,
+    KeyLike,
+};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EGCAggregator<T: KeyLike> {
@@ -14,10 +18,13 @@ pub struct EGCAggregator<T: KeyLike> {
     pub fragments: MzMajorIntensityArray<T>,
 }
 
-impl <'a, T: KeyLike> EGCAggregator<T> {
-    pub fn new(eg: Arc<ElutionGroup<T>>, ref_rt_mss: Arc<[u32]>) -> Result<Self, DataProcessingError> {
-
-        let precursors = MzMajorIntensityArray::try_new_empty(eg.precursors.clone(), ref_rt_mss.clone())?;
+impl<'a, T: KeyLike> EGCAggregator<T> {
+    pub fn new(
+        eg: Arc<ElutionGroup<T>>,
+        ref_rt_mss: Arc<[u32]>,
+    ) -> Result<Self, DataProcessingError> {
+        let precursors =
+            MzMajorIntensityArray::try_new_empty(eg.precursors.clone(), ref_rt_mss.clone())?;
         let fragments = MzMajorIntensityArray::try_new_empty(eg.fragments.clone(), ref_rt_mss)?;
         Ok(Self {
             eg,
@@ -26,7 +33,9 @@ impl <'a, T: KeyLike> EGCAggregator<T> {
         })
     }
 
-    pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram)> {
+    pub fn iter_mut_precursors(
+        &mut self,
+    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram)> {
         self.precursors.iter_mut_mzs()
     }
 
@@ -34,9 +43,13 @@ impl <'a, T: KeyLike> EGCAggregator<T> {
         self.fragments.iter_mut_mzs()
     }
 
-    pub fn unpack(self) -> (Arc<ElutionGroup<T>>, MzMajorIntensityArray<i8>, MzMajorIntensityArray<T>) {
+    pub fn unpack(
+        self,
+    ) -> (
+        Arc<ElutionGroup<T>>,
+        MzMajorIntensityArray<i8>,
+        MzMajorIntensityArray<T>,
+    ) {
         (self.eg, self.precursors, self.fragments)
     }
-
-
 }

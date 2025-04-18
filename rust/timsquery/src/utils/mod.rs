@@ -3,5 +3,5 @@ pub mod display;
 pub mod dtw;
 pub mod frame_processing;
 pub mod sorting;
-pub mod tolerance_ranges;
 pub mod streaming_calculators;
+pub mod tolerance_ranges;

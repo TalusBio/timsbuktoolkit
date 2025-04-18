@@ -6,13 +6,13 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use timsquery::{QueriableData, GenerallyQueriable};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use timsquery::models::aggregators::{
+    EGCAggregator,
     EGSAggregator,
     PointIntensityAggregator,
-    EGCAggregator,
 };
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::indices::{
@@ -20,11 +20,15 @@ use timsquery::models::indices::{
     QuadSplittedTransposedIndex,
 };
 use timsquery::models::tolerance::{
-    Tolerance,
     MobilityTolerance,
     MzToleramce,
     QuadTolerance,
     RtTolerance,
+    Tolerance,
+};
+use timsquery::{
+    GenerallyQueriable,
+    QueriableData,
 };
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
@@ -35,7 +39,6 @@ use tracing_bunyan_formatter::{
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
-use std::sync::Arc;
 
 fn main() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -168,17 +171,30 @@ pub enum AggregatorContainer {
 }
 
 impl AggregatorContainer {
-    fn new(queries: Vec<Arc<ElutionGroup<String>>>, aggregator: PossibleAggregator, ref_rts: Arc<[u32]>) -> Self {
+    fn new(
+        queries: Vec<Arc<ElutionGroup<String>>>,
+        aggregator: PossibleAggregator,
+        ref_rts: Arc<[u32]>,
+    ) -> Self {
         match aggregator {
-            PossibleAggregator::PointIntensityAggregator => {
-                AggregatorContainer::Point(queries.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect())
-            }
-            PossibleAggregator::ChromatogramAggregator => {
-                AggregatorContainer::Chromatogram(queries.iter().map(|x| EGCAggregator::new(x.clone(), ref_rts.clone()).unwrap()).collect())
-            }
-            PossibleAggregator::SpectrumAggregator => {
-                AggregatorContainer::Spectrum(queries.iter().map(|x| EGSAggregator::new(x.clone())).collect())
-            }
+            PossibleAggregator::PointIntensityAggregator => AggregatorContainer::Point(
+                queries
+                    .iter()
+                    .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
+                    .collect(),
+            ),
+            PossibleAggregator::ChromatogramAggregator => AggregatorContainer::Chromatogram(
+                queries
+                    .iter()
+                    .map(|x| EGCAggregator::new(x.clone(), ref_rts.clone()).unwrap())
+                    .collect(),
+            ),
+            PossibleAggregator::SpectrumAggregator => AggregatorContainer::Spectrum(
+                queries
+                    .iter()
+                    .map(|x| EGSAggregator::new(x.clone()))
+                    .collect(),
+            ),
         }
     }
 
@@ -186,13 +202,13 @@ impl AggregatorContainer {
         match self {
             AggregatorContainer::Point(aggregators) => {
                 index.par_add_query_multi(aggregators, tolerance);
-            },
+            }
             AggregatorContainer::Chromatogram(aggregators) => {
                 index.par_add_query_multi(aggregators, tolerance);
-            },
+            }
             AggregatorContainer::Spectrum(aggregators) => {
                 index.par_add_query_multi(aggregators, tolerance);
-            },
+            }
         }
     }
 
@@ -205,22 +221,20 @@ impl AggregatorContainer {
                         println!("Pretty printing enabled");
                         serde_json::to_string_pretty(&$aggregators).unwrap()
                     }
-                    SerializationFormat::Json => {
-                        serde_json::to_string(&$aggregators).unwrap()
-                    }
+                    SerializationFormat::Json => serde_json::to_string(&$aggregators).unwrap(),
                 }
-            }
+            };
         }
         match self {
             AggregatorContainer::Point(aggregators) => {
                 serialize_format!(format, aggregators)
-            },
+            }
             AggregatorContainer::Chromatogram(aggregators) => {
                 serialize_format!(format, aggregators)
-            },
+            }
             AggregatorContainer::Spectrum(aggregators) => {
                 serialize_format!(format, aggregators)
-            },
+            }
         }
     }
 
@@ -244,7 +258,10 @@ pub enum PossibleIndex {
 }
 
 impl PossibleIndex {
-    pub fn build_index(&self, raw_file_path: &str) -> (Box<dyn GenerallyQueriable<String>>, Arc<[u32]>) {
+    pub fn build_index(
+        &self,
+        raw_file_path: &str,
+    ) -> (Box<dyn GenerallyQueriable<String>>, Arc<[u32]>) {
         match self {
             PossibleIndex::ExpandedRawFrameIndex => {
                 let tmp = ExpandedRawFrameIndex::from_path(raw_file_path).unwrap();
@@ -252,10 +269,10 @@ impl PossibleIndex {
                 (Box::new(tmp), rts)
             }
             PossibleIndex::TransposedQuadIndex => {
-                let tmp =  QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
+                let tmp = QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
                 let rts = tmp.cycle_rt_ms.clone();
                 (Box::new(tmp), rts)
-            },
+            }
         }
     }
 }
@@ -321,4 +338,3 @@ struct ElutionGroupResults<T: Serialize> {
     elution_group: ElutionGroup<String>,
     result: T,
 }
-

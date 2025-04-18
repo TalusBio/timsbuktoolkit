@@ -1,12 +1,16 @@
-
-use crate::{KeyLike, Tolerance};
-use crate::traits::QueriableData;
-use crate::models::aggregators::{EGCAggregator, EGSAggregator, PointIntensityAggregator};
 use super::model::ExpandedRawFrameIndex;
+use crate::models::aggregators::{
+    EGCAggregator,
+    EGSAggregator,
+    PointIntensityAggregator,
+};
+use crate::traits::QueriableData;
+use crate::{
+    KeyLike,
+    Tolerance,
+};
 
-impl<FH: KeyLike> QueriableData<EGCAggregator<FH>>
-    for ExpandedRawFrameIndex
-{
+impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for ExpandedRawFrameIndex {
     fn add_query(&self, aggregator: &mut EGCAggregator<FH>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         todo!();
@@ -139,18 +143,13 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>>
     // }
 }
 
-
-impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>>
-    for ExpandedRawFrameIndex
-{
+impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for ExpandedRawFrameIndex {
     fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
         todo!();
     }
 }
 
-impl<FH: KeyLike> QueriableData<EGSAggregator<FH>>
-    for ExpandedRawFrameIndex
-{
+impl<FH: KeyLike> QueriableData<EGSAggregator<FH>> for ExpandedRawFrameIndex {
     fn add_query(&self, aggregator: &mut EGSAggregator<FH>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         todo!();

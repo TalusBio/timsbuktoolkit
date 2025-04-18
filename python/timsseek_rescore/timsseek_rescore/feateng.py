@@ -164,6 +164,7 @@ def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
 
     return df_use
 
+
 def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     pprint("Starting to_mokapot")
     loggable_cols = (
@@ -286,6 +287,7 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     nonfeat_cols = set(cols.columns) - set(cols.feature_columns)
     pprint(f"Non-feature columns: {nonfeat_cols}")
     return df_use, cols
+
 
 def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
     files = set()

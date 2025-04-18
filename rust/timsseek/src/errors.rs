@@ -1,6 +1,8 @@
 use serde_json;
-use timsquery::TimsqueryError;
-use timsquery::DataProcessingError as TQDataProcessingError;
+use timsquery::{
+    DataProcessingError as TQDataProcessingError,
+    TimsqueryError,
+};
 use timsrust::TimsRustError;
 
 #[derive(Debug)]
@@ -20,7 +22,7 @@ pub enum DataProcessingError {
         field: String,
         context: String,
     },
-    TimsQueryDataProcessingError{ 
+    TimsQueryDataProcessingError {
         error: TQDataProcessingError,
         context: String,
     },
@@ -119,7 +121,9 @@ impl From<DataProcessingError> for TimsSeekError {
 
 impl From<TQDataProcessingError> for TimsSeekError {
     fn from(x: TQDataProcessingError) -> Self {
-        Self::DataProcessingError(DataProcessingError::TimsQueryDataProcessingError{ error: x, context: "".to_string() })
+        Self::DataProcessingError(DataProcessingError::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        })
     }
 }
-
