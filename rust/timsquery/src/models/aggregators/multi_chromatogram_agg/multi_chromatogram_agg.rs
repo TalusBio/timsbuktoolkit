@@ -7,10 +7,10 @@ use super::arrays::{
 use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::raw_peak::RawPeak;
 use crate::models::queries::MsLevelContext;
-use crate::traits::aggregator::Aggregator;
 use serde::Serialize;
 use std::hash::Hash;
 use std::sync::Arc;
+use crate::traits::key_like::KeyLike;
 
 use timsrust::converters::{
     ConvertableDomain,
@@ -19,7 +19,7 @@ use timsrust::converters::{
 };
 
 #[derive(Debug, Clone)]
-pub struct MultiCMGStatsAgg<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> {
+pub struct MultiCMGStatsAgg<FH: KeyLike> {
     pub converters: (Tof2MzConverter, Scan2ImConverter),
     pub ms1_stats: ParitionedCMGAggregator<usize>,
     pub ms2_stats: ParitionedCMGAggregator<FH>,
@@ -31,12 +31,12 @@ pub struct MultiCMGStatsAgg<FH: Clone + Eq + Serialize + Hash + Send + Sync + st
 }
 
 #[derive(Debug, Clone)]
-pub struct MultiCMGStatsFactory<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> {
+pub struct MultiCMGStatsFactory<FH: KeyLike> {
     pub converters: (Tof2MzConverter, Scan2ImConverter),
     pub _phantom: std::marker::PhantomData<FH>,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> MultiCMGStatsFactory<FH> {
+impl<FH: KeyLike> MultiCMGStatsFactory<FH> {
     pub fn build_with_elution_group(
         &self,
         elution_group: &ElutionGroup<FH>,
@@ -89,20 +89,22 @@ impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> MultiCMG
 // TODO: I hate this name ... I need to find something
 // better - JSPP - 2024-12-20
 #[derive(Debug, Clone, Serialize)]
-pub struct NaturalFinalizedMultiCMGArrays<FH: Clone + Eq + Serialize + Hash + Send + Sync> {
+pub struct NaturalFinalizedMultiCMGArrays<FH: KeyLike> {
     pub ms1_arrays: PartitionedCMGArrayStats<usize>,
     pub ms2_arrays: PartitionedCMGArrayStats<FH>,
     pub id: u64,
 }
 
-impl<FH: Clone + Eq + Serialize + Hash + Send + Sync + std::fmt::Debug> Aggregator
-    for MultiCMGStatsAgg<FH>
-{
-    type Context = MsLevelContext<usize, FH>;
-    type Item = RawPeak;
-    type Output = NaturalFinalizedMultiCMGArrays<FH>;
+impl <FH: KeyLike>MultiCMGStatsAgg {
+    pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = &mut usize> {
+        self.ms1_stats.iter_mut_keys()
+    }
 
-    fn add(&mut self, peak: impl Into<Self::Item>) {
+}
+
+impl<FH: KeyLike> MultiCMGStatsAgg<FH> {
+
+    fn add(&mut self, peak: RawPeak) {
         let peak = peak.into();
         let u64_intensity = peak.intensity as u64;
         let rt_miliseconds = (peak.retention_time * 1000.0) as u32;

@@ -1,10 +1,10 @@
 use crate::errors::DataProcessingError;
-use crate::models::{
+use crate::utils::correlation::rolling_cosine_similarity;
+use crate::utils::top_n_array::TopNArray;
+use timsquery::models::{
     Array2D,
     MzMajorIntensityArray,
 };
-use crate::utils::correlation::rolling_cosine_similarity;
-use crate::utils::top_n_array::TopNArray;
 use tracing::debug;
 
 /// Calculates the coelution score of a set of chromatograms.
@@ -82,7 +82,7 @@ pub fn coelution_score_arr<const TOP_N: usize>(
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score<const TOP_N: usize, K: Clone>(
+pub fn coelution_score<const TOP_N: usize, K: Clone + Ord>(
     slices: &MzMajorIntensityArray<K>,
     window: usize,
 ) -> Result<Vec<f32>, DataProcessingError> {

@@ -95,7 +95,7 @@ impl<'q> SearchResultBuilder<'q> {
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = SetField::Some(&pre_score.digest);
         self.ref_eg = SetField::Some(&pre_score.reference);
-        self.nqueries = SetField::Some(pre_score.reference.fragment_mzs.len() as u8);
+        self.nqueries = SetField::Some(pre_score.reference.fragments.len() as u8);
         self.decoy_marking = SetField::Some(pre_score.digest.decoy);
         self.charge = SetField::Some(pre_score.charge);
         self
@@ -220,7 +220,7 @@ impl<'q> SearchResultBuilder<'q> {
                     .expect_some("digest_slice", "digest_slice")?
                     .clone(),
             ),
-            precursor_mz: ref_eg.precursor_mzs[1],
+            precursor_mz: ref_eg.get_monoisotopic_precursor_mz().unwrap_or(f64::NAN),
             precursor_charge: self.charge.expect_some("charge", "charge")?,
             precursor_mobility_query: ref_eg.mobility,
             precursor_rt_query_seconds: ref_eg.rt_seconds,

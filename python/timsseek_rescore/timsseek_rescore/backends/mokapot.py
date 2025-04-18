@@ -1,5 +1,3 @@
-
-
 import mokapot
 import numpy as np
 from rich.pretty import pprint

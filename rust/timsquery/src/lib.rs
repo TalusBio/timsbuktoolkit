@@ -1,19 +1,18 @@
 // Re-export main structures
+pub use crate::models::Tolerance;
 pub use crate::models::elution_group::ElutionGroup;
 pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 
 // Re-export traits
-pub use crate::traits::aggregator::Aggregator;
-pub use crate::traits::queriable_data::QueriableData;
-pub use crate::traits::tolerance::{
-    Tolerance,
-    ToleranceAdapter,
+pub use crate::traits::KeyLike;
+pub use crate::traits::queriable_data::{
+    GenerallyQueriable,
+    QueriableData,
 };
 
 // Declare modules
 pub mod errors;
 pub mod models;
-pub mod queriable_tims_data;
 pub mod traits;
 pub mod utils;
 

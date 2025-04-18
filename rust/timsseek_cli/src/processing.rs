@@ -14,10 +14,12 @@ use std::time::{
     Duration,
     Instant,
 };
-use timsquery::models::aggregators::MultiCMGStatsFactory;
+use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::{
+    QueriableData,
+    Tolerance,
+};
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::digest::digestion::{
     DigestionEnd,
@@ -120,14 +122,19 @@ impl std::fmt::Display for RuntimeMetrics {
 pub fn process_chunk_full<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
-    ref_time_ms: Arc<[u32]>,
+    tolerance: &'a Tolerance,
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
     let query_start = Instant::now();
-    let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
-        factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
-    });
+    let mut res = queries
+        .queries
+        .iter()
+        .map(|x| EGCAggregator::new(x.clone(), index.cycle_rt_ms.clone()).unwrap())
+        .collect::<Vec<_>>();
+    index.par_add_query_multi(&mut res, tolerance);
+
+    // query_multi_group(index, tolerance, &queries.queries, &|x| {
+    //     factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
+    // });
     let query_time = query_start.elapsed();
     let builders: Vec<SearchResultBuilder> = (0..res.len())
         .map(|_| SearchResultBuilder::default())
@@ -147,7 +154,6 @@ pub fn process_chunk_full<'a>(
             reference: q.clone(),
             expected_intensities: queries.expected_intensities[i].clone(),
             query_values: res[i].clone(),
-            ref_time_ms: ref_time_ms.clone(),
         });
     }
     let prescore_time = prescore_start.elapsed();
@@ -156,9 +162,8 @@ pub fn process_chunk_full<'a>(
     let mut longitudinal_main_score_elements = Vec::with_capacity(queries.queries.len());
     for i in 0..queries.queries.len() {
         match int_arrs[i].as_ref() {
-            Ok(int_arrs) => longitudinal_main_score_elements.push(Some(
-                LongitudinalMainScoreElements::new(int_arrs, ref_time_ms.clone()),
-            )),
+            Ok(int_arrs) => longitudinal_main_score_elements
+                .push(Some(LongitudinalMainScoreElements::new(int_arrs))),
             Err(_e) => longitudinal_main_score_elements.push(None),
         }
     }
@@ -216,19 +221,23 @@ pub fn process_chunk_full<'a>(
 pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
-    ref_time_ms: Arc<[u32]>,
+    tolerance: &'a Tolerance,
 ) -> (Vec<IonSearchResults>, RuntimeMetrics) {
     let start = Instant::now();
     let num_queries = queries.len();
-    let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
-        factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
-    });
+    let mut res = queries
+        .queries
+        .iter()
+        .map(|x| EGCAggregator::new(x.clone(), index.cycle_rt_ms.clone()).unwrap())
+        .collect::<Vec<_>>();
+    index.par_add_query_multi(&mut res, tolerance);
+    // let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
+    //     factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
+    // });
     let elap_time_querying = start.elapsed();
     info!("Querying took {:?}", elap_time_querying);
 
-    let init_fn = || IntensityArrays::new_empty(5, 10, ref_time_ms.clone()).unwrap();
+    let init_fn = || IntensityArrays::new_empty(5, 10, index.cycle_rt_ms.clone()).unwrap();
 
     let loc_start = Instant::now();
     let loc_scores: Vec<LocalizedPreScore> = res
@@ -237,14 +246,13 @@ pub fn process_chunk<'a>(
         .map_init(
             init_fn,
             |buff, (res_elem, (expect_inten, (eg_elem, (digest, charge_elem))))| {
-                let id = res_elem.id;
+                let id = res_elem.eg.id;
                 let prescore = PreScore {
                     charge: charge_elem,
                     digest,
                     reference: eg_elem,
                     expected_intensities: expect_inten,
                     query_values: res_elem,
-                    ref_time_ms: ref_time_ms.clone(),
                 };
 
                 // let loc = prescore.localize();
@@ -320,9 +328,7 @@ pub fn process_chunk<'a>(
 pub fn main_loop<'a>(
     chunked_query_iterator: impl ExactSizeIterator<Item = NamedQueryChunk>,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
-    tolerance: &'a DefaultTolerance,
-    ref_time_ms: Arc<[u32]>,
+    tolerance: &'a Tolerance,
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
@@ -341,7 +347,7 @@ pub fn main_loop<'a>(
             // to disk. If that is not requested, the (hypothetically) more
             // efficient version is used.
             let out: (Vec<IonSearchResults>, RuntimeMetrics) = if out_path.full_output {
-                let tmp = process_chunk_full(chunk, index, factory, tolerance, ref_time_ms.clone());
+                let tmp = process_chunk_full(chunk, index, tolerance);
                 let res_full: Vec<FullQueryResult> = tmp
                     .0
                     .into_iter()
@@ -384,7 +390,7 @@ pub fn main_loop<'a>(
                 let res = res_full.into_iter().map(|x| x.search_results).collect();
                 (res, tmp.1)
             } else {
-                process_chunk(chunk, index, factory, tolerance, ref_time_ms.clone())
+                process_chunk(chunk, index, tolerance)
             };
 
             metrics = metrics.fold(out.1);
@@ -408,8 +414,6 @@ pub fn main_loop<'a>(
 pub fn process_fasta(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex, // TODO: Make generic
-    ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<IonAnnot>,
     digestion: DigestionConfig,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
@@ -454,22 +458,13 @@ pub fn process_fasta(
         digestion.build_decoys,
     );
 
-    main_loop(
-        chunked_query_iterator,
-        index,
-        factory,
-        &analysis.tolerance,
-        ref_time_ms.clone(),
-        output,
-    )?;
+    main_loop(chunked_query_iterator, index, &analysis.tolerance, output)?;
     Ok(())
 }
 
 pub fn process_speclib(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex,
-    ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<IonAnnot>,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
@@ -485,13 +480,6 @@ pub fn process_speclib(
     );
     let speclib_iter = speclib.as_iterator(analysis.chunk_size);
 
-    main_loop(
-        speclib_iter,
-        index,
-        factory,
-        &analysis.tolerance,
-        ref_time_ms.clone(),
-        output,
-    )?;
+    main_loop(speclib_iter, index, &analysis.tolerance, output)?;
     Ok(())
 }

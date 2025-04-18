@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -29,6 +28,7 @@ def plot_importances(importances: dict[str, list[float]]):
     ax.set_xscale("log")
     fig.tight_layout()
     return fig
+
 
 def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     pprint("Plotting main scores")
@@ -99,6 +99,7 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     # plt.title("Histogram of 'main_score' scores.")
     plt.savefig(target_file)
     plt.close()
+
 
 def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     pprint("Plotting main scores")
