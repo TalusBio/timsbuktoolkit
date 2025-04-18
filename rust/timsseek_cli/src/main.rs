@@ -115,23 +115,11 @@ fn main() -> std::result::Result<(), errors::CliError> {
     // Process based on input type
     match config.input {
         Some(InputConfig::Fasta { path, digestion }) => {
-            processing::process_fasta(
-                path,
-                &index,
-                digestion,
-                &config.analysis,
-                &output_config,
-            )
-            .unwrap();
+            processing::process_fasta(path, &index, digestion, &config.analysis, &output_config)
+                .unwrap();
         }
         Some(InputConfig::Speclib { path }) => {
-            processing::process_speclib(
-                path,
-                &index,
-                &config.analysis,
-                &output_config,
-            )
-            .unwrap();
+            processing::process_speclib(path, &index, &config.analysis, &output_config).unwrap();
         }
         None => {
             return Err(errors::CliError::Config {

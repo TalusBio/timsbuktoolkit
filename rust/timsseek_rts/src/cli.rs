@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use timsquery::traits::tolerance::Tolerance;
+use timsquery::Tolerance;
 use timsseek::errors::{
     Result,
     TimsSeekError,

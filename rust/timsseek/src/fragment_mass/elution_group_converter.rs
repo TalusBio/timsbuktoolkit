@@ -16,12 +16,12 @@ use rustyms::{
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 use tracing::{
     error,
     warn,
 };
-use std::sync::Arc;
 
 /// Super simple 1/k0 prediction.
 ///

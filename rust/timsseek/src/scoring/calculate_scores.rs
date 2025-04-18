@@ -33,7 +33,6 @@ pub struct PreScore {
     pub reference: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
     pub query_values: EGCAggregator<IonAnnot>,
-    pub ref_time_ms: Arc<[u32]>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -186,7 +185,7 @@ fn gaussblur(x: &mut [f32]) {
 }
 
 impl LongitudinalMainScoreElements {
-    pub fn new(intensity_arrays: &IntensityArrays, ref_time_ms: Arc<[u32]>) -> Result<Self> {
+    pub fn new(intensity_arrays: &IntensityArrays) -> Result<Self> {
         let mut ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
             &intensity_arrays.ms1_expected_intensities,
@@ -209,6 +208,8 @@ impl LongitudinalMainScoreElements {
             }
         });
 
+        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
+
         // In this section a "insufficient data error" will be returned if not enough
         // data exists to calculate a score.
         let ms2_coe_scores =
@@ -222,7 +223,7 @@ impl LongitudinalMainScoreElements {
         let tmp = coelution_score::coelution_score::<6, i8>(&intensity_arrays.ms1_mzmajor, 7);
         let mut ms1_coelution_score = match tmp {
             Ok(scores) => scores,
-            Err(_) => vec![0.0; ref_time_ms.len()],
+            Err(_) => vec![0.0; rt_len],
         };
         let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
 
@@ -247,7 +248,7 @@ impl LongitudinalMainScoreElements {
         // gaussblur(&mut hyperscore);
         gaussblur(&mut split_lazyscore);
 
-        let five_pct_index = ref_time_ms.len() * 5 / 100;
+        let five_pct_index = rt_len * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
         let lzb_std = calculate_centered_std(
@@ -264,7 +265,7 @@ impl LongitudinalMainScoreElements {
             ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
             split_lazyscore,
             // hyperscore,
-            ref_time_ms,
+            ref_time_ms: intensity_arrays.ms1_rtmajor.rts_ms.clone(),
             ms2_lazyscore_vs_baseline_std: lzb_std,
             ms2_corr_v_gauss,
         })
@@ -333,7 +334,7 @@ impl PartialOrd for ScoreInTime {
 impl PreScore {
     fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore> {
         let longitudinal_main_score_elements =
-            LongitudinalMainScoreElements::new(&intensity_arrays, self.ref_time_ms.clone())?;
+            LongitudinalMainScoreElements::new(&intensity_arrays)?;
 
         let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
         let norm_lazy_std =
@@ -345,7 +346,7 @@ impl PreScore {
 
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
-        let ten_pct_index = self.ref_time_ms.len() / 20;
+        let ten_pct_index = self.query_values.fragments.rts_ms.len() / 20;
         let max_window =
             max_loc.saturating_sub(ten_pct_index)..max_loc.saturating_add(ten_pct_index);
         let next = apex_candidates
@@ -371,17 +372,27 @@ impl PreScore {
             None => f32::NAN,
         };
 
-        let ms2_loc = self
-            .query_values
-            .fragments
-            .rts_ms
-            .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
+        // TODO make this a method .... 'map_to_rt_index'??
+        // let ms2_loc = self
+        //     .query_values
+        //     .fragments
+        //     .rts_ms
+        //     .partition_point(|&x| x <= self.query_values.fragments.rts_ms[max_loc]);
 
-        let ms1_loc = self
-            .query_values
-            .precursors
-            .rts_ms
-            .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
+        // let ms1_loc = self
+        //     .query_values
+        //     .precursors
+        //     .rts_ms
+        //     .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
+
+        // FOR NOW I will leave this assert and if it holds this is an assumption I can make and
+        // I will remove the dead code above.
+        assert_eq!(
+            self.query_values.fragments.rts_ms,
+            self.query_values.precursors.rts_ms
+        );
+        let (ms1_loc, ms2_loc) = (max_loc, max_loc);
+        let ref_time_ms = self.query_values.precursors.rts_ms[max_loc];
 
         let summed_ms1_int: f32 = match intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
             Some(row) => row.iter().sum(),
@@ -435,7 +446,7 @@ impl PreScore {
             observed_mobility: ims as f32,
             observed_mobility_ms1: ims_ms1 as f32,
             observed_mobility_ms2: ims_ms2 as f32,
-            retention_time_ms: self.ref_time_ms[max_loc],
+            retention_time_ms: ref_time_ms,
 
             ms2_cosine_ref_sim: longitudinal_main_score_elements.ms2_cosine_ref_sim[max_loc],
             ms2_coelution_score: longitudinal_main_score_elements.ms2_coelution_score[max_loc],

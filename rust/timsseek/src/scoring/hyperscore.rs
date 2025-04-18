@@ -64,35 +64,42 @@ pub fn single_hyperscore(slice: &[f32], grouping: Option<&[u8]>, count_threshold
     score
 }
 
-pub fn single_hyperscore_labeled(slice: &[f32], labels: &[(IonAnnot, f64)], count_threshold: f32) -> f32 {
+pub fn single_hyperscore_labeled(
+    slice: &[f32],
+    labels: &[(IonAnnot, f64)],
+    count_threshold: f32,
+) -> f32 {
     let mut nt_count = 0;
     let mut ct_count = 0;
 
     let mut nt_sum = 0.0;
     let mut ct_sum = 0.0;
 
-    slice.iter().zip(labels).for_each(|(inten, &(lab, _exp_inten))| {
-        // Not smaller is diff than bigger because of Nans
-        match inten.partial_cmp(&count_threshold) {
-            Some(Ordering::Less) => return,
-            Some(Ordering::Equal) => return,
-            Some(Ordering::Greater) => {}
-            None => return,
-        }
+    slice
+        .iter()
+        .zip(labels)
+        .for_each(|(inten, &(lab, _exp_inten))| {
+            // Not smaller is diff than bigger because of Nans
+            match inten.partial_cmp(&count_threshold) {
+                Some(Ordering::Less) => return,
+                Some(Ordering::Equal) => return,
+                Some(Ordering::Greater) => {}
+                None => return,
+            }
 
-        match lab.terminality() {
-            IonSeriesTerminality::CTerm => {
-                ct_count += 1;
-                ct_sum += inten;
+            match lab.terminality() {
+                IonSeriesTerminality::CTerm => {
+                    ct_count += 1;
+                    ct_sum += inten;
+                }
+                IonSeriesTerminality::NTerm => {
+                    nt_count += 1;
+                    nt_sum += inten;
+                }
+                // Unfragmented precursors dont get added to the score
+                IonSeriesTerminality::None => {}
             }
-            IonSeriesTerminality::NTerm => {
-                nt_count += 1;
-                nt_sum += inten;
-            }
-            // Unfragmented precursors dont get added to the score
-            IonSeriesTerminality::None => {}
-        }
-    });
+        });
 
     let score =
         (nt_sum + ct_sum).ln_1p() + lnfact(ct_count as u16) as f32 + lnfact(nt_count as u16) as f32;

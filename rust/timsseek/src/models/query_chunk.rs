@@ -4,8 +4,8 @@ use crate::fragment_mass::IonAnnot;
 use rayon::iter::Zip as RayonZip;
 use rayon::prelude::*;
 use rayon::vec::IntoIter as RayonVecIntoIter;
-use timsquery::models::elution_group::ElutionGroup;
 use std::sync::Arc;
+use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone)]
 pub struct NamedQueryChunk {
