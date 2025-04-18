@@ -30,5 +30,5 @@ where
 }
 
 // Blanket trait implementation meaning that the index can be queried with any aggregator.
-pub trait GenerallyQueriable<T: KeyLike>: QueriableData<EGSAggregator<T>> + QueriableData<EGSAggregator<T>> + QueriableData<PointIntensityAggregator<T>> {}
-impl <T: KeyLike, I: QueriableData<EGSAggregator<T>> + QueriableData<EGSAggregator<T>> + QueriableData<PointIntensityAggregator<T>>> GenerallyQueriable<T> for I {}
+pub trait GenerallyQueriable<T: KeyLike>: QueriableData<EGSAggregator<T>> + QueriableData<EGCAggregator<T>> + QueriableData<PointIntensityAggregator<T>> {}
+impl <T: KeyLike, I: QueriableData<EGSAggregator<T>> + QueriableData<EGCAggregator<T>> + QueriableData<PointIntensityAggregator<T>>> GenerallyQueriable<T> for I {}

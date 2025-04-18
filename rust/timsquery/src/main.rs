@@ -130,14 +130,10 @@ fn main_query_index(args: QueryIndexArgs) {
     let (index, rts) = index_use.build_index(&raw_file_path);
     let mut queries = AggregatorContainer::new(elution_groups.clone(), aggregator_use, rts);
 
-    execute_query(
-        index_use,
-        aggregator_use,
-        raw_file_path,
-        tolerance_settings,
-        elution_groups,
-        args_clone,
-    );
+    let output_path = args.output_path;
+    let serialization_format = args.format;
+    queries.add_query(index, &tolerance_settings);
+    queries.serialize_write(serialization_format, &output_path);
 }
 
 fn template_tolerance_settings() -> Tolerance {
@@ -167,18 +163,18 @@ pub enum PossibleAggregator {
 
 pub enum AggregatorContainer {
     Point(Vec<PointIntensityAggregator<String>>),
-    Chromatogram(Vec<EGSAggregator<String>>),
+    Chromatogram(Vec<EGCAggregator<String>>),
     Spectrum(Vec<EGSAggregator<String>>),
 }
 
 impl AggregatorContainer {
-    fn new(queries: Vec<Arc<ElutionGroup<String>>>, aggregator: PossibleAggregator, ref_rts: Arc<u32>) -> Self {
+    fn new(queries: Vec<Arc<ElutionGroup<String>>>, aggregator: PossibleAggregator, ref_rts: Arc<[u32]>) -> Self {
         match aggregator {
             PossibleAggregator::PointIntensityAggregator => {
                 AggregatorContainer::Point(queries.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect())
             }
             PossibleAggregator::ChromatogramAggregator => {
-                AggregatorContainer::Chromatogram(queries.iter().map(|x| EGCAggregator::new(x.clone(), ref_rts.clone())).collect())
+                AggregatorContainer::Chromatogram(queries.iter().map(|x| EGCAggregator::new(x.clone(), ref_rts.clone()).unwrap()).collect())
             }
             PossibleAggregator::SpectrumAggregator => {
                 AggregatorContainer::Spectrum(queries.iter().map(|x| EGSAggregator::new(x.clone())).collect())
@@ -186,7 +182,7 @@ impl AggregatorContainer {
         }
     }
 
-    fn add_query(&mut self, index: &dyn GenerallyQueriable<String>, tolerance: &Tolerance) {
+    fn add_query(&mut self, index: Box<dyn GenerallyQueriable<String>>, tolerance: &Tolerance) {
         match self {
             AggregatorContainer::Point(aggregators) => {
                 index.par_add_query_multi(aggregators, tolerance);
@@ -198,6 +194,45 @@ impl AggregatorContainer {
                 index.par_add_query_multi(aggregators, tolerance);
             },
         }
+    }
+
+    fn serialize_inner(&self, format: SerializationFormat) -> String {
+        // There has to be a better way of doing this ...
+        macro_rules! serialize_format {
+            ($format:ident, $aggregators:ident) => {
+                match format {
+                    SerializationFormat::PrettyJson => {
+                        println!("Pretty printing enabled");
+                        serde_json::to_string_pretty(&$aggregators).unwrap()
+                    }
+                    SerializationFormat::Json => {
+                        serde_json::to_string(&$aggregators).unwrap()
+                    }
+                }
+            }
+        }
+        match self {
+            AggregatorContainer::Point(aggregators) => {
+                serialize_format!(format, aggregators)
+            },
+            AggregatorContainer::Chromatogram(aggregators) => {
+                serialize_format!(format, aggregators)
+            },
+            AggregatorContainer::Spectrum(aggregators) => {
+                serialize_format!(format, aggregators)
+            },
+        }
+    }
+
+    fn serialize_write(&self, serialization_format: SerializationFormat, output_path: &str) {
+        let serialization_start = Instant::now();
+        // TODO make this a macro ...
+        let put_path = std::path::Path::new(&output_path).join("results.json");
+        let serialized = self.serialize_inner(serialization_format);
+        std::fs::write(put_path.clone(), serialized).unwrap();
+        println!("Wrote to {}", put_path.display());
+        let serialization_elapsed = serialization_start.elapsed();
+        println!("Serialization took {:#?}", serialization_elapsed);
     }
 }
 
@@ -287,92 +322,3 @@ struct ElutionGroupResults<T: Serialize> {
     result: T,
 }
 
-pub fn execute_query(
-    index: PossibleIndex,
-    aggregator: PossibleAggregator,
-    raw_file_path: String,
-    tolerance: Tolerance,
-    elution_groups: Vec<Arc<ElutionGroup<String>>>,
-    args: QueryIndexArgs,
-) {
-    let output_path = args.output_path;
-    let serialization_format = args.format;
-
-    macro_rules! execute_query_inner {
-        ($index:expr, $agg:expr) => {
-            let mut tmp: Vec<_> = elution_groups.iter().map(|x| $agg(x.clone())).collect();
-            let tmp = &$index.par_add_query_multi(&tolerance, &elution_groups, &$agg);
-
-            std::fs::create_dir_all(output_path.clone()).unwrap();
-
-            let serialization_start = Instant::now();
-            // TODO make this a macro ...
-            let put_path = match serialization_format {
-                SerializationFormat::PrettyJson => {
-                    println!("Pretty printing enabled");
-                    let put_path = std::path::Path::new(&output_path).join("results.json");
-                    let serialized = serde_json::to_string_pretty(&out).unwrap();
-                    std::fs::write(put_path.clone(), serialized).unwrap();
-                    put_path
-                }
-                SerializationFormat::Json => {
-                    let serialized = serde_json::to_string(&out).unwrap();
-                    let put_path = std::path::Path::new(&output_path).join("results.json");
-                    std::fs::write(put_path.clone(), serialized).unwrap();
-                    put_path
-                }
-            };
-            println!("Wrote to {}", put_path.display());
-            let serialization_elapsed = serialization_start.elapsed();
-            println!("Serialization took {:#?}", serialization_elapsed);
-        };
-    }
-
-    match (index, aggregator) {
-        (PossibleIndex::TransposedQuadIndex, aggregator) => {
-            let index = QuadSplittedTransposedIndex::from_path_centroided(&(raw_file_path.clone()))
-                .unwrap();
-            match aggregator {
-                PossibleAggregator::RawPeakIntensityAggregator => {
-                    let aggregator = PointIntensityAggregator::new_with_elution_group;
-                    execute_query_inner!(index, aggregator);
-                }
-                PossibleAggregator::RawPeakVectorAggregator => {
-                    let aggregator = RawPeakVectorAggregator::new_with_elution_group;
-                    execute_query_inner!(index, aggregator);
-                }
-                PossibleAggregator::MultiCMGStats => {
-                    let factory = MultiCMGStatsFactory {
-                        converters: (index.mz_converter, index.im_converter),
-                        _phantom: std::marker::PhantomData::<String>,
-                    };
-                    execute_query_inner!(index, |x| factory.build_with_elution_group(x, None));
-                }
-            }
-        }
-        (PossibleIndex::ExpandedRawFrameIndex, aggregator) => {
-            let index = ExpandedRawFrameIndex::from_path(&(raw_file_path.clone())).unwrap();
-            match aggregator {
-                PossibleAggregator::RawPeakIntensityAggregator => {
-                    let aggregator = PointIntensityAggregator::new_with_elution_group;
-                    execute_query_inner!(index, aggregator);
-                }
-                PossibleAggregator::RawPeakVectorAggregator => {
-                    let aggregator = RawPeakVectorAggregator::new_with_elution_group;
-                    execute_query_inner!(index, aggregator);
-                }
-                PossibleAggregator::MultiCMGStats => {
-                    let factory = MultiCMGStatsFactory {
-                        converters: (index.mz_converter, index.im_converter),
-                        _phantom: std::marker::PhantomData::<String>,
-                    };
-                    execute_query_inner!(index, |x| factory.build_with_elution_group(x, None));
-                }
-            }
-        }
-
-        (PossibleIndex::Unspecified, _) => {
-            panic!("Should have been handled");
-        }
-    }
-}

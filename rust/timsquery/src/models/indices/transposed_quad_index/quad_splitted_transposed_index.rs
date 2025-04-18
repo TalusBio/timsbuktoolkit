@@ -338,12 +338,16 @@ impl QuadSplittedTransposedIndexBuilder {
                 .unwrap()
         });
 
+        let mut cycle_rts_ms: Vec<_> = precursor_index.as_ref().unwrap().frame_rts.iter().map(|rt| (*rt * 1000.0) as u32).collect();
+        cycle_rts_ms.sort_unstable();
+
         QuadSplittedTransposedIndex {
             precursor_index: precursor_index.expect("Precursor peaks should be present"),
             fragment_indices: indices,
             flat_quad_settings,
             mz_converter: self.mz_converter.unwrap(),
             im_converter: self.im_converter.unwrap(),
+            cycle_rt_ms: cycle_rts_ms.into(),
         }
     }
 }

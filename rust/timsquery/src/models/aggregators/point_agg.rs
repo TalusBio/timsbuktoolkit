@@ -3,7 +3,7 @@ use crate::KeyLike;
 use serde::Serialize;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PointIntensityAggregator<T: KeyLike> {
     pub query: Arc<ElutionGroup<T>>,
     pub intensity: u64,

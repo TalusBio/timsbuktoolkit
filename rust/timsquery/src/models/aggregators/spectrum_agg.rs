@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::ElutionGroup;
 use crate::KeyLike;
 use std::sync::Arc;
 
-
+#[derive(Debug, Clone, Serialize)]
 pub struct EGSAggregator<T: KeyLike> {
     pub eg: Arc<ElutionGroup<T>>,
     precursors: Vec<f32>,
