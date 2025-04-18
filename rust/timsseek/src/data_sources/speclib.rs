@@ -28,7 +28,7 @@ pub struct ExpectedIntensities {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
     #[serde(flatten)]
-    pub elution_group: ElutionGroup<IonAnnot>,
+    pub elution_group: Arc<ElutionGroup<IonAnnot>>,
     #[serde(flatten)]
     pub expected_intensities: ExpectedIntensities,
 }
@@ -37,7 +37,7 @@ pub struct ReferenceEG {
 pub struct Speclib {
     digests: Vec<DigestSlice>,
     charges: Vec<u8>,
-    queries: Vec<ElutionGroup<IonAnnot>>,
+    queries: Vec<Arc<ElutionGroup<IonAnnot>>>,
     expected_intensities: Vec<ExpectedIntensities>,
 }
 
@@ -85,7 +85,10 @@ impl Speclib {
 
         let (exp_int, (queries, (charges, digests))): (
             Vec<ExpectedIntensities>,
-            (Vec<ElutionGroup<IonAnnot>>, (Vec<u8>, Vec<DigestSlice>)),
+            (
+                Vec<Arc<ElutionGroup<IonAnnot>>>,
+                (Vec<u8>, Vec<DigestSlice>),
+            ),
         ) = speclib
             .into_par_iter()
             .map(|x| {

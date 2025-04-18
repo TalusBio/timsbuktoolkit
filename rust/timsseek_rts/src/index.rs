@@ -6,10 +6,13 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use timsquery::ElutionGroup;
+use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::indices::ExpandedRawFrameIndex;
-use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::Tolerance;
+use timsquery::{
+    ElutionGroup,
+    QueriableData,
+    Tolerance,
+};
 use timsseek::data_sources::speclib::ExpectedIntensities;
 use timsseek::errors::Result;
 use timsseek::fragment_mass::IonAnnot;
@@ -48,18 +51,14 @@ impl InputQuery {
                 id: 0,
                 mobility: 0.75,
                 rt_seconds: 0.0,
-                precursors: vec![
-                    (-1, 450.0),
-                    (0, 450.5),
-                    (1, 451.0),
-                    (2, 451.5),
-                ],
+                precursors: vec![(-1, 450.0), (0, 450.5), (1, 451.0), (2, 451.5)].into(),
                 fragments: vec![
-                        (IonAnnot::try_from("a1").unwrap(), 450.0),
-                        (IonAnnot::try_from("a2").unwrap(), 450.5),
-                        (IonAnnot::try_from("a3").unwrap(), 451.0),
-                        (IonAnnot::try_from("a4").unwrap(), 451.5),
-                    ],
+                    (IonAnnot::try_from("a1").unwrap(), 450.0),
+                    (IonAnnot::try_from("a2").unwrap(), 450.5),
+                    (IonAnnot::try_from("a3").unwrap(), 451.0),
+                    (IonAnnot::try_from("a4").unwrap(), 451.5),
+                ]
+                .into(),
             },
             expected_intensities: ExpectedIntensities {
                 precursor_intensities: vec![1.0, 1.0, 1.0, 1.0],
@@ -120,35 +119,27 @@ impl BundledDotDIndex {
         let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
         let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
 
-        Ok(BundledDotDIndex {
-            index,
-            tolerance,
-        })
+        Ok(BundledDotDIndex { index, tolerance })
     }
 
     pub fn query(&self, queries: NamedQuery) -> Result<FullQueryResult> {
-        let res = query_multi_group(
-            &self.index,
-            &self.tolerance,
-            &[queries.elution_group.clone()],
-            &|x| {
-                self.factory
-                    .build_with_elution_group(x, Some(self.ref_time_ms.clone()))
-            },
-        );
+        let mut res = EGCAggregator::new(
+            Arc::new(queries.elution_group.clone()),
+            self.index.cycle_rt_ms.clone(),
+        )
+        .unwrap();
+        self.index.add_query(&mut res, &self.tolerance);
         let builder = SearchResultBuilder::default();
-        let int_arrs = IntensityArrays::new(&res[0], &queries.expected_intensities)?;
+        let int_arrs = IntensityArrays::new(&res, &queries.expected_intensities)?;
         let prescore = PreScore {
             charge: queries.charge,
             digest: queries.digest,
-            reference: queries.elution_group,
+            reference: Arc::new(queries.elution_group),
             expected_intensities: queries.expected_intensities,
-            query_values: res[0].clone(),
-            ref_time_ms: self.ref_time_ms.clone(),
+            query_values: res.clone(),
         };
 
-        let longitudinal_main_score_elements =
-            LongitudinalMainScoreElements::new(&int_arrs, self.ref_time_ms.clone())?;
+        let longitudinal_main_score_elements = LongitudinalMainScoreElements::new(&int_arrs)?;
 
         let res2 = builder
             .with_localized_pre_score(&prescore.localize()?)
@@ -158,7 +149,7 @@ impl BundledDotDIndex {
         Ok(FullQueryResult {
             main_score_elements: longitudinal_main_score_elements,
             longitudinal_main_score,
-            extractions: res[0].clone(),
+            extractions: res.clone(),
             search_results: res2,
         })
     }

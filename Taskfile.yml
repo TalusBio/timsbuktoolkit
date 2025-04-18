@@ -31,7 +31,8 @@ tasks:
 
   todos:
     cmds:
-      - grep -H -R TODO tims*/src
+      - grep -nH -R TODO rust/tims*/src
+      - grep -nH -R "todo!" rust/tims*/src
 
   build_python:
     cmds:
