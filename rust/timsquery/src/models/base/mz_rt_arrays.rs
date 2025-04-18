@@ -1,8 +1,13 @@
 use super::Array2D;
-use crate::{errors::DataProcessingError, models::aggregators::EGCAggregator};
-use std::sync::Arc;
 use crate::KeyLike;
-use serde::ser::{Serialize, Serializer, SerializeStruct};
+use crate::errors::DataProcessingError;
+use crate::models::aggregators::EGCAggregator;
+use serde::ser::{
+    Serialize,
+    SerializeStruct,
+    Serializer,
+};
+use std::sync::Arc;
 
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same retention time
@@ -24,8 +29,7 @@ pub struct MzMajorIntensityArray<K: Clone + Eq> {
     pub rts_ms: Arc<[u32]>,
 }
 
-
-impl <K: KeyLike> Serialize for MzMajorIntensityArray<K> {
+impl<K: KeyLike> Serialize for MzMajorIntensityArray<K> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -42,7 +46,7 @@ impl <K: KeyLike> Serialize for MzMajorIntensityArray<K> {
 
 #[derive(Debug)]
 pub struct MutableChromatogram<'a> {
-    slc: &'a mut [f32], 
+    slc: &'a mut [f32],
     rts: &'a [u32],
 }
 
@@ -53,13 +57,15 @@ impl<'a> MutableChromatogram<'a> {
     }
 }
 
-
 impl<K: KeyLike> MzMajorIntensityArray<K> {
-    pub fn try_new_empty(order_mz: Arc<[(K, f64)]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+    pub fn try_new_empty(
+        order_mz: Arc<[(K, f64)]>,
+        rts_ms: Arc<[u32]>,
+    ) -> Result<Self, DataProcessingError> {
         let major_dim = order_mz.len();
         let minor_dim = rts_ms.len();
         if minor_dim == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData );
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         let vals: Vec<f32> = vec![0.0; major_dim * minor_dim];
         let out_arr = Array2D::from_flat_vector(vals, major_dim, minor_dim)
@@ -71,7 +77,6 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
         })
     }
 
-
     // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
     pub fn get_row(&self, key: &K) -> Option<&[f32]> {
         let idx = self.order_mz.iter().position(|(k, _)| k == key)?;
@@ -80,7 +85,12 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
 
     pub fn iter_mut_mzs(&mut self) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_>)> {
         assert_eq!(self.arr.nrows(), self.order_mz.len());
-        self.order_mz.iter().zip(self.arr.iter_mut_rows().map(|slc| MutableChromatogram{slc, rts: &self.rts_ms}))
+        self.order_mz
+            .iter()
+            .zip(self.arr.iter_mut_rows().map(|slc| MutableChromatogram {
+                slc,
+                rts: &self.rts_ms,
+            }))
     }
 
     pub fn transpose_clone(&self) -> RTMajorIntensityArray<K> {
@@ -138,7 +148,9 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
                 continue;
             }
             let inten_slc = tmp.unwrap();
-            self.arr.try_replace_row_with(j, inten_slc).expect("Sufficient Capacity");
+            self.arr
+                .try_replace_row_with(j, inten_slc)
+                .expect("Sufficient Capacity");
         }
         self.order_mz = order;
         // I am pretty sure this is not needed ...
@@ -148,14 +160,17 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
 }
 
 impl<FH: KeyLike> RTMajorIntensityArray<FH> {
-    pub fn try_new_empty(order: Arc<[(FH, f64)]>, rts_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+    pub fn try_new_empty(
+        order: Arc<[(FH, f64)]>,
+        rts_ms: Arc<[u32]>,
+    ) -> Result<Self, DataProcessingError> {
         let minor_dim = rts_ms.len();
         let major_dim = order.len();
         if major_dim == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData );
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         if minor_dim == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData );
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         let vals: Vec<f32> = vec![0.0; minor_dim * major_dim];
         let out_arr = Array2D::from_flat_vector(vals, minor_dim, major_dim)
@@ -178,7 +193,7 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         if minor_dim == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData); 
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         self.arr.reset_with_default(minor_dim, major_dim, 0.0);
         self.fill_with(array);
@@ -200,13 +215,11 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
         self.order = order;
         self.rts_ms = array.rts_ms.clone();
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_array2d_from_cmg_int_mz_major() {

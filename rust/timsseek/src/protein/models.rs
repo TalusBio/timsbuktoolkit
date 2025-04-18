@@ -7,11 +7,10 @@ pub struct ProteinSequence {
     pub sequence: Arc<str>,
 }
 
-
 /// Essentially a builder for the `ProteinSequence` struct.
 ///
 /// Usage is meant to be:
-/// 
+///
 /// ```
 /// // let id = 0;
 /// // let description = "sp|ASDAD|ASDADSAD2";

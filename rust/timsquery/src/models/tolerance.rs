@@ -85,7 +85,9 @@ impl Tolerance {
 
     pub fn mobility_range(&self, mobility: f32) -> Option<IncludedRange<f32>> {
         match self.mobility {
-            MobilityTolerance::Absolute((low, high)) => Some((mobility - low, mobility + high).into()),
+            MobilityTolerance::Absolute((low, high)) => {
+                Some((mobility - low, mobility + high).into())
+            }
             MobilityTolerance::Pct((low, high)) => {
                 let low = mobility * (low / 100.0);
                 let high = mobility * (high / 100.0);

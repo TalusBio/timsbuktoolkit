@@ -1,8 +1,13 @@
+use crate::models::aggregators::{
+    EGCAggregator,
+    EGSAggregator,
+    PointIntensityAggregator,
+};
+use crate::{
+    KeyLike,
+    Tolerance,
+};
 use rayon::prelude::*;
-use crate::Tolerance;
-use crate::models::aggregators::{PointIntensityAggregator, EGSAggregator, EGCAggregator};
-use crate::KeyLike;
-
 
 /// Trait meant to signal that some form of data is
 /// queriable using a specific aggregator.
@@ -13,7 +18,6 @@ use crate::KeyLike;
 ///
 /// Note that its necessary to implement either `add_query`
 /// (or both that and `add_query_multi_group`)
-///
 pub trait QueriableData<QA>
 where
     QA: Send + Sync,
@@ -21,8 +25,7 @@ where
 {
     fn add_query(&self, queriable_aggregator: &mut QA, tolerance: &Tolerance);
 
-    fn par_add_query_multi(&self, queriable_aggregators: &mut[QA], tolerance: &Tolerance)
-    {
+    fn par_add_query_multi(&self, queriable_aggregators: &mut [QA], tolerance: &Tolerance) {
         queriable_aggregators
             .par_iter_mut()
             .for_each(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
@@ -30,5 +33,17 @@ where
 }
 
 // Blanket trait implementation meaning that the index can be queried with any aggregator.
-pub trait GenerallyQueriable<T: KeyLike>: QueriableData<EGSAggregator<T>> + QueriableData<EGCAggregator<T>> + QueriableData<PointIntensityAggregator<T>> {}
-impl <T: KeyLike, I: QueriableData<EGSAggregator<T>> + QueriableData<EGCAggregator<T>> + QueriableData<PointIntensityAggregator<T>>> GenerallyQueriable<T> for I {}
+pub trait GenerallyQueriable<T: KeyLike>:
+    QueriableData<EGSAggregator<T>>
+    + QueriableData<EGCAggregator<T>>
+    + QueriableData<PointIntensityAggregator<T>>
+{
+}
+impl<
+    T: KeyLike,
+    I: QueriableData<EGSAggregator<T>>
+        + QueriableData<EGCAggregator<T>>
+        + QueriableData<PointIntensityAggregator<T>>,
+> GenerallyQueriable<T> for I
+{
+}

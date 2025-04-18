@@ -1,5 +1,5 @@
-use crate::models::elution_group::ElutionGroup;
 use crate::KeyLike;
+use crate::models::elution_group::ElutionGroup;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -9,10 +9,8 @@ pub struct PointIntensityAggregator<T: KeyLike> {
     pub intensity: u64,
 }
 
-impl <T: KeyLike>PointIntensityAggregator<T> {
-    pub fn new_with_elution_group(
-        elution_group: Arc<ElutionGroup<T>>,
-    ) -> Self {
+impl<T: KeyLike> PointIntensityAggregator<T> {
+    pub fn new_with_elution_group(elution_group: Arc<ElutionGroup<T>>) -> Self {
         Self {
             query: elution_group,
             intensity: 0,
@@ -26,10 +24,8 @@ pub struct RawPeakVectorAggregator<T: KeyLike> {
     pub peaks: RawPeakVectorArrays,
 }
 
-impl <T: KeyLike>RawPeakVectorAggregator<T> {
-    pub fn new_with_elution_group(
-        elution_group: Arc<ElutionGroup<T>>,
-    ) -> Self {
+impl<T: KeyLike> RawPeakVectorAggregator<T> {
+    pub fn new_with_elution_group(elution_group: Arc<ElutionGroup<T>>) -> Self {
         Self {
             query: elution_group,
             peaks: RawPeakVectorArrays::new(),
@@ -55,4 +51,3 @@ pub struct RawPeakVectorArrays {
     pub intensities: Vec<u32>,
     pub retention_times: Vec<f32>,
 }
-

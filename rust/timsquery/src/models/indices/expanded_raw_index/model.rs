@@ -1,3 +1,4 @@
+use crate::errors::TimsqueryError;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
     FrameProcessingConfig,
@@ -12,6 +13,7 @@ use crate::models::frames::single_quad_settings::{
 };
 use crate::utils::tolerance_ranges::IncludedRange;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use timsrust::converters::{
     Scan2ImConverter,
@@ -26,8 +28,6 @@ use tracing::{
     info,
     instrument,
 };
-use std::sync::Arc;
-use crate::errors::TimsqueryError;
 
 #[derive(Debug)]
 pub struct ExpandedRawFrameIndex {
@@ -138,7 +138,10 @@ impl ExpandedRawFrameIndex {
     }
 
     #[instrument(name = "ExpandedRawFrameIndex::from_path_base")]
-    pub fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self, TimsqueryError> {
+    pub fn from_path_base(
+        path: &str,
+        centroid_config: FrameProcessingConfig,
+    ) -> Result<Self, TimsqueryError> {
         info!(
             "Building ExpandedRawFrameIndex from path {} config {:?}",
             path, centroid_config,
@@ -187,7 +190,13 @@ impl ExpandedRawFrameIndex {
                 }
             });
 
-        let mut cycle_rts_ms: Vec<u32> = out_ms1_frames.as_ref().unwrap().slices.iter().map(|x| (1000.0 * x.rt) as u32).collect();
+        let mut cycle_rts_ms: Vec<u32> = out_ms1_frames
+            .as_ref()
+            .unwrap()
+            .slices
+            .iter()
+            .map(|x| (1000.0 * x.rt) as u32)
+            .collect();
         cycle_rts_ms.sort_unstable();
 
         let out = Self {
@@ -202,4 +211,3 @@ impl ExpandedRawFrameIndex {
         Ok(out)
     }
 }
-

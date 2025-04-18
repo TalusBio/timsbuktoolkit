@@ -1,10 +1,10 @@
 use crate::errors::DataProcessingError;
+use crate::utils::correlation::rolling_cosine_similarity;
+use crate::utils::top_n_array::TopNArray;
 use timsquery::models::{
     Array2D,
     MzMajorIntensityArray,
 };
-use crate::utils::correlation::rolling_cosine_similarity;
-use crate::utils::top_n_array::TopNArray;
 use tracing::debug;
 
 /// Calculates the coelution score of a set of chromatograms.

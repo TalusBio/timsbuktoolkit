@@ -34,6 +34,7 @@ use std::fmt::{
     Display,
 };
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::Instant;
 use timsrust::Metadata;
 use timsrust::converters::{
@@ -49,7 +50,6 @@ use tracing::{
     info,
     instrument,
 };
-use std::sync::Arc;
 
 // TODO break this module apart ... its getting too big for my taste
 // - JSP: 2024-11-19
@@ -258,7 +258,10 @@ impl QuadSplittedTransposedIndexBuilder {
         name = "QuadSplittedTransposedIndexBuilder::from_path_base",
         level = "debug"
     )]
-    fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self, TimsqueryError> {
+    fn from_path_base(
+        path: &str,
+        centroid_config: FrameProcessingConfig,
+    ) -> Result<Self, TimsqueryError> {
         let file_reader = FrameReader::new(path)?;
 
         let sql_path = std::path::Path::new(path).join("analysis.tdf");
@@ -338,7 +341,13 @@ impl QuadSplittedTransposedIndexBuilder {
                 .unwrap()
         });
 
-        let mut cycle_rts_ms: Vec<_> = precursor_index.as_ref().unwrap().frame_rts.iter().map(|rt| (*rt * 1000.0) as u32).collect();
+        let mut cycle_rts_ms: Vec<_> = precursor_index
+            .as_ref()
+            .unwrap()
+            .frame_rts
+            .iter()
+            .map(|rt| (*rt * 1000.0) as u32)
+            .collect();
         cycle_rts_ms.sort_unstable();
 
         QuadSplittedTransposedIndex {
@@ -351,4 +360,3 @@ impl QuadSplittedTransposedIndexBuilder {
         }
     }
 }
-

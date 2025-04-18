@@ -140,11 +140,11 @@ mod tests {
     #[test]
     fn test_running_stats_calculator() {
         let mut calc = RunningStatsCalculator::new(10, 0.0);
-        calc.add( 2, 10.0);
-        calc.add( 2, 10.0);
-        calc.add( 2, 10.0);
-        calc.add( 2, 10.0);
-        calc.add( 2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
         assert!(calc.mean().unwrap() < 5.6);
         assert!(calc.mean().unwrap() > 4.4);
         assert!(calc.variance().unwrap() > 15.);

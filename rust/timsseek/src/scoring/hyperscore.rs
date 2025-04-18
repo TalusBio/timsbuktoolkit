@@ -4,11 +4,11 @@ use crate::fragment_mass::{
     IonAnnot,
     IonSeriesTerminality,
 };
-use timsquery::models::RTMajorIntensityArray;
 use crate::utils::math::{
     lnfact,
     lnfact_f32,
 };
+use timsquery::models::RTMajorIntensityArray;
 use timsquery::traits::key_like::KeyLike;
 
 pub fn peak_count<FH: KeyLike>(

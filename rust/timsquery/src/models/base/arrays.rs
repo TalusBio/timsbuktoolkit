@@ -63,16 +63,16 @@ impl<
         })
     }
 
-    pub fn new_transposed<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>, DataProcessingError> {
+    pub fn new_transposed<S: AsRef<[T]>, C: AsRef<[S]>>(
+        values: C,
+    ) -> Result<Array2D<T>, DataProcessingError> {
         let ncols = values.as_ref().len();
         if ncols == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData 
-            );
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         let nrows = values.as_ref()[0].as_ref().len();
         if nrows == 0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData 
-            );
+            return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
         let expected_size = nrows * ncols;
@@ -80,7 +80,7 @@ impl<
 
         for (ci, col) in values.as_ref().iter().enumerate() {
             if col.as_ref().len() != nrows {
-                return Err(DataProcessingError::ExpectedVectorSameLength );
+                return Err(DataProcessingError::ExpectedVectorSameLength);
             }
             for (ri, val) in col.as_ref().iter().enumerate() {
                 let idx = ri * ncols + ci; // Changed indexing for row-major order
@@ -97,7 +97,11 @@ impl<
         })
     }
 
-    pub fn from_flat_vector(values: Vec<T>, nrows: usize, ncols: usize) -> Result<Array2D<T>, DataProcessingError> {
+    pub fn from_flat_vector(
+        values: Vec<T>,
+        nrows: usize,
+        ncols: usize,
+    ) -> Result<Array2D<T>, DataProcessingError> {
         if values.len() != nrows * ncols {
             return Err(DataProcessingError::ExpectedVectorSameLength);
         }
@@ -234,21 +238,33 @@ impl<
     }
 
     pub fn get_row_mut(&mut self, index: usize) -> Result<&mut [T], DataProcessingError> {
-        let range = self.get_row_limits(index).ok_or(DataProcessingError::IndexOutOfBoundsError(index))?;
+        let range = self
+            .get_row_limits(index)
+            .ok_or(DataProcessingError::IndexOutOfBoundsError(index))?;
         Ok(&mut self.values[range])
     }
 
     pub fn try_swap_rows(&mut self, row1: usize, row2: usize) -> Result<(), DataProcessingError> {
-        let range_1 = self.get_row_limits(row1).ok_or(DataProcessingError::IndexOutOfBoundsError(row1))?;
-        let range_2 = self.get_row_limits(row2).ok_or(DataProcessingError::IndexOutOfBoundsError(row2))?;
+        let range_1 = self
+            .get_row_limits(row1)
+            .ok_or(DataProcessingError::IndexOutOfBoundsError(row1))?;
+        let range_2 = self
+            .get_row_limits(row2)
+            .ok_or(DataProcessingError::IndexOutOfBoundsError(row2))?;
         for (i, j) in range_1.zip(range_2) {
             self.values.swap(i, j);
         }
         Ok(())
     }
 
-    pub fn try_replace_row_with(&mut self, row_idx: usize, row: &[T]) -> Result<(), DataProcessingError> {
-        let range = self.get_row_limits(row_idx).ok_or(DataProcessingError::IndexOutOfBoundsError(row_idx))?;
+    pub fn try_replace_row_with(
+        &mut self,
+        row_idx: usize,
+        row: &[T],
+    ) -> Result<(), DataProcessingError> {
+        let range = self
+            .get_row_limits(row_idx)
+            .ok_or(DataProcessingError::IndexOutOfBoundsError(row_idx))?;
         self.values[range].copy_from_slice(row);
         Ok(())
     }
@@ -307,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array2d_new_transposed()  {
+    fn test_array2d_new_transposed() {
         // Test creating a 3x2 array from columns
         let columns = vec![
             vec![1, 4], // first column
@@ -366,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array2d_transpose()  {
+    fn test_array2d_transpose() {
         let values = vec![vec![1, 2, 3], vec![4, 5, 6]];
         let array = Array2D::new(&values).unwrap();
 
@@ -458,6 +474,8 @@ mod tests {
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
         array.try_swap_rows(0, 1).unwrap();
         assert_eq!(array.values, vec![4, 5, 6, 1, 2, 3]);
-        if array.try_swap_rows(1, 2).is_ok() { panic!("Should not have succeeded") };
+        if array.try_swap_rows(1, 2).is_ok() {
+            panic!("Should not have succeeded")
+        };
     }
 }

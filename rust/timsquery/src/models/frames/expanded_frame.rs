@@ -404,7 +404,10 @@ pub fn warn_and_skip_badframes(
 pub fn par_read_and_expand_frames(
     frame_reader: &FrameReader,
     centroiding_config: FrameProcessingConfig,
-) -> Result<HashMap<Option<SingleQuadrupoleSetting>, Vec<ExpandedFrameSlice<SortedState>>>, UnsupportedDataError> {
+) -> Result<
+    HashMap<Option<SingleQuadrupoleSetting>, Vec<ExpandedFrameSlice<SortedState>>>,
+    UnsupportedDataError,
+> {
     let dia_windows = match frame_reader.get_dia_windows() {
         Some(dia_windows) => dia_windows,
         None => {
