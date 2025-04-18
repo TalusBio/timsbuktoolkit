@@ -35,12 +35,14 @@ use tracing::{
     info,
     instrument,
 };
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct ExpandedRawFrameIndex {
     bundled_ms1_frames: ExpandedSliceBundle,
     bundled_frames: HashMap<SingleQuadrupoleSettingIndex, ExpandedSliceBundle>,
     flat_quad_settings: Vec<SingleQuadrupoleSetting>,
+    pub cycle_rt_ms: Arc<[u32]>,
     pub mz_converter: Tof2MzConverter,
     pub im_converter: Scan2ImConverter,
 }

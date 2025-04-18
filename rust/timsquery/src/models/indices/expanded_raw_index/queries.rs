@@ -1,7 +1,7 @@
 
 use crate::{KeyLike, Tolerance};
 use crate::traits::QueriableData;
-use crate::models::aggregators::{EGCAggregator, EGSAggregator, RawPeakIntensityAggregator};
+use crate::models::aggregators::{EGCAggregator, EGSAggregator, PointIntensityAggregator};
 use super::model::ExpandedRawFrameIndex;
 
 impl<FH: KeyLike> QueriableData<EGCAggregator<FH>>
@@ -140,10 +140,10 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>>
 }
 
 
-impl<FH: KeyLike> QueriableData<RawPeakIntensityAggregator<FH>>
+impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>>
     for ExpandedRawFrameIndex
 {
-    fn add_query(&self, aggregator: &mut RawPeakIntensityAggregator<FH>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
         todo!();
     }
 }

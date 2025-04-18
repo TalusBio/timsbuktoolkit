@@ -6,20 +6,20 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use timsquery::{QueriableData, GenerallyQueriable};
 use std::collections::HashMap;
 use std::time::Instant;
 use timsquery::models::aggregators::{
-    MultiCMGStatsFactory,
-    RawPeakIntensityAggregator,
-    RawPeakVectorAggregator,
+    EGSAggregator,
+    PointIntensityAggregator,
+    EGCAggregator,
 };
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::indices::{
     ExpandedRawFrameIndex,
     QuadSplittedTransposedIndex,
 };
-use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::{
+use timsquery::models::tolerance::{
     Tolerance,
     MobilityTolerance,
     MzToleramce,
@@ -35,6 +35,7 @@ use tracing_bunyan_formatter::{
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+use std::sync::Arc;
 
 fn main() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -99,13 +100,13 @@ fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
         let mobility = min_mobility + (i as f32 * mobility_step);
         let mz = min_mz + (i as f64 * mz_step);
         let fragment_mzs = (0..10).map(|x| (x as usize, mz + x as f64));
-        let fragment_mzs = HashMap::from_iter(fragment_mzs);
+        let fragments = Arc::from(Vec::from_iter(fragment_mzs));
         egs.push(ElutionGroup {
             id: i as u64,
             rt_seconds: rt,
             mobility,
-            precursor_mzs: vec![mz],
-            fragment_mzs,
+            precursors: Arc::from(vec![(0, mz), (1, mz + 1.0)]),
+            fragments,
         });
     }
     egs
@@ -123,18 +124,11 @@ fn main_query_index(args: QueryIndexArgs) {
 
     let tolerance_settings: Tolerance =
         serde_json::from_str(&std::fs::read_to_string(&tolerance_settings_path).unwrap()).unwrap();
-    let elution_groups: Vec<ElutionGroup<String>> =
+    let elution_groups: Vec<Arc<ElutionGroup<String>>> =
         serde_json::from_str(&std::fs::read_to_string(&elution_groups_path).unwrap()).unwrap();
 
-    let index_use = match (index_use, elution_groups.len() > 10) {
-        (PossibleIndex::ExpandedRawFrameIndex, true) => PossibleIndex::ExpandedRawFrameIndex,
-        (PossibleIndex::TransposedQuadIndex, true) => PossibleIndex::TransposedQuadIndex,
-        (PossibleIndex::ExpandedRawFrameIndex, false) => PossibleIndex::ExpandedRawFrameIndex,
-        (PossibleIndex::TransposedQuadIndex, false) => PossibleIndex::TransposedQuadIndex,
-        (PossibleIndex::Unspecified, true) => PossibleIndex::TransposedQuadIndex,
-        (PossibleIndex::Unspecified, false) => PossibleIndex::ExpandedRawFrameIndex,
-    };
-    // ExpandedRawFrameIndex,
+    let (index, rts) = index_use.build_index(&raw_file_path);
+    let mut queries = AggregatorContainer::new(elution_groups.clone(), aggregator_use, rts);
 
     execute_query(
         index_use,
@@ -166,17 +160,69 @@ struct Args {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum PossibleAggregator {
     #[default]
-    RawPeakIntensityAggregator,
-    RawPeakVectorAggregator,
-    MultiCMGStats,
+    PointIntensityAggregator,
+    ChromatogramAggregator,
+    SpectrumAggregator,
+}
+
+pub enum AggregatorContainer {
+    Point(Vec<PointIntensityAggregator<String>>),
+    Chromatogram(Vec<EGSAggregator<String>>),
+    Spectrum(Vec<EGSAggregator<String>>),
+}
+
+impl AggregatorContainer {
+    fn new(queries: Vec<Arc<ElutionGroup<String>>>, aggregator: PossibleAggregator, ref_rts: Arc<u32>) -> Self {
+        match aggregator {
+            PossibleAggregator::PointIntensityAggregator => {
+                AggregatorContainer::Point(queries.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect())
+            }
+            PossibleAggregator::ChromatogramAggregator => {
+                AggregatorContainer::Chromatogram(queries.iter().map(|x| EGCAggregator::new(x.clone(), ref_rts.clone())).collect())
+            }
+            PossibleAggregator::SpectrumAggregator => {
+                AggregatorContainer::Spectrum(queries.iter().map(|x| EGSAggregator::new(x.clone())).collect())
+            }
+        }
+    }
+
+    fn add_query(&mut self, index: &dyn GenerallyQueriable<String>, tolerance: &Tolerance) {
+        match self {
+            AggregatorContainer::Point(aggregators) => {
+                index.par_add_query_multi(aggregators, tolerance);
+            },
+            AggregatorContainer::Chromatogram(aggregators) => {
+                index.par_add_query_multi(aggregators, tolerance);
+            },
+            AggregatorContainer::Spectrum(aggregators) => {
+                index.par_add_query_multi(aggregators, tolerance);
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum PossibleIndex {
     #[default]
-    Unspecified,
     ExpandedRawFrameIndex,
     TransposedQuadIndex,
+}
+
+impl PossibleIndex {
+    pub fn build_index(&self, raw_file_path: &str) -> (Box<dyn GenerallyQueriable<String>>, Arc<[u32]>) {
+        match self {
+            PossibleIndex::ExpandedRawFrameIndex => {
+                let tmp = ExpandedRawFrameIndex::from_path(raw_file_path).unwrap();
+                let rts = tmp.cycle_rt_ms.clone();
+                (Box::new(tmp), rts)
+            }
+            PossibleIndex::TransposedQuadIndex => {
+                let tmp =  QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
+                let rts = tmp.cycle_rt_ms.clone();
+                (Box::new(tmp), rts)
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -246,7 +292,7 @@ pub fn execute_query(
     aggregator: PossibleAggregator,
     raw_file_path: String,
     tolerance: Tolerance,
-    elution_groups: Vec<ElutionGroup<String>>,
+    elution_groups: Vec<Arc<ElutionGroup<String>>>,
     args: QueryIndexArgs,
 ) {
     let output_path = args.output_path;
@@ -254,15 +300,8 @@ pub fn execute_query(
 
     macro_rules! execute_query_inner {
         ($index:expr, $agg:expr) => {
-            let tmp = query_multi_group(&$index, &tolerance, &elution_groups, &$agg);
-
-            let mut out = Vec::with_capacity(tmp.len());
-            for (res, eg) in tmp.into_iter().zip(elution_groups) {
-                out.push(ElutionGroupResults {
-                    elution_group: eg,
-                    result: res,
-                });
-            }
+            let mut tmp: Vec<_> = elution_groups.iter().map(|x| $agg(x.clone())).collect();
+            let tmp = &$index.par_add_query_multi(&tolerance, &elution_groups, &$agg);
 
             std::fs::create_dir_all(output_path.clone()).unwrap();
 
@@ -295,7 +334,7 @@ pub fn execute_query(
                 .unwrap();
             match aggregator {
                 PossibleAggregator::RawPeakIntensityAggregator => {
-                    let aggregator = RawPeakIntensityAggregator::new_with_elution_group;
+                    let aggregator = PointIntensityAggregator::new_with_elution_group;
                     execute_query_inner!(index, aggregator);
                 }
                 PossibleAggregator::RawPeakVectorAggregator => {
@@ -315,7 +354,7 @@ pub fn execute_query(
             let index = ExpandedRawFrameIndex::from_path(&(raw_file_path.clone())).unwrap();
             match aggregator {
                 PossibleAggregator::RawPeakIntensityAggregator => {
-                    let aggregator = RawPeakIntensityAggregator::new_with_elution_group;
+                    let aggregator = PointIntensityAggregator::new_with_elution_group;
                     execute_query_inner!(index, aggregator);
                 }
                 PossibleAggregator::RawPeakVectorAggregator => {

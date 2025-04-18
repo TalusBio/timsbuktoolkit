@@ -4,7 +4,7 @@ pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedInd
 pub use crate::models::Tolerance;
 
 // Re-export traits
-pub use crate::traits::queriable_data::QueriableData;
+pub use crate::traits::queriable_data::{QueriableData, GenerallyQueriable};
 pub use crate::traits::KeyLike;
 
 // Declare modules

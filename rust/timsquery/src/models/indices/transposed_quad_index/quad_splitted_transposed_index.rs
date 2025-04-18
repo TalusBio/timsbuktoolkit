@@ -49,6 +49,7 @@ use tracing::{
     info,
     instrument,
 };
+use std::sync::Arc;
 
 // TODO break this module apart ... its getting too big for my taste
 // - JSP: 2024-11-19
@@ -57,6 +58,7 @@ pub struct QuadSplittedTransposedIndex {
     precursor_index: TransposedQuadIndex,
     fragment_indices: HashMap<SingleQuadrupoleSettingIndex, TransposedQuadIndex>,
     flat_quad_settings: Vec<SingleQuadrupoleSetting>,
+    pub cycle_rt_ms: Arc<[u32]>,
     pub mz_converter: Tof2MzConverter,
     pub im_converter: Scan2ImConverter,
 }

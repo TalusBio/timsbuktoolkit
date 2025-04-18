@@ -24,7 +24,7 @@ use timsquery::models::tolerance::{
     MobilityTolerance,
 };
 use timsquery::ElutionGroup;
-use timsquery::models::aggregators::RawPeakIntensityAggregator;
+use timsquery::models::aggregators::PointIntensityAggregator;
 use timsquery::models::indices::expanded_raw_index::ExpandedRawFrameIndex;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::traits::QueriableData;
@@ -151,7 +151,7 @@ fn duration_to_seconds(duration: Duration) -> f64 {
     duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9
 }
 
-fn build_elution_groups() -> Vec<ElutionGroup<u64>> {
+fn build_elution_groups() -> Vec<Arc<ElutionGroup<u64>>> {
     const NUM_FRAGMENTS: usize = 10;
     const MAX_RT: f32 = 22.0 * 60.0;
     const MAX_MOBILITY: f32 = 1.5;
@@ -173,13 +173,13 @@ fn build_elution_groups() -> Vec<ElutionGroup<u64>> {
             fragments.push((ii as u64, fragment_mz));
         }
 
-        out_egs.push(ElutionGroup {
+        out_egs.push(Arc::new(ElutionGroup {
             id: i as u64,
             rt_seconds: rt,
             mobility,
             precursors: Arc::from(vec![(0, mz)]),
             fragments: Arc::from(fragments),
-        });
+        }));
     }
     out_egs
 }
@@ -348,9 +348,9 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
             &format!("BatchAccess_{}", tol_name),
             || ExpandedRawFrameIndex::from_path(raw_file_path).unwrap(),
             |index, _i| {
-                let qa = query_groups.iter().map(|x| RawPeakIntensityAggregator::new_with_elution_group(Arc::new(*x))).collect();
-                index.par_add_query_multi(qa, &tolerance);
-                let tot: u64 = qa.into_iter().map(|x|x.value()).sum();
+                let mut qa: Vec<_> = query_groups.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect();
+                index.par_add_query_multi(&mut qa, &tolerance);
+                let tot: u64 = qa.into_iter().map(|x|x.intensity).sum();
                 let out = format!(
                     "ExpandedRawFileIndex::query_multi_group aggregated {} ",
                     tot,
@@ -368,13 +368,12 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
             &format!("BatchAccess_{}", tol_name),
             || ExpandedRawFrameIndex::from_path_centroided(raw_file_path).unwrap(),
             |index, _i| {
-                let tmp = query_multi_group(
-                    index,
+                let mut tmp: Vec<_> = query_groups.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect();
+                index.par_add_query_multi(
+                    &mut tmp,
                     &tolerance,
-                    &query_groups,
-                    &RawPeakIntensityAggregator::new_with_elution_group,
                 );
-                let tot: u64 = tmp.into_iter().sum();
+                let tot: u64 = tmp.into_iter().map(|x|x.intensity).sum();
                 let out = format!(
                     "ExpandedRawFileIndexCentroided::query_multi_group aggregated {} ",
                     tot,
@@ -392,9 +391,9 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
             &format!("BatchAccess_{}", tol_name),
             || QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap(),
             |index, _i| {
-                let mut tmp = query_groups.iter().map(|x| RawPeakIntensityAggregator::new_with_elution_group(Arc::new(x))).collect();
-                let tmp = index.par_add_query_multi(&mut tmp, &tolerance);
-                let tot: u64 = tmp.into_iter().sum();
+                let mut tmp: Vec<_> = query_groups.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect();
+                index.par_add_query_multi(&mut tmp, &tolerance);
+                let tot: u64 = tmp.into_iter().map(|x| x.intensity).sum();
                 let out = format!("TransposedQuadIndex::query_multi_group aggregated {} ", tot,);
                 Some(out)
             },
@@ -409,9 +408,9 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
             &format!("BatchAccess_{}", tol_name),
             || QuadSplittedTransposedIndex::from_path_centroided(raw_file_path).unwrap(),
             |index, _i| {
-                let queriable_aggregators = query_groups.iter().map(|x| RawPeakIntensityAggregator::new_with_elution_group(Arc::new(x))).collect();
-                index.par_add_query_multi(queriable_aggregators, &tolerance);
-                let tot: u64 = queriable_aggregators.iter().map(|x| x.value()).sum();
+                let mut queriable_aggregators: Vec<_> = query_groups.iter().map(|x| PointIntensityAggregator::new_with_elution_group(x.clone())).collect();
+                index.par_add_query_multi(&mut queriable_aggregators, &tolerance);
+                let tot: u64 = queriable_aggregators.iter().map(|x| x.intensity).sum();
                 let out = format!("TransposedQuadIndex::query_multi_group aggregated {} ", tot,);
                 Some(out)
             },

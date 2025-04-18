@@ -1,13 +1,13 @@
 
-use crate::models::aggregators::{EGCAggregator, EGSAggregator, RawPeakIntensityAggregator};
+use crate::models::aggregators::{EGCAggregator, EGSAggregator, PointIntensityAggregator};
 use crate::Tolerance;
 use crate::KeyLike;
 use crate::traits::QueriableData;
 use super::QuadSplittedTransposedIndex;
 
-impl<FH: KeyLike> QueriableData<RawPeakIntensityAggregator<FH>> for QuadSplittedTransposedIndex
+impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for QuadSplittedTransposedIndex
 {
-    fn add_query(&self, aggregator: &mut RawPeakIntensityAggregator<FH>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
         todo!();
     }
 }
