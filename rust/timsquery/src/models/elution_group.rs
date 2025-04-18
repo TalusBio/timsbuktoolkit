@@ -16,7 +16,7 @@ pub struct ElutionGroup<T: KeyLike> {
     pub id: u64,
     pub mobility: f32,
     pub rt_seconds: f32,
-    // Also .. thei8 might not be the best for performance due to alignment ...
+    // This i8 might not be the best for performance due to alignment ...
     pub precursors: Arc<[(i8, f64)]>,
     pub fragments: Arc<[(T, f64)]>,
 }
@@ -37,6 +37,13 @@ impl<T: KeyLike> ElutionGroup<T> {
             }
         }
         (min_precursor_mz, max_precursor_mz)
+    }
+
+    pub fn get_monoisotopic_precursor_mz(&self) -> Option<f64> {
+        self.precursors
+            .iter()
+            .find(|(isotope_index, _)| *isotope_index == 0)
+            .map(|(_, precursor_mz)| *precursor_mz)
     }
 
     pub fn iter_precursors(&self) -> impl Iterator<Item = &(i8, f64)> {

@@ -7,10 +7,9 @@ use serde::{
     Serialize,
 };
 use timsquery::ElutionGroup;
-use timsquery::models::aggregators::MultiCMGStatsFactory;
 use timsquery::models::indices::ExpandedRawFrameIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::Tolerance;
+use timsquery::Tolerance;
 use timsseek::data_sources::speclib::ExpectedIntensities;
 use timsseek::errors::Result;
 use timsseek::fragment_mass::IonAnnot;
@@ -29,8 +28,6 @@ type IndexUse = ExpandedRawFrameIndex;
 
 pub struct BundledDotDIndex {
     index: IndexUse,
-    ref_time_ms: Arc<[u32]>,
-    factory: MultiCMGStatsFactory<IonAnnot>,
     tolerance: Tolerance,
 }
 
@@ -51,17 +48,18 @@ impl InputQuery {
                 id: 0,
                 mobility: 0.75,
                 rt_seconds: 0.0,
-                precursor_mzs: vec![450.0, 450.5, 451.0, 451.5],
-                fragment_mzs: HashMap::from_iter(
-                    [
+                precursors: vec![
+                    (-1, 450.0),
+                    (0, 450.5),
+                    (1, 451.0),
+                    (2, 451.5),
+                ],
+                fragments: vec![
                         (IonAnnot::try_from("a1").unwrap(), 450.0),
                         (IonAnnot::try_from("a2").unwrap(), 450.5),
                         (IonAnnot::try_from("a3").unwrap(), 451.0),
                         (IonAnnot::try_from("a4").unwrap(), 451.5),
-                    ]
-                    .iter()
-                    .cloned(),
-                ),
+                    ],
             },
             expected_intensities: ExpectedIntensities {
                 precursor_intensities: vec![1.0, 1.0, 1.0, 1.0],
@@ -122,15 +120,8 @@ impl BundledDotDIndex {
         let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
         let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
 
-        let factory = MultiCMGStatsFactory {
-            converters: (index.mz_converter, index.im_converter),
-            _phantom: std::marker::PhantomData::<IonAnnot>,
-        };
-
         Ok(BundledDotDIndex {
             index,
-            ref_time_ms,
-            factory,
             tolerance,
         })
     }

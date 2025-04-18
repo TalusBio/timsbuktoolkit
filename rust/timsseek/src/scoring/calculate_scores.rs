@@ -30,7 +30,7 @@ use timsquery::models::{
 pub struct PreScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub reference: ElutionGroup<IonAnnot>,
+    pub reference: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
     pub query_values: EGCAggregator<IonAnnot>,
     pub ref_time_ms: Arc<[u32]>,
@@ -570,68 +570,69 @@ impl SortedIntElemAtIndex {
     fn new(
         ms1_idx: usize,
         ms2_idx: usize,
-        cmgs: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        cmgs: &EGCAggregator<IonAnnot>,
         elution_group: &ElutionGroup<IonAnnot>,
     ) -> Self {
+        panic!("I need to implement the secondary search");
         // Get the elements at every index and sort them by intensity.
         // Once sorted calculate the pairwise diff.
         let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
         let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
         let ref_ims = elution_group.mobility;
 
-        if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
-            for i in 0..3 {
-                let expect_mz = elution_group.precursor_mzs.get(i);
-                let mz_err = if let Some(mz) = expect_mz {
-                    (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
-                } else {
-                    continue;
-                };
-                let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
+        // if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
+        //     for i in 0..3 {
+        //         let expect_mz = elution_group.precursor_mzs.get(i);
+        //         let mz_err = if let Some(mz) = expect_mz {
+        //             (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
+        //         } else {
+        //             continue;
+        //         };
+        //         let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
 
-                let tmp = SortableError {
-                    intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
-                    mz_err,
-                    ims_err,
-                };
-                ms1_elems.push(tmp);
-            }
-        }
+        //         let tmp = SortableError {
+        //             intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
+        //             mz_err,
+        //             ims_err,
+        //         };
+        //         ms1_elems.push(tmp);
+        //     }
+        // }
 
-        // TODO: make an impl to get the length on the RT axis.
-        if ms2_idx < cmgs.ms2_arrays.retention_time_miliseconds.len() {
-            for (k, v) in cmgs.ms2_arrays.intensities.iter() {
-                let expect_mz = elution_group.fragment_mzs.get(k);
-                let mz_err = if let Some(mz) = expect_mz {
-                    (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
-                } else {
-                    continue;
-                };
+        // // TODO: make an impl to get the length on the RT axis.
+        // if ms2_idx < cmgs.ms2_arrays.retention_time_miliseconds.len() {
+        //     for (k, v) in cmgs.ms2_arrays.intensities.iter() {
+        //         let expect_mz = elution_group.fragment_mzs.get(k);
+        //         let mz_err = if let Some(mz) = expect_mz {
+        //             (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
+        //         } else {
+        //             continue;
+        //         };
 
-                // TODO: figure out why this happens
-                if mz_err.abs() > 1.0 {
-                    println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
-                    println!("Expected mz: {}", expect_mz.unwrap());
-                    println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
-                    println!("EG: {:#?}", elution_group);
-                    println!("CMGS: {:#?}", cmgs);
-                    panic!();
-                }
-                let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
+        //         // TODO: figure out why this happens
+        //         if mz_err.abs() > 1.0 {
+        //             println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
+        //             println!("Expected mz: {}", expect_mz.unwrap());
+        //             println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
+        //             println!("EG: {:#?}", elution_group);
+        //             println!("CMGS: {:#?}", cmgs);
+        //             panic!();
+        //         }
+        //         let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
 
-                let tmp = SortableError {
-                    intensity: v[ms2_idx],
-                    mz_err,
-                    ims_err,
-                };
-                ms2_elems.push(tmp);
-            }
-        }
+        //         let tmp = SortableError {
+        //             intensity: v[ms2_idx],
+        //             mz_err,
+        //             ims_err,
+        //         };
+        //         ms2_elems.push(tmp);
+        //     }
+        // }
 
-        SortedIntElemAtIndex {
-            ms1: ms1_elems.get_values(),
-            ms2: ms2_elems.get_values(),
-        }
+        // SortedIntElemAtIndex {
+        //     ms1: ms1_elems.get_values(),
+        //     ms2: ms2_elems.get_values(),
+        // }
     }
 }
 

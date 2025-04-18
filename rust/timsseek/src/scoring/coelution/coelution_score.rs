@@ -82,7 +82,7 @@ pub fn coelution_score_arr<const TOP_N: usize>(
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score<const TOP_N: usize, K: Clone>(
+pub fn coelution_score<const TOP_N: usize, K: Clone + Ord>(
     slices: &MzMajorIntensityArray<K>,
     window: usize,
 ) -> Result<Vec<f32>, DataProcessingError> {

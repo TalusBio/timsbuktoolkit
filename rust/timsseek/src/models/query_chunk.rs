@@ -5,12 +5,13 @@ use rayon::iter::Zip as RayonZip;
 use rayon::prelude::*;
 use rayon::vec::IntoIter as RayonVecIntoIter;
 use timsquery::models::elution_group::ElutionGroup;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct NamedQueryChunk {
     pub digests: Vec<DigestSlice>,
     pub charges: Vec<u8>,
-    pub queries: Vec<ElutionGroup<IonAnnot>>,
+    pub queries: Vec<Arc<ElutionGroup<IonAnnot>>>,
     pub expected_intensities: Vec<ExpectedIntensities>,
 }
 
@@ -18,7 +19,7 @@ impl NamedQueryChunk {
     pub fn new(
         digests: Vec<DigestSlice>,
         charges: Vec<u8>,
-        queries: Vec<ElutionGroup<IonAnnot>>,
+        queries: Vec<Arc<ElutionGroup<IonAnnot>>>,
         expected_intensities: Vec<ExpectedIntensities>,
     ) -> Self {
         assert_eq!(digests.len(), charges.len());
@@ -37,7 +38,7 @@ impl NamedQueryChunk {
     ) -> RayonZip<
         RayonVecIntoIter<ExpectedIntensities>,
         RayonZip<
-            RayonVecIntoIter<ElutionGroup<IonAnnot>>,
+            RayonVecIntoIter<Arc<ElutionGroup<IonAnnot>>>,
             RayonZip<RayonVecIntoIter<DigestSlice>, RayonVecIntoIter<u8>>,
         >,
     > {

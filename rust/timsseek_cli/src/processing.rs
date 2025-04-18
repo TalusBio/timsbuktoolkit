@@ -14,10 +14,9 @@ use std::time::{
     Duration,
     Instant,
 };
-use timsquery::models::aggregators::MultiCMGStatsFactory;
+use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
-use timsquery::traits::tolerance::Tolerance;
+use timsquery::Tolerance;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::digest::digestion::{
     DigestionEnd,
@@ -120,14 +119,15 @@ impl std::fmt::Display for RuntimeMetrics {
 pub fn process_chunk_full<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a Tolerance,
     ref_time_ms: Arc<[u32]>,
 ) -> (Vec<Result<FullQueryResult, TimsSeekError>>, RuntimeMetrics) {
     let query_start = Instant::now();
-    let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
-        factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
-    });
+    let mut res = queries.queries.iter().map(|x| EGCAggregator::new(x.clone(), index.cycle_rt_ms.clone()).unwrap()).collect::<Vec<_>>();
+
+    // query_multi_group(index, tolerance, &queries.queries, &|x| {
+    //     factory.build_with_elution_group(x, Some(ref_time_ms.clone()))
+    // });
     let query_time = query_start.elapsed();
     let builders: Vec<SearchResultBuilder> = (0..res.len())
         .map(|_| SearchResultBuilder::default())
@@ -216,9 +216,7 @@ pub fn process_chunk_full<'a>(
 pub fn process_chunk<'a>(
     queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a Tolerance,
-    ref_time_ms: Arc<[u32]>,
 ) -> (Vec<IonSearchResults>, RuntimeMetrics) {
     let start = Instant::now();
     let num_queries = queries.len();
@@ -320,9 +318,7 @@ pub fn process_chunk<'a>(
 pub fn main_loop<'a>(
     chunked_query_iterator: impl ExactSizeIterator<Item = NamedQueryChunk>,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<IonAnnot>,
     tolerance: &'a Tolerance,
-    ref_time_ms: Arc<[u32]>,
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
@@ -384,7 +380,7 @@ pub fn main_loop<'a>(
                 let res = res_full.into_iter().map(|x| x.search_results).collect();
                 (res, tmp.1)
             } else {
-                process_chunk(chunk, index, factory, tolerance, ref_time_ms.clone())
+                process_chunk(chunk, index, tolerance)
             };
 
             metrics = metrics.fold(out.1);
@@ -408,8 +404,6 @@ pub fn main_loop<'a>(
 pub fn process_fasta(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex, // TODO: Make generic
-    ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<IonAnnot>,
     digestion: DigestionConfig,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
@@ -468,8 +462,6 @@ pub fn process_fasta(
 pub fn process_speclib(
     path: PathBuf,
     index: &QuadSplittedTransposedIndex,
-    ref_time_ms: Arc<[u32]>,
-    factory: &MultiCMGStatsFactory<IonAnnot>,
     analysis: &AnalysisConfig,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {

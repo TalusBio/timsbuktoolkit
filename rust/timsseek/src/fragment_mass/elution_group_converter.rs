@@ -21,6 +21,7 @@ use tracing::{
     error,
     warn,
 };
+use std::sync::Arc;
 
 /// Super simple 1/k0 prediction.
 ///
@@ -104,7 +105,7 @@ impl SequenceToElutionGroupConverter {
         id: u64,
     ) -> Result<
         (
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -186,7 +187,7 @@ impl SequenceToElutionGroupConverter {
                 precursor_intensities: expected_prec_inten.clone(),
             };
 
-            out_eg.push(eg);
+            out_eg.push(Arc::new(eg));
             out_exp_int.push(ei);
             out_charges.push(charge);
         }
@@ -200,7 +201,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -235,7 +236,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),

@@ -64,14 +64,14 @@ pub fn single_hyperscore(slice: &[f32], grouping: Option<&[u8]>, count_threshold
     score
 }
 
-pub fn single_hyperscore_labeled(slice: &[f32], labels: &[IonAnnot], count_threshold: f32) -> f32 {
+pub fn single_hyperscore_labeled(slice: &[f32], labels: &[(IonAnnot, f64)], count_threshold: f32) -> f32 {
     let mut nt_count = 0;
     let mut ct_count = 0;
 
     let mut nt_sum = 0.0;
     let mut ct_sum = 0.0;
 
-    slice.iter().zip(labels).for_each(|(inten, lab)| {
+    slice.iter().zip(labels).for_each(|(inten, &(lab, _exp_inten))| {
         // Not smaller is diff than bigger because of Nans
         match inten.partial_cmp(&count_threshold) {
             Some(Ordering::Less) => return,
@@ -121,11 +121,11 @@ fn single_lazyscore(slc: &[f32]) -> f32 {
     lnfact_f32(slc.iter().map(|&x| x.max(1.0).ln()).sum())
 }
 
-fn single_split_ion_lazyscore(slc: &[f32], labels: &[IonAnnot]) -> f32 {
+fn single_split_ion_lazyscore(slc: &[f32], labels: &[(IonAnnot, f64)]) -> f32 {
     let mut ct_lnsum = 0.0;
     let mut nt_lnsum = 0.0;
 
-    for (i, label) in labels.iter().enumerate() {
+    for (i, (label, _expect_inten)) in labels.iter().enumerate() {
         match label.terminality() {
             IonSeriesTerminality::CTerm => {
                 ct_lnsum += slc[i].max(1.0).ln();
