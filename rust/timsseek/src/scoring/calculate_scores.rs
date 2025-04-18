@@ -9,11 +9,11 @@ use crate::errors::{
     Result,
 };
 use crate::fragment_mass::IonAnnot;
-use crate::models::{
-    DigestSlice,
+use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
+use crate::models::DigestSlice;
 use crate::scoring::corr_v_ref::calculate_cosine_with_ref_gaussian;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
@@ -24,7 +24,7 @@ use core::f32;
 use serde::Serialize;
 use std::sync::Arc;
 use timsquery::ElutionGroup;
-use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::NaturalFinalizedMultiCMGArrays;
+use timsquery::models::aggregators::EGCAggregator;
 
 #[derive(Debug)]
 pub struct PreScore {
@@ -32,7 +32,7 @@ pub struct PreScore {
     pub charge: u8,
     pub reference: ElutionGroup<IonAnnot>,
     pub expected_intensities: ExpectedIntensities,
-    pub query_values: NaturalFinalizedMultiCMGArrays<IonAnnot>,
+    pub query_values: EGCAggregator<IonAnnot>,
     pub ref_time_ms: Arc<[u32]>,
 }
 
@@ -64,7 +64,7 @@ pub struct IntensityArrays {
 
 impl IntensityArrays {
     pub fn new(
-        query_values: &NaturalFinalizedMultiCMGArrays<IonAnnot>,
+        query_values: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self> {
         let (ms1_order, ms2_order, ms2_ref_vec) = Self::get_orders(expected_intensities);
@@ -299,11 +299,7 @@ impl LongitudinalMainScoreElements {
             // similarity of 0, we still have a scoring value.
 
             let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i].max(1e-3).powi(2));
-            // let ms1_cos_score = self.ms1_cosine_ref_sim[i].powi(2);
             let mut loc_score = self.ms2_lazyscore[i];
-            // let mut loc_score = self.ms2_lazyscore_vs_baseline[i];
-            // let mut loc_score = self.split_lazyscore[i];
-            // let mut loc_score =  self.ms2_lazyscore_vs_baseline[i] / self.ms2_lazyscore_vs_baseline_std;
             loc_score *= ms1_cos_score;
             loc_score *= self.ms2_cosine_ref_sim[i].max(1e-3).powi(2);
             loc_score *= self.ms2_coelution_score[i].max(1e-3).powi(2);

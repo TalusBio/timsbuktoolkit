@@ -154,22 +154,32 @@ impl SequenceToElutionGroupConverter {
             fragment_mzs
                 .retain(|(_pos, mz, _)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
 
+            fragment_mzs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
             let mobility = supersimpleprediction(precursor_mz, charge as i32);
-            let mut precursor_mzs = vec![precursor_mz; 4];
-            precursor_mzs[0] -= nmf;
-            precursor_mzs[2] += nmf;
-            precursor_mzs[3] += 2. * nmf;
+            let mut precursor_mzs = vec![(0, precursor_mz); 4];
+
+            // This just assigns the "numeral" and mass
+            // to the isotopes.
+            precursor_mzs[0].1 -= nmf;
+            precursor_mzs[0].0 = -1;
+
+            precursor_mzs[2].1 += nmf;
+            precursor_mzs[2].0 = 1;
+
+            precursor_mzs[3].1 += 2. * nmf;
+            precursor_mzs[3].0 += 2;
 
             let fragment_expect_inten =
                 HashMap::from_iter(fragment_mzs.iter().map(|(k, _, v)| (*k, *v)));
-            let fragment_mzs = HashMap::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
+            let fragment_mzs = Vec::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
             let eg = ElutionGroup {
                 id,
-                precursor_mzs,
+                precursors: precursor_mzs.into(),
                 mobility: mobility as f32,
                 rt_seconds: 0.0f32,
                 // precursor_charge: charge,
-                fragment_mzs,
+                fragments: fragment_mzs.into(),
             };
             let ei = ExpectedIntensities {
                 fragment_intensities: fragment_expect_inten,

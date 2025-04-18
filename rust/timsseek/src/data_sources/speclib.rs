@@ -312,6 +312,6 @@ mod tests {
 
         assert_eq!(speclib.digests[0].decoy, DecoyMarking::Target);
         assert_eq!(speclib.digests[0].len(), "PEPTIDEPINK".len());
-        assert_eq!(speclib.queries[0].fragment_mzs.len(), 3);
+        assert_eq!(speclib.queries[0].fragments.len(), 3);
     }
 }
