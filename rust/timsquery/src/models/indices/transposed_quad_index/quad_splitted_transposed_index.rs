@@ -2,7 +2,7 @@ use super::quad_index::{
     TransposedQuadIndex,
     TransposedQuadIndexBuilder,
 };
-use crate::errors::Result;
+use crate::errors::TimsqueryError;
 use crate::models::aggregators::EGCAggregator;
 use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::expanded_frame::{
@@ -172,7 +172,7 @@ impl Display for QuadSplittedTransposedIndex {
 
 impl QuadSplittedTransposedIndex {
     #[instrument(name = "QuadSplittedTransposedIndex::from_path", level = "debug")]
-    pub fn from_path(path: &str) -> Result<Self> {
+    pub fn from_path(path: &str) -> Result<Self, TimsqueryError> {
         let st = Instant::now();
         info!("Building transposed quad index from path {}", path);
         let tmp = QuadSplittedTransposedIndexBuilder::from_path(path)?;
@@ -187,7 +187,7 @@ impl QuadSplittedTransposedIndex {
         name = "QuadSplittedTransposedIndex::from_path_centroided",
         level = "debug"
     )]
-    pub fn from_path_centroided(path: &str) -> Result<Self> {
+    pub fn from_path_centroided(path: &str) -> Result<Self, TimsqueryError> {
         let st = Instant::now();
         info!(
             "Building CENTROIDED transposed quad index from path {}",
@@ -238,7 +238,7 @@ impl QuadSplittedTransposedIndexBuilder {
         name = "QuadSplittedTransposedIndexBuilder::from_path",
         level = "debug"
     )]
-    fn from_path(path: &str) -> Result<Self> {
+    fn from_path(path: &str) -> Result<Self, TimsqueryError> {
         Self::from_path_base(path, FrameProcessingConfig::NotCentroided)
     }
 
@@ -246,7 +246,7 @@ impl QuadSplittedTransposedIndexBuilder {
         name = "QuadSplittedTransposedIndexBuilder::from_path_centroided",
         level = "debug"
     )]
-    fn from_path_centroided(path: &str) -> Result<Self> {
+    fn from_path_centroided(path: &str) -> Result<Self, TimsqueryError> {
         let config = FrameProcessingConfig::default_centroided();
         Self::from_path_base(path, config)
     }
@@ -258,7 +258,7 @@ impl QuadSplittedTransposedIndexBuilder {
         name = "QuadSplittedTransposedIndexBuilder::from_path_base",
         level = "debug"
     )]
-    fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self> {
+    fn from_path_base(path: &str, centroid_config: FrameProcessingConfig) -> Result<Self, TimsqueryError> {
         let file_reader = FrameReader::new(path)?;
 
         let sql_path = std::path::Path::new(path).join("analysis.tdf");
@@ -279,7 +279,7 @@ impl QuadSplittedTransposedIndexBuilder {
         let split_frames = par_read_and_expand_frames(&file_reader, centroid_config)?;
 
         // TODO use the rayon contructor to fold
-        let out2: Result<Vec<Self>> = split_frames
+        let out2: Result<Vec<Self>, TimsqueryError> = split_frames
             .into_par_iter()
             .map(|(_q, frameslices)| {
                 // TODO:Refactor so the internal index is built first and then added.

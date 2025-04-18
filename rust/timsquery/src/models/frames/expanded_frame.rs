@@ -4,10 +4,7 @@ use super::single_quad_settings::{
     SingleQuadrupoleSetting,
     expand_quad_settings,
 };
-use crate::errors::{
-    Result,
-    UnsupportedDataError,
-};
+use crate::errors::UnsupportedDataError;
 use crate::sort_vecs_by_first;
 use crate::utils::compress_explode::explode_vec;
 use crate::utils::frame_processing::{
@@ -382,7 +379,7 @@ impl FrameProcessingConfig {
 }
 
 pub fn warn_and_skip_badframes(
-    frame_iter: impl ParallelIterator<Item = std::result::Result<Frame, FrameReaderError>>,
+    frame_iter: impl ParallelIterator<Item = Result<Frame, FrameReaderError>>,
 ) -> impl ParallelIterator<Item = Frame> {
     frame_iter.filter_map(|x| {
         // Log the info of the frame that broke ...
@@ -407,7 +404,7 @@ pub fn warn_and_skip_badframes(
 pub fn par_read_and_expand_frames(
     frame_reader: &FrameReader,
     centroiding_config: FrameProcessingConfig,
-) -> Result<HashMap<Option<SingleQuadrupoleSetting>, Vec<ExpandedFrameSlice<SortedState>>>> {
+) -> Result<HashMap<Option<SingleQuadrupoleSetting>, Vec<ExpandedFrameSlice<SortedState>>>, UnsupportedDataError> {
     let dia_windows = match frame_reader.get_dia_windows() {
         Some(dia_windows) => dia_windows,
         None => {
