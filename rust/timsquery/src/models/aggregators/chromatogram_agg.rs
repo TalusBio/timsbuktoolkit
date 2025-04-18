@@ -1,10 +1,13 @@
 
+use serde::Serialize;
+
 use crate::ElutionGroup;
 use crate::KeyLike;
 use crate::models::base::{MzMajorIntensityArray, MutableChromatogram};
 use std::sync::Arc;
 use crate::errors::DataProcessingError;
 
+#[derive(Debug, Clone, Serialize)]
 pub struct EGCAggregator<T: KeyLike> {
     pub eg: Arc<ElutionGroup<T>>,
     precursors: MzMajorIntensityArray<i8>,

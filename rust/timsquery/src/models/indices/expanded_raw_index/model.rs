@@ -1,5 +1,4 @@
 use crate::errors::Result;
-use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
     FrameProcessingConfig,
@@ -7,20 +6,13 @@ use crate::models::frames::expanded_frame::{
     par_read_and_expand_frames,
 };
 use crate::models::frames::peak_in_quad::PeakInQuad;
-use crate::models::frames::raw_peak::RawPeak;
 use crate::models::frames::single_quad_settings::{
     SingleQuadrupoleSetting,
     SingleQuadrupoleSettingIndex,
     get_matching_quad_settings,
-    matches_quad_settings,
 };
-use crate::traits::key_like::KeyLike;
-use crate::traits::queriable_data::QueriableData;
 use crate::utils::tolerance_ranges::IncludedRange;
-use rayon::prelude::*;
-use serde::Serialize;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::time::Instant;
 use timsrust::converters::{
     Scan2ImConverter,
@@ -195,6 +187,8 @@ impl ExpandedRawFrameIndex {
                 }
             });
 
+        let mut cycle_rts_ms: Vec<u32> = out_ms1_frames.as_ref().unwrap().slices.iter().map(|x| (1000.0 * x.rt) as u32).collect();
+        cycle_rts_ms.sort_unstable();
 
         let out = Self {
             bundled_ms1_frames: out_ms1_frames.expect("At least one ms1 frame should be present"),
@@ -202,6 +196,7 @@ impl ExpandedRawFrameIndex {
             flat_quad_settings,
             mz_converter: meta_converters.mz_converter,
             im_converter: meta_converters.im_converter,
+            cycle_rt_ms: cycle_rts_ms.into(),
         };
 
         Ok(out)

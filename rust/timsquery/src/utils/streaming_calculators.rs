@@ -140,11 +140,11 @@ mod tests {
     #[test]
     fn test_running_stats_calculator() {
         let mut calc = RunningStatsCalculator::new(10, 0.0);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
+        calc.add( 2, 10.0);
+        calc.add( 2, 10.0);
+        calc.add( 2, 10.0);
+        calc.add( 2, 10.0);
+        calc.add( 2, 10.0);
         assert!(calc.mean().unwrap() < 5.6);
         assert!(calc.mean().unwrap() > 4.4);
         assert!(calc.variance().unwrap() > 15.);
@@ -168,7 +168,7 @@ mod tests {
     fn test_running_stats_calculator_ascombes_3() {
         let mut calc = RunningStatsCalculator::new(1, ASCOMBES_3[0]);
         for val in ASCOMBES_3[1..].iter() {
-            calc.add(*val, 1);
+            calc.add(1, *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);
@@ -180,7 +180,7 @@ mod tests {
     fn test_running_stats_calculator_ascombes_4() {
         let mut calc = RunningStatsCalculator::new(1, ASCOMBES_4[0]);
         for val in ASCOMBES_4[1..].iter() {
-            calc.add(*val, 1);
+            calc.add(1, *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);

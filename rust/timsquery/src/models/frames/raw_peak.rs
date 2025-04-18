@@ -1,5 +1,4 @@
 use serde::Serialize;
-use std::convert::From;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct RawPeak {

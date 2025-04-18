@@ -2,6 +2,7 @@ use super::Array2D;
 use crate::errors::DataProcessingError;
 use std::sync::Arc;
 use crate::KeyLike;
+use serde::ser::{Serialize, Serializer, SerializeStruct};
 
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same retention time
@@ -21,6 +22,22 @@ pub struct MzMajorIntensityArray<K: Clone> {
     pub arr: Array2D<f32>,
     pub order_mz: Arc<[(K, f64)]>,
     pub rts_ms: Arc<[u32]>,
+}
+
+
+impl <K: KeyLike> Serialize for MzMajorIntensityArray<K> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("MzMajorIntensityArray", 3)?;
+        println!("FINISH IMPLEMENTING THISSS!!!");
+        // The values should go in different fields ...
+        state.serialize_field("arr", &self.arr.values)?;
+        state.serialize_field("order_mz", &self.order_mz)?;
+        state.serialize_field("rts_ms", &self.rts_ms)?;
+        state.end()
+    }
 }
 
 #[derive(Debug)]
