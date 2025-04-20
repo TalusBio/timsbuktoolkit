@@ -1,5 +1,39 @@
 use std::cmp::Ordering;
 
+/// Expand the scan offset slice to mobilities.
+///
+/// The scan offsets is in essence a run-length
+/// encoded vector of scan numbers that can be converter to the 1/k0
+/// values.
+///
+/// Essentially ... the slice [0,4,5,5], would expand to
+/// [0,0,0,0,1]; 0 to 4 have index 0, 4 to 5 have index 1, 5 to 5 would
+/// have index 2 but its empty!
+///
+/// Then this index can be converted using the Scan2ImConverter.convert
+///
+/// ... This should problably be implemented and exposed in timsrust.
+fn expand_mobility_iter<'a>(
+    scan_offsets: &'a [usize],
+) -> impl Iterator<Item = u16> + 'a {
+    let ims_iter = scan_offsets
+        .windows(2)
+        .enumerate()
+        .filter_map(|(i, w)| {
+            let num = w[1] - w[0];
+            if num == 0 {
+                return None;
+            }
+            let lo = w[0];
+            let hi = w[1];
+
+            Some((i as u16, lo, hi))
+        })
+        .map(|(im, lo, hi)| (lo..hi).map(move |_| im))
+        .flatten();
+    ims_iter
+}
+
 /// Explodes the compressed representation of a vector to its
 /// original representation.
 ///
@@ -13,20 +47,14 @@ use std::cmp::Ordering;
 /// ```
 ///
 /// This function is the inverse of `compress_vec`.
-pub fn explode_vec(input: &[usize]) -> Vec<usize> {
+pub fn explode_vec(input: &[usize]) -> Vec<u16> {
     let last_val = match input.last() {
         Some(last) => *last,
         None => return Vec::new(),
     };
 
     let mut out = Vec::with_capacity(last_val);
-    for i in 0..(input.len() - 1) {
-        let start = input[i];
-        let end = input[i + 1];
-        for _ in start..end {
-            out.push(i);
-        }
-    }
+    out.extend(expand_mobility_iter(input));
     out
 }
 
@@ -54,7 +82,7 @@ pub fn explode_vec(input: &[usize]) -> Vec<usize> {
 /// ```
 ///
 /// This function is the inverse of `explode_vec`.
-pub fn compress_vec(input: &[usize]) -> Vec<usize> {
+pub fn compress_vec(input: &[u16]) -> Vec<usize> {
     if input.is_empty() {
         return vec![];
     }
@@ -65,14 +93,14 @@ pub fn compress_vec(input: &[usize]) -> Vec<usize> {
         input
     );
 
-    let max_value = *input.last().unwrap();
+    let max_value = (*input.last().unwrap()) as usize;
     // Here the output is actually max + 2 to account for the 0 value.
     let mut compressed = vec![0; max_value + 2];
 
     for value in 0..=max_value {
         // Straight up stolen from here: https://stackoverflow.com/a/75790348/4295016
         let res: usize = input
-            .binary_search_by(|element| match element.cmp(&value) {
+            .binary_search_by(|element| match element.cmp(&(value as u16)) {
                 Ordering::Equal => Ordering::Less,
                 ord => ord,
             })

@@ -78,8 +78,8 @@ impl QuadSplittedTransposedIndex {
         &self,
         tof_range: IncludedRange<u32>,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<usize>>,
-        rt_range_seconds: Option<IncludedRange<f32>>,
+        scan_range: Option<IncludedRange<u16>>,
+        rt_range_ms: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -87,20 +87,20 @@ impl QuadSplittedTransposedIndex {
         let matching_quads: Vec<SingleQuadrupoleSettingIndex> = self
             .get_matching_quad_settings(precursor_mz_range, scan_range)
             .collect();
-        self.query_peaks_in_precursors(&matching_quads, tof_range, scan_range, rt_range_seconds, f);
+        self.query_peaks_in_precursors(&matching_quads, tof_range, scan_range, rt_range_ms, f);
     }
 
     fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
-        rt_range_seconds: Option<IncludedRange<f32>>,
+        scan_range: Option<IncludedRange<u16>>,
+        rt_range_ms: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
     {
         self.precursor_index
-            .query_peaks(tof_range, scan_range, rt_range_seconds)
+            .query_peaks(tof_range, scan_range, rt_range_ms)
             .for_each(f);
     }
 
@@ -108,8 +108,8 @@ impl QuadSplittedTransposedIndex {
         &self,
         matching_quads: &[SingleQuadrupoleSettingIndex],
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
-        rt_range_seconds: Option<IncludedRange<f32>>,
+        scan_range: Option<IncludedRange<u16>>,
+        rt_range_ms: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -119,7 +119,7 @@ impl QuadSplittedTransposedIndex {
                 .fragment_indices
                 .get(quad)
                 .expect("Only existing quads should be queried.");
-            tqi.query_peaks(tof_range, scan_range, rt_range_seconds)
+            tqi.query_peaks(tof_range, scan_range, rt_range_ms)
                 .for_each(&mut *f);
         }
     }
@@ -127,7 +127,7 @@ impl QuadSplittedTransposedIndex {
     fn get_matching_quad_settings(
         &self,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
     ) -> impl Iterator<Item = SingleQuadrupoleSettingIndex> + '_ {
         get_matching_quad_settings(&self.flat_quad_settings, precursor_mz_range, scan_range)
     }
@@ -344,10 +344,8 @@ impl QuadSplittedTransposedIndexBuilder {
         let mut cycle_rts_ms: Vec<_> = precursor_index
             .as_ref()
             .unwrap()
-            .frame_rts
-            .iter()
-            .map(|rt| (*rt * 1000.0) as u32)
-            .collect();
+            .frame_rt_ms
+            .clone();
         cycle_rts_ms.sort_unstable();
 
         QuadSplittedTransposedIndex {

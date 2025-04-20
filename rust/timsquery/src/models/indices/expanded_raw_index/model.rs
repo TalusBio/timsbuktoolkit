@@ -58,7 +58,7 @@ impl ExpandedSliceBundle {
     pub fn query_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
         frame_index_range: IncludedRange<usize>,
         f: &mut F,
     ) where
@@ -81,7 +81,7 @@ impl ExpandedRawFrameIndex {
         &self,
         tof_range: IncludedRange<u32>,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
         frame_index_range: IncludedRange<usize>,
         f: &mut F,
     ) where
@@ -96,7 +96,7 @@ impl ExpandedRawFrameIndex {
     fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
         frame_index_range: IncludedRange<usize>,
         f: &mut F,
     ) where
@@ -110,7 +110,7 @@ impl ExpandedRawFrameIndex {
         &self,
         matching_quads: &[SingleQuadrupoleSettingIndex],
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
         frame_index_range: IncludedRange<usize>,
         f: &mut F,
     ) where
