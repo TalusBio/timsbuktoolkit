@@ -1,4 +1,5 @@
 use crate::utils::tolerance_ranges::IncludedRange;
+use timsrust::converters::{ConvertableDomain, Scan2ImConverter, Tof2MzConverter};
 use core::f32;
 use serde::{
     Deserialize,
@@ -112,6 +113,16 @@ impl Tolerance {
                 (mz_low, mz_high).into()
             }
         }
+    }
+
+    pub fn indexed_tof_range(&self, mz: f64, converter: &Tof2MzConverter) -> IncludedRange<u32> {
+        let mz_rng = self.mz_range(mz);
+        (converter.invert(mz_rng.start()) as u32, converter.invert(mz_rng.end()) as u32).into()
+    }
+
+    pub fn indexed_scan_range(&self, mobility: f64, converter: &Scan2ImConverter) -> Option<IncludedRange<u16>> {
+        let im_rng = self.mobility_range(mobility as f32)?;
+        Some((converter.invert(im_rng.start() as f64) as u16, converter.invert(im_rng.end() as f64) as u16).into())
     }
 }
 

@@ -58,7 +58,7 @@ macro_rules! sort_vecs_by_first {
 /// ```
 ///
 /// https://users.rust-lang.org/t/solved-best-way-to-find-largest-three-values-in-unsorted-slice/34754/12
-pub fn top_n(slice: &[u32], n: usize) -> (Vec<u32>, Vec<usize>) {
+pub fn top_n<T: PartialOrd + Copy>(slice: &[T], n: usize) -> (Vec<T>, Vec<usize>) {
     let mut result = Vec::with_capacity(n + 1);
     let mut result_indices = Vec::with_capacity(n + 1);
     for (ind, v) in slice.iter().copied().enumerate() {

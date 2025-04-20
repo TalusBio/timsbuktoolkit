@@ -34,7 +34,7 @@ use tracing::{
 #[derive(Debug)]
 pub struct TransposedQuadIndex {
     pub quad_settings: Option<SingleQuadrupoleSetting>,
-    pub frame_rts: Vec<f64>,
+    pub frame_rt_ms: Vec<u32>,
     pub frame_indices: Vec<usize>,
     pub peak_buckets: BTreeMap<u32, PeakBucket>,
     // 72 bytes for peak Option<bucket> (24/vec)
@@ -90,7 +90,7 @@ impl Display for TransposedQuadIndex {
                 })
             ),
             glimpse_vec(
-                &self.frame_rts,
+                &self.frame_rt_ms,
                 Some(GlimpseConfig {
                     max_items: 10,
                     padding: 2,
@@ -106,13 +106,13 @@ impl TransposedQuadIndex {
     pub fn query_peaks(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
-        rt_range: Option<IncludedRange<f32>>,
+        scan_range: Option<IncludedRange<u16>>,
+        rt_range_ms: Option<IncludedRange<u32>>,
     ) -> impl Iterator<Item = PeakInQuad> + '_ {
         self.peak_buckets
             .range(tof_range.start()..=tof_range.end())
             .flat_map(move |(tof_index, pb)| {
-                pb.query_peaks(scan_range, rt_range)
+                pb.query_peaks(scan_range, rt_range_ms)
                     .map(move |p| PeakInQuad::from_peak_in_bucket(p, *tof_index))
             })
     }
@@ -122,8 +122,8 @@ impl PeakInQuad {
     pub fn from_peak_in_bucket(peak_in_bucket: PeakInBucket, tof_index: u32) -> Self {
         Self {
             scan_index: peak_in_bucket.scan_index,
-            intensity: peak_in_bucket.intensity,
-            retention_time: peak_in_bucket.retention_time,
+            corrected_intensity: peak_in_bucket.corrected_intensity,
+            retention_time_ms: peak_in_bucket.retention_time_ms,
             tof_index,
         }
     }
@@ -152,11 +152,11 @@ impl FrameRTTolerance {
 #[derive(Debug, Clone)]
 pub struct TransposedQuadIndexBuilder {
     quad_settings: Option<SingleQuadrupoleSetting>,
-    int_slices: Vec<Vec<u32>>,
+    int_slices: Vec<Vec<f32>>,
     tof_slices: Vec<Vec<u32>>,
-    scan_slices: Vec<Vec<usize>>,
+    scan_slices: Vec<Vec<u16>>,
     frame_indices: Vec<usize>,
-    frame_rts: Vec<f64>,
+    frame_rt_ms: Vec<u32>,
 }
 
 impl TransposedQuadIndexBuilder {
@@ -167,7 +167,7 @@ impl TransposedQuadIndexBuilder {
             tof_slices: Vec::new(),
             scan_slices: Vec::new(),
             frame_indices: Vec::new(),
-            frame_rts: Vec::new(),
+            frame_rt_ms: Vec::new(),
         }
     }
 
@@ -176,15 +176,15 @@ impl TransposedQuadIndexBuilder {
         self.tof_slices.extend(other.tof_slices);
         self.scan_slices.extend(other.scan_slices);
         self.frame_indices.extend(other.frame_indices);
-        self.frame_rts.extend(other.frame_rts);
+        self.frame_rt_ms.extend(other.frame_rt_ms);
     }
 
     pub fn add_frame_slice<T: SortingStateTrait>(&mut self, slice: ExpandedFrameSlice<T>) {
-        self.int_slices.push(slice.intensities);
+        self.int_slices.push(slice.corrected_intensities);
         self.tof_slices.push(slice.tof_indices);
         self.scan_slices.push(slice.scan_numbers);
         self.frame_indices.push(slice.frame_index);
-        self.frame_rts.push(slice.rt);
+        self.frame_rt_ms.push(slice.rt_ms);
     }
 
     #[instrument(
@@ -222,7 +222,7 @@ impl TransposedQuadIndexBuilder {
                 continue;
             }
         }
-        let out_rts = self.frame_rts.clone();
+        let out_rts = self.frame_rt_ms.clone();
         let out_indices = self.frame_indices.clone();
         let quad_settings = self.quad_settings;
 
@@ -273,7 +273,7 @@ impl TransposedQuadIndexBuilder {
         );
         TransposedQuadIndex {
             quad_settings,
-            frame_rts: out_rts,
+            frame_rt_ms: out_rts,
             frame_indices: out_indices,
             peak_buckets: peak_bucket,
         }
@@ -300,7 +300,7 @@ impl TransposedQuadIndexBuilder {
             let int_slice = &self.int_slices[slice_ind];
             let tof_slice = &self.tof_slices[slice_ind];
             let scan_slice = &self.scan_slices[slice_ind];
-            let frame_rt = self.frame_rts[slice_ind] as f32;
+            let frame_rt_ms = self.frame_rt_ms[slice_ind];
 
             // Q: is it worth to sort and add peaks in slices? If we do it has to be one level
             // higher, since within each slice, most tof indices would not repeat.
@@ -328,7 +328,7 @@ impl TransposedQuadIndexBuilder {
                 peak_buckets
                     .get_mut(tof)
                     .expect("Should have just added it...")
-                    .add_peak(*scan, *inten, frame_rt);
+                    .add_peak(*scan, *inten, frame_rt_ms);
 
                 added_peaks += 1;
                 if added_peaks % 500_000 == 0 {
@@ -385,21 +385,23 @@ impl TransposedQuadIndexBuilder {
             let int_slice = self.int_slices[start..end].concat();
             let tof_slice = self.tof_slices[start..end].concat();
             let scan_slice = self.scan_slices[start..end].concat();
-            let rt_slice: Vec<f32> = self.frame_rts[start..end]
+            let rt_slice_ms: Vec<_> = self.frame_rt_ms[start..end]
                 .iter()
                 .zip(self.tof_slices[start..end].iter())
-                .flat_map(|(rt, tofslice)| vec![*rt as f32; tofslice.len()])
+                .flat_map(|(rt, tofslice)| vec![*rt; tofslice.len()])
                 .collect();
+                // TODO: I am pretty sure this is possible without allocating the bunch of
+                // vectors
 
             let concat_elapsed = concat_st.elapsed();
 
             let sorting_st = Instant::now();
 
-            let out = sort_vecs_by_first!(tof_slice, scan_slice, int_slice, rt_slice);
+            let out = sort_vecs_by_first!(tof_slice, scan_slice, int_slice, rt_slice_ms);
             let tof_slice = out.0;
             let scan_slice = out.1;
             let int_slice = out.2;
-            let rt_slice = out.3;
+            let rt_slice_ms = out.3;
 
             let sorting_elapsed = sorting_st.elapsed();
 
@@ -425,7 +427,7 @@ impl TransposedQuadIndexBuilder {
                     .extend_peaks(
                         &scan_slice[range_use.clone()],
                         &int_slice[range_use.clone()],
-                        &rt_slice[range_use.clone()],
+                        &rt_slice_ms[range_use.clone()],
                     );
 
                 added_peaks += range_use.len() as u64;

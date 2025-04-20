@@ -47,7 +47,7 @@ use tracing::{
 #[derive(Debug, Clone)]
 pub struct ExpandedFrame {
     pub tof_indices: Vec<u32>,
-    pub scan_numbers: Vec<usize>,
+    pub scan_numbers: Vec<u16>,
     pub intensities: Vec<u32>,
     pub frame_index: usize,
     pub rt: f64,
@@ -70,27 +70,19 @@ impl SortingStateTrait for SortedState {}
 #[derive(Debug, Clone)]
 pub struct ExpandedFrameSlice<S: SortingStateTrait> {
     pub tof_indices: Vec<u32>, // I could Arc<[u32]> if I didnt want to sort by it ...
-    pub scan_numbers: Vec<usize>,
-    pub intensities: Vec<u32>,
+    pub scan_numbers: Vec<u16>,
+    pub corrected_intensities: Vec<f32>,
     pub frame_index: usize,
     pub rt: f64,
+    pub rt_ms: u32,
     pub acquisition_type: AcquisitionType,
     pub ms_level: MSLevel,
     pub quadrupole_settings: Option<SingleQuadrupoleSetting>,
-    pub intensity_correction_factor: f64,
     pub window_group: u8,
     pub window_subindex: u8,
     _sorting_state: PhantomData<S>,
 }
 
-// Example of how to use it with your specific types
-fn sort_by_tof_macro(
-    tof_indices: Vec<u32>,
-    scan_numbers: Vec<usize>,
-    intensities: Vec<u32>,
-) -> (Vec<u32>, Vec<usize>, Vec<u32>) {
-    sort_vecs_by_first!(tof_indices, scan_numbers, intensities)
-}
 
 impl<T: SortingStateTrait> ExpandedFrameSlice<T> {
     pub fn sort_by_tof(self) -> ExpandedFrameSlice<SortedState> {
@@ -102,19 +94,18 @@ impl<T: SortingStateTrait> ExpandedFrameSlice<T> {
         //     &mut self.intensities
         // );
 
-        let (tof_indices, scan_numbers, intensities) =
-            sort_by_tof_macro(self.tof_indices, self.scan_numbers, self.intensities);
+        let (tof_indices, scan_numbers, corrected_intensities) = sort_vecs_by_first!(self.tof_indices, self.scan_numbers, self.corrected_intensities);
 
         ExpandedFrameSlice {
             tof_indices,
             scan_numbers,
-            intensities,
+            corrected_intensities,
             frame_index: self.frame_index,
             rt: self.rt,
+            rt_ms: self.rt_ms,
             acquisition_type: self.acquisition_type,
             ms_level: self.ms_level,
             quadrupole_settings: self.quadrupole_settings,
-            intensity_correction_factor: self.intensity_correction_factor,
             window_group: self.window_group,
             window_subindex: self.window_subindex,
             _sorting_state: PhantomData,
@@ -134,7 +125,7 @@ impl ExpandedFrameSlice<SortedState> {
     pub fn query_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<usize>>,
+        scan_range: Option<IncludedRange<u16>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -154,20 +145,20 @@ impl ExpandedFrameSlice<SortedState> {
                 }
             }
 
-            let intensity = self.intensities[peak_ind];
+            let corrected_intensity = self.corrected_intensities[peak_ind];
             let tof_index = self.tof_indices[peak_ind];
-            let retention_time = self.rt;
+            let retention_time_ms = self.rt_ms;
             f(PeakInQuad {
                 scan_index,
-                intensity,
+                corrected_intensity,
                 tof_index,
-                retention_time: retention_time as f32,
+                retention_time_ms,
             });
         }
     }
 }
 
-fn trim_scan_edges(scan_start: usize, scan_end: usize) -> (usize, usize) {
+fn trim_scan_edges(scan_start: u16, scan_end: u16) -> (u16, u16) {
     // Poor man's fix to different quad windows bleeding onto each other ...
     // I will trim the smallest of 20 scans or 10% of the range size.
     //
@@ -190,18 +181,21 @@ fn trim_scan_edges(scan_start: usize, scan_end: usize) -> (usize, usize) {
 
 fn expand_unfragmented_frame(frame: Frame) -> ExpandedFrameSlice<SortedState> {
     let scan_numbers = explode_vec(&frame.scan_offsets);
-    let intensities = frame.intensities;
+    // This just makes sure the definition of the correction factor has not
+    // changed from under me ...
+    assert_eq!(frame.get_corrected_intensity(0), frame.intensities[0] as f64 * frame.intensity_correction_factor);
+    let corrected_intensities: Vec<f32> = frame.intensities.iter().map(|&x| ((x as f64) * frame.intensity_correction_factor) as f32).collect();
     let tof_indices = frame.tof_indices;
     let curr_slice = ExpandedFrameSlice {
         tof_indices,
         scan_numbers,
-        intensities,
+        corrected_intensities,
         frame_index: frame.index,
         rt: frame.rt_in_seconds,
+        rt_ms: (frame.rt_in_seconds * 1000.0) as u32,
         acquisition_type: frame.acquisition_type,
         ms_level: frame.ms_level,
         quadrupole_settings: None,
-        intensity_correction_factor: frame.intensity_correction_factor,
         window_group: frame.window_group,
         window_subindex: 0u8,
         _sorting_state: PhantomData::<UnsortedState>,
@@ -221,26 +215,31 @@ fn expand_fragmented_frame(
         let (slice_scan_start, slice_scan_end) =
             trim_scan_edges(qs.ranges.scan_start, qs.ranges.scan_end);
 
-        let tof_index_index_slice_start = frame.scan_offsets[slice_scan_start];
-        let tof_index_index_slice_end = frame.scan_offsets[slice_scan_end];
+        let tof_index_index_slice_start = frame.scan_offsets[slice_scan_start as usize];
+        let tof_index_index_slice_end = frame.scan_offsets[slice_scan_end as usize];
 
         let slice_tof_indices =
             frame.tof_indices[tof_index_index_slice_start..tof_index_index_slice_end].to_vec();
         let slice_scan_numbers =
             exploded_scans[tof_index_index_slice_start..tof_index_index_slice_end].to_vec();
-        let slice_intensities =
-            frame.intensities[tof_index_index_slice_start..tof_index_index_slice_end].to_vec();
+
+        // I want to make sure the correction factor math remains the same ...
+        // In other workds ... if the "correction factor" is still something I have to muliply
+        // by across versions of timsrust.
+        assert_eq!(frame.intensity_correction_factor * (frame.intensities[0]  as f64), frame.get_corrected_intensity(0));
+        let slice_intensities = (tof_index_index_slice_start..tof_index_index_slice_end).map(|x|frame.get_corrected_intensity(x) as f32).collect();
+        let rt_ms = (frame.rt_in_seconds * 1000.0) as u32;
 
         let curr_slice = ExpandedFrameSlice {
             tof_indices: slice_tof_indices,
             scan_numbers: slice_scan_numbers,
-            intensities: slice_intensities,
+            corrected_intensities: slice_intensities,
             frame_index: frame.index,
             rt: frame.rt_in_seconds,
+            rt_ms,
             acquisition_type: frame.acquisition_type,
             ms_level: frame.ms_level,
             quadrupole_settings: Some(qs),
-            intensity_correction_factor: frame.intensity_correction_factor,
             window_group: frame.window_group,
             window_subindex: i as u8,
             _sorting_state: PhantomData::<UnsortedState>,
@@ -481,11 +480,10 @@ use tabled::{
 pub struct ExpandedQuadSliceInfo {
     pub quad_settings: Option<SingleQuadrupoleSetting>,
     pub cycle_time_seconds: f64,
-    pub peak_width_seconds: Option<f64>,
 }
 
 impl Tabled for ExpandedQuadSliceInfo {
-    const LENGTH: usize = 7;
+    const LENGTH: usize = 6;
 
     // Required methods
     fn fields(&self) -> Vec<Cow<'_, str>> {
@@ -503,18 +501,11 @@ impl Tabled for ExpandedQuadSliceInfo {
                     Cow::Owned(scan_ranges),
                     Cow::Owned(qr.collision_energy.to_string()),
                     Cow::Owned(self.cycle_time_seconds.to_string()),
-                    Cow::Owned(
-                        self.peak_width_seconds
-                            .as_ref()
-                            .map(|x| x.to_string())
-                            .unwrap_or("None".to_string()),
-                    ),
                 ]
             }
             None => vec![
                 Cow::Borrowed("None"),
                 Cow::Borrowed("None"),
-                Cow::Owned("None".to_string()),
                 Cow::Owned("None".to_string()),
                 Cow::Owned("None".to_string()),
                 Cow::Owned("None".to_string()),
@@ -530,7 +521,6 @@ impl Tabled for ExpandedQuadSliceInfo {
             Cow::Borrowed("Scan ranges"),
             Cow::Borrowed("CE"),
             Cow::Borrowed("Cycle time"),
-            Cow::Borrowed("Peak width"),
         ]
     }
 }
@@ -550,182 +540,11 @@ impl ExpandedQuadSliceInfo {
             .sum::<f64>()
             / frameslices.len() as f64;
 
-        let peak_width = Self::estimate_peak_width(frameslices);
 
         Self {
             quad_settings: frameslices[0].quadrupole_settings,
             cycle_time_seconds: avg_cycle_time,
-            peak_width_seconds: peak_width,
         }
-    }
-
-    /// Estimate the peak width of elutions within the quad.
-    ///
-    /// This is a pretty dumb algorithm ... basically...
-    /// 1. picks 100 equally spaced points between the 20% and 80% of the frames.
-    /// 2. At each of those points finds the top 10 peaks.
-    /// 3. For each of them iteratively goes forward and backwards in time until
-    ///    the intensity of the peak drops under 1% of its intensity.
-    /// 4. The time difference between the forward and backward point is the peak width.
-    /// 5. Finds the median of the peak widths.
-    fn estimate_peak_width(frameslices: &[ExpandedFrameSlice<SortedState>]) -> Option<f64> {
-        let start_idx = frameslices.len() / 5;
-        let end_idx = frameslices.len() * 4 / 5;
-        let step = (end_idx - start_idx) / 100;
-
-        if step == 0 {
-            warn!("Estimating peak width failed, step is 0");
-            return None;
-        }
-
-        #[derive(Debug, Clone)]
-        struct Peak {
-            tof: u32,
-            patience: u32,
-            max_rt: f64,
-            min_rt: f64,
-            intensity: u32,
-            fwdone: bool,
-            bwdone: bool,
-            any_update: bool,
-        }
-
-        let mut peaks: Vec<Peak> = Vec::with_capacity(500);
-
-        for i in 0..49 {
-            let local_idx = start_idx + i * step;
-
-            let local_frame = &frameslices[local_idx];
-            let local_rt = local_frame.rt;
-            let (top_intens, top_indices) = top_n(&local_frame.intensities, 10);
-            let tofs: Vec<_> = top_indices
-                .iter()
-                .zip(top_intens.iter())
-                .filter_map(|(tof, inten)| if *inten > 100u32 { Some(tof) } else { None })
-                .map(|x| local_frame.tof_indices[*x])
-                .collect();
-            let tofs: Vec<u32> = tofs
-                .as_slice()
-                .windows(2)
-                .filter_map(|x| {
-                    let a = x[0];
-                    let b = x[1];
-                    if a.abs_diff(b) > 5 { Some(a) } else { None }
-                })
-                .collect();
-
-            let mut local_peaks: Vec<Peak> = tofs
-                .iter()
-                .map(|tof| {
-                    let mut local_inten = 0u32;
-                    local_frame.query_peaks(IncludedRange::new(tof - 1, tof + 1), None, &mut |x| {
-                        local_inten += x.intensity
-                    });
-                    assert!(local_inten > 0);
-                    Peak {
-                        tof: *tof,
-                        patience: 1,
-                        max_rt: local_rt,
-                        min_rt: local_rt,
-                        intensity: local_inten,
-                        fwdone: false,
-                        bwdone: false,
-                        any_update: false,
-                    }
-                })
-                .collect();
-
-            // Forward lookup
-            for lookup_frame in frameslices.iter().skip(local_idx + 1) {
-                let local_rt = lookup_frame.rt;
-                let mut any = false;
-                for peak in local_peaks.iter_mut() {
-                    if peak.fwdone {
-                        continue;
-                    }
-                    let mut local_int = 0u32;
-                    lookup_frame.query_peaks(
-                        IncludedRange::new(peak.tof - 1, peak.tof + 1),
-                        None,
-                        &mut |x| local_int += x.intensity,
-                    );
-                    if local_int > (peak.intensity / 100) {
-                        peak.max_rt = local_rt;
-                        peak.patience = 1;
-                        peak.any_update = true;
-                    } else if peak.patience > 0 {
-                        peak.patience -= 1;
-                    } else {
-                        peak.fwdone = true;
-                    }
-
-                    any = true;
-                }
-                if !any {
-                    break;
-                }
-            }
-
-            // reset patience
-            for peak in local_peaks.iter_mut() {
-                peak.patience = 1;
-            }
-
-            // Backward lookup
-            let mut j = local_idx - 1;
-            while j > 1 {
-                // for j in (0..local_idx).rev() {
-                let lookup_frame = &frameslices[j];
-                let local_rt = lookup_frame.rt;
-                let mut any = false;
-                for peak in local_peaks.iter_mut() {
-                    if peak.bwdone {
-                        continue;
-                    }
-                    let mut local_int = 0;
-                    lookup_frame.query_peaks(
-                        IncludedRange::new(peak.tof - 1, peak.tof + 1),
-                        None,
-                        &mut |x| local_int += x.intensity,
-                    );
-
-                    if local_int > (peak.intensity / 100) {
-                        peak.min_rt = local_rt;
-                        peak.patience = 1;
-                        peak.any_update = true;
-                    } else if peak.patience > 0 {
-                        peak.patience -= 1;
-                    } else {
-                        peak.bwdone = true;
-                    }
-
-                    any = true;
-                }
-                if !any {
-                    break;
-                }
-                j -= 1;
-            }
-
-            for peak in local_peaks.into_iter() {
-                if peak.fwdone && peak.bwdone && peak.any_update {
-                    peaks.push(peak);
-                }
-            }
-        }
-
-        if peaks.is_empty() {
-            return None;
-        }
-
-        // get median
-        peaks.sort_by(|x, y| {
-            (x.max_rt - x.min_rt)
-                .partial_cmp(&(y.max_rt - y.min_rt))
-                .unwrap()
-        });
-        let median = peaks[peaks.len() / 2].max_rt - peaks[peaks.len() / 2].min_rt;
-        Some(median)
     }
 }
 
@@ -779,10 +598,10 @@ fn centroid_frameslice_window(
 
     let peak_refs: Vec<PeakArrayRefs> = frameslices
         .iter()
-        .map(|x| PeakArrayRefs::new(&x.tof_indices, &x.scan_numbers, &x.intensities))
+        .map(|x| PeakArrayRefs::new(&x.tof_indices, &x.scan_numbers, &x.corrected_intensities))
         .collect();
 
-    let ((tof_array, intensity_array), ims_array) = lazy_centroid_weighted_frame(
+    let ((tof_array, corr_intensity_array), ims_array) = lazy_centroid_weighted_frame(
         &peak_refs,
         reference_index,
         |tof| tof_tol_range(tof, mz_tol_ppm, mz_converter),
@@ -792,13 +611,13 @@ fn centroid_frameslice_window(
     ExpandedFrameSlice {
         tof_indices: tof_array,
         scan_numbers: ims_array,
-        intensities: intensity_array,
+        corrected_intensities: corr_intensity_array,
         frame_index: frameslices[reference_index].frame_index,
         rt: frameslices[reference_index].rt,
+        rt_ms: frameslices[reference_index].rt_ms,
         acquisition_type: frameslices[reference_index].acquisition_type,
         ms_level: frameslices[reference_index].ms_level,
         quadrupole_settings: frameslices[reference_index].quadrupole_settings,
-        intensity_correction_factor: frameslices[reference_index].intensity_correction_factor,
         window_group: frameslices[reference_index].window_group,
         window_subindex: frameslices[reference_index].window_subindex,
         _sorting_state: PhantomData::<SortedState>,

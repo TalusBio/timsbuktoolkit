@@ -71,14 +71,14 @@ pub fn tof_tol_range(tof: u32, tol_ppm: f64, converter: &Tof2MzConverter) -> Inc
 }
 
 pub fn scan_tol_range(
-    scan: usize,
+    scan: u16,
     tol_pct: f64,
     converter: &Scan2ImConverter,
-) -> IncludedRange<usize> {
+) -> IncludedRange<u16> {
     let im = converter.convert(scan as f64);
     let im_range = pct_tol_range(im, tol_pct);
-    let scan_min = converter.invert(im_range.start()).round() as usize;
-    let scan_max = converter.invert(im_range.end()).round() as usize;
+    let scan_min = converter.invert(im_range.start()).round() as u16;
+    let scan_max = converter.invert(im_range.end()).round() as u16;
     // Note I need to do this here bc the conversion between scan numbers and ion
     // mobilities is not monotonically increasing. IN OTHER WORDS, lower scan numbers
     // are higher 1/k0.... But im not sure if they are ALWAYS inversely proportional.

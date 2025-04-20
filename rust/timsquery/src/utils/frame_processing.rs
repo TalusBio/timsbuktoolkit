@@ -3,20 +3,20 @@ use tracing::error;
 
 use super::tolerance_ranges::IncludedRange;
 
-pub type TofIntensityVecs = (Vec<u32>, Vec<u32>);
-pub type CentroidedVecs = (TofIntensityVecs, Vec<usize>);
+pub type TofIntensityVecs = (Vec<u32>, Vec<f32>);
+pub type CentroidedVecs = (TofIntensityVecs, Vec<u16>);
 
 fn sort_n_check(
-    agg_intensity: Vec<u32>,
+    agg_intensity: Vec<f32>,
     agg_tof: Vec<u32>,
-    agg_ims: Vec<usize>,
-) -> ((Vec<u32>, Vec<u32>), Vec<usize>) {
+    agg_ims: Vec<u16>,
+) -> ((Vec<u32>, Vec<f32>), Vec<u16>) {
     let (tof_array, ims_array, intensity_array) =
         sort_vecs_by_first!(agg_tof, agg_ims, agg_intensity);
 
     if let Some(x) = intensity_array.last() {
         assert!(
-            *x > 0,
+            *x > 0.0,
             "Expected all intensities to be positive non-zero, got {:?}",
             intensity_array
         );
@@ -28,18 +28,18 @@ fn sort_n_check(
 
 pub struct PeakArrayRefs<'a> {
     pub tof_array: &'a [u32],
-    pub ims_array: &'a [usize],
-    pub intensity_array: &'a [u32],
+    pub ims_array: &'a [u16],
+    pub corrected_intensity_array: &'a [f32],
 }
 
 impl<'a> PeakArrayRefs<'a> {
     pub fn new(
         tof_array: &'a [u32],
-        ims_array: &'a [usize],
-        intensity_array: &'a [u32],
+        ims_array: &'a [u16],
+        corrected_intensity_array: &'a [f32],
     ) -> PeakArrayRefs<'a> {
         // TODO make the asserts optional at compile time.
-        assert!(tof_array.len() == intensity_array.len());
+        assert!(tof_array.len() == corrected_intensity_array.len());
         assert!(tof_array.len() == ims_array.len());
         assert!(
             tof_array.windows(2).all(|x| x[0] <= x[1]),
@@ -48,7 +48,7 @@ impl<'a> PeakArrayRefs<'a> {
         Self {
             tof_array,
             ims_array,
-            intensity_array,
+            corrected_intensity_array,
         }
     }
 
@@ -59,24 +59,24 @@ impl<'a> PeakArrayRefs<'a> {
 
 struct Peak {
     center_tof: u32,
-    center_ims: usize,
+    center_ims: u16,
     // max_intensity: u32,
-    agg_intensity: u32,
+    agg_intensity: f32,
     // point_count: usize,
 }
 struct OrderItem {
-    intensity: u32,
-    weight: u32,
+    corrected_intensity: f32,
+    weight: f32,
     tof: u32,
-    ims: usize,
+    ims: u16,
 }
 
 fn find_gaussian_peaks(
     items: &[OrderItem],
     min_points: usize,
-    min_agg_intensity: u32,
+    min_agg_intensity: f32,
     tof_tol_range_fn: impl Fn(u32) -> IncludedRange<u32>,
-    ims_tol_range_fn: impl Fn(usize) -> IncludedRange<usize>,
+    ims_tol_range_fn: impl Fn(u16) -> IncludedRange<u16>,
 ) -> Vec<Peak> {
     let mut taken = vec![false; items.len()];
     let mut taken_queue = Vec::new();
@@ -112,7 +112,7 @@ fn find_gaussian_peaks(
         let mut point_count = 0;
         let mut is_peak = true;
         let max_weight = current.weight;
-        let mut agg_intensity = 0;
+        let mut agg_intensity = 0.0;
 
         for j in window_start..window_end {
             if taken[j] {
@@ -123,7 +123,7 @@ fn find_gaussian_peaks(
             if ims_range.contains(point.ims) {
                 taken_queue.push(j);
                 point_count += 1;
-                agg_intensity += point.intensity;
+                agg_intensity += point.corrected_intensity;
 
                 // Track maximum intensity
                 if point.weight > max_weight {
@@ -168,7 +168,7 @@ pub fn lazy_centroid_weighted_frame<'a>(
     peak_refs: &'a [PeakArrayRefs<'a>],
     reference_index: usize,
     tof_tol_range_fn: impl Fn(u32) -> IncludedRange<u32>,
-    ims_tol_range_fn: impl Fn(usize) -> IncludedRange<usize>,
+    ims_tol_range_fn: impl Fn(u16) -> IncludedRange<u16>,
 ) -> CentroidedVecs {
     let slice_sizes: Vec<usize> = peak_refs.iter().map(|x| x.len()).collect();
     let tot_size: usize = slice_sizes.iter().sum();
@@ -183,17 +183,17 @@ pub fn lazy_centroid_weighted_frame<'a>(
 
     let mut order: Vec<OrderItem> = Vec::with_capacity(tot_size);
     for (major_idx, peak_ref) in peak_refs.iter().enumerate() {
-        for (minor_idx, &intensity) in peak_ref.intensity_array.iter().enumerate() {
+        for (minor_idx, &intensity) in peak_ref.corrected_intensity_array.iter().enumerate() {
             let tof = peak_ref.tof_array[minor_idx];
             let ims = peak_ref.ims_array[minor_idx];
             let weight = if major_idx == reference_index {
-                peak_ref.intensity_array[minor_idx]
+                peak_ref.corrected_intensity_array[minor_idx]
             } else {
-                0
+                0.0
             };
             order.push(OrderItem {
                 tof,
-                intensity: weight,
+                corrected_intensity: weight,
                 ims,
                 weight: intensity,
             });
@@ -204,7 +204,9 @@ pub fn lazy_centroid_weighted_frame<'a>(
     order.sort_unstable_by(|a, b| a.tof.cmp(&b.tof));
     assert!(order[tot_size - 1].tof > order[0].tof);
 
-    let outpeaks = find_gaussian_peaks(&order, 1, 100, &tof_tol_range_fn, ims_tol_range_fn);
+    // TODO: check if this min intensity makes sense.
+    let min_agg_intensity = 1.0;
+    let outpeaks = find_gaussian_peaks(&order, 1, min_agg_intensity, &tof_tol_range_fn, ims_tol_range_fn);
 
     let ((agg_intensity, agg_tof), agg_ims) = outpeaks
         .into_iter()
@@ -224,7 +226,7 @@ mod tests {
         (tof.saturating_sub(tolerance), tof.saturating_add(tolerance)).into()
     }
 
-    fn test_ims_tolerance(ims: usize) -> IncludedRange<usize> {
+    fn test_ims_tolerance(ims: u16) -> IncludedRange<u16> {
         let tolerance = 1;
         (ims.saturating_sub(tolerance), ims.saturating_add(tolerance)).into()
     }
@@ -232,8 +234,8 @@ mod tests {
     // Helper function to create PeakArrayRefs
     fn create_peak_refs<'a>(
         tof: &'a [u32],
-        ims: &'a [usize],
-        intensity: &'a [u32],
+        ims: &'a [u16],
+        intensity: &'a [f32],
     ) -> PeakArrayRefs<'a> {
         PeakArrayRefs::new(tof, ims, intensity)
     }
@@ -245,12 +247,12 @@ mod tests {
             create_peak_refs(
                 &[100, 101, 200, 201],   // tof
                 &[1, 1, 2, 2],           // ims
-                &[1000, 2000, 500, 600], // intensity
+                &[1000., 2000., 500., 600.], // intensity
             ),
             create_peak_refs(
                 &[101, 201], // tof
                 &[1, 2],     // ims
-                &[900, 600], // intensity
+                &[900., 600.], // intensity
             ),
         ];
 
@@ -277,8 +279,8 @@ mod tests {
         // Check that the peaks were properly merged and weighted
         assert!(tof_array[0] >= 100 && tof_array[0] <= 101);
         assert_eq!(ims_array[0], 1);
-        assert_eq!(intensity_array[0], 3000); // Should be sum of intensities
-        assert_eq!(intensity_array[1], 1100); // Should be sum of intensities
+        assert_eq!(intensity_array[0], 3000.); // Should be sum of intensities
+        assert_eq!(intensity_array[1], 1100.); // Should be sum of intensities
     }
 
     // // NOTE: Current (experimental) implementation doe not have limit
@@ -331,12 +333,12 @@ mod tests {
             create_peak_refs(
                 &[100, 200],
                 &[1, 2],
-                &[1000, 100], // High intensity for first peak
+                &[1000., 100.], // High intensity for first peak
             ),
             create_peak_refs(
                 &[102, 202],
                 &[1, 2],
-                &[100, 1000], // High intensity for second peak
+                &[100., 1000.], // High intensity for second peak
             ),
         ];
 
@@ -354,8 +356,8 @@ mod tests {
     #[should_panic]
     fn test_invalid_reference_index() {
         let peak_refs = vec![
-            create_peak_refs(&[100], &[1], &[1000]),
-            create_peak_refs(&[101], &[1], &[900]),
+            create_peak_refs(&[100], &[1], &[1000.]),
+            create_peak_refs(&[101], &[1], &[900.]),
         ];
 
         // This should panic due to invalid reference index
