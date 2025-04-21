@@ -3,7 +3,6 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A struct that represents an elution group.

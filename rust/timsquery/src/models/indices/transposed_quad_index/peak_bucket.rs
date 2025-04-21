@@ -1,5 +1,4 @@
 use crate::sort_vecs_by_first;
-use crate::utils::compress_explode::compress_vec;
 use crate::utils::display::{
     GlimpseConfig,
     glimpse_vec,
@@ -101,7 +100,7 @@ impl PeakBucketBuilder {
         self.retention_times_ms.extend(retention_time_ms);
     }
 
-    pub fn build(mut self) -> PeakBucket {
+    pub fn build(self) -> PeakBucket {
         let sorted = sort_vecs_by_first!(
             &self.scan_offsets,
             &self.retention_times_ms,

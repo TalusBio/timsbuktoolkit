@@ -13,7 +13,7 @@ pub struct EGSAggregator<T: KeyLike> {
     fragments: Vec<f32>,
 }
 
-impl<'a, T: KeyLike> EGSAggregator<T> {
+impl<T: KeyLike> EGSAggregator<T> {
     pub fn new(eg: Arc<ElutionGroup<T>>) -> Self {
         let precursors = vec![0.0; eg.precursors.len()];
         let fragments = vec![0.0; eg.fragments.len()];

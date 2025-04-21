@@ -1,4 +1,3 @@
-use std::iter::repeat;
 
 use super::expanded_frame::{
     ExpandedFrameSlice,
@@ -46,7 +45,7 @@ impl ExpandedWindowGroup {
             tof_indices.extend(slice.tof_indices);
             scan_numbers.extend(slice.scan_numbers);
             corrected_intensities.extend(slice.corrected_intensities);
-            retention_times.extend(repeat(slice.rt).take(local_len));
+            retention_times.extend(std::iter::repeat_n(slice.rt, local_len));
         }
 
         ExpandedWindowGroup {

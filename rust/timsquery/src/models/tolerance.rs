@@ -90,10 +90,7 @@ impl Tolerance {
 
     pub fn rt_range_as_milis(&self, rt_minutes: f32) -> Option<IncludedRange<u32>> {
         let tmp = self.rt_range(rt_minutes);
-        match tmp {
-            Some(x) => Some(((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into()),
-            None => None,
-        }
+        tmp.map(|x| {((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into()})
     }
 
     pub fn mobility_range(&self, mobility: f32) -> Option<IncludedRange<f32>> {

@@ -334,7 +334,7 @@ impl PartialOrd for ScoreInTime {
 impl PreScore {
     fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore> {
         let longitudinal_main_score_elements =
-            LongitudinalMainScoreElements::new(&intensity_arrays)?;
+            LongitudinalMainScoreElements::new(intensity_arrays)?;
 
         let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
         let norm_lazy_std =

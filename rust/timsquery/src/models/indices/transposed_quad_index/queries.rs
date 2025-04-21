@@ -1,4 +1,3 @@
-use std::ops::Add;
 
 use super::QuadSplittedTransposedIndex;
 use crate::models::aggregators::{

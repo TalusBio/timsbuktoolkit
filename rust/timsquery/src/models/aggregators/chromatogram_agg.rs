@@ -18,7 +18,7 @@ pub struct EGCAggregator<T: KeyLike> {
     pub fragments: MzMajorIntensityArray<T>,
 }
 
-impl<'a, T: KeyLike> EGCAggregator<T> {
+impl<T: KeyLike> EGCAggregator<T> {
     pub fn new(
         eg: Arc<ElutionGroup<T>>,
         ref_rt_mss: Arc<[u32]>,
