@@ -83,7 +83,6 @@ pub struct ExpandedFrameSlice<S: SortingStateTrait> {
     _sorting_state: PhantomData<S>,
 }
 
-
 impl<T: SortingStateTrait> ExpandedFrameSlice<T> {
     pub fn sort_by_tof(self) -> ExpandedFrameSlice<SortedState> {
         // let mut indices = argsort_by(&self.tof_indices, |x| *x);
@@ -94,7 +93,11 @@ impl<T: SortingStateTrait> ExpandedFrameSlice<T> {
         //     &mut self.intensities
         // );
 
-        let (tof_indices, scan_numbers, corrected_intensities) = sort_vecs_by_first!(self.tof_indices, self.scan_numbers, self.corrected_intensities);
+        let (tof_indices, scan_numbers, corrected_intensities) = sort_vecs_by_first!(
+            self.tof_indices,
+            self.scan_numbers,
+            self.corrected_intensities
+        );
 
         ExpandedFrameSlice {
             tof_indices,
@@ -183,8 +186,15 @@ fn expand_unfragmented_frame(frame: Frame) -> ExpandedFrameSlice<SortedState> {
     let scan_numbers = explode_vec(&frame.scan_offsets);
     // This just makes sure the definition of the correction factor has not
     // changed from under me ...
-    assert_eq!(frame.get_corrected_intensity(0), frame.intensities[0] as f64 * frame.intensity_correction_factor);
-    let corrected_intensities: Vec<f32> = frame.intensities.iter().map(|&x| ((x as f64) * frame.intensity_correction_factor) as f32).collect();
+    assert_eq!(
+        frame.get_corrected_intensity(0),
+        frame.intensities[0] as f64 * frame.intensity_correction_factor
+    );
+    let corrected_intensities: Vec<f32> = frame
+        .intensities
+        .iter()
+        .map(|&x| ((x as f64) * frame.intensity_correction_factor) as f32)
+        .collect();
     let tof_indices = frame.tof_indices;
     let curr_slice = ExpandedFrameSlice {
         tof_indices,
@@ -226,8 +236,13 @@ fn expand_fragmented_frame(
         // I want to make sure the correction factor math remains the same ...
         // In other workds ... if the "correction factor" is still something I have to muliply
         // by across versions of timsrust.
-        assert_eq!(frame.intensity_correction_factor * (frame.intensities[0]  as f64), frame.get_corrected_intensity(0));
-        let slice_intensities = (tof_index_index_slice_start..tof_index_index_slice_end).map(|x|frame.get_corrected_intensity(x) as f32).collect();
+        assert_eq!(
+            frame.intensity_correction_factor * (frame.intensities[0] as f64),
+            frame.get_corrected_intensity(0)
+        );
+        let slice_intensities = (tof_index_index_slice_start..tof_index_index_slice_end)
+            .map(|x| frame.get_corrected_intensity(x) as f32)
+            .collect();
         let rt_ms = (frame.rt_in_seconds * 1000.0) as u32;
 
         let curr_slice = ExpandedFrameSlice {
@@ -539,7 +554,6 @@ impl ExpandedQuadSliceInfo {
             })
             .sum::<f64>()
             / frameslices.len() as f64;
-
 
         Self {
             quad_settings: frameslices[0].quadrupole_settings,

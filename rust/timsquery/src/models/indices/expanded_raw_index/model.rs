@@ -43,15 +43,18 @@ pub struct ExpandedRawFrameIndex {
 pub struct ExpandedSliceBundle {
     slices: Vec<ExpandedFrameSlice<SortedState>>,
     frame_indices: Vec<usize>,
+    frame_rt_ms: Vec<u32>,
 }
 
 impl ExpandedSliceBundle {
     pub fn new(mut slices: Vec<ExpandedFrameSlice<SortedState>>) -> Self {
         slices.sort_unstable_by(|a, b| a.rt.partial_cmp(&b.rt).unwrap());
         let frame_indices = slices.iter().map(|x| x.frame_index).collect();
+        let frame_rt_ms = slices.iter().map(|x| x.rt_ms).collect();
         Self {
             slices,
             frame_indices,
+            frame_rt_ms,
         }
     }
 
@@ -59,17 +62,26 @@ impl ExpandedSliceBundle {
         &self,
         tof_range: IncludedRange<u32>,
         scan_range: Option<IncludedRange<u16>>,
-        frame_index_range: IncludedRange<usize>,
+        frame_rt_ms: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
     {
         // Binary search the rt if needed.
-        let frame_indices = self.frame_indices.as_slice();
-        let low = frame_indices.partition_point(|x| *x < frame_index_range.start());
-        let high = frame_indices.partition_point(|x| *x <= frame_index_range.end());
+        let slice_rage = match frame_rt_ms {
+            Some(frame_rt_ms) => {
+                let low = self
+                    .frame_rt_ms
+                    .partition_point(|x| *x < frame_rt_ms.start());
+                let high = self
+                    .frame_rt_ms
+                    .partition_point(|x| *x <= frame_rt_ms.end());
+                low..high
+            }
+            None => 0..self.frame_rt_ms.len(),
+        };
 
-        for i in low..high {
+        for i in slice_rage {
             let slice = &self.slices[i];
             slice.query_peaks(tof_range, scan_range, f);
         }
@@ -82,7 +94,7 @@ impl ExpandedRawFrameIndex {
         tof_range: IncludedRange<u32>,
         precursor_mz_range: IncludedRange<f64>,
         scan_range: Option<IncludedRange<u16>>,
-        frame_index_range: IncludedRange<usize>,
+        frame_rt_ms_range: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -90,20 +102,20 @@ impl ExpandedRawFrameIndex {
         let matching_quads: Vec<SingleQuadrupoleSettingIndex> =
             get_matching_quad_settings(&self.flat_quad_settings, precursor_mz_range, scan_range)
                 .collect();
-        self.query_precursor_peaks(&matching_quads, tof_range, scan_range, frame_index_range, f);
+        self.query_precursor_peaks(&matching_quads, tof_range, scan_range, frame_rt_ms_range, f);
     }
 
-    fn query_ms1_peaks<F>(
+    pub fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
         scan_range: Option<IncludedRange<u16>>,
-        frame_index_range: IncludedRange<usize>,
+        frame_rt_ms: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
     {
         self.bundled_ms1_frames
-            .query_peaks(tof_range, scan_range, frame_index_range, f);
+            .query_peaks(tof_range, scan_range, frame_rt_ms, f);
     }
 
     fn query_precursor_peaks<F>(
@@ -111,7 +123,7 @@ impl ExpandedRawFrameIndex {
         matching_quads: &[SingleQuadrupoleSettingIndex],
         tof_range: IncludedRange<u32>,
         scan_range: Option<IncludedRange<u16>>,
-        frame_index_range: IncludedRange<usize>,
+        frame_rt_ms_range: Option<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -122,7 +134,7 @@ impl ExpandedRawFrameIndex {
                 .get(quad)
                 .expect("Only existing quads should be queried.");
 
-            tqi.query_peaks(tof_range, scan_range, frame_index_range, &mut *f)
+            tqi.query_peaks(tof_range, scan_range, frame_rt_ms_range, &mut *f)
         }
     }
 

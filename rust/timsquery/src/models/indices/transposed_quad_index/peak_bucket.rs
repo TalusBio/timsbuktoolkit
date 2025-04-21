@@ -7,7 +7,6 @@ use crate::utils::display::{
 use crate::utils::tolerance_ranges::IncludedRange;
 use std::fmt::Display;
 
-
 pub struct PeakInBucket {
     pub scan_index: u16,
     pub corrected_intensity: f32,
@@ -103,9 +102,12 @@ impl PeakBucketBuilder {
     }
 
     pub fn build(mut self) -> PeakBucket {
-        let sorted =
-            sort_vecs_by_first!(&self.scan_offsets, &self.retention_times_ms, &self.corrected_intensities);
-        let scan_offsets =  sorted.0;
+        let sorted = sort_vecs_by_first!(
+            &self.scan_offsets,
+            &self.retention_times_ms,
+            &self.corrected_intensities
+        );
+        let scan_offsets = sorted.0;
         let retention_times_ms = sorted.1;
         let corrected_intensities = sorted.2;
 

@@ -19,6 +19,8 @@ use config::{
 };
 
 // TODO: Check if this is faster in linux
+// It is faster in windows but not in mac.
+//
 // use mimalloc::MiMalloc;
 //
 // #[global_allocator]
