@@ -1,10 +1,9 @@
-use crate::utils::streaming_calculators::RunningStatsCalculator;
 use crate::errors::Result;
 use crate::traits::KeyLike;
+use crate::utils::streaming_calculators::RunningStatsCalculator;
 use nohash_hasher::BuildNoHashHasher;
 use std::collections::HashMap;
 use std::sync::Arc;
-
 
 pub struct ImsMzRollingCalculator {
     pub mobility: RunningStatsCalculator,
@@ -18,6 +17,7 @@ impl ImsMzRollingCalculator {
             mz: RunningStatsCalculator::new(intensity, mz),
         }
     }
+
     fn add(&mut self, intensity: u64, mobility: f32, mz: f32) {
         self.mobility.add(intensity, mobility);
         self.mz.add(intensity, mz);
@@ -27,18 +27,17 @@ impl ImsMzRollingCalculator {
 /// Hashmap that represents a series of scan+tof values
 /// that are grouped by retention time represented in ms (u32)
 pub struct SparseRTCollection {
-    inner:HashMap<u32, ImsMzRollingCalculator, BuildNoHashHasher<u32>>,
-} 
+    inner: HashMap<u32, ImsMzRollingCalculator, BuildNoHashHasher<u32>>,
+}
 
 impl SparseRTCollection {
     fn add(&mut self, rt_ms: u32, mobility: f32, mz: f32, intensity: u64) {
-        self.inner.entry(rt_ms)
+        self.inner
+            .entry(rt_ms)
             .and_modify(|curr| {
                 curr.add(intensity, mobility, mz);
             })
-            .or_insert(ImsMzRollingCalculator::new(
-                intensity, mobility, mz,
-            ));
+            .or_insert(ImsMzRollingCalculator::new(intensity, mobility, mz));
     }
 }
 
@@ -68,6 +67,7 @@ impl DenseRTCollection {
             scan_tof_calc: vec![None; num_frames],
         }
     }
+
     fn add(&mut self, rt_ms: u32, mobility: f32, mz: f32, intensity: u64) {
         let mut pos = self.reference_rt_ms.partition_point(|&x| x <= rt_ms);
         if pos == self.reference_rt_ms.len() {
@@ -83,9 +83,8 @@ impl DenseRTCollection {
                     x.add(intensity, mobility, mz);
                 }
                 None => {
-                    self.scan_tof_calc[pos] = Some(ImsMzRollingCalculator::new(
-                        intensity, mobility, mz,
-                    ))
+                    self.scan_tof_calc[pos] =
+                        Some(ImsMzRollingCalculator::new(intensity, mobility, mz))
                 }
             },
             None => {
@@ -101,13 +100,12 @@ impl DenseRTCollection {
     }
 }
 
-
 /// Represents a series of scan+tof values that are grouped by retention time represented in ms (u32)
 /// Each element in the vec is an independent 'track' (each is a precursor/transition)
 #[derive(Debug, Clone)]
 pub struct ParallelTracks {
     // Sparse(Vec<SparseRTCollection>),
-    tracks: Vec<DenseRTCollection>
+    tracks: Vec<DenseRTCollection>,
 }
 
 impl ParallelTracks {
@@ -146,7 +144,6 @@ impl ParallelTracks {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ParitionedCMGAggregator<FH: KeyLike> {
     pub scan_tof_calc: ParallelTracks,
@@ -156,8 +153,7 @@ pub struct ParitionedCMGAggregator<FH: KeyLike> {
     pub expected_tof_indices: Vec<u32>,
 }
 
-impl<FH: KeyLike> ParitionedCMGAggregator<FH>
-{
+impl<FH: KeyLike> ParitionedCMGAggregator<FH> {
     pub fn new(
         keys: Vec<FH>,
         expected_scan_index: usize,
@@ -200,6 +196,4 @@ impl<FH: KeyLike> ParitionedCMGAggregator<FH>
             intensity,
         );
     }
-
 }
-

@@ -185,7 +185,7 @@ Some of the forms of contributing to the current state of the project could be:
       We are more than happy to discuss whether it fits the scope of the project
       and evaluate how viable it would be to implement it!
 - Code
-    - We welcome pull requests! We would really appreciate if an issue is open 
+    - We welcome pull requests! We would really appreciate if an issue is open
       to discuss potential changes before they are merged.
 
 

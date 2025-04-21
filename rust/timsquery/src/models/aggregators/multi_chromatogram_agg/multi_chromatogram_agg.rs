@@ -7,10 +7,10 @@ use super::arrays::{
 use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::raw_peak::RawPeak;
 use crate::models::queries::MsLevelContext;
+use crate::traits::key_like::KeyLike;
 use serde::Serialize;
 use std::hash::Hash;
 use std::sync::Arc;
-use crate::traits::key_like::KeyLike;
 
 use timsrust::converters::{
     ConvertableDomain,
@@ -95,15 +95,13 @@ pub struct NaturalFinalizedMultiCMGArrays<FH: KeyLike> {
     pub id: u64,
 }
 
-impl <FH: KeyLike>MultiCMGStatsAgg {
+impl<FH: KeyLike> MultiCMGStatsAgg {
     pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = &mut usize> {
         self.ms1_stats.iter_mut_keys()
     }
-
 }
 
 impl<FH: KeyLike> MultiCMGStatsAgg<FH> {
-
     fn add(&mut self, peak: RawPeak) {
         let peak = peak.into();
         let u64_intensity = peak.intensity as u64;
