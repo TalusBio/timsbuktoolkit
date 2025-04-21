@@ -419,23 +419,3 @@ pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(
     Ok(())
 }
 
-pub fn write_results_to_csv<P: AsRef<Path>>(
-    results: &[IonSearchResults],
-    out_path: P,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let mut writer = WriterBuilder::default()
-        .has_headers(true)
-        .from_path(out_path.as_ref())?;
-
-    for result in results {
-        writer.serialize(result).unwrap();
-    }
-    writer.flush()?;
-    tracing::info!(
-        "Writing took {:?} -> {:?}",
-        start.elapsed(),
-        out_path.as_ref()
-    );
-    Ok(())
-}

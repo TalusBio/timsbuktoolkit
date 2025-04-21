@@ -46,7 +46,6 @@ use timsseek::scoring::full_results::FullQueryResult;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     SearchResultBuilder,
-    write_results_to_csv,
     write_results_to_parquet,
 };
 use tracing::info;
@@ -394,8 +393,6 @@ pub fn main_loop<'a>(
             };
 
             metrics = metrics.fold(out.1);
-            let out_path_csv = &out_path.directory.join(format!("chunk_{}.csv", chunk_num));
-            write_results_to_csv(&out.0, out_path_csv).unwrap();
             let out_path_pq = &out_path
                 .directory
                 .join(format!("chunk_{}.parquet", chunk_num));
