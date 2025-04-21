@@ -12,7 +12,7 @@ use timsquery::models::RTMajorIntensityArray;
 use timsquery::traits::key_like::KeyLike;
 
 pub fn peak_count<FH: KeyLike>(
-    slices: &RTMajorIntensityArray<FH>,
+    slices: &RTMajorIntensityArray<FH, f32>,
     count_threshold: f32,
 ) -> Vec<u8> {
     slices
@@ -106,10 +106,10 @@ pub fn single_hyperscore_labeled(
     if score.is_finite() { score } else { 255.0 }
 }
 
-pub fn hyperscore(slices: &RTMajorIntensityArray<IonAnnot>) -> Vec<f32> {
+pub fn hyperscore(slices: &RTMajorIntensityArray<IonAnnot, f32>) -> Vec<f32> {
     slices
         .arr
-        .row_apply(|slice| single_hyperscore_labeled(slice, &slices.order, 10.0))
+        .row_apply(|slice| single_hyperscore_labeled(slice, &slices.mz_order, 10.0))
         .collect()
 }
 
@@ -148,13 +148,13 @@ fn single_split_ion_lazyscore(slc: &[f32], labels: &[(IonAnnot, f64)]) -> f32 {
     lnfact_f32(ct_lnsum) + lnfact_f32(nt_lnsum)
 }
 
-pub fn lazyscore<K: Clone>(slices: &RTMajorIntensityArray<K>) -> Vec<f32> {
+pub fn lazyscore<K: Clone>(slices: &RTMajorIntensityArray<K, f32>) -> Vec<f32> {
     slices.arr.row_apply(single_lazyscore).collect()
 }
 
-pub fn split_ion_lazyscore(slices: &RTMajorIntensityArray<IonAnnot>) -> Vec<f32> {
+pub fn split_ion_lazyscore(slices: &RTMajorIntensityArray<IonAnnot, f32>) -> Vec<f32> {
     slices
         .arr
-        .row_apply(|slc| single_split_ion_lazyscore(slc, &slices.order))
+        .row_apply(|slc| single_split_ion_lazyscore(slc, &slices.mz_order))
         .collect()
 }

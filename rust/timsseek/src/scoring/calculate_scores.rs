@@ -53,10 +53,10 @@ pub struct LongitudinalMainScoreElements {
 
 #[derive(Debug)]
 pub struct IntensityArrays {
-    pub ms1_rtmajor: RTMajorIntensityArray<i8>,
-    pub ms1_mzmajor: MzMajorIntensityArray<i8>,
-    pub ms2_rtmajor: RTMajorIntensityArray<IonAnnot>,
-    pub ms2_mzmajor: MzMajorIntensityArray<IonAnnot>,
+    pub ms1_rtmajor: RTMajorIntensityArray<i8, f32>,
+    pub ms1_mzmajor: MzMajorIntensityArray<i8, f32>,
+    pub ms2_rtmajor: RTMajorIntensityArray<IonAnnot, f32>,
+    pub ms2_mzmajor: MzMajorIntensityArray<IonAnnot, f32>,
     pub ms1_expected_intensities: Vec<f32>,
     pub ms2_expected_intensities: Vec<f32>,
 }
@@ -70,7 +70,7 @@ impl IntensityArrays {
         let ms1_rtmajor_arr = ms1_mzmajor_arr.transpose_clone();
         let ms2_rtmajor_arr = ms2_mzmajor_arr.transpose_clone();
         let ms2_ref_vec: Vec<_> = ms2_mzmajor_arr
-            .order_mz
+            .mz_order
             .iter()
             .map(|&(k, _)| {
                 *expected_intensities
@@ -144,7 +144,7 @@ impl IntensityArrays {
         self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
         let ms2_ref_vec: Vec<_> = self
             .ms2_mzmajor
-            .order_mz
+            .mz_order
             .iter()
             .map(|&(k, _)| {
                 *expected_intensities

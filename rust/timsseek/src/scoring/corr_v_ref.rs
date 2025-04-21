@@ -7,7 +7,7 @@ use timsquery::models::{
 use timsquery::traits::key_like::KeyLike;
 
 pub fn calculate_cosine_with_ref<FH: KeyLike>(
-    slices: &RTMajorIntensityArray<FH>,
+    slices: &RTMajorIntensityArray<FH, f32>,
     ref_slice: &[f32],
 ) -> Result<Vec<f32>> {
     slices
@@ -27,7 +27,7 @@ fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32>> +
 }
 
 pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
-    slices: &MzMajorIntensityArray<FH>,
+    slices: &MzMajorIntensityArray<FH, f32>,
 ) -> Result<Vec<f32>> {
     let mut result = vec![0.0; slices.arr.ncols()];
     slices

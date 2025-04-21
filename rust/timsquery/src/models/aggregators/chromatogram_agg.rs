@@ -14,8 +14,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize)]
 pub struct EGCAggregator<T: KeyLike> {
     pub eg: Arc<ElutionGroup<T>>,
-    pub precursors: MzMajorIntensityArray<i8>,
-    pub fragments: MzMajorIntensityArray<T>,
+    pub precursors: MzMajorIntensityArray<i8, f32>, // TODO: Move this to a generic ...
+    pub fragments: MzMajorIntensityArray<T, f32>,
 }
 
 impl<T: KeyLike> EGCAggregator<T> {
@@ -35,11 +35,13 @@ impl<T: KeyLike> EGCAggregator<T> {
 
     pub fn iter_mut_precursors(
         &mut self,
-    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram)> {
+    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram<f32>)> {
         self.precursors.iter_mut_mzs()
     }
 
-    pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = (&(T, f64), MutableChromatogram)> {
+    pub fn iter_mut_fragments(
+        &mut self,
+    ) -> impl Iterator<Item = (&(T, f64), MutableChromatogram<f32>)> {
         self.fragments.iter_mut_mzs()
     }
 
@@ -47,8 +49,8 @@ impl<T: KeyLike> EGCAggregator<T> {
         self,
     ) -> (
         Arc<ElutionGroup<T>>,
-        MzMajorIntensityArray<i8>,
-        MzMajorIntensityArray<T>,
+        MzMajorIntensityArray<i8, f32>,
+        MzMajorIntensityArray<T, f32>,
     ) {
         (self.eg, self.precursors, self.fragments)
     }
