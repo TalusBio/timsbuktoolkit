@@ -4,10 +4,7 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsseek::fragment_mass::IonAnnot;
-use timsseek::utils::tdf::get_ms1_frame_times_ms;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -112,7 +109,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
     .unwrap();
 
     let tdf_path = &dotd_file_location.clone().unwrap().join("analysis.tdf");
-    let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
 
     // Process based on input type
     match config.input {

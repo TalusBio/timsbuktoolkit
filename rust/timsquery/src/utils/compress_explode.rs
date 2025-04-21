@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 /// Then this index can be converted using the Scan2ImConverter.convert
 ///
 /// ... This should problably be implemented and exposed in timsrust.
-fn expand_mobility_iter<'a>(scan_offsets: &'a [usize]) -> impl Iterator<Item = u16> + 'a {
+fn expand_mobility_iter(scan_offsets: &'_ [usize]) -> impl Iterator<Item = u16> + '_ {
     let ims_iter = scan_offsets
         .windows(2)
         .enumerate()
@@ -27,8 +27,7 @@ fn expand_mobility_iter<'a>(scan_offsets: &'a [usize]) -> impl Iterator<Item = u
 
             Some((i as u16, lo, hi))
         })
-        .map(|(im, lo, hi)| (lo..hi).map(move |_| im))
-        .flatten();
+        .flat_map(|(im, lo, hi)| (lo..hi).map(move |_| im));
     ims_iter
 }
 

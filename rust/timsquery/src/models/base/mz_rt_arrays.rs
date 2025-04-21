@@ -1,7 +1,6 @@
 use super::Array2D;
 use crate::KeyLike;
 use crate::errors::DataProcessingError;
-use crate::models::aggregators::EGCAggregator;
 use serde::ser::{
     Serialize,
     SerializeStruct,
@@ -50,7 +49,7 @@ pub struct MutableChromatogram<'a> {
     rts: &'a [u32],
 }
 
-impl<'a> MutableChromatogram<'a> {
+impl MutableChromatogram<'_> {
     pub fn add_at_close_rt(&mut self, rt_ms: u32, intensity: f32) {
         let loc = self.rts.partition_point(|&rt| rt < rt_ms);
         self.slc[loc] += intensity;
@@ -104,8 +103,7 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
     pub fn reorder_with(&mut self, order: Arc<[(K, f64)]>) {
         // This is essentially bubble sort ...
         assert_eq!(self.arr.nrows(), self.order_mz.len());
-        // Should I check there are no dupes?
-        //
+        // Q: Should I check there are no dupes? 2025-Apr-20
         let mut local_order: Vec<_> = self.order_mz.iter().cloned().collect();
         for (i, (k, _mz)) in order.iter().enumerate() {
             let j = local_order.iter().position(|(k2, _)| k2 == k).unwrap();
@@ -141,10 +139,13 @@ impl<K: KeyLike> MzMajorIntensityArray<K> {
     fn fill_with(&mut self, array: &MzMajorIntensityArray<K>) {
         let order = array.order_mz.clone();
 
-        for (j, (fh, fh_mz)) in order.iter().enumerate() {
+        for (j, (fh, _fh_mz)) in order.iter().enumerate() {
             let tmp = array.get_row(fh);
             if tmp.is_none() {
                 panic!("No row for..."); // , fh, fh_mz);
+                // TODO: make sure I dont need this continue ...
+                // I think It made sense before but not in the new
+                // implementation.
                 continue;
             }
             let inten_slc = tmp.unwrap();
@@ -219,7 +220,7 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[test]
     fn test_array2d_from_cmg_int_mz_major() {

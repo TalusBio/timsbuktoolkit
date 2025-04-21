@@ -27,7 +27,6 @@ use timsseek::digest::digestion::{
     DigestionPattern,
 };
 use timsseek::errors::TimsSeekError;
-use timsseek::fragment_mass::IonAnnot;
 use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
 use timsseek::models::{
     DigestSlice,

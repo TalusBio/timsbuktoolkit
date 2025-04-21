@@ -3,8 +3,6 @@ use super::quad_index::{
     TransposedQuadIndexBuilder,
 };
 use crate::errors::TimsqueryError;
-use crate::models::aggregators::EGCAggregator;
-use crate::models::elution_group::ElutionGroup;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
     FrameProcessingConfig,
@@ -12,30 +10,24 @@ use crate::models::frames::expanded_frame::{
     par_read_and_expand_frames,
 };
 use crate::models::frames::peak_in_quad::PeakInQuad;
-use crate::models::frames::raw_peak::RawPeak;
 use crate::models::frames::single_quad_settings::{
     SingleQuadrupoleSetting,
     SingleQuadrupoleSettingIndex,
     get_matching_quad_settings,
 };
-use crate::traits::key_like::KeyLike;
-use crate::traits::queriable_data::QueriableData;
 use crate::utils::display::{
     GlimpseConfig,
     glimpse_vec,
 };
 use crate::utils::tolerance_ranges::IncludedRange;
 use rayon::prelude::*;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{
     Debug,
     Display,
 };
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Instant;
-use timsrust::Metadata;
 use timsrust::converters::{
     Scan2ImConverter,
     Tof2MzConverter,
@@ -212,7 +204,6 @@ pub struct QuadSplittedTransposedIndexBuilder {
     indices: HashMap<Option<SingleQuadrupoleSetting>, TransposedQuadIndexBuilder>,
     mz_converter: Option<Tof2MzConverter>,
     im_converter: Option<Scan2ImConverter>,
-    metadata: Option<Metadata>,
     // TODO use during build to make sure we
     // have a the right number of peaks in the end.
     // ... this means I need to implement len for TransposedQuadIndexBuilder
@@ -272,12 +263,10 @@ impl QuadSplittedTransposedIndexBuilder {
         let sql_path = std::path::Path::new(path).join("analysis.tdf");
         let meta_converters = MetadataReader::new(&sql_path)?;
 
-        let out_meta_converters = meta_converters.clone();
         let mut final_out = Self {
             indices: HashMap::new(),
             mz_converter: Some(meta_converters.mz_converter),
             im_converter: Some(meta_converters.im_converter),
-            metadata: Some(out_meta_converters),
             added_peaks: 0,
         };
 

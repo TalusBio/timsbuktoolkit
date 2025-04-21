@@ -11,13 +11,11 @@ use crate::models::{
     DecoyMarking,
     DigestSlice,
 };
-use csv::WriterBuilder;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RecordWriter;
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
-use std::time::Instant;
 use timsquery::ElutionGroup;
 
 #[derive(Debug, Default)]

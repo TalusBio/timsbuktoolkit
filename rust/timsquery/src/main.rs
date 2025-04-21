@@ -6,7 +6,6 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use timsquery::models::aggregators::{
@@ -26,10 +25,7 @@ use timsquery::models::tolerance::{
     RtTolerance,
     Tolerance,
 };
-use timsquery::{
-    GenerallyQueriable,
-    QueriableData,
-};
+use timsquery::GenerallyQueriable;
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
 use tracing_bunyan_formatter::{
@@ -117,8 +113,6 @@ fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
 
 #[instrument]
 fn main_query_index(args: QueryIndexArgs) {
-    let args_clone = args.clone();
-
     let raw_file_path = args.raw_file_path;
     let tolerance_settings_path = args.tolerance_settings_path;
     let elution_groups_path = args.elution_groups_path;

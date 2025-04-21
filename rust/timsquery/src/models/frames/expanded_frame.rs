@@ -11,7 +11,6 @@ use crate::utils::frame_processing::{
     PeakArrayRefs,
     lazy_centroid_weighted_frame,
 };
-use crate::utils::sorting::top_n;
 use crate::utils::tolerance_ranges::{
     IncludedRange,
     scan_tol_range,
@@ -425,7 +424,7 @@ pub fn par_read_and_expand_frames(
     let dia_windows = match frame_reader.get_dia_windows() {
         Some(dia_windows) => dia_windows,
         None => {
-            return Err(UnsupportedDataError::NoMS2DataError.into());
+            return Err(UnsupportedDataError::NoMS2DataError);
         }
     };
 
