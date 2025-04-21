@@ -1,8 +1,40 @@
 use std::fmt::Debug;
 
+use serde::Serialize;
+use serde::ser::SerializeSeq;
+
 use crate::errors::DataProcessingError;
 
 use std::ops::Range;
+
+pub trait ArrayElement:
+    Clone
+    + Copy
+    + Default
+    + std::ops::Mul
+    + std::fmt::Display
+    + std::fmt::Debug
+    + std::ops::Mul<Self, Output = Self>
+    + std::ops::Add<Self, Output = Self>
+    + std::ops::AddAssign<Self>
+{
+}
+
+/// Blanket trait implementation on elements that
+/// can be used as a value in the array.
+impl<
+    T: Clone
+        + Copy
+        + Default
+        + std::ops::Mul
+        + std::fmt::Display
+        + std::fmt::Debug
+        + std::ops::Mul<T, Output = T>
+        + std::ops::Add<T, Output = T>
+        + std::ops::AddAssign<T>,
+> ArrayElement for T
+{
+}
 
 /// Implements a way to represent an array of
 /// dimensions x-y that will be later used to
@@ -12,28 +44,34 @@ use std::ops::Range;
 /// Simple 2D array
 ///
 /// `values` is a flattened array of values
-/// `major_dim` is the number of values in each row
-/// `minor_dim` is the number of rows
+/// `n_col` is the number of values in each row
+/// `n_row` is the number of rows
 ///
 /// Note on memory layout:
 ///
 /// Values that belong to the same row are adjacent
 /// in memory.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Array2D<T: Clone + Copy + std::ops::Mul> {
+pub struct Array2D<T: ArrayElement> {
     pub(super) values: Vec<T>,
-    pub(super) major_dim: usize,
-    pub(super) minor_dim: usize,
+    pub(super) n_col: usize,
+    pub(super) n_row: usize,
 }
 
-impl<
-    T: Clone
-        + Copy
-        + std::ops::Mul<T, Output = T>
-        + std::ops::Add<T, Output = T>
-        + std::ops::AddAssign<T>,
-> Array2D<T>
-{
+impl<T: Serialize + ArrayElement> Serialize for Array2D<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.n_row))?;
+        for row in self.iter_rows() {
+            seq.serialize_element(row)?;
+        }
+        seq.end()
+    }
+}
+
+impl<T: ArrayElement> Array2D<T> {
     pub fn new<S: AsRef<[T]>, C: AsRef<[S]>>(values: C) -> Result<Array2D<T>, DataProcessingError> {
         let nrows = values.as_ref().len();
         if nrows == 0 {
@@ -58,8 +96,8 @@ impl<
 
         Ok(Array2D {
             values,
-            major_dim: ncols,
-            minor_dim: nrows,
+            n_col: ncols,
+            n_row: nrows,
         })
     }
 
@@ -92,8 +130,8 @@ impl<
 
         Ok(Array2D {
             values: unwrapped_values,
-            major_dim: ncols,
-            minor_dim: nrows,
+            n_col: ncols,
+            n_row: nrows,
         })
     }
 
@@ -107,8 +145,8 @@ impl<
         }
         Ok(Array2D {
             values,
-            major_dim: ncols,
-            minor_dim: nrows,
+            n_col: ncols,
+            n_row: nrows,
         })
     }
 
@@ -129,11 +167,15 @@ impl<
         &'a self,
         f: F,
     ) -> impl Iterator<Item = W> + 'b {
-        self.values.chunks(self.major_dim).map(f)
+        self.iter_rows().map(f)
     }
 
     pub fn iter_mut_rows(&mut self) -> impl Iterator<Item = &mut [T]> {
-        self.values.chunks_mut(self.major_dim)
+        self.values.chunks_mut(self.n_col)
+    }
+
+    pub fn iter_rows(&self) -> impl Iterator<Item = &[T]> {
+        self.values.chunks(self.n_col)
     }
 
     /// RowConvolve
@@ -141,11 +183,11 @@ impl<
     /// It is equivalent to applying the passed kernel on each row of the array.
     /// and padding with zeros.
     pub fn row_convolve(&self, kernel: &[T], default_value: T) -> Array2D<T> {
-        let mut result = vec![default_value; self.minor_dim * self.major_dim];
+        let mut result = vec![default_value; self.n_row * self.n_col];
         let offset_size = (kernel.len() - 1) / 2;
 
-        for i in 0..self.minor_dim {
-            let row_offset = i * (self.major_dim);
+        for i in 0..self.n_row {
+            let row_offset = i * (self.n_col);
             let row = self.get_row(i).expect("Failed to get row, malformed array");
             row.windows(kernel.len())
                 .enumerate()
@@ -169,10 +211,10 @@ impl<
         default_value: T,
         fold_func: impl Fn(T, T) -> T,
     ) -> Vec<T> {
-        let mut result = vec![default_value; self.major_dim];
+        let mut result = vec![default_value; self.n_col];
         let offset_size = (kernel.len() - 1) / 2;
 
-        for i in 0..self.minor_dim {
+        for i in 0..self.n_row {
             let row = self.get_row(i).expect("Failed to get row, malformed array");
             row.windows(kernel.len())
                 .enumerate()
@@ -206,9 +248,9 @@ impl<
     /// ```
     pub fn outer_row_apply<W, F: FnMut(&[T], &[T]) -> W>(&self, mut f: F) -> Vec<W> {
         let mut result = Vec::new();
-        for i in 0..self.minor_dim {
+        for i in 0..self.n_row {
             let row = self.get_row(i).expect("Failed to get row, malformed array");
-            for j in 0..self.minor_dim {
+            for j in 0..self.n_row {
                 if j >= i {
                     continue;
                 }
@@ -220,13 +262,13 @@ impl<
     }
 
     pub fn insert(&mut self, row_idx: usize, col_idx: usize, value: T) {
-        let idx = row_idx * self.major_dim + col_idx;
+        let idx = row_idx * self.n_col + col_idx;
         self.values[idx] = value;
     }
 
     fn get_row_limits(&self, index: usize) -> Option<Range<usize>> {
-        let start = index * self.major_dim;
-        let end = start + self.major_dim;
+        let start = index * self.n_col;
+        let end = start + self.n_col;
         if end > self.values.len() || start >= self.values.len() {
             return None;
         }
@@ -270,38 +312,39 @@ impl<
     }
 
     pub fn nrows(&self) -> usize {
-        self.minor_dim
+        self.n_row
     }
 
     pub fn ncols(&self) -> usize {
-        self.major_dim
+        self.n_col
     }
 
     pub fn transpose_clone(&self) -> Array2D<T> {
         // Swap major_dim and minor_dim
-        let col_dim = self.major_dim;
-        let row_dim = self.minor_dim;
+        let col_dim = self.n_col;
+        let row_dim = self.n_row;
 
         let mut result = vec![self.values[0]; row_dim * col_dim];
 
-        for i in 0..row_dim {
-            for j in 0..col_dim {
-                result[j * row_dim + i] = self.values[i * col_dim + j];
+        for (i, crow) in self.iter_rows().enumerate() {
+            for (j, v) in crow.iter().enumerate() {
+                let idx = (j * row_dim) + i;
+                result[idx] = *v;
             }
         }
 
         Array2D {
             values: result,
-            major_dim: row_dim,
-            minor_dim: col_dim,
+            n_col: row_dim,
+            n_row: col_dim,
         }
     }
 
-    pub fn reset_with_default(&mut self, ncols: usize, nrows: usize, value: T) {
+    pub fn reset_with_value(&mut self, ncols: usize, nrows: usize, value: T) {
         self.values.clear();
         self.values.resize(ncols * nrows, value);
-        self.major_dim = ncols;
-        self.minor_dim = nrows;
+        self.n_col = ncols;
+        self.n_row = nrows;
     }
 }
 #[cfg(test)]
@@ -315,8 +358,8 @@ mod tests {
         let array = Array2D::new(&values).unwrap();
 
         // Check dimensions
-        assert_eq!(array.major_dim, 3); // columns
-        assert_eq!(array.minor_dim, 2); // rows
+        assert_eq!(array.n_col, 3); // columns
+        assert_eq!(array.n_row, 2); // rows
 
         // Check memory layout - values in same row should be adjacent
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
@@ -333,8 +376,8 @@ mod tests {
         let array = Array2D::new_transposed(&columns).unwrap();
 
         // Check dimensions
-        assert_eq!(array.major_dim, 3); // columns
-        assert_eq!(array.minor_dim, 2); // rows
+        assert_eq!(array.n_col, 3); // columns
+        assert_eq!(array.n_row, 2); // rows
 
         // Check memory layout - values should be arranged row-major
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
@@ -373,8 +416,8 @@ mod tests {
         let array = Array2D::new(&values).unwrap();
 
         // Verify dimensions
-        assert_eq!(array.major_dim, size);
-        assert_eq!(array.minor_dim, size);
+        assert_eq!(array.n_col, size);
+        assert_eq!(array.n_row, size);
 
         // Verify first and last values
         assert_eq!(array.values[0], 0.0);
@@ -387,8 +430,8 @@ mod tests {
         let array = Array2D::new(&values).unwrap();
 
         // Check dimensions
-        assert_eq!(array.major_dim, 3); // columns
-        assert_eq!(array.minor_dim, 2); // rows
+        assert_eq!(array.n_col, 3); // columns
+        assert_eq!(array.n_row, 2); // rows
 
         // Check memory layout - values in same row should be adjacent
         assert_eq!(array.values, vec![1, 2, 3, 4, 5, 6]);
@@ -396,8 +439,8 @@ mod tests {
         let transposed = array.transpose_clone();
 
         // Check dimensions
-        assert_eq!(transposed.major_dim, 2); // columns
-        assert_eq!(transposed.minor_dim, 3); // rows
+        assert_eq!(transposed.n_col, 2); // columns
+        assert_eq!(transposed.n_row, 3); // rows
 
         // Check memory layout - values should be arranged row-major
         assert_eq!(transposed.values, vec![1, 4, 2, 5, 3, 6]);
@@ -409,8 +452,8 @@ mod tests {
         let array = Array2D::new(&values).unwrap();
         let array2 = Array2D {
             values: vec![1, 2, 3, 4, 5, 6, 4, 5, 6, 7, 8, 9],
-            major_dim: 6,
-            minor_dim: 2,
+            n_col: 6,
+            n_row: 2,
         };
         assert_eq!(array, array2);
 
@@ -420,8 +463,8 @@ mod tests {
         // 9 = 2 + 3 + 4
         let expect = Array2D {
             values: vec![0, 6, 9, 12, 15, 0, 0, 15, 18, 21, 24, 0],
-            major_dim: 6,
-            minor_dim: 2,
+            n_col: 6,
+            n_row: 2,
         };
         assert_eq!(convolved, expect);
     }
@@ -432,8 +475,8 @@ mod tests {
         let array = Array2D::new(&values).unwrap();
         let array2 = Array2D {
             values: vec![1, 2, 3, 4, 5, 6, 4, 5, 6, 7, 8, 9],
-            major_dim: 6,
-            minor_dim: 2,
+            n_col: 6,
+            n_row: 2,
         };
         assert_eq!(array, array2);
 
@@ -450,7 +493,7 @@ mod tests {
         assert_eq!(array.ncols(), 3);
         assert_eq!(array.nrows(), 2);
 
-        array.reset_with_default(2, 3, 0i32);
+        array.reset_with_value(2, 3, 0i32);
         assert_eq!(array.values, vec![0, 0, 0, 0, 0, 0]);
         assert_eq!(array.ncols(), 2);
         assert_eq!(array.nrows(), 3);
