@@ -354,7 +354,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
                     .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
                     .collect();
                 index.par_add_query_multi(&mut qa, &tolerance);
-                let tot: u64 = qa.into_iter().map(|x| x.intensity).sum();
+                let tot: f64 = qa.into_iter().map(|x| x.intensity).sum();
                 let out = format!(
                     "ExpandedRawFileIndex::query_multi_group aggregated {} ",
                     tot,
@@ -377,7 +377,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
                     .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
                     .collect();
                 index.par_add_query_multi(&mut tmp, &tolerance);
-                let tot: u64 = tmp.into_iter().map(|x| x.intensity).sum();
+                let tot: f64 = tmp.into_iter().map(|x| x.intensity).sum();
                 let out = format!(
                     "ExpandedRawFileIndexCentroided::query_multi_group aggregated {} ",
                     tot,
@@ -400,7 +400,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
                     .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
                     .collect();
                 index.par_add_query_multi(&mut tmp, &tolerance);
-                let tot: u64 = tmp.into_iter().map(|x| x.intensity).sum();
+                let tot: f64 = tmp.into_iter().map(|x| x.intensity).sum();
                 let out = format!("TransposedQuadIndex::query_multi_group aggregated {} ", tot,);
                 Some(out)
             },
@@ -420,7 +420,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
                     .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
                     .collect();
                 index.par_add_query_multi(&mut queriable_aggregators, &tolerance);
-                let tot: u64 = queriable_aggregators.iter().map(|x| x.intensity).sum();
+                let tot: f64 = queriable_aggregators.iter().map(|x| x.intensity).sum();
                 let out = format!("TransposedQuadIndex::query_multi_group aggregated {} ", tot,);
                 Some(out)
             },

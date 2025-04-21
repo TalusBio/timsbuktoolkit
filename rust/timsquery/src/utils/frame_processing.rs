@@ -206,7 +206,13 @@ pub fn lazy_centroid_weighted_frame<'a>(
 
     // TODO: check if this min intensity makes sense.
     let min_agg_intensity = 1.0;
-    let outpeaks = find_gaussian_peaks(&order, 1, min_agg_intensity, &tof_tol_range_fn, ims_tol_range_fn);
+    let outpeaks = find_gaussian_peaks(
+        &order,
+        1,
+        min_agg_intensity,
+        &tof_tol_range_fn,
+        ims_tol_range_fn,
+    );
 
     let ((agg_intensity, agg_tof), agg_ims) = outpeaks
         .into_iter()
@@ -245,13 +251,13 @@ mod tests {
         // Test case with two simple peaks that should be merged
         let peak_refs = vec![
             create_peak_refs(
-                &[100, 101, 200, 201],   // tof
-                &[1, 1, 2, 2],           // ims
+                &[100, 101, 200, 201],       // tof
+                &[1, 1, 2, 2],               // ims
                 &[1000., 2000., 500., 600.], // intensity
             ),
             create_peak_refs(
-                &[101, 201], // tof
-                &[1, 2],     // ims
+                &[101, 201],   // tof
+                &[1, 2],       // ims
                 &[900., 600.], // intensity
             ),
         ];

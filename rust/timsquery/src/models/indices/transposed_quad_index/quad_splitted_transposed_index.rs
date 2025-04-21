@@ -17,7 +17,6 @@ use crate::models::frames::single_quad_settings::{
     SingleQuadrupoleSetting,
     SingleQuadrupoleSettingIndex,
     get_matching_quad_settings,
-    matches_quad_settings,
 };
 use crate::traits::key_like::KeyLike;
 use crate::traits::queriable_data::QueriableData;
@@ -90,7 +89,7 @@ impl QuadSplittedTransposedIndex {
         self.query_peaks_in_precursors(&matching_quads, tof_range, scan_range, rt_range_ms, f);
     }
 
-    fn query_ms1_peaks<F>(
+    pub fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
         scan_range: Option<IncludedRange<u16>>,
@@ -122,6 +121,12 @@ impl QuadSplittedTransposedIndex {
             tqi.query_peaks(tof_range, scan_range, rt_range_ms)
                 .for_each(&mut *f);
         }
+    }
+
+    pub(super) fn iter_msn_ranges(
+        &self,
+    ) -> impl '_ + Iterator<Item = (&SingleQuadrupoleSettingIndex, &TransposedQuadIndex)> {
+        self.fragment_indices.iter()
     }
 
     fn get_matching_quad_settings(
@@ -341,11 +346,7 @@ impl QuadSplittedTransposedIndexBuilder {
                 .unwrap()
         });
 
-        let mut cycle_rts_ms: Vec<_> = precursor_index
-            .as_ref()
-            .unwrap()
-            .frame_rt_ms
-            .clone();
+        let mut cycle_rts_ms: Vec<_> = precursor_index.as_ref().unwrap().frame_rt_ms.clone();
         cycle_rts_ms.sort_unstable();
 
         QuadSplittedTransposedIndex {

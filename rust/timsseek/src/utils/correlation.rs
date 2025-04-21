@@ -58,8 +58,6 @@ const MAX_CAPACITY: usize = 20;
 
 #[derive(Debug)]
 struct CosineSimilarityCircularBuffer {
-    // TODO: Cleanup and make a stack-allocated structure.
-    // Maybe an array of Option<RollingElem> with a max capacity.
     a_sum_sq: f64,
     b_sum_sq: f64,
     dot_product: f64,

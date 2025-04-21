@@ -390,8 +390,8 @@ impl TransposedQuadIndexBuilder {
                 .zip(self.tof_slices[start..end].iter())
                 .flat_map(|(rt, tofslice)| vec![*rt; tofslice.len()])
                 .collect();
-                // TODO: I am pretty sure this is possible without allocating the bunch of
-                // vectors
+            // TODO: I am pretty sure this is possible without allocating the bunch of
+            // vectors
 
             let concat_elapsed = concat_st.elapsed();
 

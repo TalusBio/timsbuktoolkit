@@ -1,9 +1,13 @@
 use crate::utils::tolerance_ranges::IncludedRange;
-use timsrust::converters::{ConvertableDomain, Scan2ImConverter, Tof2MzConverter};
 use core::f32;
 use serde::{
     Deserialize,
     Serialize,
+};
+use timsrust::converters::{
+    ConvertableDomain,
+    Scan2ImConverter,
+    Tof2MzConverter,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +88,14 @@ impl Tolerance {
         }
     }
 
+    pub fn rt_range_as_milis(&self, rt_minutes: f32) -> Option<IncludedRange<u32>> {
+        let tmp = self.rt_range(rt_minutes);
+        match tmp {
+            Some(x) => Some(((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into()),
+            None => None,
+        }
+    }
+
     pub fn mobility_range(&self, mobility: f32) -> Option<IncludedRange<f32>> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => {
@@ -98,11 +110,11 @@ impl Tolerance {
         }
     }
 
-    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> IncludedRange<f32> {
+    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> IncludedRange<f64> {
         match self.quad {
             QuadTolerance::Absolute((low, high)) => {
-                let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) as f32 - low;
-                let mz_high = precursor_mz_range.1.max(precursor_mz_range.0) as f32 + high;
+                let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) - (low as f64);
+                let mz_high = precursor_mz_range.1.max(precursor_mz_range.0) + (high as f64);
                 assert!(mz_low <= mz_high);
                 assert!(
                     mz_low > 0.0,
@@ -117,12 +129,26 @@ impl Tolerance {
 
     pub fn indexed_tof_range(&self, mz: f64, converter: &Tof2MzConverter) -> IncludedRange<u32> {
         let mz_rng = self.mz_range(mz);
-        (converter.invert(mz_rng.start()) as u32, converter.invert(mz_rng.end()) as u32).into()
+        (
+            converter.invert(mz_rng.start()) as u32,
+            converter.invert(mz_rng.end()) as u32,
+        )
+            .into()
     }
 
-    pub fn indexed_scan_range(&self, mobility: f64, converter: &Scan2ImConverter) -> Option<IncludedRange<u16>> {
+    pub fn indexed_scan_range(
+        &self,
+        mobility: f64,
+        converter: &Scan2ImConverter,
+    ) -> Option<IncludedRange<u16>> {
         let im_rng = self.mobility_range(mobility as f32)?;
-        Some((converter.invert(im_rng.start() as f64) as u16, converter.invert(im_rng.end() as f64) as u16).into())
+        Some(
+            (
+                converter.invert(im_rng.start() as f64) as u16,
+                converter.invert(im_rng.end() as f64) as u16,
+            )
+                .into(),
+        )
     }
 }
 
