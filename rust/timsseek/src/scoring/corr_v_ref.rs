@@ -56,9 +56,7 @@ pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
 
 #[test]
 fn test_calculate_cosine_with_ref_gaussian() {
-    let test_vec = (0..3)
-        .flat_map(|_| REF_GAUSSIAN)
-        .collect::<Vec<f32>>();
+    let test_vec = (0..3).flat_map(|_| REF_GAUSSIAN).collect::<Vec<f32>>();
     let out = slide_cosine_v_gaussian(&test_vec).collect::<Result<Vec<f32>>>();
     let expect_out = [
         1.0000001,

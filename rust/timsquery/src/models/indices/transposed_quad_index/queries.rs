@@ -1,4 +1,3 @@
-
 use super::QuadSplittedTransposedIndex;
 use crate::models::aggregators::{
     EGCAggregator,

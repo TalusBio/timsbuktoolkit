@@ -416,4 +416,3 @@ pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(
 
     Ok(())
 }
-

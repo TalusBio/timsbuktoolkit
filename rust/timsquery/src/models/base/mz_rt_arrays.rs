@@ -220,7 +220,6 @@ impl<FH: KeyLike> RTMajorIntensityArray<FH> {
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn test_array2d_from_cmg_int_mz_major() {

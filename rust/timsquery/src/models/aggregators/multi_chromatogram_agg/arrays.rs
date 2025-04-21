@@ -4,6 +4,7 @@ use super::aggregator::{
     ParitionedCMGAggregator,
     SparseRTCollection,
 };
+use crate::KeyLike;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::f64;
@@ -15,7 +16,6 @@ use timsrust::converters::{
     Tof2MzConverter,
 };
 use tracing::warn;
-use crate::KeyLike;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PartitionedCMGArrayStats<FH: KeyLike> {
@@ -28,10 +28,7 @@ pub struct PartitionedCMGArrayStats<FH: KeyLike> {
     pub intensities: HashMap<FH, Vec<u64>>,
 }
 
-
-impl <FH: KeyLike> PartitionedCMGArrayStats<FH> {
-
-}
+impl<FH: KeyLike> PartitionedCMGArrayStats<FH> {}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PartitionedCMGArrays<FH: KeyLike> {
