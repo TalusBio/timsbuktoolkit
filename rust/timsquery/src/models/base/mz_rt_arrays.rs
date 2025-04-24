@@ -191,6 +191,10 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         // Should I be checking for it??
         self.rts_ms = array.rts_ms.clone();
     }
+
+    pub fn num_ions(&self) -> usize {
+        self.mz_order.len()
+    }
 }
 
 impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {

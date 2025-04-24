@@ -5,6 +5,7 @@ use crate::models::base::{
     MutableChromatogram,
     MzMajorIntensityArray,
 };
+use crate::utils::tolerance_ranges::IncludedRange;
 use crate::{
     ElutionGroup,
     KeyLike,
@@ -53,5 +54,11 @@ impl<T: KeyLike> EGCAggregator<T> {
         MzMajorIntensityArray<T, f32>,
     ) {
         (self.eg, self.precursors, self.fragments)
+    }
+
+    pub fn rt_range(&self) -> IncludedRange<u32> {
+        let min = self.fragments.rts_ms.first().unwrap().min(self.precursors.rts_ms.first().unwrap());
+        let max = self.fragments.rts_ms.last().unwrap().min(self.precursors.rts_ms.last().unwrap());
+        (*min, *max).into()
     }
 }

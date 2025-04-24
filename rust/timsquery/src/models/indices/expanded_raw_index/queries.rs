@@ -170,6 +170,16 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for ExpandedRawFrameIndex {
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
         let rt_range_ms = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        let query_rt_ms = aggregator.rt_range();
+        let rt_range_ms =match tolerance.rt_range_as_milis(aggregator.eg.rt_seconds){
+            None => rt_range_ms,
+            Some(tol_range_rt) => query_rt_ms.intersection(tol_range_rt),
+        };
+
+        if rt_range_ms.is_none() {
+            return;
+        }
+
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), mut chr)| {

@@ -92,8 +92,8 @@ impl<'q> SearchResultBuilder<'q> {
 
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = SetField::Some(&pre_score.digest);
-        self.ref_eg = SetField::Some(&pre_score.reference);
-        self.nqueries = SetField::Some(pre_score.reference.fragments.len() as u8);
+        self.ref_eg = SetField::Some(&pre_score.query_values.eg);
+        self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
         self.decoy_marking = SetField::Some(pre_score.digest.decoy);
         self.charge = SetField::Some(pre_score.charge);
         self
@@ -389,6 +389,60 @@ pub struct IonSearchResults {
     ms2_inten_ratio_4: f32,
     ms2_inten_ratio_5: f32,
     ms2_inten_ratio_6: f32,
+}
+
+pub struct ResultParquetWriter {
+    row_group_size: usize,
+    writer: SerializedFileWriter<File>,
+    buffer: Vec<IonSearchResults>,
+}
+
+impl ResultParquetWriter {
+    pub fn new(out_path: impl AsRef<Path>, row_group_size: usize) -> Result<Self, std::io::Error> {
+        let file = match File::create_new(out_path.as_ref()) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to open file {:?} with error: {}",
+                    out_path.as_ref(),
+                    err
+                );
+                return Err(err);
+            }
+        };
+        let results: &[IonSearchResults] = &[];
+        let schema = results.schema().unwrap();
+        let writer = SerializedFileWriter::new(file, schema, Default::default()).unwrap();
+        Ok(Self {
+            buffer: Vec::with_capacity(row_group_size),
+            writer,
+            row_group_size,
+        })
+    }
+
+    fn flush_to_file(&mut self) {
+        let mut row_group = self.writer.next_row_group().unwrap();
+        self.buffer
+            .as_slice()
+            .write_to_row_group(&mut row_group)
+            .unwrap();
+        row_group.close().unwrap();
+        self.buffer.clear();
+    }
+
+    pub fn add(&mut self, result: IonSearchResults) {
+        self.buffer.push(result);
+        if self.buffer.len() >= self.row_group_size {
+            self.flush_to_file();
+        }
+    }
+
+    pub fn close(mut self) {
+        if !self.buffer.is_empty() {
+            self.flush_to_file();
+        }
+        self.writer.close().unwrap();
+    }
 }
 
 pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(

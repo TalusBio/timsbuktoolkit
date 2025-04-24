@@ -134,7 +134,6 @@ impl BundledDotDIndex {
         let prescore = PreScore {
             charge: queries.charge,
             digest: queries.digest,
-            reference: Arc::new(queries.elution_group),
             expected_intensities: queries.expected_intensities,
             query_values: res.clone(),
         };

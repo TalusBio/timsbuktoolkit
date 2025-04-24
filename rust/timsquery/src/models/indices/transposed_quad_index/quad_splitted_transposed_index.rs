@@ -50,6 +50,7 @@ pub struct QuadSplittedTransposedIndex {
     fragment_indices: HashMap<SingleQuadrupoleSettingIndex, TransposedQuadIndex>,
     flat_quad_settings: Vec<SingleQuadrupoleSetting>,
     pub cycle_rt_ms: Arc<[u32]>,
+    pub rt_range_ms: IncludedRange<u32>,
     pub mz_converter: Tof2MzConverter,
     pub im_converter: Scan2ImConverter,
 }
@@ -204,6 +205,7 @@ pub struct QuadSplittedTransposedIndexBuilder {
     indices: HashMap<Option<SingleQuadrupoleSetting>, TransposedQuadIndexBuilder>,
     mz_converter: Option<Tof2MzConverter>,
     im_converter: Option<Scan2ImConverter>,
+    rt_range_ms: Option<IncludedRange<u32>>,
     // TODO use during build to make sure we
     // have a the right number of peaks in the end.
     // ... this means I need to implement len for TransposedQuadIndexBuilder
@@ -262,12 +264,17 @@ impl QuadSplittedTransposedIndexBuilder {
 
         let sql_path = std::path::Path::new(path).join("analysis.tdf");
         let meta_converters = MetadataReader::new(&sql_path)?;
+        let rt_range = IncludedRange::new(
+            (meta_converters.lower_rt * 1000.0) as u32,
+            (meta_converters.upper_rt * 1000.0) as u32,
+        );
 
         let mut final_out = Self {
             indices: HashMap::new(),
             mz_converter: Some(meta_converters.mz_converter),
             im_converter: Some(meta_converters.im_converter),
             added_peaks: 0,
+            rt_range_ms: Some(rt_range),
         };
 
         let centroid_config = centroid_config
@@ -306,6 +313,11 @@ impl QuadSplittedTransposedIndexBuilder {
                 .or_insert(builder);
         }
         self.added_peaks += other.added_peaks;
+        self.rt_range_ms = match (self.rt_range_ms, other.rt_range_ms) {
+            (None, None) => None,
+            (Some(l), _w) => Some(l),
+            (None, Some(r)) => Some(r),
+        };
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -344,6 +356,7 @@ impl QuadSplittedTransposedIndexBuilder {
             flat_quad_settings,
             mz_converter: self.mz_converter.unwrap(),
             im_converter: self.im_converter.unwrap(),
+            rt_range_ms: self.rt_range_ms.unwrap(),
             cycle_rt_ms: cycle_rts_ms.into(),
         }
     }

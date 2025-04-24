@@ -7,7 +7,6 @@ use timsrust::converters::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IncludedRange<T: Copy + PartialOrd>(T, T);
 
-// TODO: Implement overlaps ...
 
 impl<T> IncludedRange<T>
 where
@@ -19,6 +18,28 @@ where
             Self(right, left)
         } else {
             Self(left, right)
+        }
+    }
+
+    // TODO: Implement other overlaps ... (union ...)
+    pub fn intersection(&self, other: Self) -> Option<Self> {
+        let left = match self.start().partial_cmp(&other.start()) {
+            Some(std::cmp::Ordering::Equal) => self.start(),
+            Some(std::cmp::Ordering::Less) => other.start(),
+            Some(std::cmp::Ordering::Greater) => self.start(),
+            None => self.start(),
+        };
+        let right = match self.end().partial_cmp(&other.end()) {
+            Some(std::cmp::Ordering::Equal) => self.start(),
+            Some(std::cmp::Ordering::Less) => self.start(),
+            Some(std::cmp::Ordering::Greater) => other.start(),
+            None => self.start(),
+        };
+
+        if left > right {
+            None
+        } else {
+            Some(Self(left, right))
         }
     }
 

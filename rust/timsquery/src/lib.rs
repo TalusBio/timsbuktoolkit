@@ -1,5 +1,9 @@
 // Re-export main structures
 pub use crate::models::Tolerance;
+pub use crate::models::aggregators::{
+    EGCAggregator,
+    EGSAggregator,
+};
 pub use crate::models::elution_group::ElutionGroup;
 pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 
