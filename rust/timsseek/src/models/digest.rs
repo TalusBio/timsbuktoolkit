@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestSlice {
     ref_seq: Arc<str>,
-    range: Range<usize>,
+    range: Range<u16>,
     pub decoy: DecoyMarking,
 }
 
@@ -25,7 +25,7 @@ impl Serialize for DigestSlice {
 }
 
 impl DigestSlice {
-    pub fn new(ref_seq: Arc<str>, range: Range<usize>, decoy: DecoyMarking) -> Self {
+    pub fn new(ref_seq: Arc<str>, range: Range<u16>, decoy: DecoyMarking) -> Self {
         Self {
             ref_seq,
             range,
@@ -37,7 +37,7 @@ impl DigestSlice {
         let len = seq.len();
         DigestSlice {
             ref_seq: seq.into(),
-            range: 0..len,
+            range: 0..(len as u16),
             decoy: if decoy {
                 DecoyMarking::ReversedDecoy
             } else {
@@ -55,7 +55,9 @@ impl DigestSlice {
     }
 
     pub fn as_decoy_string(&self) -> String {
-        as_decoy_string(&self.ref_seq.as_ref()[self.range.clone()])
+        as_decoy_string(
+            &self.ref_seq.as_ref()[(self.range.start as usize)..(self.range.end as usize)],
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -69,7 +71,7 @@ impl DigestSlice {
 
 impl From<DigestSlice> for String {
     fn from(x: DigestSlice) -> Self {
-        let tmp = &x.ref_seq.as_ref()[x.range.clone()];
+        let tmp = &x.ref_seq.as_ref()[(x.range.start as usize)..(x.range.end as usize)];
 
         match x.decoy {
             DecoyMarking::Target => tmp.to_string(),
@@ -102,22 +104,22 @@ mod tests {
         let digests: Vec<DigestSlice> = vec![
             DigestSlice {
                 ref_seq: seq.clone(),
-                range: 0..seq.as_ref().len(),
+                range: (0 as u16..seq.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq.clone(),
-                range: 0..seq2.as_ref().len(), // Note the short length
+                range: (0 as u16..seq2.as_ref().len() as u16), // Note the short length
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq2.clone(),
-                range: 0..seq2.as_ref().len(),
+                range: (0 as u16..seq2.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq2_rep.clone(),
-                range: 0..seq2_rep.as_ref().len(),
+                range: (0 as u16..seq2_rep.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
         ];

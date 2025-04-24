@@ -8,6 +8,14 @@ use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone)]
+pub struct Query {
+    pub digests: DigestSlice,
+    pub charges: u8,
+    pub queries: Arc<ElutionGroup<IonAnnot>>,
+    pub expected_intensities: ExpectedIntensities,
+}
+
+#[derive(Debug, Clone)]
 pub struct NamedQueryChunk {
     pub digests: Vec<DigestSlice>,
     pub charges: Vec<u8>,

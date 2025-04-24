@@ -88,8 +88,8 @@ impl Tolerance {
         }
     }
 
-    pub fn rt_range_as_milis(&self, rt_minutes: f32) -> Option<IncludedRange<u32>> {
-        let tmp = self.rt_range(rt_minutes);
+    pub fn rt_range_as_milis(&self, rt_seconds: f32) -> Option<IncludedRange<u32>> {
+        let tmp = self.rt_range(rt_seconds);
         tmp.map(|x| ((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into())
     }
 

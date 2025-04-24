@@ -35,6 +35,7 @@ pub struct ExpandedRawFrameIndex {
     bundled_frames: HashMap<SingleQuadrupoleSettingIndex, ExpandedSliceBundle>,
     flat_quad_settings: Vec<SingleQuadrupoleSetting>,
     pub cycle_rt_ms: Arc<[u32]>,
+    pub rt_range_ms: IncludedRange<u32>,
     pub mz_converter: Tof2MzConverter,
     pub im_converter: Scan2ImConverter,
 }
@@ -61,6 +62,9 @@ impl ExpandedSliceBundle {
     pub fn query_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
+        // TODO: remove the options from these ranges
+        // or replace with an explicit enum ...
+        // Since None is ambiguous (it means 'Any' instead of 'None')
         scan_range: Option<IncludedRange<u16>>,
         frame_rt_ms: Option<IncludedRange<u32>>,
         f: &mut F,
@@ -202,9 +206,14 @@ impl ExpandedRawFrameIndex {
                 }
             });
 
-        let mut cycle_rts_ms: Vec<u32> = out_ms1_frames
-            .as_ref()
-            .unwrap()
+        let bundled_ms1_frames = out_ms1_frames.expect("At least one ms1 frame should be present");
+
+        let rt_range = IncludedRange::new(
+            (meta_converters.lower_rt * 1000.0) as u32,
+            (meta_converters.upper_rt * 1000.0) as u32,
+        );
+
+        let mut cycle_rts_ms: Vec<u32> = bundled_ms1_frames
             .slices
             .iter()
             .map(|x| (1000.0 * x.rt) as u32)
@@ -212,9 +221,10 @@ impl ExpandedRawFrameIndex {
         cycle_rts_ms.sort_unstable();
 
         let out = Self {
-            bundled_ms1_frames: out_ms1_frames.expect("At least one ms1 frame should be present"),
+            bundled_ms1_frames,
             bundled_frames: out_ms2_frames,
             flat_quad_settings,
+            rt_range_ms: rt_range,
             mz_converter: meta_converters.mz_converter,
             im_converter: meta_converters.im_converter,
             cycle_rt_ms: cycle_rts_ms.into(),

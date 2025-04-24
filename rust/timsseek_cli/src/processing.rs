@@ -149,7 +149,6 @@ pub fn process_chunk_full<'a>(
         prescores.push(PreScore {
             charge: queries.charges[i],
             digest: queries.digests[i].clone(),
-            reference: q.clone(),
             expected_intensities: queries.expected_intensities[i].clone(),
             query_values: res[i].clone(),
         });
@@ -248,7 +247,6 @@ pub fn process_chunk<'a>(
                 let prescore = PreScore {
                     charge: charge_elem,
                     digest,
-                    reference: eg_elem,
                     expected_intensities: expect_inten,
                     query_values: res_elem,
                 };
@@ -282,7 +280,7 @@ pub fn process_chunk<'a>(
                     tracing::error!(
                         "Error creating search result for Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
                         loc.pre_score.digest,
-                        loc.pre_score.reference,
+                        loc.pre_score.query_values.eg,
                         res,
                     );
                     return None;

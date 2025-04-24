@@ -1,5 +1,6 @@
-use super::coelution::coelution_score;
-use super::{
+use super::scores::coelution::coelution_score;
+use super::scores::corr_v_ref::calculate_cosine_with_ref_gaussian;
+use super::scores::{
     corr_v_ref,
     hyperscore,
 };
@@ -10,7 +11,6 @@ use crate::errors::{
 };
 use crate::fragment_mass::IonAnnot;
 use crate::models::DigestSlice;
-use crate::scoring::corr_v_ref::calculate_cosine_with_ref_gaussian;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
     calculate_value_vs_baseline,
@@ -19,7 +19,6 @@ use crate::utils::top_n_array::TopNArray;
 use core::f32;
 use serde::Serialize;
 use std::sync::Arc;
-use timsquery::ElutionGroup;
 use timsquery::models::aggregators::EGCAggregator;
 use timsquery::models::{
     MzMajorIntensityArray,
@@ -30,7 +29,8 @@ use timsquery::models::{
 pub struct PreScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub reference: Arc<ElutionGroup<IonAnnot>>,
+    // No longer needed bc it is bundled in the EGCAggregator
+    // pub reference: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
     pub query_values: EGCAggregator<IonAnnot>,
 }
@@ -553,7 +553,6 @@ impl LocalizedPreScore {
             main_score.ref_ms1_idx,
             main_score.ref_ms2_idx,
             &pre_score.query_values,
-            &pre_score.reference,
         );
         Self {
             pre_score,
@@ -578,18 +577,13 @@ pub struct SortedIntElemAtIndex {
 }
 
 impl SortedIntElemAtIndex {
-    fn new(
-        ms1_idx: usize,
-        ms2_idx: usize,
-        cmgs: &EGCAggregator<IonAnnot>,
-        elution_group: &ElutionGroup<IonAnnot>,
-    ) -> Self {
+    fn new(ms1_idx: usize, ms2_idx: usize, cmgs: &EGCAggregator<IonAnnot>) -> Self {
         panic!("I need to implement the secondary search");
         // Get the elements at every index and sort them by intensity.
         // Once sorted calculate the pairwise diff.
         let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
         let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
-        let ref_ims = elution_group.mobility;
+        let ref_ims = cmgs.eg.mobility;
 
         // if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
         //     for i in 0..3 {

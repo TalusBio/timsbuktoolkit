@@ -263,7 +263,7 @@ impl From<PrecursorEntry> for DigestSlice {
             DecoyMarking::Target
         };
         let seq: Arc<str> = x.sequence.clone().into();
-        let range = 0..seq.as_ref().len();
+        let range = 0 as u16..seq.as_ref().len() as u16;
         DigestSlice::new(seq, range, decoy)
     }
 }

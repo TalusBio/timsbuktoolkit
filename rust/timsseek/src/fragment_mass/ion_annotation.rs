@@ -40,8 +40,6 @@ pub enum IonSeriesTerminality {
     None,
 }
 
-// TODO: Consider re-implementing with char+u8 instead of enum ...
-// Might be less ergonomic but will be a lot less verbose.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy)]
 #[allow(non_camel_case_types)]
 pub enum IonSeriesOrdinal {
