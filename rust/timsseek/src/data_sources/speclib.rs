@@ -25,12 +25,6 @@ struct SerSpeclibElement {
     elution_group: ReferenceEG,
 }
 
-#[derive(Debug, Clone)]
-struct SpeclibElement {
-    precursor: DigestSlice,
-    elution_group: ReferenceEG,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrecursorEntry {
     sequence: String,
@@ -49,18 +43,21 @@ impl From<PrecursorEntry> for DigestSlice {
         if seq.as_ref().len() >= u16::MAX as usize {
             panic!("Sequence too long (gt: {}): {}", u16::MAX, seq);
         }
-        let range = 0 as u16..seq.as_ref().len() as u16;
+        let range = 0u16..seq.as_ref().len() as u16;
         DigestSlice::new(seq, range, decoy)
     }
 }
 
-impl From<SerSpeclibElement> for SpeclibElement {
+impl From<SerSpeclibElement> for QueryItemToScore {
     fn from(x: SerSpeclibElement) -> Self {
+        let charge = x.precursor.charge;
         let precursor = x.precursor.into();
         let elution_group = x.elution_group;
-        SpeclibElement {
-            precursor,
-            elution_group,
+        QueryItemToScore {
+            expected_intensity: elution_group.expected_intensities,
+            charge,
+            query: elution_group.elution_group,
+            digest: precursor,
         }
     }
 }
@@ -81,7 +78,7 @@ pub struct ReferenceEG {
 
 #[derive(Debug, Clone)]
 pub struct Speclib {
-    elems: Vec<SpeclibElement>,
+    elems: Vec<QueryItemToScore>,
 }
 
 impl Speclib {
@@ -89,12 +86,7 @@ impl Speclib {
         let speclib_ser: Vec<SerSpeclibElement> = serde_json::from_str(json).unwrap();
 
         let speclib = speclib_ser.into_iter().map(|x| {
-            let precursor = x.precursor.into();
-            let elution_group = x.elution_group;
-            SpeclibElement {
-                precursor,
-                elution_group,
-            }
+            x.into()
         }).collect();
 
         Self {
@@ -123,7 +115,7 @@ impl Speclib {
                 };
 
                 elem.into()
-            }).collect::<Vec<SpeclibElement>>();
+            }).collect::<Vec<QueryItemToScore>>();
 
         Self { elems: tmp }
     }
@@ -221,8 +213,8 @@ mod tests {
         assert_eq!(speclib.elems.len(), 1);
         println!("{:?}", speclib);
 
-        assert_eq!(speclib.elems[0].precursor.decoy, DecoyMarking::Target);
-        assert_eq!(speclib.elems[0].precursor.len(), "PEPTIDEPINK".len());
-        assert_eq!(speclib.elems[0].elution_group.elution_group.fragments.len(), 3);
+        assert_eq!(speclib.elems[0].digest.decoy, DecoyMarking::Target);
+        assert_eq!(speclib.elems[0].digest.len(), "PEPTIDEPINK".len());
+        assert_eq!(speclib.elems[0].query.fragments.len(), 3);
     }
 }
