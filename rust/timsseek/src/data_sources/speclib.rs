@@ -3,8 +3,8 @@ use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
-    NamedQueryChunk,
 };
+use crate::scoring::QueryItemToScore;
 use rayon::prelude::*;
 use serde::{
     Deserialize,
@@ -18,6 +18,52 @@ use std::io::{
 use std::path;
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerSpeclibElement {
+    precursor: PrecursorEntry,
+    elution_group: ReferenceEG,
+}
+
+#[derive(Debug, Clone)]
+struct SpeclibElement {
+    precursor: DigestSlice,
+    elution_group: ReferenceEG,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrecursorEntry {
+    sequence: String,
+    charge: u8,
+    decoy: bool,
+}
+
+impl From<PrecursorEntry> for DigestSlice {
+    fn from(x: PrecursorEntry) -> Self {
+        let decoy = if x.decoy {
+            DecoyMarking::ReversedDecoy
+        } else {
+            DecoyMarking::Target
+        };
+        let seq: Arc<str> = x.sequence.clone().into();
+        if seq.as_ref().len() >= u16::MAX as usize {
+            panic!("Sequence too long (gt: {}): {}", u16::MAX, seq);
+        }
+        let range = 0 as u16..seq.as_ref().len() as u16;
+        DigestSlice::new(seq, range, decoy)
+    }
+}
+
+impl From<SerSpeclibElement> for SpeclibElement {
+    fn from(x: SerSpeclibElement) -> Self {
+        let precursor = x.precursor.into();
+        let elution_group = x.elution_group;
+        SpeclibElement {
+            precursor,
+            elution_group,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities {
@@ -35,76 +81,24 @@ pub struct ReferenceEG {
 
 #[derive(Debug, Clone)]
 pub struct Speclib {
-    digests: Vec<DigestSlice>,
-    charges: Vec<u8>,
-    queries: Vec<Arc<ElutionGroup<IonAnnot>>>,
-    expected_intensities: Vec<ExpectedIntensities>,
-}
-
-pub struct SpeclibIterator {
-    speclib: Speclib,
-    chunk_size: usize,
-    max_iterations: usize,
-    iteration_index: usize,
-}
-
-impl SpeclibIterator {
-    pub fn new(speclib: Speclib, chunk_size: usize) -> Self {
-        let max_iters = speclib.digests.len() / chunk_size;
-        Self {
-            speclib,
-            chunk_size,
-            max_iterations: max_iters,
-            iteration_index: 0,
-        }
-    }
-}
-
-impl Iterator for SpeclibIterator {
-    type Item = NamedQueryChunk;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // No need to make decoys when we have a speclib!!
-        let out = self
-            .speclib
-            .get_chunk(self.iteration_index, self.chunk_size);
-        self.iteration_index += 1;
-        out
-    }
-}
-
-impl ExactSizeIterator for SpeclibIterator {
-    fn len(&self) -> usize {
-        self.max_iterations
-    }
+    elems: Vec<SpeclibElement>,
 }
 
 impl Speclib {
     pub fn from_json(json: &str) -> Self {
-        let speclib: Vec<SpeclibElement> = serde_json::from_str(json).unwrap();
+        let speclib_ser: Vec<SerSpeclibElement> = serde_json::from_str(json).unwrap();
 
-        let (exp_int, (queries, (charges, digests))): (
-            Vec<ExpectedIntensities>,
-            (
-                Vec<Arc<ElutionGroup<IonAnnot>>>,
-                (Vec<u8>, Vec<DigestSlice>),
-            ),
-        ) = speclib
-            .into_par_iter()
-            .map(|x| {
-                let charge = x.precursor.charge;
-                let elution_group = x.elution_group.elution_group;
-                let expected_intensities = x.elution_group.expected_intensities;
-                let digest = x.precursor.into();
-                (expected_intensities, (elution_group, (charge, digest)))
-            })
-            .unzip();
+        let speclib = speclib_ser.into_iter().map(|x| {
+            let precursor = x.precursor.into();
+            let elution_group = x.elution_group;
+            SpeclibElement {
+                precursor,
+                elution_group,
+            }
+        }).collect();
 
         Self {
-            digests,
-            charges,
-            queries,
-            expected_intensities: exp_int,
+            elems: speclib
         }
     }
 
@@ -115,14 +109,11 @@ impl Speclib {
     }
 
     fn from_ndjson_elems(lines: &[&str]) -> Self {
-        let ((charges, digests), (queries, expected_intensities)): (
-            (Vec<_>, Vec<_>),
-            (Vec<_>, Vec<_>),
-        ) = lines
+        let tmp= lines
             .into_par_iter()
             .filter(|line| !line.is_empty())
             .map(|line| {
-                let elem: SpeclibElement = match serde_json::from_str(line) {
+                let elem: SerSpeclibElement = match serde_json::from_str(line) {
                     Ok(x) => x,
                     Err(e) => {
                         panic!("Error parsing line: {:?}; error: {:?}", line, e);
@@ -131,26 +122,10 @@ impl Speclib {
                     }
                 };
 
-                (
-                    (elem.precursor.charge, elem.precursor.into()),
-                    (
-                        elem.elution_group.elution_group,
-                        elem.elution_group.expected_intensities,
-                    ),
-                )
-            })
-            .unzip();
+                elem.into()
+            }).collect::<Vec<SpeclibElement>>();
 
-        if digests.is_empty() {
-            panic!("No digests found in speclib file");
-        }
-
-        Self {
-            digests,
-            charges,
-            queries,
-            expected_intensities,
-        }
+        Self { elems: tmp }
     }
 
     pub fn from_ndjson_file(path: &path::Path) -> Result<Self, TimsSeekError> {
@@ -163,10 +138,7 @@ impl Speclib {
         let mut current_chunk = String::new();
         let mut curr_nlines = 0;
         let mut results = Self {
-            digests: Vec::with_capacity(100_001),
-            charges: Vec::with_capacity(100_001),
-            queries: Vec::with_capacity(100_001),
-            expected_intensities: Vec::with_capacity(100_001),
+            elems: Vec::with_capacity(100_001),
         };
 
         while let Ok(len) = reader.read_line(&mut current_chunk) {
@@ -192,81 +164,18 @@ impl Speclib {
         Ok(results)
     }
 
-    fn get_chunk(&self, chunk_index: usize, chunk_size: usize) -> Option<NamedQueryChunk> {
-        let start = chunk_index * chunk_size;
-        if start >= self.digests.len() {
-            return None;
-        }
-        let end = start + chunk_size;
-        let end = if end > self.digests.len() {
-            self.digests.len()
-        } else {
-            end
-        };
-        let digests = &self.digests[start..end];
-        let charges = &self.charges[start..end];
-        let queries = &self.queries[start..end];
-        let expected_intensities = &self.expected_intensities[start..end];
-        Some(NamedQueryChunk::new(
-            digests.to_vec(),
-            charges.to_vec(),
-            queries.to_vec(),
-            expected_intensities.to_vec(),
-        ))
-    }
-
     fn fold(self, other: Self) -> Self {
-        let mut digests = self.digests;
-        digests.extend(other.digests);
-        let mut charges = self.charges;
-        charges.extend(other.charges);
-        let mut queries = self.queries;
-        queries.extend(other.queries);
-        let mut expected_intensities = self.expected_intensities;
-        expected_intensities.extend(other.expected_intensities);
         Self {
-            digests,
-            charges,
-            queries,
-            expected_intensities,
+            elems: self.elems.into_iter().chain(other.elems).collect(),
         }
-    }
-
-    pub fn as_iterator(self, chunk_size: usize) -> SpeclibIterator {
-        // TODO make an iterable version of this where the file can be "read" lazily
-        SpeclibIterator::new(self, chunk_size)
     }
 
     pub fn len(&self) -> usize {
-        self.digests.len()
+        self.elems.len()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SpeclibElement {
-    precursor: PrecursorEntry,
-    elution_group: ReferenceEG,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PrecursorEntry {
-    sequence: String,
-    charge: u8,
-    decoy: bool,
-}
-
-impl From<PrecursorEntry> for DigestSlice {
-    fn from(x: PrecursorEntry) -> Self {
-        let decoy = if x.decoy {
-            DecoyMarking::ReversedDecoy
-        } else {
-            DecoyMarking::Target
-        };
-        let seq: Arc<str> = x.sequence.clone().into();
-        let range = 0 as u16..seq.as_ref().len() as u16;
-        DigestSlice::new(seq, range, decoy)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -308,13 +217,12 @@ mod tests {
             }
         ]"#;
         let speclib = Speclib::from_json(json);
-        assert_eq!(speclib.digests.len(), 1);
-        assert_eq!(speclib.charges.len(), 1);
-        assert_eq!(speclib.queries.len(), 1);
+        assert_eq!(speclib.len(), 1);
+        assert_eq!(speclib.elems.len(), 1);
         println!("{:?}", speclib);
 
-        assert_eq!(speclib.digests[0].decoy, DecoyMarking::Target);
-        assert_eq!(speclib.digests[0].len(), "PEPTIDEPINK".len());
-        assert_eq!(speclib.queries[0].fragments.len(), 3);
+        assert_eq!(speclib.elems[0].precursor.decoy, DecoyMarking::Target);
+        assert_eq!(speclib.elems[0].precursor.len(), "PEPTIDEPINK".len());
+        assert_eq!(speclib.elems[0].elution_group.elution_group.fragments.len(), 3);
     }
 }

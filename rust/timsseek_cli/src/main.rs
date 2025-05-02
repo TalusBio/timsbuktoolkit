@@ -69,7 +69,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
     if let Some(output_dir) = args.output_dir {
         config.output = Some(OutputConfig {
             directory: output_dir,
-            full_output: args.full_output,
         });
     }
 
@@ -82,9 +81,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
         }
     };
     println!("{:#?}", config.clone());
-    if args.full_output {
-        output_config.full_output = true;
-    }
 
     // Create output director
     match std::fs::create_dir_all(&output_config.directory) {
@@ -113,8 +109,9 @@ fn main() -> std::result::Result<(), errors::CliError> {
     // Process based on input type
     match config.input {
         Some(InputConfig::Fasta { path, digestion }) => {
-            processing::process_fasta(path, &index, digestion, &config.analysis, &output_config)
-                .unwrap();
+            todo!();
+            // processing::process_fasta(path, &index, digestion, &config.analysis, &output_config)
+            //     .unwrap();
         }
         Some(InputConfig::Speclib { path }) => {
             processing::process_speclib(path, &index, &config.analysis, &output_config).unwrap();

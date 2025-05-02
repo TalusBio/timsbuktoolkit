@@ -1,9 +1,6 @@
 use std::f32;
 
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+use crate::errors::DataProcessingError;
 
 // TODO: benchmark how much faster is f32
 
@@ -19,7 +16,7 @@ use crate::errors::{
 /// let result = cosine_similarity(&a, &b).unwrap();
 /// assert_eq!(result, 0.9746318);
 /// ```
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DataProcessingError> {
     // Check if vectors have the same length and are not empty
     if a.len() != b.len() || a.is_empty() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
@@ -204,7 +201,7 @@ impl CosineSimilarityCircularBuffer {
 /// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
 /// assert_eq!(results.len(), expect_res.len());
 /// ```
-pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Result<Vec<f32>> {
+pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Result<Vec<f32>, DataProcessingError> {
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {

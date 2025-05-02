@@ -5,6 +5,8 @@ use timsquery::{
 };
 use timsrust::TimsRustError;
 
+// TODO: break up ... the type system RN gives no info bc
+// everything is a datada processing error...
 #[derive(Debug)]
 pub enum DataProcessingError {
     ExpectedSlicesSameLength {
@@ -26,6 +28,15 @@ pub enum DataProcessingError {
         error: TQDataProcessingError,
         context: String,
     },
+}
+
+impl From<TQDataProcessingError> for DataProcessingError {
+    fn from(x: TQDataProcessingError) -> Self {
+        Self::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        }
+    }
 }
 
 impl DataProcessingError {
