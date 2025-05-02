@@ -5,10 +5,7 @@ use super::scores::{
     hyperscore,
 };
 use crate::data_sources::speclib::ExpectedIntensities;
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+use crate::errors::DataProcessingError;
 use crate::fragment_mass::IonAnnot;
 use crate::models::DigestSlice;
 use crate::utils::rolling_calculators::{
@@ -65,7 +62,7 @@ impl IntensityArrays {
     pub fn new(
         query_values: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
-    ) -> Result<Self> {
+    ) -> Result<Self, DataProcessingError> {
         let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
         let ms1_rtmajor_arr = ms1_mzmajor_arr.transpose_clone();
         let ms2_rtmajor_arr = ms2_mzmajor_arr.transpose_clone();
@@ -90,7 +87,7 @@ impl IntensityArrays {
         })
     }
 
-    pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self> {
+    pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
         // This is mainly used to pre-allocated the memory that will be used later by several.
         // runs.
         let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|o| (o as i8, 867.8309)).collect();
@@ -132,7 +129,7 @@ impl IntensityArrays {
         &mut self,
         intensity_arrays: &EGCAggregator<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
-    ) -> Result<()> {
+    ) -> Result<(), DataProcessingError> {
         self.ms1_rtmajor
             .try_reset_with(&intensity_arrays.precursors)?;
         self.ms1_mzmajor
@@ -185,7 +182,7 @@ fn gaussblur(x: &mut [f32]) {
 }
 
 impl LongitudinalMainScoreElements {
-    pub fn new(intensity_arrays: &IntensityArrays) -> Result<Self> {
+    pub fn try_new(intensity_arrays: &IntensityArrays) -> Result<Self, DataProcessingError> {
         let mut ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
             &intensity_arrays.ms1_expected_intensities,
@@ -210,15 +207,7 @@ impl LongitudinalMainScoreElements {
 
         let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
 
-        // In this section a "insufficient data error" will be returned if not enough
-        // data exists to calculate a score.
-        let ms2_coe_scores =
-            coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7);
-        if let Err(e) = ms2_coe_scores {
-            let e = e.append_to_context("Failed to calculate coelution score for MS2, ");
-            return Err(crate::errors::TimsSeekError::DataProcessingError(e));
-        }
-        let mut ms2_coelution_score = ms2_coe_scores.unwrap();
+        let mut ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7)?;
 
         let tmp = coelution_score::coelution_score::<6, i8>(&intensity_arrays.ms1_mzmajor, 7);
         let mut ms1_coelution_score = match tmp {
@@ -230,14 +219,7 @@ impl LongitudinalMainScoreElements {
         // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
 
-        let mut ms2_corr_v_gauss =
-            match calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor) {
-                Ok(corr) => corr,
-                Err(e) => {
-                    // TODO: Add context to this error ... if needed
-                    return Err(e);
-                }
-            };
+        let mut ms2_corr_v_gauss = calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor)?;
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
@@ -332,9 +314,9 @@ impl PartialOrd for ScoreInTime {
 }
 
 impl PreScore {
-    fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore> {
+    fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore, DataProcessingError> {
         let longitudinal_main_score_elements =
-            LongitudinalMainScoreElements::new(intensity_arrays)?;
+            LongitudinalMainScoreElements::try_new(intensity_arrays)?;
 
         let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
         let norm_lazy_std =
@@ -467,18 +449,18 @@ impl PreScore {
         })
     }
 
-    fn calc_main_score(&self) -> Result<MainScore> {
+    fn calc_main_score(&self) -> Result<MainScore, DataProcessingError> {
         let intensity_arrays =
             IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
         self.calc_with_intensities(&intensity_arrays)
     }
 
-    fn calc_with_inten_buffer(&self, intensity_arrays: &mut IntensityArrays) -> Result<MainScore> {
+    fn calc_with_inten_buffer(&self, intensity_arrays: &mut IntensityArrays) -> Result<MainScore, DataProcessingError> {
         intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
         self.calc_with_intensities(intensity_arrays)
     }
 
-    pub fn localize(self) -> Result<LocalizedPreScore> {
+    pub fn localize(self) -> Result<LocalizedPreScore, DataProcessingError> {
         let main_score = self.calc_main_score()?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
@@ -490,7 +472,7 @@ impl PreScore {
     pub fn localize_with_buffer(
         self,
         intensity_arrays: &mut IntensityArrays,
-    ) -> Result<LocalizedPreScore> {
+    ) -> Result<LocalizedPreScore, DataProcessingError> {
         let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.

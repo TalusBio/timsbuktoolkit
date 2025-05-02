@@ -10,13 +10,8 @@ use crate::errors;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    /// Input configuration
     pub input: Option<InputConfig>,
-
-    /// Analysis parameters
     pub analysis: AnalysisConfig,
-
-    /// Output configuration
     pub output: Option<OutputConfig>,
 }
 
@@ -34,22 +29,14 @@ pub enum InputConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AnalysisConfig {
-    /// Path to the .d file
     pub dotd_file: Option<PathBuf>,
-
-    /// Processing parameters
     pub chunk_size: usize,
-
-    /// Tolerance settings
     pub tolerance: Tolerance,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OutputConfig {
-    /// Directory for results
     pub directory: PathBuf,
-    /// Whether to enable the full output mode
-    pub full_output: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

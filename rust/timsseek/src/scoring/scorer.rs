@@ -20,20 +20,19 @@ use timsquery::{
 };
 
 use super::calculate_scores::{
-    IntensityArrays,
-    LocalizedPreScore,
-    PreScore,
+    IntensityArrays, LocalizedPreScore, LongitudinalMainScoreElements, PreScore
 };
 use super::search_results::{
     IonSearchResults,
     SearchResultBuilder,
 };
+use super::full_results::FullQueryResult;
 
 #[derive(Debug, Clone)]
 pub struct QueryItemToScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub querie: Arc<ElutionGroup<IonAnnot>>,
+    pub query: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensity: ExpectedIntensities,
 }
 
@@ -48,9 +47,9 @@ pub struct ScoringMetrics {
 }
 
 pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
-    index_cycle_rt_ms: Arc<[u32]>,
-    index: I,
-    tolerance: Tolerance,
+    pub index_cycle_rt_ms: Arc<[u32]>,
+    pub index: I,
+    pub tolerance: Tolerance,
 }
 
 // Private helper methods for individual scoring steps
@@ -58,16 +57,15 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     #[inline] // Potentially inline small helper methods
     fn _build_prescore(&self, item: QueryItemToScore) -> PreScore {
         let mut agg =
-            EGCAggregator::new(item.querie.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+            EGCAggregator::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
         self.index.add_query(&mut agg, &self.tolerance);
 
-        let prescore = PreScore {
+        PreScore {
             charge: item.charge,
             digest: item.digest,
             expected_intensities: item.expected_intensity,
             query_values: agg,
-        };
-        prescore
+        }
     }
 
     // This internal version takes the buffer for optimal reuse in parallel contexts
@@ -76,7 +74,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         &self,
         prescore: PreScore,
         buffer: &mut IntensityArrays,
-    ) -> Result<LocalizedPreScore, TimsSeekError> {
+    ) -> Result<LocalizedPreScore, DataProcessingError> {
         prescore.localize_with_buffer(buffer)
         // Error handling can be done here or propagated
     }
@@ -120,6 +118,37 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
                 None
             }
         }
+    }
+
+    pub fn score_full(&self, queries: QueryItemToScore) -> Result<FullQueryResult, DataProcessingError> {
+        let mut res = EGCAggregator::new(
+            queries.query.clone(),
+            self.index_cycle_rt_ms.clone(),
+        )
+        .unwrap();
+        self.index.add_query(&mut res, &self.tolerance);
+        let builder = SearchResultBuilder::default();
+        let int_arrs = IntensityArrays::new(&res, &queries.expected_intensity)?;
+        let prescore = PreScore {
+            charge: queries.charge,
+            digest: queries.digest,
+            expected_intensities: queries.expected_intensity,
+            query_values: res.clone(),
+        };
+
+        let longitudinal_main_score_elements = LongitudinalMainScoreElements::try_new(&int_arrs)?;
+
+        let res2 = builder
+            .with_localized_pre_score(&prescore.localize()?)
+            .finalize()?;
+        let longitudinal_main_score = longitudinal_main_score_elements.main_score_iter().collect();
+
+        Ok(FullQueryResult {
+            main_score_elements: longitudinal_main_score_elements,
+            longitudinal_main_score,
+            extractions: res.clone(),
+            search_results: res2,
+        })
     }
 
     /// Scores a collection of query items efficiently in parallel.
@@ -166,9 +195,9 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         // This gives the total number skipped for any reason.
         let num_skipped = num_input_items.saturating_sub(results.len());
 
-        // Assign time - might need refinement if separate timings are critical
-        metrics.time_localizing = elapsed / 2; // Crude split example
-        metrics.time_scoring = elapsed / 2; // Needs better measurement if important
+        // // Assign time - might need refinement if separate timings are critical
+        // metrics.time_localizing = ???
+        // metrics.time_scoring = ???
 
         (results, metrics)
     }

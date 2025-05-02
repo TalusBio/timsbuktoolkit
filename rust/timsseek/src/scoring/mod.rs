@@ -4,3 +4,8 @@ pub mod scorer;
 mod scores;
 pub mod search_results;
 // pub mod search_results;
+//
+pub use scorer::{
+    Scorer,
+    QueryItemToScore,
+};

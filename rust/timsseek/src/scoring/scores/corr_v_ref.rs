@@ -1,4 +1,4 @@
-use crate::errors::Result;
+use crate::errors::DataProcessingError;
 use crate::utils::correlation::cosine_similarity;
 use timsquery::models::{
     MzMajorIntensityArray,
@@ -9,7 +9,7 @@ use timsquery::traits::key_like::KeyLike;
 pub fn calculate_cosine_with_ref<FH: KeyLike>(
     slices: &RTMajorIntensityArray<FH, f32>,
     ref_slice: &[f32],
-) -> Result<Vec<f32>> {
+) -> Result<Vec<f32>, DataProcessingError> {
     slices
         .arr
         .row_apply(|slice| cosine_similarity(slice, ref_slice))
@@ -20,7 +20,7 @@ pub fn calculate_cosine_with_ref<FH: KeyLike>(
 const REF_GAUSSIAN: [f32; 7] = [0.0044, 0.054, 0.242, 0.399, 0.242, 0.054, 0.0044];
 const REF_GAUSS_OFFSET: usize = 4;
 
-fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32>> + '_ {
+fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32, DataProcessingError>> + '_ {
     slice
         .windows(7)
         .map(|window| cosine_similarity(window, &REF_GAUSSIAN))
@@ -28,7 +28,7 @@ fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32>> +
 
 pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
     slices: &MzMajorIntensityArray<FH, f32>,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<f32>, DataProcessingError> {
     let mut result = vec![0.0; slices.arr.ncols()];
     slices
         .arr
@@ -46,7 +46,8 @@ pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
             }
             Ok(())
         })
-        .collect::<Result<()>>()?;
+        .collect::<Result<(), DataProcessingError>>()?;
+    // TODO replace with iter_rows instead of the apply ...
 
     let nrows = slices.arr.nrows();
     result.iter_mut().for_each(|v| *v /= nrows as f32);
@@ -57,7 +58,7 @@ pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
 #[test]
 fn test_calculate_cosine_with_ref_gaussian() {
     let test_vec = (0..3).flat_map(|_| REF_GAUSSIAN).collect::<Vec<f32>>();
-    let out = slide_cosine_v_gaussian(&test_vec).collect::<Result<Vec<f32>>>();
+    let out = slide_cosine_v_gaussian(&test_vec).collect::<Result<Vec<f32>, DataProcessingError>>();
     let expect_out = [
         1.0000001,
         0.7786916,

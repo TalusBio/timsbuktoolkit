@@ -25,6 +25,7 @@ use timsseek::scoring::calculate_scores::{
 use timsseek::scoring::full_results::FullQueryResult;
 use timsseek::scoring::search_results::SearchResultBuilder;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
+use timsseek::scoring::{QueryItemToScore, Scorer};
 
 // TODO: replace with a trait ... This works for now though
 type IndexUse = ExpandedRawFrameIndex;
@@ -38,7 +39,7 @@ pub struct BundledDotDIndex {
 pub struct InputQuery {
     pub sequence: String,
     pub charge: u8,
-    pub elution_group: ElutionGroup<IonAnnot>,
+    pub elution_group: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
 }
 
@@ -47,7 +48,7 @@ impl InputQuery {
         Self {
             sequence: "PEPTIDE".to_string(),
             charge: 2,
-            elution_group: ElutionGroup {
+            elution_group: Arc::new(ElutionGroup {
                 id: 0,
                 mobility: 0.75,
                 rt_seconds: 0.0,
@@ -59,7 +60,7 @@ impl InputQuery {
                     (IonAnnot::try_from("a4").unwrap(), 451.5),
                 ]
                 .into(),
-            },
+            }),
             expected_intensities: ExpectedIntensities {
                 precursor_intensities: vec![1.0, 1.0, 1.0, 1.0],
                 fragment_intensities: HashMap::from_iter(
@@ -77,13 +78,13 @@ impl InputQuery {
     }
 }
 
-impl From<InputQuery> for NamedQuery {
+impl From<InputQuery> for QueryItemToScore {
     fn from(value: InputQuery) -> Self {
         Self {
             digest: DigestSlice::from_string(value.sequence.clone(), false),
             charge: value.charge,
-            elution_group: value.elution_group,
-            expected_intensities: value.expected_intensities,
+            query: value.elution_group,
+            expected_intensity: value.expected_intensities,
         }
     }
 }
@@ -96,31 +97,36 @@ pub struct NamedQuery {
     pub expected_intensities: ExpectedIntensities,
 }
 
+pub fn new_index(
+    dotd_file_location: std::path::PathBuf,
+    tolerance: Tolerance,
+) -> Result<Scorer<IndexUse>> {
+    let st = Instant::now();
+    // Can use centroided for faster queries ...
+    let index = ExpandedRawFrameIndex::from_path(
+        dotd_file_location
+            .clone()
+            .to_str()
+            .expect("Path is not convertable to string"),
+    )?;
+    let elap_time = st.elapsed();
+    println!(
+        "Loading index took: {:?} for {}",
+        elap_time,
+        dotd_file_location.display()
+    );
+
+    let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
+    let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
+
+    Ok(Scorer {
+        index_cycle_rt_ms: ref_time_ms,
+        index,
+        tolerance,
+    })
+}
+
 impl BundledDotDIndex {
-    pub fn new(
-        dotd_file_location: std::path::PathBuf,
-        tolerance: Tolerance,
-    ) -> Result<BundledDotDIndex> {
-        let st = Instant::now();
-        // Can use centroided for faster queries ...
-        let index = ExpandedRawFrameIndex::from_path(
-            dotd_file_location
-                .clone()
-                .to_str()
-                .expect("Path is not convertable to string"),
-        )?;
-        let elap_time = st.elapsed();
-        println!(
-            "Loading index took: {:?} for {}",
-            elap_time,
-            dotd_file_location.display()
-        );
-
-        let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
-        let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
-
-        Ok(BundledDotDIndex { index, tolerance })
-    }
 
     pub fn query(&self, queries: NamedQuery) -> Result<FullQueryResult> {
         let mut res = EGCAggregator::new(
