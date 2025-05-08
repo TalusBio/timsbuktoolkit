@@ -4,15 +4,17 @@ use super::scores::{
     corr_v_ref,
     hyperscore,
 };
-use crate::data_sources::speclib::ExpectedIntensities;
 use crate::errors::DataProcessingError;
-use crate::fragment_mass::IonAnnot;
 use crate::models::DigestSlice;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
     calculate_value_vs_baseline,
 };
 use crate::utils::top_n_array::TopNArray;
+use crate::{
+    ExpectedIntensities,
+    IonAnnot,
+};
 use core::f32;
 use serde::Serialize;
 use std::sync::Arc;
@@ -87,7 +89,11 @@ impl IntensityArrays {
         })
     }
 
-    pub fn new_empty(num_ms1: usize, num_ms2: usize, ref_time_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
+    pub fn new_empty(
+        num_ms1: usize,
+        num_ms2: usize,
+        ref_time_ms: Arc<[u32]>,
+    ) -> Result<Self, DataProcessingError> {
         // This is mainly used to pre-allocated the memory that will be used later by several.
         // runs.
         let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|o| (o as i8, 867.8309)).collect();
@@ -207,7 +213,8 @@ impl LongitudinalMainScoreElements {
 
         let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
 
-        let mut ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7)?;
+        let mut ms2_coelution_score =
+            coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7)?;
 
         let tmp = coelution_score::coelution_score::<6, i8>(&intensity_arrays.ms1_mzmajor, 7);
         let mut ms1_coelution_score = match tmp {
@@ -219,7 +226,8 @@ impl LongitudinalMainScoreElements {
         // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
 
-        let mut ms2_corr_v_gauss = calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor)?;
+        let mut ms2_corr_v_gauss =
+            calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor)?;
 
         gaussblur(&mut lazyscore);
         gaussblur(&mut ms1_coelution_score);
@@ -314,7 +322,10 @@ impl PartialOrd for ScoreInTime {
 }
 
 impl PreScore {
-    fn calc_with_intensities(&self, intensity_arrays: &IntensityArrays) -> Result<MainScore, DataProcessingError> {
+    fn calc_with_intensities(
+        &self,
+        intensity_arrays: &IntensityArrays,
+    ) -> Result<MainScore, DataProcessingError> {
         let longitudinal_main_score_elements =
             LongitudinalMainScoreElements::try_new(intensity_arrays)?;
 
@@ -455,7 +466,10 @@ impl PreScore {
         self.calc_with_intensities(&intensity_arrays)
     }
 
-    fn calc_with_inten_buffer(&self, intensity_arrays: &mut IntensityArrays) -> Result<MainScore, DataProcessingError> {
+    fn calc_with_inten_buffer(
+        &self,
+        intensity_arrays: &mut IntensityArrays,
+    ) -> Result<MainScore, DataProcessingError> {
         intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
         self.calc_with_intensities(intensity_arrays)
     }
@@ -464,7 +478,7 @@ impl PreScore {
         let main_score = self.calc_main_score()?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
-            return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
         }
         Ok(LocalizedPreScore::new(self, main_score))
     }
@@ -476,7 +490,7 @@ impl PreScore {
         let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
-            return Err(DataProcessingError::ExpectedNonEmptyData { context: None }.into());
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
         }
         Ok(LocalizedPreScore::new(self, main_score))
     }

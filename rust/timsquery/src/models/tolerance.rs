@@ -10,8 +10,38 @@ use timsrust::converters::{
     Tof2MzConverter,
 };
 
+/// Tolerance settings for the search.
+///
+/// This is meant to encapsulate the different tolerances needed
+/// for all the dimensions in a search.
+///
+/// Example:
+/// ```
+/// use timsquery::Tolerance;
+///
+/// let tolerance = Tolerance::default();
+/// ```
+///
+/// Since every dimenion has a different way of defining its tolerance
+/// every dimension has its own type (highly encourage you to thech the options
+/// for each dimension).
+///
+/// Convention:
+/// In contrast with how some software defines tolerance, here we define the ranges
+/// in terms of positive values. For instance, here a tolerance of (1,1) on a value
+/// of 10 means a range of (9,11) while in some software the same range would be defined
+/// as (-1,1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MzToleramce {
+pub struct Tolerance {
+    pub ms: MzTolerance,
+    #[serde(default)]
+    pub rt: RtTolerance,
+    pub mobility: MobilityTolerance,
+    pub quad: QuadTolerance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MzTolerance {
     #[serde(rename = "da")]
     Absolute((f64, f64)),
     #[serde(rename = "ppm")]
@@ -43,19 +73,10 @@ pub enum QuadTolerance {
     Absolute((f32, f32)),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tolerance {
-    pub ms: MzToleramce,
-    #[serde(default)]
-    pub rt: RtTolerance,
-    pub mobility: MobilityTolerance,
-    pub quad: QuadTolerance,
-}
-
 impl Default for Tolerance {
     fn default() -> Self {
         Tolerance {
-            ms: MzToleramce::Ppm((20.0, 20.0)),
+            ms: MzTolerance::Ppm((20.0, 20.0)),
             rt: RtTolerance::Minutes((5.0, 5.0)),
             mobility: MobilityTolerance::Pct((3.0, 3.0)),
             quad: QuadTolerance::Absolute((0.1, 0.1)),
@@ -66,8 +87,8 @@ impl Default for Tolerance {
 impl Tolerance {
     pub fn mz_range(&self, mz: f64) -> IncludedRange<f64> {
         match self.ms {
-            MzToleramce::Absolute((low, high)) => (mz - low, mz + high).into(),
-            MzToleramce::Ppm((low, high)) => {
+            MzTolerance::Absolute((low, high)) => (mz - low, mz + high).into(),
+            MzTolerance::Ppm((low, high)) => {
                 let low = mz * low / 1e6;
                 let high = mz * high / 1e6;
                 (mz - low, mz + high).into()
@@ -148,37 +169,3 @@ impl Tolerance {
         )
     }
 }
-
-// impl NaturalPrecursorQuery {
-//     pub fn as_precursor_query(
-//         &self,
-//         mz_converter: &Tof2MzConverter,
-//         im_converter: &Scan2ImConverter,
-//     ) -> PrecursorIndexQuery {
-//         PrecursorIndexQuery {
-//             frame_index_range: (
-//                 im_converter.invert(self.mobility_range.start()).round() as usize,
-//                 im_converter.invert(self.mobility_range.end()).round() as usize,
-//             )
-//                 .into(),
-//             rt_range_seconds: self.rt_range,
-//             mz_index_ranges: self
-//                 .mz_ranges
-//                 .iter()
-//                 .map(|mz_range| {
-//                     (
-//                         mz_converter.invert(mz_range.start()).round() as u32,
-//                         mz_converter.invert(mz_range.end()).round() as u32,
-//                     )
-//                         .into()
-//                 })
-//                 .collect(),
-//             mobility_index_range: (
-//                 im_converter.invert(self.mobility_range.start()).round() as usize,
-//                 im_converter.invert(self.mobility_range.end()).round() as usize,
-//             )
-//                 .into(),
-//             isolation_mz_range: self.isolation_mz_range,
-//         }
-//     }
-// }

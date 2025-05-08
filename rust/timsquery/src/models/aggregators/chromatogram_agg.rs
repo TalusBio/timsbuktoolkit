@@ -57,8 +57,18 @@ impl<T: KeyLike> EGCAggregator<T> {
     }
 
     pub fn rt_range(&self) -> IncludedRange<u32> {
-        let min = self.fragments.rts_ms.first().unwrap().min(self.precursors.rts_ms.first().unwrap());
-        let max = self.fragments.rts_ms.last().unwrap().min(self.precursors.rts_ms.last().unwrap());
+        let min = self
+            .fragments
+            .rts_ms
+            .first()
+            .unwrap()
+            .min(self.precursors.rts_ms.first().unwrap());
+        let max = self
+            .fragments
+            .rts_ms
+            .last()
+            .unwrap()
+            .min(self.precursors.rts_ms.last().unwrap());
         (*min, *max).into()
     }
 }

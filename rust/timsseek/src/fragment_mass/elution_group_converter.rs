@@ -1,8 +1,10 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
-use crate::data_sources::speclib::ExpectedIntensities;
-use crate::fragment_mass::IonAnnot;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
+use crate::{
+    ExpectedIntensities,
+    IonAnnot,
+};
 use rayon::prelude::*;
 use rustyms::error::{
     Context,

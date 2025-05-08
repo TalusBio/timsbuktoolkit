@@ -7,7 +7,6 @@ use timsrust::converters::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IncludedRange<T: Copy + PartialOrd>(T, T);
 
-
 impl<T> IncludedRange<T>
 where
     T: Copy + PartialOrd,

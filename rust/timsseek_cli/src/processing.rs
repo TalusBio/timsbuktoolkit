@@ -1,83 +1,52 @@
-use super::config::{
-    AnalysisConfig,
-    DigestionConfig,
-    OutputConfig,
-};
+use super::config::OutputConfig;
 use indicatif::{
     ProgressIterator,
     ProgressStyle,
 };
-use rayon::prelude::*;
-use timsseek::fragment_mass::IonAnnot;
-use timsseek::scoring::scorer::Scorer;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{
-    Duration,
-    Instant,
-};
-use timsquery::models::aggregators::EGCAggregator;
+use std::time::Instant;
+use timsquery::GenerallyQueriable;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
-use timsquery::{
-    GenerallyQueriable, QueriableData, Tolerance
-};
+use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
-use timsseek::digest::digestion::{
-    DigestionEnd,
-    DigestionParameters,
-    DigestionPattern,
-};
 use timsseek::errors::TimsSeekError;
-use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
-use timsseek::models::{
-    DigestSlice,
-    DigestedSequenceIterator,
-    NamedQueryChunk,
-    deduplicate_digests,
-};
-use timsseek::protein::fasta::ProteinSequenceCollection;
-use timsseek::scoring::calculate_scores::{
-    IntensityArrays,
-    LocalizedPreScore,
-    LongitudinalMainScoreElements,
-    PreScore,
-};
-use timsseek::scoring::full_results::FullQueryResult;
+use timsseek::scoring::scorer::Scorer;
 use timsseek::scoring::search_results::{
     IonSearchResults,
-    SearchResultBuilder,
-    write_results_to_parquet,
+    ResultParquetWriter,
 };
-use tracing::info;
 
-
-pub fn main_loop<'a, I: GenerallyQueriable<IonAnnot>>(
-    chunked_query_iterator: impl ExactSizeIterator<Item = NamedQueryChunk>,
-    scorer: &'a Scorer<I>,
-    tolerance: &'a Tolerance,
+pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
+    // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
+    // # I would like this to be streaming
+    query_iterator: Speclib,
+    scorer: &Scorer<I>,
+    chunk_size: usize,
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
     let start = Instant::now();
 
+    let out_path_pq = out_path.directory.join("results.parquet");
+    let mut pq_writer = ResultParquetWriter::new(out_path_pq, 20_000).unwrap();
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )
     .unwrap();
-    chunked_query_iterator
+    query_iterator
+        .as_slice()
+        .chunks(chunk_size)
         .progress_with_style(style)
         .for_each(|chunk| {
-            // Here I am branching whether I want the 'full output', which is
-            // which writes to disk both the search results and the extractions
-            // to disk. If that is not requested, the (hypothetically) more
-            // efficient version is used.
-            let out: (Vec<IonSearchResults>, RuntimeMetrics) = scorer.score_iter(chunk);
-            let out_path_pq = &out_path
-                .directory
-                .join(format!("chunk_{}.parquet", chunk_num));
-            write_results_to_parquet(&out.0, out_path_pq).unwrap();
+            // Parallelism happens here within the score_iter function
+            let out: Vec<IonSearchResults> = scorer.score_iter(chunk);
+            for x in out.into_iter() {
+                pq_writer.add(x);
+            }
             chunk_num += 1;
         });
+
+    pq_writer.close();
     println!(
         "Finished processing {} chunks in {:?}",
         chunk_num,
@@ -88,10 +57,11 @@ pub fn main_loop<'a, I: GenerallyQueriable<IonAnnot>>(
 
 pub fn process_speclib(
     path: PathBuf,
-    index: &QuadSplittedTransposedIndex,
-    analysis: &AnalysisConfig,
+    scorer: &Scorer<QuadSplittedTransposedIndex>,
+    chunk_size: usize,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
+    // TODO: I should probably "inline" this function with the main loop
     tracing::info!("Building database from speclib file {:?}", path);
     let st = std::time::Instant::now();
     let speclib = Speclib::from_ndjson_file(&path)?;
@@ -102,8 +72,7 @@ pub fn process_speclib(
         elap_time,
         path.display()
     );
-    let speclib_iter = speclib.as_iterator(analysis.chunk_size);
 
-    main_loop(speclib_iter, index, &analysis.tolerance, output)?;
+    main_loop(speclib, scorer, chunk_size, output)?;
     Ok(())
 }

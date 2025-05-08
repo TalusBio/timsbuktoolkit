@@ -5,6 +5,7 @@ mod processing;
 
 use clap::Parser;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
+use timsseek::scoring::Scorer;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -15,13 +16,12 @@ use config::{
     OutputConfig,
 };
 
-// TODO: Check if this is faster in linux
-// It is faster in windows but not in mac.
-//
-// use mimalloc::MiMalloc;
-//
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
+#[cfg(target_os = "windows")]
+use mimalloc::MiMalloc;
+
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> std::result::Result<(), errors::CliError> {
     // Initialize logging
@@ -72,7 +72,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
         });
     }
 
-    let mut output_config = match config.output {
+    let output_config = match config.output {
         Some(ref x) => x.clone(),
         None => {
             panic!(
@@ -104,17 +104,23 @@ fn main() -> std::result::Result<(), errors::CliError> {
     )
     .unwrap();
 
-    let tdf_path = &dotd_file_location.clone().unwrap().join("analysis.tdf");
-
     // Process based on input type
     match config.input {
-        Some(InputConfig::Fasta { path, digestion }) => {
-            todo!();
-            // processing::process_fasta(path, &index, digestion, &config.analysis, &output_config)
-            //     .unwrap();
-        }
+        // Some(InputConfig::Fasta { path, digestion }) => {
+        //     // I like the idea of just converting the fasta into a speclib ...
+        //     // but a part of me feels like that would be a waste of memoory ...
+        //     // but it might also be a premature optmization ...
+        //     // processing::process_fasta(path, &index, digestion, &config.analysis, &output_config)
+        //     //     .unwrap();
+        // }
         Some(InputConfig::Speclib { path }) => {
-            processing::process_speclib(path, &index, &config.analysis, &output_config).unwrap();
+            let scorer = Scorer {
+                index_cycle_rt_ms: index.cycle_rt_ms.clone(),
+                index,
+                tolerance: config.analysis.tolerance.clone(),
+            };
+            processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)
+                .unwrap();
         }
         None => {
             return Err(errors::CliError::Config {

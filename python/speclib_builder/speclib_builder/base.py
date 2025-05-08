@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import asdict, dataclass
 
 from rustyms import FragmentationModel, LinearPeptide
+from pydantic import BaseModel, ConfigDict
 
 from .decoys import DecoyStrategy, build_massshift_dict
 
@@ -11,62 +11,37 @@ PROTON_MASS = 1.007276466
 NEUTRON_MASS = 1.008664916
 
 
-@dataclass(slots=True, frozen=True)
-class PeptideElement:
+class PeptideElement(BaseModel):
     peptide: str
     charge: int
     nce: float
     decoy: bool
 
 
-@dataclass(slots=True, frozen=True)
-class MzIntPair:
+class MzIntPair(BaseModel):
     mz: float
     intensity: float
 
 
-@dataclass(slots=True, frozen=True)
-class PrecursorEntry:
+class PrecursorEntry(BaseModel):
     sequence: str
     charge: int
     decoy: bool
 
 
-@dataclass
-class ElutionGroup:
+class ElutionGroup(BaseModel):
     id: int
     mobility: float
     rt_seconds: float
-    precursor_mzs: list[float]
-    fragment_mzs: dict[str, float]
+    precursors: list[tuple[int, float]]
+    fragments: list[tuple[str, float]]
     precursor_intensities: list[float]
     fragment_intensities: dict[str, float]
 
 
-@dataclass
-class SpeclibElement:
+class SpeclibElement(BaseModel):
     precursor: PrecursorEntry
     elution_group: ElutionGroup
-
-    def as_rt_entry(self) -> dict:
-        return {
-            "sequence": self.precursor.sequence,
-            "charge": self.precursor.charge,
-            "elution_group": {
-                "id": self.elution_group.id,
-                "mobility": self.elution_group.mobility,
-                "rt_seconds": self.elution_group.rt_seconds,
-                "precursor_mzs": self.elution_group.precursor_mzs,
-                "fragment_mzs": self.elution_group.fragment_mzs,
-            },
-            "expected_intensities": {
-                "fragment_intensities": self.elution_group.fragment_intensities,
-                "precursor_intensities": self.elution_group.precursor_intensities,
-            },
-        }
-
-    def as_dict(self) -> dict:
-        return asdict(self)
 
     def swap_peptide(
         self,
@@ -84,7 +59,7 @@ class SpeclibElement:
         other than the fragment m/z values.
         """
         peptide = LinearPeptide(proforma)
-        curr_fragment_mzs = self.elution_group.fragment_mzs
+        curr_fragment_mzs = self.elution_group.fragments
         frags = peptide.generate_theoretical_fragments(
             peptide.charge - 1, fragmentation_model
         )
@@ -94,7 +69,7 @@ class SpeclibElement:
         }
 
         keep = {}
-        for k, v in curr_fragment_mzs.items():
+        for k, v in curr_fragment_mzs:
             if k in ion_mass_dict:
                 keep[k] = ion_mass_dict[k]
             else:
@@ -110,8 +85,8 @@ class SpeclibElement:
                 id=id,
                 mobility=self.elution_group.mobility,
                 rt_seconds=self.elution_group.rt_seconds,
-                precursor_mzs=self.elution_group.precursor_mzs,
-                fragment_mzs=keep,
+                precursors=self.elution_group.precursors,
+                fragments=list(keep.items()),
                 precursor_intensities=self.elution_group.precursor_intensities,
                 fragment_intensities=self.elution_group.fragment_intensities,
             ),
@@ -133,7 +108,7 @@ class SpeclibElement:
         )
 
         new_fragment_mzs = {}
-        for k, v in self.elution_group.fragment_mzs.items():
+        for k, v in self.elution_group.fragments:
             new_fragment_mzs[k] = v + massshift_dict[k]
 
         return SpeclibElement(
@@ -146,16 +121,17 @@ class SpeclibElement:
                 id=id,
                 mobility=self.elution_group.mobility,
                 rt_seconds=self.elution_group.rt_seconds,
-                precursor_mzs=self.elution_group.precursor_mzs,
-                fragment_mzs=new_fragment_mzs,
+                precursors=self.elution_group.precursors,
+                fragments=list(new_fragment_mzs.items()),
                 precursor_intensities=self.elution_group.precursor_intensities,
                 fragment_intensities=self.elution_group.fragment_intensities,
             ),
         )
 
 
-@dataclass
-class EntryElements:
+class EntryElements(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     peptide: LinearPeptide
     ion_dict: dict[str, MzIntPair]
     rt_seconds: float

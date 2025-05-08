@@ -78,6 +78,24 @@ def main():
     fasta_file = args.fasta_file
     outfile = args.outfile
     max_keep = args.max_ions
+
+    _main(
+        fasta_file=fasta_file,
+        outfile=outfile,
+        max_keep=max_keep,
+        decoy_strategy=decoy_strategy,
+        annotator=annotator,
+    )
+
+
+def _main(
+    *,
+    fasta_file: str,
+    outfile: str,
+    max_keep: int,
+    decoy_strategy: DecoyStrategy,
+    annotator: OnnxPeptideTransformerAnnotator | DummyAnnotator,
+):
     pretty_outfile = f"{outfile}.pretty.json"
 
     peptide_builder = PeptideBuilder(
@@ -127,7 +145,7 @@ def main():
                 pretty_outs.append(elem)
                 is_first_n -= 1
 
-            file.write(json.dumps(elem.as_dict()) + "\n")
+            file.write(elem.model_dump_json() + "\n")
             file.flush()
 
         is_first_n = 10
@@ -153,12 +171,12 @@ def main():
                 pretty_outs.append(elem)
                 is_first_n -= 1
 
-            file.write(json.dumps(elem.as_dict()) + "\n")
+            file.write(elem.model_dump_json() + "\n")
             file.flush()
 
     pprint(f"Writing pretty output to file: {pretty_outfile}")
     with open(pretty_outfile, "w") as file:
-        file.write(json.dumps([x.as_dict() for x in pretty_outs], indent=4))
+        file.write(json.dumps([x.model_dump() for x in pretty_outs], indent=4))
         file.flush()
 
 

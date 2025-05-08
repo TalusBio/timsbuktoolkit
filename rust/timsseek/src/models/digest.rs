@@ -50,7 +50,7 @@ impl DigestSlice {
         DigestSlice {
             ref_seq: self.ref_seq.clone(),
             range: self.range.clone(),
-            decoy: DecoyMarking::Decoy,
+            decoy: DecoyMarking::NonReversedDecoy,
         }
     }
 
@@ -67,16 +67,24 @@ impl DigestSlice {
     pub fn is_empty(&self) -> bool {
         self.range.is_empty()
     }
+
+    pub fn is_decoy(&self) -> bool {
+        matches!(
+            self.decoy,
+            DecoyMarking::ReversedDecoy | DecoyMarking::NonReversedDecoy
+        )
+    }
 }
 
 impl From<DigestSlice> for String {
+    // TODO make this a cow ... maybe ...
     fn from(x: DigestSlice) -> Self {
         let tmp = &x.ref_seq.as_ref()[(x.range.start as usize)..(x.range.end as usize)];
 
         match x.decoy {
             DecoyMarking::Target => tmp.to_string(),
             DecoyMarking::ReversedDecoy => tmp.to_string(),
-            DecoyMarking::Decoy => as_decoy_string(tmp),
+            DecoyMarking::NonReversedDecoy => as_decoy_string(tmp),
         }
     }
 }
@@ -104,22 +112,22 @@ mod tests {
         let digests: Vec<DigestSlice> = vec![
             DigestSlice {
                 ref_seq: seq.clone(),
-                range: (0 as u16..seq.as_ref().len() as u16),
+                range: (0_u16..seq.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq.clone(),
-                range: (0 as u16..seq2.as_ref().len() as u16), // Note the short length
+                range: (0_u16..seq2.as_ref().len() as u16), // Note the short length
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq2.clone(),
-                range: (0 as u16..seq2.as_ref().len() as u16),
+                range: (0_u16..seq2.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
             DigestSlice {
                 ref_seq: seq2_rep.clone(),
-                range: (0 as u16..seq2_rep.as_ref().len() as u16),
+                range: (0_u16..seq2_rep.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
             },
         ];

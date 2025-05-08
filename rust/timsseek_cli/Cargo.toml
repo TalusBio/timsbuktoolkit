@@ -8,7 +8,6 @@ timsseek = { path = "../timsseek" }
 timsquery = { path = "../timsquery" }
 
 regex = "1.11.1"
-# mimalloc = "0.1.43"
 
 # Workspace-inherited deps
 clap = { workspace = true, features = ["derive"] }
@@ -23,3 +22,11 @@ timsrust = { workspace = true }
 [[bin]]
 name = "timsseek"
 path = "src/main.rs"
+
+[[bin]]
+name = "timsseek_sample_speclib"
+path = "src/sample_speclib.rs"
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
+

@@ -10,8 +10,10 @@ from .decoys import DecoyStrategy, yield_as_decoys
 def get_peptides(fasta_file: str) -> list[str]:
     print("Cleaving the proteins with trypsin...")
     unique_peptides = set()
+    nseqs = 0
     with open(fasta_file) as file:
         for description, sequence in fasta.FASTA(file):
+            nseqs += 1
             new_peptides = parser.cleave(
                 sequence,
                 "trypsin",
@@ -23,7 +25,7 @@ def get_peptides(fasta_file: str) -> list[str]:
 
     unique_peptides = list(unique_peptides)
     print(unique_peptides[:5])
-    print("Done, {0} sequences obtained!".format(len(unique_peptides)))
+    print(f"Done, {len(unique_peptides)} sequences obtained from {nseqs} proteins!")
     return unique_peptides
 
 
@@ -60,7 +62,8 @@ class PeptideBuilder:
             )
         )
         return [
-            PeptideElement(pep, charge, nce, False) for pep, charge, nce in targ_use
+            PeptideElement(peptide=pep, charge=charge, nce=nce, decoy=False)
+            for pep, charge, nce in targ_use
         ]
 
     def get_decoys(self) -> list[str]:
@@ -76,5 +79,6 @@ class PeptideBuilder:
             )
         )
         return [
-            PeptideElement(pep, charge, nce, True) for pep, charge, nce in decoys_use
+            PeptideElement(peptide=pep, charge=charge, nce=nce, decoy=True)
+            for pep, charge, nce in decoys_use
         ]

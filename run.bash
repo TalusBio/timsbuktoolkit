@@ -11,7 +11,6 @@ if [ -n "${FULL_RUN}" ]; then
     DOTD_FILE="/Users/sebastianpaez/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
     RESULTS_DIR="data_ignore/hela_search_results"
     SUMMARY_DIR="data_ignore/hela_search_summary"
-    EXTRAS=""
 elif [ -n "${FULL_MCCOSS}" ]; then
     echo "Bo data run"
     sleep 2
@@ -20,7 +19,6 @@ elif [ -n "${FULL_MCCOSS}" ]; then
     SPECLIB_NAME="data_ignore/20231030_LINEARIZED_UP000005640_9606.ndjson"
     RESULTS_DIR="data_ignore/mccoss_search_results"
     SUMMARY_DIR="data_ignore/mccoss_search_summary"
-    EXTRAS=""
 elif [ -n "${VIMENTIN_ONLY}" ]; then
     echo "VIM only"
     sleep 2
@@ -29,7 +27,6 @@ elif [ -n "${VIMENTIN_ONLY}" ]; then
     SPECLIB_NAME="data_ignore/vimentin.ndjson"
     RESULTS_DIR="data_ignore/vimentin_search_results"
     SUMMARY_DIR="data_ignore/vimentin_search_summary"
-    EXTRAS="--full-output"
 else
     # Quick run
     echo "Quick run"
@@ -39,7 +36,6 @@ else
     DOTD_FILE="$HOME/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
     RESULTS_DIR="data_ignore/top_proteins_hela"
     SUMMARY_DIR="data_ignore/top_proteins_hela_summary"
-    EXTRAS=""
 fi
 
 # Stop if the results dir already exists
@@ -80,7 +76,7 @@ cargo run --release --bin timsseek -- \
     --config config_use.json \
     --speclib-file $SPECLIB_NAME \
     --output-dir $RESULTS_DIR \
-    --dotd-file $DOTD_FILE $EXTRAS
+    --dotd-file $DOTD_FILE
 
 # Technically does T/D competition
 uv run python -m timsseek_rescore --results_dir $RESULTS_DIR --output_dir $SUMMARY_DIR
