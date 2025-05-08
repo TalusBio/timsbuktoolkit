@@ -1,4 +1,4 @@
-use crate::fragment_mass::IonAnnot;
+use crate::IonAnnot;
 use crate::scoring::calculate_scores::LongitudinalMainScoreElements;
 use crate::scoring::search_results::IonSearchResults;
 use serde::Serialize;

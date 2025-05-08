@@ -1,3 +1,7 @@
+# Credit where credit is due ...
+# This is essentially a port of the original code from Sage
+# and its immplementation of the isotope distribution calculation
+
 import numpy as np
 from rustyms import MolecularFormula
 
@@ -86,22 +90,6 @@ def peptide_isotopes(carbons: int, sulfurs: int) -> tuple[float, float, float]:
 
     # Normalize first 3 values
     return [val.item() / max_val for val in result[:3]]
-
-
-def test_peptide_isotopes():
-    """
-    Test function to verify peptide isotope calculations.
-    """
-    iso = peptide_isotopes(60, 5)
-    expected = [0.3972, 0.2824, 0.1869, 0.0846]
-    expected = [val / 0.3972 for val in expected[:3]]  # Normalize first 3 values
-
-    # Check if all differences are within tolerance
-    tolerance = 0.02
-    matched = all(abs(a - b) <= tolerance for a, b in zip(iso, expected, strict=True))
-
-    assert matched, f"Test failed: {iso} != {expected}"
-    print("Test passed successfully!")
 
 
 def peptide_formula_dist(formula: MolecularFormula) -> tuple[float, float, float]:

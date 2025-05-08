@@ -1,4 +1,5 @@
 use serde_json;
+use std::path::PathBuf;
 use timsquery::{
     DataProcessingError as TQDataProcessingError,
     TimsqueryError,
@@ -27,6 +28,19 @@ pub enum DataProcessingError {
     TimsQueryDataProcessingError {
         error: TQDataProcessingError,
         context: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum LibraryReadingError {
+    SpeclibParsingError {
+        source: serde_json::Error,
+        context: &'static str,
+    },
+    FileReadingError {
+        source: std::io::Error,
+        context: &'static str,
+        path: PathBuf,
     },
 }
 
@@ -88,6 +102,7 @@ pub enum TimsSeekError {
         msg: String,
     },
     DataProcessingError(DataProcessingError),
+    LibraryReadingError(LibraryReadingError),
 }
 
 impl std::fmt::Display for TimsSeekError {
@@ -127,6 +142,12 @@ impl From<serde_json::Error> for TimsSeekError {
 impl From<DataProcessingError> for TimsSeekError {
     fn from(x: DataProcessingError) -> Self {
         Self::DataProcessingError(x)
+    }
+}
+
+impl From<LibraryReadingError> for TimsSeekError {
+    fn from(x: LibraryReadingError) -> Self {
+        Self::LibraryReadingError(x)
     }
 }
 

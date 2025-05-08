@@ -13,7 +13,7 @@ use rustyms::{
     Model,
 };
 
-use super::{
+use crate::{
     IonAnnot,
     IonParsingError,
 };

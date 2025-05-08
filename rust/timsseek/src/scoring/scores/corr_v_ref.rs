@@ -20,7 +20,9 @@ pub fn calculate_cosine_with_ref<FH: KeyLike>(
 const REF_GAUSSIAN: [f32; 7] = [0.0044, 0.054, 0.242, 0.399, 0.242, 0.054, 0.0044];
 const REF_GAUSS_OFFSET: usize = 4;
 
-fn slide_cosine_v_gaussian(slice: &[f32]) -> impl Iterator<Item = Result<f32, DataProcessingError>> + '_ {
+fn slide_cosine_v_gaussian(
+    slice: &[f32],
+) -> impl Iterator<Item = Result<f32, DataProcessingError>> + '_ {
     slice
         .windows(7)
         .map(|window| cosine_similarity(window, &REF_GAUSSIAN))

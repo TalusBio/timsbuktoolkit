@@ -21,7 +21,7 @@ use timsquery::models::indices::{
 };
 use timsquery::models::tolerance::{
     MobilityTolerance,
-    MzToleramce,
+    MzTolerance,
     QuadTolerance,
     RtTolerance,
     Tolerance,
@@ -72,7 +72,10 @@ fn main_write_template(args: WriteTemplateArgs) {
     println!("Writing to {}", put_path.display());
     let egs_json_path = put_path.join("elution_groups.json");
     let tolerance_json_path = put_path.join("tolerance_settings.json");
+
+    println!("\n>>> Example elution groups: \n{}\n", &egs_json);
     std::fs::write(egs_json_path.clone(), egs_json).unwrap();
+    println!("\n>>> Example tolerances: \n{}\n", &tolerance_json);
     std::fs::write(tolerance_json_path.clone(), tolerance_json).unwrap();
     println!(
         "use as `timsquery query-index --output-path '.' --raw-file-path 'your_file.d' --tolerance-settings-path {:#?} --elution-groups-path {:#?}`",
@@ -135,7 +138,7 @@ fn main_query_index(args: QueryIndexArgs) {
 
 fn template_tolerance_settings() -> Tolerance {
     Tolerance {
-        ms: MzToleramce::Ppm((15.0, 15.0)),
+        ms: MzTolerance::Ppm((15.0, 15.0)),
         // rt: RtTolerance::Absolute((120.0, 120.0)),
         rt: RtTolerance::None,
         mobility: MobilityTolerance::Pct((10.0, 10.0)),

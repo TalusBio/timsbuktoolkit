@@ -1,12 +1,12 @@
 use std::cmp::Ordering;
 
-use crate::fragment_mass::{
-    IonAnnot,
-    IonSeriesTerminality,
-};
 use crate::utils::math::{
     lnfact,
     lnfact_f32,
+};
+use crate::{
+    IonAnnot,
+    IonSeriesTerminality,
 };
 use timsquery::models::RTMajorIntensityArray;
 use timsquery::traits::key_like::KeyLike;

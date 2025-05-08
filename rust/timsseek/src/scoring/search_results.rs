@@ -5,8 +5,8 @@ use super::calculate_scores::{
     RelativeIntensities,
     SortedErrors,
 };
+use crate::IonAnnot;
 use crate::errors::DataProcessingError;
-use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -438,6 +438,7 @@ impl ResultParquetWriter {
     }
 
     pub fn close(mut self) {
+        // TODO: add some logging ...
         if !self.buffer.is_empty() {
             self.flush_to_file();
         }

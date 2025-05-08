@@ -10,3 +10,14 @@ pub mod utils;
 extern crate parquet;
 #[macro_use]
 extern crate parquet_derive;
+
+pub use data_sources::Speclib;
+pub use models::{
+    DigestSlice,
+    ExpectedIntensities,
+    IonAnnot,
+    IonParsingError,
+    IonSeriesTerminality,
+    QueryItemToScore,
+};
+pub use scoring::Scorer;

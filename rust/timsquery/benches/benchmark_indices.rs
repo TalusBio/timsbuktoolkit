@@ -20,7 +20,7 @@ use timsquery::models::indices::expanded_raw_index::ExpandedRawFrameIndex;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::models::tolerance::{
     MobilityTolerance,
-    MzToleramce,
+    MzTolerance,
     QuadTolerance,
     RtTolerance,
 };
@@ -324,13 +324,13 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
     let mut out = vec![];
     let query_groups = build_elution_groups();
     let tolerance_with_rt = Tolerance {
-        ms: MzToleramce::Ppm((20.0, 20.0)),
+        ms: MzTolerance::Ppm((20.0, 20.0)),
         rt: RtTolerance::Minutes((5.0, 5.0)),
         mobility: MobilityTolerance::Pct((3.0, 3.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
     };
     let tolerance_with_nort = Tolerance {
-        ms: MzToleramce::Ppm((20.0, 20.0)),
+        ms: MzTolerance::Ppm((20.0, 20.0)),
         rt: RtTolerance::None,
         mobility: MobilityTolerance::Pct((3.0, 3.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),

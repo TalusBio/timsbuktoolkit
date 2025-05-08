@@ -55,7 +55,7 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for QuadSplittedTransposedInd
         let rt_range_ms = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
         // TODO: This section is kind of ugly ... I can probably move some of the logic around ...
         let query_rt_ms = aggregator.rt_range();
-        let rt_range_ms =match tolerance.rt_range_as_milis(aggregator.eg.rt_seconds){
+        let rt_range_ms = match tolerance.rt_range_as_milis(aggregator.eg.rt_seconds) {
             None => rt_range_ms,
             Some(tol_range_rt) => query_rt_ms.intersection(tol_range_rt),
         };

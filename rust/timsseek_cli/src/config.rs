@@ -18,11 +18,12 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum InputConfig {
-    #[serde(rename = "fasta")]
-    Fasta {
-        path: PathBuf,
-        digestion: DigestionConfig,
-    },
+    // TODO: Implement in-rust speclib generation to take a fasta file.
+    // #[serde(rename = "fasta")]
+    // Fasta {
+    //     path: PathBuf,
+    //     digestion: DigestionConfig,
+    // },
     #[serde(rename = "speclib")]
     Speclib { path: PathBuf },
 }

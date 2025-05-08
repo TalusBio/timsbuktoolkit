@@ -1,21 +1,31 @@
-use crate::errors::TimsSeekError;
-use crate::fragment_mass::IonAnnot;
+use crate::errors::{
+    LibraryReadingError,
+    TimsSeekError,
+};
 use crate::models::{
     DecoyMarking,
     DigestSlice,
 };
-use crate::scoring::QueryItemToScore;
+use crate::{
+    ExpectedIntensities,
+    IonAnnot,
+    QueryItemToScore,
+};
 use rayon::prelude::*;
 use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
 use std::io::{
     BufRead,
     BufReader,
 };
-use std::path;
+use std::ops::Deref;
+use std::path::{
+    self,
+    Path,
+    PathBuf,
+};
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 
@@ -62,10 +72,22 @@ impl From<SerSpeclibElement> for QueryItemToScore {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpectedIntensities {
-    pub fragment_intensities: HashMap<IonAnnot, f32>,
-    pub precursor_intensities: Vec<f32>,
+impl From<QueryItemToScore> for SerSpeclibElement {
+    fn from(x: QueryItemToScore) -> Self {
+        let precursor = PrecursorEntry {
+            sequence: x.digest.clone().into(),
+            charge: x.charge,
+            decoy: x.digest.is_decoy(),
+        };
+        let elution_group = ReferenceEG {
+            elution_group: x.query.clone(),
+            expected_intensities: x.expected_intensity,
+        };
+        SerSpeclibElement {
+            precursor,
+            elution_group,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,58 +101,83 @@ pub struct ReferenceEG {
 #[derive(Debug, Clone)]
 pub struct Speclib {
     elems: Vec<QueryItemToScore>,
+    idx: usize,
+}
+
+impl Serialize for Speclib {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let speclib_ser: Vec<SerSpeclibElement> =
+            self.elems.iter().map(|x| x.clone().into()).collect();
+        speclib_ser.serialize(serializer)
+    }
 }
 
 impl Speclib {
-    pub fn from_json(json: &str) -> Self {
-        let speclib_ser: Vec<SerSpeclibElement> = serde_json::from_str(json).unwrap();
+    pub fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
+        let speclib_ser: Vec<SerSpeclibElement> = match serde_json::from_str(json) {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(LibraryReadingError::SpeclibParsingError {
+                    source: e,
+                    context: "Error parsing JSON",
+                });
+            }
+        };
 
-        let speclib = speclib_ser.into_iter().map(|x| {
-            x.into()
-        }).collect();
+        let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
 
-        Self {
-            elems: speclib
-        }
+        Ok(Self {
+            elems: speclib,
+            idx: 0,
+        })
     }
 
-    pub fn from_ndjson(json: &str) -> Self {
+    pub fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
         // Split on newlines and parse each ...
+        // In the future I want to make this lazy but this will do for now
         let lines: Vec<&str> = json.split('\n').collect();
         Self::from_ndjson_elems(&lines)
     }
 
-    fn from_ndjson_elems(lines: &[&str]) -> Self {
-        let tmp= lines
+    fn from_ndjson_elems(lines: &[&str]) -> Result<Self, LibraryReadingError> {
+        let tmp = lines
             .into_par_iter()
             .filter(|line| !line.is_empty())
             .map(|line| {
                 let elem: SerSpeclibElement = match serde_json::from_str(line) {
                     Ok(x) => x,
                     Err(e) => {
-                        panic!("Error parsing line: {:?}; error: {:?}", line, e);
-                        // TODO: Make this a proper error
-                        // return Err(TimsSeekError::TimsRust(TimsRustError::Serde(e)));
+                        return Err(LibraryReadingError::SpeclibParsingError {
+                            source: e,
+                            context: "Error parsing line in NDJSON",
+                        });
                     }
                 };
 
-                elem.into()
-            }).collect::<Vec<QueryItemToScore>>();
+                Ok(elem.into())
+            })
+            .collect::<Result<Vec<_>, LibraryReadingError>>()?;
 
-        Self { elems: tmp }
+        Ok(Self { elems: tmp, idx: 0 })
     }
 
-    pub fn from_ndjson_file(path: &path::Path) -> Result<Self, TimsSeekError> {
-        let file = std::fs::File::open(path).map_err(|e| TimsSeekError::Io {
-            source: e,
-            path: Some(path.to_path_buf()),
-        })?;
+    pub fn from_ndjson_file(path: &path::Path) -> Result<Self, LibraryReadingError> {
+        let file =
+            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
+                source: e,
+                context: "Error opening NDJSON file",
+                path: PathBuf::from(path),
+            })?;
 
         let mut reader = BufReader::new(file);
         let mut current_chunk = String::new();
         let mut curr_nlines = 0;
         let mut results = Self {
             elems: Vec::with_capacity(100_001),
+            idx: 0,
         };
 
         while let Ok(len) = reader.read_line(&mut current_chunk) {
@@ -140,7 +187,7 @@ impl Speclib {
             }
 
             if curr_nlines % 100_000 == 0 {
-                let chunk_result = Self::from_ndjson(&current_chunk);
+                let chunk_result = Self::from_ndjson(&current_chunk)?;
                 results = results.fold(chunk_result);
                 current_chunk.clear();
                 curr_nlines = 0;
@@ -149,25 +196,55 @@ impl Speclib {
 
         // Process remaining lines
         if !current_chunk.is_empty() {
-            let chunk_result = Self::from_ndjson(&current_chunk);
+            let chunk_result = Self::from_ndjson(&current_chunk)?;
             results = results.fold(chunk_result);
         }
 
         Ok(results)
     }
 
-    fn fold(self, other: Self) -> Self {
+    pub fn sample() -> Self {
         Self {
-            elems: self.elems.into_iter().chain(other.elems).collect(),
+            elems: vec![QueryItemToScore::sample()],
+            idx: 0,
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.elems.len()
+    fn fold(self, other: Self) -> Self {
+        assert_eq!(self.idx, 0);
+        assert_eq!(other.idx, 0);
+        Self {
+            elems: self.elems.into_iter().chain(other.elems).collect(),
+            idx: 0,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[QueryItemToScore] {
+        &self.elems
     }
 }
 
+impl Iterator for Speclib {
+    type Item = QueryItemToScore;
 
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.elems.len() {
+            return None;
+        }
+        // TODO: reimplement as a real stream ...
+        // this is probably not the bottleneck but would be nice
+        // to check how expensive the clone actually is.
+        let elem = self.elems[self.idx].clone();
+        self.idx += 1;
+        Some(elem)
+    }
+}
+
+impl ExactSizeIterator for Speclib {
+    fn len(&self) -> usize {
+        self.elems.len()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -208,7 +285,7 @@ mod tests {
                 }
             }
         ]"#;
-        let speclib = Speclib::from_json(json);
+        let speclib = Speclib::from_json(json).unwrap();
         assert_eq!(speclib.len(), 1);
         assert_eq!(speclib.elems.len(), 1);
         println!("{:?}", speclib);

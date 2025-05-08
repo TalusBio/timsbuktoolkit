@@ -23,8 +23,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DataProcessingErro
             expected: a.len(),
             other: b.len(),
             context: "cosine_similarity".to_string(),
-        }
-        .into());
+        });
     }
 
     // Calculate dot product (numerator)
@@ -201,21 +200,23 @@ impl CosineSimilarityCircularBuffer {
 /// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
 /// assert_eq!(results.len(), expect_res.len());
 /// ```
-pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Result<Vec<f32>, DataProcessingError> {
+pub fn rolling_cosine_similarity(
+    a: &[f32],
+    b: &[f32],
+    window_size: usize,
+) -> Result<Vec<f32>, DataProcessingError> {
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
             expected: a.len(),
             other: b.len(),
             context: "cosine_similarity".to_string(),
-        }
-        .into());
+        });
     }
     if a.len() < window_size {
         return Err(DataProcessingError::ExpectedNonEmptyData {
             context: Some("cosine_similarity".to_string()),
-        }
-        .into());
+        });
     }
 
     let offset = window_size / 2;
