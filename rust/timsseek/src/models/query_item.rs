@@ -12,6 +12,9 @@ use timsquery::ElutionGroup;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities {
+    // TODO: ... should I make this a Vec?
+    // since i converted the elution group fragments from a
+    // hashmap to a vec it would feel more consistent...
     pub fragment_intensities: HashMap<IonAnnot, f32>,
     pub precursor_intensities: Vec<f32>,
 }

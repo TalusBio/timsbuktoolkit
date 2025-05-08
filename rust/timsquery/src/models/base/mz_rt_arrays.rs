@@ -100,7 +100,19 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     pub fn get_row(&self, key: &K) -> Option<&[V]> {
         // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
         let idx = self.mz_order.iter().position(|(k, _)| k == key)?;
+        self.get_row_idx(idx)
+    }
+
+    /// Get a single 'row', all the chromatogram for a single mz
+    pub fn get_row_idx(&self, idx: usize) -> Option<&[V]> {
+        // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
         self.arr.get_row(idx)
+    }
+
+    /// Get a single 'row', all the chromatogram for a single mz mutably
+    fn get_row_mut_idx(&mut self, idx: usize) -> Result<&mut [V], DataProcessingError> {
+        // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
+        self.arr.get_row_mut(idx)
     }
 
     pub fn iter_mut_mzs(
@@ -161,6 +173,8 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
+        self.mz_order = array.mz_order.clone();
+        self.rts_ms = array.rts_ms.clone();
         self.arr
             .reset_with_value(minor_dim, major_dim, V::default());
         self.fill_with(array);
@@ -175,11 +189,11 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         for (j, (fh, _fh_mz)) in order.iter().enumerate() {
             let tmp = array.get_row(fh);
             if tmp.is_none() {
-                panic!("No row for..."); // , fh, fh_mz);
+                panic!("No row for... {:?}", fh); // , fh, fh_mz);
                 // TODO: make sure I dont need this continue ...
                 // I think It made sense before but not in the new
                 // implementation.
-                continue;
+                // continue;
             }
             let inten_slc = tmp.unwrap();
             self.arr
@@ -224,6 +238,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
         &mut self,
         array: &MzMajorIntensityArray<FH, V>,
     ) -> Result<(), DataProcessingError> {
+        // Q: wtf am I using this for??
         // TODO consider if its worth abstracting these 5 lines ...
         let n_mz = array.mz_order.len();
         let n_rt = array.rts_ms.len();
@@ -233,7 +248,9 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
         if n_rt == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
-        self.arr.reset_with_value(n_rt, n_mz, V::default());
+        self.mz_order = array.mz_order.clone();
+        self.rts_ms = array.rts_ms.clone();
+        self.arr.reset_with_value(n_mz, n_rt, V::default());
         self.fill_with(array);
         Ok(())
     }
@@ -248,7 +265,8 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
             }
             let inten_slc = tmp.unwrap();
             for (i, &v) in inten_slc.iter().enumerate() {
-                println!("{} {} {}", i, j, v);
+                // Note that in essence here we are doing a transposition
+                // so row indices become col indices
                 self.arr.insert(i, j, v);
             }
         }
@@ -311,5 +329,92 @@ mod tests {
             4.0, 2.0, // rt >30
         ];
         assert_eq!(t_arr.arr.values, expect);
+    }
+
+    #[test]
+    fn test_array2d_reset_resize_larger() {
+        let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
+        let order: Arc<[(String, f64)]> =
+            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let mut arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+
+        let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
+        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let mut target_arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+
+        assert_eq!(arr.arr.values, vec![0.0; 8]);
+        assert_eq!(target_arr.arr.values, vec![0.0]);
+
+        // I am expecting that adding under bounds gets added to the lowest.
+        let to_insert = [(0, 4.0), (21, 2.0)];
+        for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
+            yc.add_at_close_rt(x.0, x.1);
+            yc.add_at_close_rt(x.0, x.1);
+            // I am expecting that out of bounds gets added to the last.
+            yc.add_at_close_rt(x.0 + 50, x.1);
+        }
+        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
+
+        target_arr.try_reset_with(&arr).unwrap();
+        assert_eq!(
+            target_arr.arr.values,
+            vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn test_array2d_reset_resize_smaller() {
+        let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
+        let order: Arc<[(String, f64)]> =
+            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let mut arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+
+        let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
+        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let target_arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+
+        assert_eq!(arr.arr.values, vec![0.0; 8]);
+        assert_eq!(target_arr.arr.values, vec![0.0]);
+
+        arr.try_reset_with(&target_arr).unwrap();
+        assert_eq!(arr.arr.values, vec![0.0]);
+    }
+
+    #[test]
+    fn test_array2d_reset_resize_larger_to_rt() {
+        let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
+        let order: Arc<[(String, f64)]> =
+            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let mut arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+
+        let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
+        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let mut target_arr: RTMajorIntensityArray<String, f32> =
+            RTMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+
+        assert_eq!(arr.arr.values, vec![0.0; 8]);
+        assert_eq!(target_arr.arr.values, vec![0.0]);
+
+        // I am expecting that adding under bounds gets added to the lowest.
+        let to_insert = [(0, 4.0), (21, 2.0)];
+        for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
+            yc.add_at_close_rt(x.0, x.1);
+            yc.add_at_close_rt(x.0, x.1);
+            // I am expecting that out of bounds gets added to the last.
+            yc.add_at_close_rt(x.0 + 50, x.1);
+        }
+
+        target_arr.try_reset_with(&arr).unwrap();
+        // Note the change in position
+        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
+        assert_eq!(
+            target_arr.arr.values,
+            vec![8.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 2.0]
+        );
     }
 }

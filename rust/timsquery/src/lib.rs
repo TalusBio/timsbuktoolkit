@@ -4,6 +4,11 @@ pub use crate::models::aggregators::{
     EGCAggregator,
     EGSAggregator,
 };
+pub use crate::models::base::{
+    Array2D,
+    MzMajorIntensityArray,
+    RTMajorIntensityArray,
+};
 pub use crate::models::elution_group::ElutionGroup;
 pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 

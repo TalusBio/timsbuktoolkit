@@ -20,16 +20,16 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// # Example
 ///
 /// ```
-/// use timsquery::models::aggregators::streaming_aggregator::RunningStatsCalculator;
+/// use timsquery::utils::streaming_calculators::RunningStatsCalculator;
 ///
 /// // Create a new calculator with a weight of 10 and a mean of 0.0
 /// let mut calc = RunningStatsCalculator::new(1, 0.0);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
 /// // So overall this should be the equivalent of the mean for
 /// // [0.0, 10.0, 0.0, 10.0, 0.0, 10.0]
 /// assert_eq!(calc.mean().unwrap(), 5.0, "{calc:#?}");

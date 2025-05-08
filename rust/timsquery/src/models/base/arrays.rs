@@ -154,7 +154,7 @@ impl<T: ArrayElement> Array2D<T> {
     ///
     /// Example:
     /// ```
-    /// use timsseek::models::Array2D;
+    /// use timsquery::Array2D;
     /// let array = Array2D::new(vec![vec![1, 2, 3], vec![4, 5, 6]]).unwrap();
     /// let result: Vec<u32> = array.row_apply(|x| x.iter().sum()).collect();
     /// assert_eq!(result, vec![6, 15]);
@@ -237,7 +237,7 @@ impl<T: ArrayElement> Array2D<T> {
     /// For example if I want to calculate the MAE between each row of the array
     /// I can do:
     /// ```
-    /// use timsseek::models::Array2D;
+    /// use timsquery::Array2D;
     /// let array: Array2D<f64> = Array2D::new(vec![vec![1., 2., 3.], vec![4., 5., 6.]]).unwrap();
     /// let result: Vec<f64> = array.outer_row_apply(|x, y| (x.iter().zip(y.iter()).map(|(a, b)| (a - b).abs() as f64).sum::<f64>()) / x.len() as f64);
     /// assert_eq!(result, vec![3.0]);
@@ -263,7 +263,18 @@ impl<T: ArrayElement> Array2D<T> {
 
     pub fn insert(&mut self, row_idx: usize, col_idx: usize, value: T) {
         let idx = row_idx * self.n_col + col_idx;
-        self.values[idx] = value;
+        match self.values.get_mut(idx) {
+            Some(v) => *v = value,
+            None => panic!(
+                "Index out of bounds ({}/{}): row {}/{}, col {}/{}",
+                idx,
+                self.values.len(),
+                row_idx,
+                self.n_row,
+                col_idx,
+                self.n_col,
+            ),
+        };
     }
 
     fn get_row_limits(&self, index: usize) -> Option<Range<usize>> {

@@ -12,8 +12,8 @@ use tracing::debug;
 /// # Example
 ///
 /// ```
-/// use timsseek::models::Array2D;
-/// use timsseek::scoring::coelution::coelution_score;
+/// use timsquery::Array2D;
+/// use timsseek::scoring::coelution;
 ///
 /// let slices = Array2D::new(
 ///     vec![[0., 1., 3., 22., 5.],
@@ -22,7 +22,7 @@ use tracing::debug;
 /// let window = 3;
 /// // Note that the generic type parameter is the top N of scores that will
 /// // be averaged to report the coelution.
-/// let scores = coelution_score::coelution_score_arr::<3>(&slices, window).unwrap();
+/// let scores = coelution::coelution_score_arr::<3>(&slices, window).unwrap();
 /// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
 /// ```
 pub fn coelution_score_arr<const TOP_N: usize>(
