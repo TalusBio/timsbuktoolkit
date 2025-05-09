@@ -5,7 +5,6 @@ use super::single_quad_settings::{
     expand_quad_settings,
 };
 use crate::errors::UnsupportedDataError;
-use crate::sort_vecs_by_first;
 use crate::utils::compress_explode::explode_vec;
 use crate::utils::frame_processing::{
     PeakArrayRefs,
@@ -15,6 +14,10 @@ use crate::utils::tolerance_ranges::{
     IncludedRange,
     scan_tol_range,
     tof_tol_range,
+};
+use crate::{
+    OptionallyRestricted,
+    sort_vecs_by_first,
 };
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -127,7 +130,7 @@ impl ExpandedFrameSlice<SortedState> {
     pub fn query_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -141,7 +144,7 @@ impl ExpandedFrameSlice<SortedState> {
 
         for peak_ind in peak_range {
             let scan_index = self.scan_numbers[peak_ind];
-            if let Some(scan_range) = &scan_range {
+            if let OptionallyRestricted::Restricted(scan_range) = &scan_range {
                 if !scan_range.contains(scan_index) {
                     continue;
                 }

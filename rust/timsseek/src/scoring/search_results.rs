@@ -119,9 +119,6 @@ impl<'q> SearchResultBuilder<'q> {
             score,
             delta_next,
             delta_second_next,
-            observed_mobility,
-            observed_mobility_ms1,
-            observed_mobility_ms2,
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms1_coelution_score,
@@ -137,12 +134,9 @@ impl<'q> SearchResultBuilder<'q> {
             ..
         } = main_score;
         {
-            let delta_ms1_ms2_mobility = observed_mobility_ms1 - observed_mobility_ms2;
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
             self.delta_second_next = SetField::Some(delta_second_next);
-            self.observed_mobility = SetField::Some(observed_mobility);
-            self.delta_ms1_ms2_mobility = SetField::Some(delta_ms1_ms2_mobility);
 
             self.rt_seconds = SetField::Some(retention_time_ms as f32 / 1000.0);
             self.ms2_cosine_ref_similarity = SetField::Some(ms2_cosine_ref_sim);
@@ -187,7 +181,8 @@ impl<'q> SearchResultBuilder<'q> {
         let [int1_e0, int1_e1, int1_e2] = self
             .relative_intensities
             .expect_some("ms1_intensity_errors", "ms1_intensity_errors")?
-            .ms1;
+            .ms1
+            .get_values();
         let [
             int2_e0,
             int2_e1,
@@ -199,7 +194,8 @@ impl<'q> SearchResultBuilder<'q> {
         ] = self
             .relative_intensities
             .expect_some("ms2_intensity_errors", "ms2_intensity_errors")?
-            .ms2;
+            .ms2
+            .get_values();
 
         let ref_eg = self.ref_eg.expect_some("ref_eg", "ref_eg")?;
         // TODO replace this with exhaustive unpacking.

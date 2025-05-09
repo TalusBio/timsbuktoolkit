@@ -1,7 +1,4 @@
-use crate::errors::{
-    LibraryReadingError,
-    TimsSeekError,
-};
+use crate::errors::LibraryReadingError;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -20,9 +17,7 @@ use std::io::{
     BufRead,
     BufReader,
 };
-use std::ops::Deref;
 use std::path::{
-    self,
     Path,
     PathBuf,
 };
@@ -164,7 +159,7 @@ impl Speclib {
         Ok(Self { elems: tmp, idx: 0 })
     }
 
-    pub fn from_ndjson_file(path: &path::Path) -> Result<Self, LibraryReadingError> {
+    pub fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
                 source: e,

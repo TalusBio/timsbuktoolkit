@@ -1,9 +1,12 @@
-use crate::sort_vecs_by_first;
 use crate::utils::display::{
     GlimpseConfig,
     glimpse_vec,
 };
 use crate::utils::tolerance_ranges::IncludedRange;
+use crate::{
+    OptionallyRestricted,
+    sort_vecs_by_first,
+};
 use std::fmt::Display;
 
 pub struct PeakInBucket {
@@ -133,12 +136,12 @@ impl PeakBucket {
 
     pub fn query_peaks(
         &self,
-        scan_range: Option<IncludedRange<u16>>,
-        rt_range_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        rt_range_ms: OptionallyRestricted<IncludedRange<u32>>,
     ) -> impl Iterator<Item = PeakInBucket> + '_ {
         let (scan_min, scan_max) = match scan_range {
-            Some(x) => x.into(),
-            None => (
+            OptionallyRestricted::Restricted(x) => x.into(),
+            OptionallyRestricted::Unrestricted => (
                 0,
                 *(self
                     .scan_offsets
@@ -165,7 +168,7 @@ impl PeakBucket {
             }
 
             let retention_time_ms = self.retention_times_ms[x];
-            if let Some(x) = rt_range_ms {
+            if let OptionallyRestricted::Restricted(x) = rt_range_ms {
                 if !x.contains(retention_time_ms) {
                     return None;
                 }

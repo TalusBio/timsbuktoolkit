@@ -1,8 +1,7 @@
 // Re-export main structures
-pub use crate::models::Tolerance;
 pub use crate::models::aggregators::{
-    EGCAggregator,
-    EGSAggregator,
+    ChromatogramCollector,
+    SpectralCollector,
 };
 pub use crate::models::base::{
     Array2D,
@@ -11,12 +10,19 @@ pub use crate::models::base::{
 };
 pub use crate::models::elution_group::ElutionGroup;
 pub use crate::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
+pub use crate::models::{
+    OptionallyRestricted,
+    Tolerance,
+};
 
 // Re-export traits
-pub use crate::traits::KeyLike;
 pub use crate::traits::queriable_data::{
     GenerallyQueriable,
     QueriableData,
+};
+pub use crate::traits::{
+    KeyLike,
+    ValueLike,
 };
 
 // Declare modules

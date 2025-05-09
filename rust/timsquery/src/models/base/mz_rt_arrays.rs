@@ -103,6 +103,13 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         self.get_row_idx(idx)
     }
 
+    /// Iterate over the values of a single column (all values for a RT)
+    pub fn iter_column_idx(&self, index: usize) -> impl '_ + Iterator<Item = (V, &K)> {
+        let vals = self.arr.iter_column(index);
+        let out = vals.zip(self.mz_order.iter().map(|(k, _mz)| k));
+        out
+    }
+
     /// Get a single 'row', all the chromatogram for a single mz
     pub fn get_row_idx(&self, idx: usize) -> Option<&[V]> {
         // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...

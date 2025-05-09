@@ -331,7 +331,7 @@ fn run_batch_access_benchmark(raw_file_path: &Path, env_config: EnvConfig) -> Ve
     };
     let tolerance_with_nort = Tolerance {
         ms: MzTolerance::Ppm((20.0, 20.0)),
-        rt: RtTolerance::None,
+        rt: RtTolerance::Unrestricted,
         mobility: MobilityTolerance::Pct((3.0, 3.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
     };

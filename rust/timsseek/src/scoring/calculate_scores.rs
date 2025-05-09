@@ -18,7 +18,7 @@ use crate::{
 use core::f32;
 use serde::Serialize;
 use std::sync::Arc;
-use timsquery::models::aggregators::EGCAggregator;
+use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
@@ -31,7 +31,7 @@ pub struct PreScore {
     // No longer needed bc it is bundled in the EGCAggregator
     // pub reference: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
-    pub query_values: EGCAggregator<IonAnnot>,
+    pub query_values: ChromatogramCollector<IonAnnot>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -62,7 +62,7 @@ pub struct IntensityArrays {
 
 impl IntensityArrays {
     pub fn new(
-        query_values: &EGCAggregator<IonAnnot>,
+        query_values: &ChromatogramCollector<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self, DataProcessingError> {
         let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
@@ -133,7 +133,7 @@ impl IntensityArrays {
     // refactor changes first ... JSPP Apr-18-2025
     pub fn reset_with(
         &mut self,
-        intensity_arrays: &EGCAggregator<IonAnnot>,
+        intensity_arrays: &ChromatogramCollector<IonAnnot>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<(), DataProcessingError> {
         self.ms1_rtmajor
@@ -365,19 +365,6 @@ impl PreScore {
             None => f32::NAN,
         };
 
-        // TODO make this a method .... 'map_to_rt_index'??
-        // let ms2_loc = self
-        //     .query_values
-        //     .fragments
-        //     .rts_ms
-        //     .partition_point(|&x| x <= self.query_values.fragments.rts_ms[max_loc]);
-
-        // let ms1_loc = self
-        //     .query_values
-        //     .precursors
-        //     .rts_ms
-        //     .partition_point(|&x| x <= self.ref_time_ms[max_loc]);
-
         // FOR NOW I will leave this assert and if it holds this is an assumption I can make and
         // I will remove the dead code above.
         assert_eq!(
@@ -408,37 +395,10 @@ impl PreScore {
             None => 0,
         };
 
-        // let ims_ms2 = self
-        //     .query_values
-        //     .ms2_arrays
-        //     .weighted_ims_mean
-        //     .get(ms2_loc)
-        //     .copied()
-        //     .unwrap_or(f64::NAN);
-
-        // let ims_ms1 = self
-        //     .query_values
-        //     .ms1_arrays
-        //     .weighted_ims_mean
-        //     .get(ms1_loc)
-        //     .copied()
-        //     .unwrap_or(f64::NAN);
-        let (ims_ms1, ims_ms2): (f64, f64) = (0.0, 0.0);
-
-        let ims = match (ims_ms1, ims_ms2) {
-            (x, y) if !x.is_nan() && y.is_nan() => x,
-            (x, y) if x.is_nan() && !y.is_nan() => y,
-            (x, y) if x.is_nan() && y.is_nan() => f64::NAN,
-            (x, y) => (x + y) / 2.0,
-        };
-
         Ok(MainScore {
             score: max_val,
             delta_next,
             delta_second_next,
-            observed_mobility: ims as f32,
-            observed_mobility_ms1: ims_ms1 as f32,
-            observed_mobility_ms2: ims_ms2 as f32,
             retention_time_ms: ref_time_ms,
 
             ms2_cosine_ref_sim: longitudinal_main_score_elements.ms2_cosine_ref_sim[max_loc],
@@ -504,9 +464,6 @@ pub struct MainScore {
     pub score: f32,
     pub delta_next: f32,
     pub delta_second_next: f32,
-    pub observed_mobility: f32,
-    pub observed_mobility_ms1: f32,
-    pub observed_mobility_ms2: f32,
     pub retention_time_ms: u32,
 
     pub ms2_cosine_ref_sim: f32,
@@ -526,200 +483,41 @@ pub struct MainScore {
     ref_ms2_idx: usize,
 }
 
-#[derive(Debug)]
-pub struct LocalizedPreScore {
-    pub pre_score: PreScore,
-    pub main_score: MainScore,
-    ints_at_apex: SortedIntElemAtIndex,
-}
-
-impl LocalizedPreScore {
-    pub fn inten_sorted_errors(&self) -> SortedErrors {
-        sorted_err_at_idx(&self.ints_at_apex)
-    }
-
-    pub fn relative_intensities(&self) -> RelativeIntensities {
-        RelativeIntensities::new(&self.ints_at_apex)
-    }
-}
-
-impl LocalizedPreScore {
-    fn new(pre_score: PreScore, main_score: MainScore) -> Self {
-        let ints_at_apex = SortedIntElemAtIndex::new(
-            main_score.ref_ms1_idx,
-            main_score.ref_ms2_idx,
-            &pre_score.query_values,
-        );
-        Self {
-            pre_score,
-            main_score,
-            ints_at_apex,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SortedErrors {
-    pub ms1_mz_errors: [f32; 3],
-    pub ms2_mz_errors: [f32; 7],
-    pub ms1_mobility_errors: [f32; 3],
-    pub ms2_mobility_errors: [f32; 7],
-}
-
-#[derive(Debug)]
-pub struct SortedIntElemAtIndex {
-    ms1: [SortableError; 3],
-    ms2: [SortableError; 7],
-}
-
-impl SortedIntElemAtIndex {
-    fn new(ms1_idx: usize, ms2_idx: usize, cmgs: &EGCAggregator<IonAnnot>) -> Self {
-        panic!("I need to implement the secondary search");
-        // Get the elements at every index and sort them by intensity.
-        // Once sorted calculate the pairwise diff.
-        let mut ms1_elems: TopNArray<3, SortableError> = TopNArray::new();
-        let mut ms2_elems: TopNArray<7, SortableError> = TopNArray::new();
-        let ref_ims = cmgs.eg.mobility;
-
-        // if ms1_idx < cmgs.ms1_arrays.retention_time_miliseconds.len() {
-        //     for i in 0..3 {
-        //         let expect_mz = elution_group.precursor_mzs.get(i);
-        //         let mz_err = if let Some(mz) = expect_mz {
-        //             (mz - cmgs.ms1_arrays.mz_means[&i][ms1_idx]) as f32
-        //         } else {
-        //             continue;
-        //         };
-        //         let ims_err = ref_ims - (cmgs.ms1_arrays.ims_means[&i][ms1_idx]) as f32;
-
-        //         let tmp = SortableError {
-        //             intensity: cmgs.ms1_arrays.intensities[&i][ms1_idx],
-        //             mz_err,
-        //             ims_err,
-        //         };
-        //         ms1_elems.push(tmp);
-        //     }
-        // }
-
-        // // TODO: make an impl to get the length on the RT axis.
-        // if ms2_idx < cmgs.ms2_arrays.retention_time_miliseconds.len() {
-        //     for (k, v) in cmgs.ms2_arrays.intensities.iter() {
-        //         let expect_mz = elution_group.fragment_mzs.get(k);
-        //         let mz_err = if let Some(mz) = expect_mz {
-        //             (mz - cmgs.ms2_arrays.mz_means[k][ms2_idx]) as f32
-        //         } else {
-        //             continue;
-        //         };
-
-        //         // TODO: figure out why this happens
-        //         if mz_err.abs() > 1.0 {
-        //             println!("Large mz diff for fragment {} is {}", k, mz_err.abs());
-        //             println!("Expected mz: {}", expect_mz.unwrap());
-        //             println!("Actual mz: {}", cmgs.ms2_arrays.mz_means[k][ms2_idx]);
-        //             println!("EG: {:#?}", elution_group);
-        //             println!("CMGS: {:#?}", cmgs);
-        //             panic!();
-        //         }
-        //         let ims_err = ref_ims - (cmgs.ms2_arrays.ims_means[k][ms2_idx]) as f32;
-
-        //         let tmp = SortableError {
-        //             intensity: v[ms2_idx],
-        //             mz_err,
-        //             ims_err,
-        //         };
-        //         ms2_elems.push(tmp);
-        //     }
-        // }
-
-        // SortedIntElemAtIndex {
-        //     ms1: ms1_elems.get_values(),
-        //     ms2: ms2_elems.get_values(),
-        // }
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq)]
-struct SortableError {
-    intensity: u64,
-    mz_err: f32,
-    ims_err: f32,
-}
-
-impl PartialOrd for SortableError {
-    fn partial_cmp(&self, other: &SortableError) -> Option<std::cmp::Ordering> {
-        self.intensity.partial_cmp(&other.intensity)
-    }
-}
-
-impl Default for SortableError {
-    fn default() -> Self {
-        Self {
-            intensity: 0,
-            mz_err: f32::NAN,
-            ims_err: f32::NAN,
-        }
-    }
-}
-
-fn sorted_err_at_idx(ints_at_apex: &SortedIntElemAtIndex) -> SortedErrors {
-    let mut ms1_out_mz_err = [0.0; 3];
-    let mut ms2_out_mz_err = [0.0; 7];
-    let mut ms1_out_ims_err = [0.0; 3];
-    let mut ms2_out_ims_err = [0.0; 7];
-
-    let ms1_elems = ints_at_apex.ms1;
-    let ms2_elems = ints_at_apex.ms2;
-
-    for (i, val) in ms1_elems.iter().enumerate() {
-        if i == 0 {
-            ms1_out_mz_err[i] = val.mz_err;
-            ms1_out_ims_err[i] = val.ims_err;
-        } else {
-            ms1_out_mz_err[i] = val.mz_err - ms1_elems[i - 1].mz_err;
-            ms1_out_ims_err[i] = val.ims_err - ms1_elems[i - 1].ims_err;
-        }
-    }
-
-    for (i, val) in ms2_elems.iter().enumerate() {
-        if i == 0 {
-            ms2_out_mz_err[i] = val.mz_err;
-            ms2_out_ims_err[i] = val.ims_err;
-        } else {
-            ms2_out_mz_err[i] = val.mz_err - ms2_elems[i - 1].mz_err;
-            ms2_out_ims_err[i] = val.ims_err - ms2_elems[i - 1].ims_err;
-        }
-    }
-
-    SortedErrors {
-        ms1_mz_errors: ms1_out_mz_err,
-        ms2_mz_errors: ms2_out_mz_err,
-        ms1_mobility_errors: ms1_out_ims_err,
-        ms2_mobility_errors: ms2_out_ims_err,
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct RelativeIntensities {
-    pub ms1: [f32; 3],
-    pub ms2: [f32; 7],
+    pub ms1: TopNArray<3, f32>,
+    pub ms2: TopNArray<7, f32>,
 }
 
 impl RelativeIntensities {
-    pub fn new(ints_at_apex: &SortedIntElemAtIndex) -> Self {
-        let tot_ms1: u64 = ints_at_apex.ms1.iter().map(|x| x.intensity).sum();
-        let tot_ms2: u64 = ints_at_apex.ms2.iter().map(|x| x.intensity).sum();
-        let mut ms1: [f32; 3] = [0.0; 3];
-        let mut ms2: [f32; 7] = [0.0; 7];
-        ints_at_apex
-            .ms1
-            .iter()
-            .enumerate()
-            .for_each(|(i, x)| ms1[i] = (x.intensity as f32).ln_1p() - (tot_ms1 as f32).ln_1p());
-        ints_at_apex
-            .ms2
-            .iter()
-            .enumerate()
-            .for_each(|(i, x)| ms2[i] = (x.intensity as f32).ln_1p() - (tot_ms2 as f32).ln_1p());
+    pub fn new(agg: &ChromatogramCollector<IonAnnot>, idx: usize) -> Self {
+        let mut ms1: TopNArray<3, f32> = TopNArray::new();
+        let mut ms2: TopNArray<7, f32> = TopNArray::new();
 
+        let tot_l1p_ms1: f32 = agg
+            .precursors
+            .iter_column_idx(idx)
+            .map(|(v, _k)| v)
+            .sum::<f32>()
+            .ln_1p();
+        let tot_l1p_ms2: f32 = agg
+            .precursors
+            .iter_column_idx(idx)
+            .map(|(v, _k)| v)
+            .sum::<f32>()
+            .ln_1p();
+        agg.precursors.iter_column_idx(idx).for_each(|(v, k)| {
+            // Note isotope keys < 0 mean 'decoy' isotopes
+            if *k >= 0i8 && v > 0.0 {
+                ms1.push(v.ln_1p() - tot_l1p_ms1);
+            }
+        });
+
+        agg.fragments.iter_column_idx(idx).for_each(|(v, _k)| {
+            if v > 0.0 {
+                ms2.push(v.ln_1p() - tot_l1p_ms2);
+            }
+        });
         Self { ms1, ms2 }
     }
 }

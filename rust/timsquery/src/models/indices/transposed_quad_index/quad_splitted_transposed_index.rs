@@ -2,6 +2,7 @@ use super::quad_index::{
     TransposedQuadIndex,
     TransposedQuadIndexBuilder,
 };
+use crate::OptionallyRestricted;
 use crate::errors::TimsqueryError;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
@@ -70,8 +71,8 @@ impl QuadSplittedTransposedIndex {
         &self,
         tof_range: IncludedRange<u32>,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<u16>>,
-        rt_range_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        rt_range_ms: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -85,8 +86,8 @@ impl QuadSplittedTransposedIndex {
     pub fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
-        rt_range_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        rt_range_ms: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -100,8 +101,8 @@ impl QuadSplittedTransposedIndex {
         &self,
         matching_quads: &[SingleQuadrupoleSettingIndex],
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
-        rt_range_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        rt_range_ms: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -125,7 +126,7 @@ impl QuadSplittedTransposedIndex {
     fn get_matching_quad_settings(
         &self,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<u16>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
     ) -> impl Iterator<Item = SingleQuadrupoleSettingIndex> + '_ {
         get_matching_quad_settings(&self.flat_quad_settings, precursor_mz_range, scan_range)
     }
