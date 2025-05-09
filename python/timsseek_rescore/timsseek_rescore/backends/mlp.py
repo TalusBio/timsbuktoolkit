@@ -1,5 +1,3 @@
-
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -416,6 +414,7 @@ def to_torch_folds(shuffled_df: pl.LazyFrame, num_folds: int, cols):
         (torch.from_numpy(x[0]).float(), torch.from_numpy(x[1]).float()) for x in tmp
     ]
     return out
+
 
 def mlp_stuff(
     df_use: pl.LazyFrame, cols, output_dir: Path, pos_weight: float = 0.05, **kwargs

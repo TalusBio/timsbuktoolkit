@@ -5,20 +5,40 @@ use timsrust::converters::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IncludedRange<T: Copy + PartialOrd>(pub T, pub T);
-
-// TODO: Implement overlaps ...
+pub struct IncludedRange<T: Copy + PartialOrd>(T, T);
 
 impl<T> IncludedRange<T>
 where
     T: Copy + PartialOrd,
 {
     pub fn new(left: T, right: T) -> Self {
-        // Swao if left > right
+        // Swap if left > right
         if left > right {
             Self(right, left)
         } else {
             Self(left, right)
+        }
+    }
+
+    // TODO: Implement other overlaps ... (union ...)
+    pub fn intersection(&self, other: Self) -> Option<Self> {
+        let left = match self.start().partial_cmp(&other.start()) {
+            Some(std::cmp::Ordering::Equal) => self.start(),
+            Some(std::cmp::Ordering::Less) => other.start(),
+            Some(std::cmp::Ordering::Greater) => self.start(),
+            None => self.start(),
+        };
+        let right = match self.end().partial_cmp(&other.end()) {
+            Some(std::cmp::Ordering::Equal) => self.start(),
+            Some(std::cmp::Ordering::Less) => self.start(),
+            Some(std::cmp::Ordering::Greater) => other.start(),
+            None => self.start(),
+        };
+
+        if left > right {
+            None
+        } else {
+            Some(Self(left, right))
         }
     }
 
@@ -70,15 +90,11 @@ pub fn tof_tol_range(tof: u32, tol_ppm: f64, converter: &Tof2MzConverter) -> Inc
     )
 }
 
-pub fn scan_tol_range(
-    scan: usize,
-    tol_pct: f64,
-    converter: &Scan2ImConverter,
-) -> IncludedRange<usize> {
+pub fn scan_tol_range(scan: u16, tol_pct: f64, converter: &Scan2ImConverter) -> IncludedRange<u16> {
     let im = converter.convert(scan as f64);
     let im_range = pct_tol_range(im, tol_pct);
-    let scan_min = converter.invert(im_range.start()).round() as usize;
-    let scan_max = converter.invert(im_range.end()).round() as usize;
+    let scan_min = converter.invert(im_range.start()).round() as u16;
+    let scan_max = converter.invert(im_range.end()).round() as u16;
     // Note I need to do this here bc the conversion between scan numbers and ion
     // mobilities is not monotonically increasing. IN OTHER WORDS, lower scan numbers
     // are higher 1/k0.... But im not sure if they are ALWAYS inversely proportional.

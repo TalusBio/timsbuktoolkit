@@ -15,22 +15,23 @@ use std::net::{
 };
 use std::sync::Arc;
 use std::thread;
+use timsquery::models::indices::ExpandedRawFrameIndex;
 use timsseek::errors::{
     Result,
     TimsSeekError,
 };
-use timsseek::scoring::full_results::FullQueryResult;
+use timsseek::scoring::Scorer;
 
 mod cli;
 mod index;
 
 struct DaemonServer {
-    index: Arc<index::BundledDotDIndex>,
+    index: Arc<Scorer<ExpandedRawFrameIndex>>,
     running: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonServer {
-    pub fn new(index: index::BundledDotDIndex) -> std::io::Result<Self> {
+    pub fn new(index: Scorer<ExpandedRawFrameIndex>) -> std::io::Result<Self> {
         Ok(Self {
             index: Arc::new(index),
             running: std::sync::atomic::AtomicBool::new(true),
@@ -68,7 +69,7 @@ impl DaemonServer {
 
 fn handle_connection(
     mut stream: TcpStream,
-    index: Arc<index::BundledDotDIndex>,
+    index: Arc<Scorer<ExpandedRawFrameIndex>>,
     _running: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -108,7 +109,7 @@ fn handle_connection(
         };
 
         let start = std::time::Instant::now();
-        let query_res: Result<FullQueryResult> = index.query(query.into());
+        let query_res = index.as_ref().score_full(query.into());
         let elap_time = start.elapsed();
         println!("Querying took {:#?} for query", elap_time);
         let response = match query_res {
@@ -118,7 +119,7 @@ fn handle_connection(
             }),
             Err(e) => json!({
                 "status": "error",
-                "data": format!("{}", e)
+                "data": format!("{:?}", e)
             }),
         };
         send_response(&mut stream, &response)?;
@@ -138,7 +139,7 @@ fn main() -> Result<()> {
     let conf = cli::Cli::parse();
     let sample = InputQuery::sample();
     let tol = conf.read_config()?;
-    let index = index::BundledDotDIndex::new(conf.dotd_file, tol)?;
+    let index = index::new_index(conf.dotd_file, tol)?;
 
     println!("Starting server");
     println!(
@@ -147,14 +148,14 @@ fn main() -> Result<()> {
     );
 
     let st = std::time::Instant::now();
-    let _check_out = match index.query(sample.into()) {
+    let _check_out = match index.score_full(sample.into()) {
         Ok(q) => {
             println!("Query OK");
             q
         }
         Err(e) => {
-            println!("Query failed: {}", e);
-            return Err(e);
+            println!("Query failed: {:?}", e);
+            return Err(e.into());
         }
     };
     let elap_time = st.elapsed();

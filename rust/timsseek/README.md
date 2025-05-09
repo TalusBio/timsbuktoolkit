@@ -1,6 +1,6 @@
 # timsseek
 
-A fast and efficient peptide-centric search tool for diaPASEF data on the Bruker timsTOF platform. 
+A fast and efficient peptide-centric search tool for diaPASEF data on the Bruker timsTOF platform.
 
 ## About
 

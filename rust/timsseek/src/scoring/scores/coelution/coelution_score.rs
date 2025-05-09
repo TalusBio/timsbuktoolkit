@@ -1,10 +1,10 @@
 use crate::errors::DataProcessingError;
-use crate::models::{
+use crate::utils::correlation::rolling_cosine_similarity;
+use crate::utils::top_n_array::TopNArray;
+use timsquery::models::{
     Array2D,
     MzMajorIntensityArray,
 };
-use crate::utils::correlation::rolling_cosine_similarity;
-use crate::utils::top_n_array::TopNArray;
 use tracing::debug;
 
 /// Calculates the coelution score of a set of chromatograms.
@@ -12,8 +12,8 @@ use tracing::debug;
 /// # Example
 ///
 /// ```
-/// use timsseek::models::Array2D;
-/// use timsseek::scoring::coelution::coelution_score;
+/// use timsquery::Array2D;
+/// use timsseek::scoring::coelution;
 ///
 /// let slices = Array2D::new(
 ///     vec![[0., 1., 3., 22., 5.],
@@ -22,7 +22,7 @@ use tracing::debug;
 /// let window = 3;
 /// // Note that the generic type parameter is the top N of scores that will
 /// // be averaged to report the coelution.
-/// let scores = coelution_score::coelution_score_arr::<3>(&slices, window).unwrap();
+/// let scores = coelution::coelution_score_arr::<3>(&slices, window).unwrap();
 /// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
 /// ```
 pub fn coelution_score_arr<const TOP_N: usize>(
@@ -82,8 +82,8 @@ pub fn coelution_score_arr<const TOP_N: usize>(
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score<const TOP_N: usize, K: Clone>(
-    slices: &MzMajorIntensityArray<K>,
+pub fn coelution_score<const TOP_N: usize, K: Clone + Ord>(
+    slices: &MzMajorIntensityArray<K, f32>,
     window: usize,
 ) -> Result<Vec<f32>, DataProcessingError> {
     coelution_score_arr::<TOP_N>(&slices.arr, window)

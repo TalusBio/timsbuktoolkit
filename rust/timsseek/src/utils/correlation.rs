@@ -1,9 +1,6 @@
 use std::f32;
 
-use crate::errors::{
-    DataProcessingError,
-    Result,
-};
+use crate::errors::DataProcessingError;
 
 // TODO: benchmark how much faster is f32
 
@@ -19,15 +16,14 @@ use crate::errors::{
 /// let result = cosine_similarity(&a, &b).unwrap();
 /// assert_eq!(result, 0.9746318);
 /// ```
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DataProcessingError> {
     // Check if vectors have the same length and are not empty
     if a.len() != b.len() || a.is_empty() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
             expected: a.len(),
             other: b.len(),
             context: "cosine_similarity".to_string(),
-        }
-        .into());
+        });
     }
 
     // Calculate dot product (numerator)
@@ -58,8 +54,6 @@ const MAX_CAPACITY: usize = 20;
 
 #[derive(Debug)]
 struct CosineSimilarityCircularBuffer {
-    // TODO: Cleanup and make a stack-allocated structure.
-    // Maybe an array of Option<RollingElem> with a max capacity.
     a_sum_sq: f64,
     b_sum_sq: f64,
     dot_product: f64,
@@ -206,21 +200,23 @@ impl CosineSimilarityCircularBuffer {
 /// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
 /// assert_eq!(results.len(), expect_res.len());
 /// ```
-pub fn rolling_cosine_similarity(a: &[f32], b: &[f32], window_size: usize) -> Result<Vec<f32>> {
+pub fn rolling_cosine_similarity(
+    a: &[f32],
+    b: &[f32],
+    window_size: usize,
+) -> Result<Vec<f32>, DataProcessingError> {
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
             expected: a.len(),
             other: b.len(),
             context: "cosine_similarity".to_string(),
-        }
-        .into());
+        });
     }
     if a.len() < window_size {
         return Err(DataProcessingError::ExpectedNonEmptyData {
             context: Some("cosine_similarity".to_string()),
-        }
-        .into());
+        });
     }
 
     let offset = window_size / 2;

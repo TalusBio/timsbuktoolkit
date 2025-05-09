@@ -7,7 +7,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, std::hash::Hash, PartialOrd, Ord)]
 pub enum DecoyMarking {
     Target,
-    Decoy,
+    NonReversedDecoy,
     ReversedDecoy,
 }
 
@@ -15,7 +15,7 @@ impl DecoyMarking {
     pub fn as_str(&self) -> &'static str {
         match self {
             DecoyMarking::Target => "Target",
-            DecoyMarking::Decoy => "Decoy",
+            DecoyMarking::NonReversedDecoy => "Decoy",
             DecoyMarking::ReversedDecoy => "Decoy",
         }
     }
@@ -23,7 +23,7 @@ impl DecoyMarking {
     pub fn is_decoy(&self) -> bool {
         match self {
             DecoyMarking::Target => false,
-            DecoyMarking::Decoy => true,
+            DecoyMarking::NonReversedDecoy => true,
             DecoyMarking::ReversedDecoy => true,
         }
     }

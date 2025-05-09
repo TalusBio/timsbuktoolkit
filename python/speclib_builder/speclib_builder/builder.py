@@ -45,10 +45,14 @@ class DummyAnnotator(PeptideAnnotator):
         frags = [x for x in frags if x.neutral_loss is None]
         frags = [x for x in frags if x.charge <= (pep.charge - 1)]
         ion_dict = {
-            f"{f.ion}^{f.charge}": MzIntPair(f.formula.mass() / f.charge, 1.0)
+            f"{f.ion}^{f.charge}": MzIntPair(
+                mz=f.formula.mass() / f.charge, intensity=1.0
+            )
             for f in frags
         }
-        return EntryElements(pep, ion_dict, decoy, 0)
+        return EntryElements(
+            peptide=pep, ion_dict=ion_dict, decoy=decoy, rt_seconds=0, id=0
+        )
 
 
 @dataclass
@@ -90,7 +94,7 @@ class EntryBuilder:
 
         neutron_fraction = NEUTRON_MASS / peptide.charge
         precursor_mzs = [
-            float(precursor_mz + (neutron_fraction * isotope))
+            (isotope, float(precursor_mz + (neutron_fraction * isotope)))
             for isotope in [-1, 0, 1, 2]
         ]
 
@@ -112,7 +116,7 @@ class EntryBuilder:
             and (v.mz < self.max_ion_mz)
         }
 
-        ion_mzs = {k: v.mz for k, v in ion_dict.items()}
+        ion_mzs = [(k, v.mz) for k, v in ion_dict.items()]
         ion_intensities = {k: v.intensity for k, v in ion_dict.items()}
         if len(ion_mzs) < self.min_ions:
             return None
@@ -126,8 +130,8 @@ class EntryBuilder:
             "id": id,
             "mobility": ims,
             "rt_seconds": rt_seconds,
-            "precursor_mzs": precursor_mzs,
-            "fragment_mzs": ion_mzs,
+            "precursors": precursor_mzs,
+            "fragments": ion_mzs,
         }
         expected_intensities = {
             "precursor_intensities": [0.001] + list(isotope_dist),
@@ -135,7 +139,7 @@ class EntryBuilder:
         }
 
         entry = SpeclibElement(
-            PrecursorEntry(**precursor_entry),
-            ElutionGroup(**elution_group, **expected_intensities),
+            precursor=PrecursorEntry(**precursor_entry),
+            elution_group=ElutionGroup(**elution_group, **expected_intensities),
         )
         return entry

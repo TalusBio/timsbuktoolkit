@@ -1,19 +1,19 @@
-mod arrays;
 mod decoy;
 mod digest;
-mod mz_rt_arrays;
-mod query_chunk;
-mod sequence_iterator;
+mod ion_annotation;
+mod query_item;
 
-pub use arrays::Array2D;
 pub use decoy::DecoyMarking;
 pub use digest::{
     DigestSlice,
     deduplicate_digests,
 };
-pub use mz_rt_arrays::{
-    MzMajorIntensityArray,
-    RTMajorIntensityArray,
+pub use ion_annotation::{
+    IonAnnot,
+    IonParsingError,
+    IonSeriesTerminality,
 };
-pub use query_chunk::NamedQueryChunk;
-pub use sequence_iterator::DigestedSequenceIterator;
+pub use query_item::{
+    ExpectedIntensities,
+    QueryItemToScore,
+};

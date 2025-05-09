@@ -72,7 +72,9 @@ class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
             if elem is None:
                 continue
             pep, ion_dict = elem
-            ion_dict = {k: MzIntPair(v[0], v[1]) for k, v in ion_dict.items()}
+            ion_dict = {
+                k: MzIntPair(mz=v[0], intensity=v[1]) for k, v in ion_dict.items()
+            }
             try:
                 rt_seconds = self.rt_model.predict_peptide(pep)
             except ValueError as e:
@@ -80,7 +82,7 @@ class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
                     print(f"Skipping peptide {pep} due to invalid residue U")
                     continue
             yield EntryElements(
-                pep,
+                peptide=pep,
                 rt_seconds=rt_seconds,
                 ion_dict=ion_dict,
                 decoy=pe.decoy,

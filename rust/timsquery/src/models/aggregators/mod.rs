@@ -1,10 +1,15 @@
-pub mod raw_peak_agg;
-pub mod streaming_aggregator;
+pub mod chromatogram_agg;
+pub mod mobilogram_agg;
+pub mod point_agg;
+pub mod spectrum_agg;
 
-pub use raw_peak_agg::{
-    ChromatomobilogramStats,
-    MultiCMGStatsAgg,
-    MultiCMGStatsFactory,
-    RawPeakIntensityAggregator,
-    RawPeakVectorAggregator,
-};
+pub use chromatogram_agg::ChromatogramCollector;
+pub use point_agg::PointIntensityAggregator;
+pub use spectrum_agg::SpectralCollector;
+
+// pub use raw_peak_agg::{
+//     MultiCMGStatsAgg,
+//     MultiCMGStatsFactory,
+//     RawPeakIntensityAggregator,
+//     RawPeakVectorAggregator,
+// };

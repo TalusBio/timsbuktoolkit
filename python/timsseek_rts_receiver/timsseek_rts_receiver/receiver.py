@@ -334,7 +334,7 @@ class TargetDecoyPair:
     decoy: PeptideElement
 
 
-def input_compoinent() -> PeptideElement:
+def input_component() -> PeptideElement:
     options = ["Sequence", "Examples", "Digest"]
     option = st.selectbox("Input", options)
     if option == "Sequence":
@@ -425,7 +425,7 @@ def main():
 
     annotator = DummyAnnotator()
     ml_annotator = OnnxPeptideTransformerAnnotator.get_default()
-    peptide = input_compoinent()
+    peptide = input_component()
 
     if ml_annotator is not None:
         st.info("Using ML annotator")

@@ -69,7 +69,7 @@ def as_decoy_proforma(proforma: str, decoy_strategy: DecoyStrategy) -> str:
 
 def yield_as_decoys(
     peptides: list[str],
-    decoy_strategy: Literal[DecoyStrategy.MUTATE, DecoyStrategy.REVERSE],
+    decoy_strategy: DecoyStrategy,
 ) -> Generator[str, None, None]:
     for peptide in peptides:
         try:

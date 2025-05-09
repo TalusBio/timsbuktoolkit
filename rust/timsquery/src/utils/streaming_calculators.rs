@@ -20,16 +20,16 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// # Example
 ///
 /// ```
-/// use timsquery::models::aggregators::streaming_aggregator::RunningStatsCalculator;
+/// use timsquery::utils::streaming_calculators::RunningStatsCalculator;
 ///
 /// // Create a new calculator with a weight of 10 and a mean of 0.0
 /// let mut calc = RunningStatsCalculator::new(1, 0.0);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
-/// calc.add(10.0, 1);
-/// calc.add(0.0, 1);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
+/// calc.add(1, 10.0);
+/// calc.add(1, 0.0);
 /// // So overall this should be the equivalent of the mean for
 /// // [0.0, 10.0, 0.0, 10.0, 0.0, 10.0]
 /// assert_eq!(calc.mean().unwrap(), 5.0, "{calc:#?}");
@@ -51,9 +51,9 @@ pub struct RunningStatsCalculator {
     weight: u64,
     mean_n: f64,
     d_: f64,
+    // TODO: Make min/max conditionally compiled
     min: f64,
     max: f64,
-    // count: u64,
 }
 
 impl RunningStatsCalculator {
@@ -72,7 +72,7 @@ impl RunningStatsCalculator {
     }
 
     /// Add a new value to the running stats calculator.
-    pub fn add(&mut self, value: f64, weight: u64) {
+    pub fn add(&mut self, weight: u64, value: f64) {
         if weight == 0 {
             panic!("Weight must be > 0, adding");
         }
@@ -95,6 +95,7 @@ impl RunningStatsCalculator {
         // float issue ... TODO investigate.
 
         // In the meantime I will just squeeze the mean to the min/max observed values.
+        // TODO:Make this conditional compilation
         self.min = self.min.min(value);
         self.max = self.max.max(value);
 
@@ -141,11 +142,11 @@ mod tests {
     #[test]
     fn test_running_stats_calculator() {
         let mut calc = RunningStatsCalculator::new(10, 0.0);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
-        calc.add(10.0, 2);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
+        calc.add(2, 10.0);
         assert!(calc.mean().unwrap() < 5.6);
         assert!(calc.mean().unwrap() > 4.4);
         assert!(calc.variance().unwrap() > 15.);
@@ -169,7 +170,7 @@ mod tests {
     fn test_running_stats_calculator_ascombes_3() {
         let mut calc = RunningStatsCalculator::new(1, ASCOMBES_3[0]);
         for val in ASCOMBES_3[1..].iter() {
-            calc.add(*val, 1);
+            calc.add(1, *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);
@@ -181,7 +182,7 @@ mod tests {
     fn test_running_stats_calculator_ascombes_4() {
         let mut calc = RunningStatsCalculator::new(1, ASCOMBES_4[0]);
         for val in ASCOMBES_4[1..].iter() {
-            calc.add(*val, 1);
+            calc.add(1, *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);

@@ -1,7 +1,13 @@
 use serde_json;
-use timsquery::TimsqueryError;
+use std::path::PathBuf;
+use timsquery::{
+    DataProcessingError as TQDataProcessingError,
+    TimsqueryError,
+};
 use timsrust::TimsRustError;
 
+// TODO: break up ... the type system RN gives no info bc
+// everything is a datada processing error...
 #[derive(Debug)]
 pub enum DataProcessingError {
     ExpectedSlicesSameLength {
@@ -19,6 +25,32 @@ pub enum DataProcessingError {
         field: String,
         context: String,
     },
+    TimsQueryDataProcessingError {
+        error: TQDataProcessingError,
+        context: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum LibraryReadingError {
+    SpeclibParsingError {
+        source: serde_json::Error,
+        context: &'static str,
+    },
+    FileReadingError {
+        source: std::io::Error,
+        context: &'static str,
+        path: PathBuf,
+    },
+}
+
+impl From<TQDataProcessingError> for DataProcessingError {
+    fn from(x: TQDataProcessingError) -> Self {
+        Self::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        }
+    }
 }
 
 impl DataProcessingError {
@@ -47,6 +79,12 @@ impl DataProcessingError {
             } => {
                 owned_context.push_str(context);
             }
+            DataProcessingError::TimsQueryDataProcessingError {
+                context: owned_context,
+                ..
+            } => {
+                owned_context.push_str(context);
+            }
         }
         self
     }
@@ -64,6 +102,7 @@ pub enum TimsSeekError {
         msg: String,
     },
     DataProcessingError(DataProcessingError),
+    LibraryReadingError(LibraryReadingError),
 }
 
 impl std::fmt::Display for TimsSeekError {
@@ -103,5 +142,20 @@ impl From<serde_json::Error> for TimsSeekError {
 impl From<DataProcessingError> for TimsSeekError {
     fn from(x: DataProcessingError) -> Self {
         Self::DataProcessingError(x)
+    }
+}
+
+impl From<LibraryReadingError> for TimsSeekError {
+    fn from(x: LibraryReadingError) -> Self {
+        Self::LibraryReadingError(x)
+    }
+}
+
+impl From<TQDataProcessingError> for TimsSeekError {
+    fn from(x: TQDataProcessingError) -> Self {
+        Self::DataProcessingError(DataProcessingError::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        })
     }
 }

@@ -40,8 +40,6 @@ pub enum IonSeriesTerminality {
     None,
 }
 
-// TODO: Consider re-implementing with char+u8 instead of enum ...
-// Might be less ergonomic but will be a lot less verbose.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy)]
 #[allow(non_camel_case_types)]
 pub enum IonSeriesOrdinal {
@@ -192,14 +190,6 @@ impl TryFrom<FragmentType> for IonSeriesOrdinal {
 /// ion annotation. Essentially we are packing in 32 bytes
 /// the ion series (b,y ...), charge (+1 / -1 ...),
 /// ordinal (12 in the ion series) and isotope.
-///
-/// 8 bytes - ion series (I could use 4 ... but I have enough bytes)
-/// 8 bytes - Ordinal
-/// 8 bytes - charge as an i4
-/// 8 bytes - isotope as i4, technically no negative isotopes are possible, but
-///           they are useful as fake constructs for scoring.
-///
-/// Our i4's are essentially the last 4 bytes of an i32
 ///
 /// It is not meant to represent all possible ions but rather have
 /// a very compact representation of the common ones.

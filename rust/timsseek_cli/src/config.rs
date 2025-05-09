@@ -3,53 +3,41 @@ use serde::{
     Serialize,
 };
 use std::path::PathBuf;
-use timsquery::traits::tolerance::DefaultTolerance;
+use timsquery::Tolerance;
 
 use crate::cli::Cli;
 use crate::errors;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    /// Input configuration
     pub input: Option<InputConfig>,
-
-    /// Analysis parameters
     pub analysis: AnalysisConfig,
-
-    /// Output configuration
     pub output: Option<OutputConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum InputConfig {
-    #[serde(rename = "fasta")]
-    Fasta {
-        path: PathBuf,
-        digestion: DigestionConfig,
-    },
+    // TODO: Implement in-rust speclib generation to take a fasta file.
+    // #[serde(rename = "fasta")]
+    // Fasta {
+    //     path: PathBuf,
+    //     digestion: DigestionConfig,
+    // },
     #[serde(rename = "speclib")]
     Speclib { path: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AnalysisConfig {
-    /// Path to the .d file
     pub dotd_file: Option<PathBuf>,
-
-    /// Processing parameters
     pub chunk_size: usize,
-
-    /// Tolerance settings
-    pub tolerance: DefaultTolerance,
+    pub tolerance: Tolerance,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OutputConfig {
-    /// Directory for results
     pub directory: PathBuf,
-    /// Whether to enable the full output mode
-    pub full_output: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

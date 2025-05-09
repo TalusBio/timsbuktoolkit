@@ -1,8 +1,10 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
-use crate::data_sources::speclib::ExpectedIntensities;
-use crate::fragment_mass::IonAnnot;
 use crate::isotopes::peptide_isotopes;
 use crate::models::DigestSlice;
+use crate::{
+    ExpectedIntensities,
+    IonAnnot,
+};
 use rayon::prelude::*;
 use rustyms::error::{
     Context,
@@ -16,6 +18,7 @@ use rustyms::{
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 use tracing::{
     error,
@@ -104,7 +107,7 @@ impl SequenceToElutionGroupConverter {
         id: u64,
     ) -> Result<
         (
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -154,29 +157,39 @@ impl SequenceToElutionGroupConverter {
             fragment_mzs
                 .retain(|(_pos, mz, _)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
 
+            fragment_mzs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
             let mobility = supersimpleprediction(precursor_mz, charge as i32);
-            let mut precursor_mzs = vec![precursor_mz; 4];
-            precursor_mzs[0] -= nmf;
-            precursor_mzs[2] += nmf;
-            precursor_mzs[3] += 2. * nmf;
+            let mut precursor_mzs = vec![(0, precursor_mz); 4];
+
+            // This just assigns the "numeral" and mass
+            // to the isotopes.
+            precursor_mzs[0].1 -= nmf;
+            precursor_mzs[0].0 = -1;
+
+            precursor_mzs[2].1 += nmf;
+            precursor_mzs[2].0 = 1;
+
+            precursor_mzs[3].1 += 2. * nmf;
+            precursor_mzs[3].0 += 2;
 
             let fragment_expect_inten =
                 HashMap::from_iter(fragment_mzs.iter().map(|(k, _, v)| (*k, *v)));
-            let fragment_mzs = HashMap::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
+            let fragment_mzs = Vec::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
             let eg = ElutionGroup {
                 id,
-                precursor_mzs,
+                precursors: precursor_mzs.into(),
                 mobility: mobility as f32,
                 rt_seconds: 0.0f32,
                 // precursor_charge: charge,
-                fragment_mzs,
+                fragments: fragment_mzs.into(),
             };
             let ei = ExpectedIntensities {
                 fragment_intensities: fragment_expect_inten,
                 precursor_intensities: expected_prec_inten.clone(),
             };
 
-            out_eg.push(eg);
+            out_eg.push(Arc::new(eg));
             out_exp_int.push(ei);
             out_charges.push(charge);
         }
@@ -190,7 +203,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -225,7 +238,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<ElutionGroup<IonAnnot>>,
+            Vec<Arc<ElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -297,7 +310,7 @@ mod tests {
             min_fragment_mz: 200.,
         };
         let seq: Arc<str> = "PEPTIDEPINK".into();
-        let range_use: std::ops::Range<usize> = 0..seq.len();
+        let range_use: std::ops::Range<u16> = 0u16..seq.len() as u16;
         let dig_slice = DigestSlice::new(seq, range_use, DecoyMarking::Target);
         let seq_slc = vec![dig_slice];
         let out = converter.convert_sequences(&seq_slc).unwrap();

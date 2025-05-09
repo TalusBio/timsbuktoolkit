@@ -15,26 +15,26 @@ def _sample_element():
             "id": 4,
             "mobility": 1.0175,
             "rt_seconds": 0,
-            "precursor_mzs": [
-                722.8980675419999,
-                723.4024,
-                723.906732458,
-                724.411064916,
+            "precursors": [
+                (-1, 722.8980675419999),
+                (1, 723.4024),
+                (2, 723.906732458),
+                (3, 724.411064916),
             ],
-            "fragment_mzs": {
-                "y9^1": 1004.5382,
-                "y11^2": 623.34436,
-                "y10^1": 1132.5968,
-                "y8^1": 917.50616,
-                "y11^1": 1245.6808,
-                "y10^2": 566.80231,
-                "b3^1": 314.20798,
-                "y4^1": 475.32495,
-                "y7^1": 846.46906,
-                "y6^1": 718.41046,
-                "y5^1": 590.35193,
-                "b4^1": 442.26657,
-            },
+            "fragments": [
+                ("y9^1", 1004.5382),
+                ("y11^2", 623.34436),
+                ("y10^1", 1132.5968),
+                ("y8^1", 917.50616),
+                ("y11^1", 1245.6808),
+                ("y10^2", 566.80231),
+                ("b3^1", 314.20798),
+                ("y4^1", 475.32495),
+                ("y7^1", 846.46906),
+                ("y6^1", 718.41046),
+                ("y5^1", 590.35193),
+                ("b4^1", 442.26657),
+            ],
             "precursor_intensities": [
                 0.001,
                 1.0,
@@ -58,22 +58,7 @@ def _sample_element():
         },
     }
 
-    elem = SpeclibElement(
-        precursor=PrecursorEntry(
-            sequence=entry["precursor"]["sequence"],
-            charge=entry["precursor"]["charge"],
-            decoy=entry["precursor"]["decoy"],
-        ),
-        elution_group=ElutionGroup(
-            id=entry["elution_group"]["id"],
-            mobility=entry["elution_group"]["mobility"],
-            rt_seconds=entry["elution_group"]["rt_seconds"],
-            precursor_mzs=entry["elution_group"]["precursor_mzs"],
-            fragment_mzs=entry["elution_group"]["fragment_mzs"],
-            precursor_intensities=entry["elution_group"]["precursor_intensities"],
-            fragment_intensities=entry["elution_group"]["fragment_intensities"],
-        ),
-    )
+    elem = SpeclibElement(**entry)
 
     return elem
 
@@ -93,13 +78,15 @@ def test_peptide_swap_same():
     assert elem_bkp.elution_group.id == 4
     assert elem.elution_group.id == 4
 
-    assert elem.elution_group.precursor_mzs == new_elem.elution_group.precursor_mzs
-    assert set(elem.elution_group.fragment_mzs.keys()) == set(
-        new_elem.elution_group.fragment_mzs.keys()
+    assert elem.elution_group.precursors == new_elem.elution_group.precursors
+    assert set(x[0] for x in elem.elution_group.fragments) == set(
+        x[0] for x in new_elem.elution_group.fragments
     )
-    for k in elem.elution_group.fragment_mzs.keys():
-        orig = elem.elution_group.fragment_mzs[k]
-        new = new_elem.elution_group.fragment_mzs[k]
+    orig_dict = {x[0]: x[1] for x in elem.elution_group.fragments}
+    new_dict = {x[0]: x[1] for x in new_elem.elution_group.fragments}
+    for k, _ in elem.elution_group.fragments:
+        orig = orig_dict[k]
+        new = new_dict[k]
         diff = orig - new
 
         assert abs(diff) < 0.002, f"{k}: {diff}; original: {orig}, new: {new}"
@@ -117,20 +104,23 @@ def test_peptide_swap_decoy():
     assert new_elem.precursor.sequence == new_pep
     assert new_elem.precursor.sequence != elem.precursor.sequence
 
-    assert set(elem.elution_group.fragment_mzs.keys()) == set(
-        new_elem.elution_group.fragment_mzs.keys()
+    assert set(x[0] for x in elem.elution_group.fragments) == set(
+        x[0] for x in new_elem.elution_group.fragments
     )
     sames = {}
     diffs = {}
-    for k in elem.elution_group.fragment_mzs.keys():
-        orig = elem.elution_group.fragment_mzs[k]
-        new = new_elem.elution_group.fragment_mzs[k]
+
+    orig_dict = {x[0]: x[1] for x in elem.elution_group.fragments}
+    new_dict = {x[0]: x[1] for x in new_elem.elution_group.fragments}
+    for i, x in enumerate(elem.elution_group.fragments):
+        orig = orig_dict[x[0]]
+        new = new_dict[x[0]]
         diff = orig - new
 
         if abs(diff) < 0.002:
-            sames[k] = diff
+            sames[x[0]] = diff
         else:
-            diffs[k] = diff
+            diffs[x[0]] = diff
 
     assert len(sames) == 0
     V_TO_A_MASS = 42.04807294523107
@@ -232,5 +222,5 @@ def test_peptide_decoy_pseudorev():
     for mz, k in expect:
         # Note that here I am using the original element to check
         # for the presence of the key. BUT the new one for the mass.
-        if k in elem.elution_group.fragment_mzs:
-            assert abs(new_elem.elution_group.fragment_mzs[k] - mz) < 0.01
+        if k in elem.elution_group.fragments:
+            assert abs(new_elem.elution_group.fragments[k] - mz) < 0.01

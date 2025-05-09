@@ -1,5 +1,3 @@
-use std::iter::repeat;
-
 use super::expanded_frame::{
     ExpandedFrameSlice,
     SortingStateTrait,
@@ -12,8 +10,8 @@ use timsrust::{
 
 pub struct ExpandedWindowGroup {
     pub tof_indices: Vec<u32>,
-    pub scan_numbers: Vec<usize>,
-    pub intensities: Vec<u32>,
+    pub scan_numbers: Vec<u16>,
+    pub corrected_intensities: Vec<f32>,
     pub retention_times: Vec<f64>,
     // pub frame_indices: Vec<usize>,
     pub acquisition_type: AcquisitionType,
@@ -33,7 +31,7 @@ impl ExpandedWindowGroup {
             .sum();
         let mut tof_indices = Vec::with_capacity(num_peaks);
         let mut scan_numbers = Vec::with_capacity(num_peaks);
-        let mut intensities = Vec::with_capacity(num_peaks);
+        let mut corrected_intensities = Vec::with_capacity(num_peaks);
         let mut retention_times = Vec::with_capacity(num_peaks);
 
         let acq_type = expanded_frame_slices[0].acquisition_type;
@@ -45,14 +43,14 @@ impl ExpandedWindowGroup {
             let local_len = slice.tof_indices.len();
             tof_indices.extend(slice.tof_indices);
             scan_numbers.extend(slice.scan_numbers);
-            intensities.extend(slice.intensities);
-            retention_times.extend(repeat(slice.rt).take(local_len));
+            corrected_intensities.extend(slice.corrected_intensities);
+            retention_times.extend(std::iter::repeat_n(slice.rt, local_len));
         }
 
         ExpandedWindowGroup {
             tof_indices,
             scan_numbers,
-            intensities,
+            corrected_intensities,
             retention_times,
             acquisition_type: acq_type,
             ms_level,

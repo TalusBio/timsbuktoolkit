@@ -99,7 +99,7 @@ impl DigestionParameters {
                         }
                         Some(DigestSlice::new(
                             sequence.clone(),
-                            start..end,
+                            start as u16..end as u16,
                             DecoyMarking::Target,
                         ))
                     })

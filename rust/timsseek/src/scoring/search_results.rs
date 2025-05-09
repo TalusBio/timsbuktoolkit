@@ -5,19 +5,17 @@ use super::calculate_scores::{
     RelativeIntensities,
     SortedErrors,
 };
+use crate::IonAnnot;
 use crate::errors::DataProcessingError;
-use crate::fragment_mass::IonAnnot;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
 };
-use csv::WriterBuilder;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RecordWriter;
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
-use std::time::Instant;
 use timsquery::ElutionGroup;
 
 #[derive(Debug, Default)]
@@ -94,8 +92,8 @@ impl<'q> SearchResultBuilder<'q> {
 
     fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = SetField::Some(&pre_score.digest);
-        self.ref_eg = SetField::Some(&pre_score.reference);
-        self.nqueries = SetField::Some(pre_score.reference.fragment_mzs.len() as u8);
+        self.ref_eg = SetField::Some(&pre_score.query_values.eg);
+        self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
         self.decoy_marking = SetField::Some(pre_score.digest.decoy);
         self.charge = SetField::Some(pre_score.charge);
         self
@@ -121,9 +119,6 @@ impl<'q> SearchResultBuilder<'q> {
             score,
             delta_next,
             delta_second_next,
-            observed_mobility,
-            observed_mobility_ms1,
-            observed_mobility_ms2,
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms1_coelution_score,
@@ -139,12 +134,9 @@ impl<'q> SearchResultBuilder<'q> {
             ..
         } = main_score;
         {
-            let delta_ms1_ms2_mobility = observed_mobility_ms1 - observed_mobility_ms2;
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
             self.delta_second_next = SetField::Some(delta_second_next);
-            self.observed_mobility = SetField::Some(observed_mobility);
-            self.delta_ms1_ms2_mobility = SetField::Some(delta_ms1_ms2_mobility);
 
             self.rt_seconds = SetField::Some(retention_time_ms as f32 / 1000.0);
             self.ms2_cosine_ref_similarity = SetField::Some(ms2_cosine_ref_sim);
@@ -189,7 +181,8 @@ impl<'q> SearchResultBuilder<'q> {
         let [int1_e0, int1_e1, int1_e2] = self
             .relative_intensities
             .expect_some("ms1_intensity_errors", "ms1_intensity_errors")?
-            .ms1;
+            .ms1
+            .get_values();
         let [
             int2_e0,
             int2_e1,
@@ -201,7 +194,8 @@ impl<'q> SearchResultBuilder<'q> {
         ] = self
             .relative_intensities
             .expect_some("ms2_intensity_errors", "ms2_intensity_errors")?
-            .ms2;
+            .ms2
+            .get_values();
 
         let ref_eg = self.ref_eg.expect_some("ref_eg", "ref_eg")?;
         // TODO replace this with exhaustive unpacking.
@@ -220,7 +214,7 @@ impl<'q> SearchResultBuilder<'q> {
                     .expect_some("digest_slice", "digest_slice")?
                     .clone(),
             ),
-            precursor_mz: ref_eg.precursor_mzs[1],
+            precursor_mz: ref_eg.get_monoisotopic_precursor_mz().unwrap_or(f64::NAN),
             precursor_charge: self.charge.expect_some("charge", "charge")?,
             precursor_mobility_query: ref_eg.mobility,
             precursor_rt_query_seconds: ref_eg.rt_seconds,
@@ -393,6 +387,61 @@ pub struct IonSearchResults {
     ms2_inten_ratio_6: f32,
 }
 
+pub struct ResultParquetWriter {
+    row_group_size: usize,
+    writer: SerializedFileWriter<File>,
+    buffer: Vec<IonSearchResults>,
+}
+
+impl ResultParquetWriter {
+    pub fn new(out_path: impl AsRef<Path>, row_group_size: usize) -> Result<Self, std::io::Error> {
+        let file = match File::create_new(out_path.as_ref()) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to open file {:?} with error: {}",
+                    out_path.as_ref(),
+                    err
+                );
+                return Err(err);
+            }
+        };
+        let results: &[IonSearchResults] = &[];
+        let schema = results.schema().unwrap();
+        let writer = SerializedFileWriter::new(file, schema, Default::default()).unwrap();
+        Ok(Self {
+            buffer: Vec::with_capacity(row_group_size),
+            writer,
+            row_group_size,
+        })
+    }
+
+    fn flush_to_file(&mut self) {
+        let mut row_group = self.writer.next_row_group().unwrap();
+        self.buffer
+            .as_slice()
+            .write_to_row_group(&mut row_group)
+            .unwrap();
+        row_group.close().unwrap();
+        self.buffer.clear();
+    }
+
+    pub fn add(&mut self, result: IonSearchResults) {
+        self.buffer.push(result);
+        if self.buffer.len() >= self.row_group_size {
+            self.flush_to_file();
+        }
+    }
+
+    pub fn close(mut self) {
+        // TODO: add some logging ...
+        if !self.buffer.is_empty() {
+            self.flush_to_file();
+        }
+        self.writer.close().unwrap();
+    }
+}
+
 pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(
     results: &[IonSearchResults],
     out_path: P,
@@ -416,26 +465,5 @@ pub fn write_results_to_parquet<P: AsRef<Path> + Clone>(
     row_group.close().unwrap();
     writer.close().unwrap();
 
-    Ok(())
-}
-
-pub fn write_results_to_csv<P: AsRef<Path>>(
-    results: &[IonSearchResults],
-    out_path: P,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let mut writer = WriterBuilder::default()
-        .has_headers(true)
-        .from_path(out_path.as_ref())?;
-
-    for result in results {
-        writer.serialize(result).unwrap();
-    }
-    writer.flush()?;
-    tracing::info!(
-        "Writing took {:?} -> {:?}",
-        start.elapsed(),
-        out_path.as_ref()
-    );
     Ok(())
 }

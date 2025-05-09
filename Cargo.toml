@@ -8,8 +8,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.0-b0"
-edition = "2021"
+version = "0.12.0-b0"
+edition = "2024"
 authors = ["Sebastian Paez"]
 license = "MIT"
 
@@ -25,7 +25,8 @@ timsrust = "=0.4.2"
 rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.17.11", features = ["rayon"] }
-parquet = { version = "54.3.1" }
+parquet = { version = "55.0.0" }
+mimalloc = { version = "0.1.46", features = ["secure"] }
 
 [profile.release]
 lto = 'thin'
