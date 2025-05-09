@@ -1,8 +1,12 @@
 use super::QuadSplittedTransposedIndex;
+use crate::OptionallyRestricted::{
+    Restricted,
+    Unrestricted,
+};
 use crate::models::aggregators::{
-    EGCAggregator,
-    EGSAggregator,
+    ChromatogramCollector,
     PointIntensityAggregator,
+    SpectralCollector,
 };
 use crate::models::frames::peak_in_quad::PeakInQuad;
 use crate::traits::QueriableData;
@@ -47,8 +51,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for QuadSplittedTr
     }
 }
 
-impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for QuadSplittedTransposedIndex {
-    fn add_query(&self, aggregator: &mut EGCAggregator<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH>> for QuadSplittedTransposedIndex {
+    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
@@ -56,13 +60,15 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for QuadSplittedTransposedInd
         // TODO: This section is kind of ugly ... I can probably move some of the logic around ...
         let query_rt_ms = aggregator.rt_range();
         let rt_range_ms = match tolerance.rt_range_as_milis(aggregator.eg.rt_seconds) {
-            None => rt_range_ms,
-            Some(tol_range_rt) => query_rt_ms.intersection(tol_range_rt),
+            Unrestricted => rt_range_ms,
+            Restricted(tol_range_rt) => {
+                let tmp = query_rt_ms.intersection(tol_range_rt);
+                if tmp.is_none() {
+                    return;
+                }
+                Restricted(tmp.unwrap())
+            }
         };
-
-        if rt_range_ms.is_none() {
-            return;
-        }
 
         aggregator
             .iter_mut_precursors()
@@ -98,8 +104,8 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for QuadSplittedTransposedInd
     }
 }
 
-impl<FH: KeyLike> QueriableData<EGSAggregator<FH>> for QuadSplittedTransposedIndex {
-    fn add_query(&self, aggregator: &mut EGSAggregator<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for QuadSplittedTransposedIndex {
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);

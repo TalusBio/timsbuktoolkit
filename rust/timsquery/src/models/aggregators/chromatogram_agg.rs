@@ -13,13 +13,13 @@ use crate::{
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct EGCAggregator<T: KeyLike> {
+pub struct ChromatogramCollector<T: KeyLike> {
     pub eg: Arc<ElutionGroup<T>>,
     pub precursors: MzMajorIntensityArray<i8, f32>, // TODO: Move this to a generic ...
     pub fragments: MzMajorIntensityArray<T, f32>,
 }
 
-impl<T: KeyLike> EGCAggregator<T> {
+impl<T: KeyLike> ChromatogramCollector<T> {
     pub fn new(
         eg: Arc<ElutionGroup<T>>,
         ref_rt_mss: Arc<[u32]>,

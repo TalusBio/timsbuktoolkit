@@ -1,3 +1,4 @@
+use crate::OptionallyRestricted;
 use crate::errors::TimsqueryError;
 use crate::models::frames::expanded_frame::{
     ExpandedFrameSlice,
@@ -65,15 +66,15 @@ impl ExpandedSliceBundle {
         // TODO: remove the options from these ranges
         // or replace with an explicit enum ...
         // Since None is ambiguous (it means 'Any' instead of 'None')
-        scan_range: Option<IncludedRange<u16>>,
-        frame_rt_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        frame_rt_ms: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
     {
         // Binary search the rt if needed.
         let slice_rage = match frame_rt_ms {
-            Some(frame_rt_ms) => {
+            OptionallyRestricted::Restricted(frame_rt_ms) => {
                 let low = self
                     .frame_rt_ms
                     .partition_point(|x| *x < frame_rt_ms.start());
@@ -82,7 +83,7 @@ impl ExpandedSliceBundle {
                     .partition_point(|x| *x <= frame_rt_ms.end());
                 low..high
             }
-            None => 0..self.frame_rt_ms.len(),
+            OptionallyRestricted::Unrestricted => 0..self.frame_rt_ms.len(),
         };
 
         for i in slice_rage {
@@ -97,8 +98,8 @@ impl ExpandedRawFrameIndex {
         &self,
         tof_range: IncludedRange<u32>,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<u16>>,
-        frame_rt_ms_range: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        frame_rt_ms_range: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -112,8 +113,8 @@ impl ExpandedRawFrameIndex {
     pub fn query_ms1_peaks<F>(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
-        frame_rt_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        frame_rt_ms: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),
@@ -126,8 +127,8 @@ impl ExpandedRawFrameIndex {
         &self,
         matching_quads: &[SingleQuadrupoleSettingIndex],
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
-        frame_rt_ms_range: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        frame_rt_ms_range: OptionallyRestricted<IncludedRange<u32>>,
         f: &mut F,
     ) where
         F: FnMut(PeakInQuad),

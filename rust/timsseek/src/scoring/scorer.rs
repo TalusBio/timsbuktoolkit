@@ -1,7 +1,5 @@
 use crate::errors::DataProcessingError;
-use crate::models::DigestSlice;
 use crate::{
-    ExpectedIntensities,
     IonAnnot,
     QueryItemToScore,
 };
@@ -9,8 +7,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 use timsquery::{
-    EGCAggregator,
-    ElutionGroup,
+    ChromatogramCollector,
     GenerallyQueriable,
     Tolerance,
 };
@@ -26,6 +23,7 @@ use super::search_results::{
     IonSearchResults,
     SearchResultBuilder,
 };
+use tracing::info;
 
 pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
     pub index_cycle_rt_ms: Arc<[u32]>,
@@ -38,7 +36,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     #[inline]
     fn _build_prescore(&self, item: &QueryItemToScore) -> PreScore {
         let mut agg =
-            EGCAggregator::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+            ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
         self.index.add_query(&mut agg, &self.tolerance);
 
         PreScore {
@@ -84,7 +82,8 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         queries: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
         let mut res =
-            EGCAggregator::new(queries.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+            ChromatogramCollector::new(queries.query.clone(), self.index_cycle_rt_ms.clone())
+                .unwrap();
         self.index.add_query(&mut res, &self.tolerance);
         let builder = SearchResultBuilder::default();
         let int_arrs = IntensityArrays::new(&res, &queries.expected_intensity)?;
@@ -127,12 +126,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
                 let prescore = self._build_prescore(item);
                 match self._localize_step(prescore, buffer) {
                     // Reuse buffer
-                    Ok(localized) => {
-                        match self._finalize_step(&localized) {
-                            Ok(final_result) => Some(final_result),
-                            Err(_e) => None, // TODO: LOG
-                        }
-                    }
+                    Ok(localized) => self._finalize_step(&localized).ok(),
                     Err(_e) => None, // TODO: LOG
                 }
             })
@@ -140,13 +134,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .collect();
 
         let elapsed = loc_score_start.elapsed();
-        // // TODO:
-        // metrics.num_processed = results.len();
-        // let num_skipped = num_input_items.saturating_sub(results.len());
-
-        // TODO:
-        // metrics.time_localizing = ???
-        // metrics.time_scoring = ???
+        info!("Scoring {} items took: {:?}", num_input_items, elapsed);
 
         results
     }

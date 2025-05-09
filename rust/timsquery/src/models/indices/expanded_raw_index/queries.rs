@@ -1,8 +1,12 @@
 use super::model::ExpandedRawFrameIndex;
+use crate::OptionallyRestricted::{
+    Restricted,
+    Unrestricted,
+};
 use crate::models::aggregators::{
-    EGCAggregator,
-    EGSAggregator,
+    ChromatogramCollector,
     PointIntensityAggregator,
+    SpectralCollector,
 };
 use crate::models::frames::peak_in_quad::PeakInQuad;
 use crate::traits::QueriableData;
@@ -36,149 +40,26 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for ExpandedRawFra
             self.query_peaks(mz_range, quad_range, scan_range, rt_range_ms, &mut clsr);
         });
     }
-    // fn query(&self, fragment_query: &FragmentGroupIndexQuery<FH>) -> Vec<RawPeak> {
-    //     let precursor_mz_range = (
-    //         fragment_query.precursor_query.isolation_mz_range.0 as f64,
-    //         fragment_query.precursor_query.isolation_mz_range.0 as f64,
-    //     )
-    //         .into();
-    //     let scan_range = Some(fragment_query.precursor_query.mobility_index_range);
-
-    //     fragment_query
-    //         .mz_index_ranges
-    //         .iter()
-    //         .flat_map(|(_fh, tof_range)| {
-    //             let mut local_vec: Vec<RawPeak> = vec![];
-    //             self.query_peaks(
-    //                 *tof_range,
-    //                 precursor_mz_range,
-    //                 scan_range,
-    //                 fragment_query.precursor_query.frame_index_range,
-    //                 &mut |x| local_vec.push(RawPeak::from(x)),
-    //             );
-
-    //             local_vec
-    //         })
-    //         .collect()
-    // }
-
-    // fn add_query<A, O, AG, C2>(
-    //     &self,
-    //     fragment_query: &FragmentGroupIndexQuery<FH>,
-    //     aggregator: &mut AG,
-    // ) where
-    //     A: From<RawPeak> + Send + Sync + Clone + Copy,
-    //     AG: Aggregator<Item = A, Output = O, Context = C2>,
-    //     MsLevelContext<usize, FH>: Into<C2>,
-    // {
-    //     let precursor_mz_range = (
-    //         fragment_query.precursor_query.isolation_mz_range.0 as f64,
-    //         fragment_query.precursor_query.isolation_mz_range.0 as f64,
-    //     )
-    //         .into();
-    //     let scan_range = Some(fragment_query.precursor_query.mobility_index_range);
-    //     fragment_query
-    //         .mz_index_ranges
-    //         .iter()
-    //         .for_each(|(_fh, tof_range)| {
-    //             self.query_peaks(
-    //                 *tof_range,
-    //                 precursor_mz_range,
-    //                 scan_range,
-    //                 fragment_query.precursor_query.frame_index_range,
-    //                 &mut |peak| aggregator.add(RawPeak::from(peak)),
-    //             );
-    //         })
-    // }
-
-    // fn add_query_multi_group<A, O, AG, C2>(
-    //     &self,
-    //     fragment_queries: &[FragmentGroupIndexQuery<FH>],
-    //     aggregator: &mut [AG],
-    // ) where
-    //     A: From<RawPeak> + Send + Sync + Clone + Copy,
-    //     AG: Aggregator<Item = A, Output = O, Context = C2>,
-    //     MsLevelContext<usize, FH>: Into<C2>,
-    // {
-    //     let prec_mz_ranges = fragment_queries
-    //         .iter()
-    //         .map(|x| {
-    //             (
-    //                 x.precursor_query.isolation_mz_range.start() as f64,
-    //                 x.precursor_query.isolation_mz_range.end() as f64,
-    //             )
-    //                 .into()
-    //         })
-    //         .collect::<Vec<_>>();
-
-    //     let scan_ranges = fragment_queries
-    //         .iter()
-    //         .map(|x| Some(x.precursor_query.mobility_index_range))
-    //         .collect::<Vec<_>>();
-
-    //     let frame_index_ranges = fragment_queries
-    //         .iter()
-    //         .map(|x| x.precursor_query.frame_index_range)
-    //         .collect::<Vec<_>>();
-
-    //     // Query the ms1 mzs first.
-    //     aggregator.par_iter_mut().enumerate().for_each(|(i, agg)| {
-    //         fragment_queries[i]
-    //             .iter_ms1_mzs()
-    //             .for_each(|(fh, mz_range)| {
-    //                 if agg.supports_context() {
-    //                     agg.set_context(fh.into());
-    //                 }
-    //                 self.query_ms1_peaks(
-    //                     mz_range,
-    //                     scan_ranges[i],
-    //                     frame_index_ranges[i],
-    //                     &mut |x| agg.add(RawPeak::from(x)),
-    //                 );
-    //             });
-    //     });
-
-    //     for quad_setting in self.flat_quad_settings.iter() {
-    //         let local_index = quad_setting.index;
-
-    //         let tqi = self
-    //             .bundled_frames
-    //             .get(&local_index)
-    //             .expect("Only existing quads should be queried.");
-
-    //         aggregator.par_iter_mut().enumerate().for_each(|(i, agg)| {
-    //             if !matches_quad_settings(quad_setting, prec_mz_ranges[i], scan_ranges[i]) {
-    //                 return;
-    //             }
-
-    //             for (fh, tof_range) in fragment_queries[i].iter_ms2_mzs() {
-    //                 if agg.supports_context() {
-    //                     agg.set_context(fh.into());
-    //                 }
-    //                 tqi.query_peaks(tof_range, scan_ranges[i], frame_index_ranges[i], &mut |x| {
-    //                     agg.add(RawPeak::from(x))
-    //                 });
-    //             }
-    //         });
-    //     }
-    // }
 }
 
-impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for ExpandedRawFrameIndex {
-    fn add_query(&self, aggregator: &mut EGCAggregator<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH>> for ExpandedRawFrameIndex {
+    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
         let rt_range_ms = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
         let query_rt_ms = aggregator.rt_range();
-        let rt_range_ms = match tolerance.rt_range_as_milis(aggregator.eg.rt_seconds) {
-            None => rt_range_ms,
-            Some(tol_range_rt) => query_rt_ms.intersection(tol_range_rt),
-        };
+        let rt_range_ms = match rt_range_ms {
+            Unrestricted => rt_range_ms,
+            Restricted(tol_range_rt) => {
+                let tmp = query_rt_ms.intersection(tol_range_rt);
 
-        if rt_range_ms.is_none() {
-            return;
-        }
+                if tmp.is_none() {
+                    return;
+                }
+                Restricted(tmp.unwrap())
+            }
+        };
 
         aggregator
             .iter_mut_precursors()
@@ -193,9 +74,6 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for ExpandedRawFrameIndex {
         aggregator
             .iter_mut_fragments()
             .for_each(|((_idx, mz), mut chr)| {
-                // there is a bit of repeated work here ...
-                // calculating the mz range for each quad instead of once per ion ...
-                // todo: fix later ...
                 let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
                 let mut clsr = |x: PeakInQuad| {
                     chr.add_at_close_rt(x.retention_time_ms, x.corrected_intensity);
@@ -205,8 +83,8 @@ impl<FH: KeyLike> QueriableData<EGCAggregator<FH>> for ExpandedRawFrameIndex {
     }
 }
 
-impl<FH: KeyLike> QueriableData<EGSAggregator<FH>> for ExpandedRawFrameIndex {
-    fn add_query(&self, aggregator: &mut EGSAggregator<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for ExpandedRawFrameIndex {
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
@@ -224,9 +102,6 @@ impl<FH: KeyLike> QueriableData<EGSAggregator<FH>> for ExpandedRawFrameIndex {
         aggregator
             .iter_mut_fragments()
             .for_each(|((_idx, mz), ion)| {
-                // there is a bit of repeated work here ...
-                // calculating the mz range for each quad instead of once per ion ...
-                // todo: fix later ...
                 let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
                 let mut clsr = |x: PeakInQuad| {
                     *ion += x.corrected_intensity;

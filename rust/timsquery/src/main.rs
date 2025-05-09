@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use timsquery::GenerallyQueriable;
 use timsquery::models::aggregators::{
-    EGCAggregator,
-    EGSAggregator,
+    ChromatogramCollector,
     PointIntensityAggregator,
+    SpectralCollector,
 };
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::indices::{
@@ -140,7 +140,7 @@ fn template_tolerance_settings() -> Tolerance {
     Tolerance {
         ms: MzTolerance::Ppm((15.0, 15.0)),
         // rt: RtTolerance::Absolute((120.0, 120.0)),
-        rt: RtTolerance::None,
+        rt: RtTolerance::Unrestricted,
         mobility: MobilityTolerance::Pct((10.0, 10.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
     }
@@ -163,8 +163,8 @@ pub enum PossibleAggregator {
 
 pub enum AggregatorContainer {
     Point(Vec<PointIntensityAggregator<String>>),
-    Chromatogram(Vec<EGCAggregator<String>>),
-    Spectrum(Vec<EGSAggregator<String>>),
+    Chromatogram(Vec<ChromatogramCollector<String>>),
+    Spectrum(Vec<SpectralCollector<String, f32>>),
 }
 
 impl AggregatorContainer {
@@ -183,13 +183,13 @@ impl AggregatorContainer {
             PossibleAggregator::ChromatogramAggregator => AggregatorContainer::Chromatogram(
                 queries
                     .iter()
-                    .map(|x| EGCAggregator::new(x.clone(), ref_rts.clone()).unwrap())
+                    .map(|x| ChromatogramCollector::new(x.clone(), ref_rts.clone()).unwrap())
                     .collect(),
             ),
             PossibleAggregator::SpectrumAggregator => AggregatorContainer::Spectrum(
                 queries
                     .iter()
-                    .map(|x| EGSAggregator::new(x.clone()))
+                    .map(|x| SpectralCollector::new(x.clone()))
                     .collect(),
             ),
         }

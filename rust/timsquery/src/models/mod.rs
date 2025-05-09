@@ -10,4 +10,7 @@ pub use base::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
-pub use tolerance::Tolerance;
+pub use tolerance::{
+    OptionallyRestricted,
+    Tolerance,
+};

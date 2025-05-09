@@ -297,6 +297,11 @@ impl<T: ArrayElement> Array2D<T> {
         Ok(&mut self.values[range])
     }
 
+    pub fn iter_column(&self, index: usize) -> impl '_ + Iterator<Item = T> {
+        let out = self.iter_rows().map(move |row| row[index]);
+        out
+    }
+
     pub fn try_swap_rows(&mut self, row1: usize, row2: usize) -> Result<(), DataProcessingError> {
         let range_1 = self
             .get_row_limits(row1)

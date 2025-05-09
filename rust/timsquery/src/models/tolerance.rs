@@ -55,7 +55,7 @@ pub enum RtTolerance {
     #[serde(rename = "percent")]
     Pct((f32, f32)),
     #[default]
-    None,
+    Unrestricted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ pub enum MobilityTolerance {
     Absolute((f32, f32)),
     #[serde(rename = "percent")]
     Pct((f32, f32)),
-    None,
+    Unrestricted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +72,17 @@ pub enum QuadTolerance {
     #[serde(rename = "absolute")]
     Absolute((f32, f32)),
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum OptionallyRestricted<T: Copy> {
+    Restricted(T),
+    Unrestricted,
+}
+
+pub use self::OptionallyRestricted::{
+    Restricted,
+    Unrestricted,
+};
 
 impl Default for Tolerance {
     fn default() -> Self {
@@ -97,34 +108,41 @@ impl Tolerance {
     }
 
     // TODO add an unit ...
-    pub fn rt_range(&self, rt_minutes: f32) -> Option<IncludedRange<f32>> {
+    pub fn rt_range(&self, rt_minutes: f32) -> OptionallyRestricted<IncludedRange<f32>> {
         match self.rt {
-            RtTolerance::Minutes((low, high)) => Some((rt_minutes - low, rt_minutes + high).into()),
+            RtTolerance::Minutes((low, high)) => {
+                Restricted((rt_minutes - low, rt_minutes + high).into())
+            }
             RtTolerance::Pct((low, high)) => {
                 let low = rt_minutes * low / 100.0;
                 let high = rt_minutes * high / 100.0;
-                Some((rt_minutes - low, rt_minutes + high).into())
+                Restricted((rt_minutes - low, rt_minutes + high).into())
             }
-            RtTolerance::None => None,
+            RtTolerance::Unrestricted => Unrestricted,
         }
     }
 
-    pub fn rt_range_as_milis(&self, rt_seconds: f32) -> Option<IncludedRange<u32>> {
+    pub fn rt_range_as_milis(&self, rt_seconds: f32) -> OptionallyRestricted<IncludedRange<u32>> {
         let tmp = self.rt_range(rt_seconds);
-        tmp.map(|x| ((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into())
+        match tmp {
+            Restricted(x) => {
+                Restricted(((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into())
+            }
+            Unrestricted => Unrestricted,
+        }
     }
 
-    pub fn mobility_range(&self, mobility: f32) -> Option<IncludedRange<f32>> {
+    pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<IncludedRange<f32>> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => {
-                Some((mobility - low, mobility + high).into())
+                Restricted((mobility - low, mobility + high).into())
             }
             MobilityTolerance::Pct((low, high)) => {
                 let low = mobility * (low / 100.0);
                 let high = mobility * (high / 100.0);
-                Some((mobility - low, mobility + high).into())
+                Restricted((mobility - low, mobility + high).into())
             }
-            MobilityTolerance::None => None,
+            MobilityTolerance::Unrestricted => Unrestricted,
         }
     }
 
@@ -158,14 +176,19 @@ impl Tolerance {
         &self,
         mobility: f64,
         converter: &Scan2ImConverter,
-    ) -> Option<IncludedRange<u16>> {
-        let im_rng = self.mobility_range(mobility as f32)?;
-        Some(
-            (
-                converter.invert(im_rng.start() as f64) as u16,
-                converter.invert(im_rng.end() as f64) as u16,
-            )
-                .into(),
-        )
+    ) -> OptionallyRestricted<IncludedRange<u16>> {
+        match self.mobility_range(mobility as f32) {
+            Restricted(im_rng) => {
+                let im_rng = (im_rng.start() as f64, im_rng.end() as f64);
+                Restricted(
+                    (
+                        converter.invert(im_rng.0) as u16,
+                        converter.invert(im_rng.1) as u16,
+                    )
+                        .into(),
+                )
+            }
+            Unrestricted => Unrestricted,
+        }
     }
 }

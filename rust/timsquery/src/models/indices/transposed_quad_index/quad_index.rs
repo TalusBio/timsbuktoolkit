@@ -9,12 +9,15 @@ use crate::models::frames::expanded_frame::{
 };
 use crate::models::frames::peak_in_quad::PeakInQuad;
 use crate::models::frames::single_quad_settings::SingleQuadrupoleSetting;
-use crate::sort_vecs_by_first;
 use crate::utils::display::{
     GlimpseConfig,
     glimpse_vec,
 };
 use crate::utils::tolerance_ranges::IncludedRange;
+use crate::{
+    OptionallyRestricted,
+    sort_vecs_by_first,
+};
 use std::collections::{
     BTreeMap,
     HashMap,
@@ -106,8 +109,8 @@ impl TransposedQuadIndex {
     pub fn query_peaks(
         &self,
         tof_range: IncludedRange<u32>,
-        scan_range: Option<IncludedRange<u16>>,
-        rt_range_ms: Option<IncludedRange<u32>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
+        rt_range_ms: OptionallyRestricted<IncludedRange<u32>>,
     ) -> impl Iterator<Item = PeakInQuad> + '_ {
         self.peak_buckets
             .range(tof_range.start()..=tof_range.end())

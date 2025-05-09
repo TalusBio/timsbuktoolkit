@@ -3,6 +3,7 @@ use std::hash::Hash;
 
 use timsrust::QuadrupoleSettings;
 
+use crate::OptionallyRestricted;
 use crate::utils::tolerance_ranges::IncludedRange;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,7 +146,7 @@ pub fn expand_quad_settings(quad_settings: &QuadrupoleSettings) -> ExpandedFrame
 pub fn get_matching_quad_settings(
     flat_quad_settings: &[SingleQuadrupoleSetting],
     precursor_mz_range: IncludedRange<f64>,
-    scan_range: Option<IncludedRange<u16>>,
+    scan_range: OptionallyRestricted<IncludedRange<u16>>,
 ) -> impl Iterator<Item = SingleQuadrupoleSettingIndex> + '_ {
     flat_quad_settings
         .iter()
@@ -161,9 +162,9 @@ impl SingleQuadrupoleSetting {
             && (self.ranges.isolation_high >= precursor_mz_range.start())
     }
 
-    fn matches_scan_range(&self, scan_range: Option<IncludedRange<u16>>) -> bool {
+    fn matches_scan_range(&self, scan_range: OptionallyRestricted<IncludedRange<u16>>) -> bool {
         match scan_range {
-            Some(tmp_range) => {
+            OptionallyRestricted::Restricted(tmp_range) => {
                 let min_scan = tmp_range.start();
                 let max_scan = tmp_range.end();
                 assert!(self.ranges.scan_start <= self.ranges.scan_end);
@@ -185,14 +186,14 @@ impl SingleQuadrupoleSetting {
                     true
                 }
             }
-            None => true,
+            OptionallyRestricted::Unrestricted => true,
         }
     }
 
     pub fn matches_quad_settings(
         &self,
         precursor_mz_range: IncludedRange<f64>,
-        scan_range: Option<IncludedRange<u16>>,
+        scan_range: OptionallyRestricted<IncludedRange<u16>>,
     ) -> bool {
         self.matches_iso_window(precursor_mz_range) && self.matches_scan_range(scan_range)
     }

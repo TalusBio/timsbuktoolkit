@@ -1,7 +1,7 @@
 use crate::models::aggregators::{
-    EGCAggregator,
-    EGSAggregator,
+    ChromatogramCollector,
     PointIntensityAggregator,
+    SpectralCollector,
 };
 use crate::{
     KeyLike,
@@ -34,15 +34,15 @@ where
 
 // Blanket trait implementation meaning that the index can be queried with any aggregator.
 pub trait GenerallyQueriable<T: KeyLike>:
-    QueriableData<EGSAggregator<T>>
-    + QueriableData<EGCAggregator<T>>
+    QueriableData<SpectralCollector<T, f32>>
+    + QueriableData<ChromatogramCollector<T>>
     + QueriableData<PointIntensityAggregator<T>>
 {
 }
 impl<
     T: KeyLike,
-    I: QueriableData<EGSAggregator<T>>
-        + QueriableData<EGCAggregator<T>>
+    I: QueriableData<SpectralCollector<T, f32>>
+        + QueriableData<ChromatogramCollector<T>>
         + QueriableData<PointIntensityAggregator<T>>,
 > GenerallyQueriable<T> for I
 {
