@@ -14,7 +14,6 @@ pub trait ArrayElement:
     + std::ops::Mul
     + std::fmt::Display
     + std::fmt::Debug
-    + std::ops::Mul<Self, Output = Self>
     + std::ops::Add<Self, Output = Self>
     + std::ops::AddAssign<Self>
 {
@@ -29,7 +28,6 @@ impl<
         + std::ops::Mul
         + std::fmt::Display
         + std::fmt::Debug
-        + std::ops::Mul<T, Output = T>
         + std::ops::Add<T, Output = T>
         + std::ops::AddAssign<T>,
 > ArrayElement for T
@@ -178,60 +176,6 @@ impl<T: ArrayElement> Array2D<T> {
         self.values.chunks(self.n_col)
     }
 
-    /// RowConvolve
-    /// Apply a a convolution on each row of the array separately.
-    /// It is equivalent to applying the passed kernel on each row of the array.
-    /// and padding with zeros.
-    pub fn row_convolve(&self, kernel: &[T], default_value: T) -> Array2D<T> {
-        let mut result = vec![default_value; self.n_row * self.n_col];
-        let offset_size = (kernel.len() - 1) / 2;
-
-        for i in 0..self.n_row {
-            let row_offset = i * (self.n_col);
-            let row = self.get_row(i).expect("Failed to get row, malformed array");
-            row.windows(kernel.len())
-                .enumerate()
-                .for_each(|(ii, window)| {
-                    window
-                        .iter()
-                        .zip(kernel.iter())
-                        .map(|(&a, &b)| a * b)
-                        .for_each(|prod| {
-                            result[ii + offset_size + row_offset] += prod;
-                        });
-                })
-        }
-
-        Array2D::from_flat_vector(result, self.nrows(), self.ncols()).unwrap()
-    }
-
-    pub fn convolve_fold(
-        &self,
-        kernel: &[T],
-        default_value: T,
-        fold_func: impl Fn(T, T) -> T,
-    ) -> Vec<T> {
-        let mut result = vec![default_value; self.n_col];
-        let offset_size = (kernel.len() - 1) / 2;
-
-        for i in 0..self.n_row {
-            let row = self.get_row(i).expect("Failed to get row, malformed array");
-            row.windows(kernel.len())
-                .enumerate()
-                .for_each(|(ii, window)| {
-                    window
-                        .iter()
-                        .zip(kernel.iter())
-                        .map(|(&a, &b)| a * b)
-                        .for_each(|prod| {
-                            result[ii + offset_size] = fold_func(result[ii + offset_size], prod);
-                        });
-                })
-        }
-
-        result
-    }
-
     /// Apply a function to each pair of rows of the array
     ///
     /// For example if I want to calculate the MAE between each row of the array
@@ -363,6 +307,63 @@ impl<T: ArrayElement> Array2D<T> {
         self.n_row = nrows;
     }
 }
+
+impl<T: ArrayElement + std::ops::Mul<T, Output = T>> Array2D<T> {
+    /// RowConvolve
+    /// Apply a a convolution on each row of the array separately.
+    /// It is equivalent to applying the passed kernel on each row of the array.
+    /// and padding with zeros.
+    pub fn row_convolve(&self, kernel: &[T], default_value: T) -> Array2D<T> {
+        let mut result = vec![default_value; self.n_row * self.n_col];
+        let offset_size = (kernel.len() - 1) / 2;
+
+        for i in 0..self.n_row {
+            let row_offset = i * (self.n_col);
+            let row = self.get_row(i).expect("Failed to get row, malformed array");
+            row.windows(kernel.len())
+                .enumerate()
+                .for_each(|(ii, window)| {
+                    window
+                        .iter()
+                        .zip(kernel.iter())
+                        .map(|(&a, &b)| a * b)
+                        .for_each(|prod| {
+                            result[ii + offset_size + row_offset] += prod;
+                        });
+                })
+        }
+
+        Array2D::from_flat_vector(result, self.nrows(), self.ncols()).unwrap()
+    }
+
+    pub fn convolve_fold(
+        &self,
+        kernel: &[T],
+        default_value: T,
+        fold_func: impl Fn(T, T) -> T,
+    ) -> Vec<T> {
+        let mut result = vec![default_value; self.n_col];
+        let offset_size = (kernel.len() - 1) / 2;
+
+        for i in 0..self.n_row {
+            let row = self.get_row(i).expect("Failed to get row, malformed array");
+            row.windows(kernel.len())
+                .enumerate()
+                .for_each(|(ii, window)| {
+                    window
+                        .iter()
+                        .zip(kernel.iter())
+                        .map(|(&a, &b)| a * b)
+                        .for_each(|prod| {
+                            result[ii + offset_size] = fold_func(result[ii + offset_size], prod);
+                        });
+                })
+        }
+
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

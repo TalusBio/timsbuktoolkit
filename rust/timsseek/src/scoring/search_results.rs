@@ -1,10 +1,9 @@
 use super::calculate_scores::{
-    LocalizedPreScore,
     MainScore,
     PreScore,
     RelativeIntensities,
-    SortedErrors,
 };
+use super::offsets::MzMobilityOffsets;
 use crate::IonAnnot;
 use crate::errors::DataProcessingError;
 use crate::models::{
@@ -17,6 +16,7 @@ use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
 use timsquery::ElutionGroup;
+use tracing::info;
 
 #[derive(Debug, Default)]
 pub struct SearchResultBuilder<'q> {
@@ -83,14 +83,7 @@ impl<T> SetField<T> {
 }
 
 impl<'q> SearchResultBuilder<'q> {
-    pub fn with_localized_pre_score(self, pre_score: &'q LocalizedPreScore) -> Self {
-        self.with_pre_score(&pre_score.pre_score)
-            .with_sorted_errors(pre_score.inten_sorted_errors())
-            .with_relative_intensities(pre_score.relative_intensities())
-            .with_main_score(pre_score.main_score)
-    }
-
-    fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
+    pub fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
         self.digest_slice = SetField::Some(&pre_score.digest);
         self.ref_eg = SetField::Some(&pre_score.query_values.eg);
         self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
@@ -99,20 +92,33 @@ impl<'q> SearchResultBuilder<'q> {
         self
     }
 
-    fn with_sorted_errors(mut self, sorted_errors: SortedErrors) -> Self {
-        self.ms1_mz_errors = SetField::Some(sorted_errors.ms1_mz_errors);
-        self.ms1_mobility_errors = SetField::Some(sorted_errors.ms1_mobility_errors);
-        self.ms2_mz_errors = SetField::Some(sorted_errors.ms2_mz_errors);
-        self.ms2_mobility_errors = SetField::Some(sorted_errors.ms2_mobility_errors);
+    pub fn with_sorted_offsets(mut self, offsets: &MzMobilityOffsets) -> Self {
+        self.ms1_mz_errors = SetField::Some(offsets.ms1_mz_errors());
+        self.ms1_mobility_errors = SetField::Some(offsets.ms1_mobility_errors());
+        self.ms2_mz_errors = SetField::Some(offsets.ms2_mz_errors());
+        self.ms2_mobility_errors = SetField::Some(offsets.ms2_mobility_errors());
+        
+
+        let mob_errors = offsets.avg_delta_mobs();
+        let cum_err = mob_errors.0 + mob_errors.1;
+        let obs_mob = (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
+        let d_err = match (mob_errors.0.mean_mobility(), mob_errors.1.mean_mobility()) {
+            (Ok(mz), Ok(mob)) => {
+                mz - mob
+            }
+            _ => f64::NAN,
+        };
+        self.delta_ms1_ms2_mobility = SetField::Some(d_err as f32);
+        self.observed_mobility = SetField::Some(obs_mob);
         self
     }
 
-    fn with_relative_intensities(mut self, relative_intensities: RelativeIntensities) -> Self {
+    pub fn with_relative_intensities(mut self, relative_intensities: RelativeIntensities) -> Self {
         self.relative_intensities = SetField::Some(relative_intensities);
         self
     }
 
-    fn with_main_score(mut self, main_score: MainScore) -> Self {
+    pub fn with_main_score(mut self, main_score: MainScore) -> Self {
         // TODO use exhaustive unpacking to make more explicit any values
         // I Might be ignoring.
         let MainScore {
@@ -417,6 +423,7 @@ impl ResultParquetWriter {
     }
 
     fn flush_to_file(&mut self) {
+        info!("Flushing {} results to file", self.buffer.len());
         let mut row_group = self.writer.next_row_group().unwrap();
         self.buffer
             .as_slice()

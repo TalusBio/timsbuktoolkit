@@ -1,3 +1,5 @@
+use std::ops::AddAssign;
+
 use super::model::ExpandedRawFrameIndex;
 use crate::OptionallyRestricted::{
     Restricted,
@@ -8,11 +10,16 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::frames::peak_in_quad::PeakInQuad;
+use crate::models::frames::peak_in_quad::{
+    PeakInQuad,
+    ResolvedPeakInQuad,
+};
 use crate::traits::QueriableData;
 use crate::{
     KeyLike,
+    PeakAddable,
     Tolerance,
+    ValueLike,
 };
 
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for ExpandedRawFrameIndex {
@@ -42,8 +49,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for ExpandedRawFra
     }
 }
 
-impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH>> for ExpandedRawFrameIndex {
-    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for ExpandedRawFrameIndex {
+    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH, f32>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
@@ -105,6 +112,40 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for ExpandedRawFrame
                 let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
                 let mut clsr = |x: PeakInQuad| {
                     *ion += x.corrected_intensity;
+                };
+                self.query_peaks(mz_range, quad_range, scan_range, rt_range_ms, &mut clsr);
+            });
+    }
+}
+
+// I know this is ugly copy paste but I am not sure if writing a macro would be
+// even uglier ... I might change it aroung later ...
+impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>>
+    for ExpandedRawFrameIndex
+{
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
+        let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
+        let scan_range =
+            tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
+        let rt_range_ms = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        aggregator
+            .iter_mut_precursors()
+            .for_each(|((_idx, mz), ion)| {
+                let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
+                let mut clsr = |peak: PeakInQuad| {
+                    let tmp = peak.resolve(&self.im_converter, &self.mz_converter);
+                    *ion += tmp;
+                };
+                self.query_ms1_peaks(mz_range, scan_range, rt_range_ms, &mut clsr);
+            });
+
+        aggregator
+            .iter_mut_fragments()
+            .for_each(|((_idx, mz), ion)| {
+                let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
+                let mut clsr = |peak: PeakInQuad| {
+                    let tmp = peak.resolve(&self.im_converter, &self.mz_converter);
+                    *ion += tmp;
                 };
                 self.query_peaks(mz_range, quad_range, scan_range, rt_range_ms, &mut clsr);
             });

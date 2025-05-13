@@ -104,9 +104,9 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     }
 
     /// Iterate over the values of a single column (all values for a RT)
-    pub fn iter_column_idx(&self, index: usize) -> impl '_ + Iterator<Item = (V, &K)> {
+    pub fn iter_column_idx(&self, index: usize) -> impl '_ + Iterator<Item = (&K, V)> {
         let vals = self.arr.iter_column(index);
-        let out = vals.zip(self.mz_order.iter().map(|(k, _mz)| k));
+        let out = self.mz_order.iter().map(|(k, _mz)| k).zip(vals);
         out
     }
 

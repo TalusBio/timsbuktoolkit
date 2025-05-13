@@ -5,6 +5,7 @@ mod processing;
 
 use clap::Parser;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
+use timsquery::models::tolerance::RtTolerance;
 use timsseek::scoring::Scorer;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
@@ -104,6 +105,8 @@ fn main() -> std::result::Result<(), errors::CliError> {
     )
     .unwrap();
 
+    let fragmented_range = index.fragmented_range();
+
     // Process based on input type
     match config.input {
         // Some(InputConfig::Fasta { path, digestion }) => {
@@ -118,6 +121,11 @@ fn main() -> std::result::Result<(), errors::CliError> {
                 index_cycle_rt_ms: index.cycle_rt_ms.clone(),
                 index,
                 tolerance: config.analysis.tolerance.clone(),
+                secondary_tolerance: config
+                    .analysis
+                    .tolerance
+                    .with_rt_tolerance(RtTolerance::Minutes((0.1, 0.1))),
+                fragmented_range,
             };
             processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)
                 .unwrap();

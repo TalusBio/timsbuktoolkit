@@ -52,4 +52,14 @@ impl<T: KeyLike> ElutionGroup<T> {
     pub fn iter_fragments(&self) -> impl Iterator<Item = &(T, f64)> {
         self.fragments.iter()
     }
+
+    pub fn with_rt_seconds(
+        &self,
+        rt_seconds: f32,
+    ) -> Self {
+        Self {
+            rt_seconds,
+            ..self.clone()
+        }
+    }
 }

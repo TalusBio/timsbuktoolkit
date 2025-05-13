@@ -1,4 +1,4 @@
-use tracing::debug;
+use std::ops::AddAssign;
 
 // Generic streaming aggregator that takes a pair of unsigned ints one with a value
 // and another with a weight and in a streaming fashion adds the value to the accumulator
@@ -33,7 +33,7 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// // So overall this should be the equivalent of the mean for
 /// // [0.0, 10.0, 0.0, 10.0, 0.0, 10.0]
 /// assert_eq!(calc.mean().unwrap(), 5.0, "{calc:#?}");
-/// assert!((4.5..5.5).contains(&calc.standard_deviation().unwrap()), "{calc:#?}");
+/// // assert!((4.5..5.5).contains(&calc.standard_deviation().unwrap()), "{calc:#?}");
 /// ```
 ///
 /// # Notes
@@ -48,23 +48,21 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// Read the blog ... its amazing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunningStatsCalculator {
-    weight: u64,
+    weight: f64,
     mean_n: f64,
-    d_: f64,
     // TODO: Make min/max conditionally compiled
     min: f64,
     max: f64,
 }
 
 impl RunningStatsCalculator {
-    pub fn new(weight: u64, mean: f64) -> Self {
-        if weight == 0 {
+    pub fn new(weight: f64, mean: f64) -> Self {
+        if weight == 0. {
             panic!("Weight must be > 0, initializing");
         }
         Self {
             weight,
             mean_n: mean,
-            d_: 1.0,
             min: mean,
             max: mean,
             // count: 0,
@@ -72,20 +70,15 @@ impl RunningStatsCalculator {
     }
 
     /// Add a new value to the running stats calculator.
-    pub fn add(&mut self, weight: u64, value: f64) {
-        if weight == 0 {
+    pub fn add(&mut self, weight: f64, value: f64) {
+        if weight == 0. {
             panic!("Weight must be > 0, adding");
         }
-        let f64_weight = weight as f64;
+        let f64_weight = weight;
         // Update the mean
-        let weight_ratio = f64_weight / self.weight as f64;
+        let weight_ratio = f64_weight / self.weight;
         let delta = value - self.mean_n;
-        let last_mean_n = self.mean_n;
         self.mean_n += delta * weight_ratio;
-
-        // Update the variance
-        let to_add = f64_weight * (value - self.mean_n) * (value - last_mean_n);
-        self.d_ += to_add;
 
         // Update the weight
         self.weight += weight;
@@ -103,35 +96,24 @@ impl RunningStatsCalculator {
     }
 
     pub fn mean(&self) -> Result<f64> {
-        if self.weight == 0 {
+        if self.weight == 0. {
             return Err(StreamingAggregatorError::NotEnoughData);
         }
         Ok(self.mean_n)
     }
 
-    pub fn variance(&self) -> Result<f64> {
-        if self.weight == 0 {
-            return Err(StreamingAggregatorError::NotEnoughData);
-        }
-        Ok(self.d_.abs() / self.weight as f64)
-    }
-
-    pub fn standard_deviation(&self) -> Result<f64> {
-        let variance = self.variance()?;
-        if variance.is_nan() {
-            debug!("variance is nan, state -> {:?}", self);
-        };
-        if variance.is_infinite() {
-            debug!("variance is infinite, state -> {:?}", self);
-        };
-        if variance.is_sign_negative() {
-            debug!("variance is negative, state -> {:?}", self);
-        };
-        Ok(variance.sqrt())
-    }
-
-    pub fn weight(&self) -> u64 {
+    pub fn weight(&self) -> f64 {
         self.weight
+    }
+}
+
+impl AddAssign for RunningStatsCalculator {
+    fn add_assign(&mut self, other: Self) {
+        if other.weight == 0. {
+            return;
+        }
+        // Update the mean
+        self.add(other.weight, other.mean_n);
     }
 }
 
@@ -141,18 +123,18 @@ mod tests {
 
     #[test]
     fn test_running_stats_calculator() {
-        let mut calc = RunningStatsCalculator::new(10, 0.0);
-        calc.add(2, 10.0);
-        calc.add(2, 10.0);
-        calc.add(2, 10.0);
-        calc.add(2, 10.0);
-        calc.add(2, 10.0);
+        let mut calc = RunningStatsCalculator::new(10., 0.0);
+        calc.add(2., 10.0);
+        calc.add(2., 10.0);
+        calc.add(2., 10.0);
+        calc.add(2., 10.0);
+        calc.add(2., 10.0);
         assert!(calc.mean().unwrap() < 5.6);
         assert!(calc.mean().unwrap() > 4.4);
-        assert!(calc.variance().unwrap() > 15.);
-        assert!(calc.variance().unwrap() < 25.);
-        assert!(calc.standard_deviation().unwrap() > 4.5);
-        assert!(calc.standard_deviation().unwrap() < 5.5);
+        // assert!(calc.variance().unwrap() > 15.);
+        // assert!(calc.variance().unwrap() < 25.);
+        // assert!(calc.standard_deviation().unwrap() > 4.5);
+        // assert!(calc.standard_deviation().unwrap() < 5.5);
     }
 
     // https://www.kaggle.com/datasets/carlmcbrideellis/data-anscombes-quartet?resource=download
@@ -168,32 +150,32 @@ mod tests {
 
     #[test]
     fn test_running_stats_calculator_ascombes_3() {
-        let mut calc = RunningStatsCalculator::new(1, ASCOMBES_3[0]);
+        let mut calc = RunningStatsCalculator::new(1., ASCOMBES_3[0]);
         for val in ASCOMBES_3[1..].iter() {
-            calc.add(1, *val);
+            calc.add(1., *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);
-        assert!(calc.standard_deviation().unwrap() > 1.92);
-        assert!(calc.standard_deviation().unwrap() < 1.99);
+        // assert!(calc.standard_deviation().unwrap() > 1.92);
+        // assert!(calc.standard_deviation().unwrap() < 1.99);
     }
 
     #[test]
     fn test_running_stats_calculator_ascombes_4() {
-        let mut calc = RunningStatsCalculator::new(1, ASCOMBES_4[0]);
+        let mut calc = RunningStatsCalculator::new(1., ASCOMBES_4[0]);
         for val in ASCOMBES_4[1..].iter() {
-            calc.add(1, *val);
+            calc.add(1., *val);
         }
         assert!(calc.mean().unwrap() < 7.6);
         assert!(calc.mean().unwrap() > 7.4);
 
-        // Note that the tolerance here is a hair higher ... bc there
-        // is an outlier value.
-        assert!(
-            calc.standard_deviation().unwrap() > 1.91,
-            "Expected > 1.92, got {}",
-            calc.standard_deviation().unwrap()
-        );
-        assert!(calc.standard_deviation().unwrap() < 1.99);
+        // // Note that the tolerance here is a hair higher ... bc there
+        // // is an outlier value.
+        // assert!(
+        //     calc.standard_deviation().unwrap() > 1.91,
+        //     "Expected > 1.92, got {}",
+        //     calc.standard_deviation().unwrap()
+        // );
+        // assert!(calc.standard_deviation().unwrap() < 1.99);
     }
 }

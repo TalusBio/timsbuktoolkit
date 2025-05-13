@@ -17,21 +17,24 @@ use crate::{
 };
 use core::f32;
 use serde::Serialize;
+use timsquery::{MzMobilityStatsCollector, SpectralCollector};
 use std::sync::Arc;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
+use tracing::warn;
 
+/// The PreScore is meant to be in essence a bundle of a query
+/// with the collected intensities from the raw data for a specific
+/// file.
 #[derive(Debug)]
 pub struct PreScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    // No longer needed bc it is bundled in the EGCAggregator
-    // pub reference: Arc<ElutionGroup<IonAnnot>>,
     pub expected_intensities: ExpectedIntensities,
-    pub query_values: ChromatogramCollector<IonAnnot>,
+    pub query_values: ChromatogramCollector<IonAnnot, f32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -52,6 +55,7 @@ pub struct LongitudinalMainScoreElements {
 
 #[derive(Debug)]
 pub struct IntensityArrays {
+    // TODO: Reimplement to use directly the chromatogram collector
     pub ms1_rtmajor: RTMajorIntensityArray<i8, f32>,
     pub ms1_mzmajor: MzMajorIntensityArray<i8, f32>,
     pub ms2_rtmajor: RTMajorIntensityArray<IonAnnot, f32>,
@@ -62,7 +66,7 @@ pub struct IntensityArrays {
 
 impl IntensityArrays {
     pub fn new(
-        query_values: &ChromatogramCollector<IonAnnot>,
+        query_values: &ChromatogramCollector<IonAnnot, f32>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<Self, DataProcessingError> {
         let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
@@ -133,7 +137,7 @@ impl IntensityArrays {
     // refactor changes first ... JSPP Apr-18-2025
     pub fn reset_with(
         &mut self,
-        intensity_arrays: &ChromatogramCollector<IonAnnot>,
+        intensity_arrays: &ChromatogramCollector<IonAnnot, f32>,
         expected_intensities: &ExpectedIntensities,
     ) -> Result<(), DataProcessingError> {
         self.ms1_rtmajor
@@ -189,6 +193,23 @@ fn gaussblur(x: &mut [f32]) {
 
 impl LongitudinalMainScoreElements {
     pub fn try_new(intensity_arrays: &IntensityArrays) -> Result<Self, DataProcessingError> {
+        let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
+        let max_lzs = lazyscore.iter().max_by(|x,y| {
+            if x.is_nan() {
+                return std::cmp::Ordering::Less;
+            }
+            if y.is_nan() {
+                return std::cmp::Ordering::Greater;
+            }
+            match x.partial_cmp(y) {
+                Some(x) => x,
+                None => panic!("Failed to compare lazyscore values {} vs {}", x, y),
+            }
+        }).unwrap_or(&0.0f32);
+        if max_lzs <= &1e-3 {
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: Some("No non-0 lazyscore".into()) });
+        }
+
         let mut ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
             &intensity_arrays.ms1_expected_intensities,
@@ -221,7 +242,6 @@ impl LongitudinalMainScoreElements {
             Ok(scores) => scores,
             Err(_) => vec![0.0; rt_len],
         };
-        let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
 
         // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
         let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
@@ -241,10 +261,16 @@ impl LongitudinalMainScoreElements {
         let five_pct_index = rt_len * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
         let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
-        let lzb_std = calculate_centered_std(
+        let mut lzb_std = calculate_centered_std(
             &lazyscore_vs_baseline
                 [(half_five_pct_idnex)..(lazyscore_vs_baseline.len() - half_five_pct_idnex)],
         );
+
+        // This feels incredibly dirty ...
+        // TODO: Find an elegant way to set this threshold ...
+        if lzb_std < 1.0 {
+            lzb_std = 1.0;
+        }
 
         Ok(Self {
             ms1_cosine_ref_sim,
@@ -335,8 +361,6 @@ impl PreScore {
         let max_val = apex_candidates[0].score;
         let max_loc = apex_candidates[0].index;
 
-        // TODO: Branch here if the results are empty.
-
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
         let ten_pct_index = self.query_values.fragments.rts_ms.len() / 20;
@@ -386,7 +410,7 @@ impl PreScore {
             Some(row) => {
                 let mut count = 0;
                 for x in row {
-                    if *x > 10.0f32 {
+                    if *x > 1.0f32 {
                         count += 1;
                     }
                 }
@@ -394,6 +418,12 @@ impl PreScore {
             }
             None => 0,
         };
+
+        let lazyscore_z = longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std;
+        if lazyscore_z.is_nan() {
+            let tmp = format!("Lazy score is NaN {} and {}", longitudinal_main_score_elements.ms2_lazyscore[max_loc], norm_lazy_std);
+            return Err(DataProcessingError::ExpectedFiniteNonNanData { context: tmp });
+        }
 
         Ok(MainScore {
             score: max_val,
@@ -408,7 +438,7 @@ impl PreScore {
             lazyscore: longitudinal_main_score_elements.ms2_lazyscore[max_loc],
             lazyscore_vs_baseline: longitudinal_main_score_elements.ms2_lazyscore_vs_baseline
                 [max_loc],
-            lazyscore_z: longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std,
+            lazyscore_z,
             ms2_corr_v_gauss: longitudinal_main_score_elements.ms2_corr_v_gauss[max_loc],
             // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
@@ -434,25 +464,26 @@ impl PreScore {
         self.calc_with_intensities(intensity_arrays)
     }
 
-    pub fn localize(self) -> Result<LocalizedPreScore, DataProcessingError> {
+    pub fn localize(self) -> Result<MainScore, DataProcessingError> {
         let main_score = self.calc_main_score()?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
             return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
         }
-        Ok(LocalizedPreScore::new(self, main_score))
+        Ok(main_score)
     }
 
     pub fn localize_with_buffer(
-        self,
+        &self,
         intensity_arrays: &mut IntensityArrays,
-    ) -> Result<LocalizedPreScore, DataProcessingError> {
+    ) -> Result<MainScore, DataProcessingError> {
         let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
+            warn!("Main score is NaN");
             return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
         }
-        Ok(LocalizedPreScore::new(self, main_score))
+        Ok(main_score)
     }
 }
 
@@ -490,32 +521,33 @@ pub struct RelativeIntensities {
 }
 
 impl RelativeIntensities {
-    pub fn new(agg: &ChromatogramCollector<IonAnnot>, idx: usize) -> Self {
+    pub fn new(agg: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> Self {
         let mut ms1: TopNArray<3, f32> = TopNArray::new();
         let mut ms2: TopNArray<7, f32> = TopNArray::new();
 
-        let tot_l1p_ms1: f32 = agg
-            .precursors
-            .iter_column_idx(idx)
-            .map(|(v, _k)| v)
-            .sum::<f32>()
+        let tot_l1p_ms1: f64 = agg
+            .iter_precursors()
+            .map(|(_k, v)| v.weight())
+            .sum::<f64>()
             .ln_1p();
-        let tot_l1p_ms2: f32 = agg
-            .precursors
-            .iter_column_idx(idx)
-            .map(|(v, _k)| v)
-            .sum::<f32>()
+        let tot_l1p_ms2: f64 = agg
+            .iter_fragments()
+            .map(|(_k, v)| v.weight())
+            .sum::<f64>()
             .ln_1p();
-        agg.precursors.iter_column_idx(idx).for_each(|(v, k)| {
+
+        agg.iter_precursors().for_each(|((k, mz), v)| {
             // Note isotope keys < 0 mean 'decoy' isotopes
-            if *k >= 0i8 && v > 0.0 {
-                ms1.push(v.ln_1p() - tot_l1p_ms1);
+            let weight = v.weight();
+            if *k >= 0i8 && weight > 0.0 {
+                ms1.push((weight.ln_1p() - tot_l1p_ms1) as f32);
             }
         });
 
-        agg.fragments.iter_column_idx(idx).for_each(|(v, _k)| {
-            if v > 0.0 {
-                ms2.push(v.ln_1p() - tot_l1p_ms2);
+        agg.iter_fragments().for_each(|(_k, v)| {
+            let weight = v.weight();
+            if weight > 0.0 {
+                ms2.push((weight.ln_1p() - tot_l1p_ms2) as f32);
             }
         });
         Self { ms1, ms2 }

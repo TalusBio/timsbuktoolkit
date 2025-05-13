@@ -103,6 +103,9 @@ pub fn new_index(
     Ok(Scorer {
         index_cycle_rt_ms: ref_time_ms,
         index,
-        tolerance,
+        tolerance: tolerance.clone(),
+        secondary_tolerance: tolerance.with_rt_tolerance(
+            timsquery::models::tolerance::RtTolerance::Minutes((0.5, 0.5)),
+        ),
     })
 }
