@@ -120,8 +120,8 @@ class BinaryClassifier(nn.Module):
         self,
         input_dim: int,
         nhidden_layers: int = 4,
-        hidden_dims: int = 64,
-        dropout: float = 0.1,
+        hidden_dims: int = 96,
+        dropout: float = 0.00,
     ):
         super().__init__()
 

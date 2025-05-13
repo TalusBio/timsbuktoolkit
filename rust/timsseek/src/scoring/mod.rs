@@ -1,5 +1,6 @@
 pub mod calculate_scores;
 pub mod full_results;
+mod offsets;
 pub mod scorer;
 mod scores;
 pub mod search_results;

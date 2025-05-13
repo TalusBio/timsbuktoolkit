@@ -1,7 +1,10 @@
+use crate::models::frames::PeakInQuad;
 use crate::{
     ElutionGroup,
+    IncludedRange,
     KeyLike,
 };
+use std::ops::AddAssign;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -24,6 +27,10 @@ impl<const N: usize> MobilogramSlice<N> {
         }
     }
 
+    pub fn get_range(&self) -> IncludedRange<f32> {
+        (self.start, self.end).into()
+    }
+
     fn many_new(start: f32, end: f32, n: usize) -> Vec<Self> {
         let mut slices = Vec::with_capacity(n);
         for _i in 0..n {
@@ -34,13 +41,13 @@ impl<const N: usize> MobilogramSlice<N> {
 }
 
 #[derive(Debug, Clone)]
-pub struct EGSMAggregator<T: KeyLike, const N: usize> {
+pub struct MobilogramCollector<T: KeyLike, const N: usize> {
     pub eg: Arc<ElutionGroup<T>>,
     precursors: Vec<MobilogramSlice<N>>,
     fragments: Vec<MobilogramSlice<N>>,
 }
 
-impl<T: KeyLike, const N: usize> EGSMAggregator<T, N> {
+impl<T: KeyLike, const N: usize> MobilogramCollector<T, N> {
     pub fn new(eg: Arc<ElutionGroup<T>>, start: f32, end: f32) -> Self {
         let precursors = MobilogramSlice::many_new(start, end, eg.precursors.len());
         let fragments = MobilogramSlice::many_new(start, end, eg.fragments.len());

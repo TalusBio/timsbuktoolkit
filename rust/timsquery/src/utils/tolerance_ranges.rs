@@ -46,6 +46,10 @@ where
         self.0 <= x && x <= self.1
     }
 
+    pub fn intersects(&self, x: Self) -> bool {
+        self.contains(x.start()) || self.contains(x.end())
+    }
+
     pub fn start(&self) -> T {
         self.0
     }

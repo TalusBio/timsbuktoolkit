@@ -1,6 +1,7 @@
 // Re-export main structures
 pub use crate::models::aggregators::{
     ChromatogramCollector,
+    MzMobilityStatsCollector,
     SpectralCollector,
 };
 pub use crate::models::base::{
@@ -22,6 +23,7 @@ pub use crate::traits::queriable_data::{
 };
 pub use crate::traits::{
     KeyLike,
+    PeakAddable,
     ValueLike,
 };
 
@@ -30,6 +32,8 @@ pub mod errors;
 pub mod models;
 pub mod traits;
 pub mod utils;
+
+pub use utils::tolerance_ranges::IncludedRange;
 
 // Re-export errors
 pub use crate::errors::{

@@ -191,4 +191,8 @@ impl Tolerance {
             Unrestricted => Unrestricted,
         }
     }
+
+    pub fn with_rt_tolerance(&self, rt: RtTolerance) -> Self {
+        Self { rt, ..self.clone() }
+    }
 }

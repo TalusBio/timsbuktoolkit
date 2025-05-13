@@ -130,6 +130,19 @@ impl QuadSplittedTransposedIndex {
     ) -> impl Iterator<Item = SingleQuadrupoleSettingIndex> + '_ {
         get_matching_quad_settings(&self.flat_quad_settings, precursor_mz_range, scan_range)
     }
+
+    pub fn fragmented_range(&self) -> IncludedRange<f64> {
+        let mut min = f64::MAX;
+        let mut max = f64::MIN;
+        for quad in self.fragment_indices.values() {
+            if let Some(qs) = quad.quad_settings {
+                min = min.min(qs.ranges.isolation_low);
+                max = max.max(qs.ranges.isolation_high);
+            }
+        }
+        IncludedRange::new(min, max)
+
+    }
 }
 
 impl Display for QuadSplittedTransposedIndex {

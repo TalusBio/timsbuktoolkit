@@ -1,13 +1,18 @@
 use crate::models::aggregators::{
     ChromatogramCollector,
+    MzMobilityStatsCollector,
     PointIntensityAggregator,
     SpectralCollector,
 };
+use crate::models::frames::ResolvedPeakInQuad;
 use crate::{
     KeyLike,
+    PeakAddable,
     Tolerance,
+    ValueLike,
 };
 use rayon::prelude::*;
+use std::ops::AddAssign;
 
 /// Trait meant to signal that some form of data is
 /// queriable using a specific aggregator.
@@ -35,15 +40,17 @@ where
 // Blanket trait implementation meaning that the index can be queried with any aggregator.
 pub trait GenerallyQueriable<T: KeyLike>:
     QueriableData<SpectralCollector<T, f32>>
-    + QueriableData<ChromatogramCollector<T>>
+    + QueriableData<SpectralCollector<T, MzMobilityStatsCollector>>
+    + QueriableData<ChromatogramCollector<T, f32>>
     + QueriableData<PointIntensityAggregator<T>>
 {
 }
 impl<
     T: KeyLike,
     I: QueriableData<SpectralCollector<T, f32>>
-        + QueriableData<ChromatogramCollector<T>>
-        + QueriableData<PointIntensityAggregator<T>>,
+        + QueriableData<ChromatogramCollector<T, f32>>
+        + QueriableData<PointIntensityAggregator<T>>
+        + QueriableData<SpectralCollector<T, MzMobilityStatsCollector>>,
 > GenerallyQueriable<T> for I
 {
 }

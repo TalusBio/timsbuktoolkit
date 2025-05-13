@@ -8,6 +8,6 @@ use timsquery::models::aggregators::ChromatogramCollector;
 pub struct FullQueryResult {
     pub main_score_elements: LongitudinalMainScoreElements,
     pub longitudinal_main_score: Vec<f32>,
-    pub extractions: ChromatogramCollector<IonAnnot>,
+    pub extractions: ChromatogramCollector<IonAnnot, f32>,
     pub search_results: IonSearchResults,
 }

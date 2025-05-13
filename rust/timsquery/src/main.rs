@@ -8,7 +8,6 @@ use serde::{
 };
 use std::sync::Arc;
 use std::time::Instant;
-use timsquery::GenerallyQueriable;
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -25,6 +24,10 @@ use timsquery::models::tolerance::{
     QuadTolerance,
     RtTolerance,
     Tolerance,
+};
+use timsquery::{
+    GenerallyQueriable,
+    PeakAddable,
 };
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
@@ -163,7 +166,7 @@ pub enum PossibleAggregator {
 
 pub enum AggregatorContainer {
     Point(Vec<PointIntensityAggregator<String>>),
-    Chromatogram(Vec<ChromatogramCollector<String>>),
+    Chromatogram(Vec<ChromatogramCollector<String, f32>>),
     Spectrum(Vec<SpectralCollector<String, f32>>),
 }
 

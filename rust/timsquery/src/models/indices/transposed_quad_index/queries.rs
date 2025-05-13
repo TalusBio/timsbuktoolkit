@@ -8,12 +8,18 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::frames::peak_in_quad::PeakInQuad;
+use crate::models::frames::peak_in_quad::{
+    PeakInQuad,
+    ResolvedPeakInQuad,
+};
 use crate::traits::QueriableData;
 use crate::{
     KeyLike,
+    PeakAddable,
     Tolerance,
+    ValueLike,
 };
+use std::ops::AddAssign;
 
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for QuadSplittedTransposedIndex {
     fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
@@ -51,8 +57,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for QuadSplittedTr
     }
 }
 
-impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH>> for QuadSplittedTransposedIndex {
-    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH>, tolerance: &Tolerance) {
+impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for QuadSplittedTransposedIndex {
+    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH, f32>, tolerance: &Tolerance) {
         let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
         let scan_range =
             tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
@@ -138,6 +144,51 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for QuadSplittedTran
                             .query_peaks(mz_range, scan_range, rt_range_ms)
                             .for_each(|x| {
                                 *ion += x.corrected_intensity;
+                            });
+                    });
+            });
+    }
+}
+
+// This is some ugly copy-pasted code but I will fix it later if I have to ...
+impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>>
+    for QuadSplittedTransposedIndex
+{
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
+        let quad_range = tolerance.quad_range(aggregator.eg.get_precursor_mz_limits());
+        let scan_range =
+            tolerance.indexed_scan_range(aggregator.eg.mobility as f64, &self.im_converter);
+        let rt_range_ms = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        aggregator
+            .iter_mut_precursors()
+            .for_each(|((_idx, mz), ion)| {
+                let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
+                let mut clsr = |peak: PeakInQuad| {
+                    let tmp = peak.resolve(&self.im_converter, &self.mz_converter);
+                    *ion += tmp;
+                };
+                self.query_ms1_peaks(mz_range, scan_range, rt_range_ms, &mut clsr);
+            });
+
+        self.iter_msn_ranges()
+            .filter(|(_qi, quad)| {
+                quad.quad_settings
+                    .expect("All MS2 indices should have quad info")
+                    .matches_quad_settings(quad_range, scan_range)
+            })
+            .for_each(|(_ii, quad_idx)| {
+                aggregator
+                    .iter_mut_fragments()
+                    .for_each(|((_idx, mz), ion)| {
+                        // There is a bit of repeated work here ...
+                        // calculating the mz range for each quad instead of once per ion ...
+                        // TODO: Fix later ...
+                        let mz_range = tolerance.indexed_tof_range(*mz, &self.mz_converter);
+                        quad_idx
+                            .query_peaks(mz_range, scan_range, rt_range_ms)
+                            .for_each(|peak| {
+                                let tmp = peak.resolve(&self.im_converter, &self.mz_converter);
+                                *ion += tmp;
                             });
                     });
             });
