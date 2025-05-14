@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import warnings
 
-from rustyms import FragmentationModel, LinearPeptide
 from pydantic import BaseModel, ConfigDict
+from rustyms import FragmentationModel, LinearPeptide
 
 from .decoys import DecoyStrategy, build_massshift_dict
 

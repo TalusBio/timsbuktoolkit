@@ -10,8 +10,8 @@ from rich.pretty import pprint
 from uniplot import histogram
 
 from ..datamodels import Report
-from ..folding import to_folds_xgb
 from ..feateng import to_mokapot_df
+from ..folding import to_folds_xgb
 from ..plotting import plot_importances
 
 

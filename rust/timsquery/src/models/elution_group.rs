@@ -53,10 +53,7 @@ impl<T: KeyLike> ElutionGroup<T> {
         self.fragments.iter()
     }
 
-    pub fn with_rt_seconds(
-        &self,
-        rt_seconds: f32,
-    ) -> Self {
+    pub fn with_rt_seconds(&self, rt_seconds: f32) -> Self {
         Self {
             rt_seconds,
             ..self.clone()

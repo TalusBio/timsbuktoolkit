@@ -141,7 +141,6 @@ impl QuadSplittedTransposedIndex {
             }
         }
         IncludedRange::new(min, max)
-
     }
 }
 

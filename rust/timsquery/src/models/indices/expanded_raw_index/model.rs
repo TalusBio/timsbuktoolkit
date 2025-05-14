@@ -233,4 +233,14 @@ impl ExpandedRawFrameIndex {
 
         Ok(out)
     }
+
+    pub fn fragmented_range(&self) -> IncludedRange<f64> {
+        let mut min = f64::MAX;
+        let mut max = f64::MIN;
+        for quad in self.flat_quad_settings.iter() {
+            min = min.min(quad.ranges.isolation_low);
+            max = max.max(quad.ranges.isolation_high);
+        }
+        IncludedRange::new(min, max)
+    }
 }

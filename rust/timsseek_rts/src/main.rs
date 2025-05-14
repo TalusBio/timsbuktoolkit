@@ -16,6 +16,8 @@ use std::net::{
 use std::sync::Arc;
 use std::thread;
 use timsquery::models::indices::ExpandedRawFrameIndex;
+use timsseek::QueryItemToScore;
+use timsseek::data_sources::speclib::SerSpeclibElement;
 use timsseek::errors::{
     Result,
     TimsSeekError,
@@ -96,7 +98,7 @@ fn handle_connection(
             }
         };
 
-        let query: InputQuery = match serde_json::from_value(query) {
+        let query: SerSpeclibElement = match serde_json::from_value(query) {
             Ok(q) => q,
             Err(e) => {
                 let response = json!({
@@ -137,7 +139,9 @@ fn send_response(stream: &mut TcpStream, response: &Value) -> std::io::Result<()
 // Example usage
 fn main() -> Result<()> {
     let conf = cli::Cli::parse();
-    let sample = InputQuery::sample();
+    // SerSpeclibElement
+    // let sample = QueryItemToScore::sample();
+    let sample = SerSpeclibElement::sample();
     let tol = conf.read_config()?;
     let index = index::new_index(conf.dotd_file, tol)?;
 

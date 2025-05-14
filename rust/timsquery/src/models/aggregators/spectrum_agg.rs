@@ -11,7 +11,10 @@ use crate::{
     KeyLike,
     ValueLike,
 };
-use std::ops::{Add, AddAssign};
+use std::ops::{
+    Add,
+    AddAssign,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,10 +120,14 @@ impl MzMobilityStatsCollector {
 
 impl Add for MzMobilityStatsCollector {
     type Output = Self;
+
     fn add(self, other: Self) -> Self {
         let mz = match (self.mean_mz, other.mean_mz) {
             (Some(mut mmz), Some(ommz)) => {
-                mmz.add(ommz.weight(), ommz.mean().expect("mean should be initialized with value"));
+                mmz.add(
+                    ommz.weight(),
+                    ommz.mean().expect("mean should be initialized with value"),
+                );
                 Some(mmz)
             }
             (None, None) => None,
@@ -130,8 +137,11 @@ impl Add for MzMobilityStatsCollector {
 
         let mobility = match (self.mean_mobility, other.mean_mobility) {
             (Some(mut mmob), Some(ommob)) => {
-            mmob.add(ommob.weight(), ommob.mean().expect("mean should be initialized with value"));
-            Some(mmob)
+                mmob.add(
+                    ommob.weight(),
+                    ommob.mean().expect("mean should be initialized with value"),
+                );
+                Some(mmob)
             }
             (None, None) => None,
             (Some(x), None) => Some(x),
@@ -144,7 +154,6 @@ impl Add for MzMobilityStatsCollector {
         }
     }
 }
-
 
 impl AddAssign<ResolvedPeakInQuad> for MzMobilityStatsCollector {
     fn add_assign(&mut self, other: ResolvedPeakInQuad) {
