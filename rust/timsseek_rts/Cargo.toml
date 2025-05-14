@@ -27,3 +27,4 @@ indicatif = { workspace = true }
 [[bin]]
 name = "timsseek_rts"
 path = "src/main.rs"
+

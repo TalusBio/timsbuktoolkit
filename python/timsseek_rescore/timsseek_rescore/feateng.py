@@ -29,8 +29,9 @@ def lazy_zero_fill(df: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
 def log_cols(df: pl.LazyFrame, columns: list[str]) -> pl.LazyFrame:
     exprs = []
     for col in columns:
-        exprs.append(pl.col(col).log1p().fill_nan(0))
-    return df.with_columns(exprs)
+        exprs.append(pl.col(col).fill_nan(0).log1p().fill_nan(0))
+    out = df.with_columns(exprs)
+    return out
 
 
 def add_id(df: pl.LazyFrame) -> pl.LazyFrame:
@@ -43,10 +44,13 @@ def check_noninf(df: pl.DataFrame, columns: list[str]):
     pprint("Checking for infinite values")
     any_inf = False
     df_inf = df.select(columns).filter(pl.any_horizontal(pl.all().is_infinite()))
-    pprint(df_inf)
+    if len(df_inf) > 0:
+        pprint(df_inf)
+        pprint(df_inf[0].to_dict(as_series=False))
     for col in columns:
         if df_inf[col].is_infinite().any():
-            pprint(f"Column {col} has infinite values")
+            ninf = df_inf[col].is_infinite().sum()
+            pprint(f"Column {col} has infinite ({ninf}/{len(df)}) values")
             any_inf = True
     if any_inf:
         raise ValueError("Data contains infinite values")

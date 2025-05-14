@@ -8,7 +8,12 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 use timsquery::{
-    ChromatogramCollector, GenerallyQueriable, IncludedRange, MzMobilityStatsCollector, SpectralCollector, Tolerance
+    ChromatogramCollector,
+    GenerallyQueriable,
+    IncludedRange,
+    MzMobilityStatsCollector,
+    SpectralCollector,
+    Tolerance,
 };
 
 use super::calculate_scores::{
@@ -100,6 +105,18 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .with_main_score(*main_score)
             .finalize()
     }
+
+    #[inline]
+    pub fn _build_buffer(
+        &self,
+        item: &QueryItemToScore,
+    ) -> Result<IntensityArrays, DataProcessingError> {
+        IntensityArrays::new_empty(
+            item.query.precursors.len(),
+            item.query.fragments.len(),
+            self.index_cycle_rt_ms.clone(),
+        )
+    }
 }
 
 impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
@@ -114,8 +131,8 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let main_score = match self._localize_step(&prescore, buffer) {
             Ok(score) => score,
             Err(e) => {
-                info!("Error in localization: {:?}", e);
-                info!("Query id: {:#?}", item.query.id);
+                // info!("Error in localization: {:?}", e);
+                // info!("Query id: {:#?}", item.query.id);
                 return None;
             }
         };
@@ -132,52 +149,55 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     }
 
     pub fn score(&self, item: QueryItemToScore) -> Option<IonSearchResults> {
-        let mut buffer = IntensityArrays::new_empty(5, 10, self.index_cycle_rt_ms.clone()).ok()?;
-        return self.buffered_score(item, &mut buffer);
+        let mut buffer = self._build_buffer(&item).ok()?;
+        self.buffered_score(item, &mut buffer)
     }
 
     pub fn score_full(
         &self,
-        queries: QueryItemToScore,
+        item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
         let mut res =
-            ChromatogramCollector::new(queries.query.clone(), self.index_cycle_rt_ms.clone())
-                .unwrap();
+            ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
         self.index.add_query(&mut res, &self.tolerance);
         let builder = SearchResultBuilder::default();
-        let int_arrs = IntensityArrays::new(&res, &queries.expected_intensity)?;
-        let prescore = PreScore {
-            charge: queries.charge,
-            digest: queries.digest,
-            expected_intensities: queries.expected_intensity,
+        let int_arrs = IntensityArrays::new(&res, &item.expected_intensity)?;
+        let pre_score = PreScore {
+            charge: item.charge,
+            digest: item.digest.clone(),
+            expected_intensities: item.expected_intensity.clone(),
             query_values: res.clone(),
         };
 
         let longitudinal_main_score_elements = LongitudinalMainScoreElements::try_new(&int_arrs)?;
+        let mut buffer = self._build_buffer(&item)?;
+        let main_score = self._localize_step(&pre_score, &mut buffer)?;
+        let secondary_query = self._secondary_query(&item, &pre_score, &main_score);
+        let offsets = MzMobilityOffsets::new(&secondary_query, item.query.mobility as f64);
+        let rel_inten = RelativeIntensities::new(&secondary_query);
 
-        todo!();
-        // let res2 = builder
-        //    .with_localized_pre_score(&prescore.localize()?)
-        //    .finalize()?;
-        // let longitudinal_main_score = longitudinal_main_score_elements.main_score_iter().collect();
+        let res2 = builder
+            .with_pre_score(&pre_score)
+            .with_sorted_offsets(&offsets)
+            .with_relative_intensities(rel_inten)
+            .with_main_score(main_score)
+            .finalize()?;
+        let longitudinal_main_score = longitudinal_main_score_elements.main_score_iter().collect();
 
-        // Ok(FullQueryResult {
-        //    main_score_elements: longitudinal_main_score_elements,
-        //    longitudinal_main_score,
-        //    extractions: res.clone(),
-        //    search_results: res2,
-        //})
+        Ok(FullQueryResult {
+            main_score_elements: longitudinal_main_score_elements,
+            longitudinal_main_score,
+            extractions: res.clone(),
+            search_results: res2,
+        })
     }
 
-    /// Scores a collection of query items efficiently in parallel.
-    /// Handles parallelization and buffer management internally.
-    pub fn score_iter(
-        &self,
-        items_to_score: &[QueryItemToScore], // Takes Vec for easy parallel iteration
-    ) -> Vec<IonSearchResults> {
+    pub fn score_iter(&self, items_to_score: &[QueryItemToScore]) -> Vec<IonSearchResults> {
         let num_input_items = items_to_score.len();
-        let loc_score_start = Instant::now(); // Combined timing for iter
+        let loc_score_start = Instant::now();
 
+        // There are still A LOT of allocations that can be saved with this pattern
+        // but this is a good start.
         let init_fn = || IntensityArrays::new_empty(5, 10, self.index_cycle_rt_ms.clone()).unwrap();
 
         let results: Vec<IonSearchResults> = items_to_score
@@ -185,7 +205,6 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .filter(|x| {
                 let lims = IncludedRange::from(x.query.get_precursor_mz_limits());
                 self.fragmented_range.intersects(lims)
-
             })
             .map_init(init_fn, |buffer, item| {
                 // The pre-score is essentually just the collected intensities.

@@ -1,11 +1,15 @@
-from pathlib import Path
-import pytest
-import subprocess
 import json
-from speclib_builder.base import SpeclibElement, ElutionGroup
+import subprocess
+from pathlib import Path
+
+import pytest
+from speclib_builder.base import ElutionGroup, SpeclibElement
 from speclib_builder.decoys import DecoyStrategy
-from speclib_builder.fasta_cli import _main
-from speclib_builder.fasta_cli import DummyAnnotator, OnnxPeptideTransformerAnnotator
+from speclib_builder.fasta_cli import (
+    DummyAnnotator,
+    OnnxPeptideTransformerAnnotator,
+    _main,
+)
 
 
 @pytest.fixture

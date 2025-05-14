@@ -17,12 +17,15 @@ use crate::{
 };
 use core::f32;
 use serde::Serialize;
-use timsquery::{MzMobilityStatsCollector, SpectralCollector};
 use std::sync::Arc;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
+};
+use timsquery::{
+    MzMobilityStatsCollector,
+    SpectralCollector,
 };
 use tracing::warn;
 
@@ -194,20 +197,25 @@ fn gaussblur(x: &mut [f32]) {
 impl LongitudinalMainScoreElements {
     pub fn try_new(intensity_arrays: &IntensityArrays) -> Result<Self, DataProcessingError> {
         let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
-        let max_lzs = lazyscore.iter().max_by(|x,y| {
-            if x.is_nan() {
-                return std::cmp::Ordering::Less;
-            }
-            if y.is_nan() {
-                return std::cmp::Ordering::Greater;
-            }
-            match x.partial_cmp(y) {
-                Some(x) => x,
-                None => panic!("Failed to compare lazyscore values {} vs {}", x, y),
-            }
-        }).unwrap_or(&0.0f32);
+        let max_lzs = lazyscore
+            .iter()
+            .max_by(|x, y| {
+                if x.is_nan() {
+                    return std::cmp::Ordering::Less;
+                }
+                if y.is_nan() {
+                    return std::cmp::Ordering::Greater;
+                }
+                match x.partial_cmp(y) {
+                    Some(x) => x,
+                    None => panic!("Failed to compare lazyscore values {} vs {}", x, y),
+                }
+            })
+            .unwrap_or(&0.0f32);
         if max_lzs <= &1e-3 {
-            return Err(DataProcessingError::ExpectedNonEmptyData { context: Some("No non-0 lazyscore".into()) });
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("No non-0 lazyscore".into()),
+            });
         }
 
         let mut ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
@@ -421,7 +429,10 @@ impl PreScore {
 
         let lazyscore_z = longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std;
         if lazyscore_z.is_nan() {
-            let tmp = format!("Lazy score is NaN {} and {}", longitudinal_main_score_elements.ms2_lazyscore[max_loc], norm_lazy_std);
+            let tmp = format!(
+                "Lazy score is NaN {} and {}",
+                longitudinal_main_score_elements.ms2_lazyscore[max_loc], norm_lazy_std
+            );
             return Err(DataProcessingError::ExpectedFiniteNonNanData { context: tmp });
         }
 

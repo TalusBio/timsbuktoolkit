@@ -25,9 +25,15 @@ use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SerSpeclibElement {
+pub struct SerSpeclibElement {
     precursor: PrecursorEntry,
     elution_group: ReferenceEG,
+}
+
+impl SerSpeclibElement {
+    pub fn sample() -> Self {
+        QueryItemToScore::sample().into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

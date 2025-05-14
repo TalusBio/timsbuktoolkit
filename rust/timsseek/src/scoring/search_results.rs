@@ -97,15 +97,12 @@ impl<'q> SearchResultBuilder<'q> {
         self.ms1_mobility_errors = SetField::Some(offsets.ms1_mobility_errors());
         self.ms2_mz_errors = SetField::Some(offsets.ms2_mz_errors());
         self.ms2_mobility_errors = SetField::Some(offsets.ms2_mobility_errors());
-        
 
         let mob_errors = offsets.avg_delta_mobs();
         let cum_err = mob_errors.0 + mob_errors.1;
         let obs_mob = (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
         let d_err = match (mob_errors.0.mean_mobility(), mob_errors.1.mean_mobility()) {
-            (Ok(mz), Ok(mob)) => {
-                mz - mob
-            }
+            (Ok(mz), Ok(mob)) => mz - mob,
             _ => f64::NAN,
         };
         self.delta_ms1_ms2_mobility = SetField::Some(d_err as f32);

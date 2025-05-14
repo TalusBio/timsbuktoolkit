@@ -34,35 +34,12 @@ pub struct InputQuery {
 
 impl InputQuery {
     pub fn sample() -> Self {
+        let tmp = QueryItemToScore::sample();
         Self {
-            sequence: "PEPTIDE".to_string(),
-            charge: 2,
-            elution_group: Arc::new(ElutionGroup {
-                id: 0,
-                mobility: 0.75,
-                rt_seconds: 0.0,
-                precursors: vec![(-1, 450.0), (0, 450.5), (1, 451.0), (2, 451.5)].into(),
-                fragments: vec![
-                    (IonAnnot::try_from("a1").unwrap(), 450.0),
-                    (IonAnnot::try_from("a2").unwrap(), 450.5),
-                    (IonAnnot::try_from("a3").unwrap(), 451.0),
-                    (IonAnnot::try_from("a4").unwrap(), 451.5),
-                ]
-                .into(),
-            }),
-            expected_intensities: ExpectedIntensities {
-                precursor_intensities: vec![1.0, 1.0, 1.0, 1.0],
-                fragment_intensities: HashMap::from_iter(
-                    [
-                        (IonAnnot::try_from("a1").unwrap(), 1.0),
-                        (IonAnnot::try_from("a2").unwrap(), 1.0),
-                        (IonAnnot::try_from("a3").unwrap(), 1.0),
-                        (IonAnnot::try_from("a4").unwrap(), 1.0),
-                    ]
-                    .iter()
-                    .cloned(),
-                ),
-            },
+            sequence: String::from(tmp.digest),
+            charge: tmp.charge,
+            elution_group: tmp.query,
+            expected_intensities: tmp.expected_intensity,
         }
     }
 }
@@ -99,6 +76,7 @@ pub fn new_index(
 
     let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
     let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
+    let fragmented_range = index.fragmented_range();
 
     Ok(Scorer {
         index_cycle_rt_ms: ref_time_ms,
@@ -107,5 +85,6 @@ pub fn new_index(
         secondary_tolerance: tolerance.with_rt_tolerance(
             timsquery::models::tolerance::RtTolerance::Minutes((0.5, 0.5)),
         ),
+        fragmented_range,
     })
 }

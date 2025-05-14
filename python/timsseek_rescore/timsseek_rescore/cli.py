@@ -5,13 +5,11 @@ from pathlib import Path
 import polars as pl
 from rich.pretty import pprint
 
-from .feateng import read_files
-
 from .backends.mlp import mlp_stuff
 from .backends.mokapot import mokapot_stuff
 from .backends.xgb import xgboost_stuff
+from .feateng import read_files, to_mokapot_df
 from .plotting import main_score_hist
-from .feateng import to_mokapot_df
 
 
 # TODO: Rename
@@ -29,9 +27,9 @@ def main(args):
 
     main_score_hist(data, outdir)
     xgboost_stuff(data, outdir)
-    mokapot_stuff(data, outdir)
     data, cols = to_mokapot_df(data)
     score = mlp_stuff(data, cols=cols, output_dir=outdir)
+    mokapot_stuff(data, outdir)
 
     exit()
     # Leaving the code I used for hparam tuning of the MLP

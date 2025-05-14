@@ -69,7 +69,11 @@ impl MzMobilityOffsets {
             });
         }
 
-        Self { ms1, ms2, ref_mobility }
+        Self {
+            ms1,
+            ms2,
+            ref_mobility,
+        }
     }
 
     pub fn ms1_mz_errors(&self) -> [f32; 3] {
@@ -116,11 +120,7 @@ impl MzMobilityOffsets {
             if v.ims_err.is_nan() {
                 continue;
             }
-            ms2.add(
-                v.intensity,
-                v.mz_err as f64,
-                v.ims_err as f64,
-            );
+            ms2.add(v.intensity, v.mz_err as f64, v.ims_err as f64);
         }
 
         let vals = self.ms1.get_values();
@@ -128,11 +128,7 @@ impl MzMobilityOffsets {
             if v.ims_err.is_nan() {
                 continue;
             }
-            ms1.add(
-                v.intensity,
-                v.mz_err as f64,
-                v.ims_err as f64,
-            );
+            ms1.add(v.intensity, v.mz_err as f64, v.ims_err as f64);
         }
 
         (ms1, ms2)
