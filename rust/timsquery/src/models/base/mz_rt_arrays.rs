@@ -116,12 +116,6 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         self.arr.get_row(idx)
     }
 
-    /// Get a single 'row', all the chromatogram for a single mz mutably
-    fn get_row_mut_idx(&mut self, idx: usize) -> Result<&mut [V], DataProcessingError> {
-        // Not sure if "row" makes that much sense ... but I feel like get_mz is even less clear ...
-        self.arr.get_row_mut(idx)
-    }
-
     pub fn iter_mut_mzs(
         &mut self,
     ) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_, V>)> {
