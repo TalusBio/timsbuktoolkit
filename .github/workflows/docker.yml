@@ -4,8 +4,11 @@ on:
   pull_request:
     branches:
       - main
-  release:
-    types: [published, edited]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches:
+      - main
 
 env:
   REGISTRY: ghcr.io
@@ -14,9 +17,12 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release')
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Get Cargo toolchain
         uses: actions-rs/toolchain@v1
@@ -46,8 +52,8 @@ jobs:
         uses: docker/setup-buildx-action@v2
 
       - name: Login to the GitHub Container Registry
-        # Only login if it's a release event
-        if: github.event_name == 'release'
+        # Only login and push if this workflow was triggered by a successful workflow_run of a release
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release'
         uses: docker/login-action@v1
         with:
           registry: ${{ env.REGISTRY }}
@@ -59,10 +65,21 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The docker/metadata-action is smart enough to extract the original release tag
+          # from `github.event.workflow_run.event.release.tag_name` when triggered by workflow_run
+          # and the original event was a release.
+          tags: |
+            type=schedule
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long # This will be used for pull_requests
+            # For workflow_run triggered by a release, this action automatically gets the release tag.
 
       - name: Build and Push the Docker image to the GHCR
-        # Only push if it's a release event
-        if: github.event_name == 'release'
+        # Only push if it's a workflow_run triggered by a release
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release'
         uses: docker/build-push-action@v3
         with:
           context: .
@@ -70,7 +87,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      
+
       - name: Build the Docker image (without pushing)
         # Build but don't push on pull requests
         if: github.event_name == 'pull_request'
