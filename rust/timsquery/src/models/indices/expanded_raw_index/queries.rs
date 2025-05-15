@@ -1,4 +1,3 @@
-use std::ops::AddAssign;
 
 use super::model::ExpandedRawFrameIndex;
 use crate::OptionallyRestricted::{
@@ -10,16 +9,12 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::frames::peak_in_quad::{
-    PeakInQuad,
-    ResolvedPeakInQuad,
-};
+use crate::models::frames::peak_in_quad::PeakInQuad;
 use crate::traits::QueriableData;
 use crate::{
     KeyLike,
     PeakAddable,
     Tolerance,
-    ValueLike,
 };
 
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for ExpandedRawFrameIndex {

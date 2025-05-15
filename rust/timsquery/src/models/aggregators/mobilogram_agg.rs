@@ -1,10 +1,8 @@
-use crate::models::frames::PeakInQuad;
 use crate::{
     ElutionGroup,
     IncludedRange,
     KeyLike,
 };
-use std::ops::AddAssign;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]

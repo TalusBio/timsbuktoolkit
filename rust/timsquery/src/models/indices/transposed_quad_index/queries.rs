@@ -8,18 +8,13 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::frames::peak_in_quad::{
-    PeakInQuad,
-    ResolvedPeakInQuad,
-};
+use crate::models::frames::peak_in_quad::PeakInQuad;
 use crate::traits::QueriableData;
 use crate::{
     KeyLike,
     PeakAddable,
     Tolerance,
-    ValueLike,
 };
-use std::ops::AddAssign;
 
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for QuadSplittedTransposedIndex {
     fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {

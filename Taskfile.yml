@@ -40,4 +40,14 @@ tasks:
 
   bumpver:
     cmds:
+      # --tag {alpha, beta, dev, rc, post, final}
       - uv run --dev  bumpver update --minor --allow-dirty --no-commit
+
+  docker:
+    cmds:
+      # - cargo install cross --git https://github.com/cross-rs/cross
+      - cross build --release --target x86_64-unknown-linux-gnu --features build-binary --bin timsquery
+      - cross build --release --target x86_64-unknown-linux-gnu --bin timsseek
+      - docker build --platform linux/amd64 -t timsseek:local .
+
+      

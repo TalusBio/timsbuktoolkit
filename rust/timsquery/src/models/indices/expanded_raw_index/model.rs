@@ -44,18 +44,15 @@ pub struct ExpandedRawFrameIndex {
 #[derive(Debug, Clone)]
 pub struct ExpandedSliceBundle {
     slices: Vec<ExpandedFrameSlice<SortedState>>,
-    frame_indices: Vec<usize>,
     frame_rt_ms: Vec<u32>,
 }
 
 impl ExpandedSliceBundle {
     pub fn new(mut slices: Vec<ExpandedFrameSlice<SortedState>>) -> Self {
         slices.sort_unstable_by(|a, b| a.rt.partial_cmp(&b.rt).unwrap());
-        let frame_indices = slices.iter().map(|x| x.frame_index).collect();
         let frame_rt_ms = slices.iter().map(|x| x.rt_ms).collect();
         Self {
             slices,
-            frame_indices,
             frame_rt_ms,
         }
     }
