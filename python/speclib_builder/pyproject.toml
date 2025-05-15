@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "speclib_builder"
-version = "0.13.0-b0"
+version = "0.14.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "rich",
