@@ -157,7 +157,7 @@ mod tests {
         let slices =
             Array2D::new(vec![[0., 1., 1., 3., 200., 5.], [1., 2., 1., 4., 200., 6.]]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr::<1>(&slices, window, &None);
+        let scores = coelution_score_arr::<1>(&slices, window);
         let expected = vec![0.0, 0.75, 0.974026, 0.99997497, 0.99995005, 0.0];
         assert_close_enough(&scores.unwrap(), &expected, 1e-2);
     }
