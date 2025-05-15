@@ -49,27 +49,22 @@ pub fn coelution_score_arr_filter<const TOP_N: usize>(
     for i in 0..slices.nrows() {
         // I also think this is a very ugly chunk of code ...
         // that I need to find a better way to make more elegant.
-        match filter {
-            Some(f) => {
-                if !f(i) {
-                    continue;
-                }
+        if let Some(f) = filter {
+            if !f(i) {
+                continue;
             }
-            None => {}
         };
         let slice1 = slices.get_row(i).expect("Using nrows to check length");
         for j in 0..slices.nrows() {
             if j >= i {
                 continue;
             }
-            match filter {
-                Some(f) => {
-                    if !f(j) {
-                        continue;
-                    }
+            if let Some(f) = filter {
+                if !f(j) {
+                    continue;
                 }
-                None => {}
             };
+
             let slice2 = slices.get_row(j).expect("Using nrows to check length");
             let cosine_similarities = rolling_cosine_similarity(slice1, slice2, window_size)
                 .expect("The passed array should already be checked for length and non-emptyness");
@@ -117,10 +112,9 @@ pub fn coelution_score_filter<const TOP_N: usize, K: Clone + Ord>(
     window: usize,
     filter: &Option<impl Fn(&K) -> bool>,
 ) -> Result<Vec<f32>, DataProcessingError> {
-    let inner_filter = match filter {
-        Some(f) => Some(|i| slices.mz_order.get(i).map_or(false, |(k, _mz)| f(k))),
-        None => None,
-    };
+    let inner_filter = filter.as_ref().map(|f| {
+        |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k))
+    });
     coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &inner_filter)
 }
 
