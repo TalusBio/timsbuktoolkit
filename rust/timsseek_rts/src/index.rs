@@ -1,59 +1,13 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{
-    Deserialize,
-    Serialize,
-};
 use timsquery::models::indices::ExpandedRawFrameIndex;
-use timsquery::{
-    ElutionGroup,
-    Tolerance,
-};
+use timsquery::Tolerance;
 use timsseek::errors::Result;
-use timsseek::models::DigestSlice;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
-use timsseek::{
-    ExpectedIntensities,
-    IonAnnot,
-    QueryItemToScore,
-    Scorer,
-};
+use timsseek::Scorer;
 
 // TODO: replace with a trait ... This works for now though
 type IndexUse = ExpandedRawFrameIndex;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InputQuery {
-    pub sequence: String,
-    pub charge: u8,
-    pub elution_group: Arc<ElutionGroup<IonAnnot>>,
-    pub expected_intensities: ExpectedIntensities,
-}
-
-impl InputQuery {
-    pub fn sample() -> Self {
-        let tmp = QueryItemToScore::sample();
-        Self {
-            sequence: String::from(tmp.digest),
-            charge: tmp.charge,
-            elution_group: tmp.query,
-            expected_intensities: tmp.expected_intensity,
-        }
-    }
-}
-
-impl From<InputQuery> for QueryItemToScore {
-    fn from(value: InputQuery) -> Self {
-        Self {
-            digest: DigestSlice::from_string(value.sequence.clone(), false),
-            charge: value.charge,
-            query: value.elution_group,
-            expected_intensity: value.expected_intensities,
-        }
-    }
-}
 
 pub fn new_index(
     dotd_file_location: std::path::PathBuf,
@@ -61,7 +15,8 @@ pub fn new_index(
 ) -> Result<Scorer<IndexUse>> {
     let st = Instant::now();
     // Can use centroided for faster queries ...
-    let index = ExpandedRawFrameIndex::from_path(
+    // let index = ExpandedRawFrameIndex::from_path(
+    let index = ExpandedRawFrameIndex::from_path_centroided(
         dotd_file_location
             .clone()
             .to_str()

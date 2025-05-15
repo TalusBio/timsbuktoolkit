@@ -455,9 +455,6 @@ impl PreScore {
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
-
-            ref_ms1_idx: ms1_loc,
-            ref_ms2_idx: ms2_loc,
         })
     }
 
@@ -520,9 +517,6 @@ pub struct MainScore {
     pub ms1_cosine_ref_sim: f32,
     pub ms1_coelution_score: f32,
     pub ms1_summed_intensity: f32,
-
-    ref_ms1_idx: usize,
-    ref_ms2_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -547,7 +541,7 @@ impl RelativeIntensities {
             .sum::<f64>()
             .ln_1p();
 
-        agg.iter_precursors().for_each(|((k, mz), v)| {
+        agg.iter_precursors().for_each(|((k, _mz), v)| {
             // Note isotope keys < 0 mean 'decoy' isotopes
             let weight = v.weight();
             if *k >= 0i8 && weight > 0.0 {

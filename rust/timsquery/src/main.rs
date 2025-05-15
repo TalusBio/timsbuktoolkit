@@ -25,10 +25,7 @@ use timsquery::models::tolerance::{
     RtTolerance,
     Tolerance,
 };
-use timsquery::{
-    GenerallyQueriable,
-    PeakAddable,
-};
+use timsquery::GenerallyQueriable;
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
 use tracing_bunyan_formatter::{

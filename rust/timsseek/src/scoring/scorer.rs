@@ -3,7 +3,6 @@ use crate::{
     IonAnnot,
     QueryItemToScore,
 };
-use parquet::format::NanoSeconds;
 use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -76,10 +75,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     fn _secondary_query(
         &self,
         item: &QueryItemToScore,
-        prescore: &PreScore,
+        _prescore: &PreScore,
         main_score: &MainScore,
     ) -> SpectralCollector<IonAnnot, MzMobilityStatsCollector> {
         // TODO: add the change in the tolerance target rt
+        // proably usig the information in the prescore
         let new_rt = main_score.retention_time_ms;
         let new_query = Arc::new(item.query.with_rt_seconds(new_rt as f32 / 1000.0));
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
@@ -130,7 +130,9 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let prescore = self._build_prescore(&item);
         let main_score = match self._localize_step(&prescore, buffer) {
             Ok(score) => score,
-            Err(e) => {
+            Err(_e) => {
+                // TODO: trim what errors I should log and which are
+                // accepted here
                 // info!("Error in localization: {:?}", e);
                 // info!("Query id: {:#?}", item.query.id);
                 return None;

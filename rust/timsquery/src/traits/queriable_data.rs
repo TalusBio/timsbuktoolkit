@@ -4,15 +4,11 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::frames::ResolvedPeakInQuad;
 use crate::{
     KeyLike,
-    PeakAddable,
     Tolerance,
-    ValueLike,
 };
 use rayon::prelude::*;
-use std::ops::AddAssign;
 
 /// Trait meant to signal that some form of data is
 /// queriable using a specific aggregator.

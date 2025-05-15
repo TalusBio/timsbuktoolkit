@@ -8,16 +8,16 @@ use crate::utils::top_n_array::TopNArray;
 
 #[derive(Debug)]
 pub struct MzMobilityOffsets {
-    pub ms1: TopNArray<3, SortableError>,
-    pub ms2: TopNArray<7, SortableError>,
-    pub ref_mobility: f64,
+    pub(crate) ms1: TopNArray<3, SortableError>,
+    pub(crate) ms2: TopNArray<7, SortableError>,
+    pub(crate) ref_mobility: f64,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-struct SortableError {
-    intensity: f64,
-    mz_err: f32,
-    ims_err: f32,
+pub struct SortableError {
+    pub(crate) intensity: f64,
+    pub(crate) mz_err: f32,
+    pub(crate) ims_err: f32,
 }
 
 impl PartialOrd for SortableError {

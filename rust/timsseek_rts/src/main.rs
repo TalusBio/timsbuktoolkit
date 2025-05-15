@@ -1,5 +1,4 @@
 use clap::Parser;
-use index::InputQuery;
 use serde_json::{
     Value,
     json,
@@ -16,7 +15,6 @@ use std::net::{
 use std::sync::Arc;
 use std::thread;
 use timsquery::models::indices::ExpandedRawFrameIndex;
-use timsseek::QueryItemToScore;
 use timsseek::data_sources::speclib::SerSpeclibElement;
 use timsseek::errors::{
     Result,

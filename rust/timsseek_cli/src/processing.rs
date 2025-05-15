@@ -39,6 +39,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         .progress_with_style(style)
         .for_each(|chunk| {
             // Parallelism happens here within the score_iter function
+            println!("Processing chunk {}, length {}", chunk_num, chunk.len());
             let out: Vec<IonSearchResults> = scorer.score_iter(chunk);
             for x in out.into_iter() {
                 pq_writer.add(x);
