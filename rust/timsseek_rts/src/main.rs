@@ -151,7 +151,7 @@ fn main() -> Result<()> {
 
     let st = std::time::Instant::now();
     match index.score_full(sample.into()) {
-        Ok(q) => {
+        Ok(_q) => {
             println!("Query OK");
         }
         Err(e) => {
