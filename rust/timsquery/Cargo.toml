@@ -12,7 +12,7 @@ tracing-bunyan-formatter = "0.3.10"
 tracing-chrome = "0.7.2"
 
 # These are only used for benchmarks
-rand = { version = "0.8.5", optional = true }
+rand = { version = "0.9.1", optional = true }
 rand_chacha = { version = "0.3.1", optional = true }
 
 # Workspace-inherited deps
