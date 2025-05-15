@@ -204,12 +204,20 @@ class ResponseData(BaseModel):
 
     def plot_main_score(self, min_rt, max_rt):
         fig, ax = plt.subplots()
+        peptide = self.search_results.sequence
+        charge = self.search_results.precursor_charge
+
         rts = np.array(self.main_score_elements.ref_time_ms)
         ranges = np.searchsorted(rts, [min_rt, max_rt])
         rt_plot = (rts[ranges[0] : ranges[1]] / 1000) / 60
         ax.plot(rt_plot, self.longitudinal_main_score[ranges[0] : ranges[1]])
         ax.set_xlabel("Retention Time (min)")
         ax.set_ylabel("Main Score")
+        # Title
+        ax.set_title(
+            f"Main Score for {peptide} (z={charge})\n"
+            f"Best RT: {self.search_results.obs_rt_seconds / 60:.2f} min"
+        )
         fig.tight_layout()
         return fig
 

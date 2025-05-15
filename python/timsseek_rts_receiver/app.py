@@ -43,8 +43,13 @@ def main():
         st.write(query_data_decoy)
 
     stime = time.monotonic()
-    data_target = query_server(host, int(port), query_data_target.model_dump())
-    data_decoy = query_server(host, int(port), query_data_decoy.model_dump())
+
+    try:
+        data_target = query_server(host, int(port), query_data_target.model_dump())
+        data_decoy = query_server(host, int(port), query_data_decoy.model_dump())
+    except Exception as e:
+        st.error(f"Query failed: {e}")
+        st.stop()
 
     if isinstance(data_target, str):
         st.error(f"Query failed: {data_target}")

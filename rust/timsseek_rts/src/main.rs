@@ -150,14 +150,13 @@ fn main() -> Result<()> {
     );
 
     let st = std::time::Instant::now();
-    let _check_out = match index.score_full(sample.into()) {
+    match index.score_full(sample.into()) {
         Ok(q) => {
             println!("Query OK");
-            q
         }
         Err(e) => {
             println!("Query failed: {:?}", e);
-            return Err(e.into());
+            // return Err(e.into());
         }
     };
     let elap_time = st.elapsed();
