@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use timsquery::models::indices::ExpandedRawFrameIndex;
 use timsquery::Tolerance;
+use timsquery::models::indices::ExpandedRawFrameIndex;
+use timsseek::Scorer;
 use timsseek::errors::Result;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
-use timsseek::Scorer;
 
 // TODO: replace with a trait ... This works for now though
 type IndexUse = ExpandedRawFrameIndex;

@@ -8,6 +8,7 @@ use serde::{
 };
 use std::sync::Arc;
 use std::time::Instant;
+use timsquery::GenerallyQueriable;
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -25,7 +26,6 @@ use timsquery::models::tolerance::{
     RtTolerance,
     Tolerance,
 };
-use timsquery::GenerallyQueriable;
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
 use tracing_bunyan_formatter::{

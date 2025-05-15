@@ -245,7 +245,11 @@ impl LongitudinalMainScoreElements {
         let mut ms2_coelution_score =
             coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7)?;
 
-        let tmp = coelution_score::coelution_score::<6, i8>(&intensity_arrays.ms1_mzmajor, 7);
+        let tmp = coelution_score::coelution_score_filter::<6, i8>(
+            &intensity_arrays.ms1_mzmajor,
+            7,
+            &Some(|x: &i8| *x >= 0i8),
+        );
         let mut ms1_coelution_score = match tmp {
             Ok(scores) => scores,
             Err(_) => vec![0.0; rt_len],
