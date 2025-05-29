@@ -205,6 +205,20 @@ pub fn rolling_cosine_similarity(
     b: &[f32],
     window_size: usize,
 ) -> Result<Vec<f32>, DataProcessingError> {
+    let mut results = vec![f32::NAN; a.len()];
+    rolling_cosine_similarity_into(a, b, window_size, &mut results)?;
+    Ok(results)
+}
+
+pub fn rolling_cosine_similarity_into(
+    a: &[f32],
+    b: &[f32],
+    window_size: usize,
+    result_vec: &mut Vec<f32>,
+) -> Result<(), DataProcessingError> {
+    // let mut results = vec![f32::NAN; a.len()];
+    result_vec.clear();
+    result_vec.resize(a.len(), f32::NAN);
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
@@ -220,22 +234,21 @@ pub fn rolling_cosine_similarity(
     }
 
     let offset = window_size / 2;
-    let mut results = vec![f32::NAN; a.len()];
 
     // Initialize the first window
     let mut cosine_sim =
         CosineSimilarityCircularBuffer::new(&a[0..window_size], &b[0..window_size]);
 
     // Calculate similarity for first window
-    results[offset] = cosine_sim.calculate_similarity();
+    result_vec[offset] = cosine_sim.calculate_similarity();
 
     // Roll the window
     for i in (offset + 1)..(a.len() - offset) {
         cosine_sim.update(a[i + offset], b[i + offset]);
-        results[i] = cosine_sim.calculate_similarity();
+        result_vec[i] = cosine_sim.calculate_similarity();
     }
 
-    Ok(results)
+    Ok(())
 }
 
 #[cfg(test)]

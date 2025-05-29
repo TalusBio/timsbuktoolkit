@@ -113,19 +113,27 @@ pub fn hyperscore(slices: &RTMajorIntensityArray<IonAnnot, f32>) -> Vec<f32> {
         .collect()
 }
 
-pub fn calculate_lazy_hyperscore(npeaks: &[u8], summed_intensity: &[u64]) -> Vec<f32> {
-    let mut scores = vec![0.0; npeaks.len()];
-    for i in 0..npeaks.len() {
-        let npeaks_i = npeaks[i];
-        let summed_intensity_i = summed_intensity[i];
-        let log1p_intensities_i = (summed_intensity_i as f32 + 1.0).ln();
-        scores[i] = lnfact(npeaks_i as u16) as f32 + (2.0 * log1p_intensities_i);
-    }
-    scores
+// pub fn calculate_lazy_hyperscore(npeaks: &[u8], summed_intensity: &[u64]) -> Vec<f32> {
+//     let mut scores = vec![0.0; npeaks.len()];
+//     for i in 0..npeaks.len() {
+//         let npeaks_i = npeaks[i];
+//         let summed_intensity_i = summed_intensity[i];
+//         let log1p_intensities_i = (summed_intensity_i as f32 + 1.0).ln();
+//         scores[i] = lnfact(npeaks_i as u16) as f32 + (2.0 * log1p_intensities_i);
+//     }
+//     scores
+// }
+
+#[inline(always)]
+pub fn single_lazyscore(slc: impl IntoIterator<Item = f32>) -> f32 {
+    lnfact_f32(slc.into_iter().map(|x| x.max(1.0).ln()).sum())
 }
 
-fn single_lazyscore(slc: &[f32]) -> f32 {
-    lnfact_f32(slc.iter().map(|&x| x.max(1.0).ln()).sum())
+// This function is needed only bc the infterface to row_apply
+// requires taking a slice not an interator ... I can refactor that later
+// if need be.
+fn single_lazyscore_slc(slc: &[f32]) -> f32 {
+    single_lazyscore(slc.iter().copied())
 }
 
 fn single_split_ion_lazyscore(slc: &[f32], labels: &[(IonAnnot, f64)]) -> f32 {
@@ -148,13 +156,16 @@ fn single_split_ion_lazyscore(slc: &[f32], labels: &[(IonAnnot, f64)]) -> f32 {
     lnfact_f32(ct_lnsum) + lnfact_f32(nt_lnsum)
 }
 
-pub fn lazyscore<K: Clone>(slices: &RTMajorIntensityArray<K, f32>) -> Vec<f32> {
-    slices.arr.row_apply(single_lazyscore).collect()
+pub fn lazyscore<K: Clone>(
+    slices: &RTMajorIntensityArray<K, f32>,
+) -> impl Iterator<Item = f32> + '_ {
+    slices.arr.row_apply(single_lazyscore_slc)
 }
 
-pub fn split_ion_lazyscore(slices: &RTMajorIntensityArray<IonAnnot, f32>) -> Vec<f32> {
+pub fn split_ion_lazyscore(
+    slices: &RTMajorIntensityArray<IonAnnot, f32>,
+) -> impl Iterator<Item = f32> + '_ {
     slices
         .arr
         .row_apply(|slc| single_split_ion_lazyscore(slc, &slices.mz_order))
-        .collect()
 }

@@ -15,6 +15,10 @@ use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
 };
+use tracing::{
+    debug,
+    info,
+};
 
 pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
@@ -39,8 +43,13 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         .progress_with_style(style)
         .for_each(|chunk| {
             // Parallelism happens here within the score_iter function
-            println!("Processing chunk {}, length {}", chunk_num, chunk.len());
-            let out: Vec<IonSearchResults> = scorer.score_iter(chunk);
+            let mut out: Vec<IonSearchResults> = scorer.score_iter(chunk);
+            out.sort_unstable_by(|x, y| x.main_score.partial_cmp(&y.main_score).unwrap());
+            debug!("Worst score in chunk: {:#?}", out[0]);
+            if let Some(last) = out.last() {
+                debug!("Best Score in chunk: {:#?}", last);
+            }
+
             for x in out.into_iter() {
                 pq_writer.add(x);
             }
@@ -63,11 +72,11 @@ pub fn process_speclib(
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     // TODO: I should probably "inline" this function with the main loop
-    tracing::info!("Building database from speclib file {:?}", path);
+    info!("Building database from speclib file {:?}", path);
     let st = std::time::Instant::now();
     let speclib = Speclib::from_ndjson_file(&path)?;
     let elap_time = st.elapsed();
-    println!(
+    info!(
         "Loading speclib of length {} took: {:?} for {}",
         speclib.len(),
         elap_time,

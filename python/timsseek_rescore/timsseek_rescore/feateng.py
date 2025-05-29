@@ -174,12 +174,15 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     loggable_cols = (
         # Log
         "npeaks",
-        "lazyerscore",
         "main_score",
         "delta_next",
         "delta_second_next",
-        "lazyerscore_vs_baseline",
-        "norm_lazyerscore_vs_baseline",
+        "apex_lazyerscore",
+        "apex_lazyerscore_vs_baseline",
+        "apex_norm_lazyerscore_vs_baseline",
+        "ms2_isotope_lazyerscore",
+        "ms2_lazyerscore",
+        "ms2_isotope_lazyerscore_ratio",
         "ms1_summed_precursor_intensity",
         "ms2_summed_transition_intensity",
         # TODO: consider clamping instead of logging here.
@@ -241,7 +244,10 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             "ms2_coelution_score",
             "ms1_cosine_ref_similarity",
             "ms1_coelution_score",
+            "ms1_corr_v_gauss",
+            "ms2_corr_v_gauss",
             "nqueries",
+            # Intensity ratios
             "ms1_inten_ratio_2",
             "ms2_inten_ratio_4",
             "ms2_inten_ratio_6",
@@ -252,6 +258,9 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
             "ms1_inten_ratio_0",
             "ms2_inten_ratio_5",
             "ms2_inten_ratio_0",
+            # Cycle counts
+            "raising_cycles",
+            "falling_cycles",
         )
         + loggable_cols
         + imputable_cols
@@ -296,10 +305,10 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
 def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
     files = set()
     for results_dir in results_dirs:
-        files.update(results_dir.glob("*.parquet"))
+        files.update(results_dir.glob("result*.parquet"))
 
     files = list(files)
-    pprint(f"Scanning {len(files)} files")
+    pprint(f"Scanning {len(files)} files -> {files}")
     data = pl.scan_parquet(files)
     pprint("Done scanning")
     return data

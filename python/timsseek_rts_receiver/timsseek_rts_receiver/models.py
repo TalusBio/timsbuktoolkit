@@ -3,10 +3,13 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+from speclib_builder.base import ElutionGroup
 
 
 class ArrayResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     arr: List[List[float]]
     rts_ms: List[int]
     mz_order: Union[List[Tuple[int, float]], list[Tuple[str, float]]]
@@ -29,12 +32,22 @@ class ArrayResponse(BaseModel):
 
 
 class Extractions(BaseModel):
-    # eg: ElutionGroup
+    model_config = ConfigDict(extra="forbid")
+
+    eg: ElutionGroup
     fragments: ArrayResponse
     precursors: ArrayResponse
 
+    def min_rt(self):
+        return min(self.fragments.rts_ms + self.precursors.rts_ms)
+
+    def max_rt(self):
+        return max(self.fragments.rts_ms + self.precursors.rts_ms)
+
 
 class MainScoreElements(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     ms1_coelution_score: List[float]
     ms1_cosine_ref_sim: List[float]
     ms2_coelution_score: List[float]
@@ -43,26 +56,30 @@ class MainScoreElements(BaseModel):
     # Should Nones be allowed??
     ms2_lazyscore_vs_baseline: List[float | None]
     ms2_corr_v_gauss: List[float]
-    # TODO: REMOVE
-    # hyperscore: List[float]
+    ms1_corr_v_gauss: List[float]
     split_lazyscore: List[float]
-    # END
 
-    ref_time_ms: List[int]
     ms2_lazyscore_vs_baseline_std: float
 
-    def plot(self, min_rt_ms, max_rt_ms, vlines_ms: Optional[List[int]] = None):
+    def plot(
+        self,
+        min_rt_ms,
+        max_rt_ms,
+        rt_use: np.array,
+        vlines_ms: Optional[List[int]] = None,
+    ):
+        # TODO: fix the piping of the retention times ...
+
         # Make a plot grid, where each row is a different score element
         # but all share the same retention time axis
         ncol = 3
         nrow = 3
         fig, ax = plt.subplots(nrows=nrow, ncols=ncol, figsize=(10, 12))
 
-        rt_use = np.array(self.ref_time_ms)
         ranges = np.searchsorted(rt_use, [min_rt_ms, max_rt_ms])
         rt_plot = (rt_use[ranges[0] : ranges[1]] / 1000) / 60
 
-        mask_label = np.zeros(len(self.ref_time_ms), dtype=bool)
+        mask_label = np.zeros_like(rt_use, dtype=bool)
         if vlines_ms is not None:
             for vline in vlines_ms:
                 local_range = np.searchsorted(rt_use, [vline - 5_000, vline + 5_000])
@@ -78,6 +95,7 @@ class MainScoreElements(BaseModel):
             # ("Hyperscore", self.hyperscore),
             ("Split LazyScore", self.split_lazyscore),
             ("MS2 Corr v Gauss", self.ms2_corr_v_gauss),
+            ("MS1 Corr v Gauss", self.ms1_corr_v_gauss),
         ]
 
         for i, (name, score) in enumerate(score_name_pairs):
@@ -119,23 +137,25 @@ class MainScoreElements(BaseModel):
         fig.tight_layout()
         return fig
 
-    def min_rt(self):
-        return min(self.ref_time_ms)
-
-    def max_rt(self):
-        return max(self.ref_time_ms)
-
 
 class SearchResults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     is_target: bool
-    lazyerscore: float
-    norm_lazyerscore_vs_baseline: float
-    lazyerscore_vs_baseline: float
+    apex_lazyerscore: float
+    apex_norm_lazyerscore_vs_baseline: float
+    apex_lazyerscore_vs_baseline: float
+    ms2_lazyerscore: float
+    ms2_isotope_lazyerscore: float
+    ms2_isotope_lazyerscore_ratio: float
     ms2_corr_v_gauss: float
+    ms1_corr_v_gauss: float
     main_score: float
     delta_next: float
     delta_second_next: float
     nqueries: int
+    falling_cycles: float
+    raising_cycles: float
     ms1_coelution_score: float
     ms1_cosine_ref_similarity: float
     ms1_mobility_error_0: float
@@ -197,6 +217,8 @@ class SearchResults(BaseModel):
 
 
 class ResponseData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     extractions: Extractions
     main_score_elements: MainScoreElements
     longitudinal_main_score: List[float]
@@ -207,7 +229,7 @@ class ResponseData(BaseModel):
         peptide = self.search_results.sequence
         charge = self.search_results.precursor_charge
 
-        rts = np.array(self.main_score_elements.ref_time_ms)
+        rts = np.array(self.extractions.precursors.rts_ms)
         ranges = np.searchsorted(rts, [min_rt, max_rt])
         rt_plot = (rts[ranges[0] : ranges[1]] / 1000) / 60
         ax.plot(rt_plot, self.longitudinal_main_score[ranges[0] : ranges[1]])
@@ -223,5 +245,7 @@ class ResponseData(BaseModel):
 
 
 class Response(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     data: ResponseData

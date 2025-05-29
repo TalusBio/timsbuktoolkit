@@ -254,6 +254,18 @@ impl IonAnnot {
     pub fn terminality(&self) -> IonSeriesTerminality {
         self.series_ordinal.terminality()
     }
+
+    pub fn with_offset_neutrons(&self, offset_neutrons: i8) -> Self {
+        Self {
+            series_ordinal: self.series_ordinal,
+            charge: self.charge,
+            isotope: self.isotope + offset_neutrons,
+        }
+    }
+
+    pub fn get_charge(&self) -> i8 {
+        self.charge
+    }
 }
 
 impl TryFrom<&str> for IonAnnot {

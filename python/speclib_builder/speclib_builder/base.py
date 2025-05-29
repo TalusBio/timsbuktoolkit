@@ -35,8 +35,11 @@ class ElutionGroup(BaseModel):
     rt_seconds: float
     precursors: list[tuple[int, float]]
     fragments: list[tuple[str, float]]
-    precursor_intensities: list[float]
-    fragment_intensities: dict[str, float]
+
+    # Note that for the speclib entry, the intensities are required
+    # but not for timsquery/as an output
+    precursor_intensities: list[float] | None = None
+    fragment_intensities: dict[str, float] | None = None
 
 
 class SpeclibElement(BaseModel):
