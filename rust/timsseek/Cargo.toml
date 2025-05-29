@@ -20,6 +20,7 @@ tracing = { workspace = true }
 rayon = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
+arrayvec = "0.7.6"
 
 
 [lib]

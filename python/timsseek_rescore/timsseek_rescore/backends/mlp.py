@@ -17,6 +17,9 @@ from ..datamodels import Report
 from ..folding import to_folds
 from ..plotting import plot_importances
 
+# FFN_ACTIVATION = nn.SELU
+FFN_ACTIVATION = nn.ReLU
+
 
 class AsymmetricMarginBCELoss(nn.Module):
     def __init__(self, *, margin_0=0.1, margin_1=0.4):
@@ -115,32 +118,69 @@ class FocalLoss3(nn.Module):
             return loss
 
 
+class ResidualMLPBlock(nn.Module):
+    def __init__(self, input_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.input_layer = nn.Linear(input_dim, input_dim)
+        # self.activation = nn.SELU()
+        self.activation = FFN_ACTIVATION()
+        self.dropout = nn.Dropout(dropout)
+        self.batchnorm = nn.BatchNorm1d(input_dim)
+
+    def forward(self, x):
+        residual = x
+        x = self.input_layer(x)
+        x = self.batchnorm(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        return x + residual
+
+
+class ResidualMLPBlockI(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.input_layer = nn.Linear(input_dim, output_dim)
+        # self.activation = nn.SELU()
+        self.activation = FFN_ACTIVATION()
+        self.dropout = nn.Dropout(dropout)
+        self.batchnorm = nn.BatchNorm1d(output_dim)
+        self.input_projection = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        residual = x
+        x = self.input_layer(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.batchnorm(x)
+        return x + self.input_projection(residual)
+
+
 class BinaryClassifier(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        nhidden_layers: int = 4,
-        hidden_dims: int = 96,
+        nhidden_layers: int = 2,
+        hidden_dims: int = 48,
         dropout: float = 0.00,
     ):
         super().__init__()
 
         # ACTIVATION = nn.ReLU
         # Selu seems to be critical to train deeper networks.
-        ACTIVATION = nn.SELU
+        # ACTIVATION = nn.SELU
 
         layers = []
         layers.append(nn.BatchNorm1d(input_dim))
-        layers.append(nn.Linear(input_dim, hidden_dims))
-        layers.append(ACTIVATION())
+        layers.append(
+            ResidualMLPBlockI(
+                input_dim=input_dim, output_dim=hidden_dims, dropout=dropout
+            )
+        )
         self.input_layer = nn.Sequential(*layers)
 
         layers = []
         for _ in range(nhidden_layers):
-            layers.append(nn.Linear(hidden_dims, hidden_dims))
-            layers.append(ACTIVATION())
-            if dropout > 0.0:
-                layers.append(nn.Dropout(dropout))
+            layers.append(ResidualMLPBlock(input_dim=hidden_dims, dropout=dropout))
 
         self.hidden_layers = nn.ModuleList(layers)
 
@@ -150,6 +190,10 @@ class BinaryClassifier(nn.Module):
         self.output_layer = nn.Sequential(*layers)
 
         pprint(self)
+        nparams = sum(p.numel() for p in self.parameters())
+        nparams_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        pprint(f"Number of parameters: {nparams}")
+        pprint(f"Number of trainable parameters: {nparams_trainable}")
 
     def forward(self, x):
         x = self.input_layer(x)
@@ -158,6 +202,38 @@ class BinaryClassifier(nn.Module):
             x = layer(x)
 
         return self.output_layer(x)
+
+    def train_epoch(self, dataloader, device, optimizer, criterion) -> float:
+        self.train()
+        train_losses = []
+        for x_batch, y_batch in dataloader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+
+            optimizer.zero_grad()
+            y_pred = self(x_batch)
+            loss = criterion(y_pred, y_batch.view(-1, 1))
+            loss.backward()
+            optimizer.step()
+
+            train_losses.append(loss.item())
+
+        self.eval()
+        return np.mean(train_losses).item()
+
+    def val_epoch(self, dataloader, device, criterion) -> float:
+        val_losses = []
+        with torch.no_grad():
+            for x_batch, y_batch in dataloader:
+                x_batch, y_batch = (
+                    x_batch.to(device),
+                    y_batch.to(device),
+                )
+                y_pred = self(x_batch)
+                val_loss = criterion(y_pred, y_batch.view(-1, 1))
+                val_losses.append(val_loss.item())
+
+        avg_val_loss = np.mean(val_losses)
+        return avg_val_loss
 
 
 @dataclass
@@ -175,6 +251,18 @@ class MLPKFoldModel:
     scores: List[Optional[torch.Tensor]]
     device: torch.device
 
+    def determine_device(self):
+        # Determine the device
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            print("Using CUDA (GPU) for training.")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print("Using MPS (Apple Silicon GPU) for training.")
+        else:
+            self.device = torch.device("cpu")
+            print("Using CPU for training.")
+
     @staticmethod
     def from_folds(
         folds: List[tuple[torch.Tensor, torch.Tensor]], device: torch.device
@@ -188,7 +276,7 @@ class MLPKFoldModel:
 
     def train(
         self,
-        batch_size: int = 124,
+        batch_size: int = 250,
         epochs: int = 20,
         learning_rate: float = 1e-4,
         pos_weight: float = 0.2,
@@ -205,9 +293,16 @@ class MLPKFoldModel:
             val_dataset = TensorDataset(val_data[0], val_data[1])
 
             train_loader = DataLoader(
-                train_dataset, batch_size=batch_size, shuffle=True
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=0,
             )
-            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                num_workers=0,
+            )
 
             # Initialize model
             model = BinaryClassifier(input_dim=train_data[0].shape[1], **kwargs).to(
@@ -220,59 +315,42 @@ class MLPKFoldModel:
             # criterion = WeightedBCELoss2(fneg_weight=pos_weight)
 
             # Usually gamma is positive bc the desire is to emphasize well classified
-            # Examples, whilst we actually want to focus in misclassified examples
-            # Where they are kind of "hard" to distinguish
+            # BUT ... since we know we have a lot of false positives, we want to give
+            # "false targets" a lower weight.
             criterion = FocalLoss3(alpha=pos_weight, gamma=0.5)
 
-            # Training loop
             best_val_loss = float("inf")
             patience = 5
             patience_counter = 0
             best_model = None
 
             for epoch in range(epochs):
-                # Training
-                model.train()
-                train_losses = []
-                for x_batch, y_batch in train_loader:
-                    x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
-
-                    optimizer.zero_grad()
-                    y_pred = model(x_batch)
-                    loss = criterion(y_pred, y_batch.view(-1, 1))
-                    loss.backward()
-                    optimizer.step()
-
-                    train_losses.append(loss.item())
-
-                # Validation
-                model.eval()
-                val_losses = []
-                with torch.no_grad():
-                    for x_batch, y_batch in val_loader:
-                        x_batch, y_batch = (
-                            x_batch.to(self.device),
-                            y_batch.to(self.device),
-                        )
-                        y_pred = model(x_batch)
-                        val_loss = criterion(y_pred, y_batch.view(-1, 1))
-                        val_losses.append(val_loss.item())
-
-                avg_val_loss = np.mean(val_losses)
+                train_loss_mean = model.train_epoch(
+                    dataloader=train_loader,
+                    device=self.device,
+                    optimizer=optimizer,
+                    criterion=criterion,
+                )
+                val_loss_mean = model.val_epoch(
+                    dataloader=val_loader,
+                    device=self.device,
+                    criterion=criterion,
+                )
 
                 # Early stopping
                 print(
-                    f"Epoch {epoch}: train_loss = {np.mean(train_losses):.4f}, val_loss = {avg_val_loss:.4f}"
+                    f"Epoch {epoch}: train_loss = {train_loss_mean:.4f}, val_loss = {val_loss_mean:.4f}"
                 )
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
+                if val_loss_mean < best_val_loss:
+                    best_val_loss = val_loss_mean
                     best_model = model.state_dict()
                     patience_counter = 0
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
                         print(
-                            f"Early stopping at epoch {epoch}. Best validation loss: {best_val_loss:.4f}"
+                            f"Early stopping at epoch {epoch}."
+                            f" Best validation loss: {best_val_loss:.4f}"
                         )
                         break
 
@@ -305,38 +383,6 @@ class MLPKFoldModel:
                 scores_list.append(torch.cat(fold_scores))
 
             self.scores[i] = torch.stack(scores_list).mean(dim=0)
-
-    def get_importances(self, feat_names: list[str] | None = None):
-        # Note: Feature importance is not as straightforward in neural networks
-        # This is a simple implementation using gradient-based importance
-        importances = []
-
-        for model in self.models:
-            importance_dict = {}
-
-            # Compute average gradient magnitude for each feature
-            for i, (features, targets) in enumerate(self.folds):
-                features.requires_grad_(True)
-                output = model(features.to(self.device))
-                output.sum().backward()
-
-                grad_magnitude = features.grad.abs().mean(dim=0)
-                importance_dict = {}
-                for j in range(features.shape[1]):
-                    feat_name = (
-                        feat_names[j] if feat_names is not None else f"feature_{j}"
-                    )
-                    importance_dict[feat_name] = grad_magnitude[j].item()
-
-                features.requires_grad_(False)
-                model.zero_grad()
-
-            importances.append(importance_dict)
-
-        # Format similar to original
-        imps_order = sorted(importances[0].items(), key=lambda x: x[1], reverse=True)
-        out = {k[0]: [w.get(k[0], 0) for w in importances] for k in imps_order}
-        return out
 
     def get_importances2(self, feat_names: list[str] | None = None):
         """
@@ -385,16 +431,13 @@ class MLPKFoldModel:
                 features.requires_grad_(False)
                 model.zero_grad()
 
-            # Average importance across folds
             for key in importance_dict:
                 importance_dict[key] /= len(self.folds)
 
             importances.append(importance_dict)
 
-            # Remove the hook
             hook.remove()
 
-        # Format similar to original
         imps_order = sorted(importances[0].items(), key=lambda x: x[1], reverse=True)
         out = {k[0]: [w.get(k[0], 0) for w in importances] for k in imps_order}
         return out
@@ -423,9 +466,10 @@ def mlp_stuff(
     df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
     folds = to_torch_folds(shuffled_df=df_use, num_folds=5, cols=cols)
     fold_model = MLPKFoldModel.from_folds(folds, device="cpu")
+    # Moving the data back and forth is slower ...
+    # fold_model.determine_device()
     fold_model.train(pos_weight=pos_weight, **kwargs)
     fold_model.score()
-    # importances = fold_model.get_importances(feat_names=cols.feature_columns)
     importances = fold_model.get_importances2(feat_names=cols.feature_columns)
     pprint(importances)
     fig = plot_importances(importances)

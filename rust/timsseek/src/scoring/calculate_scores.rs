@@ -1,14 +1,19 @@
 use super::scores::coelution::coelution_score;
-use super::scores::corr_v_ref::calculate_cosine_with_ref_gaussian;
+use super::scores::corr_v_ref::calculate_cosine_with_ref_gaussian_into;
 use super::scores::{
     corr_v_ref,
     hyperscore,
+};
+use super::{
+    COELUTION_WINDOW_WIDTH,
+    NUM_MS1_IONS,
+    NUM_MS2_IONS,
 };
 use crate::errors::DataProcessingError;
 use crate::models::DigestSlice;
 use crate::utils::rolling_calculators::{
     calculate_centered_std,
-    calculate_value_vs_baseline,
+    calculate_value_vs_baseline_into,
 };
 use crate::utils::top_n_array::TopNArray;
 use crate::{
@@ -44,6 +49,7 @@ pub struct PreScore {
 pub struct LongitudinalMainScoreElements {
     pub ms1_cosine_ref_sim: Vec<f32>,
     pub ms1_coelution_score: Vec<f32>,
+    pub ms1_corr_v_gauss: Vec<f32>,
     pub ms2_cosine_ref_sim: Vec<f32>,
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
@@ -52,7 +58,6 @@ pub struct LongitudinalMainScoreElements {
     pub split_lazyscore: Vec<f32>,
 
     /// END
-    pub ref_time_ms: Arc<[u32]>,
     ms2_lazyscore_vs_baseline_std: f32,
 }
 
@@ -166,9 +171,13 @@ impl IntensityArrays {
         self.ms2_expected_intensities = ms2_ref_vec;
         Ok(())
     }
+
+    pub fn get_top_ions<const N: usize>(&self) -> () {
+        todo!()
+    }
 }
 
-fn gaussblur(x: &mut [f32]) {
+fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
     // Temp implementation ... shoudl make something nicer in the future.
     let len = x.len();
     if len < 3 {
@@ -177,27 +186,40 @@ fn gaussblur(x: &mut [f32]) {
 
     // Using fixed kernel weights [0.5, 1.0, 0.5]
     // Note: These weights are already normalized (sum = 2)
-    let mut temp = vec![0.0; len];
+    buffer.clear();
+    buffer.resize(len, 0.0);
 
     // Handle first element
-    temp[0] = (x[0] * 1.5 + x[1] * 0.5) / 2.0;
+    buffer[0] = (x[0] * 1.5 + x[1] * 0.5) / 2.0;
 
     // Main convolution loop
     for i in 1..len - 1 {
-        temp[i] = (x[i - 1] * 0.5 + x[i] * 1.0 + x[i + 1] * 0.5) / 2.0;
+        buffer[i] = (x[i - 1] * 0.5 + x[i] * 1.0 + x[i + 1] * 0.5) / 2.0;
     }
 
     // Handle last element
-    temp[len - 1] = (x[len - 1] * 1.5 + x[len - 2] * 0.5) / 2.0;
+    buffer[len - 1] = (x[len - 1] * 1.5 + x[len - 2] * 0.5) / 2.0;
 
     // Copy results back
-    x.copy_from_slice(&temp);
+    x.copy_from_slice(buffer);
 }
 
 impl LongitudinalMainScoreElements {
     pub fn try_new(intensity_arrays: &IntensityArrays) -> Result<Self, DataProcessingError> {
-        let mut lazyscore = hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor);
-        let max_lzs = lazyscore
+        let mut out = Self::new_with_capacity(intensity_arrays.ms1_rtmajor.rts_ms.len());
+        out.try_reset_with(intensity_arrays)?;
+        Ok(out)
+    }
+
+    pub fn try_reset_with(
+        &mut self,
+        intensity_arrays: &IntensityArrays,
+    ) -> Result<(), DataProcessingError> {
+        self.clear();
+        self.ms2_lazyscore
+            .extend(hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor));
+        let max_lzs = self
+            .ms2_lazyscore
             .iter()
             .max_by(|x, y| {
                 if x.is_nan() {
@@ -218,23 +240,24 @@ impl LongitudinalMainScoreElements {
             });
         }
 
-        let mut ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
+        // TODO: Reimplement as in-place
+        self.ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
             &intensity_arrays.ms1_expected_intensities,
         )
         .unwrap();
-        let mut ms2_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
+        self.ms2_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms2_rtmajor,
             &intensity_arrays.ms2_expected_intensities,
         )
         .unwrap();
         // Fill missing
-        ms1_cosine_ref_sim.iter_mut().for_each(|x| {
+        self.ms1_cosine_ref_sim.iter_mut().for_each(|x| {
             if x.is_nan() {
                 *x = 1e-3
             }
         });
-        ms2_cosine_ref_sim.iter_mut().for_each(|x| {
+        self.ms2_cosine_ref_sim.iter_mut().for_each(|x| {
             if x.is_nan() {
                 *x = 1e-3
             }
@@ -242,40 +265,58 @@ impl LongitudinalMainScoreElements {
 
         let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
 
-        let mut ms2_coelution_score =
-            coelution_score::coelution_score::<10, IonAnnot>(&intensity_arrays.ms2_mzmajor, 7)?;
-
+        // TODO: reimplement this to make it inplace ...
+        self.ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(
+            &intensity_arrays.ms2_mzmajor,
+            COELUTION_WINDOW_WIDTH,
+        )?;
         let tmp = coelution_score::coelution_score_filter::<6, i8>(
             &intensity_arrays.ms1_mzmajor,
             7,
             &Some(|x: &i8| *x >= 0i8),
         );
-        let mut ms1_coelution_score = match tmp {
+        self.ms1_coelution_score = match tmp {
             Ok(scores) => scores,
             Err(_) => vec![0.0; rt_len],
         };
 
-        // let mut hyperscore = hyperscore::hyperscore(&intensity_arrays.ms2_rtmajor);
-        let mut split_lazyscore = hyperscore::split_ion_lazyscore(&intensity_arrays.ms2_rtmajor);
+        self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
+            &intensity_arrays.ms2_rtmajor,
+        ));
 
-        let mut ms2_corr_v_gauss =
-            calculate_cosine_with_ref_gaussian(&intensity_arrays.ms2_mzmajor)?;
+        calculate_cosine_with_ref_gaussian_into(
+            &intensity_arrays.ms2_mzmajor,
+            |_| true,
+            &mut self.ms2_corr_v_gauss,
+        )?;
+        calculate_cosine_with_ref_gaussian_into(
+            &intensity_arrays.ms1_mzmajor,
+            |&k| k >= 0,
+            &mut self.ms1_corr_v_gauss,
+        )?;
 
-        gaussblur(&mut lazyscore);
-        gaussblur(&mut ms1_coelution_score);
-        gaussblur(&mut ms2_coelution_score);
-        gaussblur(&mut ms2_cosine_ref_sim);
-        gaussblur(&mut ms1_cosine_ref_sim);
-        gaussblur(&mut ms2_corr_v_gauss);
-        // gaussblur(&mut hyperscore);
-        gaussblur(&mut split_lazyscore);
+        let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
+        gaussblur(&mut self.ms2_lazyscore, &mut buffer);
+        gaussblur(&mut self.ms1_coelution_score, &mut buffer);
+        gaussblur(&mut self.ms2_coelution_score, &mut buffer);
+        gaussblur(&mut self.ms2_cosine_ref_sim, &mut buffer);
+        gaussblur(&mut self.ms1_cosine_ref_sim, &mut buffer);
+        gaussblur(&mut self.ms2_corr_v_gauss, &mut buffer);
+        gaussblur(&mut self.ms1_corr_v_gauss, &mut buffer);
+        gaussblur(&mut self.split_lazyscore, &mut buffer);
 
         let five_pct_index = rt_len * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
-        let lazyscore_vs_baseline = calculate_value_vs_baseline(&lazyscore, five_pct_index);
+
+        // TODO trim here if the max size is too large
+        calculate_value_vs_baseline_into(
+            &self.ms2_lazyscore,
+            five_pct_index,
+            &mut self.ms2_lazyscore_vs_baseline,
+        );
         let mut lzb_std = calculate_centered_std(
-            &lazyscore_vs_baseline
-                [(half_five_pct_idnex)..(lazyscore_vs_baseline.len() - half_five_pct_idnex)],
+            &self.ms2_lazyscore_vs_baseline[(half_five_pct_idnex)
+                ..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_idnex)],
         );
 
         // This feels incredibly dirty ...
@@ -284,24 +325,107 @@ impl LongitudinalMainScoreElements {
             lzb_std = 1.0;
         }
 
-        Ok(Self {
+        self.ms2_lazyscore_vs_baseline_std = lzb_std;
+
+        self.check_lengths()
+            .expect("All vecs to be the same length");
+        Ok(())
+    }
+
+    fn check_lengths(&self) -> Result<(), DataProcessingError> {
+        let len = self.ms1_cosine_ref_sim.len();
+        macro_rules! check_len {
+            ($x:expr) => {
+                if $x.len() != len {
+                    return Err(DataProcessingError::ExpectedSlicesSameLength {
+                        expected: len,
+                        other: $x.len(),
+                        context: format!("Slices not same length -> {:?}", stringify!($x)).into(),
+                    });
+                }
+            };
+        }
+
+        // This is reallty not necessary but exhaustive pattern
+        // matching helps me not forget any of the fields.
+        let Self {
             ms1_cosine_ref_sim,
             ms1_coelution_score,
             ms2_cosine_ref_sim,
             ms2_coelution_score,
-            ms2_lazyscore: lazyscore,
-            ms2_lazyscore_vs_baseline: lazyscore_vs_baseline,
+            ms2_lazyscore,
+            ms2_lazyscore_vs_baseline,
             split_lazyscore,
-            // hyperscore,
-            ref_time_ms: intensity_arrays.ms1_rtmajor.rts_ms.clone(),
-            ms2_lazyscore_vs_baseline_std: lzb_std,
             ms2_corr_v_gauss,
-        })
+            ms1_corr_v_gauss,
+            ms2_lazyscore_vs_baseline_std: _,
+        } = self;
+
+        check_len!(ms1_cosine_ref_sim);
+        check_len!(ms1_coelution_score);
+        check_len!(ms2_cosine_ref_sim);
+        check_len!(ms2_coelution_score);
+        check_len!(ms2_lazyscore);
+        check_len!(ms2_lazyscore_vs_baseline);
+        check_len!(split_lazyscore);
+        check_len!(ms2_corr_v_gauss);
+        check_len!(ms1_corr_v_gauss);
+
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        let LongitudinalMainScoreElements {
+            ms1_cosine_ref_sim,
+            ms1_coelution_score,
+            ms2_cosine_ref_sim,
+            ms2_coelution_score,
+            ms2_lazyscore,
+            ms2_lazyscore_vs_baseline,
+            split_lazyscore,
+            ms2_corr_v_gauss,
+            ms1_corr_v_gauss,
+            ms2_lazyscore_vs_baseline_std: _,
+        } = self;
+
+        ms1_cosine_ref_sim.clear();
+        ms1_coelution_score.clear();
+        ms2_cosine_ref_sim.clear();
+        ms2_coelution_score.clear();
+        ms2_lazyscore.clear();
+        ms2_lazyscore_vs_baseline.clear();
+        split_lazyscore.clear();
+        ms2_corr_v_gauss.clear();
+        ms1_corr_v_gauss.clear();
+    }
+
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        let ms1_cosine_ref_sim = Vec::with_capacity(capacity);
+        let ms1_coelution_score = Vec::with_capacity(capacity);
+        let ms2_cosine_ref_sim = Vec::with_capacity(capacity);
+        let ms2_coelution_score = Vec::with_capacity(capacity);
+        let ms2_lazyscore = Vec::with_capacity(capacity);
+        let ms2_lazyscore_vs_baseline = Vec::with_capacity(capacity);
+        let split_lazyscore = Vec::with_capacity(capacity);
+        let ms2_corr_v_gauss = Vec::with_capacity(capacity);
+        let ms1_corr_v_gauss = Vec::with_capacity(capacity);
+        Self {
+            ms1_cosine_ref_sim,
+            ms1_coelution_score,
+            ms2_cosine_ref_sim,
+            ms2_coelution_score,
+            ms2_lazyscore,
+            ms2_lazyscore_vs_baseline,
+            split_lazyscore,
+            ms2_lazyscore_vs_baseline_std: 1.0,
+            ms2_corr_v_gauss,
+            ms1_corr_v_gauss,
+        }
     }
 
     fn find_apex_candidates(&self) -> [ScoreInTime; 20] {
         let mut candidate_groups: [TopNArray<2, ScoreInTime>; 21] = [TopNArray::new(); 21];
-        let five_pct_index = self.ref_time_ms.len() * 5 / 100;
+        let five_pct_index = self.ms1_corr_v_gauss.len() * 5 / 100;
         for (i, score) in self.main_score_iter().enumerate() {
             if score.is_nan() {
                 continue;
@@ -319,20 +443,53 @@ impl LongitudinalMainScoreElements {
     }
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
-        (0..self.ref_time_ms.len()).map(|i| {
-            // The 0.75 - 0.25 means we are downscaling the main lazyscore up to 0.75
-            // since the similarity is in the 0-1 range; even if the precursor has
-            // similarity of 0, we still have a scoring value.
-
-            let ms1_cos_score = 0.75 + (0.25 * self.ms1_cosine_ref_sim[i].max(1e-3).powi(2));
-            let mut loc_score = self.ms2_lazyscore[i];
-            loc_score *= ms1_cos_score;
-            loc_score *= self.ms2_cosine_ref_sim[i].max(1e-3).powi(2);
-            loc_score *= self.ms2_coelution_score[i].max(1e-3).powi(2);
-            loc_score *= self.ms2_corr_v_gauss[i].max(1e-3).powi(2);
-            loc_score
-        })
+        (0..self.ms1_corr_v_gauss.len()).map(|x| self.main_score_at(x))
     }
+
+    fn main_score_at(&self, idx: usize) -> f32 {
+        // The 0.75 - 0.25 means we are downscaling the main lazyscore up to 0.75
+        // since the similarity is in the 0-1 range; even if the precursor has
+        // similarity of 0, we still have a scoring value.
+        const MS1_SCALING: f32 = 0.25;
+        const MS1_OFFSET: f32 = 0.75;
+
+        let ms1_cos_score =
+            MS1_SCALING + (MS1_OFFSET * self.ms1_cosine_ref_sim[idx].max(1e-3).powi(2));
+        let ms1_gauss_score =
+            MS1_SCALING + (MS1_OFFSET * self.ms1_corr_v_gauss[idx].max(1e-3).powi(2));
+        let mut loc_score = self.ms2_lazyscore[idx];
+        loc_score *= ms1_cos_score;
+        loc_score *= ms1_gauss_score;
+        loc_score *= self.ms2_cosine_ref_sim[idx].max(1e-3).powi(2);
+        loc_score *= self.ms2_coelution_score[idx].max(1e-3).powi(2);
+        loc_score *= self.ms2_corr_v_gauss[idx].max(1e-3).powi(2);
+        loc_score
+    }
+}
+
+// TODO: Move this to somewhere that makes sense ...
+/// If a negative step is passed, it essentially means we are
+/// going left.
+fn count_falling_steps(start: usize, step: i32, slc: &[f32]) -> u8 {
+    const MAX_WIDTH: u8 = 10;
+    let mut count = 0;
+    let edge = slc.len() as i32;
+    let mut last = slc[start];
+    while count < MAX_WIDTH {
+        let next = start as i32 + (step * count as i32);
+        if next < 0 || next >= edge {
+            break;
+        }
+        let next = next as usize;
+        let score = slc[next];
+        if score > last {
+            break;
+        }
+        last = score;
+        count += 1;
+    }
+
+    count
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -363,9 +520,12 @@ impl PreScore {
     fn calc_with_intensities(
         &self,
         intensity_arrays: &IntensityArrays,
+        buffer: &mut LongitudinalMainScoreElements,
     ) -> Result<MainScore, DataProcessingError> {
-        let longitudinal_main_score_elements =
-            LongitudinalMainScoreElements::try_new(intensity_arrays)?;
+        // I prbably should pass an allocator here ...
+        // Since there is so much stuff happening ...
+        buffer.try_reset_with(intensity_arrays)?;
+        let longitudinal_main_score_elements = buffer;
 
         let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
         let norm_lazy_std =
@@ -439,6 +599,16 @@ impl PreScore {
             );
             return Err(DataProcessingError::ExpectedFiniteNonNanData { context: tmp });
         }
+        let raising_cycles = count_falling_steps(
+            max_loc,
+            -1,
+            longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
+        );
+        let falling_cycles = count_falling_steps(
+            max_loc.saturating_sub(1),
+            1,
+            longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
+        );
 
         Ok(MainScore {
             score: max_val,
@@ -455,25 +625,33 @@ impl PreScore {
                 [max_loc],
             lazyscore_z,
             ms2_corr_v_gauss: longitudinal_main_score_elements.ms2_corr_v_gauss[max_loc],
+            ms1_corr_v_gauss: longitudinal_main_score_elements.ms1_corr_v_gauss[max_loc],
             // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
             ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
             ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
+
+            raising_cycles,
+            falling_cycles,
         })
     }
 
     fn calc_main_score(&self) -> Result<MainScore, DataProcessingError> {
         let intensity_arrays =
             IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
-        self.calc_with_intensities(&intensity_arrays)
+        let mut buffer = LongitudinalMainScoreElements::new_with_capacity(
+            self.query_values.precursors.rts_ms.len(),
+        );
+        self.calc_with_intensities(&intensity_arrays, &mut buffer)
     }
 
     fn calc_with_inten_buffer(
         &self,
         intensity_arrays: &mut IntensityArrays,
+        longit_buffer: &mut LongitudinalMainScoreElements,
     ) -> Result<MainScore, DataProcessingError> {
         intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
-        self.calc_with_intensities(intensity_arrays)
+        self.calc_with_intensities(intensity_arrays, longit_buffer)
     }
 
     pub fn localize(self) -> Result<MainScore, DataProcessingError> {
@@ -488,8 +666,9 @@ impl PreScore {
     pub fn localize_with_buffer(
         &self,
         intensity_arrays: &mut IntensityArrays,
+        longit_buffer: &mut LongitudinalMainScoreElements,
     ) -> Result<MainScore, DataProcessingError> {
-        let main_score = self.calc_with_inten_buffer(intensity_arrays)?;
+        let main_score = self.calc_with_inten_buffer(intensity_arrays, longit_buffer)?;
         if main_score.score.is_nan() {
             // TODO find a way to nicely log the reason why some are nan.
             warn!("Main score is NaN");
@@ -517,22 +696,31 @@ pub struct MainScore {
     pub lazyscore_vs_baseline: f32,
     pub lazyscore_z: f32,
     pub ms2_corr_v_gauss: f32,
+    pub ms1_corr_v_gauss: f32,
 
     pub ms1_cosine_ref_sim: f32,
     pub ms1_coelution_score: f32,
     pub ms1_summed_intensity: f32,
+
+    /// Top N ions sorted in decreasing order of intensity
+    /// at the apex of the chromatogram.
+    // pub top_ions: [Option<IonAnnot>; 6],
+    pub raising_cycles: u8,
+    pub falling_cycles: u8,
 }
 
+/// Represents the relative intensities of the MS1 and MS2
+/// ions, relative to total intensity of the respective MS level.
 #[derive(Debug, Clone, Copy)]
 pub struct RelativeIntensities {
-    pub ms1: TopNArray<3, f32>,
-    pub ms2: TopNArray<7, f32>,
+    pub ms1: TopNArray<NUM_MS1_IONS, f32>,
+    pub ms2: TopNArray<NUM_MS2_IONS, f32>,
 }
 
 impl RelativeIntensities {
     pub fn new(agg: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> Self {
-        let mut ms1: TopNArray<3, f32> = TopNArray::new();
-        let mut ms2: TopNArray<7, f32> = TopNArray::new();
+        let mut ms1: TopNArray<NUM_MS1_IONS, f32> = TopNArray::new();
+        let mut ms2: TopNArray<NUM_MS2_IONS, f32> = TopNArray::new();
 
         let tot_l1p_ms1: f64 = agg
             .iter_precursors()

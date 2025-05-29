@@ -15,8 +15,8 @@ pub fn new_index(
 ) -> Result<Scorer<IndexUse>> {
     let st = Instant::now();
     // Can use centroided for faster queries ...
-    // let index = ExpandedRawFrameIndex::from_path(
-    let index = ExpandedRawFrameIndex::from_path_centroided(
+    let index = ExpandedRawFrameIndex::from_path(
+        // let index = ExpandedRawFrameIndex::from_path_centroided(
         dotd_file_location
             .clone()
             .to_str()

@@ -128,6 +128,19 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
             }))
     }
 
+    pub fn iter_mzs(&self) -> impl Iterator<Item = (&(K, f64), &[V])> {
+        assert_eq!(self.arr.nrows(), self.mz_order.len());
+        self.mz_order.iter().zip(self.arr.iter_rows())
+    }
+
+    pub fn iter_items_at(&self, rt_ms: u32) -> impl Iterator<Item = (&K, V)> {
+        let idx = self
+            .rts_ms
+            .partition_point(|&rt| rt < rt_ms)
+            .min(self.rts_ms.len() - 1);
+        self.iter_column_idx(idx)
+    }
+
     /// Create a clone of the array but transposed,
     /// instead of every chromatogram beging adjacent in memory,
     /// every retention time is adjacent in memory.

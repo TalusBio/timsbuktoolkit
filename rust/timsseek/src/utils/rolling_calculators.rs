@@ -1,16 +1,25 @@
+use arrayvec::ArrayVec;
+use tracing::warn;
+
+const MAX_WINDOW_SIZE: usize = 100;
+
 pub struct RollingMedianCalculator<T: PartialOrd + Copy + Clone> {
     window_size: usize,
-    // TODO: Evaluate if using a different data structure
-    // is better. (heap? fixed size array?)
-    data: Vec<(T, usize)>,
+    data: ArrayVec<(T, usize), MAX_WINDOW_SIZE>,
     index: usize,
 }
 
 impl<T: PartialOrd + Copy + Clone> RollingMedianCalculator<T> {
     pub fn new(window_size: usize) -> Self {
+        if window_size > MAX_WINDOW_SIZE {
+            warn!(
+                "Window size {} is larger than max size {}. Clamping to max size.",
+                window_size, MAX_WINDOW_SIZE
+            );
+        }
         Self {
-            window_size,
-            data: Vec::with_capacity(window_size),
+            window_size: window_size.min(MAX_WINDOW_SIZE),
+            data: ArrayVec::new(),
             index: 0,
         }
     }
@@ -39,12 +48,14 @@ impl<T: PartialOrd + Copy + Clone> RollingMedianCalculator<T> {
     }
 }
 
-pub fn rolling_median<T: PartialOrd + Copy + Clone>(
+pub fn rolling_median_into<T: PartialOrd + Copy + Clone>(
     values: &[T],
     window_size: usize,
     pad_value: T,
-) -> Vec<T> {
-    let mut out = vec![pad_value; values.len()];
+    out: &mut Vec<T>,
+) {
+    out.clear();
+    out.resize(values.len(), pad_value);
     let mut rolling = RollingMedianCalculator::new(window_size);
     let offset = window_size / 2;
     for (i, value) in values.iter().enumerate() {
@@ -53,15 +64,17 @@ pub fn rolling_median<T: PartialOrd + Copy + Clone>(
             out[i - offset] = rolling.median().unwrap();
         }
     }
-    out
 }
 
-pub fn calculate_value_vs_baseline(vals: &[f32], baseline_window_size: usize) -> Vec<f32> {
-    let baseline = rolling_median(vals, baseline_window_size, f32::NAN);
-    vals.iter()
-        .zip(baseline.iter())
-        .map(|(x, y)| x - y)
-        .collect()
+pub fn calculate_value_vs_baseline_into(
+    vals: &[f32],
+    baseline_window_size: usize,
+    out: &mut Vec<f32>,
+) {
+    rolling_median_into(vals, baseline_window_size, f32::NAN, out);
+    for (x, bx) in vals.iter().zip(out.iter_mut()) {
+        *bx += x;
+    }
 }
 
 /// Calculate the centered standard deviation

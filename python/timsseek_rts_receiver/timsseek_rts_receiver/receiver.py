@@ -1,5 +1,6 @@
 import json
 import time
+import numpy as np
 
 import streamlit as st
 from matplotlib import pyplot as plt
@@ -145,8 +146,8 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     column.dataframe(res.data.search_results.as_table(), use_container_width=True)
 
     best_rt = res.data.search_results.obs_rt_seconds / 60
-    min_rt = (res.data.main_score_elements.min_rt() / 1000) / 60
-    max_rt = (res.data.main_score_elements.max_rt() / 1000) / 60
+    min_rt = (res.data.extractions.min_rt() / 1000) / 60
+    max_rt = (res.data.extractions.max_rt() / 1000) / 60
     default_min = best_rt - 0.5
     default_max = best_rt + 0.5
     min_rt_show = column.slider(
@@ -171,6 +172,7 @@ def show_results(data, column, subtitle=None, key_prefix=""):
     fig = res.data.main_score_elements.plot(
         min_rt_show * 1000 * 60,
         max_rt_show * 1000 * 60,
+        rt_use=np.array(res.data.extractions.precursors.rts_ms),
         vlines_ms=[best_rt * 1000 * 60],
     )
     column.pyplot(fig, clear_figure=True, use_container_width=True)

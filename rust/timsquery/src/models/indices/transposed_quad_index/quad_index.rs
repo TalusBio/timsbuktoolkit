@@ -30,7 +30,7 @@ use timsrust::converters::{
 };
 use tracing::{
     debug,
-    info,
+    error,
     instrument,
 };
 
@@ -453,7 +453,7 @@ impl TransposedQuadIndexBuilder {
             }
 
             let insertion_elapsed = insertion_st.elapsed();
-            info!(
+            debug!(
                 "BatchedBuild: quad_settings={:?} start={:?} end={:?}/{} peaks {}/{} concat took {:#?} sorting took: {:#?} insertion took {:#?}",
                 self.quad_settings,
                 start,
@@ -470,7 +470,7 @@ impl TransposedQuadIndexBuilder {
         }
 
         if added_peaks != tot_peaks {
-            println!(
+            error!(
                 "TransposedQuadIndex::add_frame_slice failed at peak count check, expected: {}, real: {}",
                 tot_peaks, added_peaks
             );

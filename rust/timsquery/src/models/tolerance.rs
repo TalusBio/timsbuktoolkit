@@ -107,8 +107,7 @@ impl Tolerance {
         }
     }
 
-    // TODO add an unit ...
-    pub fn rt_range(&self, rt_minutes: f32) -> OptionallyRestricted<IncludedRange<f32>> {
+    pub fn rt_range_minutes(&self, rt_minutes: f32) -> OptionallyRestricted<IncludedRange<f32>> {
         match self.rt {
             RtTolerance::Minutes((low, high)) => {
                 Restricted((rt_minutes - low, rt_minutes + high).into())
@@ -123,10 +122,19 @@ impl Tolerance {
     }
 
     pub fn rt_range_as_milis(&self, rt_seconds: f32) -> OptionallyRestricted<IncludedRange<u32>> {
-        let tmp = self.rt_range(rt_seconds);
+        let minutes = rt_seconds / 60.0;
+        let tmp = self.rt_range_minutes(minutes);
         match tmp {
             Restricted(x) => {
-                Restricted(((x.start() * 1000.0) as u32, (x.end() * 1000.0) as u32).into())
+                let start_seconds = x.start() * 60.0;
+                let end_seconds = x.end() * 60.0;
+                Restricted(
+                    (
+                        (start_seconds * 1000.0) as u32,
+                        (end_seconds * 1000.0) as u32,
+                    )
+                        .into(),
+                )
             }
             Unrestricted => Unrestricted,
         }

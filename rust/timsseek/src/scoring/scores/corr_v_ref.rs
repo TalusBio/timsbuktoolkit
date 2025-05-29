@@ -28,31 +28,40 @@ fn slide_cosine_v_gaussian(
         .map(|window| cosine_similarity(window, &REF_GAUSSIAN))
 }
 
-pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
+pub fn calculate_cosine_with_ref_gaussian_into<FH: KeyLike>(
     slices: &MzMajorIntensityArray<FH, f32>,
-) -> Result<Vec<f32>, DataProcessingError> {
-    let mut result = vec![0.0; slices.arr.ncols()];
-    slices
-        .arr
-        .row_apply(|row| {
-            for (i, v) in slide_cosine_v_gaussian(row).enumerate() {
-                match v {
-                    Err(e) => return Err(e),
-                    Ok(v) => {
-                        if v.is_nan() {
-                            continue;
-                        }
-                        result[i + REF_GAUSS_OFFSET] += v.max(0.0);
+    filter: impl Fn(&FH) -> bool,
+    buffer: &mut Vec<f32>,
+) -> Result<(), DataProcessingError> {
+    buffer.clear();
+    buffer.resize(slices.arr.ncols(), 0.0);
+
+    let ratio = 1f32 / slices.arr.nrows() as f32;
+    slices.iter_mzs().try_for_each(|((k, _mz), slc)| {
+        if !filter(k) {
+            return Ok(());
+        }
+        for (i, v) in slide_cosine_v_gaussian(slc).enumerate() {
+            match v {
+                Err(e) => return Err(e),
+                Ok(v) => {
+                    if v.is_nan() {
+                        continue;
                     }
+                    buffer[i + REF_GAUSS_OFFSET] += v.max(0.0) * ratio;
                 }
             }
-            Ok(())
-        })
-        .collect::<Result<(), DataProcessingError>>()?;
-    // TODO replace with iter_rows instead of the apply ...
+        }
+        Ok(())
+    })
+}
 
-    let nrows = slices.arr.nrows();
-    result.iter_mut().for_each(|v| *v /= nrows as f32);
+pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
+    slices: &MzMajorIntensityArray<FH, f32>,
+    filter: impl Fn(&FH) -> bool,
+) -> Result<Vec<f32>, DataProcessingError> {
+    let mut result = vec![0.0; slices.arr.ncols()];
+    calculate_cosine_with_ref_gaussian_into(slices, filter, &mut result)?;
 
     Ok(result)
 }

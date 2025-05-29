@@ -1,4 +1,3 @@
-
 use crate::errors::DataProcessingError;
 use crate::utils::correlation::rolling_cosine_similarity;
 use crate::utils::top_n_array::TopNArray;
@@ -36,7 +35,7 @@ pub fn coelution_score_arr<const TOP_N: usize>(
 
 /// Calculates the coelution score of a set of chromatograms.
 /// with a filter ...
-pub fn coelution_score_arr_filter<const TOP_N: usize>(
+fn coelution_score_arr_filter<const TOP_N: usize>(
     slices: &Array2D<f32>,
     window_size: usize,
     filter: &Option<impl Fn(usize) -> bool>,
@@ -112,9 +111,21 @@ pub fn coelution_score_filter<const TOP_N: usize, K: Clone + Ord>(
     window: usize,
     filter: &Option<impl Fn(&K) -> bool>,
 ) -> Result<Vec<f32>, DataProcessingError> {
-    let inner_filter = filter.as_ref().map(|f| {
-        |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k))
-    });
+    let inner_filter = filter
+        .as_ref()
+        .map(|f| |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k)));
+    coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &inner_filter)
+}
+
+/// See the docs for [`coelution_score_arr`].
+pub fn coelution_score_filter_into<const TOP_N: usize, K: Clone + Ord>(
+    slices: &MzMajorIntensityArray<K, f32>,
+    window: usize,
+    filter: &Option<impl Fn(&K) -> bool>,
+) -> Result<Vec<f32>, DataProcessingError> {
+    let inner_filter = filter
+        .as_ref()
+        .map(|f| |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k)));
     coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &inner_filter)
 }
 

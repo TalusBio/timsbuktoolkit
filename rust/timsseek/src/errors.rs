@@ -22,7 +22,7 @@ pub enum DataProcessingError {
         context: String,
     },
     ExpectedSetField {
-        field: String,
+        field: &'static str,
         context: String,
     },
     TimsQueryDataProcessingError {
