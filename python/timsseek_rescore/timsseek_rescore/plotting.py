@@ -170,3 +170,40 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     # plt.title("Histogram of 'main_score' scores.")
     plt.savefig(target_file)
     plt.close()
+
+def plot_scores_hist(df: pl.LazyFrame, columns: list[str], output_dir: Path):
+    targets_df = df.filter(pl.col("is_target") == "true")
+    decoys_df = df.filter(pl.col("is_target") == "false")
+
+    pprint(f"Plotting scores for columns: {columns}")
+    for score in columns:
+        pprint(f"Plotting histogram for score: {score}")
+        target_scores = targets_df[score].to_numpy()
+        decoy_scores = decoys_df[score].to_numpy()
+
+        scores = np.concatenate((target_scores, decoy_scores))
+        bins = np.histogram_bin_edges(scores[~np.isnan(scores)], bins=50)
+
+        fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(10, 8), sharex=True)
+
+        ax[0].hist(scores, bins, alpha=0.5, label="All Scores")
+        ax[0].hist(target_scores, bins, alpha=0.5, label="Target Scores")
+        ax[0].hist(decoy_scores, bins, alpha=0.5, label="Decoy Scores")
+        ax[0].set_xlabel(f"Score: {score}")
+        ax[0].set_ylabel("Count")
+        ax[0].legend(loc="upper right")
+        ax[0].set_yscale("log")
+
+        ax[1].hist(scores, bins, alpha=0.5, label="All Scores")
+        ax[1].hist(target_scores, bins, alpha=0.5, label="Target Scores")
+        ax[1].hist(decoy_scores, bins, alpha=0.5, label="Decoy Scores")
+        ax[1].set_xlabel(f"Score: {score}")
+        ax[1].set_ylabel("Count")
+        ax[1].legend(loc="upper right")
+
+        target_file = output_dir / f"score_plot_{score}.png"
+        pprint(f"Saving plot to {target_file}")
+        plt.title(f"Histogram of '{score}' scores.")
+        plt.savefig(target_file)
+        plt.close()
+

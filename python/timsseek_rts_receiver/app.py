@@ -38,9 +38,9 @@ def main():
     query_data_target = entry_builder.build_entry(annotator.model(peptide.target))
     query_data_decoy = entry_builder.build_entry(annotator.model(peptide.decoy))
     with st.expander("Query data - target"):
-        st.write(query_data_target)
+        st.code(query_data_target.model_dump_json(indent=2), language="json")
     with st.expander("Query data - decoy"):
-        st.write(query_data_decoy)
+        st.code(query_data_decoy.model_dump_json(indent=2), language="json")
 
     stime = time.monotonic()
 
