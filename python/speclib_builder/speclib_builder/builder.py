@@ -64,7 +64,7 @@ class EntryBuilder:
     max_ion_mz: float = 2000
     min_ions: int = 3
 
-    def build_entry(self, elem: EntryElements) -> dict | None:
+    def build_entry(self, elem: EntryElements) -> SpeclibElement | None:
         return self.as_entry(
             peptide=elem.peptide,
             rt_seconds=elem.rt_seconds,

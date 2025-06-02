@@ -131,6 +131,7 @@ fn main_query_index(args: QueryIndexArgs) {
     let mut queries = AggregatorContainer::new(elution_groups.clone(), aggregator_use, rts);
 
     let output_path = args.output_path;
+    std::fs::create_dir_all(&output_path).unwrap();
     let serialization_format = args.format;
     queries.add_query(index, &tolerance_settings);
     queries.serialize_write(serialization_format, &output_path);
@@ -237,7 +238,6 @@ impl AggregatorContainer {
 
     fn serialize_write(&self, serialization_format: SerializationFormat, output_path: &str) {
         let serialization_start = Instant::now();
-        // TODO make this a macro ...
         let put_path = std::path::Path::new(&output_path).join("results.json");
         let serialized = self.serialize_inner(serialization_format);
         std::fs::write(put_path.clone(), serialized).unwrap();

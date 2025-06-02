@@ -77,11 +77,8 @@ class KFoldModel:
         return np.concatenate(targets)
 
 
-def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
-    df_use, cols = to_mokapot_df(df)
-    pprint("Shuffling")
-    df_use = df_use.sample(frac=1).reset_index(drop=True, inplace=False)
-    folds = to_folds_xgb(shuffled_df=df_use, num_folds=5, cols=cols)
+def xgboost_stuff(shuffled_df: pl.DataFrame, cols: list[str], output_dir: Path):
+    folds = to_folds_xgb(shuffled_df=shuffled_df, num_folds=5, cols=cols)
     fold_model = KFoldModel.from_folds(folds)
     fold_model.train()
     fold_model.score()
@@ -95,11 +92,11 @@ def xgboost_stuff(df: pl.LazyFrame, output_dir: Path):
 
     ctargs = fold_model.concat_targets()
     cscores = fold_model.concat_scores()
-    df_use["rescore_score"] = cscores
-    df_use["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
-    df_use = df_use.sort_values("rescore_score", ascending=False)
+    shuffled_df["rescore_score"] = cscores
+    shuffled_df["qvalue"] = mokapot.qvalues.qvalues_from_scores(cscores, ctargs == 1)
+    shuffled_df = shuffled_df.sort_values("rescore_score", ascending=False)
     outfile = output_dir / "rescored_values.parquet"
-    df_use.to_parquet(outfile, index=False)
+    shuffled_df.to_parquet(outfile, index=False)
     pprint(f"Wrote {outfile}")
     order = np.argsort(-cscores)
     ctargs = ctargs[order]

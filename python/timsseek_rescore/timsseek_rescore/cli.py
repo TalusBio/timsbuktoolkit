@@ -9,7 +9,7 @@ from .backends.mlp import mlp_stuff
 from .backends.mokapot import mokapot_stuff
 from .backends.xgb import xgboost_stuff
 from .feateng import read_files, to_mokapot_df
-from .plotting import main_score_hist
+from .plotting import main_score_hist, plot_scores_hist
 
 
 # TODO: Rename
@@ -25,10 +25,15 @@ def main(args):
     if not outdir.exists():
         outdir.mkdir(parents=True)
 
-    main_score_hist(data, outdir)
-    # mokapot_stuff(data, outdir)
-    # xgboost_stuff(data, outdir)
     data, cols = to_mokapot_df(data)
+    pprint("Shuffling")
+    data = data.sample(frac=1).reset_index(drop=True, inplace=False)
+    # This generates a pandas df ...
+
+    main_score_hist(pl.from_pandas(data).lazy(), outdir)
+    plot_scores_hist(pl.from_pandas(data), cols.feature_columns, outdir)
+    # mokapot_stuff(data, outdir)
+    xgboost_stuff(data, cols, outdir)
     score = mlp_stuff(data, cols=cols, output_dir=outdir)
 
 

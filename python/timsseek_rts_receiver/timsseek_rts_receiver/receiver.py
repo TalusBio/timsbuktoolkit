@@ -49,7 +49,7 @@ class TargetDecoyPair(BaseModel):
     decoy: PeptideElement
 
 
-def input_component() -> PeptideElement:
+def input_component() -> TargetDecoyPair:
     options = ["Sequence", "Examples", "Digest"]
     option = st.selectbox("Input", options)
     if option == "Sequence":
