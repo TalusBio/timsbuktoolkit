@@ -1,3 +1,5 @@
+use std::ops::Neg;
+
 use arrayvec::ArrayVec;
 use tracing::warn;
 
@@ -73,6 +75,7 @@ pub fn calculate_value_vs_baseline_into(
 ) {
     rolling_median_into(vals, baseline_window_size, f32::NAN, out);
     for (x, bx) in vals.iter().zip(out.iter_mut()) {
+        *bx = bx.neg();
         *bx += x;
     }
 }
@@ -114,7 +117,8 @@ mod tests {
     #[test]
     fn test_rolling_median() {
         let input = vec![1.0, 2.0, 30.0, 4.0, 5.0, 60.0, 7.0, 8.0, 9.0];
-        let out = rolling_median(&input, 3, f64::NAN);
+        let mut out = Vec::new();
+        rolling_median_into(&input, 3, f64::NAN, &mut out);
         let expect_out = vec![f64::NAN, 2.0, 4.0, 5.0, 5.0, 7.0, 8.0, 8.0, f64::NAN];
 
         // assert_eq!(
@@ -140,8 +144,10 @@ mod tests {
     fn test_value_vs_baseline() {
         let vals: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let baseline_window_size = 3;
-        let _baseline = rolling_median(&vals, baseline_window_size, f32::NAN);
-        let out = calculate_value_vs_baseline(&vals, baseline_window_size);
+        let mut _baseline = Vec::new();
+        rolling_median_into(&vals, baseline_window_size, f32::NAN, &mut _baseline);
+        let mut out = Vec::new();
+        calculate_value_vs_baseline_into(&vals, baseline_window_size, &mut out);
         let expect_val = vec![f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::NAN];
         let all_close = out
             .iter()

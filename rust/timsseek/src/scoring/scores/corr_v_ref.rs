@@ -56,15 +56,15 @@ pub fn calculate_cosine_with_ref_gaussian_into<FH: KeyLike>(
     })
 }
 
-pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
-    slices: &MzMajorIntensityArray<FH, f32>,
-    filter: impl Fn(&FH) -> bool,
-) -> Result<Vec<f32>, DataProcessingError> {
-    let mut result = vec![0.0; slices.arr.ncols()];
-    calculate_cosine_with_ref_gaussian_into(slices, filter, &mut result)?;
-
-    Ok(result)
-}
+// pub fn calculate_cosine_with_ref_gaussian<FH: KeyLike>(
+//     slices: &MzMajorIntensityArray<FH, f32>,
+//     filter: impl Fn(&FH) -> bool,
+// ) -> Result<Vec<f32>, DataProcessingError> {
+//     let mut result = vec![0.0; slices.arr.ncols()];
+//     calculate_cosine_with_ref_gaussian_into(slices, filter, &mut result)?;
+//
+//     Ok(result)
+// }
 
 #[test]
 fn test_calculate_cosine_with_ref_gaussian() {

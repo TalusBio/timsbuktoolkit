@@ -605,7 +605,7 @@ impl PreScore {
             longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
         );
         let falling_cycles = count_falling_steps(
-            max_loc.saturating_sub(1),
+            max_loc,
             1,
             longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
         );
