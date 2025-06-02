@@ -56,9 +56,10 @@ impl SecondaryQuery {
         let lazyscore = single_lazyscore(
             self.inner
                 .iter_fragments()
-                .map(|((k, _mz), v)| v.weight() as f32),
+                .map(|((_k, _mz), v)| v.weight() as f32),
         );
-        let iso_lazyscore = single_lazyscore(self.isotope.iter_fragments().map(|((k, _mz), v)| *v));
+        let iso_lazyscore =
+            single_lazyscore(self.isotope.iter_fragments().map(|((_k, _mz), v)| *v));
         let ratio = iso_lazyscore / lazyscore.max(1.0);
         SecondaryLazyScores {
             lazyscore,
@@ -173,11 +174,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
 }
 
 #[derive(Debug, Default)]
-struct ScoreTimings {
-    prescore: Duration,
-    localize: Duration,
-    secondary_query: Duration,
-    finalization: Duration,
+pub struct ScoreTimings {
+    pub prescore: Duration,
+    pub localize: Duration,
+    pub secondary_query: Duration,
+    pub finalization: Duration,
 }
 
 impl std::ops::AddAssign for ScoreTimings {
