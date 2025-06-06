@@ -36,6 +36,16 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
 
+// mimalloc seems to work better for windows
+// ... more accurately ... not using it causes everyting to
+// be extremely slow on windows...
+#[cfg(target_os = "windows")]
+use mimalloc::MiMalloc;
+
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let formatting_layer = BunyanFormattingLayer::new("timsquery".into(), std::io::stdout);
