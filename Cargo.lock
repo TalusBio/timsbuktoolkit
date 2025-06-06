@@ -1694,6 +1694,7 @@ version = "0.18.0"
 dependencies = [
  "clap",
  "indicatif",
+ "mimalloc",
  "nohash-hasher",
  "rand",
  "rand_chacha",
