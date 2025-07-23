@@ -15,6 +15,7 @@ tasks:
   test:
     cmds:
       - cargo test -- --nocapture
+      - uv run python -m pytest
 
   fmt:
     cmds:

@@ -3,11 +3,13 @@ import json
 
 from rich.pretty import pprint
 from tqdm.auto import tqdm
+from pathlib import Path
 
 from .builder import DummyAnnotator, EntryBuilder
 from .decoys import DecoyStrategy
 from .fasta import PeptideBuilder
 from .onxx_predictor import OnnxPeptideTransformerAnnotator
+from .writer import SpeclibWriter
 
 
 class ModelType(enum.Enum):
@@ -44,7 +46,7 @@ def build_parser():
         help="Maximum number of ions to keep per precursor",
     )
     parser.add_argument(
-        "--outfile", type=str, default="FUUUUU.ndjson", help="Output file"
+        "--outfile", type=str, default="FUUUUU.msgpack.zst", help="Output file"
     )
     parser.add_argument(
         "--model",
@@ -95,8 +97,9 @@ def _main(
     max_keep: int,
     decoy_strategy: DecoyStrategy,
     annotator: OnnxPeptideTransformerAnnotator | DummyAnnotator,
+    file_format: str = "msgpack_zstd",
 ):
-    pretty_outfile = f"{outfile}.pretty.json"
+    pretty_outfile = str(Path(outfile).with_suffix("")) + ".pretty.json"
 
     peptide_builder = PeptideBuilder(
         fasta_file=fasta_file,
@@ -123,7 +126,8 @@ def _main(
     id = 0
 
     pprint(f"Writing output to file: {outfile}")
-    with open(outfile, "w") as file:
+
+    with SpeclibWriter(path=Path(outfile), file_format=file_format) as writer:
         targ_use = peptide_builder.get_modified_targets()
         for x in tqdm(
             annotator.batched_model(targ_use),
@@ -145,8 +149,7 @@ def _main(
                 pretty_outs.append(elem)
                 is_first_n -= 1
 
-            file.write(elem.model_dump_json() + "\n")
-            file.flush()
+            writer.append(elem)
 
         is_first_n = 10
 
@@ -171,8 +174,7 @@ def _main(
                 pretty_outs.append(elem)
                 is_first_n -= 1
 
-            file.write(elem.model_dump_json() + "\n")
-            file.flush()
+            writer.append(elem)
 
     pprint(f"Writing pretty output to file: {pretty_outfile}")
     with open(pretty_outfile, "w") as file:

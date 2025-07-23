@@ -29,7 +29,7 @@ fn generate_sample_speclib() {
 
 fn parse_speclib(speclib_file: &str) -> Result<(), timsseek::errors::LibraryReadingError> {
     // This function parses a speclib file and prints the parsed content to stdout.
-    let speclib = Speclib::from_ndjson_file(std::path::Path::new(speclib_file))?;
+    let speclib = Speclib::from_file(std::path::Path::new(speclib_file))?;
     println!("{}", to_string_pretty(&speclib).unwrap());
     Ok(())
 }

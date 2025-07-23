@@ -124,7 +124,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
                 secondary_tolerance: config
                     .analysis
                     .tolerance
-                    .with_rt_tolerance(RtTolerance::Minutes((0.1, 0.1))),
+                    .with_rt_tolerance(RtTolerance::Minutes((0.5, 0.5))),
                 fragmented_range,
             };
             processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)

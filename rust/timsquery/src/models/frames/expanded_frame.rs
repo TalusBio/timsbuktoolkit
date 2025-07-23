@@ -45,6 +45,8 @@ use tracing::{
     warn,
 };
 
+const INTENSITY_CORRECTION_FACTOR_SCALING: f32 = 1000.0;
+
 /// A frame after expanding the mobility data and re-sorting it by tof.
 #[derive(Debug, Clone)]
 pub struct ExpandedFrame {
@@ -192,11 +194,19 @@ fn expand_unfragmented_frame(frame: Frame) -> ExpandedFrameSlice<SortedState> {
         frame.get_corrected_intensity(0),
         frame.intensities[0] as f64 * frame.intensity_correction_factor
     );
+    let local_corr_factor = frame.intensity_correction_factor as f32 * INTENSITY_CORRECTION_FACTOR_SCALING;
     let corrected_intensities: Vec<f32> = frame
         .intensities
         .iter()
-        .map(|&x| ((x as f64) * frame.intensity_correction_factor) as f32)
+        .map(|&x| x as f32 * local_corr_factor)
         .collect();
+    // We assume in parts of the program that all intensiti es are >= 1.0
+    assert!(
+        corrected_intensities.iter().all(|&x| x >= 1.0),
+        "Expected all intensities to be >= 1.0, got: {:?}",
+        corrected_intensities
+    );
+
     let tof_indices = frame.tof_indices;
     let curr_slice = ExpandedFrameSlice {
         tof_indices,
@@ -242,9 +252,19 @@ fn expand_fragmented_frame(
             frame.intensity_correction_factor * (frame.intensities[0] as f64),
             frame.get_corrected_intensity(0)
         );
-        let slice_intensities = (tof_index_index_slice_start..tof_index_index_slice_end)
-            .map(|x| frame.get_corrected_intensity(x) as f32)
+        let local_corr_factor =
+            frame.intensity_correction_factor as f32 * INTENSITY_CORRECTION_FACTOR_SCALING;
+        let slice_intensities: Vec<f32> = (tof_index_index_slice_start..tof_index_index_slice_end)
+            .map(|x| frame.intensities[x] as f32 * local_corr_factor)
             .collect();
+
+        // We assume all over that no intensity is < 1.0 (since simetimes we get the product of
+        // of multiple intensitues.
+        assert!(
+            slice_intensities.iter().all(|&x| x >= 1.0),
+            "Expected all intensities to be >= 1.0, got: {:?}",
+            slice_intensities
+        );
         let rt_ms = (frame.rt_in_seconds * 1000.0) as u32;
 
         let curr_slice = ExpandedFrameSlice {
