@@ -95,7 +95,7 @@ class EntryBuilder:
         neutron_fraction = NEUTRON_MASS / peptide.charge
         precursor_mzs = [
             (isotope, float(precursor_mz + (neutron_fraction * isotope)))
-            for isotope in [-1, 0, 1, 2]
+            for isotope in [0, 1, 2]
         ]
 
         intensities = [v.intensity for v in ion_dict.values()]
@@ -134,7 +134,7 @@ class EntryBuilder:
             "fragments": ion_mzs,
         }
         expected_intensities = {
-            "precursor_intensities": [0.001] + list(isotope_dist),
+            "precursor_intensities": list(isotope_dist),
             "fragment_intensities": ion_intensities,
         }
 

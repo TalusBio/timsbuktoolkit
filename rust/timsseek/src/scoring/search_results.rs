@@ -175,8 +175,8 @@ impl<'q> SearchResultBuilder<'q> {
             self.ms2_summed_transition_intensity = SetField::Some(ms2_summed_intensity);
             self.ms2_corr_v_gauss = SetField::Some(ms2_corr_v_gauss);
             self.ms1_corr_v_gauss = SetField::Some(ms1_corr_v_gauss);
-            self.raising_cycles = SetField::Some(raising_cycles as u8);
-            self.falling_cycles = SetField::Some(falling_cycles as u8);
+            self.raising_cycles = SetField::Some(raising_cycles);
+            self.falling_cycles = SetField::Some(falling_cycles);
         }
 
         self

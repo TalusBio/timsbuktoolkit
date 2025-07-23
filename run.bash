@@ -7,7 +7,7 @@ if [ -n "${FULL_RUN}" ]; then
     echo "Full run"
     sleep 2
     FASTA_FILE="$HOME/fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-    SPECLIB_NAME="data_ignore/20231030_LINEARIZED_UP000005640_9606.ndjson"
+    SPECLIB_NAME="data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zstd"
     DOTD_FILE="/Users/sebastianpaez/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
     RESULTS_DIR="data_ignore/hela_search_results"
     SUMMARY_DIR="data_ignore/hela_search_summary"
@@ -16,7 +16,7 @@ elif [ -n "${FULL_MCCOSS}" ]; then
     sleep 2
     DOTD_FILE="$HOME/data/bo_maccoss/N20211212chenc_WOSP00101_DIA_60min_K562_rep1_1_Slot2-37_1_9898.d"
     FASTA_FILE="$HOME/fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-    SPECLIB_NAME="data_ignore/20231030_LINEARIZED_UP000005640_9606.ndjson"
+    SPECLIB_NAME="data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zstd"
     RESULTS_DIR="data_ignore/mccoss_search_results"
     SUMMARY_DIR="data_ignore/mccoss_search_summary"
 elif [ -n "${VIMENTIN_ONLY}" ]; then
@@ -24,7 +24,7 @@ elif [ -n "${VIMENTIN_ONLY}" ]; then
     sleep 2
     DOTD_FILE="$HOME/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
     FASTA_FILE="$HOME/fasta/VIMENTIN.fasta"
-    SPECLIB_NAME="data_ignore/vimentin.ndjson"
+    SPECLIB_NAME="data_ignore/vimentin.msgpack.zstd"
     RESULTS_DIR="data_ignore/vimentin_search_results"
     SUMMARY_DIR="data_ignore/vimentin_search_summary"
 else
@@ -32,8 +32,8 @@ else
     echo "Quick run"
     sleep 2
     FASTA_FILE="$HOME/fasta/hela_gt20peps.fasta"
-    SPECLIB_NAME="data_ignore/asdad.ndjson"
-    DOTD_FILE="$HOME/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
+    SPECLIB_NAME="data_ignore/asdad.msgpack.zstd"
+    DOTD_FILE="$HOME/git.bkp/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d"
     RESULTS_DIR="data_ignore/top_proteins_hela"
     SUMMARY_DIR="data_ignore/top_proteins_hela_summary"
 fi

@@ -13,8 +13,11 @@ dependencies = [
   "numpy >= 2, < 3",
   "rustyms",
   "polars",
+  "loguru",
   "uniplot",
   "pydantic >= 2.11.4, < 3",
+  "zstandard",
+  "msgpack",
 ]
 
 [project.scripts]

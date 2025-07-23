@@ -16,6 +16,7 @@ use serde::{
 use std::io::{
     BufRead,
     BufReader,
+    Read,
 };
 use std::path::{
     Path,
@@ -116,8 +117,221 @@ impl Serialize for Speclib {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SpeclibFormat {
+    NdJson,
+    NdJsonZstd,
+    MessagePack,
+    MessagePackZstd,
+}
+
+impl SpeclibFormat {
+    pub fn detect_from_path(path: &Path) -> Result<Self, LibraryReadingError> {
+        let path_str = path.to_string_lossy().to_lowercase();
+
+        if path_str.ends_with(".msgpack.zst") {
+            Ok(SpeclibFormat::MessagePackZstd)
+        } else if path_str.ends_with(".msgpack") {
+            Ok(SpeclibFormat::MessagePack)
+        } else if path_str.ends_with(".ndjson.zst") {
+            Ok(SpeclibFormat::NdJsonZstd)
+        } else if path_str.ends_with(".ndjson") {
+            Ok(SpeclibFormat::NdJson)
+        } else {
+            // Try to detect by reading first few bytes
+            Self::detect_from_content(path)
+        }
+    }
+
+    fn detect_from_content(path: &Path) -> Result<Self, LibraryReadingError> {
+        let file =
+            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
+                source: e,
+                context: "Error opening file for format detection",
+                path: PathBuf::from(path),
+            })?;
+
+        let mut reader = BufReader::new(file);
+        let mut buffer = [0u8; 8];
+
+        match reader.read(&mut buffer) {
+            Ok(bytes_read) if bytes_read >= 4 => {
+                if &buffer[0..4] == &[0x28, 0xB5, 0x2F, 0xFD] {
+                    Ok(SpeclibFormat::MessagePackZstd)
+                } else if buffer[0] == b'{' {
+                    Ok(SpeclibFormat::NdJson)
+                } else {
+                    Ok(SpeclibFormat::MessagePack)
+                }
+            }
+            _ => Ok(SpeclibFormat::NdJson),
+        }
+    }
+}
+
+pub struct SpeclibReader<'a> {
+    inner: Box<dyn Iterator<Item = Result<QueryItemToScore, LibraryReadingError>> + Send + 'a>,
+}
+
+impl<'a> SpeclibReader<'a> {
+    pub fn new<R: Read + Send + 'a>(
+        reader: R,
+        format: SpeclibFormat,
+    ) -> Result<Self, LibraryReadingError> {
+        let inner: Box<dyn Iterator<Item = Result<QueryItemToScore, LibraryReadingError>> + Send> =
+            match format {
+                SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
+                SpeclibFormat::NdJsonZstd => {
+                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
+                        LibraryReadingError::SpeclibParsingError {
+                            source: serde_json::Error::io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                e,
+                            )),
+                            context: "Error creating ZSTD decoder",
+                        }
+                    })?;
+                    Box::new(NdJsonReader::new(BufReader::new(decoder)))
+                }
+                SpeclibFormat::MessagePack => Box::new(MessagePackReader::new(reader)),
+                SpeclibFormat::MessagePackZstd => {
+                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
+                        LibraryReadingError::SpeclibParsingError {
+                            source: serde_json::Error::io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                e,
+                            )),
+                            context: "Error creating ZSTD decoder",
+                        }
+                    })?;
+                    Box::new(MessagePackReader::new(decoder))
+                }
+            };
+
+        Ok(SpeclibReader { inner })
+    }
+}
+
+impl<'a> Iterator for SpeclibReader<'a> {
+    type Item = Result<QueryItemToScore, LibraryReadingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+// NDJSON reader (your existing logic)
+struct NdJsonReader<R: BufRead> {
+    reader: R,
+}
+
+impl<R: BufRead> NdJsonReader<R> {
+    fn new(reader: R) -> Self {
+        Self { reader }
+    }
+}
+
+impl<R: BufRead> Iterator for NdJsonReader<R> {
+    type Item = Result<QueryItemToScore, LibraryReadingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => None, // EOF
+            Ok(_) => {
+                if line.trim().is_empty() {
+                    return self.next(); // Skip empty lines
+                }
+
+                let elem: SerSpeclibElement = match serde_json::from_str(&line) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        return Some(Err(LibraryReadingError::SpeclibParsingError {
+                            source: e,
+                            context: "Error parsing NDJSON line",
+                        }));
+                    }
+                };
+
+                Some(Ok(elem.into()))
+            }
+            Err(e) => Some(Err(LibraryReadingError::FileReadingError {
+                source: e,
+                context: "Error reading line",
+                path: PathBuf::new(),
+            })),
+        }
+    }
+}
+
+struct MessagePackReader<R: Read> {
+    deserializer: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<R>>,
+}
+
+impl<R: Read> MessagePackReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            deserializer: rmp_serde::Deserializer::new(reader),
+        }
+    }
+}
+
+impl<R: Read> Iterator for MessagePackReader<R> {
+    type Item = Result<QueryItemToScore, LibraryReadingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use serde::Deserialize;
+
+        match SerSpeclibElement::deserialize(&mut self.deserializer) {
+            Ok(elem) => Some(Ok(elem.into())),
+            Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                None
+            } // EOF
+            Err(rmp_serde::decode::Error::InvalidDataRead(ref io_err))
+                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                None
+            } // EOF
+            Err(e) => Some(Err(LibraryReadingError::SpeclibParsingError {
+                source: serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e,
+                )),
+                context: "Error reading MessagePack",
+            })),
+        }
+    }
+}
+
 impl Speclib {
-    pub fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
+    pub fn from_file(path: &Path) -> Result<Self, LibraryReadingError> {
+        let format = SpeclibFormat::detect_from_path(path)?;
+        Self::from_file_with_format(path, format)
+    }
+
+    pub fn from_file_with_format(
+        path: &Path,
+        format: SpeclibFormat,
+    ) -> Result<Self, LibraryReadingError> {
+        let file =
+            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
+                source: e,
+                context: "Error opening speclib file",
+                path: PathBuf::from(path),
+            })?;
+
+        let reader = SpeclibReader::new(file, format)?;
+        let elements: Result<Vec<_>, _> = reader.collect();
+
+        Ok(Self {
+            elems: elements?,
+            idx: 0,
+        })
+    }
+
+    pub(crate) fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
         let speclib_ser: Vec<SerSpeclibElement> = match serde_json::from_str(json) {
             Ok(x) => x,
             Err(e) => {
@@ -136,7 +350,7 @@ impl Speclib {
         })
     }
 
-    pub fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
+    pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
         // Split on newlines and parse each ...
         // In the future I want to make this lazy but this will do for now
         let lines: Vec<&str> = json.split('\n').collect();
@@ -165,7 +379,7 @@ impl Speclib {
         Ok(Self { elems: tmp, idx: 0 })
     }
 
-    pub fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
+    pub(crate) fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
                 source: e,

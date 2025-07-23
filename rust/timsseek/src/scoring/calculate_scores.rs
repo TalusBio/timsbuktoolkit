@@ -533,6 +533,12 @@ impl PreScore {
         let max_val = apex_candidates[0].score;
         let max_loc = apex_candidates[0].index;
 
+        if max_val == 0.0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+            context: Some("No non-0 main score".into()),
+            });
+        }
+
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
         let ten_pct_index = self.query_values.fragments.rts_ms.len() / 20;

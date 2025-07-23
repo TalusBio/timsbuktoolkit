@@ -29,6 +29,8 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
+    let mut nqueried =  0;
+    let mut nwritten = 0;
     let start = Instant::now();
 
     let out_path_pq = out_path.directory.join("results.parquet");
@@ -42,8 +44,10 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         .chunks(chunk_size)
         .progress_with_style(style)
         .for_each(|chunk| {
+            nqueried += chunk.len();
             // Parallelism happens here within the score_iter function
             let mut out: Vec<IonSearchResults> = scorer.score_iter(chunk);
+            nwritten += out.len();
             out.sort_unstable_by(|x, y| x.main_score.partial_cmp(&y.main_score).unwrap());
             debug!("Worst score in chunk: {:#?}", out[0]);
             if let Some(last) = out.last() {
@@ -57,6 +61,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         });
 
     pq_writer.close();
+    println!("Processed {} queries, wrote {} results", nqueried, nwritten);
     println!(
         "Finished processing {} chunks in {:?}",
         chunk_num,
@@ -74,7 +79,7 @@ pub fn process_speclib(
     // TODO: I should probably "inline" this function with the main loop
     info!("Building database from speclib file {:?}", path);
     let st = std::time::Instant::now();
-    let speclib = Speclib::from_ndjson_file(&path)?;
+    let speclib = Speclib::from_file(&path)?;
     let elap_time = st.elapsed();
     info!(
         "Loading speclib of length {} took: {:?} for {}",
