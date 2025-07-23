@@ -51,4 +51,3 @@ tasks:
       - cross build --release --target x86_64-unknown-linux-gnu --bin timsseek
       - docker build --platform linux/amd64 -t timsseek:local .
 
-      

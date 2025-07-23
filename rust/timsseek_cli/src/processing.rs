@@ -29,7 +29,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
-    let mut nqueried =  0;
+    let mut nqueried = 0;
     let mut nwritten = 0;
     let start = Instant::now();
 

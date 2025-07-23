@@ -535,7 +535,7 @@ impl PreScore {
 
         if max_val == 0.0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
-            context: Some("No non-0 main score".into()),
+                context: Some("No non-0 main score".into()),
             });
         }
 
