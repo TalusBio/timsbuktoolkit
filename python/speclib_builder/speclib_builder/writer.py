@@ -21,7 +21,6 @@ class FormatWriter:
     _handle: Any = None
     _num_written: int = 0
     _write_time: float = 0.0
-    _batch: List[Dict] = field(default_factory=list)  # For Parquet batching
 
     def open(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,12 +65,7 @@ class FormatWriter:
         self._num_written += 1
 
     def close(self):
-        if self.format_name == "parquet":
-            # Write any remaining batch
-            if self._batch:
-                self._write_parquet_batch()
-        elif self._handle:
-            self._handle.close()
+        self._handle.close()
 
     def get_stats(self) -> Dict:
         file_size = self.path.stat().st_size if self.path.exists() else 0
@@ -112,7 +106,6 @@ class SpeclibWriter:
         if not self._opened:
             raise RuntimeError("Writer is not open")
 
-        # Original behavior - write to main NDJSON file
         if self._writer is None:
             raise RuntimeError(
                 "Unregistered handle. Make sure you are using this as a context manager"
@@ -134,12 +127,11 @@ class SpeclibWriter:
         self._writer.close()
 
         stats = self._writer.get_stats()
-        print(f"{stats['format'].upper()}:")
-        print(f"  Write time: {stats['write_time']:.3f}s")
-        print(f"  Avg per record: {stats['avg_time_per_record'] * 1000:.2f}ms")
-        print(f"  Path: {stats['path']}")
-        print()
-        print("=" * 70)
+        logger.debug(
+            f"Finished writing {stats['num_written']} records to {stats['path']} "
+            f"in {stats['write_time']:.3f}s "
+            f"({stats['avg_time_per_record'] * 1000:.2f}ms per record)"
+        )
 
 
 def warn_extension(path: Path, ext: str):

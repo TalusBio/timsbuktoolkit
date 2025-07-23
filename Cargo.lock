@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "clap",
  "indicatif",
@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "arrayvec",
  "csv",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "clap",
  "indicatif",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_rts"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "clap",
  "csv",
