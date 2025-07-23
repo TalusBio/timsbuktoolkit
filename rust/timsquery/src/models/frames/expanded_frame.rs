@@ -194,7 +194,8 @@ fn expand_unfragmented_frame(frame: Frame) -> ExpandedFrameSlice<SortedState> {
         frame.get_corrected_intensity(0),
         frame.intensities[0] as f64 * frame.intensity_correction_factor
     );
-    let local_corr_factor = frame.intensity_correction_factor as f32 * INTENSITY_CORRECTION_FACTOR_SCALING;
+    let local_corr_factor =
+        frame.intensity_correction_factor as f32 * INTENSITY_CORRECTION_FACTOR_SCALING;
     let corrected_intensities: Vec<f32> = frame
         .intensities
         .iter()
