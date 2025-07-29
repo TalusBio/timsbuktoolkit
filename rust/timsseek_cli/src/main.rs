@@ -95,17 +95,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
     };
 
     let dotd_file_location = &config.analysis.dotd_file;
-    let index = QuadSplittedTransposedIndex::from_path_centroided(
-        // let index = QuadSplittedTransposedIndex::from_path(
-        dotd_file_location
-            .clone()
-            .unwrap() // TODO: Error handling
-            .to_str()
-            .expect("Path is not convertable to string"),
-    )
-    .unwrap();
 
-    let fragmented_range = index.fragmented_range();
     let index_elems = config.index_type.build_index(dotd_file_location
             .clone()
             .unwrap() // TODO: Error handling

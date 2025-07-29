@@ -37,6 +37,9 @@ impl IndexType {
     ) -> IndexElements {
         match self {
             IndexType::Expanded => {
+                // Throughput seems to be ~ 30% better if I use the centroided version
+                // But I like the idea of having the full resolution data available +
+                // for the high throughput use case, we have the transposed index.
                 let tmp = ExpandedRawFrameIndex::from_path(raw_file_path).unwrap();
                 let rts = tmp.cycle_rt_ms.clone();
                 let fragmented_range = tmp.fragmented_range();
@@ -47,7 +50,7 @@ impl IndexType {
                 }
             }
             IndexType::Transposed => {
-                let tmp = QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
+                let tmp = QuadSplittedTransposedIndex::from_path_centroided(raw_file_path).unwrap();
                 let rts = tmp.cycle_rt_ms.clone();
                 let fragmented_range = tmp.fragmented_range();
                 IndexElements {
