@@ -95,17 +95,12 @@ fn main() -> std::result::Result<(), errors::CliError> {
     };
 
     let dotd_file_location = &config.analysis.dotd_file;
-    let index = QuadSplittedTransposedIndex::from_path_centroided(
-        // let index = QuadSplittedTransposedIndex::from_path(
-        dotd_file_location
+
+    let index_elems = config.index_type.build_index(dotd_file_location
             .clone()
             .unwrap() // TODO: Error handling
             .to_str()
-            .expect("Path is not convertable to string"),
-    )
-    .unwrap();
-
-    let fragmented_range = index.fragmented_range();
+            .expect("Path is not convertable to string"));
 
     // Process based on input type
     match config.input {
@@ -118,14 +113,14 @@ fn main() -> std::result::Result<(), errors::CliError> {
         // }
         Some(InputConfig::Speclib { path }) => {
             let scorer = Scorer {
-                index_cycle_rt_ms: index.cycle_rt_ms.clone(),
-                index,
+                index_cycle_rt_ms: index_elems.index_cycle_rt_ms,
+                index: index_elems.index,
                 tolerance: config.analysis.tolerance.clone(),
                 secondary_tolerance: config
                     .analysis
                     .tolerance
                     .with_rt_tolerance(RtTolerance::Minutes((0.5, 0.5))),
-                fragmented_range,
+                fragmented_range: index_elems.fragmented_range,
             };
             processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)
                 .unwrap();
@@ -139,3 +134,4 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
     Ok(())
 }
+
