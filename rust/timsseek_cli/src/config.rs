@@ -2,17 +2,71 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use timsseek::IonAnnot;
 use std::path::PathBuf;
 use timsquery::Tolerance;
+use timsquery::models::indices::{
+    ExpandedRawFrameIndex,
+    QuadSplittedTransposedIndex,
+};
+use timsquery::GenerallyQueriable;
+use std::sync::Arc;
+use timsquery::IncludedRange;
 
 use crate::cli::Cli;
 use crate::errors;
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub enum IndexType {
+    #[default]
+    Transposed,
+    Expanded,
+}
+
+pub struct IndexElements {
+    pub index: Box<dyn GenerallyQueriable<IonAnnot>>,
+    pub index_cycle_rt_ms: Arc<[u32]>,
+    pub fragmented_range: IncludedRange<f64>,
+    
+}
+
+impl IndexType {
+    pub fn build_index(
+        &self,
+        raw_file_path: &str,
+    ) -> IndexElements {
+        match self {
+            IndexType::Expanded => {
+                let tmp = ExpandedRawFrameIndex::from_path(raw_file_path).unwrap();
+                let rts = tmp.cycle_rt_ms.clone();
+                let fragmented_range = tmp.fragmented_range();
+                IndexElements {
+                    index: Box::new(tmp),
+                    index_cycle_rt_ms: rts,
+                    fragmented_range,
+                }
+            }
+            IndexType::Transposed => {
+                let tmp = QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
+                let rts = tmp.cycle_rt_ms.clone();
+                let fragmented_range = tmp.fragmented_range();
+                IndexElements {
+                    index: Box::new(tmp),
+                    index_cycle_rt_ms: rts,
+                    fragmented_range,
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub input: Option<InputConfig>,
     pub analysis: AnalysisConfig,
     pub output: Option<OutputConfig>,
+    #[serde(default)]
+    pub index_type: IndexType,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -69,9 +69,9 @@ impl SecondaryQuery {
     }
 }
 
-pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
+pub struct Scorer<I: GenerallyQueriable<IonAnnot> + ?Sized> {
     pub index_cycle_rt_ms: Arc<[u32]>,
-    pub index: I,
+    pub index: Box<I>,
     pub tolerance: Tolerance,
     // The secondsty tolerance is used for ...
     // the secondary query and is meant to be
@@ -81,7 +81,7 @@ pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
     pub fragmented_range: IncludedRange<f64>,
 }
 
-impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
+impl<I: GenerallyQueriable<IonAnnot> + ?Sized> Scorer<I> {
     // does inlining do anything here?
     #[inline]
     fn _build_prescore(&self, item: &QueryItemToScore) -> PreScore {
@@ -224,7 +224,7 @@ impl FromParallelIterator<(Option<IonSearchResults>, ScoreTimings)> for IonSearc
     }
 }
 
-impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
+impl<I: GenerallyQueriable<IonAnnot> + ?Sized> Scorer<I> {
     /// Scores a single query item by orchestrating the internal steps.
     /// Useful for testing or single-item processing scenarios.
     pub fn buffered_score(

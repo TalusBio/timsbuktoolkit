@@ -20,7 +20,7 @@ use tracing::{
     info,
 };
 
-pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
+pub fn main_loop<I: GenerallyQueriable<IonAnnot> + ?Sized>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
     // # I would like this to be streaming
     query_iterator: Speclib,
@@ -70,9 +70,9 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     Ok(())
 }
 
-pub fn process_speclib(
+pub fn process_speclib<I: GenerallyQueriable<IonAnnot> + ?Sized>(
     path: PathBuf,
-    scorer: &Scorer<QuadSplittedTransposedIndex>,
+    scorer: &Scorer<I>,
     chunk_size: usize,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
