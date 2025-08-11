@@ -26,7 +26,7 @@ rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
 parquet = { version = "55.2.0" }
-mimalloc = { version = "0.1.46", features = ["secure"] }
+mimalloc = { version = "0.1.47", features = ["secure"] }
 
 [profile.release]
 lto = 'thin'
