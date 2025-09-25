@@ -1,27 +1,37 @@
 use std::time::Instant;
 
-use timsquery::Tolerance;
-use timsquery::models::indices::ExpandedRawFrameIndex;
+use timsquery::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    TimsTofPath,
+    Tolerance,
+};
 use timsseek::Scorer;
 use timsseek::errors::Result;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
 
-// TODO: replace with a trait ... This works for now though
-type IndexUse = ExpandedRawFrameIndex;
-
 pub fn new_index(
     dotd_file_location: std::path::PathBuf,
     tolerance: Tolerance,
-) -> Result<Scorer<IndexUse>> {
+) -> Result<Scorer<IndexedTimstofPeaks>> {
     let st = Instant::now();
     // Can use centroided for faster queries ...
-    let index = ExpandedRawFrameIndex::from_path(
-        // let index = ExpandedRawFrameIndex::from_path_centroided(
+    //
+    let file = TimsTofPath::new(
         dotd_file_location
             .clone()
             .to_str()
             .expect("Path is not convertable to string"),
     )?;
+    // TODO: make an actual error...
+    let centroiding_config = CentroidingConfig {
+        max_peaks: 50_000,
+        mz_ppm_tol: 10.0,
+        im_pct_tol: 5.0,
+        early_stop_iterations: 200,
+    };
+    print!("Loading index... (this might take a min) ");
+    let (index, _stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
     let elap_time = st.elapsed();
     println!(
         "Loading index took: {:?} for {}",

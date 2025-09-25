@@ -1,7 +1,8 @@
 use serde::Serialize;
 use serde::ser::SerializeStruct;
+use timscentroid::indexing::IndexedPeak;
 
-use crate::models::frames::peak_in_quad::ResolvedPeakInQuad;
+use crate::traits::queriable_data::PeakAddable;
 use crate::utils::streaming_calculators::{
     RunningStatsCalculator,
     StreamingAggregatorError,
@@ -118,6 +119,18 @@ impl MzMobilityStatsCollector {
     }
 }
 
+impl AddAssign<IndexedPeak> for MzMobilityStatsCollector {
+    fn add_assign(&mut self, other: IndexedPeak) {
+        self.add(
+            other.intensity as f64,
+            other.mz as f64,
+            other.mobility_ook0.to_f64(),
+        );
+    }
+}
+
+impl PeakAddable for MzMobilityStatsCollector {}
+
 impl Add for MzMobilityStatsCollector {
     type Output = Self;
 
@@ -152,15 +165,5 @@ impl Add for MzMobilityStatsCollector {
             mean_mz: mz,
             mean_mobility: mobility,
         }
-    }
-}
-
-impl AddAssign<ResolvedPeakInQuad> for MzMobilityStatsCollector {
-    fn add_assign(&mut self, other: ResolvedPeakInQuad) {
-        self.add(
-            other.corrected_intensity as f64,
-            other.mz as f64,
-            other.mobility as f64,
-        );
     }
 }

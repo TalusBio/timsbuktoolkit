@@ -172,7 +172,7 @@ impl IntensityArrays {
         Ok(())
     }
 
-    pub fn get_top_ions<const N: usize>(&self) -> () {
+    pub fn get_top_ions<const N: usize>(&self) {
         todo!()
     }
 }
@@ -295,6 +295,9 @@ impl LongitudinalMainScoreElements {
             &mut self.ms1_corr_v_gauss,
         )?;
 
+        // This gaussian blur makes it ~ 25% slower ... but it makes the scores
+        // significantly "better" (+5% as measured by number of ID's at 1% FDR)
+        // and they "look" better.
         let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
         gaussblur(&mut self.ms2_lazyscore, &mut buffer);
         gaussblur(&mut self.ms1_coelution_score, &mut buffer);
@@ -307,6 +310,17 @@ impl LongitudinalMainScoreElements {
 
         let five_pct_index = rt_len * 5 / 100;
         let half_five_pct_idnex = five_pct_index / 2;
+
+        if five_pct_index > 100 {
+            eprintln!("{:?}", intensity_arrays.ms1_rtmajor.rts_ms);
+            eprintln!(
+                "Got a very high five percent index ... {} down from {}",
+                five_pct_index, rt_len
+            );
+            // TODO: handle gradefully cases where
+            // long gradients/ultra fast cycle times go down.
+            panic!();
+        }
 
         // TODO trim here if the max size is too large
         calculate_value_vs_baseline_into(

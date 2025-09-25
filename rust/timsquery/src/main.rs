@@ -8,17 +8,17 @@ use serde::{
 };
 use std::sync::Arc;
 use std::time::Instant;
-use timsquery::GenerallyQueriable;
+
+use timscentroid::{
+    IndexedTimstofPeaks,
+    TimsTofPath,
+};
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
     SpectralCollector,
 };
 use timsquery::models::elution_group::ElutionGroup;
-use timsquery::models::indices::{
-    ExpandedRawFrameIndex,
-    QuadSplittedTransposedIndex,
-};
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -35,6 +35,9 @@ use tracing_bunyan_formatter::{
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+
+// Require for the trait.
+use timsquery::QueriableData;
 
 // mimalloc seems to work better for windows
 // ... more accurately ... not using it causes everyting to
@@ -124,12 +127,23 @@ fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
     egs
 }
 
+fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
+    let reader = file.load_frame_reader().unwrap();
+    let mut rts: Vec<_> = reader
+        .frame_metas
+        .iter()
+        .map(|f| (f.rt_in_seconds * 1000.0).round() as u32)
+        .collect();
+    rts.sort_unstable();
+    rts.dedup();
+    rts.into()
+}
+
 #[instrument]
 fn main_query_index(args: QueryIndexArgs) {
     let raw_file_path = args.raw_file_path;
     let tolerance_settings_path = args.tolerance_settings_path;
     let elution_groups_path = args.elution_groups_path;
-    let index_use = args.index;
     let aggregator_use = args.aggregator;
 
     let tolerance_settings: Tolerance =
@@ -137,13 +151,22 @@ fn main_query_index(args: QueryIndexArgs) {
     let elution_groups: Vec<Arc<ElutionGroup<String>>> =
         serde_json::from_str(&std::fs::read_to_string(&elution_groups_path).unwrap()).unwrap();
 
-    let (index, rts) = index_use.build_index(&raw_file_path);
+    let file = TimsTofPath::new(&raw_file_path).unwrap();
+    let centroiding_config = timscentroid::CentroidingConfig {
+        max_peaks: 50_000,
+        mz_ppm_tol: 5.0,
+        im_pct_tol: 3.0,
+        early_stop_iterations: 200,
+    };
+    let (index, building_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
+    let rts = get_ms1_rts_as_millis(&file);
+    println!("Indexing Stats: {:#?}", building_stats);
     let mut queries = AggregatorContainer::new(elution_groups.clone(), aggregator_use, rts);
 
     let output_path = args.output_path;
     std::fs::create_dir_all(&output_path).unwrap();
     let serialization_format = args.format;
-    queries.add_query(index, &tolerance_settings);
+    queries.add_query(&index, &tolerance_settings);
     queries.serialize_write(serialization_format, &output_path);
 }
 
@@ -206,7 +229,7 @@ impl AggregatorContainer {
         }
     }
 
-    fn add_query(&mut self, index: Box<dyn GenerallyQueriable<String>>, tolerance: &Tolerance) {
+    fn add_query(&mut self, index: &IndexedTimstofPeaks, tolerance: &Tolerance) {
         match self {
             AggregatorContainer::Point(aggregators) => {
                 index.par_add_query_multi(aggregators, tolerance);
@@ -264,26 +287,6 @@ pub enum PossibleIndex {
     TransposedQuadIndex,
 }
 
-impl PossibleIndex {
-    pub fn build_index(
-        &self,
-        raw_file_path: &str,
-    ) -> (Box<dyn GenerallyQueriable<String>>, Arc<[u32]>) {
-        match self {
-            PossibleIndex::ExpandedRawFrameIndex => {
-                let tmp = ExpandedRawFrameIndex::from_path(raw_file_path).unwrap();
-                let rts = tmp.cycle_rt_ms.clone();
-                (Box::new(tmp), rts)
-            }
-            PossibleIndex::TransposedQuadIndex => {
-                let tmp = QuadSplittedTransposedIndex::from_path(raw_file_path).unwrap();
-                let rts = tmp.cycle_rt_ms.clone();
-                (Box::new(tmp), rts)
-            }
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum SerializationFormat {
     #[default]
@@ -316,10 +319,6 @@ pub struct QueryIndexArgs {
     // The aggregator to use.
     #[arg(short, long, default_value_t, value_enum)]
     aggregator: PossibleAggregator,
-
-    // The index to use.
-    #[arg(short, long, value_enum)]
-    index: PossibleIndex,
 }
 
 #[derive(Parser, Debug)]

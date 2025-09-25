@@ -5,8 +5,10 @@ use indicatif::{
 };
 use std::path::PathBuf;
 use std::time::Instant;
-use timsquery::GenerallyQueriable;
-use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
+use timsquery::{
+    GenerallyQueriable,
+    IndexedTimstofPeaks,
+};
 use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
@@ -28,6 +30,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     chunk_size: usize,
     out_path: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
+    let total = query_iterator.len();
     let mut chunk_num = 0;
     let mut nqueried = 0;
     let mut nwritten = 0;
@@ -58,6 +61,14 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
                 pq_writer.add(x);
             }
             chunk_num += 1;
+            let pct_done = (nqueried as f64 / total as f64) * 100.0;
+            let estimated_total = start.elapsed().as_secs_f64() * (100.0 / pct_done);
+            let eta = (estimated_total - start.elapsed().as_secs_f64()).max(0.0);
+            let eta_duration = std::time::Duration::from_secs_f64(eta);
+            info!(
+                "Processed chunk {}, total queries {}, total written {}, elapsed {:?}, {:.2}% done, ETA {:?}",
+                chunk_num, nqueried, nwritten, start.elapsed(), pct_done, eta_duration
+            );
         });
 
     pq_writer.close();
@@ -72,7 +83,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
 
 pub fn process_speclib(
     path: PathBuf,
-    scorer: &Scorer<QuadSplittedTransposedIndex>,
+    scorer: &Scorer<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {

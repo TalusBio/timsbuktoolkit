@@ -1,4 +1,3 @@
-use crate::models::frames::expanded_frame::FrameProcessingConfig;
 use std::fmt::Display;
 use timsrust::TimsRustError;
 
@@ -40,7 +39,6 @@ pub enum UnsupportedDataError {
 
 #[derive(Debug)]
 pub enum DataProcessingError {
-    CentroidingError(FrameProcessingConfig),
     ExpectedVectorLength { real: usize, expected: usize },
     ExpectedNonEmptyData,
     InsufficientData { real: usize, expected: usize },

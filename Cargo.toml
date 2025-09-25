@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "rust/timscentroid",
     "rust/timsseek",
     "rust/timsseek_cli",
     "rust/timsseek_rts",
@@ -14,6 +15,7 @@ authors = ["Sebastian Paez"]
 license = "MIT"
 
 [workspace.dependencies]
+half = "2.6"
 tracing = { version = "0.1.40", features = ["log"] }
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = "1.0.141"
@@ -21,12 +23,14 @@ tracing-subscriber = { version = "0.3.18", features = [
   "registry",
   "env-filter",
 ] }
-timsrust = "=0.4.2"
+timsrust = { git = "https://github.com/jspaezp/timsrust", branch = "experimental/recalib_iter" }
+rusqlite = "0.37.0"
 rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
-parquet = { version = "55.2.0" }
+parquet = { version = "56.1" }
 mimalloc = { version = "0.1.46", features = ["secure"] }
+thiserror = "2"
 
 [profile.release]
 lto = 'thin'
