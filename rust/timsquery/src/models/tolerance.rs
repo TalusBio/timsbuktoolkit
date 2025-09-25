@@ -1,8 +1,16 @@
-use crate::utils::tolerance_ranges::IncludedRange;
+use OptionallyRestricted::{
+    Restricted,
+    Unrestricted,
+};
 use core::f32;
+use half::f16;
 use serde::{
     Deserialize,
     Serialize,
+};
+use timscentroid::utils::{
+    OptionallyRestricted,
+    TupleRange,
 };
 use timsrust::converters::{
     ConvertableDomain,
@@ -73,17 +81,6 @@ pub enum QuadTolerance {
     Absolute((f32, f32)),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum OptionallyRestricted<T: Copy> {
-    Restricted(T),
-    Unrestricted,
-}
-
-pub use self::OptionallyRestricted::{
-    Restricted,
-    Unrestricted,
-};
-
 impl Default for Tolerance {
     fn default() -> Self {
         Tolerance {
@@ -96,32 +93,60 @@ impl Default for Tolerance {
 }
 
 impl Tolerance {
-    pub fn mz_range(&self, mz: f64) -> IncludedRange<f64> {
+    pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
         match self.ms {
-            MzTolerance::Absolute((low, high)) => (mz - low, mz + high).into(),
+            MzTolerance::Absolute((low, high)) => (mz - low, mz + high).try_into().expect(
+                "mz tolerance should never result in an invalid range, since low and high are positive",
+            ),
             MzTolerance::Ppm((low, high)) => {
                 let low = mz * low / 1e6;
                 let high = mz * high / 1e6;
-                (mz - low, mz + high).into()
+                (mz - low, mz + high).try_into().expect(
+                    "mz tolerance should never result in an invalid range, since low and high are positive",
+                )
             }
         }
     }
 
-    pub fn rt_range_minutes(&self, rt_minutes: f32) -> OptionallyRestricted<IncludedRange<f32>> {
+    pub fn mz_range_f32(&self, mz: f32) -> TupleRange<f32> {
+        let tmp = self.mz_range(mz as f64);
+        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+    }
+
+    pub fn rt_range_seconds_f16(&self, rt_seconds: f32) -> OptionallyRestricted<TupleRange<f16>> {
+        let minutes = rt_seconds / 60.0;
+        let tmp = self.rt_range_minutes(minutes);
+        let sixty = f16::from_f32(60.0);
+        // TODO: make this significantly more efficient
+
+        match tmp {
+            Restricted(x) => Restricted(
+                (
+                    f16::from_f32(x.start()) * sixty,
+                    f16::from_f32(x.end()) * sixty,
+                )
+                    .try_into()
+                    .unwrap(),
+            ),
+            Unrestricted => Unrestricted,
+        }
+    }
+
+    pub fn rt_range_minutes(&self, rt_minutes: f32) -> OptionallyRestricted<TupleRange<f32>> {
         match self.rt {
             RtTolerance::Minutes((low, high)) => {
-                Restricted((rt_minutes - low, rt_minutes + high).into())
+                Restricted((rt_minutes - low, rt_minutes + high).try_into().unwrap())
             }
             RtTolerance::Pct((low, high)) => {
                 let low = rt_minutes * low / 100.0;
                 let high = rt_minutes * high / 100.0;
-                Restricted((rt_minutes - low, rt_minutes + high).into())
+                Restricted((rt_minutes - low, rt_minutes + high).try_into().unwrap())
             }
             RtTolerance::Unrestricted => Unrestricted,
         }
     }
 
-    pub fn rt_range_as_milis(&self, rt_seconds: f32) -> OptionallyRestricted<IncludedRange<u32>> {
+    pub fn rt_range_as_milis(&self, rt_seconds: f32) -> OptionallyRestricted<TupleRange<u32>> {
         let minutes = rt_seconds / 60.0;
         let tmp = self.rt_range_minutes(minutes);
         match tmp {
@@ -133,28 +158,46 @@ impl Tolerance {
                         (start_seconds * 1000.0) as u32,
                         (end_seconds * 1000.0) as u32,
                     )
-                        .into(),
+                        .try_into()
+                        .unwrap(),
                 )
             }
             Unrestricted => Unrestricted,
         }
     }
 
-    pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<IncludedRange<f32>> {
+    pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f32>> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => {
-                Restricted((mobility - low, mobility + high).into())
+                Restricted((mobility - low, mobility + high).try_into().unwrap())
             }
             MobilityTolerance::Pct((low, high)) => {
                 let low = mobility * (low / 100.0);
                 let high = mobility * (high / 100.0);
-                Restricted((mobility - low, mobility + high).into())
+                Restricted((mobility - low, mobility + high).try_into().unwrap())
             }
             MobilityTolerance::Unrestricted => Unrestricted,
         }
     }
 
-    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> IncludedRange<f64> {
+    pub fn mobility_range_f16(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f16>> {
+        let tmp = self.mobility_range(mobility);
+        match tmp {
+            Restricted(x) => Restricted(
+                (f16::from_f32(x.start()), f16::from_f32(x.end()))
+                    .try_into()
+                    .unwrap(),
+            ),
+            Unrestricted => Unrestricted,
+        }
+    }
+
+    pub fn quad_range_f32(&self, precursor_mz_range: (f32, f32)) -> TupleRange<f32> {
+        let tmp = self.quad_range((precursor_mz_range.0 as f64, precursor_mz_range.1 as f64));
+        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+    }
+
+    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> TupleRange<f64> {
         match self.quad {
             QuadTolerance::Absolute((low, high)) => {
                 let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) - (low as f64);
@@ -166,25 +209,26 @@ impl Tolerance {
                     self,
                     precursor_mz_range,
                 );
-                (mz_low, mz_high).into()
+                (mz_low, mz_high).try_into().unwrap()
             }
         }
     }
 
-    pub fn indexed_tof_range(&self, mz: f64, converter: &Tof2MzConverter) -> IncludedRange<u32> {
+    pub fn indexed_tof_range(&self, mz: f64, converter: &Tof2MzConverter) -> TupleRange<u32> {
         let mz_rng = self.mz_range(mz);
         (
             converter.invert(mz_rng.start()) as u32,
             converter.invert(mz_rng.end()) as u32,
         )
-            .into()
+            .try_into()
+            .unwrap()
     }
 
     pub fn indexed_scan_range(
         &self,
         mobility: f64,
         converter: &Scan2ImConverter,
-    ) -> OptionallyRestricted<IncludedRange<u16>> {
+    ) -> OptionallyRestricted<TupleRange<u16>> {
         match self.mobility_range(mobility as f32) {
             Restricted(im_rng) => {
                 let im_rng = (im_rng.start() as f64, im_rng.end() as f64);
@@ -193,7 +237,8 @@ impl Tolerance {
                         converter.invert(im_rng.0) as u16,
                         converter.invert(im_rng.1) as u16,
                     )
-                        .into(),
+                        .try_into()
+                        .unwrap(),
                 )
             }
             Unrestricted => Unrestricted,

@@ -1,3 +1,4 @@
+use super::key_like::ValueLike;
 use crate::models::aggregators::{
     ChromatogramCollector,
     MzMobilityStatsCollector,
@@ -9,6 +10,8 @@ use crate::{
     Tolerance,
 };
 use rayon::prelude::*;
+use std::ops::AddAssign;
+use timscentroid::indexing::IndexedPeak;
 
 /// Trait meant to signal that some form of data is
 /// queriable using a specific aggregator.
@@ -32,6 +35,9 @@ where
             .for_each(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
     }
 }
+
+pub trait PeakAddable: AddAssign<IndexedPeak> + ValueLike + Default {}
+// Default is needed for SpectralCollector::new
 
 // Blanket trait implementation meaning that the index can be queried with any aggregator.
 pub trait GenerallyQueriable<T: KeyLike>:

@@ -14,7 +14,7 @@ use std::net::{
 };
 use std::sync::Arc;
 use std::thread;
-use timsquery::models::indices::ExpandedRawFrameIndex;
+use timsquery::IndexedTimstofPeaks;
 use timsseek::data_sources::speclib::SerSpeclibElement;
 use timsseek::errors::{
     Result,
@@ -26,12 +26,12 @@ mod cli;
 mod index;
 
 struct DaemonServer {
-    index: Arc<Scorer<ExpandedRawFrameIndex>>,
+    index: Arc<Scorer<IndexedTimstofPeaks>>,
     running: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonServer {
-    pub fn new(index: Scorer<ExpandedRawFrameIndex>) -> std::io::Result<Self> {
+    pub fn new(index: Scorer<IndexedTimstofPeaks>) -> std::io::Result<Self> {
         Ok(Self {
             index: Arc::new(index),
             running: std::sync::atomic::AtomicBool::new(true),
@@ -69,7 +69,7 @@ impl DaemonServer {
 
 fn handle_connection(
     mut stream: TcpStream,
-    index: Arc<Scorer<ExpandedRawFrameIndex>>,
+    index: Arc<Scorer<IndexedTimstofPeaks>>,
     _running: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);

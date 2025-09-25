@@ -4,7 +4,10 @@ use timsquery::{
     DataProcessingError as TQDataProcessingError,
     TimsqueryError,
 };
-use timsrust::TimsRustError;
+use timsrust::{
+    TimsRustError,
+    TimsTofPathError,
+};
 
 // TODO: break up ... the type system RN gives no info bc
 // everything is a datada processing error...
@@ -92,6 +95,7 @@ impl DataProcessingError {
 
 #[derive(Debug)]
 pub enum TimsSeekError {
+    TimsTofPath(TimsTofPathError),
     TimsRust(TimsRustError),
     Timsquery(TimsqueryError),
     Io {
@@ -112,6 +116,12 @@ impl std::fmt::Display for TimsSeekError {
 }
 
 pub type Result<T> = std::result::Result<T, TimsSeekError>;
+
+impl From<TimsTofPathError> for TimsSeekError {
+    fn from(x: TimsTofPathError) -> Self {
+        Self::TimsTofPath(x)
+    }
+}
 
 impl From<TimsRustError> for TimsSeekError {
     fn from(x: TimsRustError) -> Self {

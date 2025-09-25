@@ -171,6 +171,7 @@ def main_score_hist(df: pl.LazyFrame, output_dir: Path):
     plt.savefig(target_file)
     plt.close()
 
+
 def plot_scores_hist(df: pl.LazyFrame, columns: list[str], output_dir: Path):
     targets_df = df.filter(pl.col("is_target") == "true")
     decoys_df = df.filter(pl.col("is_target") == "false")
@@ -206,4 +207,3 @@ def plot_scores_hist(df: pl.LazyFrame, columns: list[str], output_dir: Path):
         plt.title(f"Histogram of '{score}' scores.")
         plt.savefig(target_file)
         plt.close()
-

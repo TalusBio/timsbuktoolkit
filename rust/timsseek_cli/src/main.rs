@@ -4,10 +4,19 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::models::tolerance::RtTolerance;
+use timsquery::utils::TupleRange;
+use timsquery::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    TimsTofPath,
+};
 use timsseek::scoring::Scorer;
 use tracing::level_filters::LevelFilter;
+use tracing::{
+    error,
+    info,
+};
 use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
@@ -16,6 +25,7 @@ use config::{
     InputConfig,
     OutputConfig,
 };
+use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
 use mimalloc::MiMalloc;
@@ -23,6 +33,52 @@ use mimalloc::MiMalloc;
 #[cfg(target_os = "windows")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
+    let reader = file.load_frame_reader().unwrap();
+    let mut rts: Vec<_> = reader
+        .frame_metas
+        .iter()
+        .filter_map(|f| match f.ms_level {
+            timsrust::MSLevel::MS1 => Some((f.rt_in_seconds * 1000.0).round() as u32),
+            _ => None,
+        })
+        .collect();
+    rts.sort_unstable();
+    rts.dedup();
+    rts.into()
+}
+
+fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
+    let reader = file.load_frame_reader().unwrap();
+    let upper_mz = reader
+        .dia_windows
+        .as_ref()
+        .expect("DIA windows should be present for a dia run")
+        .iter()
+        .map(|w| {
+            w.isolation_mz
+                .iter()
+                .zip(w.isolation_width.iter())
+                .map(|(imz, iw)| imz + (iw / 2.0))
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max);
+
+    let lower_mz = reader
+        .dia_windows
+        .expect("DIA windows should be present for a dia run")
+        .iter()
+        .map(|w| {
+            w.isolation_mz
+                .iter()
+                .zip(w.isolation_width.iter())
+                .map(|(imz, iw)| imz - (iw / 2.0))
+                .fold(f64::MAX, f64::min)
+        })
+        .fold(f64::MAX, f64::min);
+    TupleRange::try_new(lower_mz, upper_mz).unwrap()
+}
 
 fn main() -> std::result::Result<(), errors::CliError> {
     // Initialize logging
@@ -81,7 +137,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
             );
         }
     };
-    println!("{:#?}", config.clone());
+    info!("Parsed configuration: {:#?}", config.clone());
 
     // Create output director
     match std::fs::create_dir_all(&output_config.directory) {
@@ -95,17 +151,26 @@ fn main() -> std::result::Result<(), errors::CliError> {
     };
 
     let dotd_file_location = &config.analysis.dotd_file;
-    let index = QuadSplittedTransposedIndex::from_path_centroided(
-        // let index = QuadSplittedTransposedIndex::from_path(
-        dotd_file_location
-            .clone()
-            .unwrap() // TODO: Error handling
-            .to_str()
-            .expect("Path is not convertable to string"),
-    )
-    .unwrap();
-
-    let fragmented_range = index.fragmented_range();
+    let centroiding_config = CentroidingConfig {
+        max_peaks: 50_000,
+        mz_ppm_tol: 10.0,
+        im_pct_tol: 5.0,
+        early_stop_iterations: 200,
+    };
+    info!("Using centroiding config: {:#?}", centroiding_config);
+    info!("Starting centroiging + load of the raw data (might take a min)");
+    let file = match TimsTofPath::new(dotd_file_location.clone().unwrap().to_str().unwrap()) {
+        Ok(x) => x,
+        Err(x) => {
+            error!("Unable to find the file at path: {:?}", dotd_file_location);
+            error!("{:?}", x);
+            panic!();
+        }
+    };
+    let (index, build_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
+    info!("Index built with stats: {}", build_stats);
+    let index_cycle_rt_ms = get_ms1_rts_as_millis(&file);
+    let fragmented_range = get_frag_range(&file);
 
     // Process based on input type
     match config.input {
@@ -118,7 +183,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
         // }
         Some(InputConfig::Speclib { path }) => {
             let scorer = Scorer {
-                index_cycle_rt_ms: index.cycle_rt_ms.clone(),
+                index_cycle_rt_ms,
                 index,
                 tolerance: config.analysis.tolerance.clone(),
                 secondary_tolerance: config

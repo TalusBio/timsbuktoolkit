@@ -306,6 +306,12 @@ impl<'q> SearchResultBuilder<'q> {
     }
 }
 
+/// Contains the results as they will be serialized to
+/// parquet.
+///
+/// Napkin math ... as of Sept 23/2025 this struct is 265 bytes
+/// Eyeballing a human proteome without mods is 1.8M peptides
+/// So ... 500MB-ish / proteome in memory.
 #[derive(Debug, Clone, Serialize, ParquetRecordWriter)]
 pub struct IonSearchResults {
     sequence: String,

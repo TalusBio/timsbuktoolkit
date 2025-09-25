@@ -1,6 +1,6 @@
+use crate::utils::TupleRange;
 use crate::{
     ElutionGroup,
-    IncludedRange,
     KeyLike,
 };
 use std::sync::Arc;
@@ -25,8 +25,8 @@ impl<const N: usize> MobilogramSlice<N> {
         }
     }
 
-    pub fn get_range(&self) -> IncludedRange<f32> {
-        (self.start, self.end).into()
+    pub fn get_range(&self) -> TupleRange<f32> {
+        TupleRange::try_new(self.start, self.end).unwrap()
     }
 
     fn many_new(start: f32, end: f32, n: usize) -> Vec<Self> {

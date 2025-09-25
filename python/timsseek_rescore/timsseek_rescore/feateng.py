@@ -169,7 +169,12 @@ def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
     return df_use
 
 
-def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
+def to_mokapot_df(
+    df: pl.LazyFrame,
+    make_nonmissing: bool = True,
+    make_monotonic: bool = True,
+    scale_cols: bool = True,
+) -> tuple[pd.DataFrame, ColumnGroups]:
     pprint("Starting to_mokapot")
     loggable_cols = (
         # Log
@@ -224,9 +229,13 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
         "delta_td_score",
     ]
 
-    df_use = log_cols(df, loggable_cols)
-    df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
-    df_use = lazy_zero_fill(df_use, zero_imputable_cols)
+    if scale_cols:
+        df_use = log_cols(df, loggable_cols)
+    if make_monotonic:
+        df_use = lazy_abs_and_maxfill(df_use, imputable_cols)
+    if make_nonmissing:
+        df_use = lazy_zero_fill(df_use, zero_imputable_cols)
+
     df_use, scaling_cols = scale_columns(df_use, scaling_cols)
     pprint("Collecting")
     df_use, ohe_cols = ohe_charges(df_use, charges=[2, 3, 4])
@@ -272,8 +281,11 @@ def to_mokapot_df(df: pl.LazyFrame) -> tuple[pd.DataFrame, ColumnGroups]:
     # This requires all columns to exist, so we do it after all preprocessing
     df_use = cast_f32(df_use, feat_cols)
     check_noninf(df_use, feat_cols)
-    check_nonnan(df_use, feat_cols)
-    check_nonexp(df_use, feat_cols)
+    if make_nonmissing:
+        check_nonnan(df_use, feat_cols)
+    if scale_cols:
+        check_nonexp(df_use, feat_cols)
+
     pprint("Converting to pandas")
     df_use = df_use.filter(pl.col("main_score") > 1)
     df_use = df_use.to_pandas()

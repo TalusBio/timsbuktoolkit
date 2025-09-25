@@ -13,25 +13,34 @@ pub struct RollingMedianCalculator<T: PartialOrd + Copy + Clone> {
 
 impl<T: PartialOrd + Copy + Clone> RollingMedianCalculator<T> {
     pub fn new(window_size: usize) -> Self {
+        let mut window_size_use = window_size;
         if window_size > MAX_WINDOW_SIZE {
             warn!(
                 "Window size {} is larger than max size {}. Clamping to max size.",
                 window_size, MAX_WINDOW_SIZE
             );
+            window_size_use = MAX_WINDOW_SIZE;
         }
         Self {
-            window_size: window_size.min(MAX_WINDOW_SIZE),
+            window_size: window_size_use,
             data: ArrayVec::new(),
             index: 0,
         }
     }
 
     pub fn add(&mut self, value: T) {
+        if self.data.len() > (self.window_size - 1) {
+            let min_index_keep = (self.index - self.window_size) + 1;
+            self.data.retain(|x| x.1 >= min_index_keep);
+            assert!(
+                self.data.len() < self.window_size,
+                "Expected to trim to less than {}, but got {}",
+                self.window_size,
+                self.data.len(),
+            );
+        }
         self.data.push((value, self.index));
         self.index += 1;
-        if self.data.len() > self.window_size {
-            self.data.retain(|x| x.1 >= self.index - self.window_size);
-        }
         self.reorder();
     }
 

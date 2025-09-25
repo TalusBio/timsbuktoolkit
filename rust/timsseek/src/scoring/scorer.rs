@@ -10,10 +10,10 @@ use std::time::{
     Duration,
     Instant,
 };
+use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
     GenerallyQueriable,
-    IncludedRange,
     MzMobilityStatsCollector,
     SpectralCollector,
     Tolerance,
@@ -78,7 +78,7 @@ pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
     // essentually the same but with a narrower retention time
     // range. (instead of the full range)
     pub secondary_tolerance: Tolerance,
-    pub fragmented_range: IncludedRange<f64>,
+    pub fragmented_range: TupleRange<f64>,
 }
 
 impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
@@ -327,7 +327,8 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .into_par_iter()
             .with_min_len(512)
             .filter(|x| {
-                let lims = IncludedRange::from(x.query.get_precursor_mz_limits());
+                let tmp = x.query.get_precursor_mz_limits();
+                let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should alredy be ordered");
                 self.fragmented_range.intersects(lims)
             })
             .map_init(init_fn, |(int_buffer, score_buff), item| {

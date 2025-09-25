@@ -1,0 +1,19 @@
+[package]
+name = "timscentroid"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+geo = "0.31"
+
+# Workspace
+timsrust = { workspace = true }
+half = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Not using it RN but looks like a super solid way to make
+# builder patterns
+# bon = "3.7.2"

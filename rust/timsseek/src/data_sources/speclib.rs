@@ -8,7 +8,6 @@ use crate::{
     IonAnnot,
     QueryItemToScore,
 };
-use rayon::prelude::*;
 use serde::{
     Deserialize,
     Serialize,
@@ -156,7 +155,7 @@ impl SpeclibFormat {
 
         match reader.read(&mut buffer) {
             Ok(bytes_read) if bytes_read >= 4 => {
-                if &buffer[0..4] == &[0x28, 0xB5, 0x2F, 0xFD] {
+                if buffer[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
                     Ok(SpeclibFormat::MessagePackZstd)
                 } else if buffer[0] == b'{' {
                     Ok(SpeclibFormat::NdJson)
@@ -212,7 +211,7 @@ impl<'a> SpeclibReader<'a> {
     }
 }
 
-impl<'a> Iterator for SpeclibReader<'a> {
+impl Iterator for SpeclibReader<'_> {
     type Item = Result<QueryItemToScore, LibraryReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -331,105 +330,77 @@ impl Speclib {
         })
     }
 
-    pub(crate) fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
-        let speclib_ser: Vec<SerSpeclibElement> = match serde_json::from_str(json) {
-            Ok(x) => x,
-            Err(e) => {
-                return Err(LibraryReadingError::SpeclibParsingError {
-                    source: e,
-                    context: "Error parsing JSON",
-                });
-            }
-        };
+    // pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
+    //     // Split on newlines and parse each ...
+    //     // In the future I want to make this lazy but this will do for now
+    //     let lines: Vec<&str> = json.split('\n').collect();
+    //     Self::from_ndjson_elems(&lines)
+    // }
 
-        let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
+    // fn from_ndjson_elems(lines: &[&str]) -> Result<Self, LibraryReadingError> {
+    //     let tmp = lines
+    //         .into_par_iter()
+    //         .filter(|line| !line.is_empty())
+    //         .map(|line| {
+    //             let elem: SerSpeclibElement = match serde_json::from_str(line) {
+    //                 Ok(x) => x,
+    //                 Err(e) => {
+    //                     return Err(LibraryReadingError::SpeclibParsingError {
+    //                         source: e,
+    //                         context: "Error parsing line in NDJSON",
+    //                     });
+    //                 }
+    //             };
 
-        Ok(Self {
-            elems: speclib,
-            idx: 0,
-        })
-    }
+    //             Ok(elem.into())
+    //         })
+    //         .collect::<Result<Vec<_>, LibraryReadingError>>()?;
 
-    pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
-        // Split on newlines and parse each ...
-        // In the future I want to make this lazy but this will do for now
-        let lines: Vec<&str> = json.split('\n').collect();
-        Self::from_ndjson_elems(&lines)
-    }
+    //     Ok(Self { elems: tmp, idx: 0 })
+    // }
 
-    fn from_ndjson_elems(lines: &[&str]) -> Result<Self, LibraryReadingError> {
-        let tmp = lines
-            .into_par_iter()
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let elem: SerSpeclibElement = match serde_json::from_str(line) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        return Err(LibraryReadingError::SpeclibParsingError {
-                            source: e,
-                            context: "Error parsing line in NDJSON",
-                        });
-                    }
-                };
+    // pub(crate) fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
+    //     let file =
+    //         std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
+    //             source: e,
+    //             context: "Error opening NDJSON file",
+    //             path: PathBuf::from(path),
+    //         })?;
 
-                Ok(elem.into())
-            })
-            .collect::<Result<Vec<_>, LibraryReadingError>>()?;
+    //     let mut reader = BufReader::new(file);
+    //     let mut current_chunk = String::new();
+    //     let mut curr_nlines = 0;
+    //     let mut results = Self {
+    //         elems: Vec::with_capacity(100_001),
+    //         idx: 0,
+    //     };
 
-        Ok(Self { elems: tmp, idx: 0 })
-    }
+    //     while let Ok(len) = reader.read_line(&mut current_chunk) {
+    //         curr_nlines += 1;
+    //         if len == 0 {
+    //             break;
+    //         }
 
-    pub(crate) fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
-        let file =
-            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
-                source: e,
-                context: "Error opening NDJSON file",
-                path: PathBuf::from(path),
-            })?;
+    //         if curr_nlines % 100_000 == 0 {
+    //             let chunk_result = Self::from_ndjson(&current_chunk)?;
+    //             results = results.fold(chunk_result);
+    //             current_chunk.clear();
+    //             curr_nlines = 0;
+    //         }
+    //     }
 
-        let mut reader = BufReader::new(file);
-        let mut current_chunk = String::new();
-        let mut curr_nlines = 0;
-        let mut results = Self {
-            elems: Vec::with_capacity(100_001),
-            idx: 0,
-        };
+    //     // Process remaining lines
+    //     if !current_chunk.is_empty() {
+    //         let chunk_result = Self::from_ndjson(&current_chunk)?;
+    //         results = results.fold(chunk_result);
+    //     }
 
-        while let Ok(len) = reader.read_line(&mut current_chunk) {
-            curr_nlines += 1;
-            if len == 0 {
-                break;
-            }
-
-            if curr_nlines % 100_000 == 0 {
-                let chunk_result = Self::from_ndjson(&current_chunk)?;
-                results = results.fold(chunk_result);
-                current_chunk.clear();
-                curr_nlines = 0;
-            }
-        }
-
-        // Process remaining lines
-        if !current_chunk.is_empty() {
-            let chunk_result = Self::from_ndjson(&current_chunk)?;
-            results = results.fold(chunk_result);
-        }
-
-        Ok(results)
-    }
+    //     Ok(results)
+    // }
 
     pub fn sample() -> Self {
         Self {
             elems: vec![QueryItemToScore::sample()],
-            idx: 0,
-        }
-    }
-
-    fn fold(self, other: Self) -> Self {
-        assert_eq!(self.idx, 0);
-        assert_eq!(other.idx, 0);
-        Self {
-            elems: self.elems.into_iter().chain(other.elems).collect(),
             idx: 0,
         }
     }
@@ -464,6 +435,28 @@ impl ExactSizeIterator for Speclib {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Speclib {
+        // Technically its used in testing ...
+        fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
+            let speclib_ser: Vec<SerSpeclibElement> = match serde_json::from_str(json) {
+                Ok(x) => x,
+                Err(e) => {
+                    return Err(LibraryReadingError::SpeclibParsingError {
+                        source: e,
+                        context: "Error parsing JSON",
+                    });
+                }
+            };
+
+            let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
+
+            Ok(Self {
+                elems: speclib,
+                idx: 0,
+            })
+        }
+    }
 
     #[test]
     fn test_speclib() {

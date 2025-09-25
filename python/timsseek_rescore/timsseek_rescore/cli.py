@@ -18,14 +18,25 @@ def main(args):
     for p in paths:
         if not p.exists():
             raise FileNotFoundError(f"Path {p} does not exist")
-    data = read_files(paths)
-    data = data.filter(pl.col("obs_mobility").is_not_nan())
 
     outdir = Path(args.output_dir)
     if not outdir.exists():
         outdir.mkdir(parents=True)
 
-    data, cols = to_mokapot_df(data)
+    xgb_out = outdir / "xgboost"
+    if not xgb_out.exists():
+        xgb_out.mkdir(parents=True)
+    mlp_out = outdir / "mlp"
+    if not mlp_out.exists():
+        mlp_out.mkdir(parents=True)
+    xgboost_part(paths, xgb_out)
+    # mlp_part(paths, mlp_out)
+
+
+def xgboost_part(paths, outdir):
+    data = read_files(paths)
+    data = data.filter(pl.col("obs_mobility").is_not_nan())
+    data, cols = to_mokapot_df(data, make_nonmissing=False, make_monotonic=False)
     pprint("Shuffling")
     data = data.sample(frac=1).reset_index(drop=True, inplace=False)
     # This generates a pandas df ...
@@ -34,6 +45,14 @@ def main(args):
     plot_scores_hist(pl.from_pandas(data), cols.feature_columns, outdir)
     # mokapot_stuff(data, outdir)
     xgboost_stuff(data, cols, outdir)
+
+
+def mlp_part(paths, outdir):
+    data = read_files(paths)
+    data, cols = to_mokapot_df(data, make_nonmissing=True, make_monotonic=True)
+    pprint("Shuffling")
+    data = data.sample(frac=1).reset_index(drop=True, inplace=False)
+    data = data.filter(pl.col("obs_mobility").is_not_nan())
     score = mlp_stuff(data, cols=cols, output_dir=outdir)
 
 

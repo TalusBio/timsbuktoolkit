@@ -6,13 +6,13 @@ use crate::models::base::{
     MutableChromatogram,
     MzMajorIntensityArray,
 };
-use crate::utils::tolerance_ranges::IncludedRange;
 use crate::{
     ElutionGroup,
     KeyLike,
     ValueLike,
 };
 use std::sync::Arc;
+use timscentroid::utils::TupleRange;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
@@ -58,7 +58,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         (self.eg, self.precursors, self.fragments)
     }
 
-    pub fn rt_range(&self) -> IncludedRange<u32> {
+    pub fn rt_range_milis(&self) -> TupleRange<u32> {
         let min = self
             .fragments
             .rts_ms
@@ -71,6 +71,6 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             .last()
             .unwrap()
             .min(self.precursors.rts_ms.last().unwrap());
-        (*min, *max).into()
+        (*min, *max).try_into().expect("rt range should be sorted")
     }
 }
