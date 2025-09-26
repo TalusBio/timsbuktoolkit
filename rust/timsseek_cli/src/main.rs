@@ -8,27 +8,15 @@ use serde::Serialize;
 use std::fs::File;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
-use timsquery::{
-    CentroidingConfig,
-    IndexedTimstofPeaks,
-    TimsTofPath,
-};
+use timsquery::{CentroidingConfig, IndexedTimstofPeaks, TimsTofPath};
 use timsseek::scoring::Scorer;
+use timsseek::utils::serde::load_index_caching;
 use tracing::level_filters::LevelFilter;
-use tracing::{
-    error,
-    info,
-};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use zstd::stream::read::Decoder;
-use zstd::stream::write::Encoder;
 
 use cli::Cli;
-use config::{
-    Config,
-    InputConfig,
-    OutputConfig,
-};
+use config::{Config, InputConfig, OutputConfig};
 use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
@@ -51,25 +39,6 @@ fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
     rts.sort_unstable();
     rts.dedup();
     rts.into()
-}
-
-// Save with compression
-fn save_compressed<T: Serialize>(data: &T, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::create(path)?;
-    let mut encoder = Encoder::new(file, 3)?;
-    bincode::serialize_into(&mut encoder, data)?;
-    encoder.finish()?;
-    Ok(())
-}
-
-// Load with decompression
-fn load_compressed<T: serde::de::DeserializeOwned>(
-    path: &str,
-) -> Result<T, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    let decoder = Decoder::new(file)?;
-    let data = bincode::deserialize_from(decoder)?;
-    Ok(data)
 }
 
 fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
@@ -173,79 +142,17 @@ fn main() -> std::result::Result<(), errors::CliError> {
         }
     };
 
-    let dotd_file_location = &config.analysis.dotd_file;
-    let index_location = dotd_file_location
-        .as_ref()
-        .map(|p| p.with_extension("idx.zst"));
-
-    fn maybe_cache_load_index(index_cache_loc: &std::path::PathBuf) -> Option<IndexedTimstofPeaks> {
-        info!(
-            "Attempting to load index from cache at {:?}",
-            index_cache_loc
-        );
-        match load_compressed(index_cache_loc.to_str().unwrap()) {
-            Ok(idx) => {
-                info!("Loaded index from cache at {:?}", index_cache_loc);
-                Some(idx)
-            }
-            Err(e) => {
-                error!(
-                    "Failed to load index from cache at {:?}: {:?}",
-                    index_cache_loc, e
-                );
-                None
-            }
-        }
-    }
-
-    let timstofpath = match TimsTofPath::new(dotd_file_location.clone().unwrap().to_str().unwrap())
-    {
+    let file_loc = config.analysis.dotd_file.clone().unwrap();
+    let timstofpath = match TimsTofPath::new(file_loc.to_str().unwrap()) {
         Ok(x) => x,
         Err(x) => {
-            error!("Unable to find the file at path: {:?}", dotd_file_location);
+            error!("Unable to find the file at path: {:?}", file_loc);
             error!("{:?}", x);
             panic!();
         }
     };
 
-    fn uncached_load_index(
-        timstofpath: &TimsTofPath,
-        cache_loc: &Option<std::path::PathBuf>,
-    ) -> IndexedTimstofPeaks {
-        let centroiding_config = CentroidingConfig {
-            max_peaks: 50_000,
-            mz_ppm_tol: 10.0,
-            im_pct_tol: 5.0,
-            early_stop_iterations: 200,
-        };
-        info!("Using centroiding config: {:#?}", centroiding_config);
-        info!("Starting centroiging + load of the raw data (might take a min)");
-        let (index, build_stats) =
-            IndexedTimstofPeaks::from_timstof_file(&timstofpath, centroiding_config);
-        info!("Index built with stats: {}", build_stats);
-
-        // Save to cache
-        if let Some(ref idx_path) = cache_loc {
-            info!("Saving index to cache at {:?}", idx_path);
-            if let Err(e) = save_compressed(&index, idx_path.to_str().unwrap()) {
-                error!("Failed to save index to cache: {:?}", e);
-            } else {
-                info!("Saved index to cache");
-            }
-        }
-        index
-    }
-
-    let index: IndexedTimstofPeaks = match index_location {
-        Some(ref idx_path) => {
-            if let Some(idx) = maybe_cache_load_index(idx_path) {
-                idx
-            } else {
-                uncached_load_index(&timstofpath, &index_location)
-            }
-        }
-        None => uncached_load_index(&timstofpath, &index_location),
-    };
+    let index = load_index_caching(file_loc).unwrap();
     let index_cycle_rt_ms = get_ms1_rts_as_millis(&timstofpath);
     let fragmented_range = get_frag_range(&timstofpath);
 
