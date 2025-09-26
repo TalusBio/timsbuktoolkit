@@ -1869,6 +1869,7 @@ name = "timsseek"
 version = "0.19.0"
 dependencies = [
  "arrayvec",
+ "bincode",
  "csv",
  "forust-ml",
  "indicatif",

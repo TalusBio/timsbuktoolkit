@@ -60,7 +60,6 @@ struct CosineSimilarityCircularBuffer {
     buffer: [RollingElem; MAX_CAPACITY],
     size: usize,
     curr_index: usize,
-    recalculations: usize,
 }
 
 impl CosineSimilarityCircularBuffer {
@@ -92,9 +91,8 @@ impl CosineSimilarityCircularBuffer {
             buffer,
             size: a.len(),
             curr_index: 0,
-            recalculations: 0,
         };
-        for (i, (&a, &b)) in a.iter().zip(b.iter()).enumerate() {
+        for (&a, &b) in a.iter().zip(b.iter()) {
             out.update(a, b);
         }
         // Make sure the current index is at 0
@@ -104,51 +102,23 @@ impl CosineSimilarityCircularBuffer {
         out
     }
 
-    fn recalculate(&mut self) {
-        let last_dp = self.dot_product;
-        let last_a = self.a_sum_sq;
-        let last_b = self.b_sum_sq;
-        self.a_sum_sq = self.buffer[..self.size].iter().map(|x| x.a_sq).sum();
-        self.b_sum_sq = self.buffer[..self.size].iter().map(|x| x.b_sq).sum();
-        self.dot_product = self.buffer[..self.size].iter().map(|x| x.prod).sum();
-        assert!(last_dp == self.dot_product);
-        assert!(last_a == self.a_sum_sq);
-        assert!(last_b == self.b_sum_sq);
-        self.recalculations += 1;
-    }
-
     fn calculate_similarity(&mut self) -> f32 {
-        let mut mag_a = (self.a_sum_sq as f64).sqrt();
-        let mut mag_b = (self.b_sum_sq as f64).sqrt();
-        let mut denom = mag_a * mag_b;
+        let mag_a = (self.a_sum_sq as f64).sqrt();
+        let mag_b = (self.b_sum_sq as f64).sqrt();
+        let denom = mag_a * mag_b;
         if denom == 0.0 {
             return 0.0;
         }
-        if self.dot_product as f64 > denom {
-            self.recalculate();
-            mag_a = (self.a_sum_sq as f64).sqrt();
-            mag_b = (self.b_sum_sq as f64).sqrt();
-            denom = mag_a * mag_b;
-            if denom == 0.0 {
-                return 0.0;
-            }
-        }
 
         let out = self.dot_product as f32 / denom as f32;
-        if out > 1.1 {
-            // TODO: Once I am happy with the numeric stability errors I should make this panic
-            if out > 2.0 {
-                println!(
-                    "Cosine similarity out of bounds, got {}, state: {:#?}",
-                    out, self
-                );
-            }
-            1.0
-        } else {
-            // Due to numerical errors, the cosine similarity can be slightly above 1
-            // And we dont really care about similarities < 1
-            out.clamp(0.0, 1.0) as f32
-        }
+        assert!(out >= 0.0);
+        assert!(
+            out <= 1.0001,
+            "Expected <=1 got {} (1.0 + 1e-4 is acceptable)",
+            out
+        );
+
+        out
     }
 
     fn update(&mut self, a: f32, b: f32) {

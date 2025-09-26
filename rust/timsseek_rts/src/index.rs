@@ -1,11 +1,6 @@
 use std::time::Instant;
 
-use timsquery::{
-    CentroidingConfig,
-    IndexedTimstofPeaks,
-    TimsTofPath,
-    Tolerance,
-};
+use timsquery::{IndexedTimstofPeaks, Tolerance};
 use timsseek::Scorer;
 use timsseek::errors::Result;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
@@ -17,21 +12,8 @@ pub fn new_index(
     let st = Instant::now();
     // Can use centroided for faster queries ...
     //
-    let file = TimsTofPath::new(
-        dotd_file_location
-            .clone()
-            .to_str()
-            .expect("Path is not convertable to string"),
-    )?;
-    // TODO: make an actual error...
-    let centroiding_config = CentroidingConfig {
-        max_peaks: 50_000,
-        mz_ppm_tol: 10.0,
-        im_pct_tol: 5.0,
-        early_stop_iterations: 200,
-    };
-    print!("Loading index... (this might take a min) ");
-    let (index, _stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
+    let file_loc = dotd_file_location.clone();
+    let index = timsseek::utils::serde::load_index_caching(file_loc).unwrap();
     let elap_time = st.elapsed();
     println!(
         "Loading index took: {:?} for {}",
