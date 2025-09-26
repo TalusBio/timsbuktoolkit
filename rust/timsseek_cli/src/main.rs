@@ -8,15 +8,26 @@ use serde::Serialize;
 use std::fs::File;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
-use timsquery::{CentroidingConfig, IndexedTimstofPeaks, TimsTofPath};
+use timsquery::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    TimsTofPath,
+};
 use timsseek::scoring::Scorer;
 use timsseek::utils::serde::load_index_caching;
 use tracing::level_filters::LevelFilter;
-use tracing::{error, info};
+use tracing::{
+    error,
+    info,
+};
 use tracing_subscriber::EnvFilter;
 
 use cli::Cli;
-use config::{Config, InputConfig, OutputConfig};
+use config::{
+    Config,
+    InputConfig,
+    OutputConfig,
+};
 use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
