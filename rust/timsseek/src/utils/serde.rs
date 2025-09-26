@@ -2,8 +2,15 @@ use bincode;
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
-use timsquery::{CentroidingConfig, IndexedTimstofPeaks, TimsTofPath};
-use tracing::{error, info};
+use timsquery::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    TimsTofPath,
+};
+use tracing::{
+    error,
+    info,
+};
 use zstd::stream::read::Decoder;
 use zstd::stream::write::Encoder;
 

@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use timsquery::{IndexedTimstofPeaks, Tolerance};
+use timsquery::{
+    IndexedTimstofPeaks,
+    Tolerance,
+};
 use timsseek::Scorer;
 use timsseek::errors::Result;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
