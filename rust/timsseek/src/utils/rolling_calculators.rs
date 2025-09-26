@@ -39,14 +39,29 @@ impl<T: PartialOrd + Copy + Clone> RollingMedianCalculator<T> {
                 self.data.len(),
             );
         }
-        self.data.push((value, self.index));
+        self.insert_in_position((value, self.index));
+        // self.push((value, self.index));
         self.index += 1;
-        self.reorder();
+        // self.reorder();
     }
 
-    fn reorder(&mut self) {
-        self.data
-            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    // fn reorder(&mut self) {
+    //     // self.data
+    //     //     .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    //     // Since only the last element can be in the wrong position, we can do
+    //     // an insertion sort step.
+    // }
+
+    fn insert_in_position(&mut self, last: (T, usize)) {
+        if self.data.len() < 2 {
+            self.data.push(last);
+            return;
+        }
+        let mut pos = self.data.len();
+        while pos > 0 && last.0 < self.data[pos - 1].0 {
+            pos -= 1;
+        }
+        self.data.insert(pos, last);
     }
 
     pub fn median(&self) -> Option<T> {

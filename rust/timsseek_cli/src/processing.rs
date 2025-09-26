@@ -37,7 +37,17 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     let start = Instant::now();
 
     let out_path_pq = out_path.directory.join("results.parquet");
-    let mut pq_writer = ResultParquetWriter::new(out_path_pq, 20_000).unwrap();
+    let mut pq_writer = ResultParquetWriter::new(out_path_pq.clone(), 20_000).map_err(|e| {
+        tracing::error!(
+            "Error creating parquet writer for path {:?}: {}",
+            out_path_pq,
+            e
+        );
+        TimsSeekError::Io {
+            path: out_path_pq.into(),
+            source: e,
+        }
+    })?;
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )

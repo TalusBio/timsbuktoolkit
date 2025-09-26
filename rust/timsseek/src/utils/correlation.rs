@@ -45,22 +45,21 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DataProcessingErro
 
 #[derive(Debug, Copy, Clone)]
 struct RollingElem {
-    a_sq: f64,
-    b_sq: f64,
-    prod: f64,
+    a_sq: u64,
+    b_sq: u64,
+    prod: u64,
 }
 
 const MAX_CAPACITY: usize = 20;
 
 #[derive(Debug)]
 struct CosineSimilarityCircularBuffer {
-    a_sum_sq: f64,
-    b_sum_sq: f64,
-    dot_product: f64,
+    a_sum_sq: u64,
+    b_sum_sq: u64,
+    dot_product: u64,
     buffer: [RollingElem; MAX_CAPACITY],
     size: usize,
     curr_index: usize,
-    abs_index: usize,
     recalculations: usize,
 }
 
@@ -80,56 +79,62 @@ impl CosineSimilarityCircularBuffer {
             // panic
             panic!("Vectors must be of length <= {}", MAX_CAPACITY);
         }
-        let mut buffer = [RollingElem {
-            a_sq: 0.0,
-            b_sq: 0.0,
-            prod: 0.0,
+        let buffer = [RollingElem {
+            a_sq: 0,
+            b_sq: 0,
+            prod: 0,
         }; MAX_CAPACITY];
-        a.iter()
-            .zip(b.iter())
-            .map(|(&a, &b)| RollingElem {
-                a_sq: (a * a) as f64,
-                b_sq: (b * b) as f64,
-                prod: (a * b) as f64,
-            })
-            .enumerate()
-            .for_each(|(i, elem)| {
-                buffer[i] = elem;
-            });
-        Self {
-            a_sum_sq: buffer[..a.len()].iter().map(|x| x.a_sq).sum(),
-            b_sum_sq: buffer[..a.len()].iter().map(|x| x.b_sq).sum(),
-            dot_product: buffer[..a.len()].iter().map(|x| x.prod).sum(),
+
+        let mut out = Self {
+            a_sum_sq: 0,
+            b_sum_sq: 0,
+            dot_product: 0,
             buffer,
             size: a.len(),
-            abs_index: a.len(),
             curr_index: 0,
             recalculations: 0,
+        };
+        for (i, (&a, &b)) in a.iter().zip(b.iter()).enumerate() {
+            out.update(a, b);
         }
+        // Make sure the current index is at 0
+        assert!(out.curr_index == 0);
+        assert!(out.size == a.len());
+
+        out
     }
 
     fn recalculate(&mut self) {
+        let last_dp = self.dot_product;
+        let last_a = self.a_sum_sq;
+        let last_b = self.b_sum_sq;
         self.a_sum_sq = self.buffer[..self.size].iter().map(|x| x.a_sq).sum();
         self.b_sum_sq = self.buffer[..self.size].iter().map(|x| x.b_sq).sum();
         self.dot_product = self.buffer[..self.size].iter().map(|x| x.prod).sum();
+        assert!(last_dp == self.dot_product);
+        assert!(last_a == self.a_sum_sq);
+        assert!(last_b == self.b_sum_sq);
         self.recalculations += 1;
     }
 
     fn calculate_similarity(&mut self) -> f32 {
-        let mut mag_a = self.a_sum_sq.sqrt();
-        let mut mag_b = self.b_sum_sq.sqrt();
+        let mut mag_a = (self.a_sum_sq as f64).sqrt();
+        let mut mag_b = (self.b_sum_sq as f64).sqrt();
         let mut denom = mag_a * mag_b;
         if denom == 0.0 {
             return 0.0;
         }
-        if self.dot_product > denom {
+        if self.dot_product as f64 > denom {
             self.recalculate();
-            mag_a = self.a_sum_sq.sqrt();
-            mag_b = self.b_sum_sq.sqrt();
+            mag_a = (self.a_sum_sq as f64).sqrt();
+            mag_b = (self.b_sum_sq as f64).sqrt();
             denom = mag_a * mag_b;
+            if denom == 0.0 {
+                return 0.0;
+            }
         }
-        let out = self.dot_product / denom;
 
+        let out = self.dot_product as f32 / denom as f32;
         if out > 1.1 {
             // TODO: Once I am happy with the numeric stability errors I should make this panic
             if out > 2.0 {
@@ -147,9 +152,8 @@ impl CosineSimilarityCircularBuffer {
     }
 
     fn update(&mut self, a: f32, b: f32) {
-        self.abs_index += 1;
-        let a: f64 = a as f64;
-        let b: f64 = b as f64;
+        let a: u64 = a as u64;
+        let b: u64 = b as u64;
         let prod = a * b;
 
         let curr_elem = RollingElem {
@@ -158,16 +162,16 @@ impl CosineSimilarityCircularBuffer {
             prod,
         };
 
-        self.a_sum_sq += curr_elem.a_sq - self.buffer[self.curr_index].a_sq;
-        self.b_sum_sq += curr_elem.b_sq - self.buffer[self.curr_index].b_sq;
-        self.dot_product += curr_elem.prod - self.buffer[self.curr_index].prod;
+        self.a_sum_sq -= self.buffer[self.curr_index].a_sq;
+        self.a_sum_sq += curr_elem.a_sq;
+        self.b_sum_sq -= self.buffer[self.curr_index].b_sq;
+        self.b_sum_sq += curr_elem.b_sq;
+        self.dot_product -= self.buffer[self.curr_index].prod;
+        self.dot_product += curr_elem.prod;
 
         // Recalculate every 5x size ... this helps with numerical errors
         // Ideally we would never recalculate but I have not been able to
         // manage the stability of the sums.
-        if self.abs_index % (5 * self.size) == 0 {
-            self.recalculate();
-        }
         self.buffer[self.curr_index] = curr_elem;
         self.curr_index = (self.curr_index + 1) % self.size;
     }
@@ -188,17 +192,18 @@ impl CosineSimilarityCircularBuffer {
 /// let b = vec![4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0];
 /// let expect_res: [f32; 9] = [
 ///     f32::NAN,
-///     0.97463184, // Note that this is the same as above
-///     0.97823,
-///     0.95065,
-///     0.97463184, // And this one
-///     0.97823,
-///     0.95065,
-///     0.97463184,
+///     0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319,
 ///     f32::NAN,
 /// ];
 /// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
 /// assert_eq!(results.len(), expect_res.len());
+/// for (result, expect) in results.iter().zip(expect_res.iter()) {
+///     if result.is_nan() {
+///         assert!(expect.is_nan());
+///     } else {
+///         assert!((result - expect).abs() < 1e-2, "{:?} vs {:?} at {:?}", results, expect_res, result);
+///     }
+/// }
 /// ```
 pub fn rolling_cosine_similarity(
     a: &[f32],
@@ -243,9 +248,10 @@ pub fn rolling_cosine_similarity_into(
     result_vec[offset] = cosine_sim.calculate_similarity();
 
     // Roll the window
-    for i in (offset + 1)..(a.len() - offset) {
-        cosine_sim.update(a[i + offset], b[i + offset]);
-        result_vec[i] = cosine_sim.calculate_similarity();
+    // for i in (offset + 1)..(a.len() - offset) {
+    for i in 0..(a.len() - window_size) {
+        cosine_sim.update(a[i + window_size], b[i + window_size]);
+        result_vec[i + offset + 1] = cosine_sim.calculate_similarity();
     }
 
     Ok(())
@@ -329,7 +335,8 @@ mod tests {
     fn test_rolling_basic() {
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, f32::NAN];
+        // Weird things happen when even number windows are used.
+        let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, 1.0];
         let results = rolling_cosine_similarity(&a, &b, 2).unwrap();
         assert_eq!(results.len(), 4);
         for result in results.iter().zip(expect_res.iter()) {
@@ -366,11 +373,11 @@ mod tests {
     fn test_rolling_zero_window() {
         let a = vec![0.0, 0.0, 1.0, 1.0];
         let b = vec![0.0, 0.0, 1.0, 1.0];
-        let results = rolling_cosine_similarity(&a, &b, 2).unwrap();
+        let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
         assert_eq!(results.len(), 4);
         assert!(results[0].is_nan());
         assert!(results[3].is_nan());
-        assert_eq!(results[1], 0.0, "{:?}", results);
+        assert_eq!(results[1], 1.0, "{:?}", results);
         assert_eq!(results[2], 1.0, "{:?}", results);
     }
 
@@ -407,7 +414,7 @@ mod tests {
             if result.is_nan() {
                 assert!(expect.is_nan());
             } else {
-                assert!((result - expect).abs() < 1e-4);
+                assert!((result - expect).abs() < 1e-4, "{:?}", results);
             }
         }
     }

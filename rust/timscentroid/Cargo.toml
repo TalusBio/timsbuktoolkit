@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-geo = "0.31"
+geo = {version="0.31", features = ["serde"]}
+geo-types = { version = "0.7", features = ["serde"] }
 
 # Workspace
 timsrust = { workspace = true }
-half = { workspace = true }
+half = { workspace = true, features = ["serde"]}
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

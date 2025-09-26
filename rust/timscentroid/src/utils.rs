@@ -82,7 +82,7 @@ where
     start_idx..end_idx
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TupleRange<T: Copy + PartialOrd>(T, T);
 
 #[derive(Error, Debug)]

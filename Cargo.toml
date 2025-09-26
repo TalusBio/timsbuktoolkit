@@ -37,3 +37,5 @@ lto = 'thin'
 codegen-units = 1
 panic = 'abort'
 opt-level = 3
+# Needed for flamegraph
+# debug = true

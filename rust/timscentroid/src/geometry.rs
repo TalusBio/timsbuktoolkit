@@ -17,6 +17,7 @@ use timsrust::QuadrupoleSettings;
 /// Holds the information of the quadrupole isolation windows.
 /// Allows to query intersections and mobility to mz ranges.
 /// and to convert im to mz ranges.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuadrupoleIsolationScheme {
     inner: MultiPolygon<f64>,
 }

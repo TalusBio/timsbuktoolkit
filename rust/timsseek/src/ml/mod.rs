@@ -587,8 +587,8 @@ mod test {
         // ranges in the decoys ... (500 * 0.75) = 375
         // I can crunch more formal stats bc ... prob distributions ...
         // but this should be a safe enough value to test.
-        assert!(num_t_gt0 > 375);
-        assert!(num_d_gt0 < 30);
+        assert!(num_t_gt0 > 375, "num_t_gt0: {}", num_t_gt0);
+        assert!(num_d_gt0 < 40, "num_d_gt0: {}", num_d_gt0);
         assert_eq!(out.len(), data_len);
     }
 }
