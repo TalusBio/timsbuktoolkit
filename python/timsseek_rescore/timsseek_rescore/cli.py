@@ -38,7 +38,7 @@ def xgboost_part(paths, outdir):
     data = data.filter(pl.col("obs_mobility").is_not_nan())
     data, cols = to_mokapot_df(data, make_nonmissing=False, make_monotonic=False)
     pprint("Shuffling")
-    data = data.sample(frac=1).reset_index(drop=True, inplace=False)
+    data = data.sample(frac=1, random_state=42).reset_index(drop=True, inplace=False)
     # This generates a pandas df ...
 
     main_score_hist(pl.from_pandas(data).lazy(), outdir)
@@ -51,7 +51,7 @@ def mlp_part(paths, outdir):
     data = read_files(paths)
     data, cols = to_mokapot_df(data, make_nonmissing=True, make_monotonic=True)
     pprint("Shuffling")
-    data = data.sample(frac=1).reset_index(drop=True, inplace=False)
+    data = data.sample(frac=1, random_state=42).reset_index(drop=True, inplace=False)
     data = data.filter(pl.col("obs_mobility").is_not_nan())
     score = mlp_stuff(data, cols=cols, output_dir=outdir)
 

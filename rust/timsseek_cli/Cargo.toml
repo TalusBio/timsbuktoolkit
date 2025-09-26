@@ -8,6 +8,8 @@ timsseek = { path = "../timsseek" }
 timsquery = { path = "../timsquery" }
 
 regex = "1.11.1"
+bincode = "1.3"
+zstd = "0.13"
 
 # Workspace-inherited deps
 clap = { workspace = true, features = ["derive"] }

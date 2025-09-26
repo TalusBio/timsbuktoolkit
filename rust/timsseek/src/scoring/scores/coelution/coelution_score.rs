@@ -23,7 +23,7 @@ use tracing::debug;
 /// // Note that the generic type parameter is the top N of scores that will
 /// // be averaged to report the coelution.
 /// let scores = coelution::coelution_score_arr::<3>(&slices, window).unwrap();
-/// assert_eq!(scores, [0.0, 0.9866667, 0.9939657, 0.9849558, 0.0]);
+/// assert_eq!(scores, [0.0, 0.9866667, 0.9939658, 0.9849558, 0.0]);
 /// ```
 pub fn coelution_score_arr<const TOP_N: usize>(
     slices: &Array2D<f32>,

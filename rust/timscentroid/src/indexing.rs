@@ -42,7 +42,7 @@ use crate::geometry::QuadrupoleIsolationScheme;
 // at 12 bytes per peak (4 + 4 + 2 + 2) = 406 MB per window group
 // Which is not horrendous tbh ...
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedPeak {
     pub mz: f32,
     pub intensity: f32,
@@ -58,6 +58,7 @@ pub struct IndexedPeak {
 /// The main flow is:
 /// 1. Read the TimsTof file and centroid the frames. (call [IndexedTimstofPeaks::from_timstof_file])
 /// 2. Query the peaks using [IndexedTimstofPeaks::query_peaks_ms1] or [IndexedTimstofPeaks::query_peaks_ms2]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexedTimstofPeaks {
     ms2_window_groups: Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
     ms1_peaks: IndexedPeakGroup,
@@ -298,7 +299,7 @@ impl IndexedTimstofPeaks {
 
 /// Represents a group of indexed peaks, organized into buckets based on m/z ranges.
 /// Each bucket internally sorted by retention time (rt).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexedPeakGroup {
     // TODO: Implement a way to represent the quad settings as polygons
     peaks: Vec<IndexedPeak>,

@@ -49,9 +49,22 @@ impl<K: KeyLike, V: ArrayElement + Serialize> Serialize for MzMajorIntensityArra
 pub struct MutableChromatogram<'a, V: ArrayElement> {
     slc: &'a mut [V],
     rts: &'a [u32],
+    last_idx_rt: (usize, u32), // Not a fan that this makes it grow from 32-48 bytes ...
 }
 
 impl<V: ArrayElement> MutableChromatogram<'_, V> {
+    fn new<'a>(slc: &'a mut [V], rts: &'a [u32]) -> MutableChromatogram<'a, V> {
+        assert!(!rts.is_empty());
+        assert_eq!(slc.len(), rts.len());
+
+        MutableChromatogram {
+            slc,
+            rts,
+            // Start at the end so that the first search always does a full search
+            last_idx_rt: (rts.len() - 1, rts.last().unwrap().clone()),
+        }
+    }
+
     /// Add the passed value at the first position higher
     /// than the internal reference retention time.
     ///
@@ -62,6 +75,32 @@ impl<V: ArrayElement> MutableChromatogram<'_, V> {
     where
         V: std::ops::AddAssign<T>,
     {
+        let loc = self.find_insertion_idx(rt_ms);
+        self.slc[loc] += intensity;
+    }
+
+    #[inline(always)]
+    fn find_insertion_idx(&mut self, rt_ms: u32) -> usize {
+        // Optimization bc commonly rts will be passed in increasing order
+        // so I can start searching from the last found index and peek ahead
+        // a few indices before doing a full binary search.
+        if rt_ms == self.last_idx_rt.1 {
+            return self.last_idx_rt.0;
+        };
+
+        if rt_ms < self.last_idx_rt.1 {
+            return self.binary_search_idx(rt_ms);
+        } else {
+            if let Some(idx) = self.peekahead_search_idx(rt_ms) {
+                return idx;
+            } else {
+                return self.binary_search_idx(rt_ms);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn binary_search_idx(&mut self, rt_ms: u32) -> usize {
         // For now clamping at the length seems like the right move ...
         // but in the future I might make a more explicit behabior returning an out of bounds
         // error.
@@ -69,7 +108,27 @@ impl<V: ArrayElement> MutableChromatogram<'_, V> {
             .rts
             .partition_point(|&rt| rt < rt_ms)
             .min(self.slc.len() - 1);
-        self.slc[loc] += intensity;
+        self.last_idx_rt = (loc, self.rts[loc]);
+        loc
+    }
+
+    #[inline(always)]
+    fn peekahead_search_idx(&mut self, rt_ms: u32) -> Option<usize> {
+        const MAX_STEPS: usize = 8;
+        // 8 is picked bc ... why not ... JK
+        // Since the rts are u32 in theory all of those will be in a single
+        // cache line.
+
+        let start = self.last_idx_rt.0;
+
+        for (offset, &rt) in self.rts[start..].iter().take(MAX_STEPS).enumerate() {
+            if rt >= rt_ms {
+                let idx = start + offset;
+                self.last_idx_rt = (idx, rt);
+                return Some(idx);
+            }
+        }
+        None
     }
 }
 
@@ -120,12 +179,11 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         &mut self,
     ) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_, V>)> {
         assert_eq!(self.arr.nrows(), self.mz_order.len());
-        self.mz_order
-            .iter()
-            .zip(self.arr.iter_mut_rows().map(|slc| MutableChromatogram {
-                slc,
-                rts: &self.rts_ms,
-            }))
+        self.mz_order.iter().zip(
+            self.arr
+                .iter_mut_rows()
+                .map(|slc| MutableChromatogram::new(slc, &self.rts_ms)),
+        )
     }
 
     pub fn iter_mzs(&self) -> impl Iterator<Item = (&(K, f64), &[V])> {
