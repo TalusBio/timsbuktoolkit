@@ -109,9 +109,6 @@ pub struct TimeResolvedScores {
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
-    // pub split_lazyscore: Vec<f32>,
-
-    /// END
     pub ms2_lazyscore_vs_baseline_std: f32,
 }
 
@@ -288,9 +285,6 @@ impl TimeResolvedScores {
     ) -> Result<(), DataProcessingError> {
         self.ms2_lazyscore
             .extend(hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor));
-        // self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
-        //     &intensity_arrays.ms2_rtmajor,
-        // ));
 
         let max_lzs = self
             .ms2_lazyscore
@@ -353,7 +347,8 @@ impl TimeResolvedScores {
         .unwrap_or_else(|_| vec![0.0; rt_len]);
         Ok(())
     }
-        // END: Burning hot code ...
+
+    // END: Burning hot code ...
 
     fn calculate_gaussian_correlation_scores(
         &mut self,
@@ -373,15 +368,6 @@ impl TimeResolvedScores {
     }
 
     fn smooth_scores(&mut self) {
-        // let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
-        // gaussblur(&mut self.ms2_lazyscore, &mut buffer);
-        // gaussblur(&mut self.ms1_coelution_score, &mut buffer);
-        // gaussblur(&mut self.ms2_coelution_score, &mut buffer);
-        // gaussblur(&mut self.ms2_cosine_ref_sim, &mut buffer);
-        // gaussblur(&mut self.ms1_cosine_ref_sim, &mut buffer);
-        // gaussblur(&mut self.ms2_corr_v_gauss, &mut buffer);
-        // gaussblur(&mut self.ms1_corr_v_gauss, &mut buffer);
-        // gaussblur(&mut self.split_lazyscore, &mut buffer);
         gaussblur_in_place(&mut self.ms2_lazyscore);
         gaussblur_in_place(&mut self.ms1_coelution_score);
         gaussblur_in_place(&mut self.ms2_coelution_score);
@@ -389,7 +375,6 @@ impl TimeResolvedScores {
         gaussblur_in_place(&mut self.ms1_cosine_ref_sim);
         gaussblur_in_place(&mut self.ms2_corr_v_gauss);
         gaussblur_in_place(&mut self.ms1_corr_v_gauss);
-        // gaussblur_in_place(&mut self.split_lazyscore);
     }
 
     fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
