@@ -58,20 +58,13 @@ struct CosineSimilarityCircularBuffer {
     b_sum_sq: u64,
     dot_product: u64,
     buffer: [RollingElem; MAX_CAPACITY],
-    size: usize,
+    window_size: usize,
     curr_index: usize,
 }
 
 impl CosineSimilarityCircularBuffer {
-    fn new(a: &[f32], b: &[f32]) -> Self {
-        if a.len() != b.len() {
-            // I am panicking here bc I dont really want this to be
-            // a recoverable error, if different lengths are passed
-            // the program is already degenerate enough that it should
-            // panic
-            panic!("Vectors must be of the same length");
-        }
-        if a.len() > MAX_CAPACITY {
+    fn new(window_size: usize) -> Self {
+        if window_size > MAX_CAPACITY {
             // I am panicking here bc I dont really want this to be
             // a recoverable error, if different lengths are passed
             // the program is already degenerate enough that it should
@@ -84,22 +77,14 @@ impl CosineSimilarityCircularBuffer {
             prod: 0,
         }; MAX_CAPACITY];
 
-        let mut out = Self {
+        Self {
             a_sum_sq: 0,
             b_sum_sq: 0,
             dot_product: 0,
             buffer,
-            size: a.len(),
+            window_size,
             curr_index: 0,
-        };
-        for (&a, &b) in a.iter().zip(b.iter()) {
-            out.update(a, b);
         }
-        // Make sure the current index is at 0
-        assert!(out.curr_index == 0);
-        assert!(out.size == a.len());
-
-        out
     }
 
     fn calculate_similarity(&mut self) -> f32 {
@@ -126,24 +111,26 @@ impl CosineSimilarityCircularBuffer {
         let b: u64 = b as u64;
         let prod = a * b;
 
-        let curr_elem = RollingElem {
-            a_sq: a * a,
-            b_sq: b * b,
-            prod,
-        };
+        // Get mutable reference to the current element in the buffer
+        let elem = &mut self.buffer[self.curr_index];
 
-        self.a_sum_sq -= self.buffer[self.curr_index].a_sq;
-        self.a_sum_sq += curr_elem.a_sq;
-        self.b_sum_sq -= self.buffer[self.curr_index].b_sq;
-        self.b_sum_sq += curr_elem.b_sq;
-        self.dot_product -= self.buffer[self.curr_index].prod;
-        self.dot_product += curr_elem.prod;
+        // Subtract the old values from the sums
+        self.a_sum_sq -= elem.a_sq;
+        self.b_sum_sq -= elem.b_sq;
+        self.dot_product -= elem.prod;
 
-        // Recalculate every 5x size ... this helps with numerical errors
-        // Ideally we would never recalculate but I have not been able to
-        // manage the stability of the sums.
-        self.buffer[self.curr_index] = curr_elem;
-        self.curr_index = (self.curr_index + 1) % self.size;
+        // Update the element in place
+        elem.a_sq = a * a;
+        elem.b_sq = b * b;
+        elem.prod = prod;
+
+        // Add the new values to the sums
+        self.a_sum_sq += elem.a_sq;
+        self.b_sum_sq += elem.b_sq;
+        self.dot_product += elem.prod;
+
+        // Move to the next index
+        self.curr_index = (self.curr_index + 1) % self.window_size;
     }
 }
 
@@ -175,25 +162,11 @@ impl CosineSimilarityCircularBuffer {
 ///     }
 /// }
 /// ```
-pub fn rolling_cosine_similarity(
-    a: &[f32],
-    b: &[f32],
+pub fn rolling_cosine_similarity<'a>(
+    a: &'a [f32],
+    b: &'a [f32],
     window_size: usize,
-) -> Result<Vec<f32>, DataProcessingError> {
-    let mut results = vec![f32::NAN; a.len()];
-    rolling_cosine_similarity_into(a, b, window_size, &mut results)?;
-    Ok(results)
-}
-
-pub fn rolling_cosine_similarity_into(
-    a: &[f32],
-    b: &[f32],
-    window_size: usize,
-    result_vec: &mut Vec<f32>,
-) -> Result<(), DataProcessingError> {
-    // let mut results = vec![f32::NAN; a.len()];
-    result_vec.clear();
-    result_vec.resize(a.len(), f32::NAN);
+) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
@@ -208,23 +181,42 @@ pub fn rolling_cosine_similarity_into(
         });
     }
 
-    let offset = window_size / 2;
-
     // Initialize the first window
-    let mut cosine_sim =
-        CosineSimilarityCircularBuffer::new(&a[0..window_size], &b[0..window_size]);
+    let cosine_sim = CosineSimilarityCircularBuffer::new(window_size);
+    Ok(RollingCosineIterator {
+        a,
+        b,
+        buffer: cosine_sim,
+        window_size,
+        state: 0,
+    })
+}
 
-    // Calculate similarity for first window
-    result_vec[offset] = cosine_sim.calculate_similarity();
+struct RollingCosineIterator<'a> {
+    a: &'a [f32],
+    b: &'a [f32],
+    buffer: CosineSimilarityCircularBuffer,
+    window_size: usize,
+    state: usize,
+}
 
-    // Roll the window
-    // for i in (offset + 1)..(a.len() - offset) {
-    for i in 0..(a.len() - window_size) {
-        cosine_sim.update(a[i + window_size], b[i + window_size]);
-        result_vec[i + offset + 1] = cosine_sim.calculate_similarity();
+impl Iterator for RollingCosineIterator<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.state >= self.a.len() {
+            return None;
+        }
+        self.buffer.update(self.a[self.state], self.b[self.state]);
+        self.state += 1;
+        let in_init_padding = self.state < self.window_size / 2;
+        let in_end_padding = self.state >= self.a.len() - self.window_size / 2;
+        if in_init_padding || in_end_padding {
+            return Some(f32::NAN);
+        } else {
+            return Some(self.buffer.calculate_similarity());
+        }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -282,7 +274,7 @@ mod tests {
             0.97463185,
             f32::NAN,
         ];
-        let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
+        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 3).unwrap().collect();
         assert_eq!(results.len(), expect_res.len());
 
         for (result, expect) in results.iter().zip(expect_res.iter()) {
@@ -307,7 +299,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0, 4.0];
         // Weird things happen when even number windows are used.
         let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, 1.0];
-        let results = rolling_cosine_similarity(&a, &b, 2).unwrap();
+        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 2).unwrap().collect();
         assert_eq!(results.len(), 4);
         for result in results.iter().zip(expect_res.iter()) {
             if result.0.is_nan() {
@@ -343,7 +335,7 @@ mod tests {
     fn test_rolling_zero_window() {
         let a = vec![0.0, 0.0, 1.0, 1.0];
         let b = vec![0.0, 0.0, 1.0, 1.0];
-        let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
+        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 3).unwrap().collect();
         assert_eq!(results.len(), 4);
         assert!(results[0].is_nan());
         assert!(results[3].is_nan());
@@ -355,7 +347,7 @@ mod tests {
     fn test_rolling_zeros_window() {
         let a = vec![0.0; 20];
         let b = vec![0.0; 20];
-        let results = rolling_cosine_similarity(&a, &b, 5).unwrap();
+        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 5).unwrap().collect();
         assert_eq!(results.len(), 20);
         let expect = [
             f32::NAN,

@@ -338,6 +338,8 @@ impl TimeResolvedScores {
         &mut self,
         intensity_arrays: &IntensityArrays,
     ) -> Result<(), DataProcessingError> {
+        // TODO: reimplement this to make it inplace ...
+        // START: Burning hot code ...
         self.ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(
             &intensity_arrays.ms2_mzmajor,
             COELUTION_WINDOW_WIDTH,
@@ -351,6 +353,7 @@ impl TimeResolvedScores {
         .unwrap_or_else(|_| vec![0.0; rt_len]);
         Ok(())
     }
+        // END: Burning hot code ...
 
     fn calculate_gaussian_correlation_scores(
         &mut self,
