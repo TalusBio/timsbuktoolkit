@@ -225,8 +225,6 @@ impl FromParallelIterator<(Option<IonSearchResults>, ScoreTimings)> for IonSearc
 }
 
 impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
-    /// Scores a single query item by orchestrating the internal steps.
-    /// Useful for testing or single-item processing scenarios.
     pub fn buffered_score(
         &self,
         item: QueryItemToScore,
