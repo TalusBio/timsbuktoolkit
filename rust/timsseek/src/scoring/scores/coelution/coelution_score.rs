@@ -81,6 +81,8 @@ fn coelution_score_arr_filter<const TOP_N: usize>(
     // TODO: Make this a single pass
     // In theory I could make the calculation of the rolling similarities an iterator
     // and then do a single pass over the iterators.
+    // That would mean I need a Vec<impl Iterator> of size nrows * (nrows - 1) / 2
+    // which is not that bad tbh
     let mut out = scores
         .iter()
         .map(|x| {

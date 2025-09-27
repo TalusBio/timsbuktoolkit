@@ -266,6 +266,7 @@ impl LongitudinalMainScoreElements {
         let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
 
         // TODO: reimplement this to make it inplace ...
+        // START: Burning hot code ...
         self.ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(
             &intensity_arrays.ms2_mzmajor,
             COELUTION_WINDOW_WIDTH,
@@ -279,6 +280,7 @@ impl LongitudinalMainScoreElements {
             Ok(scores) => scores,
             Err(_) => vec![0.0; rt_len],
         };
+        // END: Burning hot code ...
 
         self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
             &intensity_arrays.ms2_rtmajor,
