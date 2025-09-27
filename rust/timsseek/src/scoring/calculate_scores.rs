@@ -1,3 +1,51 @@
+//! # Peptide Scoring Module
+//!
+//! This module is responsible for scoring peptide candidates against observed mass spectrometry data.
+//! It takes theoretical peptide information and raw chromatographic data as input, and it produces
+//! a `MainScore` that quantifies the quality of the peptide match.
+//!
+//! ## Data Flow
+//!
+//! The scoring process can be broken down into the following stages:
+//!
+//! 1.  **Input (`PreScore`)**: The process starts with a `PreScore` object, which bundles a peptide
+//!     candidate (`DigestSlice`) with its expected theoretical isotope and fragment intensities
+//!     (`ExpectedIntensities`), and the raw experimental data collected from the instrument
+//!     (`ChromatogramCollector`).
+//!
+//! 2.  **Data Preparation (`IntensityArrays`)**: The raw data from the `ChromatogramCollector` is
+//!     transformed into `IntensityArrays`. These arrays are matrix-like structures that organize
+//!     the intensity data by retention time, making it efficient to perform calculations across
+//!     the time series.
+//!
+//! 3.  **Time-Series Feature Calculation (`LongitudinalMainScoreElements`)**: This is the most
+//!     complex step. A large struct, `LongitudinalMainScoreElements`, is used as a buffer to
+//!     calculate a wide variety of scores for *each point* in the chromatogram's time series.
+//!     These "longitudinal" scores include:
+//!     - Cosine similarity between observed and theoretical spectra.
+//!     - Co-elution scores, measuring how well different fragment ions appear and disappear together.
+//!     - Correlation with a Gaussian peak shape.
+//!     - "Lazyscore," a measure of local signal-to-noise.
+//!
+//!     After calculation, these time-series scores are smoothed using a Gaussian blur to reduce noise.
+//!
+//! 4.  **Apex Detection**: A composite `main_score` is calculated for each time point by multiplying
+//!     the various longitudinal scores together. The algorithm then identifies the time points with the
+//!     highest `main_score` values, which are considered potential "apexes" of the eluting peptide.
+//!
+//! 5.  **Final Score Generation (`MainScore`)**: At the best apex found, the system extracts a final
+//!     set of features. This includes the value of the main score at the apex, the difference in score
+//!     to the next-best apex (`delta_next`), the width of the peak, and various other sub-scores.
+//!     These are all collected into the final `MainScore` struct, which is the ultimate output of the
+//!     scoring process.
+//!
+//! ## Planned Refactoring
+//!
+//! The current implementation has several design issues, including high coupling between structs and
+//! an unclear API. A refactoring is planned to introduce a `PeptideScorer` struct that will
+//! encapsulate the scoring logic and manage internal buffers, providing a cleaner and more ergonomic
+//! interface.
+
 use super::scores::coelution::coelution_score;
 use super::scores::corr_v_ref::calculate_cosine_with_ref_gaussian_into;
 use super::scores::{
@@ -34,19 +82,25 @@ use timsquery::{
 };
 use tracing::warn;
 
-/// The PreScore is meant to be in essence a bundle of a query
-/// with the collected intensities from the raw data for a specific
-/// file.
+/// Represents a peptide candidate to be scored.
+///
+/// This struct acts as a data container, bundling the theoretical information about a peptide
+/// with the corresponding raw experimental data necessary for scoring. It is the primary input
+/// to the [`PeptideScorer::score`] method.
 #[derive(Debug)]
 pub struct PreScore {
+    /// The peptide sequence and modification information.
     pub digest: DigestSlice,
+    /// The precursor charge state.
     pub charge: u8,
+    /// The expected theoretical intensities of precursor and fragment ions.
     pub expected_intensities: ExpectedIntensities,
+    /// The observed chromatogram data collected from the instrument.
     pub query_values: ChromatogramCollector<IonAnnot, f32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct LongitudinalMainScoreElements {
+pub struct TimeResolvedScores {
     pub ms1_cosine_ref_sim: Vec<f32>,
     pub ms1_coelution_score: Vec<f32>,
     pub ms1_corr_v_gauss: Vec<f32>,
@@ -58,7 +112,7 @@ pub struct LongitudinalMainScoreElements {
     pub split_lazyscore: Vec<f32>,
 
     /// END
-    ms2_lazyscore_vs_baseline_std: f32,
+    pub ms2_lazyscore_vs_baseline_std: f32,
 }
 
 #[derive(Debug)]
@@ -73,34 +127,6 @@ pub struct IntensityArrays {
 }
 
 impl IntensityArrays {
-    pub fn new(
-        query_values: &ChromatogramCollector<IonAnnot, f32>,
-        expected_intensities: &ExpectedIntensities,
-    ) -> Result<Self, DataProcessingError> {
-        let (_, ms1_mzmajor_arr, ms2_mzmajor_arr) = query_values.clone().unpack();
-        let ms1_rtmajor_arr = ms1_mzmajor_arr.transpose_clone();
-        let ms2_rtmajor_arr = ms2_mzmajor_arr.transpose_clone();
-        let ms2_ref_vec: Vec<_> = ms2_mzmajor_arr
-            .mz_order
-            .iter()
-            .map(|&(k, _)| {
-                *expected_intensities
-                    .fragment_intensities
-                    .get(&k)
-                    .expect("Failed to find expected intensity for fragment")
-            })
-            .collect();
-
-        Ok(Self {
-            ms1_rtmajor: ms1_rtmajor_arr,
-            ms1_mzmajor: ms1_mzmajor_arr,
-            ms2_rtmajor: ms2_rtmajor_arr,
-            ms2_mzmajor: ms2_mzmajor_arr,
-            ms1_expected_intensities: expected_intensities.precursor_intensities.clone(),
-            ms2_expected_intensities: ms2_ref_vec,
-        })
-    }
-
     pub fn new_empty(
         num_ms1: usize,
         num_ms2: usize,
@@ -172,9 +198,6 @@ impl IntensityArrays {
         Ok(())
     }
 
-    pub fn get_top_ions<const N: usize>(&self) {
-        todo!()
-    }
 }
 
 fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
@@ -204,43 +227,55 @@ fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
     x.copy_from_slice(buffer);
 }
 
-impl LongitudinalMainScoreElements {
-    pub fn try_new(intensity_arrays: &IntensityArrays) -> Result<Self, DataProcessingError> {
-        let mut out = Self::new_with_capacity(intensity_arrays.ms1_rtmajor.rts_ms.len());
-        out.try_reset_with(intensity_arrays)?;
-        Ok(out)
-    }
-
+impl TimeResolvedScores {
     pub fn try_reset_with(
         &mut self,
         intensity_arrays: &IntensityArrays,
     ) -> Result<(), DataProcessingError> {
         self.clear();
+        self.calculate_lazyscores(intensity_arrays)?;
+        self.calculate_similarity_scores(intensity_arrays);
+        self.calculate_coelution_scores(intensity_arrays)?;
+        self.calculate_gaussian_correlation_scores(intensity_arrays)?;
+        self.smooth_scores();
+        self.calculate_baseline_scores(intensity_arrays);
+        self.check_lengths()?;
+        Ok(())
+    }
+
+    fn calculate_lazyscores(
+        &mut self,
+        intensity_arrays: &IntensityArrays,
+    ) -> Result<(), DataProcessingError> {
         self.ms2_lazyscore
             .extend(hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor));
+        self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
+            &intensity_arrays.ms2_rtmajor,
+        ));
+
         let max_lzs = self
             .ms2_lazyscore
             .iter()
             .max_by(|x, y| {
                 if x.is_nan() {
-                    return std::cmp::Ordering::Less;
-                }
-                if y.is_nan() {
-                    return std::cmp::Ordering::Greater;
-                }
-                match x.partial_cmp(y) {
-                    Some(x) => x,
-                    None => panic!("Failed to compare lazyscore values {} vs {}", x, y),
+                    std::cmp::Ordering::Less
+                } else if y.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    x.partial_cmp(y).unwrap()
                 }
             })
-            .unwrap_or(&0.0f32);
-        if max_lzs <= &1e-3 {
+            .unwrap_or(&0.0);
+
+        if *max_lzs <= 1e-3 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
                 context: Some("No non-0 lazyscore".into()),
             });
         }
+        Ok(())
+    }
 
-        // TODO: Reimplement as in-place
+    fn calculate_similarity_scores(&mut self, intensity_arrays: &IntensityArrays) {
         self.ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
             &intensity_arrays.ms1_expected_intensities,
@@ -251,39 +286,38 @@ impl LongitudinalMainScoreElements {
             &intensity_arrays.ms2_expected_intensities,
         )
         .unwrap();
-        // Fill missing
-        self.ms1_cosine_ref_sim.iter_mut().for_each(|x| {
-            if x.is_nan() {
-                *x = 1e-3
-            }
-        });
-        self.ms2_cosine_ref_sim.iter_mut().for_each(|x| {
-            if x.is_nan() {
-                *x = 1e-3
-            }
-        });
 
-        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
+        self.ms1_cosine_ref_sim
+            .iter_mut()
+            .for_each(|x| *x = x.max(1e-3));
+        self.ms2_cosine_ref_sim
+            .iter_mut()
+            .for_each(|x| *x = x.max(1e-3));
+    }
 
-        // TODO: reimplement this to make it inplace ...
+    fn calculate_coelution_scores(
+        &mut self,
+        intensity_arrays: &IntensityArrays,
+    ) -> Result<(), DataProcessingError> {
         self.ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(
             &intensity_arrays.ms2_mzmajor,
             COELUTION_WINDOW_WIDTH,
         )?;
-        let tmp = coelution_score::coelution_score_filter::<6, i8>(
-            &intensity_arrays.ms1_mzmajor,
-            7,
-            &Some(|x: &i8| *x >= 0i8),
-        );
-        self.ms1_coelution_score = match tmp {
-            Ok(scores) => scores,
-            Err(_) => vec![0.0; rt_len],
-        };
+        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
+        self.ms1_coelution_score =
+            coelution_score::coelution_score_filter::<6, i8>(
+                &intensity_arrays.ms1_mzmajor,
+                7,
+                &Some(|x: &i8| *x >= 0i8),
+            )
+            .unwrap_or_else(|_| vec![0.0; rt_len]);
+        Ok(())
+    }
 
-        self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
-            &intensity_arrays.ms2_rtmajor,
-        ));
-
+    fn calculate_gaussian_correlation_scores(
+        &mut self,
+        intensity_arrays: &IntensityArrays,
+    ) -> Result<(), DataProcessingError> {
         calculate_cosine_with_ref_gaussian_into(
             &intensity_arrays.ms2_mzmajor,
             |_| true,
@@ -294,10 +328,10 @@ impl LongitudinalMainScoreElements {
             |&k| k >= 0,
             &mut self.ms1_corr_v_gauss,
         )?;
+        Ok(())
+    }
 
-        // This gaussian blur makes it ~ 25% slower ... but it makes the scores
-        // significantly "better" (+5% as measured by number of ID's at 1% FDR)
-        // and they "look" better.
+    fn smooth_scores(&mut self) {
         let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
         gaussblur(&mut self.ms2_lazyscore, &mut buffer);
         gaussblur(&mut self.ms1_coelution_score, &mut buffer);
@@ -307,43 +341,31 @@ impl LongitudinalMainScoreElements {
         gaussblur(&mut self.ms2_corr_v_gauss, &mut buffer);
         gaussblur(&mut self.ms1_corr_v_gauss, &mut buffer);
         gaussblur(&mut self.split_lazyscore, &mut buffer);
+    }
 
+    fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
+        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
         let five_pct_index = rt_len * 5 / 100;
-        let half_five_pct_idnex = five_pct_index / 2;
+        let half_five_pct_index = five_pct_index / 2;
 
         if five_pct_index > 100 {
-            eprintln!("{:?}", intensity_arrays.ms1_rtmajor.rts_ms);
-            eprintln!(
-                "Got a very high five percent index ... {} down from {}",
+            warn!(
+                "High five_pct_index: {} (from rt_len: {})",
                 five_pct_index, rt_len
             );
-            // TODO: handle gradefully cases where
-            // long gradients/ultra fast cycle times go down.
-            panic!();
         }
 
-        // TODO trim here if the max size is too large
         calculate_value_vs_baseline_into(
             &self.ms2_lazyscore,
             five_pct_index,
             &mut self.ms2_lazyscore_vs_baseline,
         );
-        let mut lzb_std = calculate_centered_std(
-            &self.ms2_lazyscore_vs_baseline[(half_five_pct_idnex)
-                ..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_idnex)],
-        );
 
-        // This feels incredibly dirty ...
-        // TODO: Find an elegant way to set this threshold ...
-        if lzb_std < 1.0 {
-            lzb_std = 1.0;
-        }
+        let baseline_slice = &self.ms2_lazyscore_vs_baseline
+            [half_five_pct_index..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_index)];
+        let lzb_std = calculate_centered_std(baseline_slice);
 
-        self.ms2_lazyscore_vs_baseline_std = lzb_std;
-
-        self.check_lengths()
-            .expect("All vecs to be the same length");
-        Ok(())
+        self.ms2_lazyscore_vs_baseline_std = lzb_std.max(1.0);
     }
 
     fn check_lengths(&self) -> Result<(), DataProcessingError> {
@@ -389,7 +411,7 @@ impl LongitudinalMainScoreElements {
     }
 
     fn clear(&mut self) {
-        let LongitudinalMainScoreElements {
+        let TimeResolvedScores {
             ms1_cosine_ref_sim,
             ms1_coelution_score,
             ms2_cosine_ref_sim,
@@ -521,29 +543,101 @@ impl Default for ScoreInTime {
     }
 }
 
-impl PartialOrd for ScoreInTime {
-    fn partial_cmp(&self, other: &ScoreInTime) -> Option<std::cmp::Ordering> {
-        if self.score.is_nan() {
-            return Some(std::cmp::Ordering::Less);
-        }
-        self.score.partial_cmp(&other.score)
-    }
+
+/// The primary entry point for scoring peptide candidates.
+///
+/// `PeptideScorer` encapsulates the complex scoring logic and manages reusable memory buffers
+/// for efficiency. It is designed to be created once and then used to score multiple peptide
+/// candidates (`PreScore` objects) against the raw data from a single mass spectrometry run.
+///
+/// # Example
+///
+/// ```ignore
+/// // 1. Create a scorer instance.
+/// let mut scorer = PeptideScorer::new()?;
+///
+/// // 2. Create a PreScore object with peptide info and raw data.
+/// let prescore = PreScore { ... };
+///
+/// // 3. Score the peptide.
+/// let main_score = scorer.score(&prescore)?;
+///
+/// // 4. Use the results.
+/// println!("Score for peptide: {}", main_score.score);
+/// ```
+pub struct PeptideScorer {
+    intensity_arrays: IntensityArrays,
+    time_resolved_scores: TimeResolvedScores,
 }
 
-impl PreScore {
-    fn calc_with_intensities(
-        &self,
-        intensity_arrays: &IntensityArrays,
-        buffer: &mut LongitudinalMainScoreElements,
+impl PeptideScorer {
+    /// Creates a new `PeptideScorer`.
+    ///
+    /// This initializes the scorer and pre-allocates internal buffers. For performance,
+    /// you should create one `PeptideScorer` per analysis run and reuse it for all peptides.
+    pub fn new() -> Result<Self, DataProcessingError> {
+        // TODO: The initialization could be more robust, perhaps by taking the maximum
+        // number of time points expected as an argument to pre-allocate buffers more accurately.
+        let intensity_arrays = IntensityArrays::new_empty(NUM_MS1_IONS, NUM_MS2_IONS, Arc::new([]))?;
+        let time_resolved_scores = TimeResolvedScores::new_with_capacity(100);
+        Ok(Self {
+            intensity_arrays,
+            time_resolved_scores,
+        })
+    }
+
+    /// Scores a peptide candidate against the experimental data.
+    ///
+    /// This is the main method of the scorer. It takes a `PreScore` object, which contains
+    /// the theoretical peptide information and the observed chromatogram data, and returns a
+    /// `MainScore` struct summarizing the quality of the match.
+    ///
+    /// # Arguments
+    ///
+    /// * `prescore` - A reference to a `PreScore` object containing the data to be scored.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `MainScore` on success, or a `DataProcessingError` if
+    /// the scoring fails (e.g., due to insufficient data).
+    pub fn score(
+        &mut self,
+        prescore: &PreScore,
+    ) -> Result<MainScore, DataProcessingError> {
+        self.intensity_arrays.reset_with(
+            &prescore.query_values,
+            &prescore.expected_intensities,
+        )?;
+        let main_score = self.calculate_scores_with_intensities(prescore)?;
+
+        // Final check to ensure the score is valid before returning.
+        if main_score.score.is_nan() {
+            warn!("Main score is NaN");
+            return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+        }
+        Ok(main_score)
+    }
+
+    /// Returns a reference to the time-resolved scores from the last scoring operation.
+    ///
+    /// This is useful for debugging or when detailed, time-series data is needed for analysis.
+    pub fn last_time_resolved_scores(&self) -> &TimeResolvedScores {
+        &self.time_resolved_scores
+    }
+
+    fn calculate_scores_with_intensities(
+        &mut self,
+        prescore: &PreScore,
     ) -> Result<MainScore, DataProcessingError> {
         // I prbably should pass an allocator here ...
         // Since there is so much stuff happening ...
-        buffer.try_reset_with(intensity_arrays)?;
-        let longitudinal_main_score_elements = buffer;
+        self.time_resolved_scores
+            .try_reset_with(&self.intensity_arrays)?;
 
-        let apex_candidates = longitudinal_main_score_elements.find_apex_candidates();
-        let norm_lazy_std =
-            calculate_centered_std(&longitudinal_main_score_elements.ms2_lazyscore_vs_baseline);
+        let apex_candidates = self.time_resolved_scores.find_apex_candidates();
+        let norm_lazy_std = calculate_centered_std(
+            &self.time_resolved_scores.ms2_lazyscore_vs_baseline,
+        );
         let max_val = apex_candidates[0].score;
         let max_loc = apex_candidates[0].index;
 
@@ -555,7 +649,7 @@ impl PreScore {
 
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
-        let ten_pct_index = self.query_values.fragments.rts_ms.len() / 20;
+        let ten_pct_index = prescore.query_values.fragments.rts_ms.len() / 20;
         let max_window =
             max_loc.saturating_sub(ten_pct_index)..max_loc.saturating_add(ten_pct_index);
         let next = apex_candidates
@@ -565,9 +659,9 @@ impl PreScore {
             Some(next) => {
                 let next_window = next.index.saturating_sub(ten_pct_index)
                     ..next.index.saturating_add(ten_pct_index);
-                apex_candidates
-                    .iter()
-                    .find(|x| !max_window.contains(&x.index) && !next_window.contains(&x.index))
+                apex_candidates.iter().find(|x| {
+                    !max_window.contains(&x.index) && !next_window.contains(&x.index)
+                })
             }
             None => None,
         };
@@ -584,21 +678,23 @@ impl PreScore {
         // FOR NOW I will leave this assert and if it holds this is an assumption I can make and
         // I will remove the dead code above.
         assert_eq!(
-            self.query_values.fragments.rts_ms,
-            self.query_values.precursors.rts_ms
+            prescore.query_values.fragments.rts_ms,
+            prescore.query_values.precursors.rts_ms
         );
         let (ms1_loc, ms2_loc) = (max_loc, max_loc);
-        let ref_time_ms = self.query_values.precursors.rts_ms[max_loc];
+        let ref_time_ms = prescore.query_values.precursors.rts_ms[max_loc];
 
-        let summed_ms1_int: f32 = match intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
+        let summed_ms1_int: f32 = match self.intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc)
+        {
             Some(row) => row.iter().sum(),
             None => 0.0,
         };
-        let summed_ms2_int: f32 = match intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
+        let summed_ms2_int: f32 = match self.intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc)
+        {
             Some(row) => row.iter().sum(),
             None => 0.0,
         };
-        let npeak_ms2 = match intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
+        let npeak_ms2 = match self.intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
             Some(row) => {
                 let mut count = 0;
                 for x in row {
@@ -611,23 +707,23 @@ impl PreScore {
             None => 0,
         };
 
-        let lazyscore_z = longitudinal_main_score_elements.ms2_lazyscore[max_loc] / norm_lazy_std;
+        let lazyscore_z = self.time_resolved_scores.ms2_lazyscore[max_loc] / norm_lazy_std;
         if lazyscore_z.is_nan() {
             let tmp = format!(
                 "Lazy score is NaN {} and {}",
-                longitudinal_main_score_elements.ms2_lazyscore[max_loc], norm_lazy_std
+                self.time_resolved_scores.ms2_lazyscore[max_loc], norm_lazy_std
             );
             return Err(DataProcessingError::ExpectedFiniteNonNanData { context: tmp });
         }
         let raising_cycles = count_falling_steps(
             max_loc,
             -1,
-            longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
+            self.time_resolved_scores.ms2_lazyscore.as_slice(),
         );
         let falling_cycles = count_falling_steps(
             max_loc,
             1,
-            longitudinal_main_score_elements.ms2_lazyscore.as_slice(),
+            self.time_resolved_scores.ms2_lazyscore.as_slice(),
         );
 
         Ok(MainScore {
@@ -636,96 +732,87 @@ impl PreScore {
             delta_second_next,
             retention_time_ms: ref_time_ms,
 
-            ms2_cosine_ref_sim: longitudinal_main_score_elements.ms2_cosine_ref_sim[max_loc],
-            ms2_coelution_score: longitudinal_main_score_elements.ms2_coelution_score[max_loc],
+            ms2_cosine_ref_sim: self.time_resolved_scores.ms2_cosine_ref_sim[max_loc],
+            ms2_coelution_score: self.time_resolved_scores.ms2_coelution_score[max_loc],
             ms2_summed_intensity: summed_ms2_int,
             npeaks: npeak_ms2 as u8,
-            lazyscore: longitudinal_main_score_elements.ms2_lazyscore[max_loc],
-            lazyscore_vs_baseline: longitudinal_main_score_elements.ms2_lazyscore_vs_baseline
+            lazyscore: self.time_resolved_scores.ms2_lazyscore[max_loc],
+            lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline
                 [max_loc],
             lazyscore_z,
-            ms2_corr_v_gauss: longitudinal_main_score_elements.ms2_corr_v_gauss[max_loc],
-            ms1_corr_v_gauss: longitudinal_main_score_elements.ms1_corr_v_gauss[max_loc],
-            // ms1_ms2_correlation: longitudinal_main_score_elements.ms1_ms2_correlation[max_loc],
-            ms1_cosine_ref_sim: longitudinal_main_score_elements.ms1_cosine_ref_sim[max_loc],
-            ms1_coelution_score: longitudinal_main_score_elements.ms1_coelution_score[max_loc],
+            ms2_corr_v_gauss: self.time_resolved_scores.ms2_corr_v_gauss[max_loc],
+            ms1_corr_v_gauss: self.time_resolved_scores.ms1_corr_v_gauss[max_loc],
+            // ms1_ms2_correlation: self.time_resolved_scores.ms1_ms2_correlation[max_loc],
+            ms1_cosine_ref_sim: self.time_resolved_scores.ms1_cosine_ref_sim[max_loc],
+            ms1_coelution_score: self.time_resolved_scores.ms1_coelution_score[max_loc],
             ms1_summed_intensity: summed_ms1_int,
 
             raising_cycles,
             falling_cycles,
         })
     }
+}
 
-    fn calc_main_score(&self) -> Result<MainScore, DataProcessingError> {
-        let intensity_arrays =
-            IntensityArrays::new(&self.query_values, &self.expected_intensities)?;
-        let mut buffer = LongitudinalMainScoreElements::new_with_capacity(
-            self.query_values.precursors.rts_ms.len(),
-        );
-        self.calc_with_intensities(&intensity_arrays, &mut buffer)
-    }
-
-    fn calc_with_inten_buffer(
-        &self,
-        intensity_arrays: &mut IntensityArrays,
-        longit_buffer: &mut LongitudinalMainScoreElements,
-    ) -> Result<MainScore, DataProcessingError> {
-        intensity_arrays.reset_with(&self.query_values, &self.expected_intensities)?;
-        self.calc_with_intensities(intensity_arrays, longit_buffer)
-    }
-
-    pub fn localize(self) -> Result<MainScore, DataProcessingError> {
-        let main_score = self.calc_main_score()?;
-        if main_score.score.is_nan() {
-            // TODO find a way to nicely log the reason why some are nan.
-            return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+impl PartialOrd for ScoreInTime {
+    fn partial_cmp(&self, other: &ScoreInTime) -> Option<std::cmp::Ordering> {
+        if self.score.is_nan() {
+            return Some(std::cmp::Ordering::Less);
         }
-        Ok(main_score)
-    }
-
-    pub fn localize_with_buffer(
-        &self,
-        intensity_arrays: &mut IntensityArrays,
-        longit_buffer: &mut LongitudinalMainScoreElements,
-    ) -> Result<MainScore, DataProcessingError> {
-        let main_score = self.calc_with_inten_buffer(intensity_arrays, longit_buffer)?;
-        if main_score.score.is_nan() {
-            // TODO find a way to nicely log the reason why some are nan.
-            warn!("Main score is NaN");
-            return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
-        }
-        Ok(main_score)
+        self.score.partial_cmp(&other.score)
     }
 }
 
-/// The main score is meant to be a single number that is used to
-/// identify the location of the 'best' candidate peptide in the
-/// chromatogram.
+impl PreScore {}
+
+/// Contains the final scores and features for a peptide candidate at its detected apex.
+///
+/// This struct is the output of the [`PeptideScorer::score`] method. It provides a comprehensive
+/// set of metrics to evaluate the quality of a peptide-spectrum match. The primary metric is
+/// `score`, with other fields providing detailed diagnostic information.
 #[derive(Debug, Clone, Copy)]
 pub struct MainScore {
+    /// The main composite score, representing the overall quality of the match. Higher is better.
     pub score: f32,
+    /// The difference between the main score and the score of the second-best candidate peak.
+    /// A large delta suggests a more confident identification.
     pub delta_next: f32,
+    /// The difference between the main score and the score of the third-best candidate peak.
     pub delta_second_next: f32,
+    /// The retention time (in milliseconds) at the detected apex of the elution peak.
     pub retention_time_ms: u32,
 
+    // --- MS2-level features ---
+    /// Cosine similarity between observed and theoretical MS2 fragment intensities.
     pub ms2_cosine_ref_sim: f32,
+    /// Score representing the co-elution of MS2 fragments.
     pub ms2_coelution_score: f32,
+    /// Total summed intensity of all MS2 fragment ions at the apex.
     pub ms2_summed_intensity: f32,
+    /// The number of MS2 fragment ions detected at the apex.
     pub npeaks: u8,
+    /// A signal-to-noise-like score for MS2 fragments.
     pub lazyscore: f32,
+    /// The `lazyscore` relative to a local baseline.
     pub lazyscore_vs_baseline: f32,
+    /// The Z-score of the `lazyscore`, indicating its statistical significance.
     pub lazyscore_z: f32,
+    /// Correlation of the MS2 signal with a Gaussian peak shape.
     pub ms2_corr_v_gauss: f32,
-    pub ms1_corr_v_gauss: f32,
 
+    // --- MS1-level features ---
+    /// Correlation of the MS1 signal with a Gaussian peak shape.
+    pub ms1_corr_v_gauss: f32,
+    /// Cosine similarity between observed and theoretical MS1 isotope intensities.
     pub ms1_cosine_ref_sim: f32,
+    /// Score representing the co-elution of MS1 isotopes.
     pub ms1_coelution_score: f32,
+    /// Total summed intensity of all MS1 isotope ions at the apex.
     pub ms1_summed_intensity: f32,
 
-    /// Top N ions sorted in decreasing order of intensity
-    /// at the apex of the chromatogram.
-    // pub top_ions: [Option<IonAnnot>; 6],
+    // --- Peak shape features ---
+    /// The number of consecutive time points on the leading edge of the peak where the score is increasing.
     pub raising_cycles: u8,
+    /// The number of consecutive time points on the trailing edge of the peak where the score is decreasing.
     pub falling_cycles: u8,
 }
 

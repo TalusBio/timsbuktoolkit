@@ -20,9 +20,8 @@ use timsquery::{
 };
 
 use super::calculate_scores::{
-    IntensityArrays,
-    LongitudinalMainScoreElements,
     MainScore,
+    PeptideScorer,
     PreScore,
     RelativeIntensities,
 };
@@ -100,17 +99,6 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         }
     }
 
-    // This internal version takes the buffer for optimal reuse in parallel contexts
-    #[inline]
-    fn _localize_step(
-        &self,
-        prescore: &PreScore,
-        inten_buffer: &mut IntensityArrays,
-        score_buffer: &mut LongitudinalMainScoreElements,
-    ) -> Result<MainScore, DataProcessingError> {
-        prescore.localize_with_buffer(inten_buffer, score_buffer)
-    }
-
     #[inline]
     fn _secondary_query(
         &self,
@@ -157,20 +145,6 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .finalize()
     }
 
-    #[inline]
-    pub fn _build_buffers(
-        &self,
-        item: &QueryItemToScore,
-    ) -> Result<(IntensityArrays, LongitudinalMainScoreElements), DataProcessingError> {
-        let inten_buffer = IntensityArrays::new_empty(
-            item.query.precursors.len(),
-            item.query.fragments.len(),
-            self.index_cycle_rt_ms.clone(),
-        )?;
-        let score_buffer =
-            LongitudinalMainScoreElements::new_with_capacity(self.index_cycle_rt_ms.len());
-        Ok((inten_buffer, score_buffer))
-    }
 }
 
 #[derive(Debug, Default)]
@@ -230,8 +204,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     pub fn buffered_score(
         &self,
         item: QueryItemToScore,
-        int_buffer: &mut IntensityArrays,
-        score_buffer: &mut LongitudinalMainScoreElements,
+        scorer: &mut PeptideScorer,
         timings: &mut ScoreTimings,
     ) -> Option<IonSearchResults> {
         let st = Instant::now();
@@ -239,7 +212,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         timings.prescore += st.elapsed();
 
         let st = Instant::now();
-        let main_score = match self._localize_step(&prescore, int_buffer, score_buffer) {
+        let main_score = match scorer.score(&prescore) {
             Ok(score) => score,
             Err(_e) => {
                 // TODO: trim what errors I should log and which are
@@ -273,9 +246,9 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     }
 
     pub fn score(&self, item: QueryItemToScore) -> Option<IonSearchResults> {
-        let mut buffers = self._build_buffers(&item).ok()?;
+        let mut scorer = PeptideScorer::new().ok()?;
         let mut timings = ScoreTimings::default();
-        let maybe_score = self.buffered_score(item, &mut buffers.0, &mut buffers.1, &mut timings);
+        let maybe_score = self.buffered_score(item, &mut scorer, &mut timings);
         debug!("{:?}", timings);
         maybe_score
     }
@@ -284,28 +257,32 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         &self,
         item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
-        let mut res =
+        let mut chromatogram_collector =
             ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
-        self.index.add_query(&mut res, &self.tolerance);
+        self.index
+            .add_query(&mut chromatogram_collector, &self.tolerance);
         let pre_score = PreScore {
             charge: item.charge,
             digest: item.digest.clone(),
             expected_intensities: item.expected_intensity.clone(),
-            query_values: res.clone(),
+            query_values: chromatogram_collector.clone(),
         };
 
-        // This is a pretty big allocation ..
-        let (mut inten_buffer, mut score_buffer) = self._build_buffers(&item)?;
-        let main_score = self._localize_step(&pre_score, &mut inten_buffer, &mut score_buffer)?;
+        let mut scorer = PeptideScorer::new()?;
+        let main_score = scorer.score(&pre_score)?;
+
         let secondary_query = self._secondary_query(&item, &pre_score, &main_score);
-        let res2 = self._finalize_step(&item, &main_score, &pre_score, &secondary_query)?;
-        let longitudinal_main_score = score_buffer.main_score_iter().collect();
+        let search_results =
+            self._finalize_step(&item, &main_score, &pre_score, &secondary_query)?;
+
+        let time_resolved_scores = scorer.last_time_resolved_scores();
+        let longitudinal_main_score = time_resolved_scores.main_score_iter().collect();
 
         Ok(FullQueryResult {
-            main_score_elements: score_buffer,
+            main_score_elements: time_resolved_scores.clone(),
             longitudinal_main_score,
-            extractions: res.clone(),
-            search_results: res2,
+            extractions: chromatogram_collector,
+            search_results,
         })
     }
 
@@ -313,15 +290,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let num_input_items = items_to_score.len();
         let loc_score_start = Instant::now();
 
-        // There are still A LOT of allocations that can be saved with this pattern
-        // but this is a good start.
-        let init_fn = || {
-            let int_buffer =
-                IntensityArrays::new_empty(5, 10, self.index_cycle_rt_ms.clone()).unwrap();
-            let score_buffer =
-                LongitudinalMainScoreElements::new_with_capacity(self.index_cycle_rt_ms.len());
-            (int_buffer, score_buffer)
-        };
+        let init_fn = || PeptideScorer::new().unwrap();
 
         let results: IonSearchAccumulator = items_to_score
             .into_par_iter()
@@ -331,12 +300,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
                 let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should alredy be ordered");
                 self.fragmented_range.intersects(lims)
             })
-            .map_init(init_fn, |(int_buffer, score_buff), item| {
+            .map_init(init_fn, |scorer, item| {
                 // The pre-score is essentually just the collected intensities.
                 // TODO: Figure out how to remove this clone ...
                 let mut timings = ScoreTimings::default();
-                let maybe_score =
-                    self.buffered_score(item.clone(), int_buffer, score_buff, &mut timings);
+                let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
                 (maybe_score, timings)
             })
             .collect();
