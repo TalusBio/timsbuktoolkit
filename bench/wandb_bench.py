@@ -232,6 +232,10 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
     )
     try:
         yield run
+    except KeyboardInterrupt as e:
+        logger.warning("Keyboard interrupt, finishing wandb run")
+        run.finish(1)
+        raise e
     finally:
         run.finish()
 
