@@ -144,7 +144,6 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .with_main_score(*main_score)
             .finalize()
     }
-
 }
 
 #[derive(Debug, Default)]
@@ -246,7 +245,12 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     }
 
     pub fn score(&self, item: QueryItemToScore) -> Option<IonSearchResults> {
-        let mut scorer = PeptideScorer::new().ok()?;
+        let mut scorer = PeptideScorer::new(
+            item.query.precursors.len(),
+            item.query.fragments.len(),
+            self.index_cycle_rt_ms.clone(),
+        )
+        .ok()?;
         let mut timings = ScoreTimings::default();
         let maybe_score = self.buffered_score(item, &mut scorer, &mut timings);
         debug!("{:?}", timings);
@@ -268,7 +272,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             query_values: chromatogram_collector.clone(),
         };
 
-        let mut scorer = PeptideScorer::new()?;
+        let mut scorer = PeptideScorer::new(
+            item.query.precursors.len(),
+            item.query.fragments.len(),
+            self.index_cycle_rt_ms.clone(),
+        )?;
         let main_score = scorer.score(&pre_score)?;
 
         let secondary_query = self._secondary_query(&item, &pre_score, &main_score);
@@ -290,7 +298,15 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let num_input_items = items_to_score.len();
         let loc_score_start = Instant::now();
 
-        let init_fn = || PeptideScorer::new().unwrap();
+        let init_fn = || {
+            PeptideScorer::new(
+                // We are assuming that 5 precursors and 10 fragments are sufficient
+                5,
+                10,
+                self.index_cycle_rt_ms.clone(),
+            )
+            .unwrap()
+        };
 
         let results: IonSearchAccumulator = items_to_score
             .into_par_iter()

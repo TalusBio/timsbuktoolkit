@@ -4,15 +4,9 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use serde::Serialize;
-use std::fs::File;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
-use timsquery::{
-    CentroidingConfig,
-    IndexedTimstofPeaks,
-    TimsTofPath,
-};
+use timsquery::TimsTofPath;
 use timsseek::scoring::Scorer;
 use timsseek::utils::serde::load_index_caching;
 use tracing::level_filters::LevelFilter;

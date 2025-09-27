@@ -109,7 +109,7 @@ pub struct TimeResolvedScores {
     pub ms2_lazyscore: Vec<f32>,
     pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
-    pub split_lazyscore: Vec<f32>,
+    // pub split_lazyscore: Vec<f32>,
 
     /// END
     pub ms2_lazyscore_vs_baseline_std: f32,
@@ -134,14 +134,9 @@ impl IntensityArrays {
     ) -> Result<Self, DataProcessingError> {
         // This is mainly used to pre-allocated the memory that will be used later by several.
         // runs.
-        let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|o| (o as i8, 867.8309)).collect();
+        let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|_o| (-1i8, 867.8309)).collect();
         let ms2_order: Arc<[(IonAnnot, f64)]> = (0..=num_ms2)
-            .map(|o| {
-                (
-                    IonAnnot::new('b', Some((o + 1) as u8), 1, 0).unwrap(),
-                    867.8309,
-                )
-            })
+            .map(|_o| (IonAnnot::new('p', None, 1, 0).unwrap(), 867.8309))
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
         Ok(Self {
@@ -197,7 +192,6 @@ impl IntensityArrays {
         self.ms2_expected_intensities = ms2_ref_vec;
         Ok(())
     }
-
 }
 
 fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
@@ -227,6 +221,51 @@ fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
     x.copy_from_slice(buffer);
 }
 
+/// Applies a 1D Gaussian blur in-place with a fixed kernel [0.5, 1.0, 0.5].
+///
+/// This implementation is memory-efficient, using only a single temporary
+/// variable instead of a full-sized buffer.
+pub fn gaussblur_in_place(x: &mut [f32]) {
+    let len = x.len();
+    if len < 3 {
+        return;
+    }
+
+    // Kernel weights and normalization factor
+    const W_SIDE: f32 = 0.5;
+    const W_CENTER: f32 = 1.0;
+    const NORM: f32 = W_SIDE + W_CENTER + W_SIDE; // This is 2.0
+
+    // Store the original value of the first element before it's modified.
+    // This will act as our "previous" value for the first iteration of the loop.
+    let mut prev_val = x[0];
+
+    // Handle the first element (index 0) using your custom edge logic.
+    // Note: This calculation uses the original x[0] and x[1].
+    x[0] = (x[0] * 1.5 + x[1] * 0.5) / NORM;
+
+    // Main convolution loop for the elements in the middle.
+    // We iterate from the second element up to the second-to-last.
+    for i in 1..len - 1 {
+        // `current_val` holds the original value of x[i] before we overwrite it.
+        let current_val = x[i];
+
+        // Calculate the new value for x[i].
+        // - `prev_val` is the original `x[i-1]`
+        // - `current_val` is the original `x[i]`
+        // - `x[i+1]` is the original `x[i+1]` (it hasn't been touched yet)
+        x[i] = (prev_val * W_SIDE + current_val * W_CENTER + x[i + 1] * W_SIDE) / NORM;
+
+        // For the *next* iteration, the current value will be the previous one.
+        prev_val = current_val;
+    }
+
+    // Handle the last element (index len - 1).
+    // At this point, `prev_val` holds the original value of `x[len-2]`.
+    // The value `x[len-1]` is still in its original state.
+    x[len - 1] = (x[len - 1] * 1.5 + prev_val * 0.5) / NORM;
+}
+
 impl TimeResolvedScores {
     pub fn try_reset_with(
         &mut self,
@@ -249,9 +288,9 @@ impl TimeResolvedScores {
     ) -> Result<(), DataProcessingError> {
         self.ms2_lazyscore
             .extend(hyperscore::lazyscore(&intensity_arrays.ms2_rtmajor));
-        self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
-            &intensity_arrays.ms2_rtmajor,
-        ));
+        // self.split_lazyscore.extend(hyperscore::split_ion_lazyscore(
+        //     &intensity_arrays.ms2_rtmajor,
+        // ));
 
         let max_lzs = self
             .ms2_lazyscore
@@ -304,13 +343,12 @@ impl TimeResolvedScores {
             COELUTION_WINDOW_WIDTH,
         )?;
         let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
-        self.ms1_coelution_score =
-            coelution_score::coelution_score_filter::<6, i8>(
-                &intensity_arrays.ms1_mzmajor,
-                7,
-                &Some(|x: &i8| *x >= 0i8),
-            )
-            .unwrap_or_else(|_| vec![0.0; rt_len]);
+        self.ms1_coelution_score = coelution_score::coelution_score_filter::<6, i8>(
+            &intensity_arrays.ms1_mzmajor,
+            7,
+            &Some(|x: &i8| *x >= 0i8),
+        )
+        .unwrap_or_else(|_| vec![0.0; rt_len]);
         Ok(())
     }
 
@@ -332,15 +370,23 @@ impl TimeResolvedScores {
     }
 
     fn smooth_scores(&mut self) {
-        let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
-        gaussblur(&mut self.ms2_lazyscore, &mut buffer);
-        gaussblur(&mut self.ms1_coelution_score, &mut buffer);
-        gaussblur(&mut self.ms2_coelution_score, &mut buffer);
-        gaussblur(&mut self.ms2_cosine_ref_sim, &mut buffer);
-        gaussblur(&mut self.ms1_cosine_ref_sim, &mut buffer);
-        gaussblur(&mut self.ms2_corr_v_gauss, &mut buffer);
-        gaussblur(&mut self.ms1_corr_v_gauss, &mut buffer);
-        gaussblur(&mut self.split_lazyscore, &mut buffer);
+        // let mut buffer = Vec::with_capacity(self.ms2_lazyscore.len());
+        // gaussblur(&mut self.ms2_lazyscore, &mut buffer);
+        // gaussblur(&mut self.ms1_coelution_score, &mut buffer);
+        // gaussblur(&mut self.ms2_coelution_score, &mut buffer);
+        // gaussblur(&mut self.ms2_cosine_ref_sim, &mut buffer);
+        // gaussblur(&mut self.ms1_cosine_ref_sim, &mut buffer);
+        // gaussblur(&mut self.ms2_corr_v_gauss, &mut buffer);
+        // gaussblur(&mut self.ms1_corr_v_gauss, &mut buffer);
+        // gaussblur(&mut self.split_lazyscore, &mut buffer);
+        gaussblur_in_place(&mut self.ms2_lazyscore);
+        gaussblur_in_place(&mut self.ms1_coelution_score);
+        gaussblur_in_place(&mut self.ms2_coelution_score);
+        gaussblur_in_place(&mut self.ms2_cosine_ref_sim);
+        gaussblur_in_place(&mut self.ms1_cosine_ref_sim);
+        gaussblur_in_place(&mut self.ms2_corr_v_gauss);
+        gaussblur_in_place(&mut self.ms1_corr_v_gauss);
+        // gaussblur_in_place(&mut self.split_lazyscore);
     }
 
     fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
@@ -391,7 +437,7 @@ impl TimeResolvedScores {
             ms2_coelution_score,
             ms2_lazyscore,
             ms2_lazyscore_vs_baseline,
-            split_lazyscore,
+            // split_lazyscore,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
             ms2_lazyscore_vs_baseline_std: _,
@@ -403,7 +449,7 @@ impl TimeResolvedScores {
         check_len!(ms2_coelution_score);
         check_len!(ms2_lazyscore);
         check_len!(ms2_lazyscore_vs_baseline);
-        check_len!(split_lazyscore);
+        // check_len!(split_lazyscore);
         check_len!(ms2_corr_v_gauss);
         check_len!(ms1_corr_v_gauss);
 
@@ -418,7 +464,7 @@ impl TimeResolvedScores {
             ms2_coelution_score,
             ms2_lazyscore,
             ms2_lazyscore_vs_baseline,
-            split_lazyscore,
+            // split_lazyscore,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
             ms2_lazyscore_vs_baseline_std: _,
@@ -430,7 +476,7 @@ impl TimeResolvedScores {
         ms2_coelution_score.clear();
         ms2_lazyscore.clear();
         ms2_lazyscore_vs_baseline.clear();
-        split_lazyscore.clear();
+        // split_lazyscore.clear();
         ms2_corr_v_gauss.clear();
         ms1_corr_v_gauss.clear();
     }
@@ -442,7 +488,7 @@ impl TimeResolvedScores {
         let ms2_coelution_score = Vec::with_capacity(capacity);
         let ms2_lazyscore = Vec::with_capacity(capacity);
         let ms2_lazyscore_vs_baseline = Vec::with_capacity(capacity);
-        let split_lazyscore = Vec::with_capacity(capacity);
+        // let split_lazyscore = Vec::with_capacity(capacity);
         let ms2_corr_v_gauss = Vec::with_capacity(capacity);
         let ms1_corr_v_gauss = Vec::with_capacity(capacity);
         Self {
@@ -452,7 +498,7 @@ impl TimeResolvedScores {
             ms2_coelution_score,
             ms2_lazyscore,
             ms2_lazyscore_vs_baseline,
-            split_lazyscore,
+            // split_lazyscore,
             ms2_lazyscore_vs_baseline_std: 1.0,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
@@ -543,7 +589,6 @@ impl Default for ScoreInTime {
     }
 }
 
-
 /// The primary entry point for scoring peptide candidates.
 ///
 /// `PeptideScorer` encapsulates the complex scoring logic and manages reusable memory buffers
@@ -575,11 +620,15 @@ impl PeptideScorer {
     ///
     /// This initializes the scorer and pre-allocates internal buffers. For performance,
     /// you should create one `PeptideScorer` per analysis run and reuse it for all peptides.
-    pub fn new() -> Result<Self, DataProcessingError> {
+    pub fn new(
+        n_ms1: usize,
+        n_ms2: usize,
+        rt_ms_arc: Arc<[u32]>,
+    ) -> Result<Self, DataProcessingError> {
         // TODO: The initialization could be more robust, perhaps by taking the maximum
         // number of time points expected as an argument to pre-allocate buffers more accurately.
-        let intensity_arrays = IntensityArrays::new_empty(NUM_MS1_IONS, NUM_MS2_IONS, Arc::new([]))?;
-        let time_resolved_scores = TimeResolvedScores::new_with_capacity(100);
+        let time_resolved_scores = TimeResolvedScores::new_with_capacity(rt_ms_arc.len());
+        let intensity_arrays = IntensityArrays::new_empty(n_ms1, n_ms2, rt_ms_arc)?;
         Ok(Self {
             intensity_arrays,
             time_resolved_scores,
@@ -600,14 +649,9 @@ impl PeptideScorer {
     ///
     /// A `Result` containing the `MainScore` on success, or a `DataProcessingError` if
     /// the scoring fails (e.g., due to insufficient data).
-    pub fn score(
-        &mut self,
-        prescore: &PreScore,
-    ) -> Result<MainScore, DataProcessingError> {
-        self.intensity_arrays.reset_with(
-            &prescore.query_values,
-            &prescore.expected_intensities,
-        )?;
+    pub fn score(&mut self, prescore: &PreScore) -> Result<MainScore, DataProcessingError> {
+        self.intensity_arrays
+            .reset_with(&prescore.query_values, &prescore.expected_intensities)?;
         let main_score = self.calculate_scores_with_intensities(prescore)?;
 
         // Final check to ensure the score is valid before returning.
@@ -635,9 +679,8 @@ impl PeptideScorer {
             .try_reset_with(&self.intensity_arrays)?;
 
         let apex_candidates = self.time_resolved_scores.find_apex_candidates();
-        let norm_lazy_std = calculate_centered_std(
-            &self.time_resolved_scores.ms2_lazyscore_vs_baseline,
-        );
+        let norm_lazy_std =
+            calculate_centered_std(&self.time_resolved_scores.ms2_lazyscore_vs_baseline);
         let max_val = apex_candidates[0].score;
         let max_loc = apex_candidates[0].index;
 
@@ -659,9 +702,9 @@ impl PeptideScorer {
             Some(next) => {
                 let next_window = next.index.saturating_sub(ten_pct_index)
                     ..next.index.saturating_add(ten_pct_index);
-                apex_candidates.iter().find(|x| {
-                    !max_window.contains(&x.index) && !next_window.contains(&x.index)
-                })
+                apex_candidates
+                    .iter()
+                    .find(|x| !max_window.contains(&x.index) && !next_window.contains(&x.index))
             }
             None => None,
         };
@@ -684,13 +727,11 @@ impl PeptideScorer {
         let (ms1_loc, ms2_loc) = (max_loc, max_loc);
         let ref_time_ms = prescore.query_values.precursors.rts_ms[max_loc];
 
-        let summed_ms1_int: f32 = match self.intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc)
-        {
+        let summed_ms1_int: f32 = match self.intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
             Some(row) => row.iter().sum(),
             None => 0.0,
         };
-        let summed_ms2_int: f32 = match self.intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc)
-        {
+        let summed_ms2_int: f32 = match self.intensity_arrays.ms2_rtmajor.arr.get_row(ms2_loc) {
             Some(row) => row.iter().sum(),
             None => 0.0,
         };
@@ -737,8 +778,7 @@ impl PeptideScorer {
             ms2_summed_intensity: summed_ms2_int,
             npeaks: npeak_ms2 as u8,
             lazyscore: self.time_resolved_scores.ms2_lazyscore[max_loc],
-            lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline
-                [max_loc],
+            lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline[max_loc],
             lazyscore_z,
             ms2_corr_v_gauss: self.time_resolved_scores.ms2_corr_v_gauss[max_loc],
             ms1_corr_v_gauss: self.time_resolved_scores.ms1_corr_v_gauss[max_loc],

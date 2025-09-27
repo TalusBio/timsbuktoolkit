@@ -588,7 +588,7 @@ impl IndexedPeakGroup {
 
     /// Get a specific bucket by its index.
     /// Returns None if the index is out of bounds.
-    fn get_bucket(&self, bucket_idx: usize) -> Option<PeakBucket> {
+    fn get_bucket(&self, bucket_idx: usize) -> Option<PeakBucket<'_>> {
         self.get_bucket_range(bucket_idx)
             .map(|r| PeakBucket::from(&self.peaks[r]))
     }
