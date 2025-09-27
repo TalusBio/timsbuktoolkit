@@ -38,13 +38,13 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 
     pub fn iter_mut_precursors(
         &mut self,
-    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram<V>)> {
+    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram<'_, V>)> {
         self.precursors.iter_mut_mzs()
     }
 
     pub fn iter_mut_fragments(
         &mut self,
-    ) -> impl Iterator<Item = (&(T, f64), MutableChromatogram<V>)> {
+    ) -> impl Iterator<Item = (&(T, f64), MutableChromatogram<'_, V>)> {
         self.fragments.iter_mut_mzs()
     }
 

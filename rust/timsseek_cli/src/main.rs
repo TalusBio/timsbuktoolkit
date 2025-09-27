@@ -4,9 +4,9 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
+use timsquery::TimsTofPath;
 use timsseek::scoring::Scorer;
 use timsseek::utils::serde::load_index_caching;
 use tracing::level_filters::LevelFilter;
