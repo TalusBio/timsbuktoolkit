@@ -360,7 +360,7 @@ impl IndexedPeakGroupStats {
 #[derive(Debug, Clone)]
 pub struct IndexedPeakGroupBuildingStats {
     pub indexing_stats: IndexedPeakGroupStats,
-    pub clustering_stats: AggregatedClusteringSummary,
+    pub clustering_stats: Option<AggregatedClusteringSummary>,
     pub read_time: std::time::Duration,
 }
 
@@ -368,14 +368,19 @@ impl std::fmt::Display for IndexedPeakGroupBuildingStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Indexed Peak Group Building Stats:")?;
         writeln!(f, "Read Time (wall): {:.2?}", self.read_time)?;
-        let avg_read_time = self.read_time / self.clustering_stats.frames_processed as u32;
-        writeln!(
-            f,
-            "Average Read Time (wall) per Frame: {:#.2?}",
-            avg_read_time
-        )?;
         writeln!(f, "Indexing Stats: {:#?}", self.indexing_stats)?;
-        writeln!(f, "Clustering Stats: {}", self.clustering_stats)?;
+        match &self.clustering_stats {
+            None => writeln!(f, "No Clustering Stats")?,
+            Some(s) => {
+                let avg_read_time = self.read_time / s.frames_processed as u32;
+                writeln!(
+                    f,
+                    "Average Read Time (wall) per Frame: {:#.2?}",
+                    avg_read_time
+                )?;
+                writeln!(f, "Clustering Stats: {}", s)?;
+            }
+        }
         Ok(())
     }
 }
@@ -383,7 +388,12 @@ impl std::fmt::Display for IndexedPeakGroupBuildingStats {
 impl IndexedPeakGroupBuildingStats {
     fn combine(mut self, other: Self) -> Self {
         self.indexing_stats = self.indexing_stats.combine(&other.indexing_stats);
-        self.clustering_stats = self.clustering_stats.combine(&other.clustering_stats);
+        self.clustering_stats = match (self.clustering_stats, other.clustering_stats) {
+            (None, None) => None,
+            (Some(s), None) => Some(s),
+            (None, Some(s)) => Some(s),
+            (Some(s1), Some(s2)) => Some(s1.combine(&s2)),
+        };
         self.read_time += other.read_time;
         self
     }
@@ -406,11 +416,7 @@ impl IndexedPeakGroup {
     /// so in theory it should not be called within a parallel loop.
     fn new(mut peaks: Vec<IndexedPeak>, bucket_size: usize) -> (Self, IndexedPeakGroupStats) {
         let st = std::time::Instant::now();
-        peaks.par_sort_unstable_by(|x, y| {
-            x.mz.partial_cmp(&y.mz)
-                .unwrap()
-                .then(x.rt_ms.partial_cmp(&y.rt_ms).unwrap())
-        });
+        peaks.par_sort_unstable_by(|x, y| x.mz.partial_cmp(&y.mz).unwrap());
         let sort_time = st.elapsed();
         assert!(peaks.first().unwrap().mz <= peaks.last().unwrap().mz);
 
@@ -455,7 +461,23 @@ impl IndexedPeakGroup {
         self_mem + bucket_mem + peak_mem
     }
 
+    fn get_frame_indices_matching(
+        frame_reader: &FrameReader,
+        filter: impl Fn(&FrameMeta) -> bool + Sync,
+    ) -> Vec<usize> {
+        frame_reader
+            .frame_metas
+            .iter()
+            .enumerate()
+            .filter_map(|(i, meta)| if filter(meta) { Some(i) } else { None })
+            .collect()
+    }
+
     /// Read frames from a FrameReader that match a given filter function.
+    #[tracing::instrument(
+        level = "debug",
+        skip(frame_reader, metadata, filter, centroiding_config)
+    )]
     fn read_with_filter(
         frame_reader: &FrameReader,
         metadata: &Metadata,
@@ -463,15 +485,11 @@ impl IndexedPeakGroup {
         centroiding_config: CentroidingConfig,
     ) -> (Self, IndexedPeakGroupBuildingStats) {
         // I dont like this allocation but its not that big of a deal RN ...
-        let indices: Vec<usize> = frame_reader
-            .frame_metas
-            .iter()
-            .enumerate()
-            .filter_map(|(i, meta)| if filter(meta) { Some(i) } else { None })
-            .collect();
+        let indices = Self::get_frame_indices_matching(frame_reader, filter);
 
         // I am still not sure what I prefer here ...
         // On the greater schme of things allocating a vec for every frame is not thaaaat bad
+        // And according to benchmarks its actually faster than the lock + trim overhead
         //
         // use std::sync::{Arc, Mutex};
         // let total_peaks_estimate = indices.len() * 20_000; // assuming max 20k peaks per frame post-centroid
@@ -481,6 +499,7 @@ impl IndexedPeakGroup {
         let st = std::time::Instant::now();
         let _x = indices
             .into_par_iter()
+            .with_min_len(200)
             .map_init(
                 || {
                     (
@@ -525,19 +544,19 @@ impl IndexedPeakGroup {
                     let (reason, peaks_iter) = centroider.centroid_frame(frame_buffer);
                     let tmp = peaks_iter.map(|peak| {
                         let mz = mz_converter.convert(peak.tof_index as f64) as f32;
-                        let im = f16::from_f64(im_converter(peak.scan_index as f64)); // TODO: convert to actual IM using calibration
+                        let mobility_ook0 = f16::from_f64(im_converter(peak.scan_index as f64));
                         let intensity = peak.corrected_intensity as f32;
                         IndexedPeak {
                             mz,
                             intensity,
-                            mobility_ook0: im,
+                            mobility_ook0,
                             rt_ms: rt_milliseconds,
                         }
                     });
                     // let res_arc = all_peaks.clone();
                     // let mut res = res_arc.lock().unwrap();
                     // res.extend(tmp);
-                    Ok((tmp.collect::<Vec<_>>(), reason))
+                    Ok((tmp.collect::<Vec<IndexedPeak>>(), reason))
                 },
             )
             .map(|x| match x {
@@ -569,7 +588,7 @@ impl IndexedPeakGroup {
             out,
             IndexedPeakGroupBuildingStats {
                 indexing_stats: stats,
-                clustering_stats: _x.3,
+                clustering_stats: Some(_x.3),
                 read_time,
             },
         )

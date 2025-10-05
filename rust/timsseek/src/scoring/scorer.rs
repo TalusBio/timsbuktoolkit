@@ -5,11 +5,13 @@ use crate::{
     QueryItemToScore,
 };
 use rayon::prelude::*;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{
     Duration,
     Instant,
 };
+use timsquery::models::tolerance::MobilityTolerance;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
@@ -99,26 +101,84 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         }
     }
 
+    fn get_mobility(item: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> f64 {
+        // Get the weighted mean mobility of the fragments
+        let (sum_weights, sum_mobilities) = item
+            .iter_fragments()
+            .filter_map(|((_k, _mz), v)| {
+                let out = v
+                    .mean_mobility()
+                    .ok()
+                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()));
+                out
+            })
+            .fold((0.0, 0.0), |(other_w, other_m), (this_w, this_m)| {
+                (this_w + other_w, this_m + other_m)
+            });
+
+        // Same for precursors
+        let (p_sum_weights, p_sum_mobilities) = item
+            .iter_precursors()
+            .filter_map(|((_k, _mz), v)| {
+                let out = v
+                    .mean_mobility()
+                    .ok()
+                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()));
+                out
+            })
+            .fold((0.0, 0.0), |(other_w, other_m), (this_w, this_m)| {
+                (this_w + other_w, this_m + other_m)
+            });
+
+        let total_weight = sum_weights + p_sum_weights;
+        let out = if total_weight == 0.0 {
+            // No mobility information, return 0
+            0.0
+        } else {
+            (sum_mobilities + p_sum_mobilities) / total_weight
+        };
+        assert!(out >= 0.0);
+        // Mobility should be in that ballpark
+        assert!(out <= 2.0);
+        out
+    }
+
     #[inline]
-    fn _secondary_query(
-        &self,
-        item: &QueryItemToScore,
-        _prescore: &PreScore,
-        main_score: &MainScore,
-    ) -> SecondaryQuery {
+    fn _secondary_query(&self, item: &QueryItemToScore, main_score: &MainScore) -> SecondaryQuery {
         // TODO: add the change in the tolerance target rt
         // proably usig the information in the prescore
-        let new_rt = main_score.retention_time_ms;
-        let new_query = Arc::new(item.query.as_ref().with_rt_seconds(new_rt as f32 / 1000.0));
+        let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
+
+        // Make a search here and then use that as a filter for mobility.
+        let new_query = Arc::new(item.query.as_ref().clone().with_rt_seconds(new_rt_seconds));
+        let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
+            SpectralCollector::new(new_query);
+        self.index.add_query(&mut agg, &self.secondary_tolerance);
+
+        // Get the mobility from the main query
+        // and use that to make an isotope queries
+        let mobility = Self::get_mobility(&agg);
+        let new_query = Arc::new(
+            item.query
+                .as_ref()
+                .clone()
+                .with_rt_seconds(new_rt_seconds)
+                .with_mobility(mobility as f32),
+        );
+
         let mut isotope_agg: SpectralCollector<_, f32> =
             SpectralCollector::new(isotope_offset_fragments(&new_query, 1i8).into());
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
+        // I can probably cache this ...
+        // But I dont want to store a "tertiary" tolerance in the scorer
+        let tol_use = self
+            .secondary_tolerance
+            .clone()
+            .with_mobility_tolerance(MobilityTolerance::Pct((5.0, 5.0)));
 
-        // TODO use a specific peak width for the secondary query
-        self.index.add_query(&mut agg, &self.secondary_tolerance);
-        self.index
-            .add_query(&mut isotope_agg, &self.secondary_tolerance);
+        self.index.add_query(&mut agg, &tol_use);
+        self.index.add_query(&mut isotope_agg, &tol_use);
         SecondaryQuery {
             inner: agg,
             isotope: isotope_agg,
@@ -152,6 +212,21 @@ pub struct ScoreTimings {
     pub localize: Duration,
     pub secondary_query: Duration,
     pub finalization: Duration,
+}
+
+impl Serialize for ScoreTimings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ScoreTimings", 4)?;
+        state.serialize_field("prescore_ms", &self.prescore.as_millis())?;
+        state.serialize_field("localize_ms", &self.localize.as_millis())?;
+        state.serialize_field("secondary_query_ms", &self.secondary_query.as_millis())?;
+        state.serialize_field("finalization_ms", &self.finalization.as_millis())?;
+        state.end()
+    }
 }
 
 impl std::ops::AddAssign for ScoreTimings {
@@ -222,7 +297,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         timings.localize += st.elapsed();
 
         let st = Instant::now();
-        let secondary_query = self._secondary_query(&item, &prescore, &main_score);
+        let secondary_query = self._secondary_query(&item, &main_score);
         timings.secondary_query += st.elapsed();
 
         let st = Instant::now();
@@ -277,7 +352,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         )?;
         let main_score = scorer.score(&pre_score)?;
 
-        let secondary_query = self._secondary_query(&item, &pre_score, &main_score);
+        let secondary_query = self._secondary_query(&item, &main_score);
         let search_results =
             self._finalize_step(&item, &main_score, &pre_score, &secondary_query)?;
 
@@ -292,7 +367,10 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         })
     }
 
-    pub fn score_iter(&self, items_to_score: &[QueryItemToScore]) -> Vec<IonSearchResults> {
+    pub fn score_iter(
+        &self,
+        items_to_score: &[QueryItemToScore],
+    ) -> (Vec<IonSearchResults>, ScoreTimings) {
         let num_input_items = items_to_score.len();
         let loc_score_start = Instant::now();
 
@@ -334,6 +412,6 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
 
         info!("{:?}", results.timings);
 
-        results.res
+        (results.res, results.timings)
     }
 }

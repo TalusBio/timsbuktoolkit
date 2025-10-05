@@ -134,14 +134,17 @@ class TimsseekRunner:
         stderr_file = output_path / "timsseek_stderr.log"
 
         logger.info(f"Starting timsseek, logging to {stdout_file} and {stderr_file}")
-        res = subprocess.run(
-            args,
-            stdout=open(stdout_file, "w"),
-            stderr=open(stderr_file, "w"),
-        )
-        # Log stdout and stderr
-        logger.info(stdout_file.read_text())
-        logger.error(stderr_file.read_text())
+        try:
+            res = subprocess.run(
+                args,
+                stdout=open(stdout_file, "w"),
+                stderr=open(stderr_file, "w"),
+                check=True,
+            )
+        finally:
+            # Log stdout and stderr
+            logger.info(stdout_file.read_text())
+            logger.error(stderr_file.read_text())
         logger.info(f"Timsseek completed with return code {res.returncode}")
         return res
 
@@ -162,14 +165,18 @@ class TimsseekRunner:
         stderr_file = summary_dir / "timsseek_stderr.log"
 
         logger.info(f"Starting rescoring, logging to {stdout_file} and {stderr_file}")
-        res = subprocess.run(
-            args,
-            stdout=open(stdout_file, "w"),
-            stderr=open(stderr_file, "w"),
-        )
-        # Log stdout and stderr
-        logger.info(stdout_file.read_text())
-        logger.error(stderr_file.read_text())
+        try:
+            res = subprocess.run(
+                args,
+                stdout=open(stdout_file, "w"),
+                stderr=open(stderr_file, "w"),
+                check=True,
+            )
+        finally:
+            # Log stdout and stderr
+            logger.info(stdout_file.read_text())
+            logger.error(stderr_file.read_text())
+
         logger.info(f"Rescoring completed with return code {res.returncode}")
         return res
 
@@ -184,7 +191,7 @@ class TimsseekRunner:
                 "chunk_size": 20000,
                 "tolerance": {
                     "ms": {"ppm": [15.0, 15.0]},
-                    "mobility": {"percent": [20.0, 20.0]},
+                    "mobility": {"percent": [10.0, 10.0]},
                     "quad": {"absolute": [0.1, 0.1]},
                 },
             }
@@ -213,6 +220,14 @@ class TimsseekRunner:
         with open(report_toml, "rb") as f:
             report = tomllib.load(f)
         metrics.update(report["report"])
+
+        performance_report_path = output_dir / "res" / "performance_report.json"
+        if performance_report_path.exists():
+            with open(performance_report_path, "r") as f:
+                performance_report = json.load(f)
+            metrics.update(performance_report)
+        else:
+            logger.warning(f"Performance report {performance_report_path} does not exist")
         return metrics
 
 
@@ -275,9 +290,9 @@ def main(wandb_kwargs: dict | None = None):
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [
-        prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
-        prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
-        prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
+        # prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
+        # prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
+        # prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
         prefix / "250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
     ]
 
@@ -289,9 +304,9 @@ def main(wandb_kwargs: dict | None = None):
         )
         runner.build_speclib()
 
-        # tmpdir = Path("myloc")
-        # runner.run(wandb_kwargs=wandb_kwargs, output_loc=tmpdir)
-        runner.run(wandb_kwargs=wandb_kwargs)
+        tmpdir = Path("myloc")
+        runner.run(wandb_kwargs=wandb_kwargs, output_loc=tmpdir)
+        # runner.run(wandb_kwargs=wandb_kwargs)
 
 
 def build_parser():

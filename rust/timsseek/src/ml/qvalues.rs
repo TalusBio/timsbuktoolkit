@@ -1,8 +1,7 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetDecoy {
-    Target,
-    Decoy,
-}
+use super::{
+    LabelledScore,
+    TargetDecoy,
+};
 
 /// Assign q_values in place.
 ///

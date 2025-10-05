@@ -1,5 +1,5 @@
 pub mod centroiding;
-mod geometry;
+pub mod geometry;
 pub mod indexing;
 pub mod utils;
 

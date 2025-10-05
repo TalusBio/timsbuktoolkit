@@ -12,6 +12,12 @@ use OptionallyRestricted::{
 };
 
 fn main() {
+    // Set up logger
+    tracing_subscriber::fmt()
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     const DIA_TEST: &str =
         "/Users/sebastianpaez/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_on_DIA.d/";
     let file = TimsTofPath::new(DIA_TEST).unwrap();
@@ -24,8 +30,12 @@ fn main() {
     };
     println!("Indexing with config: {:#?}", centroiding_config);
     let (index, index_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
-    println!("Indexing Stats: {:#?}", index_stats);
+    println!("Indexing Stats: {}", index_stats);
 
+    // test_querying(&index);
+}
+
+fn test_querying(index: &IndexedTimstofPeaks) {
     let mut tot_int = 0.0;
     let mut nqueries = 0;
     let mut npeaks = 0;

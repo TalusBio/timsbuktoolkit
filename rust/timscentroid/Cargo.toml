@@ -14,6 +14,10 @@ rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Example dependencies
+tracing-subscriber = { workspace = true, features = ["env-filter"], default-features = true}
 
 # Not using it RN but looks like a super solid way to make
 # builder patterns
