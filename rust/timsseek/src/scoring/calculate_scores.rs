@@ -191,33 +191,6 @@ impl IntensityArrays {
     }
 }
 
-fn gaussblur(x: &mut [f32], buffer: &mut Vec<f32>) {
-    // Temp implementation ... shoudl make something nicer in the future.
-    let len = x.len();
-    if len < 3 {
-        return;
-    }
-
-    // Using fixed kernel weights [0.5, 1.0, 0.5]
-    // Note: These weights are already normalized (sum = 2)
-    buffer.clear();
-    buffer.resize(len, 0.0);
-
-    // Handle first element
-    buffer[0] = (x[0] * 1.5 + x[1] * 0.5) / 2.0;
-
-    // Main convolution loop
-    for i in 1..len - 1 {
-        buffer[i] = (x[i - 1] * 0.5 + x[i] * 1.0 + x[i + 1] * 0.5) / 2.0;
-    }
-
-    // Handle last element
-    buffer[len - 1] = (x[len - 1] * 1.5 + x[len - 2] * 0.5) / 2.0;
-
-    // Copy results back
-    x.copy_from_slice(buffer);
-}
-
 /// Applies a 1D Gaussian blur in-place with a fixed kernel [0.5, 1.0, 0.5].
 ///
 /// This implementation is memory-efficient, using only a single temporary
@@ -332,23 +305,26 @@ impl TimeResolvedScores {
         &mut self,
         intensity_arrays: &IntensityArrays,
     ) -> Result<(), DataProcessingError> {
-        // TODO: reimplement this to make it inplace ...
-        // START: Burning hot code ...
-        self.ms2_coelution_score = coelution_score::coelution_score::<10, IonAnnot>(
-            &intensity_arrays.ms2_mzmajor,
-            COELUTION_WINDOW_WIDTH,
-        )?;
-        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
-        self.ms1_coelution_score = coelution_score::coelution_score_filter::<6, i8>(
-            &intensity_arrays.ms1_mzmajor,
-            7,
-            &Some(|x: &i8| *x >= 0i8),
-        )
-        .unwrap_or_else(|_| vec![0.0; rt_len]);
+        let filter: Option<fn(&IonAnnot) -> bool> = None;
+        self.ms2_coelution_score
+            .extend(
+                coelution_score::coelution_vref_score_filter::<10, IonAnnot>(
+                    &intensity_arrays.ms2_mzmajor,
+                    self.ms2_lazyscore.as_slice(),
+                    COELUTION_WINDOW_WIDTH,
+                    &filter,
+                )?,
+            );
+        self.ms1_coelution_score
+            .extend(coelution_score::coelution_vref_score_filter::<6, i8>(
+                &intensity_arrays.ms1_mzmajor,
+                // Note we DO use the ms2 lazyscore as reference here
+                self.ms2_lazyscore.as_slice(),
+                7,
+                &Some(|x: &i8| *x >= 0i8),
+            )?);
         Ok(())
     }
-
-    // END: Burning hot code ...
 
     fn calculate_gaussian_correlation_scores(
         &mut self,

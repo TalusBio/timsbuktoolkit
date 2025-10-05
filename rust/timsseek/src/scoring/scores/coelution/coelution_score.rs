@@ -5,7 +5,7 @@ use timsquery::models::{
     Array2D,
     MzMajorIntensityArray,
 };
-use tracing::debug;
+use tracing::trace;
 
 /// Calculates the coelution score of a set of chromatograms.
 ///
@@ -25,120 +25,197 @@ use tracing::debug;
 /// let scores = coelution::coelution_score_arr::<3>(&slices, window).unwrap();
 /// assert_eq!(scores, [0.0, 0.9866667, 0.9939658, 0.9849558, 0.0]);
 /// ```
-pub fn coelution_score_arr<const TOP_N: usize>(
-    slices: &Array2D<f32>,
+pub fn coelution_score_arr<'a, const TOP_N: usize>(
+    slices: &'a Array2D<f32>,
     window_size: usize,
-) -> Result<Vec<f32>, DataProcessingError> {
+) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
     let filter: Option<fn(usize) -> bool> = None;
-    coelution_score_arr_filter::<TOP_N>(slices, window_size, &filter)
+    coelution_score_iter_filter::<TOP_N>(slices, window_size, filter)
 }
 
-/// Calculates the coelution score of a set of chromatograms.
-/// with a filter ...
-fn coelution_score_arr_filter<const TOP_N: usize>(
-    slices: &Array2D<f32>,
-    window_size: usize,
-    filter: &Option<impl Fn(usize) -> bool>,
-) -> Result<Vec<f32>, DataProcessingError> {
-    if slices.ncols() < window_size {
-        debug!("Not enough data to calculate coelution score");
-        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
-    }
-    let mut scores = vec![TopNArray::<TOP_N, f32>::new(); slices.ncols()];
-    for i in 0..slices.nrows() {
-        // I also think this is a very ugly chunk of code ...
-        // that I need to find a better way to make more elegant.
-        if let Some(f) = filter {
-            if !f(i) {
-                continue;
-            }
-        };
-        let slice1 = slices.get_row(i).expect("Using nrows to check length");
-        for j in 0..slices.nrows() {
-            if j >= i {
-                continue;
-            }
-            if let Some(f) = filter {
-                if !f(j) {
-                    continue;
-                }
-            };
+// Assuming these types are in the current scope:
+// use crate::{Array2D, DataProcessingError, TopNArray, rolling_cosine_similarity};
 
-            let slice2 = slices.get_row(j).expect("Using nrows to check length");
-            let cosine_similarities = rolling_cosine_similarity(slice1, slice2, window_size)
-                .expect("The passed array should already be checked for length and non-emptyness");
+struct TopMultiIter<I: Iterator<Item = f32>, const TOP_N: usize> {
+    iters: Vec<I>,
+}
 
-            for (si, score) in cosine_similarities.into_iter().enumerate() {
-                // Q: Should this raise an error or warn?
-                // Q: SHould I weight on the expected intensity?
+impl<I: Iterator<Item = f32>, const TOP_N: usize> Iterator for TopMultiIter<I, TOP_N> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut top_n = TopNArray::<TOP_N, f32>::new();
+        let mut all_none = true;
+        let mut any_none = false;
+        for iter in &mut self.iters {
+            if let Some(score) = iter.next() {
+                all_none = false;
                 if !score.is_nan() && score > 0.0 {
-                    scores[si].push(score.powi(2));
+                    top_n.push(score.powi(2));
                 }
+            } else {
+                any_none = true;
             }
         }
-    }
+        if all_none {
+            return None;
+        }
+        if any_none {
+            panic!("Iterators should all have the same length");
+        }
 
-    // TODO: Make this a single pass
-    // In theory I could make the calculation of the rolling similarities an iterator
-    // and then do a single pass over the iterators.
-    // That would mean I need a Vec<impl Iterator> of size nrows * (nrows - 1) / 2
-    // which is not that bad tbh
-    let mut out = scores
-        .iter()
-        .map(|x| {
-            let curr_vals = x.get_values();
-            let out = curr_vals.iter().sum::<f32>() / x.capacity() as f32;
-            assert!(
-                out <= 1.0,
-                "Coelution score greater than 1.0, vals: {:?}, out: {}",
-                curr_vals,
-                out
-            );
+        // Calculate the final score for the current time point.
+        let curr_vals = top_n.get_values();
+        let out = curr_vals.iter().sum::<f32>() / top_n.capacity() as f32;
+        // let out = curr_vals.iter().sum::<f32>();
+
+        // This is required bc the main score assumes scores are between 0 and 1
+        // For now ... and catching it earlier is good! (instead of later when the
+        // main score is getting calculated)
+        assert!(
+            out <= 1.0,
+            "Coelution score greater than 1.0, vals: {:?}, out: {}",
+            curr_vals,
             out
-        })
-        .collect::<Vec<f32>>();
-
-    let last_ind = out.len() - 1;
-    for i in 0..(window_size / 2) {
-        out[i] = 0.0;
-        out[last_ind - i] = 0.0;
+        );
+        Some(out)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.iters.is_empty() {
+            return (0, Some(0));
+        }
+        let (mut min, mut max) = self.iters[0].size_hint();
+        for it in &self.iters[1..] {
+            let (it_min, it_max) = it.size_hint();
+            min = min.min(it_min);
+            max = match (max, it_max) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                _ => None,
+            };
+        }
+        (min, max)
+    }
+}
+
+// This alternative calculate K^2 pairwise comparisons, which is more expensive
+// and doesn't seem to improve the score in practice.
+//
+// /// Calculates the coelution score of a set of chromatograms, returning a lazy iterator.
+// fn coelution_score_iter_filter<'a, const TOP_N: usize>(
+//     slices: &'a Array2D<f32>,
+//     window_size: usize,
+//     filter: Option<impl Fn(usize) -> bool>,
+// ) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
+//     if slices.ncols() < window_size {
+//         trace!("Not enough data to calculate coelution score");
+//         return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+//     }
+// 
+//     // Collect all pairwise rolling similarity calculations.
+//     // This still computes the similarities upfront, but the aggregation into the final
+//     // score is done lazily, one time-point at a time.
+//     let similarity_iters: Vec<_> = (0..slices.nrows())
+//         .filter(|&i| filter.as_ref().map_or(true, |f| f(i)))
+//         .tuple_combinations()
+//         .map(|(i, j)| {
+//             let slice1 = slices.get_row(i).expect("Row index i is within bounds");
+//             let slice2 = slices.get_row(j).expect("Row index j is within bounds");
+//             rolling_cosine_similarity(slice1, slice2, window_size)
+//         })
+//         .collect::<Result<Vec<_>, _>>()? // Handle potential errors from `rolling_cosine_similarity`
+//         .into_iter()
+//         .map(|v| {
+//             v.into_iter()
+//                 .map(|x| if x.is_nan() { 0.0 } else { x.max(0.0) })
+//         })
+//         .collect();
+// 
+//     let out = TopMultiIter::<_, TOP_N> {
+//         iters: similarity_iters,
+//     };
+// 
+//     Ok(out)
+// }
+
+/// Calculates the coelution score of a set of chromatograms, returning a lazy iterator.
+fn coelution_vref_score_iter_filter<'a, const TOP_N: usize>(
+    slices: &'a Array2D<f32>,
+    ref_slice: &'a [f32],
+    window_size: usize,
+    filter: Option<impl Fn(usize) -> bool>,
+) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
+    if slices.ncols() < window_size {
+        trace!("Not enough data to calculate coelution score");
+        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+    }
+
+    // Collect all rolling similarity calculations v the reference.
+    // This still computes the similarities upfront, but the aggregation into the final
+    // score is done lazily, one time-point at a time.
+    let similarity_iters: Vec<_> = (0..slices.nrows())
+        .filter(|&i| filter.as_ref().map_or(true, |f| f(i)))
+        .map(|i| {
+            let slice1 = slices.get_row(i).expect("Row index i is within bounds");
+            rolling_cosine_similarity(slice1, ref_slice, window_size)
+        })
+        .collect::<Result<Vec<_>, _>>()? // Handle potential errors from `rolling_cosine_similarity`
+        .into_iter()
+        .map(|v| {
+            v.into_iter()
+                .map(|x| if x.is_nan() { 0.0 } else { x.max(0.0) })
+        })
+        .collect();
+
+    assert!(
+        similarity_iters.len() > 0,
+        "No valid slices after filtering"
+    );
+    assert!(
+        similarity_iters.len() < 50,
+        "There are too many valid slices after filtering, probably an mz-major and an rt-major array got mixed up"
+    );
+
+    let out = TopMultiIter::<_, TOP_N> {
+        iters: similarity_iters,
+    };
 
     Ok(out)
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score_filter<const TOP_N: usize, K: Clone + Ord>(
-    slices: &MzMajorIntensityArray<K, f32>,
+pub fn coelution_score_filter<'a, const TOP_N: usize, K: Clone + Ord>(
+    slices: &'a MzMajorIntensityArray<K, f32>,
     window: usize,
-    filter: &Option<impl Fn(&K) -> bool>,
-) -> Result<Vec<f32>, DataProcessingError> {
+    filter: &'a Option<impl Fn(&K) -> bool>,
+) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
     let inner_filter = filter
         .as_ref()
         .map(|f| |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k)));
-    coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &inner_filter)
+    coelution_score_iter_filter::<TOP_N>(&slices.arr, window, inner_filter)
 }
 
 /// See the docs for [`coelution_score_arr`].
-pub fn coelution_score_filter_into<const TOP_N: usize, K: Clone + Ord>(
-    slices: &MzMajorIntensityArray<K, f32>,
+pub fn coelution_vref_score_filter<'a, const TOP_N: usize, K: Clone + Ord>(
+    slices: &'a MzMajorIntensityArray<K, f32>,
+    ref_slice: &'a [f32],
     window: usize,
-    filter: &Option<impl Fn(&K) -> bool>,
-) -> Result<Vec<f32>, DataProcessingError> {
+    filter: &'a Option<impl Fn(&K) -> bool>,
+) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
     let inner_filter = filter
         .as_ref()
         .map(|f| |i| slices.mz_order.get(i).is_some_and(|(k, _mz)| f(k)));
-    coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &inner_filter)
+    coelution_vref_score_iter_filter::<TOP_N>(&slices.arr, ref_slice, window, inner_filter)
 }
 
-/// See the docs for [`coelution_score_arr`].
-pub fn coelution_score<const TOP_N: usize, K: Clone + Ord>(
-    slices: &MzMajorIntensityArray<K, f32>,
-    window: usize,
-) -> Result<Vec<f32>, DataProcessingError> {
-    let filter: Option<fn(usize) -> bool> = None;
-    coelution_score_arr_filter::<TOP_N>(&slices.arr, window, &filter)
-}
+// /// See the docs for [`coelution_score_arr`].
+// pub fn coelution_score<'a, const TOP_N: usize, K: Clone + Ord>(
+//     slices: &'a MzMajorIntensityArray<K, f32>,
+//     window: usize,
+// ) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
+//     let filter: Option<fn(usize) -> bool> = None;
+//     coelution_score_iter_filter::<TOP_N>(&slices.arr, window, filter)
+// }
 
 #[cfg(test)]
 mod tests {
@@ -164,9 +241,11 @@ mod tests {
         let slices =
             Array2D::new(vec![[0., 1., 1., 3., 200., 5.], [1., 2., 1., 4., 200., 6.]]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr::<1>(&slices, window);
+        let scores = coelution_score_arr::<1>(&slices, window)
+            .unwrap()
+            .collect::<Vec<_>>();
         let expected = vec![0.0, 0.75, 0.974026, 0.99997497, 0.99995005, 0.0];
-        assert_close_enough(&scores.unwrap(), &expected, 1e-2);
+        assert_close_enough(&scores, &expected, 1e-2);
     }
 
     #[test]
@@ -174,9 +253,11 @@ mod tests {
         let arr = vec![0., 1., 1., 3., 200., 5.];
         let slices = Array2D::new(vec![arr.clone(), arr.clone()]).unwrap();
         let window = 3;
-        let scores = coelution_score_arr::<2>(&slices, window);
+        let scores = coelution_score_arr::<2>(&slices, window)
+            .unwrap()
+            .collect::<Vec<_>>();
         let expected = vec![0.0, 0.5, 0.5, 0.5, 0.5, 0.0];
-        assert_close_enough(&scores.unwrap(), &expected, 1e-7);
+        assert_close_enough(&scores, &expected, 1e-7);
     }
 
     #[test]

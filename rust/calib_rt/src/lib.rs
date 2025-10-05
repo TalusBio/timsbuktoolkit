@@ -306,7 +306,7 @@ pub fn calibrate<'a>(
         .collect();
 
     // Module 2: Find the optimal ascending path
-    let mut optimal_path_points = find_optimal_path(&mut filtered_nodes);
+    let optimal_path_points = find_optimal_path(&mut filtered_nodes);
 
     // Module 3: Fit the final points and prepare for extrapolation
     CalibrationCurve::new(optimal_path_points)

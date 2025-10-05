@@ -48,13 +48,6 @@ pub struct DigestionConfig {
     pub build_decoys: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ToleranceConfig {
-    pub ms_ppm: (f64, f64),
-    pub mobility_pct: (f64, f64),
-    pub quad_absolute: (f64, f64),
-}
-
 impl Default for DigestionConfig {
     fn default() -> Self {
         Self {
@@ -62,16 +55,6 @@ impl Default for DigestionConfig {
             max_length: 30,
             max_missed_cleavages: 2,
             build_decoys: true,
-        }
-    }
-}
-
-impl Default for ToleranceConfig {
-    fn default() -> Self {
-        Self {
-            ms_ppm: (10.0, 20.0),
-            mobility_pct: (0.015, 0.025),
-            quad_absolute: (0.05, 0.1),
         }
     }
 }

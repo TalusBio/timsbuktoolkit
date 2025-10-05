@@ -1,4 +1,4 @@
-pub use super::qvalues::TargetDecoy;
+pub use super::TargetDecoy;
 pub use forust_ml::constraints::{
     Constraint,
     ConstraintMap,
@@ -20,31 +20,6 @@ pub use forust_ml::{
 };
 pub use rayon::prelude::*;
 pub use std::collections::HashSet;
-
-pub trait LabelledScore {
-    fn get_score(&self) -> f64;
-    fn get_label(&self) -> TargetDecoy;
-    fn assign_qval(&mut self, q: f32);
-    fn get_qval(&self) -> f32;
-}
-
-impl LabelledScore for (f64, TargetDecoy, f32) {
-    fn get_score(&self) -> f64 {
-        self.0
-    }
-
-    fn get_label(&self) -> TargetDecoy {
-        self.1
-    }
-
-    fn assign_qval(&mut self, q: f32) {
-        self.2 = q
-    }
-
-    fn get_qval(&self) -> f32 {
-        self.2
-    }
-}
 
 pub struct GBMConfig {
     iterations: usize,

@@ -14,6 +14,7 @@ pub struct PeakCentroider<T1: ConvertableDomain, T2: ConvertableDomain> {
     taken_buff: Vec<TakenState>,
     agg_buff: Vec<PeakAggregator>,
     neighbor_ranges: Vec<(usize, usize)>, // (start_idx, end_idx) for each peak
+    ims_ranges: Vec<(u16, u16)>,          // (min_im, max_im) for scan index
     max_peaks: usize,
     mz_ppm_tol: f64,
     im_pct_tol: f64,
@@ -223,6 +224,10 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             taken_buff: Vec::with_capacity(capacity),
             neighbor_ranges: Vec::with_capacity(capacity),
             agg_buff: Vec::with_capacity(config.max_peaks),
+            // Note there are A LOT less scan indices than peaks
+            // so we can cache all values in the 0-max scan index range
+            // for each peak ... (and even extend only if needed)
+            ims_ranges: Vec::new(),
             max_peaks: config.max_peaks,
             mz_ppm_tol: config.mz_ppm_tol,
             im_pct_tol: config.im_pct_tol,
@@ -246,6 +251,10 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     }
 
     fn im_index_bounds(&self, im_index: u16) -> (u16, u16) {
+        self.ims_ranges[im_index as usize]
+    }
+
+    fn uncached_im_index_bounds(&self, im_index: u16) -> (u16, u16) {
         let im = self.im_converter.convert(im_index as f64);
         let delta_im = im * self.im_pct_tol * 0.01;
         let left_im = im - delta_im;
@@ -259,6 +268,18 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         )
     }
 
+    fn maybe_extend_ims_ranges(&mut self) {
+        let max_ims_index = self.peaks.iter().map(|x| x.scan_index).max().unwrap_or(0);
+        let curr_len = self.ims_ranges.len();
+        if max_ims_index as usize >= curr_len {
+            self.ims_ranges.resize(max_ims_index as usize + 1, (0, 0));
+            for idx in curr_len..=max_ims_index as usize {
+                let bounds = self.uncached_im_index_bounds(idx as u16);
+                self.ims_ranges[idx] = bounds;
+            }
+        }
+    }
+
     /// Carries out the setup of the internal buffers with the frame
     /// to be centroided.
     fn with_frame(&mut self, frame: &timsrust::Frame) {
@@ -267,12 +288,22 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         self.expand_to_capacity(expect_len);
         self.peaks.extend(frame.iter_corrected_peaks());
         assert_eq!(self.peaks.len(), expect_len);
+        self.maybe_extend_ims_ranges();
 
         // sort by mz ... bc binary searching on the mz space
         // for neighbors is the fastest way to find neighbors that I have tried.
-        self.peaks.sort_by(|a, b| a.tof_index.cmp(&b.tof_index));
-        self.compute_neighbor_ranges();
+        self.peaks
+            .sort_unstable_by(|a, b| a.tof_index.cmp(&b.tof_index));
+        self.compute_neighbor_ranges_and_intensity();
+        // self.compute_neighbor_ranges();
+        // self.compute_neighborhood_intensity();
 
+        // The "order" is sorted by intensity
+        // This will be used later during the centroiding (for details check that implementation)
+        self.set_orders();
+    }
+
+    fn compute_neighborhood_intensity(&mut self) {
         for idx in 0..self.peaks.len() {
             let (left, right) = self.neighbor_ranges[idx];
             let bounds = left..right;
@@ -285,17 +316,12 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 .sum();
             self.order_intensity.push(summed_int);
         }
+    }
 
-        // The "order" is sorted by intensity
-        // This will be used later during the centroiding (for details check that implementation)
+    fn set_orders(&mut self) {
         self.order.extend(0..self.peaks.len());
-        assert_eq!(self.order.len(), expect_len);
-
-        self.order.sort_unstable_by(|&a, &b| {
-            self.order_intensity[b]
-                .partial_cmp(&self.order_intensity[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        self.order
+            .sort_unstable_by(|&a, &b| self.order_intensity[b].total_cmp(&self.order_intensity[a]));
     }
 
     fn clear(&mut self) {
@@ -354,7 +380,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         // More formally ... the check is O(n) and the sort is O(n log n)
         // and the clustering O(n^2) in the worst case (but usually much better
         // since we limit the search space with ppm and pct tolerances).
-        assert!(
+        debug_assert!(
             self.peaks
                 .windows(2)
                 .all(|x| x[0].tof_index <= x[1].tof_index),
@@ -482,6 +508,59 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             elapsed,
         };
         (summary, self.drain_aggregated_peaks())
+    }
+
+    #[inline(always)]
+    fn advance_pointers(&self, left_ptr: &mut usize, right_ptr: &mut usize, tof_index: u32) {
+        let (left_tof, right_tof) = self.tof_index_bounds(tof_index);
+
+        // Advance left pointer to first peak in range
+        while *left_ptr < self.peaks.len() && self.peaks[*left_ptr].tof_index < left_tof {
+            *left_ptr += 1;
+        }
+
+        // Advance right pointer to last peak in range
+        // Start from max(right_ptr, left_ptr) to avoid going backwards
+        *right_ptr = (*right_ptr).max(*left_ptr);
+        while *right_ptr < self.peaks.len() && self.peaks[*right_ptr].tof_index <= right_tof {
+            *right_ptr += 1;
+        }
+    }
+
+    fn compute_neighbor_ranges_and_intensity(&mut self) {
+        self.neighbor_ranges.clear();
+        self.order_intensity.clear();
+        self.neighbor_ranges.reserve(self.peaks.len());
+        self.order_intensity.reserve(self.peaks.len());
+
+        let mut left_ptr = 0;
+        let mut right_ptr = 0;
+
+        let mut last_tof = u32::MAX; // impossible TOF index
+        // ALSO we are startting with sorted tof indices, so the first should be a really low value
+        // This just assures we compute the bounds for the first peak
+
+        for idx in 0..self.peaks.len() {
+            let peak = &self.peaks[idx];
+            // If the last tof == current tof, we can reuse the left and right pointers
+            if last_tof != peak.tof_index {
+                // If the TOF has changed, we need to compute the new bounds
+                self.advance_pointers(&mut left_ptr, &mut right_ptr, peak.tof_index);
+                last_tof = peak.tof_index;
+            }
+            self.neighbor_ranges.push((left_ptr, right_ptr));
+
+            let (left_im, right_im) = self.im_index_bounds(peak.scan_index);
+            // Compute intensity directly here
+            let mut summed_int = 0.0;
+            for i in left_ptr..right_ptr {
+                let scan_idx = self.peaks[i].scan_index;
+                if scan_idx >= left_im && scan_idx <= right_im {
+                    summed_int += self.peaks[i].corrected_intensity;
+                }
+            }
+            self.order_intensity.push(summed_int);
+        }
     }
 
     /// Pre-computes the neighbor ranges for each peak in the frame.

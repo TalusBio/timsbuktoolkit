@@ -12,7 +12,10 @@ use timsquery::{
 use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::scoring::scorer::Scorer;
+use timsseek::scoring::scorer::{
+    ScoreTimings,
+    Scorer,
+};
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
@@ -29,7 +32,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     scorer: &Scorer<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
-) -> std::result::Result<(), TimsSeekError> {
+) -> std::result::Result<ScoreTimings, TimsSeekError> {
     let total = query_iterator.len();
     let mut chunk_num = 0;
     let mut nqueried = 0;
@@ -48,6 +51,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
             source: e,
         }
     })?;
+    let mut all_timings = ScoreTimings::default();
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )
@@ -59,7 +63,8 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         .for_each(|chunk| {
             nqueried += chunk.len();
             // Parallelism happens here within the score_iter function
-            let mut out: Vec<IonSearchResults> = scorer.score_iter(chunk);
+            let (mut out, timings): (Vec<IonSearchResults>, ScoreTimings) = scorer.score_iter(chunk);
+            all_timings += timings;
             nwritten += out.len();
             out.sort_unstable_by(|x, y| x.main_score.partial_cmp(&y.main_score).unwrap());
             debug!("Worst score in chunk: {:#?}", out[0]);
@@ -88,7 +93,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         chunk_num,
         start.elapsed()
     );
-    Ok(())
+    Ok(all_timings)
 }
 
 pub fn process_speclib(
@@ -100,6 +105,7 @@ pub fn process_speclib(
     // TODO: I should probably "inline" this function with the main loop
     info!("Building database from speclib file {:?}", path);
     let st = std::time::Instant::now();
+    let performance_report_path = output.directory.join("performance_report.json");
     let speclib = Speclib::from_file(&path)?;
     let elap_time = st.elapsed();
     info!(
@@ -108,7 +114,14 @@ pub fn process_speclib(
         elap_time,
         path.display()
     );
-
-    main_loop(speclib, scorer, chunk_size, output)?;
+    let timings = main_loop(speclib, scorer, chunk_size, output)?;
+    let perf_report =
+        serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
+            msg: format!("Error serializing performance report to JSON: {}", e),
+        })?;
+    std::fs::write(&performance_report_path, perf_report).map_err(|e| TimsSeekError::Io {
+        path: performance_report_path.into(),
+        source: e,
+    })?;
     Ok(())
 }

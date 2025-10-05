@@ -217,6 +217,11 @@ impl Iterator for RollingCosineIterator<'_> {
             return Some(self.buffer.calculate_similarity());
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.a.len() - self.state;
+        (len, Some(len))
+    }
 }
 
 #[cfg(test)]

@@ -4,9 +4,9 @@ mod errors;
 mod processing;
 
 use clap::Parser;
+use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
-use timsquery::TimsTofPath;
 use timsseek::scoring::Scorer;
 use timsseek::utils::serde::load_index_caching;
 use tracing::level_filters::LevelFilter;
@@ -178,7 +178,8 @@ fn main() -> std::result::Result<(), errors::CliError> {
                 secondary_tolerance: config
                     .analysis
                     .tolerance
-                    .with_rt_tolerance(RtTolerance::Minutes((0.5, 0.5))),
+                    .clone()
+                    .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
                 fragmented_range,
             };
             processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)

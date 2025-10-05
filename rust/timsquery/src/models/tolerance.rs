@@ -245,7 +245,14 @@ impl Tolerance {
         }
     }
 
-    pub fn with_rt_tolerance(&self, rt: RtTolerance) -> Self {
-        Self { rt, ..self.clone() }
+    pub fn with_rt_tolerance(self, rt: RtTolerance) -> Self {
+        Self { rt, ..self }
+    }
+
+    pub fn with_mobility_tolerance(self, tol: MobilityTolerance) -> Self {
+        Self {
+            mobility: tol,
+            ..self
+        }
     }
 }
