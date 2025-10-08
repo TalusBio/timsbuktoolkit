@@ -57,7 +57,6 @@ class MainScoreElements(BaseModel):
     ms2_lazyscore_vs_baseline: List[float | None]
     ms2_corr_v_gauss: List[float]
     ms1_corr_v_gauss: List[float]
-    split_lazyscore: List[float]
 
     ms2_lazyscore_vs_baseline_std: float
 
@@ -92,8 +91,6 @@ class MainScoreElements(BaseModel):
             ("MS2 Cosine Ref Sim", self.ms2_cosine_ref_sim),
             ("MS2 LazyScore", self.ms2_lazyscore),
             ("MS2 LazyScore Baseline", self.ms2_lazyscore_vs_baseline),
-            # ("Hyperscore", self.hyperscore),
-            ("Split LazyScore", self.split_lazyscore),
             ("MS2 Corr v Gauss", self.ms2_corr_v_gauss),
             ("MS1 Corr v Gauss", self.ms1_corr_v_gauss),
         ]

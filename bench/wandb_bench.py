@@ -227,7 +227,9 @@ class TimsseekRunner:
                 performance_report = json.load(f)
             metrics.update(performance_report)
         else:
-            logger.warning(f"Performance report {performance_report_path} does not exist")
+            logger.warning(
+                f"Performance report {performance_report_path} does not exist"
+            )
         return metrics
 
 
@@ -290,9 +292,9 @@ def main(wandb_kwargs: dict | None = None):
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [
-        # prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
-        # prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
-        # prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
+        prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
+        prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
+        prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
         prefix / "250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
     ]
 
@@ -304,9 +306,9 @@ def main(wandb_kwargs: dict | None = None):
         )
         runner.build_speclib()
 
-        tmpdir = Path("myloc")
-        runner.run(wandb_kwargs=wandb_kwargs, output_loc=tmpdir)
-        # runner.run(wandb_kwargs=wandb_kwargs)
+        # tmpdir = Path("myloc")
+        # runner.run(wandb_kwargs=wandb_kwargs, output_loc=tmpdir)
+        runner.run(wandb_kwargs=wandb_kwargs)
 
 
 def build_parser():

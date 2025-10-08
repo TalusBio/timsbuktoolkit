@@ -303,21 +303,6 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         self.set_orders();
     }
 
-    fn compute_neighborhood_intensity(&mut self) {
-        for idx in 0..self.peaks.len() {
-            let (left, right) = self.neighbor_ranges[idx];
-            let bounds = left..right;
-            let im_bounds = self.im_index_bounds(self.peaks[idx].scan_index);
-            let im_bounds = im_bounds.0..=im_bounds.1;
-            let summed_int = self.peaks[bounds]
-                .iter()
-                .filter(|x| im_bounds.contains(&x.scan_index))
-                .map(|x| x.corrected_intensity)
-                .sum();
-            self.order_intensity.push(summed_int);
-        }
-    }
-
     fn set_orders(&mut self) {
         self.order.extend(0..self.peaks.len());
         self.order
@@ -527,6 +512,20 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         }
     }
 
+    /// Pre-computes the neighbor ranges for each peak in the frame.
+    /// This is used to speed up the centroiding process.
+    /// It should be called after the peaks have been sorted by TOF index.
+    /// and before the centroiding process.
+    ///
+    /// Stores them in the `neighbor_ranges` field.
+    /// ... in otherwords ... for peak i, the neighbors are in
+    /// `self.peaks[self.neighbor_ranges[i].0 .. self.neighbor_ranges[i].1]`
+    /// also stores the total intensity of the neighbors
+    /// in the `order_intensity` field.
+    /// This is used to determine the order in which
+    /// peaks are processed during centroiding.
+    /// ... this seems to be critical to solve ties because a lot of peaks have the
+    /// same intensity.
     fn compute_neighbor_ranges_and_intensity(&mut self) {
         self.neighbor_ranges.clear();
         self.order_intensity.clear();
@@ -560,41 +559,6 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 }
             }
             self.order_intensity.push(summed_int);
-        }
-    }
-
-    /// Pre-computes the neighbor ranges for each peak in the frame.
-    /// This is used to speed up the centroiding process.
-    /// It should be called after the peaks have been sorted by TOF index.
-    /// and before the centroiding process.
-    ///
-    /// Stores them in the `neighbor_ranges` field.
-    /// ... in otherwords ... for peak i, the neighbors are in
-    /// `self.peaks[self.neighbor_ranges[i].0 .. self.neighbor_ranges[i].1]`
-    fn compute_neighbor_ranges(&mut self) {
-        self.neighbor_ranges.clear();
-        self.neighbor_ranges.reserve(self.peaks.len());
-
-        let mut left_ptr = 0;
-        let mut right_ptr = 0;
-
-        for idx in 0..self.peaks.len() {
-            let peak = &self.peaks[idx];
-            let (left_tof, right_tof) = self.tof_index_bounds(peak.tof_index);
-
-            // Advance left pointer to first peak in range
-            while left_ptr < self.peaks.len() && self.peaks[left_ptr].tof_index < left_tof {
-                left_ptr += 1;
-            }
-
-            // Advance right pointer to last peak in range
-            // Start from max(right_ptr, left_ptr) to avoid going backwards
-            right_ptr = right_ptr.max(left_ptr);
-            while right_ptr < self.peaks.len() && self.peaks[right_ptr].tof_index <= right_tof {
-                right_ptr += 1;
-            }
-
-            self.neighbor_ranges.push((left_ptr, right_ptr));
         }
     }
 }

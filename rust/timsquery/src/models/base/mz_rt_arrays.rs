@@ -61,7 +61,7 @@ impl<V: ArrayElement> MutableChromatogram<'_, V> {
             slc,
             rts,
             // Start at the end so that the first search always does a full search
-            last_idx_rt: (rts.len() - 1, rts.last().unwrap().clone()),
+            last_idx_rt: (rts.len() - 1, *rts.last().unwrap()),
         }
     }
 
@@ -89,13 +89,11 @@ impl<V: ArrayElement> MutableChromatogram<'_, V> {
         };
 
         if rt_ms < self.last_idx_rt.1 {
-            return self.binary_search_idx(rt_ms);
+            self.binary_search_idx(rt_ms)
+        } else if let Some(idx) = self.peekahead_search_idx(rt_ms) {
+            idx
         } else {
-            if let Some(idx) = self.peekahead_search_idx(rt_ms) {
-                return idx;
-            } else {
-                return self.binary_search_idx(rt_ms);
-            }
+            self.binary_search_idx(rt_ms)
         }
     }
 

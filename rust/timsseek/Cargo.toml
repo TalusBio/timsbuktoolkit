@@ -33,5 +33,10 @@ parquet = { workspace = true }
 # This is a test only dependency ...
 tracing-subscriber = { workspace = true }
 
+[features]
+# This enables adding instrumentation to a lot of the scoring
+# internals, meant only for profiling use cases and generate
+# VERY verbose output.
+instrumentation = []
 
 [lib]
