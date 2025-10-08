@@ -271,7 +271,7 @@ impl<const N: usize> DataBuffer<N> {
             }
         }
 
-        for feat_idx in (0..N) {
+        for feat_idx in 0..N {
             for e in self.accum_buffer.iter() {
                 // Maybe its faster to make the vec with zeros and assign to the
                 // positions ... so we iterate only once per elemnent instead
@@ -343,7 +343,7 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         // 3 folds == [0, 1, 2]
         (0..self.n_folds)
             .for_each(|_| self.fold_classifiers.push(None));
-        for fold in (0..self.n_folds) {
+        for fold in 0..self.n_folds {
             self.fit_fold(fold, train_buffer, val_buffer)?
         }
         Ok(())
@@ -353,11 +353,11 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         let mut scores = vec![0.0; self.data.len()];
         let mut buffer = DataBuffer::default();
 
-        for train_i in (0..self.n_folds) {
+        for train_i in 0..self.n_folds {
             let train_i = train_i;
             let early_stop_i = self.next_fold(train_i);
 
-            for inference_i in (0..self.n_folds) {
+            for inference_i in 0..self.n_folds {
                 let inference_i = inference_i;
                 if inference_i == train_i {
                     continue;

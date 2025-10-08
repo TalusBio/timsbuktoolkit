@@ -1,9 +1,6 @@
 use crate::errors::DataProcessingError;
 use crate::utils::correlation::rolling_cosine_similarity;
-use timsquery::models::{
-    Array2D,
-    MzMajorIntensityArray,
-};
+use timsquery::models::{Array2D, MzMajorIntensityArray};
 use tracing::trace;
 
 // /// Calculates the coelution score of a set of chromatograms.
@@ -34,62 +31,6 @@ use tracing::trace;
 
 // Assuming these types are in the current scope:
 // use crate::{Array2D, DataProcessingError, TopNArray, rolling_cosine_similarity};
-
-struct SumMultiIter<I: Iterator<Item = f32>> {
-    iters: Vec<I>,
-}
-
-impl<I: Iterator<Item = f32>> Iterator for SumMultiIter<I> {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut sum = 0.0;
-        let mut all_none = true;
-        let mut any_none = false;
-        for iter in &mut self.iters {
-            if let Some(score) = iter.next() {
-                all_none = false;
-                if !score.is_nan() && score > 0.0 {
-                    sum += score.powi(2);
-                }
-            } else {
-                any_none = true;
-            }
-        }
-        if all_none {
-            return None;
-        }
-        if any_none {
-            panic!("Iterators should all have the same length");
-        }
-
-        // Calculate the final score for the current time point.
-        let out = sum / self.iters.len() as f32;
-        // let out = curr_vals.iter().sum::<f32>();
-
-        // This is required bc the main score assumes scores are between 0 and 1
-        // For now ... and catching it earlier is good! (instead of later when the
-        // main score is getting calculated)
-        assert!(out <= 1.0, "Coelution score greater than 1.0, out: {}", out);
-        Some(out)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.iters.is_empty() {
-            return (0, Some(0));
-        }
-        let (mut min, mut max) = self.iters[0].size_hint();
-        for it in &self.iters[1..] {
-            let (it_min, it_max) = it.size_hint();
-            min = min.min(it_min);
-            max = match (max, it_max) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                _ => None,
-            };
-        }
-        (min, max)
-    }
-}
 
 /// Calculates the coelution score of a set of chromatograms, returning a lazy iterator.
 fn coelution_vref_score_filter_onto(
