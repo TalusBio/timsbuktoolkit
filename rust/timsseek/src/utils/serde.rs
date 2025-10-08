@@ -67,7 +67,7 @@ fn uncached_load_index(
     info!("Using centroiding config: {:#?}", centroiding_config);
     info!("Starting centroiging + load of the raw data (might take a min)");
     let (index, build_stats) =
-        IndexedTimstofPeaks::from_timstof_file(&timstofpath, centroiding_config);
+        IndexedTimstofPeaks::from_timstof_file(timstofpath, centroiding_config);
     info!("Index built with stats: {}", build_stats);
 
     // Save to cache

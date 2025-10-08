@@ -106,11 +106,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let (sum_weights, sum_mobilities) = item
             .iter_fragments()
             .filter_map(|((_k, _mz), v)| {
-                let out = v
+                
+                v
                     .mean_mobility()
                     .ok()
-                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()));
-                out
+                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()))
             })
             .fold((0.0, 0.0), |(other_w, other_m), (this_w, this_m)| {
                 (this_w + other_w, this_m + other_m)
@@ -120,11 +120,11 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let (p_sum_weights, p_sum_mobilities) = item
             .iter_precursors()
             .filter_map(|((_k, _mz), v)| {
-                let out = v
+                
+                v
                     .mean_mobility()
                     .ok()
-                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()));
-                out
+                    .map(|mobility| (v.weight().log2(), mobility * v.weight().log2()))
             })
             .fold((0.0, 0.0), |(other_w, other_m), (this_w, this_m)| {
                 (this_w + other_w, this_m + other_m)

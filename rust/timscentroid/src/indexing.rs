@@ -225,11 +225,11 @@ impl IndexedTimstofPeaks {
             precursor_range_mz.end() as f64,
         );
         let f64_im_range = ion_mobility_range.map(|r| (r.start().to_f64(), r.end().to_f64()));
-        let matching_iter = self.ms2_window_groups.iter().filter(move |(wg, _peaks)| {
-            wg.intersects(f64_mz_range, f64_im_range.unwrap_or((f64::MIN, f64::MAX)))
-        });
+        
 
-        matching_iter
+        self.ms2_window_groups.iter().filter(move |(wg, _peaks)| {
+            wg.intersects(f64_mz_range, f64_im_range.unwrap_or((f64::MIN, f64::MAX)))
+        })
     }
 
     /// Read MS1 frames and return an IndexedPeakGroup along with building stats.
@@ -700,8 +700,8 @@ impl<'a> QueryPeaksIterator<'a> {
     }
 
     fn next_in_current_bucket(&mut self) -> Option<&'a IndexedPeak> {
-        if let Some(bucket) = self.current_bucket.as_ref() {
-            if self.position_in_bucket < self.end_of_current_bucket {
+        if let Some(bucket) = self.current_bucket.as_ref()
+            && self.position_in_bucket < self.end_of_current_bucket {
                 let peak = &bucket.inner[self.position_in_bucket];
                 self.position_in_bucket += 1;
                 if self.mz_range.contains(peak.mz)
@@ -715,7 +715,6 @@ impl<'a> QueryPeaksIterator<'a> {
                     return self.next_in_current_bucket();
                 }
             }
-        }
         None
     }
 }

@@ -167,6 +167,8 @@ pub fn rolling_cosine_similarity<'a>(
     b: &'a [f32],
     window_size: usize,
 ) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
+    // As of RN ... Oct 5 2025, this is the hottest function in the codebase.
+
     // Check if vectors have the same length and are long enough for the window
     if a.len() != b.len() {
         return Err(DataProcessingError::ExpectedSlicesSameLength {
@@ -190,6 +192,20 @@ pub fn rolling_cosine_similarity<'a>(
         window_size,
         state: 0,
     })
+
+    // // This alternative is only slightly slower ...
+    // let left_padding = window_size / 2;
+    // let right_padding = window_size - left_padding - 1;
+    // let tmp = a
+    //     .windows(window_size)
+    //     .zip(b.windows(window_size))
+    //     .map(|(a_win, b_win)| cosine_similarity(a_win, b_win).unwrap());
+    // // Pad the beginning and end with NaNs
+    // let iter = std::iter::repeat(f32::NAN)
+    //     .take(left_padding)
+    //     .chain(tmp)
+    //     .chain(std::iter::repeat(f32::NAN).take(right_padding));
+    // Ok(iter)
 }
 
 struct RollingCosineIterator<'a> {
@@ -212,9 +228,9 @@ impl Iterator for RollingCosineIterator<'_> {
         let in_init_padding = self.state < self.window_size / 2;
         let in_end_padding = self.state >= self.a.len() - self.window_size / 2;
         if in_init_padding || in_end_padding {
-            return Some(f32::NAN);
+            Some(f32::NAN)
         } else {
-            return Some(self.buffer.calculate_similarity());
+            Some(self.buffer.calculate_similarity())
         }
     }
 

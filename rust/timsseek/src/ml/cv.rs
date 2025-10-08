@@ -271,7 +271,7 @@ impl<const N: usize> DataBuffer<N> {
             }
         }
 
-        for feat_idx in (0..N).into_iter() {
+        for feat_idx in (0..N) {
             for e in self.accum_buffer.iter() {
                 // Maybe its faster to make the vec with zeros and assign to the
                 // positions ... so we iterate only once per elemnent instead
@@ -282,7 +282,7 @@ impl<const N: usize> DataBuffer<N> {
         }
 
         assert_eq!(self.accum_buffer.len(), self.response_buffer.len());
-        assert!(self.accum_buffer.len() > 0, "No data for fold {}", fold);
+        assert!(!self.accum_buffer.is_empty(), "No data for fold {}", fold);
     }
 
     fn as_matrix(&self) -> (Matrix<'_, f64>, &'_ [f64]) {
@@ -323,7 +323,6 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
     /// IF YOUR DATA IS ORDERED IN ANY WAY, COULD LEAD TO BIASED RESULTS.
     pub fn new(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self {
         let assigned_fold: Vec<u8> = (0..data.len())
-            .into_iter()
             .map(|x| (x % n_folds as usize).try_into().unwrap())
             .collect();
         Self {
@@ -343,9 +342,8 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         self.fold_classifiers.clear();
         // 3 folds == [0, 1, 2]
         (0..self.n_folds)
-            .into_iter()
             .for_each(|_| self.fold_classifiers.push(None));
-        for fold in (0..self.n_folds).into_iter() {
+        for fold in (0..self.n_folds) {
             self.fit_fold(fold, train_buffer, val_buffer)?
         }
         Ok(())
@@ -355,12 +353,12 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         let mut scores = vec![0.0; self.data.len()];
         let mut buffer = DataBuffer::default();
 
-        for train_i in (0..self.n_folds).into_iter() {
-            let train_i = train_i as u8;
+        for train_i in (0..self.n_folds) {
+            let train_i = train_i;
             let early_stop_i = self.next_fold(train_i);
 
-            for inference_i in (0..self.n_folds).into_iter() {
-                let inference_i = inference_i as u8;
+            for inference_i in (0..self.n_folds) {
+                let inference_i = inference_i;
                 if inference_i == train_i {
                     continue;
                 };

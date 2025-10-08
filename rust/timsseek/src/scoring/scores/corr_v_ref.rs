@@ -6,6 +6,8 @@ use timsquery::models::{
 };
 use timsquery::traits::key_like::KeyLike;
 
+// This is used to calculate the correlation with the theoretical intensity.
+// of either the isotope pattern or the predicted fragment intensities.
 pub fn calculate_cosine_with_ref<FH: KeyLike>(
     slices: &RTMajorIntensityArray<FH, f32>,
     ref_slice: &[f32],
@@ -20,6 +22,7 @@ pub fn calculate_cosine_with_ref<FH: KeyLike>(
 const REF_GAUSSIAN: [f32; 7] = [0.0044, 0.054, 0.242, 0.399, 0.242, 0.054, 0.0044];
 const REF_GAUSS_OFFSET: usize = 4;
 
+// Note that padding is not hadled here, so the output will be smaller than the input.
 fn slide_cosine_v_gaussian(
     slice: &[f32],
 ) -> impl Iterator<Item = Result<f32, DataProcessingError>> + '_ {

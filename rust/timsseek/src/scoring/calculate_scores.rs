@@ -161,6 +161,10 @@ impl IntensityArrays {
     // Right now I KNOW this is an icredibly dumb operation
     // and I should move this upstream BUT I want to finish the other
     // refactor changes first ... JSPP Apr-18-2025
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, intensity_arrays, expected_intensities), level = "trace")
+    )]
     pub fn reset_with(
         &mut self,
         intensity_arrays: &ChromatogramCollector<IonAnnot, f32>,
@@ -252,6 +256,10 @@ impl TimeResolvedScores {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, intensity_arrays), level = "trace")
+    )]
     fn calculate_lazyscores(
         &mut self,
         intensity_arrays: &IntensityArrays,
@@ -281,6 +289,10 @@ impl TimeResolvedScores {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, intensity_arrays), level = "trace")
+    )]
     fn calculate_similarity_scores(&mut self, intensity_arrays: &IntensityArrays) {
         self.ms1_cosine_ref_sim = corr_v_ref::calculate_cosine_with_ref(
             &intensity_arrays.ms1_rtmajor,
@@ -301,31 +313,36 @@ impl TimeResolvedScores {
             .for_each(|x| *x = x.max(1e-3));
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, intensity_arrays), level = "trace")
+    )]
     fn calculate_coelution_scores(
         &mut self,
         intensity_arrays: &IntensityArrays,
     ) -> Result<(), DataProcessingError> {
-        let filter: Option<fn(&IonAnnot) -> bool> = None;
-        self.ms2_coelution_score
-            .extend(
-                coelution_score::coelution_vref_score_filter::<10, IonAnnot>(
-                    &intensity_arrays.ms2_mzmajor,
-                    self.ms2_lazyscore.as_slice(),
-                    COELUTION_WINDOW_WIDTH,
-                    &filter,
-                )?,
-            );
-        self.ms1_coelution_score
-            .extend(coelution_score::coelution_vref_score_filter::<6, i8>(
-                &intensity_arrays.ms1_mzmajor,
-                // Note we DO use the ms2 lazyscore as reference here
-                self.ms2_lazyscore.as_slice(),
-                7,
-                &Some(|x: &i8| *x >= 0i8),
-            )?);
+        coelution_score::coelution_vref_score_filter_into::<IonAnnot>(
+            &intensity_arrays.ms2_mzmajor,
+            self.ms2_lazyscore.as_slice(),
+            COELUTION_WINDOW_WIDTH,
+            &|_| true,
+            &mut self.ms2_coelution_score,
+        )?;
+        coelution_score::coelution_vref_score_filter_into::<i8>(
+            &intensity_arrays.ms1_mzmajor,
+            // Note we DO use the ms2 lazyscore as reference here
+            self.ms2_lazyscore.as_slice(),
+            7,
+            &|x: &i8| *x >= 0i8,
+            &mut self.ms1_coelution_score,
+        )?;
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, intensity_arrays), level = "trace")
+    )]
     fn calculate_gaussian_correlation_scores(
         &mut self,
         intensity_arrays: &IntensityArrays,
@@ -343,6 +360,10 @@ impl TimeResolvedScores {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self), level = "trace")
+    )]
     fn smooth_scores(&mut self) {
         gaussblur_in_place(&mut self.ms2_lazyscore);
         gaussblur_in_place(&mut self.ms1_coelution_score);
@@ -613,6 +634,10 @@ impl PeptideScorer {
     ///
     /// A `Result` containing the `MainScore` on success, or a `DataProcessingError` if
     /// the scoring fails (e.g., due to insufficient data).
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, prescore), level = "trace")
+    )]
     pub fn score(&mut self, prescore: &PreScore) -> Result<MainScore, DataProcessingError> {
         self.intensity_arrays
             .reset_with(&prescore.query_values, &prescore.expected_intensities)?;
@@ -633,6 +658,10 @@ impl PeptideScorer {
         &self.time_resolved_scores
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, prescore), level = "trace")
+    )]
     fn calculate_scores_with_intensities(
         &mut self,
         prescore: &PreScore,
@@ -765,8 +794,6 @@ impl PartialOrd for ScoreInTime {
         self.score.partial_cmp(&other.score)
     }
 }
-
-impl PreScore {}
 
 /// Contains the final scores and features for a peptide candidate at its detected apex.
 ///

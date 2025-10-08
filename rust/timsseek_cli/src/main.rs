@@ -80,6 +80,7 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 fn main() -> std::result::Result<(), errors::CliError> {
     // Initialize logging
     tracing_subscriber::fmt()
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())

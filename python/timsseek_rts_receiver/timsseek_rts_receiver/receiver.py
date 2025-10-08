@@ -134,11 +134,11 @@ def show_results(data, column, subtitle=None, key_prefix=""):
         column.write(str(data))
         st.stop()
 
-    # # breakpoint()
     # extractions = Extractions(**data["data"]["extractions"])
     # main_score_elements = MainScoreElements(**data["data"]["main_score_elements"])
     # search_results = SearchResults(**data["data"]["search_results"])
     # tmp = ResponseData(**data["data"])
+
     res: Response = Response(**data)
     main_score = res.data.search_results.main_score
     column.subheader("Main Score: " + str(main_score))
