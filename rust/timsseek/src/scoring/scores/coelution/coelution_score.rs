@@ -1,6 +1,9 @@
 use crate::errors::DataProcessingError;
 use crate::utils::correlation::rolling_cosine_similarity;
-use timsquery::models::{Array2D, MzMajorIntensityArray};
+use timsquery::models::{
+    Array2D,
+    MzMajorIntensityArray,
+};
 use tracing::trace;
 
 // /// Calculates the coelution score of a set of chromatograms.

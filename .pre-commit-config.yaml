@@ -8,24 +8,22 @@ repos:
     - id: fmt
       name: fmt
       description: Format files with cargo fmt.
-      entry: cargo +nightly fmt
+      entry: task fmt
       language: system
-      types: [rust]
-      args: ["--"]
+      always_run: true
+      pass_filenames: false
     - id: cargo-check
       name: cargo check
       description: Check the package for errors.
       entry: cargo check
       language: system
-      types: [rust]
+      always_run: true
       pass_filenames: false
     - id: clippy
       name: clippy
       description: Lint rust sources
-      entry: cargo clippy
+      entry: task clippy
       language: system
-      args: ["--", "-D", "warnings"]
-      types: [rust]
       pass_filenames: false
 
 

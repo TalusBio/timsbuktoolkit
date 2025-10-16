@@ -82,6 +82,11 @@ where
     start_idx..end_idx
 }
 
+/// TupleRange represents a range defined by a tuple of two elements (T, T).
+///
+/// It represents a range as closed-closed [a, b], meaning both endpoints are inclusive.
+/// Importantly, it ensures that the first element is always less than or equal to the second,
+/// to enforce early exit in cases where a range would be propagated poinlessly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TupleRange<T: Copy + PartialOrd>(T, T);
 
@@ -109,8 +114,8 @@ impl<T: Copy + PartialOrd + std::fmt::Debug> TupleRange<T> {
         (self.0, self.1)
     }
 
-    pub fn as_range(&self) -> std::ops::Range<T> {
-        self.0..self.1
+    pub fn as_inclusive_range(&self) -> std::ops::RangeInclusive<T> {
+        self.0..=self.1
     }
 
     pub fn contains(&self, x: T) -> bool {
@@ -174,17 +179,6 @@ where
 
     fn try_into(self) -> Result<TupleRange<T>, Self::Error> {
         TupleRange::try_new(self.0, self.1)
-    }
-}
-
-impl<T> TryInto<TupleRange<T>> for std::ops::Range<T>
-where
-    T: Copy + PartialOrd + std::fmt::Debug,
-{
-    type Error = TupleRangeError<T>;
-
-    fn try_into(self) -> Result<TupleRange<T>, Self::Error> {
-        TupleRange::try_new(self.start, self.end)
     }
 }
 

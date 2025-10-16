@@ -24,7 +24,7 @@ tasks:
 
   clippy:
     cmds:
-      - cargo clippy {{.CLI_ARGS}}
+      - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
 
   bench:
     cmds:

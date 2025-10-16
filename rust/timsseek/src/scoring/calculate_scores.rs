@@ -121,6 +121,7 @@ pub struct IntensityArrays {
     pub ms2_mzmajor: MzMajorIntensityArray<IonAnnot, f32>,
     pub ms1_expected_intensities: Vec<f32>,
     pub ms2_expected_intensities: Vec<f32>,
+    pub ref_time_ms: Arc<[u32]>,
 }
 
 impl IntensityArrays {
@@ -136,25 +137,15 @@ impl IntensityArrays {
             .map(|_o| (IonAnnot::new('p', None, 1, 0).unwrap(), 867.8309))
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
+        let num_rts = ref_time_ms.len();
         Ok(Self {
-            ms1_rtmajor: RTMajorIntensityArray::try_new_empty(
-                ms1_order.clone(),
-                ref_time_ms.clone(),
-            )?,
-            ms1_mzmajor: MzMajorIntensityArray::try_new_empty(
-                ms1_order.clone(),
-                ref_time_ms.clone(),
-            )?,
-            ms2_rtmajor: RTMajorIntensityArray::try_new_empty(
-                ms2_order.clone(),
-                ref_time_ms.clone(),
-            )?,
-            ms2_mzmajor: MzMajorIntensityArray::try_new_empty(
-                ms2_order.clone(),
-                ref_time_ms.clone(),
-            )?,
+            ms1_rtmajor: RTMajorIntensityArray::try_new_empty(ms1_order.clone(), num_rts, 0)?,
+            ms1_mzmajor: MzMajorIntensityArray::try_new_empty(ms1_order.clone(), num_rts, 0)?,
+            ms2_rtmajor: RTMajorIntensityArray::try_new_empty(ms2_order.clone(), num_rts, 0)?,
+            ms2_mzmajor: MzMajorIntensityArray::try_new_empty(ms2_order.clone(), num_rts, 0)?,
             ms1_expected_intensities: vec![0.5; num_ms1],
             ms2_expected_intensities: ms2_ref_vec,
+            ref_time_ms,
         })
     }
 
@@ -375,7 +366,7 @@ impl TimeResolvedScores {
     }
 
     fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
-        let rt_len = intensity_arrays.ms1_rtmajor.rts_ms.len();
+        let rt_len = intensity_arrays.ref_time_ms.len();
         let five_pct_index = rt_len * 5 / 100;
         let half_five_pct_index = five_pct_index / 2;
 
@@ -685,7 +676,7 @@ impl PeptideScorer {
 
         // This is a delta next with the constraint that it has to be more than 5% of the max
         // index apart from the max.
-        let ten_pct_index = prescore.query_values.fragments.rts_ms.len() / 20;
+        let ten_pct_index = prescore.query_values.ref_rt_ms.len() / 20;
         let max_window =
             max_loc.saturating_sub(ten_pct_index)..max_loc.saturating_add(ten_pct_index);
         let next = apex_candidates
@@ -713,12 +704,8 @@ impl PeptideScorer {
 
         // FOR NOW I will leave this assert and if it holds this is an assumption I can make and
         // I will remove the dead code above.
-        assert_eq!(
-            prescore.query_values.fragments.rts_ms,
-            prescore.query_values.precursors.rts_ms
-        );
         let (ms1_loc, ms2_loc) = (max_loc, max_loc);
-        let ref_time_ms = prescore.query_values.precursors.rts_ms[max_loc];
+        let ref_time_ms = prescore.query_values.ref_rt_ms[max_loc];
 
         let summed_ms1_int: f32 = match self.intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
             Some(row) => row.iter().sum(),

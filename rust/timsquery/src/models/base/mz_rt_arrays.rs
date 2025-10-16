@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub struct RTMajorIntensityArray<K: Clone, V: ArrayElement> {
     pub arr: Array2D<V>,
     pub mz_order: Arc<[(K, f64)]>,
-    pub rts_ms: Arc<[u32]>,
+    pub cycle_offset: usize,
 }
 
 /// Array representation of a series of chromatograms
@@ -28,7 +28,7 @@ pub struct RTMajorIntensityArray<K: Clone, V: ArrayElement> {
 pub struct MzMajorIntensityArray<K: Clone + Eq, V: ArrayElement> {
     pub arr: Array2D<V>,
     pub mz_order: Arc<[(K, f64)]>,
-    pub rts_ms: Arc<[u32]>,
+    pub cycle_offset: usize,
 }
 
 impl<K: KeyLike, V: ArrayElement + Serialize> Serialize for MzMajorIntensityArray<K, V> {
@@ -40,7 +40,6 @@ impl<K: KeyLike, V: ArrayElement + Serialize> Serialize for MzMajorIntensityArra
         // The values should go in different fields ...
         state.serialize_field("arr", &self.arr)?;
         state.serialize_field("mz_order", &self.mz_order)?;
-        state.serialize_field("rts_ms", &self.rts_ms)?;
         state.end()
     }
 }
@@ -48,85 +47,24 @@ impl<K: KeyLike, V: ArrayElement + Serialize> Serialize for MzMajorIntensityArra
 #[derive(Debug)]
 pub struct MutableChromatogram<'a, V: ArrayElement> {
     slc: &'a mut [V],
-    rts: &'a [u32],
-    last_idx_rt: (usize, u32), // Not a fan that this makes it grow from 32-48 bytes ...
+    cycle_offset: usize,
 }
 
 impl<V: ArrayElement> MutableChromatogram<'_, V> {
-    fn new<'a>(slc: &'a mut [V], rts: &'a [u32]) -> MutableChromatogram<'a, V> {
-        assert!(!rts.is_empty());
-        assert_eq!(slc.len(), rts.len());
-
-        MutableChromatogram {
-            slc,
-            rts,
-            // Start at the end so that the first search always does a full search
-            last_idx_rt: (rts.len() - 1, *rts.last().unwrap()),
-        }
+    fn new<'a>(slc: &'a mut [V], cycle_offset: usize) -> MutableChromatogram<'a, V> {
+        MutableChromatogram { slc, cycle_offset }
     }
 
-    /// Add the passed value at the first position higher
-    /// than the internal reference retention time.
-    ///
-    /// For instance if the reference positions are [10, 20, 30]
-    /// any value with rt <10 will be assigned to the first element
-    /// any between 10-20 to the second, and any higher to the third.
-    pub fn add_at_close_rt<T>(&mut self, rt_ms: u32, intensity: T)
+    pub fn add_at_index<T>(&mut self, idx: u32, intensity: T)
     where
         V: std::ops::AddAssign<T>,
     {
-        let loc = self.find_insertion_idx(rt_ms);
-        self.slc[loc] += intensity;
-    }
-
-    #[inline(always)]
-    fn find_insertion_idx(&mut self, rt_ms: u32) -> usize {
-        // Optimization bc commonly rts will be passed in increasing order
-        // so I can start searching from the last found index and peek ahead
-        // a few indices before doing a full binary search.
-        if rt_ms == self.last_idx_rt.1 {
-            return self.last_idx_rt.0;
-        };
-
-        if rt_ms < self.last_idx_rt.1 {
-            self.binary_search_idx(rt_ms)
-        } else if let Some(idx) = self.peekahead_search_idx(rt_ms) {
-            idx
-        } else {
-            self.binary_search_idx(rt_ms)
+        let idx = idx.saturating_sub(self.cycle_offset as u32);
+        if idx as usize >= self.slc.len() {
+            self.slc[self.slc.len() - 1] += intensity;
+            return;
         }
-    }
-
-    #[inline(always)]
-    fn binary_search_idx(&mut self, rt_ms: u32) -> usize {
-        // For now clamping at the length seems like the right move ...
-        // but in the future I might make a more explicit behabior returning an out of bounds
-        // error.
-        let loc = self
-            .rts
-            .partition_point(|&rt| rt < rt_ms)
-            .min(self.slc.len() - 1);
-        self.last_idx_rt = (loc, self.rts[loc]);
-        loc
-    }
-
-    #[inline(always)]
-    fn peekahead_search_idx(&mut self, rt_ms: u32) -> Option<usize> {
-        const MAX_STEPS: usize = 8;
-        // 8 is picked bc ... why not ... JK
-        // Since the rts are u32 in theory all of those will be in a single
-        // cache line.
-
-        let start = self.last_idx_rt.0;
-
-        for (offset, &rt) in self.rts[start..].iter().take(MAX_STEPS).enumerate() {
-            if rt >= rt_ms {
-                let idx = start + offset;
-                self.last_idx_rt = (idx, rt);
-                return Some(idx);
-            }
-        }
-        None
+        self.slc[idx as usize] += intensity;
     }
 }
 
@@ -136,10 +74,11 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     /// Errors will be returned if the data is empty.
     pub fn try_new_empty(
         mz_order: Arc<[(K, f64)]>,
-        rts_ms: Arc<[u32]>,
+        rt_cycles: usize,
+        cycle_offset: usize,
     ) -> Result<Self, DataProcessingError> {
         let major_dim = mz_order.len();
-        let minor_dim = rts_ms.len();
+        let minor_dim = rt_cycles;
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
@@ -149,7 +88,7 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         Ok(Self {
             arr: out_arr,
             mz_order,
-            rts_ms: rts_ms.clone(),
+            cycle_offset,
         })
     }
 
@@ -180,21 +119,13 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         self.mz_order.iter().zip(
             self.arr
                 .iter_mut_rows()
-                .map(|slc| MutableChromatogram::new(slc, &self.rts_ms)),
+                .map(|slc| MutableChromatogram::new(slc, self.cycle_offset)),
         )
     }
 
     pub fn iter_mzs(&self) -> impl Iterator<Item = (&(K, f64), &[V])> {
         assert_eq!(self.arr.nrows(), self.mz_order.len());
         self.mz_order.iter().zip(self.arr.iter_rows())
-    }
-
-    pub fn iter_items_at(&self, rt_ms: u32) -> impl Iterator<Item = (&K, V)> {
-        let idx = self
-            .rts_ms
-            .partition_point(|&rt| rt < rt_ms)
-            .min(self.rts_ms.len() - 1);
-        self.iter_column_idx(idx)
     }
 
     /// Create a clone of the array but transposed,
@@ -204,7 +135,7 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         RTMajorIntensityArray {
             arr: self.arr.transpose_clone(),
             mz_order: self.mz_order.clone(),
-            rts_ms: self.rts_ms.clone(),
+            cycle_offset: self.cycle_offset,
         }
     }
 
@@ -239,12 +170,11 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     ) -> Result<(), DataProcessingError> {
         // TODO consider if its worth abstracting these 5 lines ...
         let major_dim = array.mz_order.len();
-        let minor_dim = array.rts_ms.len();
+        let minor_dim = array.arr.ncols();
         if minor_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         self.mz_order = array.mz_order.clone();
-        self.rts_ms = array.rts_ms.clone();
         self.arr
             .reset_with_value(minor_dim, major_dim, V::default());
         self.fill_with(array);
@@ -271,9 +201,7 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
                 .expect("Sufficient Capacity");
         }
         self.mz_order = order;
-        // I am pretty sure this is not needed ...
-        // Should I be checking for it??
-        self.rts_ms = array.rts_ms.clone();
+        self.cycle_offset = array.cycle_offset;
     }
 
     pub fn num_ions(&self) -> usize {
@@ -284,9 +212,10 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
 impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
     pub fn try_new_empty(
         order: Arc<[(FH, f64)]>,
-        rts_ms: Arc<[u32]>,
+        num_cycles: usize,
+        cycle_offset: usize,
     ) -> Result<Self, DataProcessingError> {
-        let minor_dim = rts_ms.len();
+        let minor_dim = num_cycles;
         let major_dim = order.len();
         if major_dim == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
@@ -300,7 +229,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
         Ok(Self {
             arr: out_arr,
             mz_order: order.clone(),
-            rts_ms: rts_ms.clone(),
+            cycle_offset,
         })
     }
 
@@ -311,7 +240,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
         // Q: wtf am I using this for??
         // TODO consider if its worth abstracting these 5 lines ...
         let n_mz = array.mz_order.len();
-        let n_rt = array.rts_ms.len();
+        let n_rt = array.arr.ncols();
         if n_mz == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
@@ -319,7 +248,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         self.mz_order = array.mz_order.clone();
-        self.rts_ms = array.rts_ms.clone();
+        self.cycle_offset = array.cycle_offset;
         self.arr.reset_with_value(n_mz, n_rt, V::default());
         self.fill_with(array);
         Ok(())
@@ -341,7 +270,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
             }
         }
         self.mz_order = order;
-        self.rts_ms = array.rts_ms.clone();
+        self.cycle_offset = array.cycle_offset;
     }
 }
 
@@ -363,15 +292,15 @@ mod tests {
         let order: Arc<[(String, f64)]> =
             [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
         let mut arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+            MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
         assert_eq!(arr.arr.values, vec![0.0; 8]);
         // I am expecting that adding under bounds gets added to the lowest.
         let to_insert = [(0, 4.0), (21, 2.0)];
         for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
-            yc.add_at_close_rt(x.0, x.1);
-            yc.add_at_close_rt(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
             // I am expecting that out of bounds gets added to the last.
-            yc.add_at_close_rt(x.0 + 50, x.1);
+            yc.add_at_index(x.0 + 50, x.1);
         }
         assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
     }
@@ -388,7 +317,7 @@ mod tests {
         let arr = MzMajorIntensityArray {
             arr: Array2D::from_flat_vector(vals.clone(), mz_order.len(), rts_ms.len()).unwrap(),
             mz_order,
-            rts_ms,
+            cycle_offset: 0,
         };
         assert_eq!(arr.arr.values, vals);
         let t_arr: RTMajorIntensityArray<String, f32> = arr.transpose_clone();
@@ -407,23 +336,25 @@ mod tests {
         let order: Arc<[(String, f64)]> =
             [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
         let mut arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+            MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
         let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
         let mut target_arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
         assert_eq!(arr.arr.values, vec![0.0; 8]);
         assert_eq!(target_arr.arr.values, vec![0.0]);
 
         // I am expecting that adding under bounds gets added to the lowest.
-        let to_insert = [(0, 4.0), (21, 2.0)];
+        // let to_insert = [(0, 4.0), (21, 2.0)]; // Old versions added based on RT, new ones based
+        // on index
+        let to_insert = [(0, 4.0), (1, 2.0)];
         for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
-            yc.add_at_close_rt(x.0, x.1);
-            yc.add_at_close_rt(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
             // I am expecting that out of bounds gets added to the last.
-            yc.add_at_close_rt(x.0 + 50, x.1);
+            yc.add_at_index(x.0 + 50, x.1);
         }
         assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
 
@@ -440,12 +371,12 @@ mod tests {
         let order: Arc<[(String, f64)]> =
             [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
         let mut arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+            MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
         let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
         let target_arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+            MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
         assert_eq!(arr.arr.values, vec![0.0; 8]);
         assert_eq!(target_arr.arr.values, vec![0.0]);
@@ -460,23 +391,25 @@ mod tests {
         let order: Arc<[(String, f64)]> =
             [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
         let mut arr: MzMajorIntensityArray<String, f32> =
-            MzMajorIntensityArray::try_new_empty(order, rt_ms).unwrap();
+            MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
         let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
         let mut target_arr: RTMajorIntensityArray<String, f32> =
-            RTMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt).unwrap();
+            RTMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
         assert_eq!(arr.arr.values, vec![0.0; 8]);
         assert_eq!(target_arr.arr.values, vec![0.0]);
 
         // I am expecting that adding under bounds gets added to the lowest.
-        let to_insert = [(0, 4.0), (21, 2.0)];
+        // let to_insert = [(0, 4.0), (21, 2.0)]; old versions inserted by a reference retention
+        // times, new ones jus take indices. (was more ergonomic but very slow ...)
+        let to_insert = [(0, 4.0), (1, 2.0)];
         for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
-            yc.add_at_close_rt(x.0, x.1);
-            yc.add_at_close_rt(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
+            yc.add_at_index(x.0, x.1);
             // I am expecting that out of bounds gets added to the last.
-            yc.add_at_close_rt(x.0 + 50, x.1);
+            yc.add_at_index(x.0 + 50, x.1);
         }
 
         target_arr.try_reset_with(&arr).unwrap();

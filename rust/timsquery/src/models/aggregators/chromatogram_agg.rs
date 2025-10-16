@@ -19,20 +19,23 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub eg: Arc<ElutionGroup<T>>,
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
+    pub ref_rt_ms: Arc<[u32]>,
 }
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
         eg: Arc<ElutionGroup<T>>,
-        ref_rt_mss: Arc<[u32]>,
+        ref_rt_ms: Arc<[u32]>,
     ) -> Result<Self, DataProcessingError> {
         let precursors =
-            MzMajorIntensityArray::try_new_empty(eg.precursors.clone(), ref_rt_mss.clone())?;
-        let fragments = MzMajorIntensityArray::try_new_empty(eg.fragments.clone(), ref_rt_mss)?;
+            MzMajorIntensityArray::try_new_empty(eg.precursors.clone(), ref_rt_ms.len(), 0)?;
+        let fragments =
+            MzMajorIntensityArray::try_new_empty(eg.fragments.clone(), ref_rt_ms.len(), 0)?;
         Ok(Self {
             eg,
             precursors,
             fragments,
+            ref_rt_ms,
         })
     }
 
@@ -48,29 +51,9 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.fragments.iter_mut_mzs()
     }
 
-    pub fn unpack(
-        self,
-    ) -> (
-        Arc<ElutionGroup<T>>,
-        MzMajorIntensityArray<i8, V>,
-        MzMajorIntensityArray<T, V>,
-    ) {
-        (self.eg, self.precursors, self.fragments)
-    }
-
     pub fn rt_range_milis(&self) -> TupleRange<u32> {
-        let min = self
-            .fragments
-            .rts_ms
-            .first()
-            .unwrap()
-            .min(self.precursors.rts_ms.first().unwrap());
-        let max = self
-            .fragments
-            .rts_ms
-            .last()
-            .unwrap()
-            .min(self.precursors.rts_ms.last().unwrap());
+        let min = self.ref_rt_ms.first().unwrap();
+        let max = self.ref_rt_ms.last().unwrap();
         (*min, *max).try_into().expect("rt range should be sorted")
     }
 }
