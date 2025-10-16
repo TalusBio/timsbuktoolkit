@@ -238,6 +238,7 @@ def xgboost_stuff(shuffled_df: pl.DataFrame, cols: list[str], output_dir: Path):
             y_col_label,
             outfile,
             title,
+            add_one_to_one: bool = False,
         ):
             fig, ax = plt.subplots(1, 2, figsize=(10, 5))
             x_col, xlabel = x_col_label
@@ -255,6 +256,16 @@ def xgboost_stuff(shuffled_df: pl.DataFrame, cols: list[str], output_dir: Path):
                 ax[i].set_title(f"{title} ({sub_title})")
                 ax[i].set_xlabel(xlabel)
                 ax[i].set_ylabel(ylabel)
+                if add_one_to_one:
+                    min_val = min(
+                        df[x_col].min(),
+                        df[y_col].min(),
+                    )
+                    max_val = max(
+                        df[x_col].max(),
+                        df[y_col].max(),
+                    )
+                    ax[i].plot([min_val, max_val], [min_val, max_val], "r--", lw=1)
             fig.tight_layout()
             fig.savefig(outfile)
             plt.close()
@@ -269,6 +280,15 @@ def xgboost_stuff(shuffled_df: pl.DataFrame, cols: list[str], output_dir: Path):
             ("ms2_mz_error_0", "Mass error (m/z)"),
             ("obs_rt_seconds", "Observed RT (s)"),
             output_dir / "mass_error_rt_1pct.png",
+            "1% FDR",
+        )
+
+        plot_hexbin(
+            target_df,
+            decoy_df,
+            ("ms2_mz_error_0", "Mass error (m/z)"),
+            ("precursor_mz", "Precursor m/z"),
+            output_dir / "mass_error_mz_1pct.png",
             "1% FDR",
         )
 
@@ -313,6 +333,7 @@ def xgboost_stuff(shuffled_df: pl.DataFrame, cols: list[str], output_dir: Path):
             ("obs_rt_seconds", "Observed RT (s)"),
             output_dir / "predicted_rt_obs_rt_1pct.png",
             "1% FDR",
+            add_one_to_one=True,
         )
     else:
         pprint("No values at 1% FDR")

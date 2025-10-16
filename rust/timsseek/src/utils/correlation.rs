@@ -152,7 +152,7 @@ impl CosineSimilarityCircularBuffer {
 ///     0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319, 0.9746319,
 ///     f32::NAN,
 /// ];
-/// let results = rolling_cosine_similarity(&a, &b, 3).unwrap();
+/// let results = rolling_cosine_similarity(&a, &b, 3).unwrap().collect::<Vec<_>>();
 /// assert_eq!(results.len(), expect_res.len());
 /// for (result, expect) in results.iter().zip(expect_res.iter()) {
 ///     if result.is_nan() {
@@ -225,8 +225,11 @@ impl Iterator for RollingCosineIterator<'_> {
         }
         self.buffer.update(self.a[self.state], self.b[self.state]);
         self.state += 1;
-        let in_init_padding = self.state < self.window_size / 2;
-        let in_end_padding = self.state >= self.a.len() - self.window_size / 2;
+        // So if the window size is 3, we want to pad the first and last elements
+        let left_padding = self.window_size / 2;
+        let right_padding = self.window_size - left_padding - 1;
+        let in_init_padding = self.state <= left_padding;
+        let in_end_padding = self.state > (self.a.len() - right_padding);
         if in_init_padding || in_end_padding {
             Some(f32::NAN)
         } else {
@@ -318,13 +321,18 @@ mod tests {
     fn test_rolling_basic() {
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![1.0, 2.0, 3.0, 4.0];
+        let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, f32::NAN];
         // Weird things happen when even number windows are used.
-        let expect_res: [f32; 4] = [f32::NAN, 1.0, 1.0, 1.0];
-        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 2).unwrap().collect();
+        let results: Vec<_> = rolling_cosine_similarity(&a, &b, 3).unwrap().collect();
         assert_eq!(results.len(), 4);
         for result in results.iter().zip(expect_res.iter()) {
             if result.0.is_nan() {
-                assert!(result.1.is_nan());
+                assert!(
+                    result.1.is_nan(),
+                    "Nan at position within {:?} expected {:?}",
+                    results,
+                    expect_res,
+                );
             } else {
                 assert!(
                     (result.0 - result.1).abs() < 1e-4,
@@ -360,7 +368,7 @@ mod tests {
         assert_eq!(results.len(), 4);
         assert!(results[0].is_nan());
         assert!(results[3].is_nan());
-        assert_eq!(results[1], 1.0, "{:?}", results);
+        assert_eq!(results[1], 0.0, "{:?}", results);
         assert_eq!(results[2], 1.0, "{:?}", results);
     }
 

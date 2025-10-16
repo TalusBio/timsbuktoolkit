@@ -219,7 +219,6 @@ impl Iterator for SpeclibReader<'_> {
     }
 }
 
-// NDJSON reader (your existing logic)
 struct NdJsonReader<R: BufRead> {
     reader: R,
 }

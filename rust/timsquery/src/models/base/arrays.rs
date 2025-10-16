@@ -56,6 +56,29 @@ pub struct Array2D<T: ArrayElement> {
     pub(super) n_row: usize,
 }
 
+struct Array2DView<'a, T: ArrayElement> {
+    data: &'a Array2D<T>,
+    col_range: Range<usize>,
+    row_range: Range<usize>,
+}
+
+impl<T: Serialize + ArrayElement> Serialize for Array2DView<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.row_range.len()))?;
+        for (ir, row) in self.data.iter_rows().enumerate() {
+            if !self.row_range.contains(&ir) {
+                continue;
+            }
+            let row_slice = &row[self.col_range.clone()];
+            seq.serialize_element(row_slice)?;
+        }
+        seq.end()
+    }
+}
+
 impl<T: Serialize + ArrayElement> Serialize for Array2D<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

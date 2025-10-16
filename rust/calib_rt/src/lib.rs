@@ -1,6 +1,7 @@
-/// Core implementation of the Calib-RT algorithm.
-/// Original description
-/// https://doi.org/10.1093/bioinformatics/btae417
+//! Core implementation of the Calib-RT algorithm.
+//!
+//! Original description
+//! https://doi.org/10.1093/bioinformatics/btae417
 
 /// Custom error types for the Calib-RT library.
 #[derive(Debug, Clone)]
@@ -168,27 +169,25 @@ impl Grid {
         let mut max_in_row = vec![1; self.bins];
         let mut max_in_col = vec![1; self.bins];
 
-        for r in 0..self.bins {
-            for c in 0..self.bins {
+        for (r, mrow_elem) in max_in_row.iter_mut().enumerate() {
+            for (c, mcol_elem) in max_in_col.iter_mut().enumerate() {
                 let index = r * self.bins + c;
                 let freq = self.nodes[index].frequency;
-                if freq > max_in_row[r] {
-                    max_in_row[r] = freq;
+                if &freq > mrow_elem {
+                    *mrow_elem = freq;
                 }
-                if freq > max_in_col[c] {
-                    max_in_col[c] = freq;
+                if &freq > mcol_elem {
+                    *mcol_elem = freq;
                 }
             }
         }
 
-        for r in 0..self.bins {
-            for c in 0..self.bins {
-                let index = r * self.bins + c;
-                let node = &mut self.nodes[index];
-                node.suppressed = true;
-                if node.frequency == max_in_row[r] && node.frequency == max_in_col[c] {
-                    node.suppressed = false;
-                }
+        for (index, node) in self.nodes.iter_mut().enumerate() {
+            let r = index / self.bins;
+            let c = index % self.bins;
+            node.suppressed = true;
+            if node.frequency == max_in_row[r] && node.frequency == max_in_col[c] {
+                node.suppressed = false;
             }
         }
     }
@@ -245,9 +244,10 @@ fn find_optimal_path(nodes: &mut [Node]) -> Vec<Point> {
     // 2.3 Path Finding: Find the path with the maximum weight sum
     let mut max_path_weight = 0.0;
     let mut end_of_path_idx = 0;
-    for i in 0..n {
-        if max_weights[i] > max_path_weight {
-            max_path_weight = max_weights[i];
+
+    for (i, max_w) in max_weights.into_iter().enumerate() {
+        if max_w > max_path_weight {
+            max_path_weight = max_w;
             end_of_path_idx = i;
         }
     }

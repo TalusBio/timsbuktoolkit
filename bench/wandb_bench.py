@@ -207,6 +207,7 @@ class TimsseekRunner:
             ("mobility_error_plot", "mobility_error_rt_1pct.png"),
             ("mz_mobility_plot", "mz_mobility_1pct.png"),
             ("predicted_rt_obs_plot", "predicted_rt_obs_rt_1pct.png"),
+            ("mass_error_mz_1pct_plot", "mass_error_mz_1pct.png"),
         ]
 
         for metric_name, file_name in xgboost_images:

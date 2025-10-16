@@ -341,8 +341,7 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
     ) -> Result<(), ForustError> {
         self.fold_classifiers.clear();
         // 3 folds == [0, 1, 2]
-        (0..self.n_folds)
-            .for_each(|_| self.fold_classifiers.push(None));
+        (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
         for fold in 0..self.n_folds {
             self.fit_fold(fold, train_buffer, val_buffer)?
         }
@@ -354,11 +353,9 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         let mut buffer = DataBuffer::default();
 
         for train_i in 0..self.n_folds {
-            let train_i = train_i;
             let early_stop_i = self.next_fold(train_i);
 
             for inference_i in 0..self.n_folds {
-                let inference_i = inference_i;
                 if inference_i == train_i {
                     continue;
                 };
@@ -449,7 +446,7 @@ mod test {
         Uniform,
     };
 
-    use crate::ml::FeatureLike;
+    use crate::ml::cv::FeatureLike;
 
     struct MyFeature {
         vals: [f64; 5],
