@@ -3,6 +3,11 @@
 //! Original description
 //! https://doi.org/10.1093/bioinformatics/btae417
 
+pub mod grid;
+mod pathfinding;
+pub mod plotting;
+pub use grid::Grid;
+
 /// Custom error types for the Calib-RT library.
 #[derive(Debug, Clone)]
 pub enum CalibRtError {
@@ -14,6 +19,8 @@ pub enum CalibRtError {
     ZeroRange,
     /// Returned when prediction is attempted for a value outside the calibrated range.
     OutOfBounds(f64),
+    /// Returned when the weight of a point is invalid (e.g., Nan, infinite ...).
+    UnsupportedWeight(f64),
 }
 
 /// Represents a single data point on the library-measured-RT plane.
@@ -21,6 +28,7 @@ pub enum CalibRtError {
 pub struct Point {
     pub x: f64,
     pub y: f64,
+    pub weight: f64,
 }
 
 /// Represents the final calibration curve.
@@ -58,11 +66,11 @@ impl CalibrationCurve {
     pub fn predict(&self, x_val: f64) -> Result<f64, CalibRtError> {
         let first_x = self.points.first().unwrap().x;
         let last_x = self.points.last().unwrap().x;
-        if x_val <= first_x {
+        if x_val < first_x {
             return Err(CalibRtError::OutOfBounds(self.predict_with_index(x_val, 1)));
         }
 
-        if x_val >= last_x {
+        if x_val > last_x {
             return Err(CalibRtError::OutOfBounds(
                 self.predict_with_index(x_val, self.slopes.len()),
             ));
@@ -85,189 +93,6 @@ impl CalibrationCurve {
     }
 }
 
-/// Represents a node (cell) in the grid.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Node {
-    center: Point,
-    frequency: u32,
-    suppressed: bool,
-}
-
-/// Represents the gridded data after initial filtering.
-pub struct Grid {
-    nodes: Vec<Node>,
-    x_range: (f64, f64),
-    y_range: (f64, f64),
-    x_span: f64,
-    y_span: f64,
-    bins: usize,
-}
-
-impl Grid {
-    /// Creates a new, empty grid with a fixed geometry.
-    /// The center of each node is constant based on the grid resolution.
-    pub fn new(
-        bins: usize,
-        x_range: (f64, f64),
-        y_range: (f64, f64),
-    ) -> Result<Self, CalibRtError> {
-        if bins == 0 {
-            return Err(CalibRtError::ZeroRange);
-        };
-        let x_span = x_range.1 - x_range.0;
-        let y_span = y_range.1 - y_range.0;
-
-        if x_span <= 0.0 || y_span <= 0.0 {
-            return Err(CalibRtError::ZeroRange);
-        }
-
-        let mut nodes = Vec::with_capacity(bins * bins);
-        for r in 0..bins {
-            for c in 0..bins {
-                let center_x = x_range.0 + (c as f64 + 0.5) * (x_span / bins as f64);
-                let center_y = y_range.0 + (r as f64 + 0.5) * (y_span / bins as f64);
-                nodes.push(Node {
-                    center: Point {
-                        x: center_x,
-                        y: center_y,
-                    },
-                    frequency: 0,
-                    suppressed: false,
-                });
-            }
-        }
-
-        Ok(Self {
-            nodes,
-            x_range,
-            y_range,
-            x_span,
-            y_span,
-            bins,
-        })
-    }
-
-    /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
-    pub fn add_point(&mut self, point: &Point) {
-        let Point { x, y } = point;
-
-        let gx = (((x - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
-        let gy = (((y - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
-
-        let gx = gx.min(self.bins - 1);
-        let gy = gy.min(self.bins - 1);
-
-        let index = gy * self.bins + gx;
-        if let Some(node) = self.nodes.get_mut(index) {
-            node.frequency += 1;
-        }
-    }
-
-    /// Applies nonmaximal suppression to the grid nodes.
-    pub fn suppress_nonmax(&mut self) {
-        // We start with 1s to prevent the max being empty in all ...
-        let mut max_in_row = vec![1; self.bins];
-        let mut max_in_col = vec![1; self.bins];
-
-        for (r, mrow_elem) in max_in_row.iter_mut().enumerate() {
-            for (c, mcol_elem) in max_in_col.iter_mut().enumerate() {
-                let index = r * self.bins + c;
-                let freq = self.nodes[index].frequency;
-                if &freq > mrow_elem {
-                    *mrow_elem = freq;
-                }
-                if &freq > mcol_elem {
-                    *mcol_elem = freq;
-                }
-            }
-        }
-
-        for (index, node) in self.nodes.iter_mut().enumerate() {
-            let r = index / self.bins;
-            let c = index % self.bins;
-            node.suppressed = true;
-            if node.frequency == max_in_row[r] && node.frequency == max_in_col[c] {
-                node.suppressed = false;
-            }
-        }
-    }
-}
-
-// --------------------------------------------------------------------------------
-// Module 2: Optimal Ascending Path Identification
-// --------------------------------------------------------------------------------
-
-/// Finds the highest-weight path through the nodes that satisfies the monotonic constraint.
-fn find_optimal_path(nodes: &mut [Node]) -> Vec<Point> {
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-
-    // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
-    nodes.sort_by(|a, b| {
-        a.center
-            .x
-            .partial_cmp(&b.center.x)
-            .unwrap()
-            .then_with(|| a.center.y.partial_cmp(&b.center.y).unwrap())
-    });
-
-    let n = nodes.len();
-    let mut max_weights = vec![0.0; n];
-    let mut prev_node_indices = vec![None; n];
-
-    for i in 0..n {
-        max_weights[i] = nodes[i].frequency as f64; // Path can start at any node
-
-        for j in 0..i {
-            // 2.1 & 2.2: Check for monotonic edge and calculate weight
-            if nodes[i].center.x > nodes[j].center.x && nodes[i].center.y > nodes[j].center.y {
-                let dx = nodes[i].center.x - nodes[j].center.x;
-                let dy = nodes[i].center.y - nodes[j].center.y;
-                let dist = (dx * dx + dy * dy).sqrt();
-
-                if dist > 1e-6 {
-                    // Avoid division by zero
-                    let edge_weight =
-                        (nodes[i].frequency as f64 * nodes[j].frequency as f64) / dist;
-                    let new_weight = max_weights[j] + edge_weight;
-
-                    if new_weight > max_weights[i] {
-                        max_weights[i] = new_weight;
-                        prev_node_indices[i] = Some(j);
-                    }
-                }
-            }
-        }
-    }
-
-    // 2.3 Path Finding: Find the path with the maximum weight sum
-    let mut max_path_weight = 0.0;
-    let mut end_of_path_idx = 0;
-
-    for (i, max_w) in max_weights.into_iter().enumerate() {
-        if max_w > max_path_weight {
-            max_path_weight = max_w;
-            end_of_path_idx = i;
-        }
-    }
-
-    // Reconstruct the path
-    let mut path = Vec::new();
-    let mut current_idx_opt = Some(end_of_path_idx);
-    while let Some(current_idx) = current_idx_opt {
-        path.push(nodes[current_idx].center);
-        current_idx_opt = prev_node_indices[current_idx];
-    }
-    path.reverse();
-
-    path
-}
-
-// --------------------------------------------------------------------------------
-// Main Calib-RT Function
-// --------------------------------------------------------------------------------
-
 /// Calibrates retention times using the Calib-RT algorithm.
 ///
 /// # Arguments
@@ -279,7 +104,7 @@ fn find_optimal_path(nodes: &mut [Node]) -> Vec<Point> {
 /// # Returns
 /// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
 pub fn calibrate<'a>(
-    points: impl IntoIterator<Item = &'a Point>,
+    points: impl IntoIterator<Item = &'a Point> + 'a,
     x_range: (f64, f64),
     y_range: (f64, f64),
     grid_size: usize,
@@ -287,27 +112,35 @@ pub fn calibrate<'a>(
     // Module 1: Grid data and apply nonmaximal suppression
     let mut grid = Grid::new(grid_size, x_range, y_range)?;
 
-    let mut point_count = 0;
-    for point in points {
-        grid.add_point(point);
-        point_count += 1;
-    }
+    grid.extend_points(points)?;
+    grid.suppress_nonmax()?;
+    grid.display_heatmap();
 
-    if point_count == 0 {
-        return Err(CalibRtError::NoPoints);
-    }
-
-    grid.suppress_nonmax();
-
-    let mut filtered_nodes: Vec<Node> = grid
+    let mut filtered_nodes: Vec<grid::Node> = grid
         .nodes
         .into_iter()
-        .filter(|n| !n.suppressed && n.frequency > 0)
+        .filter(|n| !n.suppressed && n.center.weight > 0.0)
         .collect();
 
     // Module 2: Find the optimal ascending path
-    let optimal_path_points = find_optimal_path(&mut filtered_nodes);
-
+    let optimal_path_points = pathfinding::find_optimal_path(&mut filtered_nodes);
     // Module 3: Fit the final points and prepare for extrapolation
-    CalibrationCurve::new(optimal_path_points)
+    let calcurve = CalibrationCurve::new(optimal_path_points);
+    match calcurve {
+        Ok(ref c) => {
+            plotting::plot_function(
+                |x| match c.predict(x) {
+                    Ok(y) => y,
+                    Err(CalibRtError::OutOfBounds(y)) => y,
+                    Err(_) => panic!("Unexpected error during plotting"),
+                },
+                (x_range.0, x_range.1),
+                40,
+                20,
+            );
+        }
+        Err(ref e) => (),
+    };
+
+    calcurve
 }
