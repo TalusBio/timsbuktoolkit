@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "rust/calib_rt",
+    "rust/calibrt",
     "rust/timscentroid",
     "rust/timsseek",
     "rust/timsseek_cli",

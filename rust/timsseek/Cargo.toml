@@ -20,6 +20,7 @@ rand = "0.9.2"
 
 # Workspace member deps
 timsquery = { path = "../timsquery" }
+calibrt = { path = "../calibrt" }
 
 # Workspace-inherited deps
 timsrust = { workspace = true }
@@ -38,5 +39,6 @@ tracing-subscriber = { workspace = true }
 # internals, meant only for profiling use cases and generate
 # VERY verbose output.
 instrumentation = []
+serial_scoring = []
 
 [lib]

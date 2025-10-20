@@ -184,7 +184,6 @@ def to_mokapot_df(
         "delta_second_next",
         "apex_lazyerscore",
         "apex_lazyerscore_vs_baseline",
-        "apex_norm_lazyerscore_vs_baseline",
         "ms2_isotope_lazyerscore",
         "ms2_lazyerscore",
         "ms2_isotope_lazyerscore_ratio",
@@ -270,6 +269,7 @@ def to_mokapot_df(
             # Cycle counts
             "raising_cycles",
             "falling_cycles",
+            "apex_norm_lazyerscore_vs_baseline",
         )
         + loggable_cols
         + imputable_cols

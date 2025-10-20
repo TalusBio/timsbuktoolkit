@@ -322,11 +322,9 @@ impl Speclib {
 
         let reader = SpeclibReader::new(file, format)?;
         let elements: Result<Vec<_>, _> = reader.collect();
+        let elems = elements?;
 
-        Ok(Self {
-            elems: elements?,
-            idx: 0,
-        })
+        Ok(Self { elems, idx: 0 })
     }
 
     // pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {

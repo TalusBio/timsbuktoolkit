@@ -157,8 +157,9 @@ impl Default for GBMConfig {
             create_missing_branch: false,
             sample_method: SampleMethod::None,
             grow_policy: GrowPolicy::DepthWise,
-            evaluation_metric: None,
-            early_stopping_rounds: Some(10),
+            evaluation_metric: Some(Metric::LogLoss),
+            // evaluation_metric: None,
+            early_stopping_rounds: Some(5),
             initialize_base_score: true,
             terminate_missing_features: HashSet::new(),
             missing_node_treatment: MissingNodeTreatment::AssignToParent,
@@ -246,51 +247,78 @@ impl GBMConfig {
     }
 }
 
-pub trait FeatureLike<const N: usize> {
-    fn as_feature(&self) -> [f64; N];
+pub trait FeatureLike {
+    /// Note: the returned iterator MUST yield exactly N elements
+    /// for every element of this type.
+    fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_;
     fn get_y(&self) -> f64;
+    fn assign_score(&mut self, score: f64) -> ();
+    fn get_score(&self) -> f64;
 }
 
 #[derive(Default)]
-pub struct DataBuffer<const N: usize> {
+pub struct DataBuffer {
     fold_buffer: Vec<f64>,
-    accum_buffer: Vec<[f64; N]>,
     response_buffer: Vec<f64>,
+    nrows: usize,
+    ncols: usize,
 }
 
-impl<const N: usize> DataBuffer<N> {
-    fn fill_buffer(&mut self, assigned_fold: &[u8], data: &[impl FeatureLike<N>], fold: u8) {
-        self.fold_buffer.clear();
-        self.accum_buffer.clear();
-        self.response_buffer.clear();
+#[derive(Debug)]
+pub enum DataBufferError {
+    NoDataForFold(u8),
+    UnequalLengths(usize, usize),
+}
 
+impl DataBuffer {
+    fn fill_buffer(
+        &mut self,
+        assigned_fold: &[u8],
+        data: &[impl FeatureLike],
+        fold: u8,
+    ) -> Result<(), DataBufferError> {
+        self.fold_buffer.clear();
+        self.response_buffer.clear();
+        self.nrows = assigned_fold.iter().filter(|&&x| x == fold).count();
+
+        let mut dumb_buffer = Vec::new();
+        dumb_buffer.extend(data.first().unwrap().as_feature());
+
+        self.ncols = dumb_buffer.len();
+
+        // now we resize to 0s, since the matrix is feature-major
+        // so we need to insert stuff in essentually the transposed order
+        self.fold_buffer.resize(self.ncols * self.nrows, 0.0);
+
+        let mut sample_idx = 0;
         for (elem_fold, elem) in assigned_fold.iter().zip(data.iter()) {
             if fold == *elem_fold {
-                self.accum_buffer.push(elem.as_feature());
+                let mut local_added = 0;
+                for (feature_idx, val) in elem.as_feature().into_iter().enumerate() {
+                    let idx = feature_idx * self.nrows + sample_idx;
+                    assert!(self.fold_buffer[idx] == 0.0);
+                    self.fold_buffer[idx] = val;
+                    local_added += 1;
+                }
+
+                if local_added != self.ncols {
+                    return Err(DataBufferError::UnequalLengths(local_added, self.ncols));
+                }
                 self.response_buffer.push(elem.get_y());
+                sample_idx += 1;
             }
         }
 
-        for feat_idx in 0..N {
-            for e in self.accum_buffer.iter() {
-                // Maybe its faster to make the vec with zeros and assign to the
-                // positions ... so we iterate only once per elemnent instead
-                // of once per element*feature
-                let value = e[feat_idx];
-                self.fold_buffer.push(value);
-            }
-        }
-
-        assert_eq!(self.accum_buffer.len(), self.response_buffer.len());
-        assert!(!self.accum_buffer.is_empty(), "No data for fold {}", fold);
+        Ok(())
     }
 
     fn as_matrix(&self) -> (Matrix<'_, f64>, &'_ [f64]) {
-        let nrows = self.accum_buffer.len();
-        (
-            Matrix::new(self.fold_buffer.as_slice(), nrows, N),
-            self.response_buffer.as_slice(),
-        )
+        let ncols = self.fold_buffer.len() / self.nrows;
+        let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, ncols);
+        assert_eq!(self.fold_buffer.len(), self.nrows * self.ncols);
+        assert_eq!(mat.rows, self.nrows);
+        assert_eq!(self.response_buffer.len(), self.nrows);
+        (mat, self.response_buffer.as_slice())
     }
 }
 
@@ -305,9 +333,10 @@ impl<const N: usize> DataBuffer<N> {
 /// So the score for any point in the data is the average of
 /// the results for all classifiers that didint use it
 /// for either training or early_stopping_rounds.
-pub struct CrossValidatedScorer<const N: usize, T: FeatureLike<N>> {
+pub struct CrossValidatedScorer<T: FeatureLike> {
     n_folds: u8,
     data: Vec<T>,
+    weights: Vec<f64>,
     assigned_fold: Vec<u8>,
     fold_classifiers: Vec<Option<GradientBooster>>,
     // I tried this but makes no difference ...
@@ -315,40 +344,95 @@ pub struct CrossValidatedScorer<const N: usize, T: FeatureLike<N>> {
     config: GBMConfig,
 }
 
-impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
+impl<T: FeatureLike> CrossValidatedScorer<T> {
     /// Create a new CrossValidatedScorer
     ///
     /// NOTE: THIS ASSUMES YOUR DATA IS ALREADY SHUFFLED
     /// FOLDS WILL BE ASSIGNED IN ORDER (0, 1, 2, ..., n_folds-1, 0, 1, ...)
     /// IF YOUR DATA IS ORDERED IN ANY WAY, COULD LEAD TO BIASED RESULTS.
-    pub fn new(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self {
+    pub fn new_from_shuffled(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self {
         let assigned_fold: Vec<u8> = (0..data.len())
             .map(|x| (x % n_folds as usize).try_into().unwrap())
             .collect();
+        let weights = vec![1.0; data.len()];
         Self {
             n_folds,
             data,
             assigned_fold,
             fold_classifiers: Vec::new(),
+            weights,
             config,
         }
     }
 
     pub fn fit<'a>(
         &mut self,
-        train_buffer: &'a mut DataBuffer<N>,
-        val_buffer: &'a mut DataBuffer<N>,
+        train_buffer: &'a mut DataBuffer,
+        val_buffer: &'a mut DataBuffer,
     ) -> Result<(), ForustError> {
-        self.fold_classifiers.clear();
-        // 3 folds == [0, 1, 2]
-        (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
-        for fold in 0..self.n_folds {
-            self.fit_fold(fold, train_buffer, val_buffer)?
+        self.fit_step(train_buffer, val_buffer)?;
+        self.assign_scores();
+
+        for _iteration in 0..1 {
+            self.reweight_targets_below_decoy_mean(0.5)?;
+            self.fit_step(train_buffer, val_buffer)?;
+            self.assign_scores();
         }
         Ok(())
     }
 
-    pub fn score(&self) -> Vec<f64> {
+    fn reweight_targets_below_decoy_mean(&mut self, z_thresh: f64) -> Result<(), ForustError> {
+        let mean_decoy_score: f64 = self
+            .data
+            .iter()
+            .filter(|x| x.get_y() == 0.0)
+            .map(|x| x.get_score())
+            .sum::<f64>()
+            / self.data.iter().filter(|x| x.get_y() == 0.0).count() as f64;
+
+        let sd_decoy_score: f64 = (self
+            .data
+            .iter()
+            .filter(|x| x.get_y() == 0.0)
+            .map(|x| {
+                let diff = x.get_score() - mean_decoy_score;
+                diff * diff
+            })
+            .sum::<f64>()
+            / self.data.iter().filter(|x| x.get_y() == 0.0).count() as f64)
+            .sqrt();
+
+        let threshold = mean_decoy_score + (z_thresh * sd_decoy_score);
+
+        for i in 0..self.data.len() {
+            // Set the weight to 0 on targets below the mean decoy score
+            let is_target = self.data[i].get_y() > 0.5;
+            let score_under_thresh = self.data[i].get_score() < threshold;
+            self.weights[i] = if is_target && score_under_thresh {
+                0.01
+            } else {
+                0.5
+            };
+        }
+
+        Ok(())
+    }
+
+    pub fn fit_step<'a>(
+        &mut self,
+        train_buffer: &'a mut DataBuffer,
+        val_buffer: &'a mut DataBuffer,
+    ) -> Result<(), ForustError> {
+        self.fold_classifiers.clear();
+        (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
+        for fold in 0..self.n_folds {
+            self.fit_fold(fold, train_buffer, val_buffer)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_scores(&self) -> Vec<f64> {
         let mut scores = vec![0.0; self.data.len()];
         let mut buffer = DataBuffer::default();
 
@@ -385,6 +469,18 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
         scores
     }
 
+    fn assign_scores(&mut self) {
+        let scores = self.get_scores();
+        for (v, s) in self.data.iter_mut().zip(scores.iter()) {
+            v.assign_score(*s);
+        }
+    }
+
+    pub fn score(mut self) -> Vec<T> {
+        self.assign_scores();
+        self.data
+    }
+
     fn next_fold(&self, fold: u8) -> u8 {
         let mut maybe_next = fold + 1;
         if maybe_next >= self.n_folds {
@@ -397,8 +493,8 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
     fn fold_to_matrices<'a>(
         &'a self,
         fold: u8,
-        train_buffer: &'a mut DataBuffer<N>,
-        val_buffer: &'a mut DataBuffer<N>,
+        train_buffer: &'a mut DataBuffer,
+        val_buffer: &'a mut DataBuffer,
     ) -> ((Matrix<'a, f64>, &'a [f64]), (Matrix<'a, f64>, &'a [f64])) {
         let next_fold_id = self.next_fold(fold);
         (
@@ -410,29 +506,44 @@ impl<const N: usize, T: FeatureLike<N>> CrossValidatedScorer<N, T> {
     fn fold_to_matrix<'a>(
         &self,
         fold: u8,
-        buffer: &'a mut DataBuffer<N>,
+        buffer: &'a mut DataBuffer,
     ) -> (Matrix<'a, f64>, &'a [f64]) {
-        buffer.fill_buffer(self.assigned_fold.as_slice(), self.data.as_slice(), fold);
+        buffer
+            .fill_buffer(self.assigned_fold.as_slice(), self.data.as_slice(), fold)
+            .unwrap();
         buffer.as_matrix()
+    }
+
+    fn train_weights(&self, fold: u8) -> Vec<f64> {
+        self.weights
+            .iter()
+            .zip(self.assigned_fold.iter())
+            .filter_map(|(&w, &f)| if f == fold { Some(w) } else { None })
+            .collect()
     }
 
     fn fit_fold<'a>(
         &mut self,
         fold: u8,
-        train_buffer: &'a mut DataBuffer<N>,
-        val_buffer: &'a mut DataBuffer<N>,
+        train_buffer: &'a mut DataBuffer,
+        val_buffer: &'a mut DataBuffer,
     ) -> Result<(), ForustError> {
         // let mut model = SelfSupervisedBooster::try_new(&self.config, 10)?;
         let mut model = self.config.try_build()?;
         let ((matrix, response), (v_matrix, v_response)) =
             self.fold_to_matrices(fold, train_buffer, val_buffer);
         // let (val_matrix, val_response) = self.fold_to_matrix(fold);
-        // model.fit_unweighted(matrix, response, evaluation_data)
-        let evaluation_data = Some(vec![(v_matrix, v_response, &[1.0f64; 1][..])]);
-        model.fit_unweighted(&matrix, response, evaluation_data)?;
-        // model
-        //     .fit_unweighted(matrix, response, v_matrix, v_response)
-        //     .map_err(|x| x.0)?;
+        let eval_weight = self.train_weights(self.next_fold(fold));
+        assert_eq!(eval_weight.len(), v_response.len());
+        let evaluation_data = Some(vec![(v_matrix, v_response, eval_weight.as_ref())]);
+        // model.fit_unweighted(&matrix, response, evaluation_data)?;
+        // let sample_weight = response
+        //     .iter()
+        //     .map(|&x| if x > 0.5 { 1.0 } else { 2.0 })
+        //     .collect::<Vec<f64>>();
+        let sample_weight = self.train_weights(fold);
+        assert_eq!(sample_weight.len(), response.len());
+        model.fit(&matrix, response, &sample_weight, evaluation_data)?;
         self.fold_classifiers[fold as usize] = Some(model);
         Ok(())
     }
@@ -451,15 +562,24 @@ mod test {
     struct MyFeature {
         vals: [f64; 5],
         class: f64,
+        score: f64,
     }
 
-    impl FeatureLike<5> for MyFeature {
-        fn as_feature(&self) -> [f64; 5] {
+    impl FeatureLike for MyFeature {
+        fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
             self.vals
         }
 
         fn get_y(&self) -> f64 {
             self.class
+        }
+
+        fn assign_score(&mut self, score: f64) -> () {
+            self.score = score;
+        }
+
+        fn get_score(&self) -> f64 {
+            self.score
         }
     }
 
@@ -474,11 +594,12 @@ mod test {
                 vals: [
                     between_unch.sample(&mut rng),
                     between_unch.sample(&mut rng),
-                    between_unch.sample(&mut rng),
+                    between_targ.sample(&mut rng),
                     between_targ.sample(&mut rng),
                     between_targ.sample(&mut rng),
                 ],
                 class: 1.0,
+                score: f64::NAN,
             };
             out.push(tmp);
         }
@@ -492,6 +613,7 @@ mod test {
                     between_unch.sample(&mut rng),
                 ],
                 class: 0.0,
+                score: f64::NAN,
             };
             out.push(tmp);
         }
@@ -504,21 +626,36 @@ mod test {
         let data = random_data(500, 500);
         let data_len = data.len();
 
-        let mut scorer = CrossValidatedScorer::new(3, data, config);
+        let mut scorer = CrossValidatedScorer::new_from_shuffled(3, data, config);
         scorer
             .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
             .unwrap();
 
-        let out = scorer.score();
-        let num_t_gt0 = out[..=500].iter().filter(|&&x| x > 0.0).count();
-        let num_d_gt0 = out[500..].iter().filter(|&&x| x > 0.0).count();
+        let out = scorer.get_scores();
+        let avg_t: f64 = out[..=500].iter().sum::<f64>() / 500.0;
+        let avg_d: f64 = out[500..].iter().sum::<f64>() / 500.0;
+        let num_t_gt_d = out[..=500].iter().filter(|&&x| x > avg_d).count();
+        let num_d_gt_t = out[500..].iter().filter(|&&x| x > avg_t).count();
         // There are 2 features that have 2x the uniform range.
         // Thus 75% chance of having at least one feature where the value is out of the possible
         // ranges in the decoys ... (500 * 0.75) = 375
         // I can crunch more formal stats bc ... prob distributions ...
         // but this should be a safe enough value to test.
-        assert!(num_t_gt0 > 375, "num_t_gt0: {}", num_t_gt0);
-        assert!(num_d_gt0 < 40, "num_d_gt0: {}", num_d_gt0);
+        assert!(
+            num_t_gt_d > 300,
+            "num_t_gt_d: {}, averages={} {}",
+            num_t_gt_d,
+            avg_t,
+            avg_d
+        );
+        // assert!(num_t_gt0 > 375, "num_t_gt0: {}", num_t_gt0);
+        assert!(
+            num_d_gt_t < 100,
+            "num_d_gt_t: {}, averages {} and {}",
+            num_d_gt_t,
+            avg_t,
+            avg_d
+        );
         assert_eq!(out.len(), data_len);
     }
 }

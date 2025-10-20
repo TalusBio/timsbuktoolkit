@@ -9,12 +9,23 @@ use timsquery::models::tolerance::RtTolerance;
 use timsquery::utils::TupleRange;
 use timsseek::scoring::Scorer;
 use timsseek::utils::serde::load_index_caching;
-use tracing::level_filters::LevelFilter;
 use tracing::{
     error,
     info,
 };
-use tracing_subscriber::EnvFilter;
+use tracing_profile::{
+    PrintTreeConfig,
+    PrintTreeLayer,
+};
+use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::fmt::{
+    self,
+};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{
+    self,
+};
 
 use cli::Cli;
 use config::{
@@ -23,6 +34,7 @@ use config::{
     OutputConfig,
 };
 use std::sync::Arc;
+// use tracing_profile::PerfettoLayer;
 
 #[cfg(target_os = "windows")]
 use mimalloc::MiMalloc;
@@ -78,14 +90,44 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 }
 
 fn main() -> std::result::Result<(), errors::CliError> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        ) // This uses RUST_LOG environment variable
+    let perf_filter = EnvFilter::builder()
+        .with_default_directive("trace".parse().unwrap())
+        .with_env_var("RUST_PERF_LOG")
+        .from_env_lossy();
+
+    // Filter out events but keep spans
+    let events_filter = tracing_subscriber::filter::filter_fn(|metadata| !metadata.is_event());
+
+    let fmt_filter = EnvFilter::builder()
+        .with_default_directive("info".parse().unwrap())
+        .with_env_var("RUST_LOG")
+        .from_env_lossy();
+
+    let (tree_layer, _guard) = PrintTreeLayer::new(PrintTreeConfig {
+        attention_above_percent: 25.0,
+        relevant_above_percent: 2.5,
+        hide_below_percent: 0.0,
+        display_unaccounted: true,
+        no_color: false,
+        accumulate_spans_count: false,
+        accumulate_events: false,
+        aggregate_similar_siblings: true,
+    });
+
+    // let (pf_layer, pf_guard) = PerfettoLayer::new_from_env().unwrap();
+
+    let fmt_layer = fmt::layer()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_filter(fmt_filter);
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(
+            tree_layer
+                .with_filter(perf_filter)
+                .with_filter(events_filter),
+        )
+        // .with(pf_layer)
         .init();
 
     // Parse command line arguments

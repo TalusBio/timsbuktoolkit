@@ -10,6 +10,8 @@ timsquery = { path = "../timsquery" }
 regex = "1.11.1"
 
 # Workspace-inherited deps
+# tracing-profile = { version="0.10.11",features=["perfetto"] }
+tracing-profile = { path = "../../../tracing-profile/" }
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -30,3 +32,5 @@ path = "src/sample_speclib.rs"
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }
 
+[features]
+instrumentation = ["timsseek/instrumentation"]

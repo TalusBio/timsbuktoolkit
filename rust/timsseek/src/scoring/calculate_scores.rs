@@ -59,10 +59,7 @@ use super::{
 };
 use crate::errors::DataProcessingError;
 use crate::models::DigestSlice;
-use crate::utils::rolling_calculators::{
-    calculate_centered_std,
-    calculate_value_vs_baseline_into,
-};
+use crate::utils::math::lnfact_f32;
 use crate::utils::top_n_array::TopNArray;
 use crate::{
     ExpectedIntensities,
@@ -107,9 +104,10 @@ pub struct TimeResolvedScores {
     pub ms2_cosine_ref_sim: Vec<f32>,
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
-    pub ms2_lazyscore_vs_baseline: Vec<f32>,
+    // pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
-    pub ms2_lazyscore_vs_baseline_std: f32,
+    pub main_score: Vec<f32>,
+    // pub ms2_lazyscore_vs_baseline_std: f32,
 }
 
 #[derive(Debug)]
@@ -232,6 +230,14 @@ pub fn gaussblur_in_place(x: &mut [f32]) {
 }
 
 impl TimeResolvedScores {
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(
+            skip(self, intensity_arrays),
+            level = "trace",
+            name = "reset_time_resolved_scores"
+        )
+    )]
     pub fn try_reset_with(
         &mut self,
         intensity_arrays: &IntensityArrays,
@@ -242,7 +248,8 @@ impl TimeResolvedScores {
         self.calculate_coelution_scores(intensity_arrays)?;
         self.calculate_gaussian_correlation_scores(intensity_arrays)?;
         self.smooth_scores();
-        self.calculate_baseline_scores(intensity_arrays);
+        self.compute_main_scores();
+        // self.calculate_baseline_scores(intensity_arrays);
         self.check_lengths()?;
         Ok(())
     }
@@ -323,7 +330,7 @@ impl TimeResolvedScores {
             &intensity_arrays.ms1_mzmajor,
             // Note we DO use the ms2 lazyscore as reference here
             self.ms2_lazyscore.as_slice(),
-            7,
+            COELUTION_WINDOW_WIDTH,
             &|x: &i8| *x >= 0i8,
             &mut self.ms1_coelution_score,
         )?;
@@ -332,7 +339,7 @@ impl TimeResolvedScores {
 
     #[cfg_attr(
         feature = "instrumentation",
-        tracing::instrument(skip(self, intensity_arrays), level = "trace")
+        tracing::instrument(skip_all, level = "trace")
     )]
     fn calculate_gaussian_correlation_scores(
         &mut self,
@@ -365,30 +372,34 @@ impl TimeResolvedScores {
         gaussblur_in_place(&mut self.ms1_corr_v_gauss);
     }
 
-    fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
-        let rt_len = intensity_arrays.ref_time_ms.len();
-        let five_pct_index = rt_len * 5 / 100;
-        let half_five_pct_index = five_pct_index / 2;
+    // #[cfg_attr(
+    //     feature = "instrumentation",
+    //     tracing::instrument(skip_all, level = "trace")
+    // )]
+    // fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
+    //     let rt_len = intensity_arrays.ref_time_ms.len();
+    //     let five_pct_index = rt_len * 5 / 100;
+    //     let half_five_pct_index = five_pct_index / 2;
 
-        if five_pct_index > 100 {
-            warn!(
-                "High five_pct_index: {} (from rt_len: {})",
-                five_pct_index, rt_len
-            );
-        }
+    //     if five_pct_index > 100 {
+    //         warn!(
+    //             "High five_pct_index: {} (from rt_len: {})",
+    //             five_pct_index, rt_len
+    //         );
+    //     }
 
-        calculate_value_vs_baseline_into(
-            &self.ms2_lazyscore,
-            five_pct_index,
-            &mut self.ms2_lazyscore_vs_baseline,
-        );
+    //     calculate_value_vs_baseline_into(
+    //         &self.ms2_lazyscore,
+    //         five_pct_index,
+    //         &mut self.ms2_lazyscore_vs_baseline,
+    //     );
 
-        let baseline_slice = &self.ms2_lazyscore_vs_baseline
-            [half_five_pct_index..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_index)];
-        let lzb_std = calculate_centered_std(baseline_slice);
+    //     let baseline_slice = &self.ms2_lazyscore_vs_baseline
+    //         [half_five_pct_index..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_index)];
+    //     let lzb_std = calculate_centered_std(baseline_slice);
 
-        self.ms2_lazyscore_vs_baseline_std = lzb_std.max(1.0);
-    }
+    //     self.ms2_lazyscore_vs_baseline_std = lzb_std.max(1.0);
+    // }
 
     fn check_lengths(&self) -> Result<(), DataProcessingError> {
         let len = self.ms1_cosine_ref_sim.len();
@@ -412,11 +423,11 @@ impl TimeResolvedScores {
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms2_lazyscore,
-            ms2_lazyscore_vs_baseline,
-            // split_lazyscore,
+            // ms2_lazyscore_vs_baseline,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
-            ms2_lazyscore_vs_baseline_std: _,
+            main_score,
+            // ms2_lazyscore_vs_baseline_std: _,
         } = self;
 
         check_len!(ms1_cosine_ref_sim);
@@ -424,14 +435,19 @@ impl TimeResolvedScores {
         check_len!(ms2_cosine_ref_sim);
         check_len!(ms2_coelution_score);
         check_len!(ms2_lazyscore);
-        check_len!(ms2_lazyscore_vs_baseline);
+        // check_len!(ms2_lazyscore_vs_baseline);
         // check_len!(split_lazyscore);
         check_len!(ms2_corr_v_gauss);
         check_len!(ms1_corr_v_gauss);
+        check_len!(main_score);
 
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self), level = "trace")
+    )]
     fn clear(&mut self) {
         let TimeResolvedScores {
             ms1_cosine_ref_sim,
@@ -439,11 +455,12 @@ impl TimeResolvedScores {
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms2_lazyscore,
-            ms2_lazyscore_vs_baseline,
+            // ms2_lazyscore_vs_baseline,
             // split_lazyscore,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
-            ms2_lazyscore_vs_baseline_std: _,
+            main_score,
+            // ms2_lazyscore_vs_baseline_std: _,
         } = self;
 
         ms1_cosine_ref_sim.clear();
@@ -451,10 +468,11 @@ impl TimeResolvedScores {
         ms2_cosine_ref_sim.clear();
         ms2_coelution_score.clear();
         ms2_lazyscore.clear();
-        ms2_lazyscore_vs_baseline.clear();
+        // ms2_lazyscore_vs_baseline.clear();
         // split_lazyscore.clear();
         ms2_corr_v_gauss.clear();
         ms1_corr_v_gauss.clear();
+        main_score.clear();
     }
 
     pub fn new_with_capacity(capacity: usize) -> Self {
@@ -463,45 +481,41 @@ impl TimeResolvedScores {
         let ms2_cosine_ref_sim = Vec::with_capacity(capacity);
         let ms2_coelution_score = Vec::with_capacity(capacity);
         let ms2_lazyscore = Vec::with_capacity(capacity);
-        let ms2_lazyscore_vs_baseline = Vec::with_capacity(capacity);
+        // let ms2_lazyscore_vs_baseline = Vec::with_capacity(capacity);
         // let split_lazyscore = Vec::with_capacity(capacity);
         let ms2_corr_v_gauss = Vec::with_capacity(capacity);
         let ms1_corr_v_gauss = Vec::with_capacity(capacity);
+        let main_score = Vec::with_capacity(capacity);
         Self {
             ms1_cosine_ref_sim,
             ms1_coelution_score,
             ms2_cosine_ref_sim,
             ms2_coelution_score,
             ms2_lazyscore,
-            ms2_lazyscore_vs_baseline,
+            // ms2_lazyscore_vs_baseline,
             // split_lazyscore,
-            ms2_lazyscore_vs_baseline_std: 1.0,
+            // ms2_lazyscore_vs_baseline_std: 1.0,
             ms2_corr_v_gauss,
             ms1_corr_v_gauss,
+            main_score,
         }
     }
 
-    fn find_apex_candidates(&self) -> [ScoreInTime; 20] {
-        let mut candidate_groups: [TopNArray<2, ScoreInTime>; 21] = [TopNArray::new(); 21];
-        let five_pct_index = self.ms1_corr_v_gauss.len() * 5 / 100;
-        for (i, score) in self.main_score_iter().enumerate() {
-            if score.is_nan() {
-                continue;
-            }
-            let sit = ScoreInTime { score, index: i };
-            candidate_groups[i / five_pct_index].push(sit);
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip_all, level = "trace")
+    )]
+    fn compute_main_scores(&mut self) {
+        let len = self.ms1_corr_v_gauss.len();
+        self.main_score.clear();
+        for i in 0..len {
+            let score = self.main_score_at(i);
+            self.main_score.push(score);
         }
-        let mut candidates: TopNArray<20, ScoreInTime> = TopNArray::new();
-        for c in candidate_groups.iter() {
-            for val in c.get_values().iter() {
-                candidates.push(*val);
-            }
-        }
-        candidates.get_values()
     }
 
     pub fn main_score_iter(&self) -> impl '_ + Iterator<Item = f32> {
-        (0..self.ms1_corr_v_gauss.len()).map(|x| self.main_score_at(x))
+        self.main_score.iter().copied()
     }
 
     fn main_score_at(&self, idx: usize) -> f32 {
@@ -591,6 +605,62 @@ pub struct PeptideScorer {
     time_resolved_scores: TimeResolvedScores,
 }
 
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+fn find_top_with_exclusions<'a>(
+    slc: &'a [f32],
+    ranges: &'a mut [std::ops::Range<usize>],
+) -> Option<(f32, usize)> {
+    let mut top_idx: Option<usize> = None;
+    let mut top_val: Option<f32> = None;
+
+    // Sort by start of range
+    ranges.sort_by_key(|r| r.start);
+
+    let mut range_iter_idx = 0;
+    let mut current_exclusion_end = 0; // Track the furthest exclusion point
+
+    let mut idx = 0;
+    while idx < slc.len() {
+        // Check if we need to update our exclusion end point
+        while range_iter_idx < ranges.len() && ranges[range_iter_idx].start <= idx {
+            current_exclusion_end = current_exclusion_end.max(ranges[range_iter_idx].end);
+            range_iter_idx += 1;
+        }
+
+        // If we're in an excluded region, skip to the end
+        if idx < current_exclusion_end {
+            idx = current_exclusion_end;
+            continue;
+        }
+
+        let val = slc[idx];
+
+        match top_val {
+            Some(current_top) => {
+                if !val.is_nan() && val > current_top {
+                    top_val = Some(val);
+                    top_idx = Some(idx);
+                }
+            }
+            None => {
+                if !val.is_nan() {
+                    top_val = Some(val);
+                    top_idx = Some(idx);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    match (top_val, top_idx) {
+        (Some(v), Some(i)) => Some((v, i)),
+        _ => None,
+    }
+}
+
 impl PeptideScorer {
     /// Creates a new `PeptideScorer`.
     ///
@@ -649,6 +719,20 @@ impl PeptideScorer {
         &self.time_resolved_scores
     }
 
+    pub fn calculate_rise_and_fall_cycles(&self, max_loc: usize) -> (u8, u8) {
+        let raising_cycles = count_falling_steps(
+            max_loc,
+            -1,
+            self.time_resolved_scores.ms2_lazyscore.as_slice(),
+        );
+        let falling_cycles = count_falling_steps(
+            max_loc,
+            1,
+            self.time_resolved_scores.ms2_lazyscore.as_slice(),
+        );
+        (raising_cycles, falling_cycles)
+    }
+
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, prescore), level = "trace")
@@ -662,48 +746,46 @@ impl PeptideScorer {
         self.time_resolved_scores
             .try_reset_with(&self.intensity_arrays)?;
 
-        let apex_candidates = self.time_resolved_scores.find_apex_candidates();
-        let norm_lazy_std =
-            calculate_centered_std(&self.time_resolved_scores.ms2_lazyscore_vs_baseline);
-        let max_val = apex_candidates[0].score;
-        let max_loc = apex_candidates[0].index;
+        let max_loc = find_top_with_exclusions(&self.time_resolved_scores.main_score, &mut []);
 
+        if max_loc.is_none() {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("No main score found".into()),
+            });
+        }
+        let (max_val, max_loc) = max_loc.unwrap();
         if max_val == 0.0 {
             return Err(DataProcessingError::ExpectedNonEmptyData {
                 context: Some("No non-0 main score".into()),
             });
         }
+        let (raising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
 
-        // This is a delta next with the constraint that it has to be more than 5% of the max
-        // index apart from the max.
-        let ten_pct_index = prescore.query_values.ref_rt_ms.len() / 20;
-        let max_window =
-            max_loc.saturating_sub(ten_pct_index)..max_loc.saturating_add(ten_pct_index);
-        let next = apex_candidates
-            .iter()
-            .find(|x| !max_window.contains(&x.index));
-        let second_next = match next {
-            Some(next) => {
-                let next_window = next.index.saturating_sub(ten_pct_index)
-                    ..next.index.saturating_add(ten_pct_index);
-                apex_candidates
-                    .iter()
-                    .find(|x| !max_window.contains(&x.index) && !next_window.contains(&x.index))
-            }
-            None => None,
+        let max_width = self.time_resolved_scores.ms1_cosine_ref_sim.len();
+
+        let range_closuse = |apex: usize, factor: usize| -> std::ops::Range<usize> {
+            let start = apex.saturating_sub((raising_cycles as usize) * factor);
+            let end = apex + (factor * (falling_cycles as usize)) + 1;
+
+            (start)..(end.min(max_width))
         };
 
-        let delta_next = match next {
-            Some(next) => max_val - next.score,
-            None => f32::NAN,
-        };
-        let delta_second_next = match second_next {
-            Some(next) => max_val - next.score,
-            None => f32::NAN,
-        };
+        let max_window = range_closuse(max_loc, 2);
+        let next = find_top_with_exclusions(
+            &self.time_resolved_scores.main_score,
+            &mut [max_window.clone()],
+        )
+        .unwrap_or((0.0, max_loc)); // If none found, return 0.0 and max_loc
 
-        // FOR NOW I will leave this assert and if it holds this is an assumption I can make and
-        // I will remove the dead code above.
+        let second_next = find_top_with_exclusions(
+            &self.time_resolved_scores.main_score,
+            &mut [max_window.clone(), range_closuse(next.1, 1)],
+        )
+        .unwrap_or((0.0, max_loc)); // If none found, return 0.0 and max_loc
+
+        let delta_next = max_val - next.0;
+        let delta_second_next = max_val - second_next.0;
+
         let (ms1_loc, ms2_loc) = (max_loc, max_loc);
         let ref_time_ms = prescore.query_values.ref_rt_ms[max_loc];
 
@@ -728,7 +810,43 @@ impl PeptideScorer {
             None => 0,
         };
 
+        let peak_range = range_closuse(max_loc, 2);
+        let baseline_range = range_closuse(max_loc, 4);
+        let brs = baseline_range.start;
+
+        let div_factor = (baseline_range.len() as f32 - peak_range.len() as f32).max(1.0);
+        let lambda: f32 = (self.time_resolved_scores.ms2_lazyscore[baseline_range]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, x)| {
+                let real_i = brs + i;
+                if real_i < peak_range.start || real_i >= peak_range.end {
+                    // Replace nan with 0
+                    if x.is_nan() { Some(0.0) } else { Some(*x) }
+                } else {
+                    None
+                }
+            })
+            .sum::<f32>()
+            / div_factor)
+            .max(1.0);
+        // println!("lambda: {}", lambda);
+        let k = self.time_resolved_scores.ms2_lazyscore[max_loc];
+        // lnfact(k).exp()
+        // Straight up stolen from sage ... not sure if it fits out distribution
+        // assumptions ...
+        let mut poisson = lambda.powf(k) * f32::exp(-lambda) / lnfact_f32(k).exp();
+        if poisson.is_infinite() {
+            // Approximately the smallest positive non-zero value representable by f64
+            poisson = 1E-325;
+        }
+
+        // let norm_lazy_std =
+        //     calculate_centered_std(&self.time_resolved_scores.ms2_lazyscore_vs_baseline);
+        // let norm_lazy_std = 1.0;
+        let norm_lazy_std = lambda.sqrt().max(1.0);
         let lazyscore_z = self.time_resolved_scores.ms2_lazyscore[max_loc] / norm_lazy_std;
+        // println!("Lazy score z: {}", lazyscore_z);
         if lazyscore_z.is_nan() {
             let tmp = format!(
                 "Lazy score is NaN {} and {}",
@@ -736,16 +854,6 @@ impl PeptideScorer {
             );
             return Err(DataProcessingError::ExpectedFiniteNonNanData { context: tmp });
         }
-        let raising_cycles = count_falling_steps(
-            max_loc,
-            -1,
-            self.time_resolved_scores.ms2_lazyscore.as_slice(),
-        );
-        let falling_cycles = count_falling_steps(
-            max_loc,
-            1,
-            self.time_resolved_scores.ms2_lazyscore.as_slice(),
-        );
 
         Ok(MainScore {
             score: max_val,
@@ -758,7 +866,8 @@ impl PeptideScorer {
             ms2_summed_intensity: summed_ms2_int,
             npeaks: npeak_ms2 as u8,
             lazyscore: self.time_resolved_scores.ms2_lazyscore[max_loc],
-            lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline[max_loc],
+            // lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline[max_loc],
+            lazyscore_vs_baseline: poisson,
             lazyscore_z,
             ms2_corr_v_gauss: self.time_resolved_scores.ms2_corr_v_gauss[max_loc],
             ms1_corr_v_gauss: self.time_resolved_scores.ms1_corr_v_gauss[max_loc],
@@ -873,5 +982,49 @@ impl RelativeIntensities {
             }
         });
         Self { ms1, ms2 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_find_top_with_exclusions() {
+        let slc = vec![0.1, 0.5, 0.3, 0.9, 0.4, 0.8, 0.2];
+
+        let result = super::find_top_with_exclusions(&slc, &mut []);
+        assert_eq!(result, Some((0.9, 3)));
+
+        let mut foo: [std::ops::Range<usize>; 1] = [2..5];
+        let result = super::find_top_with_exclusions(&slc, &mut foo);
+        assert_eq!(result, Some((0.8, 5)));
+
+        let mut exclusions = vec![0..7, 2..7]; // Exclude all
+        let result = super::find_top_with_exclusions(&slc, &mut exclusions);
+        assert_eq!(result, None);
+
+        let mut exclusions = vec![]; // No exclusions
+        let result = super::find_top_with_exclusions(&slc, &mut exclusions);
+        assert_eq!(result, Some((0.9, 3)));
+    }
+
+    #[test]
+    fn test_overlapping_exclusions() {
+        let slc = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut ranges = vec![0..5, 2..8]; // Overlapping: should exclude 0-7
+
+        let result = super::find_top_with_exclusions(&slc, &mut ranges);
+
+        assert_eq!(result, Some((10.0, 9))); // Should find max at index 9
+    }
+
+    #[test]
+    fn test_nested_exclusions() {
+        let slc = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut ranges = vec![0..8, 2..4]; // Nested: should exclude 0-7
+
+        let result = super::find_top_with_exclusions(&slc, &mut ranges);
+
+        assert_eq!(result, Some((10.0, 9))); // Should find max at index 9
     }
 }
