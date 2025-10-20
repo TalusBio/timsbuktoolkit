@@ -193,6 +193,7 @@ class TimsseekRunner:
                     "ms": {"ppm": [15.0, 15.0]},
                     "mobility": {"percent": [10.0, 10.0]},
                     "quad": {"absolute": [0.1, 0.1]},
+                    "rt": {"minutes": [5, 5]},
                 },
             }
         }

@@ -84,10 +84,18 @@ pub struct Scorer<I: GenerallyQueriable<IonAnnot>> {
 
 impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
     // does inlining do anything here?
-    #[inline]
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, item), level = "trace")
+    )]
     fn _build_prescore(&self, item: &QueryItemToScore) -> PreScore {
+        let span = tracing::span!(tracing::Level::TRACE, "build_prescore::new_collector").entered();
+        // TODO: pass the collector as a buffer!!!
+        // Note: This is surprisingly cheap to do compared to adding the query.
         let mut agg =
             ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+        span.exit();
+
         self.index.add_query(&mut agg, &self.tolerance);
 
         // TODO: implement an 'is_empty' or equivalent to check if anything was added
@@ -139,7 +147,10 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         out
     }
 
-    #[inline]
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, item, main_score), level = "trace")
+    )]
     fn _secondary_query(&self, item: &QueryItemToScore, main_score: &MainScore) -> SecondaryQuery {
         // TODO: add the change in the tolerance target rt
         // proably usig the information in the prescore
@@ -181,7 +192,10 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         }
     }
 
-    #[inline]
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip_all, level = "trace")
+    )]
     fn _finalize_step(
         &self,
         item: &QueryItemToScore,
@@ -253,6 +267,16 @@ impl IonSearchAccumulator {
         }
         self.timings += item.1;
         self
+    }
+}
+
+impl FromIterator<(Option<IonSearchResults>, ScoreTimings)> for IonSearchAccumulator {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (Option<IonSearchResults>, ScoreTimings)>,
+    {
+        iter.into_iter()
+            .fold(IonSearchAccumulator::default(), IonSearchAccumulator::fold)
     }
 }
 
@@ -363,6 +387,10 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         })
     }
 
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, items_to_score), level = "trace")
+    )]
     pub fn score_iter(
         &self,
         items_to_score: &[QueryItemToScore],
@@ -380,22 +408,55 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
             .unwrap()
         };
 
-        let results: IonSearchAccumulator = items_to_score
-            .into_par_iter()
-            .with_min_len(512)
-            .filter(|x| {
-                let tmp = x.query.get_precursor_mz_limits();
-                let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should alredy be ordered");
-                self.fragmented_range.intersects(lims)
-            })
-            .map_init(init_fn, |scorer, item| {
-                // The pre-score is essentually just the collected intensities.
-                // TODO: Figure out how to remove this clone ...
-                let mut timings = ScoreTimings::default();
-                let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
-                (maybe_score, timings)
-            })
-            .collect();
+        let filter_fn = |x: &&QueryItemToScore| {
+            let tmp = x.query.get_precursor_mz_limits();
+            let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
+            self.fragmented_range.intersects(lims)
+        };
+
+        #[cfg(not(feature = "serial_scoring"))]
+        let results: IonSearchAccumulator = {
+            items_to_score
+                .into_par_iter()
+                .with_min_len(512)
+                .filter(filter_fn)
+                .map_init(init_fn, |scorer, item| {
+                    let mut timings = ScoreTimings::default();
+                    let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
+                    (maybe_score, timings)
+                })
+                .collect()
+        };
+
+        #[cfg(feature = "serial_scoring")]
+        let results: IonSearchAccumulator = {
+            let mut scorer = init_fn();
+            items_to_score
+                .into_iter()
+                .filter(filter_fn)
+                .map(|item| {
+                    let mut timings = ScoreTimings::default();
+                    let maybe_score = self.buffered_score(item.clone(), &mut scorer, &mut timings);
+                    (maybe_score, timings)
+                })
+                .collect()
+        };
+        // let results: IonSearchAccumulator = items_to_score
+        //     .into_par_iter()
+        //     .with_min_len(512)
+        //     .filter(|x| {
+        //         let tmp = x.query.get_precursor_mz_limits();
+        //         let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should alredy be ordered");
+        //         self.fragmented_range.intersects(lims)
+        //     })
+        //     .map_init(init_fn, |scorer, item| {
+        //         // The pre-score is essentually just the collected intensities.
+        //         // TODO: Figure out how to remove this clone ...
+        //         let mut timings = ScoreTimings::default();
+        //         let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
+        //         (maybe_score, timings)
+        //     })
+        //     .collect();
 
         let elapsed = loc_score_start.elapsed();
         let avg_speed =

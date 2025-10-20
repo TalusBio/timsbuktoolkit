@@ -1,5 +1,6 @@
 pub mod cv;
 pub mod qvalues;
+pub use qvalues::rescore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetDecoy {
@@ -8,17 +9,12 @@ pub enum TargetDecoy {
 }
 
 pub trait LabelledScore {
-    fn get_score(&self) -> f64;
     fn get_label(&self) -> TargetDecoy;
     fn assign_qval(&mut self, q: f32);
     fn get_qval(&self) -> f32;
 }
 
 impl LabelledScore for (f64, TargetDecoy, f32) {
-    fn get_score(&self) -> f64 {
-        self.0
-    }
-
     fn get_label(&self) -> TargetDecoy {
         self.1
     }

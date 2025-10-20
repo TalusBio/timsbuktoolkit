@@ -12,6 +12,8 @@ use timsquery::{
 use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
+use timsseek::ml::qvalues::report_qvalues_at_thresholds;
+use timsseek::ml::rescore;
 use timsseek::scoring::scorer::{
     ScoreTimings,
     Scorer,
@@ -25,6 +27,10 @@ use tracing::{
     info,
 };
 
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
 pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
     // # I would like this to be streaming
@@ -56,6 +62,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )
     .unwrap();
+    let mut results: Vec<IonSearchResults> = Vec::new();
     query_iterator
         .as_slice()
         .chunks(chunk_size)
@@ -71,6 +78,7 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
             if let Some(last) = out.last() {
                 debug!("Best Score in chunk: {:#?}", last);
             }
+            results.extend(out.iter().cloned());
 
             for x in out.into_iter() {
                 pq_writer.add(x);
@@ -93,6 +101,53 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
         chunk_num,
         start.elapsed()
     );
+
+    // This is a really dirty deduplication step ... since some targets can be decoys as well
+    // we just sort by sequence and keep the best scoring one
+    results.sort_unstable_by(|x, y| {
+        let seq_ord = x.sequence.cmp(&y.sequence);
+        if seq_ord == std::cmp::Ordering::Equal {
+            // Move to the first position the target
+            match (x.is_target, y.is_target) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            }
+        } else {
+            seq_ord
+        }
+    });
+    results.dedup_by(|x, y| x.sequence == y.sequence);
+
+    // Sort in descending order of score
+    results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
+    assert!(results.first().unwrap().main_score >= results.last().unwrap().main_score);
+
+    let data = rescore(results);
+    for val in report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]) {
+        let (thresh, n_below_thresh, n_targets, n_decoys) = val;
+        println!(
+            "Found {} targets and {} decoys at q-value threshold {:.2} ({} total)",
+            n_targets, n_decoys, thresh, n_below_thresh
+        );
+    }
+    let out_path_pq = out_path.directory.join("results_rescored.parquet");
+    let mut pq_writer = ResultParquetWriter::new(out_path_pq.clone(), 20_000).map_err(|e| {
+        tracing::error!(
+            "Error creating parquet writer for path {:?}: {}",
+            out_path_pq,
+            e
+        );
+        TimsSeekError::Io {
+            path: out_path_pq.into(),
+            source: e,
+        }
+    })?;
+    for res in data.into_iter() {
+        pq_writer.add(res);
+    }
+    pq_writer.close();
+
     Ok(all_timings)
 }
 

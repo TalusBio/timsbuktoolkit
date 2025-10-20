@@ -6,8 +6,10 @@ pub mod isotopes;
 pub mod ml;
 pub mod models;
 pub mod protein;
+pub mod rt_calibration;
 pub mod scoring;
 pub mod utils;
+
 extern crate parquet;
 #[macro_use]
 extern crate parquet_derive;
@@ -21,4 +23,7 @@ pub use models::{
     IonSeriesTerminality,
     QueryItemToScore,
 };
-pub use scoring::Scorer;
+pub use scoring::{
+    IonSearchResults,
+    Scorer,
+};

@@ -297,12 +297,17 @@ mod tests {
         // I am expecting that adding under bounds gets added to the lowest.
         let to_insert = [(0, 4.0), (21, 2.0)];
         for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
+            // On each iteration we get [0 ,0, 0, 0]
             yc.add_at_index(x.0, x.1);
             yc.add_at_index(x.0, x.1);
+            // here should be [8.0 ,0, 0, 0  ] on iteration 1
+            // here should be [0   ,0, 0, 4.0] on iteration 2
             // I am expecting that out of bounds gets added to the last.
             yc.add_at_index(x.0 + 50, x.1);
+            // here should be [8.0 ,0, 0, 4.0] on iteration 1
+            // here should be [0   ,0, 0, 6.0] on iteration 2
         }
-        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
+        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 6.0]);
     }
 
     #[test]
@@ -351,17 +356,24 @@ mod tests {
         // on index
         let to_insert = [(0, 4.0), (1, 2.0)];
         for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
+            // On each iteration we get [0 ,0 ,0, 0]
             yc.add_at_index(x.0, x.1);
             yc.add_at_index(x.0, x.1);
+            // here should be [8.0 ,0 ,0, 0] on iteration 1
+            // here should be [0 ,4.0 ,0, 0] on iteration 2
             // I am expecting that out of bounds gets added to the last.
             yc.add_at_index(x.0 + 50, x.1);
+            // here should be [8.0 ,0 ,0, 4.0] on iteration 1
+            // here should be [0 ,4.0, 0.0, 2.0] on iteration 2
         }
-        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
+        assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 4.0, 0.0, 2.0]);
 
+        // Since we are resetting two mz major arrays the resulting data should be
+        // the same.
         target_arr.try_reset_with(&arr).unwrap();
         assert_eq!(
             target_arr.arr.values,
-            vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]
+            vec![8.0, 0.0, 0.0, 4.0, 0.0, 4.0, 0.0, 2.0]
         );
     }
 
@@ -401,18 +413,9 @@ mod tests {
         assert_eq!(arr.arr.values, vec![0.0; 8]);
         assert_eq!(target_arr.arr.values, vec![0.0]);
 
-        // I am expecting that adding under bounds gets added to the lowest.
-        // let to_insert = [(0, 4.0), (21, 2.0)]; old versions inserted by a reference retention
-        // times, new ones jus take indices. (was more ergonomic but very slow ...)
-        let to_insert = [(0, 4.0), (1, 2.0)];
-        for (x, (_y, mut yc)) in to_insert.iter().zip(arr.iter_mut_mzs()) {
-            yc.add_at_index(x.0, x.1);
-            yc.add_at_index(x.0, x.1);
-            // I am expecting that out of bounds gets added to the last.
-            yc.add_at_index(x.0 + 50, x.1);
-        }
-
+        arr.arr.values = vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0];
         target_arr.try_reset_with(&arr).unwrap();
+
         // Note the change in position
         assert_eq!(arr.arr.values, vec![8.0, 0.0, 0.0, 4.0, 0.0, 0.0, 4.0, 2.0]);
         assert_eq!(

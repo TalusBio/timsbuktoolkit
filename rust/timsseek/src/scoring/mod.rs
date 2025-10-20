@@ -12,6 +12,7 @@ pub use scores::{
 };
 
 pub use scorer::Scorer;
+pub use search_results::IonSearchResults;
 
 const NUM_MS2_IONS: usize = 7;
 const NUM_MS1_IONS: usize = 3;

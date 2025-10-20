@@ -66,7 +66,7 @@ fn coelution_vref_score_filter_onto(
     // Collect all rolling similarity calculations v the reference.
     // This still computes the similarities upfront, but the aggregation into the final
     // score is done lazily, one time-point at a time.
-    (0..slices.nrows())
+    let res: Result<(), DataProcessingError> = (0..slices.nrows())
         .filter(|&i| filter(i))
         .try_for_each(|i| {
             let slice1 = slices.get_row(i).expect("Row index i is within bounds");
@@ -75,10 +75,16 @@ fn coelution_vref_score_filter_onto(
                 if v.is_nan() {
                     continue;
                 }
-                buffer[i] += v.max(0.0) * norm_factor;
+                buffer[i] += v.max(0.0) // * norm_factor;
             }
             Ok(())
-        })
+        });
+    res?;
+
+    for x in buffer.iter_mut() {
+        *x *= norm_factor;
+    }
+    Ok(())
 }
 
 /// See the docs for [`coelution_score_arr`].
