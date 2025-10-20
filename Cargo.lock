@@ -319,6 +319,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

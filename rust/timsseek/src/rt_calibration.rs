@@ -15,6 +15,7 @@ impl From<IonSearchResults> for Point {
         Point {
             x: val.precursor_rt_query_seconds as f64,
             y: val.obs_rt_seconds as f64,
+            weight: val.main_score as f64,
         }
     }
 }

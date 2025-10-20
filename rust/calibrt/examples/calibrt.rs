@@ -3,9 +3,19 @@ use calibrt::{
     calibrate,
 };
 use rand::Rng;
+use tracing_subscriber;
+
+fn setup_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .try_init();
+}
 
 fn main() {
     println!("Running Calib-RT Example");
+    setup_tracing();
 
     // 1. Generate some sample data
     let mut rng = rand::thread_rng();
@@ -15,7 +25,7 @@ fn main() {
     for i in 0..500 {
         let x = i as f64;
         let y = real_x_to_y(x);
-        points.push(Point { x, y });
+        points.push(Point { x, y, weight: 1.0 });
     }
     // Add some random noise points
     let mut rng = rand::thread_rng();
@@ -23,6 +33,7 @@ fn main() {
         points.push(Point {
             x: rng.gen_range(0.0..100.0),
             y: rng.gen_range(0.0..150.0),
+            weight: 1.0,
         });
     }
 
