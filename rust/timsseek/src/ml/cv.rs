@@ -135,20 +135,20 @@ impl Default for GBMConfig {
     fn default() -> Self {
         GBMConfig {
             iterations: 500,
-            learning_rate: 0.1,
-            max_depth: 5,
+            learning_rate: 0.3,
+            max_depth: 6,
             max_leaves: usize::MAX,
             l1: 0.,
             l2: 1.,
             gamma: 0.,
             max_delta_step: 0.,
-            min_leaf_weight: 5.,
+            min_leaf_weight: 2.,
             base_score: 0.5,
             nbins: 256,
             parallel: true,
             allow_missing_splits: true,
             monotone_constraints: None,
-            subsample: 0.75,
+            subsample: 1.0,
             top_rate: 0.1,
             other_rate: 0.2,
             colsample_bytree: 1.0,
@@ -159,7 +159,7 @@ impl Default for GBMConfig {
             grow_policy: GrowPolicy::DepthWise,
             evaluation_metric: Some(Metric::LogLoss),
             // evaluation_metric: None,
-            early_stopping_rounds: Some(5),
+            early_stopping_rounds: Some(20),
             initialize_base_score: true,
             terminate_missing_features: HashSet::new(),
             missing_node_treatment: MissingNodeTreatment::AssignToParent,
@@ -354,7 +354,13 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         let assigned_fold: Vec<u8> = (0..data.len())
             .map(|x| (x % n_folds as usize).try_into().unwrap())
             .collect();
-        let weights = vec![1.0; data.len()];
+        // let weights = vec![1.0; data.len()];
+        // default to a weight of 0.5 to all targets and 1.0 for decoys
+        let weights: Vec<f64> = data
+            .iter()
+            .map(|x| if x.get_y() > 0.5 { 0.5 } else { 1.0 })
+            .collect();
+
         Self {
             n_folds,
             data,

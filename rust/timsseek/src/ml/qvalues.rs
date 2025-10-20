@@ -10,6 +10,7 @@ use super::{
 };
 use rand::prelude::*;
 use rayon::prelude::*;
+use tracing::debug;
 
 /// Assign q_values in place.
 ///
@@ -97,8 +98,8 @@ pub fn rescore<T: LabelledScore + FeatureLike + Send + Sync + std::fmt::Debug>(
     // Sort by score descending
     out.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
     assign_qval(&mut out, |x| T::get_score(x) as f32);
-    println!("Best:\n{:#?}", out.first());
-    println!("Worst:\n{:#?}", out.last());
+    debug!("Best:\n{:#?}", out.first());
+    debug!("Worst:\n{:#?}", out.last());
     out
 }
 
@@ -198,7 +199,7 @@ impl FeatureLike for IonSearchResults {
             precursor_mz.round(),
             precursor_charge as f64,
             precursor_mobility_query as f64,
-            // // precursor_rt_query_seconds.round() as f64,
+            precursor_rt_query_seconds.round() as f64,
             nqueries as f64,
             // Combined
             main_score as f64,

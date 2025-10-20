@@ -564,21 +564,6 @@ fn count_falling_steps(start: usize, step: i32, slc: &[f32]) -> u8 {
     count
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ScoreInTime {
-    score: f32,
-    index: usize,
-}
-
-impl Default for ScoreInTime {
-    fn default() -> Self {
-        Self {
-            score: f32::NAN,
-            index: 0,
-        }
-    }
-}
-
 /// The primary entry point for scoring peptide candidates.
 ///
 /// `PeptideScorer` encapsulates the complex scoring logic and manages reusable memory buffers
@@ -879,15 +864,6 @@ impl PeptideScorer {
             raising_cycles,
             falling_cycles,
         })
-    }
-}
-
-impl PartialOrd for ScoreInTime {
-    fn partial_cmp(&self, other: &ScoreInTime) -> Option<std::cmp::Ordering> {
-        if self.score.is_nan() {
-            return Some(std::cmp::Ordering::Less);
-        }
-        self.score.partial_cmp(&other.score)
     }
 }
 

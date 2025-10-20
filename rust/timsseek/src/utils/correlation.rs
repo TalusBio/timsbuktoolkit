@@ -106,6 +106,11 @@ impl CosineSimilarityCircularBuffer {
         out
     }
 
+    // This is too hot, cannot instrument for performance reasons
+    // #[cfg_attr(
+    //     feature = "instrumentation",
+    //     tracing::instrument(skip_all, level = "trace")
+    // )]
     fn update(&mut self, a: f32, b: f32) {
         let a: u64 = a as u64;
         let b: u64 = b as u64;
@@ -219,6 +224,11 @@ struct RollingCosineIterator<'a> {
 impl Iterator for RollingCosineIterator<'_> {
     type Item = f32;
 
+    // This function is too hot, cannot instrument for performance reasons
+    // #[cfg_attr(
+    //     feature = "instrumentation",
+    //     tracing::instrument(skip_all, level = "trace")
+    // )]
     fn next(&mut self) -> Option<Self::Item> {
         if self.state >= self.a.len() {
             return None;

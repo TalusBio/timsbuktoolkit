@@ -50,7 +50,7 @@ class KFoldModel:
             {"objective": "binary:logistic", "scale_pos_weight": 0.5},
             # {"objective": "binary:logistic"},
             train,
-            num_boost_round=200,
+            num_boost_round=500,
             evals=[
                 (early_stop, "validation"),
             ],
