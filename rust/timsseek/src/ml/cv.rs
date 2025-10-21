@@ -163,7 +163,7 @@ impl Default for GBMConfig {
             initialize_base_score: true,
             terminate_missing_features: HashSet::new(),
             missing_node_treatment: MissingNodeTreatment::AssignToParent,
-            log_iterations: 10,
+            log_iterations: 50,
             force_children_to_bound_parent: false,
         }
     }

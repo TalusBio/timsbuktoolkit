@@ -16,17 +16,14 @@ use timscentroid::utils::TupleRange;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
-    pub eg: Arc<ElutionGroup<T>>,
+    pub eg: ElutionGroup<T>,
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
     pub ref_rt_ms: Arc<[u32]>,
 }
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
-    pub fn new(
-        eg: Arc<ElutionGroup<T>>,
-        ref_rt_ms: Arc<[u32]>,
-    ) -> Result<Self, DataProcessingError> {
+    pub fn new(eg: ElutionGroup<T>, ref_rt_ms: Arc<[u32]>) -> Result<Self, DataProcessingError> {
         let precursors =
             MzMajorIntensityArray::try_new_empty(eg.precursors.clone(), ref_rt_ms.len(), 0)?;
         let fragments =

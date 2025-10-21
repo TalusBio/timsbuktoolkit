@@ -7,7 +7,6 @@ use serde::{
     Serialize,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 use timsquery::ElutionGroup;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +22,7 @@ pub struct ExpectedIntensities {
 pub struct QueryItemToScore {
     pub digest: DigestSlice,
     pub charge: u8,
-    pub query: Arc<ElutionGroup<IonAnnot>>,
+    pub query: ElutionGroup<IonAnnot>,
     pub expected_intensity: ExpectedIntensities,
 }
 
@@ -58,7 +57,7 @@ impl QueryItemToScore {
         let pepseq = "PEPTIDEPINKPEPTIDE".into();
         let digest = DigestSlice::from_string(pepseq, false);
         let charge = 2;
-        let query = Arc::new(eg);
+        let query = eg;
         let expected_intensity = ei;
         QueryItemToScore {
             digest,

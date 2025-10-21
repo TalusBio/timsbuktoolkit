@@ -117,16 +117,18 @@ impl Grid {
 
         let mut suppressed_sum = 0.0;
         let mut non_suppressed_sum = 0.0;
+        let mut num_unsuppressed = 0;
         self.nodes.iter().for_each(|x| {
             if x.suppressed {
                 suppressed_sum += x.center.weight;
             } else {
                 non_suppressed_sum += x.center.weight;
+                num_unsuppressed += 1;
             }
         });
         info!(
-            "Suppression complete. Suppressed weight sum: {}, Non-suppressed weight sum: {}",
-            suppressed_sum, non_suppressed_sum
+            "Suppression complete. Suppressed weight sum: {}, Non-suppressed weight sum: {}, Num Unsuppressed: {}",
+            suppressed_sum, non_suppressed_sum, num_unsuppressed
         );
         if non_suppressed_sum == 0.0 {
             return Err(CalibRtError::NoPoints);

@@ -7,6 +7,7 @@ pub mod grid;
 mod pathfinding;
 pub mod plotting;
 pub use grid::Grid;
+use tracing::info;
 
 /// Custom error types for the Calib-RT library.
 #[derive(Debug, Clone)]
@@ -61,6 +62,30 @@ impl CalibrationCurve {
         Ok(Self { points, slopes })
     }
 
+    pub fn wrmse<'a>(&self, test_points: impl Iterator<Item = &'a Point> + 'a) -> f64 {
+        let mut total_error = 0.0;
+        let mut weight: f64 = 0.0;
+
+        for p in test_points {
+            match self.predict(p.x) {
+                Ok(predicted_y) => {
+                    let error = predicted_y - p.y;
+                    total_error += (error * error) * p.weight;
+                    weight += p.weight;
+                }
+                Err(_) => {
+                    // Ignore out-of-bounds points for MSE calculation
+                }
+            }
+        }
+
+        if weight == 0.0 {
+            f64::NAN // No valid predictions
+        } else {
+            (total_error / weight).sqrt()
+        }
+    }
+
     /// Predicts a calibrated measured RT (Y) for a given library RT (X).
     /// Returns an error if the value is outside the bounds of the calibration curve.
     pub fn predict(&self, x_val: f64) -> Result<f64, CalibRtError> {
@@ -103,8 +128,8 @@ impl CalibrationCurve {
 ///
 /// # Returns
 /// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-pub fn calibrate<'a>(
-    points: impl IntoIterator<Item = &'a Point> + 'a,
+pub fn calibrate(
+    points: &[Point],
     x_range: (f64, f64),
     y_range: (f64, f64),
     grid_size: usize,
@@ -128,11 +153,14 @@ pub fn calibrate<'a>(
     let calcurve = CalibrationCurve::new(optimal_path_points);
     match calcurve {
         Ok(ref c) => {
+            let wrmse = c.wrmse(points.iter());
+            info!("RMSE: {}", wrmse);
             plotting::plot_function(
-                |x| match c.predict(x) {
-                    Ok(y) => y,
-                    Err(CalibRtError::OutOfBounds(y)) => y,
-                    Err(_) => panic!("Unexpected error during plotting"),
+                |x| {
+                    c.predict(x).map_err(|e| match e {
+                        CalibRtError::OutOfBounds(y) => y,
+                        _ => panic!("Unexpected error during plotting"),
+                    })
                 },
                 (x_range.0, x_range.1),
                 40,
