@@ -186,7 +186,7 @@ fn get_block_char(intensity: f64) -> &'static str {
 /// ```
 pub fn plot_function<F>(f: F, x_range: (f64, f64), width: usize, height: usize)
 where
-    F: Fn(f64) -> f64,
+    F: Fn(f64) -> Result<f64, f64>,
 {
     println!("\n{}", format_function_plot(f, x_range, width, height));
 }
@@ -194,7 +194,7 @@ where
 /// Formats a function plot as a string for logging or display.
 pub fn format_function_plot<F>(f: F, x_range: (f64, f64), width: usize, height: usize) -> String
 where
-    F: Fn(f64) -> f64,
+    F: Fn(f64) -> Result<f64, f64>,
 {
     let mut output = String::new();
 
@@ -208,7 +208,10 @@ where
 
     for i in 0..width {
         let x = x_min + (i as f64 / (width - 1) as f64) * x_span;
-        let y = f(x);
+        let (is_err, y) = match f(x) {
+            Ok(y) => (false, y),
+            Err(y) => (true, y),
+        };
 
         // Track min/max for y-axis scaling
         if y.is_finite() {
@@ -216,7 +219,7 @@ where
             y_max = y_max.max(y);
         }
 
-        samples.push((x, y));
+        samples.push((x, y, is_err));
     }
 
     // Handle edge cases
@@ -228,17 +231,17 @@ where
     let y_span = y_max - y_min;
 
     // Create the plot grid
-    let mut grid = vec![vec![' '; width]; height];
+    let mut grid = vec![vec![(' ', false); width]; height];
 
     // Plot the function
-    for (col, &(x, y)) in samples.iter().enumerate() {
+    for (col, &(x, y, err)) in samples.iter().enumerate() {
         if y.is_finite() {
             // Map y to row (inverted because row 0 is at top)
             let normalized = (y - y_min) / y_span;
             let row = ((1.0 - normalized) * (height - 1) as f64) as usize;
             let row = row.min(height - 1);
 
-            grid[row][col] = '●';
+            grid[row][col] = ('●', err);
         }
     }
 
@@ -260,18 +263,18 @@ where
     // Draw axes
     if let Some(row) = zero_row {
         for col in 0..width {
-            if grid[row][col] == ' ' {
-                grid[row][col] = '─';
+            if grid[row][col].0 == ' ' {
+                grid[row][col].0 = '─';
             }
         }
     }
 
     if let Some(col) = zero_col {
         for row in 0..height {
-            if grid[row][col] == ' ' {
-                grid[row][col] = '│';
-            } else if grid[row][col] == '─' {
-                grid[row][col] = '┼';
+            if grid[row][col].0 == ' ' {
+                grid[row][col].0 = '│';
+            } else if grid[row][col].0 == '─' {
+                grid[row][col].0 = '┼';
             }
         }
     }
@@ -284,9 +287,14 @@ where
     // Render grid with colors
     for row in &grid {
         output.push('║');
-        for &ch in row {
+        for &(ch, err) in row {
             let colored = match ch {
-                '●' => format!("{}{}{}", COLOR_CYAN, ch, COLOR_RESET),
+                '●' => format!(
+                    "{}{}{}",
+                    if err { COLOR_BLUE } else { COLOR_CYAN },
+                    ch,
+                    COLOR_RESET
+                ),
                 '─' | '│' | '┼' => format!("{}{}{}", COLOR_GRAY, ch, COLOR_RESET),
                 _ => ch.to_string(),
             };

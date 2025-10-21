@@ -16,17 +16,16 @@ use std::ops::{
     Add,
     AddAssign,
 };
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
-    pub eg: Arc<ElutionGroup<T>>,
+    pub eg: ElutionGroup<T>,
     precursors: Vec<V>,
     fragments: Vec<V>,
 }
 
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
-    pub fn new(eg: Arc<ElutionGroup<T>>) -> Self {
+    pub fn new(eg: ElutionGroup<T>) -> Self {
         let precursors = vec![Default::default(); eg.precursors.len()];
         let fragments = vec![Default::default(); eg.fragments.len()];
         Self {

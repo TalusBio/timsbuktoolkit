@@ -32,7 +32,7 @@ fn main() {
     let (index, index_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
     println!("Indexing Stats: {}", index_stats);
 
-    // test_querying(&index);
+    test_querying(&index);
 }
 
 fn test_querying(index: &IndexedTimstofPeaks) {
@@ -84,7 +84,7 @@ fn test_querying(index: &IndexedTimstofPeaks) {
         tot_int, npeaks, peaks_per_query
     );
     println!(
-        "Estimated time to query a full proteome ({} transitions): {:?}",
+        ">>> Estimated time to query a full proteome ({} transitions): {:?}",
         total_transitions, time_to_proteome
     );
 }

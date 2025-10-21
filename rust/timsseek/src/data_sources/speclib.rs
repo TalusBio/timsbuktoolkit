@@ -94,15 +94,37 @@ impl From<QueryItemToScore> for SerSpeclibElement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
     #[serde(flatten)]
-    pub elution_group: Arc<ElutionGroup<IonAnnot>>,
+    pub elution_group: ElutionGroup<IonAnnot>,
     #[serde(flatten)]
     pub expected_intensities: ExpectedIntensities,
 }
 
 #[derive(Debug, Clone)]
 pub struct Speclib {
-    elems: Vec<QueryItemToScore>,
+    pub elems: Vec<QueryItemToScore>,
+}
+
+struct SpeclibIterator<'a> {
+    speclib: &'a Speclib,
     idx: usize,
+}
+
+impl Iterator for SpeclibIterator<'_> {
+    type Item = QueryItemToScore;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.speclib.elems.len() {
+            return None;
+        }
+        let elem = self.speclib.elems[self.idx].clone();
+        self.idx += 1;
+        Some(elem)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.speclib.elems.len() - self.idx;
+        (remaining, Some(remaining))
+    }
 }
 
 impl Serialize for Speclib {
@@ -304,6 +326,17 @@ impl<R: Read> Iterator for MessagePackReader<R> {
 }
 
 impl Speclib {
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = QueryItemToScore> + 'a {
+        SpeclibIterator {
+            speclib: self,
+            idx: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.elems.len()
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, LibraryReadingError> {
         let format = SpeclibFormat::detect_from_path(path)?;
         Self::from_file_with_format(path, format)
@@ -324,7 +357,7 @@ impl Speclib {
         let elements: Result<Vec<_>, _> = reader.collect();
         let elems = elements?;
 
-        Ok(Self { elems, idx: 0 })
+        Ok(Self { elems })
     }
 
     // pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
@@ -398,34 +431,11 @@ impl Speclib {
     pub fn sample() -> Self {
         Self {
             elems: vec![QueryItemToScore::sample()],
-            idx: 0,
         }
     }
 
     pub fn as_slice(&self) -> &[QueryItemToScore] {
         &self.elems
-    }
-}
-
-impl Iterator for Speclib {
-    type Item = QueryItemToScore;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.idx >= self.elems.len() {
-            return None;
-        }
-        // TODO: reimplement as a real stream ...
-        // this is probably not the bottleneck but would be nice
-        // to check how expensive the clone actually is.
-        let elem = self.elems[self.idx].clone();
-        self.idx += 1;
-        Some(elem)
-    }
-}
-
-impl ExactSizeIterator for Speclib {
-    fn len(&self) -> usize {
-        self.elems.len()
     }
 }
 
@@ -448,10 +458,7 @@ mod tests {
 
             let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
 
-            Ok(Self {
-                elems: speclib,
-                idx: 0,
-            })
+            Ok(Self { elems: speclib })
         }
     }
 
@@ -491,7 +498,6 @@ mod tests {
             }
         ]"#;
         let speclib = Speclib::from_json(json).unwrap();
-        assert_eq!(speclib.len(), 1);
         assert_eq!(speclib.elems.len(), 1);
         println!("{:?}", speclib);
 

@@ -14,6 +14,7 @@ use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::rescore;
+use timsseek::rt_calibration::recalibrate_speclib;
 use timsseek::scoring::scorer::{
     ScoreTimings,
     Scorer,
@@ -34,7 +35,7 @@ use tracing::{
 pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
     // # I would like this to be streaming
-    query_iterator: Speclib,
+    mut query_iterator: Speclib,
     scorer: &Scorer<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
@@ -122,6 +123,16 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     // Sort in descending order of score
     results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
     assert!(results.first().unwrap().main_score >= results.last().unwrap().main_score);
+
+    match recalibrate_speclib(
+        &mut query_iterator,
+        &results[..(100_000.min(results.len()))],
+    ) {
+        Ok(_) => info!("Recalibrated speclib retention times based on search results"),
+        Err(e) => {
+            tracing::error!("Error recalibrating speclib retention times: {:?}", e);
+        }
+    };
 
     let data = rescore(results);
     for val in report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]) {

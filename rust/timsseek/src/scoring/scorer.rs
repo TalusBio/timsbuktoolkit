@@ -157,7 +157,7 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
 
         // Make a search here and then use that as a filter for mobility.
-        let new_query = Arc::new(item.query.as_ref().clone().with_rt_seconds(new_rt_seconds));
+        let new_query = item.query.clone().with_rt_seconds(new_rt_seconds);
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
         self.index.add_query(&mut agg, &self.secondary_tolerance);
@@ -165,16 +165,14 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         // Get the mobility from the main query
         // and use that to make an isotope queries
         let mobility = Self::get_mobility(&agg);
-        let new_query = Arc::new(
-            item.query
-                .as_ref()
-                .clone()
-                .with_rt_seconds(new_rt_seconds)
-                .with_mobility(mobility as f32),
-        );
+        let new_query = item
+            .query
+            .clone()
+            .with_rt_seconds(new_rt_seconds)
+            .with_mobility(mobility as f32);
 
         let mut isotope_agg: SpectralCollector<_, f32> =
-            SpectralCollector::new(isotope_offset_fragments(&new_query, 1i8).into());
+            SpectralCollector::new(isotope_offset_fragments(&new_query, 1i8));
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
         // I can probably cache this ...
