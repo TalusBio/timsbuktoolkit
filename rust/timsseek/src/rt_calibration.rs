@@ -19,7 +19,7 @@ impl From<&IonSearchResults> for Point {
         Point {
             x: val.precursor_rt_query_seconds as f64,
             y: val.obs_rt_seconds as f64,
-            weight: val.is_target as u8 as f64, // simply weight targets 1, decoys 0
+            weight: 1.0,
         }
         // weight: val.main_score.ln_1p().max(0.0) as f64, // very non-good
         // so just weight equally for now.
