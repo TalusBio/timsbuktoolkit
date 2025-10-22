@@ -52,7 +52,7 @@ class TimsseekRunner:
             "--model",
             "onnx",
         ]
-        res = subprocess.run(args)
+        res = subprocess.run(args, check=True)
         return res
 
     def setup_run(self):
@@ -286,11 +286,11 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
 
 
 def main(wandb_kwargs: dict | None = None):
-    fasta_file = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-    speclib_path = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
+    # fasta_file = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
+    # speclib_path = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
 
-    # fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
-    # speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
+    fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
+    speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [

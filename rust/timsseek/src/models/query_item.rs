@@ -55,7 +55,7 @@ impl QueryItemToScore {
             precursor_intensities: vec![0.0, 1.0, 0.4, 0.1],
         };
         let pepseq = "PEPTIDEPINKPEPTIDE".into();
-        let digest = DigestSlice::from_string(pepseq, false);
+        let digest = DigestSlice::from_string(pepseq, false, 1);
         let charge = 2;
         let query = eg;
         let expected_intensity = ei;

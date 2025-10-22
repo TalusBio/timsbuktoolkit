@@ -379,11 +379,11 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         self.fit_step(train_buffer, val_buffer)?;
         self.assign_scores();
 
-        for _iteration in 0..1 {
-            self.reweight_targets_below_decoy_mean(0.5)?;
-            self.fit_step(train_buffer, val_buffer)?;
-            self.assign_scores();
-        }
+        // for _iteration in 0..1 {
+        //     self.reweight_targets_below_decoy_mean(0.5)?;
+        //     self.fit_step(train_buffer, val_buffer)?;
+        //     self.assign_scores();
+        // }
         Ok(())
     }
 

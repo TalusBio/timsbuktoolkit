@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Generator
+from typing import Generator, Iterable
 
 from pyteomics import fasta, parser
 
 from .base import PeptideElement
-from .decoys import DecoyStrategy, yield_as_decoys
+from .decoys import DecoyStrategy, yield_with_decoys
 
 
 def get_peptides(fasta_file: str) -> list[str]:
@@ -29,21 +29,25 @@ def get_peptides(fasta_file: str) -> list[str]:
     return unique_peptides
 
 
-def yield_with_mods(peptides: list[str]) -> Generator[str, None, None]:
+def yield_with_mods(
+    peptides: Iterable[tuple[str, bool, int]],
+) -> Generator[tuple[str, bool, int], None, None]:
+    # TODO: implement more mods ...
     for peptide in peptides:
-        yield peptide.replace("C", "C[UNIMOD:4]")
+        yield (peptide[0].replace("C", "C[UNIMOD:4]"), peptide[1], peptide[2])
 
 
 def yield_with_charges(
-    peptides,
+    peptides: Iterable[tuple[str, bool, int]],
     min_charge,
     max_charge,
-) -> Generator[tuple[str, int, float], None, None]:
+) -> Generator[tuple[str, bool, int, int, float], None, None]:
     for peptide in peptides:
         for charge in range(min_charge, max_charge + 1):
-            yield (peptide, charge, 30.0)
+            yield (peptide[0], peptide[1], peptide[2], charge, 30.0)
 
 
+# This is more a factory than a builder, but anyway ...
 @dataclass
 class PeptideBuilder:
     fasta_file: str
@@ -55,30 +59,23 @@ class PeptideBuilder:
         peps = get_peptides(fasta_file=self.fasta_file)
         return peps
 
-    def get_modified_targets(self) -> list[PeptideElement]:
+    def get_modified_target_decoys(self) -> list[PeptideElement]:
         targ_use = list(
             yield_with_charges(
-                yield_with_mods(self.get_targets()), self.min_charge, self.max_charge
+                yield_with_mods(
+                    yield_with_decoys(self.get_targets(), self.decoy_strategy)
+                ),
+                self.min_charge,
+                self.max_charge,
             )
         )
         return [
-            PeptideElement(peptide=pep, charge=charge, nce=nce, decoy=False)
-            for pep, charge, nce in targ_use
-        ]
-
-    def get_decoys(self) -> list[str]:
-        peps = get_peptides(fasta_file=self.fasta_file)
-        decoys = list(yield_as_decoys(peps, self.decoy_strategy))
-        return decoys
-
-    def get_modified_decoys(self) -> list[PeptideElement]:
-        decoys = self.get_decoys()
-        decoys_use = list(
-            yield_with_charges(
-                yield_with_mods(decoys), self.min_charge, self.max_charge
+            PeptideElement(
+                peptide=pep,
+                charge=charge,
+                nce=nce,
+                decoy=decoy,
+                decoy_group=decoy_group,
             )
-        )
-        return [
-            PeptideElement(peptide=pep, charge=charge, nce=nce, decoy=True)
-            for pep, charge, nce in decoys_use
+            for pep, decoy, decoy_group, charge, nce in targ_use
         ]

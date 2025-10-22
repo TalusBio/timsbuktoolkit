@@ -83,37 +83,45 @@ impl DigestionParameters {
     pub fn digest(&self, sequence: Arc<str>) -> Vec<DigestSlice> {
         let sites = self.cleavage_sites(sequence.as_ref());
         let num_sites = sites.len();
-        (0..sites.len())
-            .flat_map(|i| {
-                let start = sites[i].start;
-                let local_out: Vec<DigestSlice> = (0..(self.max_missed_cleavages + 1))
-                    .filter_map(|j| {
-                        if i + j > num_sites - 1 {
-                            return None;
-                        }
-                        let end = sites[i + j].end;
-                        let span = end - start;
+        let mut out = Vec::new();
+        let mut digest_id = 0;
+        (0..sites.len()).for_each(|i| {
+            let start = sites[i].start;
+            (0..(self.max_missed_cleavages + 1)).for_each(|j| {
+                if i + j > num_sites - 1 {
+                    return;
+                }
+                let end = sites[i + j].end;
+                let span = end - start;
 
-                        if span < self.min_length || span > self.max_length {
-                            return None;
-                        }
-                        Some(DigestSlice::new(
-                            sequence.clone(),
-                            start as u16..end as u16,
-                            DecoyMarking::Target,
-                        ))
-                    })
-                    .collect();
-                local_out
-            })
-            .collect()
+                if span < self.min_length || span > self.max_length {
+                    return;
+                }
+                out.push(DigestSlice::new(
+                    sequence.clone(),
+                    start as u16..end as u16,
+                    DecoyMarking::Target,
+                    digest_id,
+                ));
+
+                digest_id += 1;
+            });
+        });
+        out
     }
 
     pub fn digest_multiple(&self, sequences: &[Arc<str>]) -> Vec<DigestSlice> {
-        sequences
-            .iter()
-            .flat_map(|seq| self.digest(seq.clone()))
-            .collect()
+        let mut out = Vec::new();
+        let mut last_id = 0;
+        sequences.iter().for_each(|seq| {
+            let mut tmp = self.digest(seq.clone());
+            tmp.iter_mut().for_each(|x| {
+                x.decoy_group += last_id;
+            });
+            out.extend(tmp);
+            last_id += out.len() as u32;
+        });
+        out
     }
 }
 

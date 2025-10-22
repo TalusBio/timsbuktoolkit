@@ -93,7 +93,8 @@ fn main() -> std::result::Result<(), errors::CliError> {
     let perf_filter = EnvFilter::builder()
         .with_default_directive("trace".parse().unwrap())
         .with_env_var("RUST_PERF_LOG")
-        .from_env_lossy();
+        .from_env_lossy()
+        .add_directive("forust_ml::gradientbooster=warn".parse().unwrap());
 
     // Filter out events but keep spans
     let events_filter = tracing_subscriber::filter::filter_fn(|metadata| !metadata.is_event());

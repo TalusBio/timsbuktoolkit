@@ -317,7 +317,7 @@ def to_mokapot_df(
 def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
     files = set()
     for results_dir in results_dirs:
-        files.update(results_dir.glob("result*.parquet"))
+        files.update(results_dir.glob("results.parquet"))
 
     files = list(files)
     pprint(f"Scanning {len(files)} files -> {files}")

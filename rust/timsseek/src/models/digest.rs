@@ -12,6 +12,7 @@ pub struct DigestSlice {
     ref_seq: Arc<str>,
     range: Range<u16>,
     pub decoy: DecoyMarking,
+    pub decoy_group: u32,
 }
 
 impl Serialize for DigestSlice {
@@ -25,15 +26,21 @@ impl Serialize for DigestSlice {
 }
 
 impl DigestSlice {
-    pub fn new(ref_seq: Arc<str>, range: Range<u16>, decoy: DecoyMarking) -> Self {
+    pub fn new(
+        ref_seq: Arc<str>,
+        range: Range<u16>,
+        decoy: DecoyMarking,
+        decoy_group: u32,
+    ) -> Self {
         Self {
             ref_seq,
             range,
             decoy,
+            decoy_group,
         }
     }
 
-    pub fn from_string(seq: String, decoy: bool) -> DigestSlice {
+    pub fn from_string(seq: String, decoy: bool, decoy_group: u32) -> DigestSlice {
         let len = seq.len();
         DigestSlice {
             ref_seq: seq.into(),
@@ -43,6 +50,7 @@ impl DigestSlice {
             } else {
                 DecoyMarking::Target
             },
+            decoy_group,
         }
     }
 
@@ -51,6 +59,7 @@ impl DigestSlice {
             ref_seq: self.ref_seq.clone(),
             range: self.range.clone(),
             decoy: DecoyMarking::NonReversedDecoy,
+            decoy_group: self.decoy_group,
         }
     }
 
@@ -114,21 +123,25 @@ mod tests {
                 ref_seq: seq.clone(),
                 range: (0_u16..seq.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
+                decoy_group: 1,
             },
             DigestSlice {
                 ref_seq: seq.clone(),
                 range: (0_u16..seq2.as_ref().len() as u16), // Note the short length
                 decoy: DecoyMarking::Target,
+                decoy_group: 1,
             },
             DigestSlice {
                 ref_seq: seq2.clone(),
                 range: (0_u16..seq2.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
+                decoy_group: 1,
             },
             DigestSlice {
                 ref_seq: seq2_rep.clone(),
                 range: (0_u16..seq2_rep.as_ref().len() as u16),
                 decoy: DecoyMarking::Target,
+                decoy_group: 1,
             },
         ];
         let deduped = deduplicate_digests(digests);
@@ -141,8 +154,8 @@ mod tests {
     fn test_from_string() {
         let seq = "PEPTIDEPINKTOMATO".to_string();
         let expect_len = seq.len();
-        let digests = DigestSlice::from_string(seq.clone(), false);
-        let digests_decoy = DigestSlice::from_string(seq.clone(), true);
+        let digests = DigestSlice::from_string(seq.clone(), false, 1);
+        let digests_decoy = DigestSlice::from_string(seq.clone(), true, 2);
         assert_eq!(digests.len(), expect_len);
         assert_eq!(digests.decoy, DecoyMarking::Target);
         assert_eq!(digests_decoy.len(), expect_len);

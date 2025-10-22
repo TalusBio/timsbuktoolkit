@@ -87,6 +87,7 @@ class OnnxPeptideTransformerAnnotator(PeptideAnnotator):
                 ion_dict=ion_dict,
                 decoy=pe.decoy,
                 id=self.num_yielded,
+                decoy_group=pe.decoy_group,
             )
             self.num_yielded += 1
 

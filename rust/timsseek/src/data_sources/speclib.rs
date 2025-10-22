@@ -24,6 +24,8 @@ use std::path::{
 use std::sync::Arc;
 use timsquery::models::elution_group::ElutionGroup;
 
+/// This is meant to the be the serializable version of the speclib element
+/// so ... in general should be backwards compatible and implement Into<QueryItemToScore>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerSpeclibElement {
     precursor: PrecursorEntry,
@@ -41,6 +43,7 @@ struct PrecursorEntry {
     sequence: String,
     charge: u8,
     decoy: bool,
+    decoy_group: u32,
 }
 
 impl From<PrecursorEntry> for DigestSlice {
@@ -55,7 +58,7 @@ impl From<PrecursorEntry> for DigestSlice {
             panic!("Sequence too long (gt: {}): {}", u16::MAX, seq);
         }
         let range = 0u16..seq.as_ref().len() as u16;
-        DigestSlice::new(seq, range, decoy)
+        DigestSlice::new(seq, range, decoy, x.decoy_group)
     }
 }
 
@@ -79,6 +82,7 @@ impl From<QueryItemToScore> for SerSpeclibElement {
             sequence: x.digest.clone().into(),
             charge: x.charge,
             decoy: x.digest.is_decoy(),
+            decoy_group: x.digest.decoy_group,
         };
         let elution_group = ReferenceEG {
             elution_group: x.query.clone(),

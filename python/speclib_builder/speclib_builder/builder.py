@@ -71,6 +71,7 @@ class EntryBuilder:
             ion_dict=elem.ion_dict,
             decoy=elem.decoy,
             id=elem.id,
+            decoy_group=elem.decoy_group,
         )
 
     def as_entry(
@@ -81,6 +82,7 @@ class EntryBuilder:
         ion_dict: dict[str, MzIntPair],
         decoy: bool,
         id: int,
+        decoy_group: int,
     ) -> SpeclibElement | None:
         pep_formula = peptide.formula()[0]
         isotope_dist = peptide_formula_dist(pep_formula)
@@ -125,6 +127,7 @@ class EntryBuilder:
             "sequence": str(peptide),
             "charge": peptide.charge,
             "decoy": decoy,
+            "decoy_group": decoy_group,
         }
         elution_group = {
             "id": id,

@@ -50,7 +50,11 @@ impl MzMobilityOffsets {
             }
             let intensity = val.weight();
             let mz_err = (val.mean_mz().unwrap_or(f64::NAN) - ref_mz) as f32;
+            // Make PPM
+            let mz_err = mz_err / (*ref_mz as f32) * 1e6;
             let ims_err = (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
+            // Make Pct
+            let ims_err = ims_err / (ref_mobility as f32) * 1e2;
             ms1.push(SortableError {
                 intensity,
                 mz_err,
@@ -61,7 +65,9 @@ impl MzMobilityOffsets {
         for ((_key, ref_mz), val) in item.iter_fragments() {
             let intensity = val.weight();
             let mz_err = (val.mean_mz().unwrap_or(f64::NAN) - ref_mz) as f32;
+            let mz_err = mz_err / (*ref_mz as f32) * 1e6;
             let ims_err = (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
+            let ims_err = ims_err / (ref_mobility as f32) * 1e2;
             ms2.push(SortableError {
                 intensity,
                 mz_err,

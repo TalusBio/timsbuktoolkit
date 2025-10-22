@@ -16,6 +16,7 @@ class PeptideElement(BaseModel):
     charge: int
     nce: float
     decoy: bool
+    decoy_group: int
 
 
 class MzIntPair(BaseModel):
@@ -27,6 +28,7 @@ class PrecursorEntry(BaseModel):
     sequence: str
     charge: int
     decoy: bool
+    decoy_group: int
 
 
 class ElutionGroup(BaseModel):
@@ -119,6 +121,7 @@ class SpeclibElement(BaseModel):
                 sequence=new_seq,
                 charge=self.precursor.charge,
                 decoy=True,
+                decoy_group=self.precursor.decoy_group,
             ),
             elution_group=ElutionGroup(
                 id=id,
@@ -140,3 +143,4 @@ class EntryElements(BaseModel):
     rt_seconds: float
     decoy: bool
     id: int
+    decoy_group: int
