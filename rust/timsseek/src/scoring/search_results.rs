@@ -28,6 +28,8 @@ pub struct SearchResultBuilder<'q> {
     digest_slice: SetField<&'q DigestSlice>,
     ref_eg: SetField<&'q ElutionGroup<IonAnnot>>,
     decoy_marking: SetField<DecoyMarking>,
+    library_id: SetField<u32>,
+    decoy_group_id: SetField<u32>,
     charge: SetField<u8>,
     nqueries: SetField<u8>,
 
@@ -100,6 +102,7 @@ impl<'q> SearchResultBuilder<'q> {
         self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
         self.decoy_marking = SetField::Some(pre_score.digest.decoy);
         self.charge = SetField::Some(pre_score.charge);
+        self.decoy_group_id = SetField::Some(pre_score.digest.decoy_group);
         self
     }
 
@@ -226,6 +229,8 @@ impl<'q> SearchResultBuilder<'q> {
 
         let results = IonSearchResults {
             sequence: String::from(expect_some!(digest_slice).clone()),
+            library_id: 1, // expect_some!(library_id),
+            decoy_group_id: expect_some!(decoy_group_id),
             precursor_mz: ref_eg.get_monoisotopic_precursor_mz().unwrap_or(f64::NAN),
             precursor_charge: expect_some!(charge),
             precursor_mobility_query: ref_eg.mobility,
@@ -303,6 +308,8 @@ impl<'q> SearchResultBuilder<'q> {
 
             discriminant_score: f32::NAN,
             qvalue: f32::NAN,
+            delta_group: f32::NAN,
+            delta_group_ratio: f32::NAN,
         };
 
         Ok(results)
@@ -318,6 +325,8 @@ impl<'q> SearchResultBuilder<'q> {
 #[derive(Debug, Clone, Serialize, ParquetRecordWriter)]
 pub struct IonSearchResults {
     pub sequence: String,
+    pub library_id: u32,
+    pub decoy_group_id: u32,
     pub precursor_mz: f64,
     pub precursor_charge: u8,
     pub precursor_mobility_query: f32,
@@ -338,6 +347,8 @@ pub struct IonSearchResults {
     pub sq_delta_ms1_ms2_mobility: f32,
     pub raising_cycles: u8,
     pub falling_cycles: u8,
+    pub delta_group: f32,
+    pub delta_group_ratio: f32,
 
     // MS2
     pub npeaks: u8,

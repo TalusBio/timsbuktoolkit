@@ -109,6 +109,8 @@ impl FeatureLike for IonSearchResults {
     fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
         let Self {
             sequence: _,
+            library_id: _,
+            decoy_group_id: _,
             precursor_mz,
             precursor_charge,
             precursor_mobility_query,
@@ -193,6 +195,8 @@ impl FeatureLike for IonSearchResults {
 
             discriminant_score: _,
             qvalue: _,
+            delta_group,
+            delta_group_ratio,
         } = *self;
 
         vec![
@@ -203,6 +207,7 @@ impl FeatureLike for IonSearchResults {
             nqueries as f64,
             // Combined
             main_score as f64,
+            (main_score / delta_next) as f64,
             delta_next as f64,
             delta_second_next as f64,
             obs_rt_seconds as f64,
@@ -263,6 +268,8 @@ impl FeatureLike for IonSearchResults {
             ms2_inten_ratio_4 as f64,
             ms2_inten_ratio_5 as f64,
             ms2_inten_ratio_6 as f64,
+            delta_group as f64,
+            delta_group_ratio as f64,
         ]
     }
 

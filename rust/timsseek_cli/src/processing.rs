@@ -120,14 +120,13 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     });
     results.dedup_by(|x, y| x.sequence == y.sequence);
 
+    let mut results = target_decoy_compete(results);
+
     // Sort in descending order of score
     results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
     assert!(results.first().unwrap().main_score >= results.last().unwrap().main_score);
 
-    match recalibrate_speclib(
-        &mut query_iterator,
-        &results[..(100_000.min(results.len()))],
-    ) {
+    match recalibrate_speclib(&mut query_iterator, &results) {
         Ok(_) => info!("Recalibrated speclib retention times based on search results"),
         Err(e) => {
             tracing::error!("Error recalibrating speclib retention times: {:?}", e);
@@ -160,6 +159,70 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     pq_writer.close();
 
     Ok(all_timings)
+}
+
+fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResults> {
+    // Compete target-decoy pairs
+    // First keep the t/d id and then sort by score, bests go first
+    // competition happens at the precursor level
+    // so we can dedupe them
+    results.sort_unstable_by(|x, y| {
+        x.decoy_group_id
+            .cmp(&y.decoy_group_id)
+            .then_with(|| x.precursor_charge.cmp(&y.precursor_charge))
+            .then_with(|| {
+                // No score should be nan or infinite here ...
+                x.main_score.partial_cmp(&y.main_score).unwrap().reverse()
+            })
+    });
+    info!(
+        "Number of results before t/d competition: {}",
+        results.len()
+    );
+
+    // Assign the delta group scores
+    // this is the (td_id, charge, index, score)
+    let mut last_id: Option<(u32, u8, usize, f32)> = None;
+    let mut set = false;
+    for i in 0..results.len() {
+        let res = &mut results[i];
+        let current_id = (res.decoy_group_id, res.precursor_charge);
+        if let Some((last_td_id, last_charge, last_index, last_score)) = last_id {
+            if (last_td_id, last_charge) == current_id {
+                if set {
+                    continue;
+                }
+                // same group
+                // since we are going downhill, this score will alwayts be negative
+                let delta_score = res.main_score - last_score;
+                let delta_group_ratio = last_score / res.main_score.max(1.0);
+
+                // Since we are going to drop this ... we save some time not
+                // assigning this score RN...
+                // res.delta_group = delta_score;
+                // results[last_index].delta_group_ratio = 1 / delta_group_ratio;
+
+                // Also set the delta cn for the last one if its not already set
+                results[last_index].delta_group = -delta_score;
+                results[last_index].delta_group_ratio = delta_group_ratio;
+                set = true;
+            } else {
+                // new group
+                last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
+                set = false;
+            }
+        } else {
+            // first entry
+            last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
+            set = false;
+        }
+    }
+
+    results.dedup_by(|x, y| {
+        (x.decoy_group_id == y.decoy_group_id) & (x.precursor_charge == y.precursor_charge)
+    });
+    info!("Number of results after t/d competition: {}", results.len());
+    results
 }
 
 pub fn process_speclib(

@@ -67,13 +67,13 @@ def as_decoy_proforma(proforma: str, decoy_strategy: DecoyStrategy) -> str:
     return str(tmp).replace("UNIMOD:", "U:")
 
 
-def yield_as_decoys(
-    peptides: list[str],
-    decoy_strategy: DecoyStrategy,
-) -> Generator[str, None, None]:
-    for peptide in peptides:
+def yield_with_decoys(
+    peptides: list[str], decoy_strategy: DecoyStrategy
+) -> Generator[tuple[str, bool, int], None, None]:
+    for id, peptide in enumerate(peptides):
+        yield peptide, False, id
         try:
-            yield as_decoy(peptide, decoy_strategy)
+            yield as_decoy(peptide, decoy_strategy), True, id
         except KeyError as e:
             print(f"No decoy for {peptide} because KeyError: {e}")
 

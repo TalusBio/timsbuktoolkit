@@ -128,7 +128,7 @@ def _main(
     pprint(f"Writing output to file: {outfile}")
 
     with SpeclibWriter(path=Path(outfile), file_format=file_format) as writer:
-        targ_use = peptide_builder.get_modified_targets()
+        targ_use = peptide_builder.get_modified_target_decoys()
         for x in tqdm(
             annotator.batched_model(targ_use),
             desc="Targets",
@@ -137,35 +137,11 @@ def _main(
             id += 1
             elem = entry_builder.as_entry(
                 peptide=x.peptide,
-                decoy=False,
+                decoy=x.decoy,
                 id=id,
                 ion_dict=x.ion_dict,
                 rt_seconds=x.rt_seconds,
-            )
-            if elem is None:
-                continue
-            if is_first_n > 0:
-                pprint(elem)
-                pretty_outs.append(elem)
-                is_first_n -= 1
-
-            writer.append(elem)
-
-        is_first_n = 10
-
-        decoys = peptide_builder.get_modified_decoys()
-        for x in tqdm(
-            annotator.batched_model(decoys),
-            desc="Decoys",
-            total=len(decoys),
-        ):
-            id += 1
-            elem = entry_builder.as_entry(
-                peptide=x.peptide,
-                ion_dict=x.ion_dict,
-                decoy=True,
-                id=id,
-                rt_seconds=x.rt_seconds,
+                decoy_group=x.decoy_group,
             )
             if elem is None:
                 continue
