@@ -59,13 +59,16 @@ use super::{
 };
 use crate::errors::DataProcessingError;
 use crate::models::DigestSlice;
-use crate::utils::math::lnfact_f32;
+// use crate::utils::math::lnfact_f32;
 use crate::utils::top_n_array::TopNArray;
 use crate::{
     ExpectedIntensities,
     IonAnnot,
 };
-use core::f32;
+use core::{
+    f32,
+    f64,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use timsquery::models::aggregators::ChromatogramCollector;
@@ -522,20 +525,26 @@ impl TimeResolvedScores {
         // The 0.75 - 0.25 means we are downscaling the main lazyscore up to 0.75
         // since the similarity is in the 0-1 range; even if the precursor has
         // similarity of 0, we still have a scoring value.
-        const MS1_SCALING: f32 = 0.25;
-        const MS1_OFFSET: f32 = 0.75;
+        //
+
+        const MS1_SCALING: f32 = 0.75;
+        const MS1_OFFSET: f32 = 0.25;
 
         let ms1_cos_score =
-            MS1_SCALING + (MS1_OFFSET * self.ms1_cosine_ref_sim[idx].max(1e-3).powi(2));
+            MS1_SCALING + (MS1_OFFSET * self.ms1_coelution_score[idx].max(1e-3).powi(2));
         let ms1_gauss_score =
             MS1_SCALING + (MS1_OFFSET * self.ms1_corr_v_gauss[idx].max(1e-3).powi(2));
-        let mut loc_score = self.ms2_lazyscore[idx];
+        // let mut loc_score = self.ms2_lazyscore[idx];
+        let mut loc_score = 1.0;
         loc_score *= ms1_cos_score;
         loc_score *= ms1_gauss_score;
         loc_score *= self.ms2_cosine_ref_sim[idx].max(1e-3).powi(2);
         loc_score *= self.ms2_coelution_score[idx].max(1e-3).powi(2);
         loc_score *= self.ms2_corr_v_gauss[idx].max(1e-3).powi(2);
         loc_score
+
+        // self.ms2_coelution_score[idx].max(1e-3).powi(2) // 4.5k
+        // self.ms2_corr_v_gauss[idx].max(1e-3).powi(2) // 5.6k
     }
 }
 
@@ -800,36 +809,32 @@ impl PeptideScorer {
         let brs = baseline_range.start;
 
         let div_factor = (baseline_range.len() as f32 - peak_range.len() as f32).max(1.0);
-        let lambda: f32 = (self.time_resolved_scores.ms2_lazyscore[baseline_range]
+        let lambda: f64 = (self.time_resolved_scores.ms2_lazyscore[baseline_range]
             .iter()
             .enumerate()
             .filter_map(|(i, x)| {
                 let real_i = brs + i;
                 if real_i < peak_range.start || real_i >= peak_range.end {
                     // Replace nan with 0
-                    if x.is_nan() { Some(0.0) } else { Some(*x) }
+                    if x.is_nan() {
+                        Some(0.0)
+                    } else {
+                        Some(*x as f64)
+                    }
                 } else {
                     None
                 }
             })
-            .sum::<f32>()
-            / div_factor)
+            .sum::<f64>()
+            / div_factor as f64)
             .max(1.0);
         // println!("lambda: {}", lambda);
-        let k = self.time_resolved_scores.ms2_lazyscore[max_loc];
-        // lnfact(k).exp()
-        // Straight up stolen from sage ... not sure if it fits out distribution
-        // assumptions ...
-        let mut poisson = lambda.powf(k) * f32::exp(-lambda) / lnfact_f32(k).exp();
-        if poisson.is_infinite() {
-            // Approximately the smallest positive non-zero value representable by f64
-            poisson = 1E-325;
-        }
+        let k = self.time_resolved_scores.ms2_lazyscore[max_loc] as f64;
 
         // let norm_lazy_std =
         //     calculate_centered_std(&self.time_resolved_scores.ms2_lazyscore_vs_baseline);
         // let norm_lazy_std = 1.0;
-        let norm_lazy_std = lambda.sqrt().max(1.0);
+        let norm_lazy_std = lambda.sqrt().max(1.0) as f32;
         let lazyscore_z = self.time_resolved_scores.ms2_lazyscore[max_loc] / norm_lazy_std;
         // println!("Lazy score z: {}", lazyscore_z);
         if lazyscore_z.is_nan() {
@@ -852,7 +857,7 @@ impl PeptideScorer {
             npeaks: npeak_ms2 as u8,
             lazyscore: self.time_resolved_scores.ms2_lazyscore[max_loc],
             // lazyscore_vs_baseline: self.time_resolved_scores.ms2_lazyscore_vs_baseline[max_loc],
-            lazyscore_vs_baseline: poisson,
+            lazyscore_vs_baseline: (k / lambda) as f32,
             lazyscore_z,
             ms2_corr_v_gauss: self.time_resolved_scores.ms2_corr_v_gauss[max_loc],
             ms1_corr_v_gauss: self.time_resolved_scores.ms1_corr_v_gauss[max_loc],

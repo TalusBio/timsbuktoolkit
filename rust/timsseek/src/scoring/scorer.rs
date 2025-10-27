@@ -460,9 +460,10 @@ impl<I: GenerallyQueriable<IonAnnot>> Scorer<I> {
         let avg_speed =
             std::time::Duration::from_nanos(elapsed.as_nanos() as u64 / num_input_items as u64);
         let throughput = num_input_items as f64 / elapsed.as_secs_f64();
+        let million_per_min = 1e-6 * throughput * 60.0;
         info!(
-            "Scoring {} items took: {:?} throughput: {}/s, avg: {:?}",
-            num_input_items, elapsed, throughput, avg_speed
+            "Scoring {} items took: {:?} throughput: {:#.1}/s, million_per_min: {:#.1}, avg: {:?}",
+            num_input_items, elapsed, throughput, million_per_min, avg_speed
         );
 
         info!("{:?}", results.timings);

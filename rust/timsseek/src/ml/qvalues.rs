@@ -115,6 +115,7 @@ impl FeatureLike for IonSearchResults {
             precursor_charge,
             precursor_mobility_query,
             precursor_rt_query_seconds,
+            recalibrated_query_rt,
             nqueries,
             is_target: _,
 
@@ -126,6 +127,7 @@ impl FeatureLike for IonSearchResults {
             obs_mobility,
             delta_theo_rt,
             sq_delta_theo_rt,
+            calibrated_sq_delta_theo_rt,
             delta_ms1_ms2_mobility,
             // ms1_ms2_correlation,
             sq_delta_ms1_ms2_mobility,
@@ -270,6 +272,8 @@ impl FeatureLike for IonSearchResults {
             ms2_inten_ratio_6 as f64,
             delta_group as f64,
             delta_group_ratio as f64,
+            recalibrated_query_rt as f64,
+            calibrated_sq_delta_theo_rt as f64,
         ]
     }
 

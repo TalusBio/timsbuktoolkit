@@ -37,7 +37,7 @@ impl From<&IonSearchResults> for Point {
 pub fn recalibrate_speclib(
     speclib: &mut Speclib,
     calib_data: &[IonSearchResults],
-) -> Result<(), CalibRtError> {
+) -> Result<RTCalibration, CalibRtError> {
     let mut min_x = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
     let mut min_y = f64::INFINITY;
@@ -100,14 +100,31 @@ pub fn recalibrate_speclib(
             });
             if oob_preds.0 > 0 {
                 warn!(
-                    "{} out of bounds RT predictions (min RT {}s, max RT {}s)",
-                    oob_preds.0, oob_preds.1, oob_preds.2
+                    "{}/{} out of bounds RT predictions (min RT {}s, max RT {}s)",
+                    oob_preds.0,
+                    cool_preds + oob_preds.0,
+                    oob_preds.1,
+                    oob_preds.2
                 );
             }
 
-            Ok(())
+            Ok(cal_curve)
         }
 
         Err(e) => Err(e),
+    }
+}
+
+pub fn recalibrate_results(calibration: &RTCalibration, results: &mut [IonSearchResults]) {
+    for v in results.iter_mut() {
+        let pred_rt = calibration
+            .predict(v.precursor_rt_query_seconds as f64)
+            .unwrap_or_else(|e| match e {
+                CalibRtError::OutOfBounds(x) => x,
+                _ => panic!("Unexpected error during RT prediction"),
+            });
+        v.recalibrated_query_rt = pred_rt as f32;
+        v.calibrated_sq_delta_theo_rt = (v.obs_rt_seconds - v.recalibrated_query_rt).powi(2);
+        v.delta_theo_rt = v.obs_rt_seconds - v.recalibrated_query_rt;
     }
 }
