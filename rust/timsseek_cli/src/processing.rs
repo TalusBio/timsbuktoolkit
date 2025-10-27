@@ -14,7 +14,10 @@ use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::rescore;
-use timsseek::rt_calibration::recalibrate_speclib;
+use timsseek::rt_calibration::{
+    recalibrate_results,
+    recalibrate_speclib,
+};
 use timsseek::scoring::scorer::{
     ScoreTimings,
     Scorer,
@@ -127,7 +130,10 @@ pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
     assert!(results.first().unwrap().main_score >= results.last().unwrap().main_score);
 
     match recalibrate_speclib(&mut query_iterator, &results) {
-        Ok(_) => info!("Recalibrated speclib retention times based on search results"),
+        Ok(calib) => {
+            info!("Recalibrated speclib retention times based on search results");
+            recalibrate_results(&calib, results.as_mut_slice());
+        }
         Err(e) => {
             tracing::error!("Error recalibrating speclib retention times: {:?}", e);
         }
@@ -195,7 +201,7 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
                 // same group
                 // since we are going downhill, this score will alwayts be negative
                 let delta_score = res.main_score - last_score;
-                let delta_group_ratio = last_score / res.main_score.max(1.0);
+                let delta_group_ratio = res.main_score / last_score;
 
                 // Since we are going to drop this ... we save some time not
                 // assigning this score RN...

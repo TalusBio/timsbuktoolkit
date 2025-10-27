@@ -33,7 +33,7 @@ pub fn new_index(
         index,
         tolerance: tolerance.clone(),
         secondary_tolerance: tolerance.with_rt_tolerance(
-            timsquery::models::tolerance::RtTolerance::Minutes((0.5, 0.5)),
+            timsquery::models::tolerance::RtTolerance::Minutes((0.1, 0.1)),
         ),
         fragmented_range,
     })

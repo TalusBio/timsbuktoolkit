@@ -147,24 +147,6 @@ def td_compete(df_use: pl.DataFrame) -> pl.DataFrame:
             )
         )
     )
-    df_use = df_use.with_columns(
-        delta_td_score=pl.when(pl.col("main_score").count() > 1)
-        .then(
-            pl.col("main_score")
-            - pl.col("main_score").min().over(["td_id", "precursor_charge"])
-        )
-        .otherwise(pl.col("main_score")),
-    )
-
-    pprint("Initial T/D competition")
-    init_nrow = len(df_use)
-    df_use = df_use.filter(
-        pl.col("main_score")
-        == pl.col("main_score").max().over(["td_id", "precursor_charge"])
-    )
-    pprint(
-        f"T/D competition Removed {init_nrow - len(df_use)} rows (kept {len(df_use)})"
-    )
 
     return df_use
 
@@ -191,6 +173,7 @@ def to_mokapot_df(
         "ms2_summed_transition_intensity",
         # TODO: consider clamping instead of logging here.
         "sq_delta_theo_rt",
+        "calibrated_sq_delta_theo_rt",
     )
     imputable_cols = (
         # Abs impute
@@ -224,9 +207,7 @@ def to_mokapot_df(
     )
     # zero_imputable_cols = ("ms1_ms2_correlation",)
     zero_imputable_cols = ()
-    generated_cols = [
-        "delta_td_score",
-    ]
+    generated_cols = []
 
     if scale_cols:
         df_use = log_cols(df, loggable_cols)
@@ -270,6 +251,9 @@ def to_mokapot_df(
             "raising_cycles",
             "falling_cycles",
             "apex_norm_lazyerscore_vs_baseline",
+            # ...
+            "delta_group_ratio",
+            "delta_group",
         )
         + loggable_cols
         + imputable_cols
@@ -287,14 +271,13 @@ def to_mokapot_df(
         check_nonexp(df_use, feat_cols)
 
     pprint("Converting to pandas")
-    df_use = df_use.filter(pl.col("main_score") > 1)
     df_use = df_use.to_pandas()
     cols = ColumnGroups(
         columns=df_use.columns,
         target_column="is_target",
         peptide_column="sequence",
         # spectrum_columns=("id", "td_id"),
-        spectrum_columns=("td_id",),
+        spectrum_columns=("id",),
         feature_columns=feat_cols,
         extra_confidence_level_columns=(),
         optional_columns=OptionalColumns(
@@ -317,7 +300,7 @@ def to_mokapot_df(
 def read_files(results_dirs: list[Path]) -> pl.LazyFrame:
     files = set()
     for results_dir in results_dirs:
-        files.update(results_dir.glob("results.parquet"))
+        files.update(results_dir.glob("results_rescored.parquet"))
 
     files = list(files)
     pprint(f"Scanning {len(files)} files -> {files}")

@@ -97,6 +97,7 @@ impl<T> SetField<T> {
 
 impl<'q> SearchResultBuilder<'q> {
     pub fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
+        self.library_id = SetField::Some(pre_score.query_values.eg.id as u32);
         self.digest_slice = SetField::Some(&pre_score.digest);
         self.ref_eg = SetField::Some(&pre_score.query_values.eg);
         self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
@@ -229,7 +230,7 @@ impl<'q> SearchResultBuilder<'q> {
 
         let results = IonSearchResults {
             sequence: String::from(expect_some!(digest_slice).clone()),
-            library_id: 1, // expect_some!(library_id),
+            library_id: expect_some!(library_id),
             decoy_group_id: expect_some!(decoy_group_id),
             precursor_mz: ref_eg.get_monoisotopic_precursor_mz().unwrap_or(f64::NAN),
             precursor_charge: expect_some!(charge),
@@ -310,6 +311,8 @@ impl<'q> SearchResultBuilder<'q> {
             qvalue: f32::NAN,
             delta_group: f32::NAN,
             delta_group_ratio: f32::NAN,
+            recalibrated_query_rt: f32::NAN,
+            calibrated_sq_delta_theo_rt: f32::NAN,
         };
 
         Ok(results)
@@ -331,6 +334,7 @@ pub struct IonSearchResults {
     pub precursor_charge: u8,
     pub precursor_mobility_query: f32,
     pub precursor_rt_query_seconds: f32,
+    pub recalibrated_query_rt: f32,
     pub nqueries: u8,
     pub is_target: bool,
 
@@ -342,6 +346,7 @@ pub struct IonSearchResults {
     pub obs_mobility: f32,
     pub delta_theo_rt: f32,
     pub sq_delta_theo_rt: f32,
+    pub calibrated_sq_delta_theo_rt: f32,
     pub delta_ms1_ms2_mobility: f32,
     // ms1_ms2_correlation: f32,
     pub sq_delta_ms1_ms2_mobility: f32,
