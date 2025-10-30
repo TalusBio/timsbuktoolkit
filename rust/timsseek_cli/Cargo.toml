@@ -11,7 +11,7 @@ regex = "1.11.1"
 
 # Workspace-inherited deps
 # tracing-profile = { version="0.10.11",features=["perfetto"] }
-tracing-profile = { path = "../../../tracing-profile/" }
+tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common", features=["perfetto"] }
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
