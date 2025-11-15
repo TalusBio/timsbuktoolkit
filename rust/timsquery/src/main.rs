@@ -79,17 +79,27 @@ fn main_write_template(args: WriteTemplateArgs) {
     // Do pretty serialization.
     let egs_json = serde_json::to_string_pretty(&egs).unwrap();
     let tolerance_json = serde_json::to_string_pretty(&tolerance).unwrap();
+    let tolerance_json_narrow = serde_json::to_string_pretty(
+        &tolerance.with_rt_tolerance(RtTolerance::Minutes((5.0, 5.0))),
+    )
+    .unwrap();
 
     let put_path = std::path::Path::new(&output_path);
     std::fs::create_dir_all(put_path).unwrap();
     println!("Writing to {}", put_path.display());
     let egs_json_path = put_path.join("elution_groups.json");
     let tolerance_json_path = put_path.join("tolerance_settings.json");
+    let tolerance_json_narrow_path = put_path.join("tolerance_settings_narrow.json");
 
     println!("\n>>> Example elution groups: \n{}\n", &egs_json);
     std::fs::write(egs_json_path.clone(), egs_json).unwrap();
     println!("\n>>> Example tolerances: \n{}\n", &tolerance_json);
     std::fs::write(tolerance_json_path.clone(), tolerance_json).unwrap();
+    println!(
+        "\n>>> Example tolerances (narrow): \n{}\n",
+        &tolerance_json_narrow
+    );
+    std::fs::write(tolerance_json_narrow_path.clone(), tolerance_json_narrow).unwrap();
     println!(
         "use as `timsquery query-index --output-path '.' --raw-file-path 'your_file.d' --tolerance-settings-path {:#?} --elution-groups-path {:#?}`",
         tolerance_json_path, egs_json_path,
@@ -148,7 +158,7 @@ fn main_query_index(args: QueryIndexArgs) {
 
     let tolerance_settings: Tolerance =
         serde_json::from_str(&std::fs::read_to_string(&tolerance_settings_path).unwrap()).unwrap();
-    let elution_groups: Vec<Arc<ElutionGroup<String>>> =
+    let elution_groups: Vec<ElutionGroup<String>> =
         serde_json::from_str(&std::fs::read_to_string(&elution_groups_path).unwrap()).unwrap();
 
     let file = TimsTofPath::new(&raw_file_path).unwrap();
@@ -161,7 +171,7 @@ fn main_query_index(args: QueryIndexArgs) {
     let (index, building_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
     let rts = get_ms1_rts_as_millis(&file);
     println!("Indexing Stats: {:#?}", building_stats);
-    let mut queries = AggregatorContainer::new(elution_groups.clone(), aggregator_use, rts);
+    let mut queries = AggregatorContainer::new(elution_groups, aggregator_use, rts);
 
     let output_path = args.output_path;
     std::fs::create_dir_all(&output_path).unwrap();
@@ -203,27 +213,27 @@ pub enum AggregatorContainer {
 
 impl AggregatorContainer {
     fn new(
-        queries: Vec<Arc<ElutionGroup<String>>>,
+        queries: Vec<ElutionGroup<String>>,
         aggregator: PossibleAggregator,
         ref_rts: Arc<[u32]>,
     ) -> Self {
         match aggregator {
             PossibleAggregator::PointIntensityAggregator => AggregatorContainer::Point(
                 queries
-                    .iter()
-                    .map(|x| PointIntensityAggregator::new_with_elution_group(x.clone()))
+                    .into_iter()
+                    .map(|x| PointIntensityAggregator::new_with_elution_group(x.into()))
                     .collect(),
             ),
             PossibleAggregator::ChromatogramAggregator => AggregatorContainer::Chromatogram(
                 queries
-                    .iter()
-                    .map(|x| ChromatogramCollector::new(x.clone(), ref_rts.clone()).unwrap())
+                    .into_iter()
+                    .map(|x| ChromatogramCollector::new(x, ref_rts.clone()).unwrap())
                     .collect(),
             ),
             PossibleAggregator::SpectrumAggregator => AggregatorContainer::Spectrum(
                 queries
-                    .iter()
-                    .map(|x| SpectralCollector::new(x.clone()))
+                    .into_iter()
+                    .map(|x| SpectralCollector::new(x))
                     .collect(),
             ),
         }
