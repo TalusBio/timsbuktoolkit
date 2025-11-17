@@ -314,7 +314,7 @@ checksum = "325918d6fe32f23b19878fe4b34794ae41fc19ddbe53b10571a4874d44ffd39b"
 
 [[package]]
 name = "calibrt"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.2.0"
+version = "0.20.0"
 dependencies = [
  "geo",
  "geo-types",
@@ -2117,6 +2117,7 @@ dependencies = [
 name = "timsquery"
 version = "0.20.0"
 dependencies = [
+ "bincode",
  "clap",
  "half",
  "indicatif",
@@ -2132,6 +2133,7 @@ dependencies = [
  "tracing-bunyan-formatter",
  "tracing-chrome",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
@@ -2156,7 +2158,6 @@ name = "timsseek"
 version = "0.20.0"
 dependencies = [
  "arrayvec",
- "bincode",
  "calibrt",
  "csv",
  "forust-ml",
@@ -2199,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_rts"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "clap",
  "csv",

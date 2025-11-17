@@ -32,6 +32,7 @@ pub use timscentroid::{
 // Declare modules
 pub mod errors;
 pub mod models;
+pub mod serde;
 pub mod traits;
 pub mod utils;
 pub use crate::utils::TupleRange;

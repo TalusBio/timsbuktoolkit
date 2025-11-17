@@ -6,9 +6,9 @@ mod processing;
 use clap::Parser;
 use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
+use timsquery::serde::load_index_caching;
 use timsquery::utils::TupleRange;
 use timsseek::scoring::Scorer;
-use timsseek::utils::serde::load_index_caching;
 use tracing::{
     error,
     info,
