@@ -16,7 +16,7 @@ pub fn new_index(
     // Can use centroided for faster queries ...
     //
     let file_loc = dotd_file_location.clone();
-    let index = timsseek::utils::serde::load_index_caching(file_loc).unwrap();
+    let index = timsquery::serde::load_index_caching(file_loc).unwrap();
     let elap_time = st.elapsed();
     println!(
         "Loading index took: {:?} for {}",

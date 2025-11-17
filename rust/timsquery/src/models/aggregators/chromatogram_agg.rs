@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::errors::DataProcessingError;
 use crate::models::base::{
     ArrayElement,
-    MutableChromatogram,
+    Chromatogram,
     MzMajorIntensityArray,
 };
 use crate::{
@@ -38,13 +38,11 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 
     pub fn iter_mut_precursors(
         &mut self,
-    ) -> impl Iterator<Item = (&(i8, f64), MutableChromatogram<'_, V>)> {
+    ) -> impl Iterator<Item = (&(i8, f64), Chromatogram<'_, V>)> {
         self.precursors.iter_mut_mzs()
     }
 
-    pub fn iter_mut_fragments(
-        &mut self,
-    ) -> impl Iterator<Item = (&(T, f64), MutableChromatogram<'_, V>)> {
+    pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = (&(T, f64), Chromatogram<'_, V>)> {
         self.fragments.iter_mut_mzs()
     }
 

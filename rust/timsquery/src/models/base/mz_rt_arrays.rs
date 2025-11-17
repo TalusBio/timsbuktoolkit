@@ -44,17 +44,46 @@ impl<K: KeyLike, V: ArrayElement + Serialize> Serialize for MzMajorIntensityArra
     }
 }
 
+/// A mutable view into a single chromatogram within a MzMajorIntensityArray
+///
+/// The meaning of the cycle_offset is that the indices passed to add_at_index
+/// are adjusted by subtracting the cycle_offset before accessing the underlying slice.
 #[derive(Debug)]
-pub struct MutableChromatogram<'a, V: ArrayElement> {
+pub struct Chromatogram<'a, V: ArrayElement> {
+    /// The slice of intensities for this chromatogram
     slc: &'a mut [V],
+
+    /// The offset to apply to indices when adding intensities.
+    /// In essence it means "how much do I need to add to the index in this slice to match
+    /// the global cyle (retention time) index".
     cycle_offset: usize,
 }
 
-impl<V: ArrayElement> MutableChromatogram<'_, V> {
-    fn new<'a>(slc: &'a mut [V], cycle_offset: usize) -> MutableChromatogram<'a, V> {
-        MutableChromatogram { slc, cycle_offset }
+impl<V: ArrayElement> Chromatogram<'_, V> {
+    fn new<'a>(slc: &'a mut [V], cycle_offset: usize) -> Chromatogram<'a, V> {
+        Chromatogram { slc, cycle_offset }
     }
 
+    pub fn as_slice(&self) -> &[V] {
+        self.slc
+    }
+
+    pub fn try_get_slice(&self, start: usize, end: usize) -> Option<&[V]> {
+        // add index offsetting
+        let start = start.saturating_sub(self.cycle_offset);
+        let end = end.saturating_sub(self.cycle_offset);
+        if start >= self.slc.len() || end > self.slc.len() || start >= end {
+            return None;
+        }
+        Some(&self.slc[start..end])
+    }
+
+    pub fn len(&self) -> usize {
+        self.slc.len()
+    }
+
+    /// Add intensity at the given index, adjusting for cycle offset.
+    /// If the index is out of bounds, add to the last element.
     pub fn add_at_index<T>(&mut self, idx: u32, intensity: T)
     where
         V: std::ops::AddAssign<T>,
@@ -112,14 +141,12 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         self.arr.get_row(idx)
     }
 
-    pub fn iter_mut_mzs(
-        &mut self,
-    ) -> impl Iterator<Item = (&(K, f64), MutableChromatogram<'_, V>)> {
+    pub fn iter_mut_mzs(&mut self) -> impl Iterator<Item = (&(K, f64), Chromatogram<'_, V>)> {
         assert_eq!(self.arr.nrows(), self.mz_order.len());
         self.mz_order.iter().zip(
             self.arr
                 .iter_mut_rows()
-                .map(|slc| MutableChromatogram::new(slc, self.cycle_offset)),
+                .map(|slc| Chromatogram::new(slc, self.cycle_offset)),
         )
     }
 

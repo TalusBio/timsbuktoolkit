@@ -1,6 +1,6 @@
 [package]
 name = "timsquery"
-version = "0.20.0"
+version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
 
@@ -10,6 +10,9 @@ tabled = "0.17.0"
 
 tracing-bunyan-formatter = "0.3.10"
 tracing-chrome = "0.7.2"
+
+bincode = "1.3"
+zstd = "0.13"
 
 # Workspace member deps
 timscentroid = { path = "../timscentroid" }

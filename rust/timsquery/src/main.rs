@@ -2,12 +2,24 @@ use clap::{
     Parser,
     Subcommand,
 };
+use serde::ser::{
+    SerializeSeq,
+    Serializer,
+};
 use serde::{
     Deserialize,
     Serialize,
 };
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{
+    Duration,
+    Instant,
+};
+use timsquery::serde::load_index_caching;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 use timscentroid::{
     IndexedTimstofPeaks,
@@ -28,16 +40,17 @@ use timsquery::models::tolerance::{
 };
 use tracing::instrument;
 use tracing::subscriber::set_global_default;
-use tracing_bunyan_formatter::{
-    BunyanFormattingLayer,
-    JsonStorageLayer,
-};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
 
 // Require for the trait.
 use timsquery::QueriableData;
+use tracing::{
+    error,
+    info,
+    warn,
+};
 
 // mimalloc seems to work better for windows
 // ... more accurately ... not using it causes everyting to
@@ -51,11 +64,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let formatting_layer = BunyanFormattingLayer::new("timsquery".into(), std::io::stdout);
     let subscriber = Registry::default()
         .with(env_filter)
-        .with(JsonStorageLayer)
-        .with(formatting_layer);
+        .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE));
 
     set_global_default(subscriber).expect("Setting default subscriber failed");
     let args = Args::parse();
@@ -67,6 +78,87 @@ fn main() {
             println!("No command provided");
         }
     }
+}
+
+#[instrument]
+fn main_query_index(args: QueryIndexArgs) {
+    let raw_file_path = args.raw_file_path;
+    let tolerance_settings_path = args.tolerance_settings_path;
+    let elution_groups_path = args.elution_groups_path;
+    let aggregator_use = args.aggregator;
+
+    let tolerance_settings: Tolerance =
+        serde_json::from_str(&std::fs::read_to_string(&tolerance_settings_path).unwrap()).unwrap();
+    info!("Using tolerance settings: {:#?}", tolerance_settings);
+    info!("Loading elution groups from {}", elution_groups_path);
+    let elution_groups: Vec<ElutionGroup<usize>> = read_query_elution_groups(&elution_groups_path);
+    info!("Loaded {} elution groups", elution_groups.len());
+
+    let index = load_index_caching(&raw_file_path).unwrap();
+    let rts = get_ms1_rts_as_millis(&raw_file_path);
+
+    let output_path = args.output_path;
+    let serialization_format = args.format;
+    let batch_size = args.batch_size;
+
+    std::fs::create_dir_all(&output_path).unwrap();
+    let put_path = std::path::Path::new(&output_path).join("results.json");
+
+    stream_process_batches(
+        elution_groups,
+        aggregator_use,
+        rts,
+        &index,
+        &tolerance_settings,
+        serialization_format,
+        &put_path,
+        batch_size,
+    );
+}
+
+fn read_query_elution_groups(path: &impl AsRef<std::path::Path>) -> Vec<ElutionGroup<usize>> {
+    // We attempt to read as from elution group intpus, if we fail we try to use the direct elution group format.
+    let tmp_inner = std::fs::read_to_string(&path.as_ref()).unwrap();
+    let try_input: Result<Vec<ElutionGroupInput>, _> = serde_json::from_str(&tmp_inner);
+    if let Ok(eg_inputs) = try_input {
+        let out: Vec<ElutionGroup<usize>> = eg_inputs.into_iter().map(|x| x.into()).collect();
+        return out;
+    }
+    // Fallback to direct elution group format. and if that does not work try to convert to Vec<ElutionGroup<String>>
+    // warn that the ids will be dropped and converted to usize indices.
+    let out = serde_json::from_str(&tmp_inner);
+    let out = match out {
+        Ok(egs) => egs,
+        Err(e) => {
+            warn!(
+                "Failed to read elution groups as ElutionGroupInput or ElutionGroup<usize>: {}",
+                e
+            );
+            warn!("Attempting to read as ElutionGroup<String> and convert ids to usize indices.");
+            warn!("This will drop the original ids and replace them with usize indices.");
+            let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&tmp_inner).unwrap();
+            let mut out: Vec<ElutionGroup<usize>> = Vec::with_capacity(egs_string.len());
+            for (i, eg) in egs_string.into_iter().enumerate() {
+                let eg_usize = ElutionGroup {
+                    id: i as u64,
+                    mobility: eg.mobility,
+                    rt_seconds: eg.rt_seconds,
+                    precursors: eg.precursors,
+                    fragments: Arc::from(
+                        eg.fragments
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_lab, mz))| (i, *mz))
+                            .collect::<Vec<(usize, f64)>>(),
+                    ),
+                };
+                out.push(eg_usize);
+            }
+            out
+        }
+    };
+
+    out
 }
 
 fn main_write_template(args: WriteTemplateArgs) {
@@ -106,7 +198,7 @@ fn main_write_template(args: WriteTemplateArgs) {
     );
 }
 
-fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
+fn template_elution_groups(num: usize) -> Vec<ElutionGroupInput> {
     let mut egs = Vec::with_capacity(num);
 
     let min_mz = 400.0;
@@ -124,21 +216,23 @@ fn template_elution_groups(num: usize) -> Vec<ElutionGroup<usize>> {
         let rt = min_rt + (i as f32 * rt_step);
         let mobility = min_mobility + (i as f32 * mobility_step);
         let mz = min_mz + (i as f64 * mz_step);
-        let fragment_mzs = (0..10).map(|x| (x as usize, mz + x as f64));
-        let fragments = Arc::from(Vec::from_iter(fragment_mzs));
-        egs.push(ElutionGroup {
+        let fragments = (0..10).map(|x| mz + x as f64).collect();
+        let precursors = (0..2).map(|x| mz + x as f64).collect();
+        egs.push(ElutionGroupInput {
             id: i as u64,
             rt_seconds: rt,
             mobility,
-            precursors: Arc::from(vec![(0, mz), (1, mz + 1.0)]),
             fragments,
+            precursors,
         });
     }
+
     egs
 }
 
-fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
-    let reader = file.load_frame_reader().unwrap();
+fn get_ms1_rts_as_millis(file: &impl AsRef<Path>) -> Arc<[u32]> {
+    let ttp = TimsTofPath::new(file.as_ref()).unwrap();
+    let reader = ttp.load_frame_reader().unwrap();
     let mut rts: Vec<_> = reader
         .frame_metas
         .iter()
@@ -149,41 +243,328 @@ fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
     rts.into()
 }
 
-#[instrument]
-fn main_query_index(args: QueryIndexArgs) {
-    let raw_file_path = args.raw_file_path;
-    let tolerance_settings_path = args.tolerance_settings_path;
-    let elution_groups_path = args.elution_groups_path;
-    let aggregator_use = args.aggregator;
+#[instrument(skip_all)]
+fn stream_process_batches(
+    elution_groups: Vec<ElutionGroup<usize>>,
+    aggregator_use: PossibleAggregator,
+    rts: Arc<[u32]>,
+    index: &IndexedTimstofPeaks,
+    tolerance: &Tolerance,
+    serialization_format: SerializationFormat,
+    output_path: &Path,
+    batch_size: usize,
+) {
+    let total_groups = elution_groups.len();
+    let total_batches = (total_groups + batch_size - 1) / batch_size;
 
-    let tolerance_settings: Tolerance =
-        serde_json::from_str(&std::fs::read_to_string(&tolerance_settings_path).unwrap()).unwrap();
-    let elution_groups: Vec<ElutionGroup<String>> =
-        serde_json::from_str(&std::fs::read_to_string(&elution_groups_path).unwrap()).unwrap();
+    info!(
+        "Processing {} elution groups in {} batches of up to {}",
+        total_groups, total_batches, batch_size
+    );
 
-    let file = TimsTofPath::new(&raw_file_path).unwrap();
-    let centroiding_config = timscentroid::CentroidingConfig {
-        max_peaks: 50_000,
-        mz_ppm_tol: 5.0,
-        im_pct_tol: 3.0,
-        early_stop_iterations: 200,
-    };
-    let (index, building_stats) = IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
-    let rts = get_ms1_rts_as_millis(&file);
-    println!("Indexing Stats: {:#?}", building_stats);
-    let mut queries = AggregatorContainer::new(elution_groups, aggregator_use, rts);
+    let serialization_start = Instant::now();
+    let file = File::create(output_path).unwrap();
+    let writer = BufWriter::new(file);
 
-    let output_path = args.output_path;
-    std::fs::create_dir_all(&output_path).unwrap();
-    let serialization_format = args.format;
-    queries.add_query(&index, &tolerance_settings);
-    queries.serialize_write(serialization_format, &output_path);
+    match serialization_format {
+        SerializationFormat::PrettyJson => {
+            let mut ser = serde_json::Serializer::pretty(writer);
+            process_and_serialize(
+                elution_groups,
+                aggregator_use,
+                rts,
+                index,
+                tolerance,
+                &mut ser,
+                total_groups,
+                total_batches,
+                batch_size,
+                serialization_start,
+                output_path,
+            );
+        }
+        SerializationFormat::Json => {
+            let mut ser = serde_json::Serializer::new(writer);
+            process_and_serialize(
+                elution_groups,
+                aggregator_use,
+                rts,
+                index,
+                tolerance,
+                &mut ser,
+                total_groups,
+                total_batches,
+                batch_size,
+                serialization_start,
+                output_path,
+            );
+        }
+    }
+}
+
+#[instrument(skip_all)]
+fn process_and_serialize<S>(
+    elution_groups: Vec<ElutionGroup<usize>>,
+    aggregator_use: PossibleAggregator,
+    rts: Arc<[u32]>,
+    index: &IndexedTimstofPeaks,
+    tolerance: &Tolerance,
+    ser: S,
+    total_groups: usize,
+    total_batches: usize,
+    batch_size: usize,
+    serialization_start: Instant,
+    output_path: &Path,
+) where
+    S: Serializer,
+{
+    let mut seq = ser.serialize_seq(Some(total_groups)).unwrap();
+
+    // Report max once per 2s progress
+    let mut last_progress = Instant::now();
+    let progress_interval = Duration::from_secs(2);
+
+    for (batch_idx, chunk) in elution_groups.chunks(batch_size).enumerate() {
+        let mut batch_start = None;
+        if last_progress.elapsed() >= progress_interval {
+            info!(
+                "Processing batch {}/{} ({} groups)",
+                batch_idx + 1,
+                total_batches,
+                chunk.len(),
+            );
+            batch_start = Some(Instant::now());
+            last_progress = Instant::now();
+        }
+
+        // TODO: reset container instead of recreating it every time.
+        let mut container = AggregatorContainer::new(chunk.to_vec(), aggregator_use, rts.clone());
+
+        container.add_query(index, tolerance);
+
+        // Serialize each result in the batch
+        container.serialize_to_seq(&mut seq);
+
+        if let Some(batch_start) = batch_start {
+            let batch_elapsed = batch_start.elapsed();
+            info!(
+                "Batch {}/{} completed in {:.2?}",
+                batch_idx + 1,
+                total_batches,
+                batch_elapsed,
+            );
+        }
+    }
+
+    seq.end().unwrap();
+
+    let serialization_elapsed = serialization_start.elapsed();
+    println!("Wrote to {}", output_path.display());
+    println!(
+        "Total processing and serialization took {:#?}",
+        serialization_elapsed
+    );
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ElutionGroupInput {
+    pub id: u64,
+    pub mobility: f32,
+    pub rt_seconds: f32,
+    pub precursors: Vec<f64>,
+    pub fragments: Vec<f64>,
+}
+
+impl Into<ElutionGroup<usize>> for ElutionGroupInput {
+    fn into(self) -> ElutionGroup<usize> {
+        let precursors: Arc<[(i8, f64)]> = Arc::from(
+            self.precursors
+                .into_iter()
+                .enumerate()
+                .map(|(i, mz)| (i as i8, mz))
+                .collect::<Vec<(i8, f64)>>(),
+        );
+        let fragments: Arc<[(usize, f64)]> = Arc::from(
+            self.fragments
+                .into_iter()
+                .enumerate()
+                .map(|(i, mz)| (i, mz))
+                .collect::<Vec<(usize, f64)>>(),
+        );
+        ElutionGroup {
+            id: self.id,
+            mobility: self.mobility,
+            rt_seconds: self.rt_seconds,
+            precursors,
+            fragments,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SpectrumOutput {
+    id: u64,
+    mobility_ook0: f32,
+    rt_seconds: f32,
+    precursor_mzs: Vec<f64>,
+    fragment_mzs: Vec<f64>,
+    precursor_intensities: Vec<f32>,
+    fragment_intensities: Vec<f32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChromatogramOutput {
+    id: u64,
+    mobility_ook0: f32,
+    rt_seconds: f32,
+    precursors_mzs: Vec<f64>,
+    fragment_mzs: Vec<f64>,
+    precursor_intensities: Vec<Vec<f32>>,
+    fragment_intensities: Vec<Vec<f32>>,
+    retention_time_results_seconds: Vec<f32>,
+}
+
+impl TryInto<ChromatogramOutput> for ChromatogramCollector<usize, f32> {
+    type Error = ();
+
+    fn try_into(mut self) -> Result<ChromatogramOutput, Self::Error> {
+        let mut non_zero_min_idx = self.ref_rt_ms.len();
+        let mut non_zero_max_idx = 0usize;
+
+        self.iter_mut_precursors().for_each(|((_idx, _mz), cmg)| {
+            let slc = cmg.as_slice();
+            for (i, &inten) in slc.iter().enumerate() {
+                if inten > 0.0 {
+                    let abs_idx = i;
+                    if abs_idx < non_zero_min_idx {
+                        non_zero_min_idx = abs_idx;
+                    }
+                    if abs_idx > non_zero_max_idx {
+                        non_zero_max_idx = abs_idx;
+                    }
+                }
+            }
+        });
+
+        self.iter_mut_fragments().for_each(|((_idx, _mz), cmg)| {
+            let slc = cmg.as_slice();
+            for (i, &inten) in slc.iter().enumerate() {
+                if inten > 0.0 {
+                    let abs_idx = i;
+                    if abs_idx < non_zero_min_idx {
+                        non_zero_min_idx = abs_idx;
+                    }
+                    if abs_idx > non_zero_max_idx {
+                        non_zero_max_idx = abs_idx;
+                    }
+                }
+            }
+        });
+
+        if non_zero_min_idx > non_zero_max_idx {
+            // No non zero intensities found
+            return Err(());
+        }
+
+        let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = self
+            .iter_mut_precursors()
+            .map(|(&(idx, mz), cmg)| {
+                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
+                    Some(slc) => slc.to_vec(),
+                    None => {
+                        error!(
+                            "Failed to get slice for precursor mz {} in chromatogram id {}",
+                            mz, idx,
+                        );
+                        panic!(
+                            "Failed to get slice for precursor mz {} in chromatogram id {}, len = {}, min_idx = {}, max_idx = {}",
+                            mz, idx,
+                            cmg.as_slice().len(),
+                            non_zero_min_idx,
+                            non_zero_max_idx,
+                        );
+                    }
+                };
+                if out_vec.iter().all(|&x| x == 0.0) {
+                    return None;
+                }
+                Some((mz, out_vec))
+            })
+            .flatten()
+            .unzip();
+        let (fragment_mzs, fragment_intensities): (Vec<f64>, Vec<Vec<f32>>) = self
+            .iter_mut_fragments()
+            .map(|(&(idx, mz), cmg)| {
+                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
+                    Some(slc) => slc.to_vec(),
+                    None => {
+                        error!(
+                            "Failed to get slice for fragment mz {} in chromatogram id {}",
+                            mz, idx,
+                        );
+                        panic!(
+                            "Failed to get slice for fragment mz {} in chromatogram id {}, len = {}, min_idx = {}, max_idx = {}",
+                            mz, idx,
+                            cmg.as_slice().len(),
+                            non_zero_min_idx,
+                            non_zero_max_idx,
+                        );
+                    }
+                };
+                if out_vec.iter().all(|&x| x == 0.0) {
+                    return None;
+                }
+
+                Some((
+                    mz,
+                    out_vec,
+                ))
+            })
+            .flatten()
+            .unzip();
+
+        Ok(ChromatogramOutput {
+            id: self.eg.id,
+            mobility_ook0: self.eg.mobility,
+            rt_seconds: self.eg.rt_seconds,
+            precursors_mzs: precursor_mzs,
+            fragment_mzs: fragment_mzs,
+            precursor_intensities,
+            fragment_intensities,
+            retention_time_results_seconds: self.ref_rt_ms[non_zero_min_idx..=non_zero_max_idx]
+                .iter()
+                .map(|&x| x as f32 / 1000.0)
+                .collect(),
+        })
+    }
+}
+
+impl From<&SpectralCollector<usize, f32>> for SpectrumOutput {
+    fn from(agg: &SpectralCollector<usize, f32>) -> Self {
+        let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<f32>) = agg
+            .iter_precursors()
+            .map(|((_idx, mz), inten)| (mz, inten))
+            .unzip();
+        let (fragment_mzs, fragment_intensities) = agg
+            .iter_fragments()
+            .map(|((_idx, mz), inten)| (mz, inten))
+            .unzip();
+
+        SpectrumOutput {
+            id: agg.eg.id,
+            mobility_ook0: agg.eg.mobility,
+            rt_seconds: agg.eg.rt_seconds,
+            precursor_mzs,
+            fragment_mzs,
+            precursor_intensities,
+            fragment_intensities,
+        }
+    }
 }
 
 fn template_tolerance_settings() -> Tolerance {
     Tolerance {
         ms: MzTolerance::Ppm((15.0, 15.0)),
-        // rt: RtTolerance::Absolute((120.0, 120.0)),
         rt: RtTolerance::Unrestricted,
         mobility: MobilityTolerance::Pct((10.0, 10.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
@@ -206,14 +587,14 @@ pub enum PossibleAggregator {
 }
 
 pub enum AggregatorContainer {
-    Point(Vec<PointIntensityAggregator<String>>),
-    Chromatogram(Vec<ChromatogramCollector<String, f32>>),
-    Spectrum(Vec<SpectralCollector<String, f32>>),
+    Point(Vec<PointIntensityAggregator<usize>>),
+    Chromatogram(Vec<ChromatogramCollector<usize, f32>>),
+    Spectrum(Vec<SpectralCollector<usize, f32>>),
 }
 
 impl AggregatorContainer {
     fn new(
-        queries: Vec<ElutionGroup<String>>,
+        queries: Vec<ElutionGroup<usize>>,
         aggregator: PossibleAggregator,
         ref_rts: Arc<[u32]>,
     ) -> Self {
@@ -239,6 +620,7 @@ impl AggregatorContainer {
         }
     }
 
+    #[instrument(skip_all, level = "debug")]
     fn add_query(&mut self, index: &IndexedTimstofPeaks, tolerance: &Tolerance) {
         match self {
             AggregatorContainer::Point(aggregators) => {
@@ -253,40 +635,38 @@ impl AggregatorContainer {
         }
     }
 
-    fn serialize_inner(&self, format: SerializationFormat) -> String {
-        // There has to be a better way of doing this ...
-        macro_rules! serialize_format {
-            ($format:ident, $aggregators:ident) => {
-                match format {
-                    SerializationFormat::PrettyJson => {
-                        println!("Pretty printing enabled");
-                        serde_json::to_string_pretty(&$aggregators).unwrap()
-                    }
-                    SerializationFormat::Json => serde_json::to_string(&$aggregators).unwrap(),
-                }
-            };
-        }
+    fn serialize_to_seq<S>(&mut self, seq: &mut S)
+    where
+        S: SerializeSeq,
+    {
         match self {
             AggregatorContainer::Point(aggregators) => {
-                serialize_format!(format, aggregators)
+                for agg in aggregators {
+                    seq.serialize_element(agg).unwrap();
+                }
             }
             AggregatorContainer::Chromatogram(aggregators) => {
-                serialize_format!(format, aggregators)
+                for agg in aggregators.drain(..) {
+                    let id = agg.eg.id;
+                    let ser_agg: Result<ChromatogramOutput, _> = agg.try_into();
+                    match ser_agg {
+                        Ok(ser_agg) => {
+                            seq.serialize_element(&ser_agg).unwrap();
+                        }
+                        Err(_) => {
+                            warn!("Skipping empty chromatogram for elution group id {}", id);
+                            // Skip empty chromatograms
+                        }
+                    }
+                }
             }
             AggregatorContainer::Spectrum(aggregators) => {
-                serialize_format!(format, aggregators)
+                for agg in aggregators.iter() {
+                    let ser_agg = SpectrumOutput::from(agg);
+                    seq.serialize_element(&ser_agg).unwrap();
+                }
             }
         }
-    }
-
-    fn serialize_write(&self, serialization_format: SerializationFormat, output_path: &str) {
-        let serialization_start = Instant::now();
-        let put_path = std::path::Path::new(&output_path).join("results.json");
-        let serialized = self.serialize_inner(serialization_format);
-        std::fs::write(put_path.clone(), serialized).unwrap();
-        println!("Wrote to {}", put_path.display());
-        let serialization_elapsed = serialization_start.elapsed();
-        println!("Serialization took {:#?}", serialization_elapsed);
     }
 }
 
@@ -326,9 +706,13 @@ pub struct QueryIndexArgs {
     #[arg(short, long, default_value_t, value_enum)]
     format: SerializationFormat,
 
-    // The aggregator to use.
+    /// The aggregator to use.
     #[arg(short, long, default_value_t, value_enum)]
     aggregator: PossibleAggregator,
+
+    /// Batch size for streaming serialization (default: 500)
+    #[arg(short, long, default_value_t = 500)]
+    batch_size: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -347,10 +731,4 @@ enum Commands {
     /// Query the index.
     QueryIndex(QueryIndexArgs),
     WriteTemplate(WriteTemplateArgs),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ElutionGroupResults<T: Serialize> {
-    elution_group: ElutionGroup<String>,
-    result: T,
 }

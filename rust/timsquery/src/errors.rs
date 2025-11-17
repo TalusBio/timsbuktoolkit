@@ -1,5 +1,8 @@
 use std::fmt::Display;
-use timsrust::TimsRustError;
+use timsrust::{
+    TimsRustError,
+    TimsTofPathError,
+};
 
 #[derive(Debug)]
 pub enum TimsqueryError {
@@ -23,6 +26,7 @@ impl TimsqueryError {
 #[derive(Debug)]
 pub enum DataReadingError {
     UnsupportedDataError(UnsupportedDataError),
+    TimsTofPathError(TimsTofPathError),
     TimsRustError(TimsRustError), // Why doesnt timsrust error derive clone?
 }
 

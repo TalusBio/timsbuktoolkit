@@ -1,12 +1,12 @@
-use bincode;
-use serde::Serialize;
-use std::fs::File;
-use std::path::Path;
-use timsquery::{
+use crate::{
     CentroidingConfig,
     IndexedTimstofPeaks,
     TimsTofPath,
 };
+use bincode;
+use serde::Serialize;
+use std::fs::File;
+use std::path::Path;
 use tracing::{
     error,
     info,
@@ -84,9 +84,14 @@ fn uncached_load_index(
 
 pub fn load_index_caching(
     file_location: impl AsRef<Path>,
-) -> Result<IndexedTimstofPeaks, crate::errors::TimsSeekError> {
+) -> Result<IndexedTimstofPeaks, crate::errors::DataReadingError> {
     let st = std::time::Instant::now();
-    let timstofpath = TimsTofPath::new(file_location.as_ref())?;
+    let timstofpath = match TimsTofPath::new(file_location.as_ref()) {
+        Ok(x) => x,
+        Err(e) => {
+            return Err(crate::errors::DataReadingError::TimsTofPathError(e));
+        }
+    };
     // TODO: make timstofpath expose the path so we can use that as a prefix ...
     // Since that would be the "cannonical" path
     let index_location = file_location

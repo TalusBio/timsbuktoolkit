@@ -6,7 +6,7 @@ pub use arrays::{
     ArrayElement,
 };
 pub use mz_rt_arrays::{
-    MutableChromatogram,
+    Chromatogram,
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };

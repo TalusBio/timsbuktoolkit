@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "MIT"
@@ -39,4 +39,4 @@ codegen-units = 1
 panic = 'abort'
 opt-level = 3
 # Needed for flamegraph
-debug = true
+# debug = true

@@ -270,11 +270,11 @@ where
     }
 
     if let Some(col) = zero_col {
-        for row in 0..height {
-            if grid[row][col].0 == ' ' {
-                grid[row][col].0 = '│';
-            } else if grid[row][col].0 == '─' {
-                grid[row][col].0 = '┼';
+        for row in grid.iter_mut().take(height) {
+            if row[col].0 == ' ' {
+                row[col].0 = '│';
+            } else if row[col].0 == '─' {
+                row[col].0 = '┼';
             }
         }
     }
