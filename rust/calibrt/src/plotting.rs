@@ -234,7 +234,7 @@ where
     let mut grid = vec![vec![(' ', false); width]; height];
 
     // Plot the function
-    for (col, &(x, y, err)) in samples.iter().enumerate() {
+    for (col, &(_x, y, err)) in samples.iter().enumerate() {
         if y.is_finite() {
             // Map y to row (inverted because row 0 is at top)
             let normalized = (y - y_min) / y_span;

@@ -2,6 +2,10 @@ use clap::{
     Parser,
     Subcommand,
 };
+use rayon::iter::{
+    ParallelDrainRange,
+    ParallelIterator,
+};
 use serde::ser::{
     SerializeSeq,
     Serializer,
@@ -19,6 +23,7 @@ use std::time::{
     Instant,
 };
 use timsquery::serde::load_index_caching;
+use timsrust::MSLevel;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use timscentroid::{
@@ -236,6 +241,7 @@ fn get_ms1_rts_as_millis(file: &impl AsRef<Path>) -> Arc<[u32]> {
     let mut rts: Vec<_> = reader
         .frame_metas
         .iter()
+        .filter(|x| x.ms_level == MSLevel::MS1)
         .map(|f| (f.rt_in_seconds * 1000.0).round() as u32)
         .collect();
     rts.sort_unstable();
@@ -417,7 +423,7 @@ struct ChromatogramOutput {
     id: u64,
     mobility_ook0: f32,
     rt_seconds: f32,
-    precursors_mzs: Vec<f64>,
+    precursor_mzs: Vec<f64>,
     fragment_mzs: Vec<f64>,
     precursor_intensities: Vec<Vec<f32>>,
     fragment_intensities: Vec<Vec<f32>>,
@@ -527,8 +533,8 @@ impl TryInto<ChromatogramOutput> for ChromatogramCollector<usize, f32> {
             id: self.eg.id,
             mobility_ook0: self.eg.mobility,
             rt_seconds: self.eg.rt_seconds,
-            precursors_mzs: precursor_mzs,
-            fragment_mzs: fragment_mzs,
+            precursor_mzs,
+            fragment_mzs,
             precursor_intensities,
             fragment_intensities,
             retention_time_results_seconds: self.ref_rt_ms[non_zero_min_idx..=non_zero_max_idx]
@@ -646,18 +652,28 @@ impl AggregatorContainer {
                 }
             }
             AggregatorContainer::Chromatogram(aggregators) => {
-                for agg in aggregators.drain(..) {
-                    let id = agg.eg.id;
-                    let ser_agg: Result<ChromatogramOutput, _> = agg.try_into();
-                    match ser_agg {
-                        Ok(ser_agg) => {
-                            seq.serialize_element(&ser_agg).unwrap();
+                let converted: Vec<_> = aggregators
+                    .par_drain(..)
+                    .map(|agg| {
+                        let agg_id = agg.eg.id;
+                        let ser_agg: Result<ChromatogramOutput, _> = agg.try_into();
+                        match ser_agg {
+                            Ok(ser_agg) => Some(ser_agg),
+                            Err(_) => {
+                                warn!(
+                                    "Skipping empty chromatogram for elution group id {}",
+                                    agg_id,
+                                );
+                                // Skip empty chromatograms
+                                None
+                            }
                         }
-                        Err(_) => {
-                            warn!("Skipping empty chromatogram for elution group id {}", id);
-                            // Skip empty chromatograms
-                        }
-                    }
+                    })
+                    .flatten()
+                    .collect();
+
+                for ser_agg in converted.iter() {
+                    seq.serialize_element(&ser_agg).unwrap();
                 }
             }
             AggregatorContainer::Spectrum(aggregators) => {
@@ -671,17 +687,11 @@ impl AggregatorContainer {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
-pub enum PossibleIndex {
-    #[default]
-    ExpandedRawFrameIndex,
-    TransposedQuadIndex,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum SerializationFormat {
+    Json,
     #[default]
     PrettyJson,
-    Json,
+    // Ndjson,
 }
 
 #[derive(Parser, Debug, Clone)]

@@ -379,48 +379,6 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         self.fit_step(train_buffer, val_buffer)?;
         self.assign_scores();
 
-        // for _iteration in 0..1 {
-        //     self.reweight_targets_below_decoy_mean(0.5)?;
-        //     self.fit_step(train_buffer, val_buffer)?;
-        //     self.assign_scores();
-        // }
-        Ok(())
-    }
-
-    fn reweight_targets_below_decoy_mean(&mut self, z_thresh: f64) -> Result<(), ForustError> {
-        let mean_decoy_score: f64 = self
-            .data
-            .iter()
-            .filter(|x| x.get_y() == 0.0)
-            .map(|x| x.get_score())
-            .sum::<f64>()
-            / self.data.iter().filter(|x| x.get_y() == 0.0).count() as f64;
-
-        let sd_decoy_score: f64 = (self
-            .data
-            .iter()
-            .filter(|x| x.get_y() == 0.0)
-            .map(|x| {
-                let diff = x.get_score() - mean_decoy_score;
-                diff * diff
-            })
-            .sum::<f64>()
-            / self.data.iter().filter(|x| x.get_y() == 0.0).count() as f64)
-            .sqrt();
-
-        let threshold = mean_decoy_score + (z_thresh * sd_decoy_score);
-
-        for i in 0..self.data.len() {
-            // Set the weight to 0 on targets below the mean decoy score
-            let is_target = self.data[i].get_y() > 0.5;
-            let score_under_thresh = self.data[i].get_score() < threshold;
-            self.weights[i] = if is_target && score_under_thresh {
-                0.01
-            } else {
-                0.5
-            };
-        }
-
         Ok(())
     }
 
@@ -580,7 +538,7 @@ mod test {
             self.class
         }
 
-        fn assign_score(&mut self, score: f64) -> () {
+        fn assign_score(&mut self, score: f64) {
             self.score = score;
         }
 
@@ -595,7 +553,7 @@ mod test {
         let mut rng = rand::rng();
         let mut out = Vec::new();
 
-        for nt in 0..num_targets {
+        for _nt in 0..num_targets {
             let tmp = MyFeature {
                 vals: [
                     between_unch.sample(&mut rng),
@@ -609,7 +567,7 @@ mod test {
             };
             out.push(tmp);
         }
-        for nt in 0..num_decoys {
+        for _nt in 0..num_decoys {
             let tmp = MyFeature {
                 vals: [
                     between_unch.sample(&mut rng),

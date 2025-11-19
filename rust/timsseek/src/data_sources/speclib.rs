@@ -473,7 +473,8 @@ mod tests {
                 "precursor": {
                     "sequence": "PEPTIDEPINK",
                     "charge": 2,
-                    "decoy": false
+                    "decoy": false,
+                    "decoy_group": 0
                 },
                 "elution_group": {
                     "id": 0,
