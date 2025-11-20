@@ -6,11 +6,12 @@ members = [
     "rust/timsseek",
     "rust/timsseek_cli",
     "rust/timsseek_rts",
-    "rust/timsquery"
+    "rust/timsquery",
+    "rust/timsquery_cli"
 ]
 
 [workspace.package]
-version = "0.20.0"
+version = "0.20.1"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "MIT"

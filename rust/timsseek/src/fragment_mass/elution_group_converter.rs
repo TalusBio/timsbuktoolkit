@@ -311,7 +311,7 @@ mod tests {
         };
         let seq: Arc<str> = "PEPTIDEPINK".into();
         let range_use: std::ops::Range<u16> = 0u16..seq.len() as u16;
-        let dig_slice = DigestSlice::new(seq, range_use, DecoyMarking::Target);
+        let dig_slice = DigestSlice::new(seq, range_use, DecoyMarking::Target, 1);
         let seq_slc = vec![dig_slice];
         let out = converter.convert_sequences(&seq_slc).unwrap();
         assert_eq!(out.0.len(), 2);

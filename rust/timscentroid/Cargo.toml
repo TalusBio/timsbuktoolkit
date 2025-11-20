@@ -2,6 +2,7 @@
 name = "timscentroid"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 geo = {version="0.31", features = ["serde"]}

@@ -1,33 +1,25 @@
 [package]
-name = "timsquery"
+name = "timsquery_cli"
 version.workspace = true
-edition = "2021"
-license = "Apache-2.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 [dependencies]
-nohash-hasher = "=0.2.0"
-tabled = "0.17.0"
-
-tracing-bunyan-formatter = "0.3.10"
-tracing-chrome = "0.7.2"
-
-bincode = "1.3"
-zstd = "0.13"
-
-# Workspace member deps
+timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 
-# Workspace-inherited deps
+# Workspace-inherited deps from the original main.rs
+clap = { workspace = true, features = ["derive"] }
 timsrust = { workspace = true }
-serde = { workspace = true, features = ["rc"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
 indicatif = { workspace = true, features = ["rayon"] }
 half = { workspace = true }
-
-[lib]
+thiserror = { workspace = true } # User requested
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }

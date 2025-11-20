@@ -391,7 +391,7 @@ mod tests {
 
         assign_qval(&mut data, |x| x.score as f32);
 
-        for i in (0..qvals.len()) {
+        for i in 0..qvals.len() {
             let real = qvals[i];
             let model = data[i].get_qval();
 

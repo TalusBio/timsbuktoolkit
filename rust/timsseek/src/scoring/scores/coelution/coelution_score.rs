@@ -87,7 +87,23 @@ fn coelution_vref_score_filter_onto(
     Ok(())
 }
 
-/// See the docs for [`coelution_score_arr`].
+/// Calculates the coelution score for a set of chromatograms against a reference slice.
+///
+/// This function is a variant of `coelution_vref_score_filter_onto` that works with
+/// an `MzMajorIntensityArray`. It uses the m/z order within the `slices` to filter
+/// which chromatograms to include in the score calculation.
+///
+/// # Arguments
+///
+/// * `slices` - An `MzMajorIntensityArray` containing the intensity data. The rows of this
+///              array correspond to different m/z values, and the columns correspond to
+///              different time points or cycles. The `mz_order` field of this struct provides
+///              the mapping from row index to m/z value.
+/// * `ref_slice` - A slice representing the reference chromatogram.
+/// * `window` - The size of the rolling window for the cosine similarity calculation.
+/// * `filter` - A closure that takes a key (of type `K`) from the `mz_order` and returns
+///              `true` if the corresponding chromatogram should be included in the calculation.
+/// * `buffer` - A mutable buffer to store the resulting coelution scores.
 pub fn coelution_vref_score_filter_into<'a, K: Clone + Ord>(
     slices: &'a MzMajorIntensityArray<K, f32>,
     ref_slice: &'a [f32],
@@ -128,36 +144,43 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_coelution_score() {
-    //     let slices =
-    //         Array2D::new(vec![[0., 1., 1., 3., 200., 5.], [1., 2., 1., 4., 200., 6.]]).unwrap();
-    //     let window = 3;
-    //     let scores = coelution_score_arr::<1>(&slices, window)
-    //         .unwrap()
-    //         .collect::<Vec<_>>();
-    //     let expected = vec![0.0, 0.75, 0.974026, 0.99997497, 0.99995005, 0.0];
-    //     assert_close_enough(&scores, &expected, 1e-2);
-    // }
+    #[test]
+    fn test_coelution_vref_score_filter_into() {
+        // 1. Setup the MzMajorIntensityArray
+        let mz_order = vec![(1, 100.0), (2, 200.0)];
+        let n_cycles = 4;
+        let cycle_offset = 0;
+        let mut slices =
+            MzMajorIntensityArray::try_new_empty(mz_order.into(), n_cycles, cycle_offset).unwrap();
+        slices.arr = Array2D::new(vec![
+            [1.0, 1.0, 0.0, 0.0], // id = 1
+            [0.0, 0.0, 1.0, 1.0], // id = 2
+        ])
+        .unwrap();
 
-    // #[test]
-    // fn test_coelution_score_eq() {
-    //     let arr = vec![0., 1., 1., 3., 200., 5.];
-    //     let slices = Array2D::new(vec![arr.clone(), arr.clone()]).unwrap();
-    //     let window = 3;
-    //     let scores = coelution_score_arr::<2>(&slices, window)
-    //         .unwrap()
-    //         .collect::<Vec<_>>();
-    //     let expected = vec![0.0, 0.5, 0.5, 0.5, 0.5, 0.0];
-    //     assert_close_enough(&scores, &expected, 1e-7);
-    // }
+        // 2. Setup other parameters
+        let ref_slice = vec![1.0, 1.0, 0.0, 0.0];
+        let window = 3;
+        let mut buffer = Vec::new();
 
-    // #[test]
-    // fn test_coelution_score_no_overlap() {
-    //     let slices = Array2D::new(vec![[0., 1.], [1., 2.], [2., 3.]]).unwrap();
-    //     // Since the window is larger than the size of the slices, we should get an error.
-    //     let window = 3;
-    //     let scores = coelution_score_arr::<2>(&slices, window);
-    //     assert!(scores.is_err());
-    // }
+        // 3. Define a filter and call the function
+        let filter = |k: &i32| *k == 1 || *k == 2; // Include both
+        coelution_vref_score_filter_into(&slices, &ref_slice, window, &filter, &mut buffer)
+            .unwrap();
+
+        // 4. Define expected results and assert
+        // For row 1 vs ref_slice (self): rolling cos sim is roughly [0, 1, 1, 0]
+        // For row 2 vs ref_slice (orthogonal): rolling cos sim is roughly [0, 0, 0, 0]
+        // The sum of similarities is [0.0, 1.0, 1.0, 0.0]
+        // The number of elements is 2, so the norm_factor is 0.5.
+        // Expected buffer = sum * norm_factor
+        let expected = vec![0.0, 0.5, 0.5, 0.0];
+        assert_close_enough(&buffer, &expected, 1e-7);
+
+        // 5. Test the filter that returns an error (only one item selected)
+        let filter_one = |k: &i32| *k == 1;
+        let result =
+            coelution_vref_score_filter_into(&slices, &ref_slice, window, &filter_one, &mut buffer);
+        assert!(result.is_err());
+    }
 }
