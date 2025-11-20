@@ -12,9 +12,8 @@ and transparent way to query and analyze timsTOF mass spectrometry data.
 timsseek is a collection of Rust-based tools designed for efficient processing and analysis of timsTOF
 mass spectrometry data. The project consists of several components:
 
-- `timsquery`
-    - Implements a series of modular indices+aggregators+queries that can be used to query timsTOF data.
-    - It also compoiles to a cli that can be used to query the data.
+- `timsquery`: Library implementing a series of modular indices+aggregators+queries that can be used to query timsTOF data.
+- `timsquery_cli`: Command-line interface for querying timsTOF data using the timsquery library.
 - `timsseek`: Implement spectral library reading+build and core logic to score peptide-data matches.
 - `timsseek_cli`: Command-line interface for a peptide-centric search engine.
 - `timsseek_rts`

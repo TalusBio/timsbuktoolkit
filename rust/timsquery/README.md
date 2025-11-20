@@ -14,9 +14,11 @@
 
 ## What is this?
 
-Timsquery is meant to be a library and command line tool that allows querying TIMS data in a generic way.
+Timsquery is a library that allows querying TIMS data in a generic way.
 Basically, pick a way in which you want your data to be aggregated, pick how you want to query it and pick
 your file, and you get back results that match those three things!
+
+For a command-line interface to use this library, see the `timsquery_cli` crate.
 
 More explicitly:
 - The main design is to have modular components:

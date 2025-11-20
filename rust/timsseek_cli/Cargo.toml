@@ -2,6 +2,7 @@
 name = "timsseek_cli"
 version.workspace = true
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 timsseek = { path = "../timsseek" }

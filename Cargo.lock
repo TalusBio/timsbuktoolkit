@@ -2118,7 +2118,6 @@ name = "timsquery"
 version = "0.20.1"
 dependencies = [
  "bincode",
- "clap",
  "half",
  "indicatif",
  "mimalloc",
@@ -2134,6 +2133,25 @@ dependencies = [
  "tracing-chrome",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "timsquery_cli"
+version = "0.20.1"
+dependencies = [
+ "clap",
+ "half",
+ "indicatif",
+ "mimalloc",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+ "timscentroid",
+ "timsquery",
+ "timsrust",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

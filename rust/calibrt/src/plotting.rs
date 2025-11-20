@@ -181,8 +181,8 @@ fn get_block_char(intensity: f64) -> &'static str {
 /// # Example
 /// ```
 /// use calibrt::plotting::plot_function;
-/// plot_function(|x| x.sin(), (-3.14, 3.14), 60, 20);
-/// plot_function(|x| x * x, (-5.0, 5.0), 80, 30);
+/// plot_function(|x| Ok(x.sin()), (-3.14, 3.14), 60, 20);
+/// plot_function(|x| Ok(x * x), (-5.0, 5.0), 80, 30);
 /// ```
 pub fn plot_function<F>(f: F, x_range: (f64, f64), width: usize, height: usize)
 where
