@@ -167,7 +167,7 @@ pub fn calibrate(
                 20,
             );
         }
-        Err(ref e) => (),
+        Err(ref _e) => (),
     };
 
     calcurve

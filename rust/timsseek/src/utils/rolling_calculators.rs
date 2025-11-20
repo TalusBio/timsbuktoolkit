@@ -165,13 +165,13 @@ mod tests {
         let all_close = out
             .iter()
             .zip(expect_val.iter())
-            .filter(|(a, b)| ((!a.is_nan()) && (!b.is_nan())))
+            .filter(|(a, b)| (!a.is_nan()) && (!b.is_nan()))
             .all(|(a, b)| (a - b).abs() < 1e-6);
 
         let all_match_nan = out
             .iter()
             .zip(expect_val.iter())
-            .filter(|(a, b)| ((a.is_nan()) || (b.is_nan())))
+            .filter(|(a, b)| (a.is_nan()) || (b.is_nan()))
             .all(|(a, b)| a.is_nan() && b.is_nan());
 
         assert!(all_close, "Expected {:?}, got {:?}", expect_val, out);

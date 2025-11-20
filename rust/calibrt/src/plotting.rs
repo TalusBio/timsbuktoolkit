@@ -181,8 +181,8 @@ fn get_block_char(intensity: f64) -> &'static str {
 /// # Example
 /// ```
 /// use calibrt::plotting::plot_function;
-/// plot_function(|x| x.sin(), (-3.14, 3.14), 60, 20);
-/// plot_function(|x| x * x, (-5.0, 5.0), 80, 30);
+/// plot_function(|x| Ok(x.sin()), (-3.14, 3.14), 60, 20);
+/// plot_function(|x| Ok(x * x), (-5.0, 5.0), 80, 30);
 /// ```
 pub fn plot_function<F>(f: F, x_range: (f64, f64), width: usize, height: usize)
 where
@@ -234,7 +234,7 @@ where
     let mut grid = vec![vec![(' ', false); width]; height];
 
     // Plot the function
-    for (col, &(x, y, err)) in samples.iter().enumerate() {
+    for (col, &(_x, y, err)) in samples.iter().enumerate() {
         if y.is_finite() {
             // Map y to row (inverted because row 0 is at top)
             let normalized = (y - y_min) / y_span;

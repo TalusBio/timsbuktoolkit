@@ -314,7 +314,7 @@ checksum = "325918d6fe32f23b19878fe4b34794ae41fc19ddbe53b10571a4874d44ffd39b"
 
 [[package]]
 name = "calibrt"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "geo",
  "geo-types",
@@ -2115,10 +2115,9 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "bincode",
- "clap",
  "half",
  "indicatif",
  "mimalloc",
@@ -2134,6 +2133,25 @@ dependencies = [
  "tracing-chrome",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "timsquery_cli"
+version = "0.20.1"
+dependencies = [
+ "clap",
+ "half",
+ "indicatif",
+ "mimalloc",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+ "timscentroid",
+ "timsquery",
+ "timsrust",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2155,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "arrayvec",
  "calibrt",
@@ -2181,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "clap",
  "indicatif",
@@ -2200,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_rts"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "clap",
  "csv",
