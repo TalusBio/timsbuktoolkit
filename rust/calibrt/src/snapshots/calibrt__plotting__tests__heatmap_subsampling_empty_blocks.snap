@@ -1,0 +1,13 @@
+---
+source: rust/calibrt/src/plotting.rs
+expression: heatmap
+---
+╔═════╗
+║[91m░[0m[90m [0m[90m [0m[90m [0m[90m [0m║
+║[90m [0m[90m [0m[90m [0m[90m [0m[90m [0m║
+║[90m█[0m[90m [0m[90m [0m[90m [0m[90m [0m║
+║[90m [0m[90m [0m[90m [0m[90m [0m[90m [0m║
+║[90m [0m[90m [0m[90m [0m[90m [0m[90m [0m║
+╚═════╝
+
+  Legend: [90m█[0m = suppressed, [91m█[0m = non-suppressed (max), Range: 0-10 hits (Scale: 2x × 2y)

@@ -165,18 +165,25 @@ impl Grid {
                     }
                 }
 
-                let node = max_node.unwrap_or(&self.nodes[0]);
-                let intensity = if max_freq > 0.0 {
-                    node.center.weight / max_freq
+                // Determine color based on whether there's a non-suppressed node in the block
+                // If max_node is None (all nodes have weight 0), treat as suppressed
+                let (intensity, color) = if let Some(node) = max_node {
+                    let intensity = if max_freq > 0.0 {
+                        node.center.weight / max_freq
+                    } else {
+                        0.0
+                    };
+                    let color = if !node.suppressed {
+                        Color::Red
+                    } else {
+                        Color::Gray
+                    };
+                    (intensity, color)
                 } else {
-                    0.0
+                    // No nodes with weight > 0 in this block, treat as suppressed
+                    (0.0, Color::Gray)
                 };
                 let block = get_block_char(intensity);
-                let color = if !node.suppressed {
-                    Color::Red
-                } else {
-                    Color::Gray
-                };
                 canvas.set(display_c, display_r, Cell::new(block, color));
             }
         }
@@ -368,6 +375,52 @@ mod tests {
     fn test_heatmap_no_downscaling() {
         let grid = create_test_grid(20);
         let heatmap = grid.format_heatmap_sized((30, 30));
+        insta::assert_snapshot!(heatmap);
+    }
+
+    #[test]
+    fn test_heatmap_subsampling_empty_blocks() {
+        // This test verifies that empty blocks (weight=0) are shown as suppressed (gray)
+        // and don't inherit the suppression state of nodes[0]
+        let mut grid = Grid::new(10, (0.0, 10.0), (0.0, 10.0)).unwrap();
+
+        // Set nodes[0] as non-suppressed with some weight
+        grid.nodes[0].center.weight = 5.0;
+        grid.nodes[0].suppressed = false;
+
+        // Set a few other nodes with weight, all suppressed
+        grid.nodes[50].center.weight = 10.0;
+        grid.nodes[50].suppressed = true;
+
+        // All other nodes have weight 0 and are suppressed
+        for i in 1..grid.nodes.len() {
+            if i != 50 {
+                grid.nodes[i].center.weight = 0.0;
+                grid.nodes[i].suppressed = true;
+            }
+        }
+
+        // Render with downsampling (10x10 grid into 5x5 display)
+        let heatmap = grid.format_heatmap_sized((5, 5));
+
+        // Count red (non-suppressed) cells in the output
+        // Before the fix: many cells will be red due to inheriting nodes[0].suppressed
+        // After the fix: only the cell containing nodes[0] should be red
+        let red_ansi = Color::Red.to_ansi();
+        let red_count = heatmap.matches(red_ansi).count();
+
+        println!("Red cells found: {}", red_count);
+
+        // Before fix: red_count will be much higher (20+ due to many empty blocks being red)
+        // After fix: red_count should be 1-2 (only the block containing nodes[0])
+        assert!(
+            red_count <= 2,
+            "Found {} red cells, expected ≤2. Empty blocks are incorrectly inheriting nodes[0].suppressed",
+            red_count
+        );
+
+        // Snapshot should show only one red block (containing nodes[0])
+        // and all empty blocks as gray
         insta::assert_snapshot!(heatmap);
     }
 }

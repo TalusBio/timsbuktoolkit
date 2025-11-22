@@ -143,3 +143,163 @@ pub(crate) struct Node {
     pub(crate) center: Point,
     pub(crate) suppressed: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper function to print grid state and return non-suppressed nodes
+    fn print_grid_state(grid: &Grid) -> Vec<(usize, usize, f64)> {
+        println!("\nGrid state (S=suppressed, N=not suppressed):");
+        for r in 0..grid.bins {
+            for c in 0..grid.bins {
+                let idx = r * grid.bins + c;
+                let marker = if grid.nodes[idx].suppressed { "S" } else { "N" };
+                print!("{:4.0}{} ", grid.nodes[idx].center.weight, marker);
+            }
+            println!();
+        }
+
+        let non_suppressed: Vec<_> = grid
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.suppressed)
+            .map(|(i, n)| {
+                let r = i / grid.bins;
+                let c = i % grid.bins;
+                (r, c, n.center.weight)
+            })
+            .collect();
+
+        println!("Non-suppressed nodes (row, col, weight): {:?}", non_suppressed);
+        non_suppressed
+    }
+
+    #[test]
+    fn test_suppress_nonmax_simple_3x3() {
+        // Create a 3x3 grid with known values
+        // Grid layout (row, col):
+        //   0   1   2
+        // 0 [1] [2] [9]  <- max in row 0 is 9
+        // 1 [4] [5] [6]  <- max in row 1 is 6
+        // 2 [7] [8] [3]  <- max in row 2 is 8
+        //   ^   ^   ^
+        //   |   |   max in col 2 is 9
+        //   |   max in col 1 is 8
+        //   max in col 0 is 7
+
+        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
+
+        let test_data = [
+            (0.5, 0.5, 1.0),  // bin (0,0) = 1
+            (1.5, 0.5, 2.0),  // bin (0,1) = 2
+            (2.5, 0.5, 9.0),  // bin (0,2) = 9
+            (0.5, 1.5, 4.0),  // bin (1,0) = 4
+            (1.5, 1.5, 5.0),  // bin (1,1) = 5
+            (2.5, 1.5, 6.0),  // bin (1,2) = 6
+            (0.5, 2.5, 7.0),  // bin (2,0) = 7
+            (1.5, 2.5, 8.0),  // bin (2,1) = 8
+            (2.5, 2.5, 3.0),  // bin (2,2) = 3
+        ];
+
+        for (x, y, weight) in test_data.iter() {
+            grid.add_point(&Point {
+                x: *x,
+                y: *y,
+                weight: *weight,
+            })
+            .unwrap();
+        }
+
+        grid.suppress_nonmax().unwrap();
+
+        let non_suppressed = print_grid_state(&grid);
+
+        // Only nodes that are BOTH row max AND column max should be non-suppressed
+        // - (0,2) = 9: max_in_row[0]=9 ✓, max_in_col[2]=9 ✓ → NOT suppressed
+        // - (2,1) = 8: max_in_row[2]=8 ✓, max_in_col[1]=8 ✓ → NOT suppressed
+
+        assert_eq!(
+            non_suppressed.len(),
+            2,
+            "Expected 2 non-suppressed nodes, found {}",
+            non_suppressed.len()
+        );
+
+        // Verify the specific nodes
+        assert!(
+            non_suppressed.contains(&(0, 2, 9.0)),
+            "Node at (0,2) with weight 9.0 should be non-suppressed"
+        );
+        assert!(
+            non_suppressed.contains(&(2, 1, 8.0)),
+            "Node at (2,1) with weight 8.0 should be non-suppressed"
+        );
+    }
+
+    #[test]
+    fn test_suppress_nonmax_single_global_max() {
+        // Create a 3x3 grid where one cell is the max in both its row and column
+        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
+
+        let test_data = [
+            (0.5, 0.5, 1.0), (1.5, 0.5, 2.0), (2.5, 0.5, 3.0),
+            (0.5, 1.5, 4.0), (1.5, 1.5, 9.0), (2.5, 1.5, 6.0),  // 9 is max
+            (0.5, 2.5, 7.0), (1.5, 2.5, 8.0), (2.5, 2.5, 5.0),
+        ];
+
+        for (x, y, weight) in test_data.iter() {
+            grid.add_point(&Point { x: *x, y: *y, weight: *weight }).unwrap();
+        }
+
+        grid.suppress_nonmax().unwrap();
+
+        let non_suppressed = print_grid_state(&grid);
+
+        // Only the center cell (1,1) with weight 9 should be non-suppressed
+        assert_eq!(
+            non_suppressed.len(),
+            1,
+            "Expected 1 non-suppressed node (the global max), found {}",
+            non_suppressed.len()
+        );
+
+        assert!(
+            non_suppressed.contains(&(1, 1, 9.0)),
+            "Node at (1,1) with weight 9.0 should be non-suppressed"
+        );
+    }
+
+    #[test]
+    fn test_suppress_nonmax_diagonal_pattern() {
+        // Create a diagonal pattern where each diagonal element is max in its row and column
+        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
+
+        let test_data = [
+            (0.5, 0.5, 9.0), (1.5, 0.5, 1.0), (2.5, 0.5, 1.0),  // (0,0) = 9
+            (0.5, 1.5, 1.0), (1.5, 1.5, 9.0), (2.5, 1.5, 1.0),  // (1,1) = 9
+            (0.5, 2.5, 1.0), (1.5, 2.5, 1.0), (2.5, 2.5, 9.0),  // (2,2) = 9
+        ];
+
+        for (x, y, weight) in test_data.iter() {
+            grid.add_point(&Point { x: *x, y: *y, weight: *weight }).unwrap();
+        }
+
+        grid.suppress_nonmax().unwrap();
+
+        let non_suppressed = print_grid_state(&grid);
+
+        // All 3 diagonal elements should be non-suppressed
+        assert_eq!(
+            non_suppressed.len(),
+            3,
+            "Expected 3 non-suppressed nodes (diagonal), found {}",
+            non_suppressed.len()
+        );
+
+        assert!(non_suppressed.contains(&(0, 0, 9.0)), "Diagonal (0,0) should be non-suppressed");
+        assert!(non_suppressed.contains(&(1, 1, 9.0)), "Diagonal (1,1) should be non-suppressed");
+        assert!(non_suppressed.contains(&(2, 2, 9.0)), "Diagonal (2,2) should be non-suppressed");
+    }
+}
