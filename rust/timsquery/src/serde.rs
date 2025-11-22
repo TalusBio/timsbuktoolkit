@@ -71,7 +71,7 @@ fn uncached_load_index(
     info!("Index built with stats: {}", build_stats);
 
     // Save to cache
-    if let Some(ref idx_path) = cache_loc {
+    if let Some(idx_path) = cache_loc {
         info!("Saving index to cache at {:?}", idx_path);
         if let Err(e) = save_compressed(&index, idx_path.to_str().unwrap()) {
             error!("Failed to save index to cache: {:?}", e);
