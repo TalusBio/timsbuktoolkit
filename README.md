@@ -9,16 +9,18 @@ and transparent way to query and analyze timsTOF mass spectrometry data.
 
 ## Overview
 
-timsseek is a collection of Rust-based tools designed for efficient processing and analysis of timsTOF
+Timsbuktoolkit is a collection of Rust-based tools designed for efficient processing and analysis of timsTOF
 mass spectrometry data. The project consists of several components:
 
-- `timsquery`: Library implementing a series of modular indices+aggregators+queries that can be used to query timsTOF data.
+- `timsquery`: Library implementing a series of modular aggregators+queries that can be used to query timsTOF data.
 - `timsquery_cli`: Command-line interface for querying timsTOF data using the timsquery library.
 - `timsseek`: Implement spectral library reading+build and core logic to score peptide-data matches.
 - `timsseek_cli`: Command-line interface for a peptide-centric search engine.
 - `timsseek_rts`
     - Command-line program that starts a server where on-demand search of peptides can be performed.
-    - It also incluides an example receiver server in srteamlit (python) to show how to interface with it.
+    - It also includes an example receiver server in streamlit (python) to show how to interface with it.
+- `timscentroid`: Internal library for indexing and centroiding timsTOF data.
+- `calibrt`: Internal library for retention time calibration.
 
 ## Installation
 
@@ -48,7 +50,7 @@ Each component has a different usage pattern.
 
 #### Timsseek
 
-To run timsquery we need a spectral library and a configuration file and a raw
+To run timsseek we need a spectral library and a configuration file and a raw
 data file.
 
 The current implementation of the speclib is an ndjson file
@@ -93,9 +95,8 @@ cargo run --release --bin timsseek -- \
     --output-dir $RESULTS_DIR \
     --dotd-file $DOTD_FILE $EXTRAS
 
-# Rn this is kind of an ugly script that runs some summary plotting
-# and target-decoy competitions.
-uv run -s showscores.py --results_dir $RESULTS_DIR --output_dir $SUMMARY_DIR
+# Run rescoring with summary plotting and target-decoy competitions
+uv run python -m timsseek_rescore --results_dir $RESULTS_DIR --output_dir $SUMMARY_DIR
 ```
 
 #### On-Demand Search
@@ -122,7 +123,7 @@ SERVER_PID=$!
 
 # To start the receiver, this sample app allows typing a peptide
 # and visualizing the scores
-uv run --project timsseek_rts/python/ --verbose streamlit run timsseek_rts/python/receiver.py
+uv run python -m streamlit run python/timsseek_rts_receiver/app.py
 kill $SERVER_PID
 wait
 
@@ -166,7 +167,7 @@ This project is licensed under the Apache License, Version 2.0.
 
 ## Contributing
 
-Contrubutions are welcome and not all of them have to be code!
+Contributions are welcome and not all of them have to be code!
 Some of the forms of contributing to the current state of the project could be:
 
 - Requesting documentation
