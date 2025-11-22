@@ -7,7 +7,8 @@ members = [
     "rust/timsseek_cli",
     "rust/timsseek_rts",
     "rust/timsquery",
-    "rust/timsquery_cli"
+    "rust/timsquery_cli",
+    "rust/timsquery_viewer"
 ]
 
 [workspace.package]

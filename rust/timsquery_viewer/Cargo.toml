@@ -1,0 +1,33 @@
+[package]
+name = "timsquery_viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "timsquery_viewer"
+path = "src/main.rs"
+
+[dependencies]
+timsquery = { path = "../timsquery" }
+timscentroid = { path = "../timscentroid" }
+
+# GUI dependencies
+egui = "0.30"
+eframe = { version = "0.30", default-features = true, features = ["default_fonts"] }
+egui_plot = "0.30"
+egui_extras = { version = "0.30", features = ["serde"] }
+rfd = "0.15"
+
+# Workspace-inherited deps
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+timsrust = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
