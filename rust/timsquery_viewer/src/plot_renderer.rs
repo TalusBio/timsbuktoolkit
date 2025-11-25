@@ -4,128 +4,155 @@ use egui_plot::{
     Line,
     Plot,
     PlotPoints,
+    PlotPoint,
 };
 
+use tracing::instrument;
 use crate::chromatogram_processor::ChromatogramOutput;
 
-/// Renders a chromatogram plot using egui_plot
-pub fn render_chromatogram_plot(
-    ui: &mut egui::Ui,
-    chromatogram: &ChromatogramOutput,
-    reset_bounds: &mut bool,
-    reset_x: &mut bool,
-    reset_y: &mut bool,
-) {
-    ui.label(format!("Elution Group ID: {}", chromatogram.id));
-    ui.label(format!(
-        "RT: {:.2} s, Mobility: {:.4}",
-        chromatogram.rt_seconds, chromatogram.mobility_ook0
-    ));
-    ui.separator();
+struct LineData {
+    points: Vec<PlotPoint>,
+    name: String,
+    stroke: egui::Stroke,
+}
 
-    // Calculate data bounds for reset functionality
-    let mut min_rt = f64::MAX;
-    let mut max_rt = f64::MIN;
-    let mut min_intensity = f64::MAX;
-    let mut max_intensity = f64::MIN;
-
-    for &rt in &chromatogram.retention_time_results_seconds {
-        min_rt = min_rt.min(rt as f64);
-        max_rt = max_rt.max(rt as f64);
+impl LineData {
+    fn to_plot_line<'a>(&'a self) -> Line<'a> {
+        Line::new(&self.name, self.points.as_slice())
+            .stroke(self.stroke)
     }
+}
 
-    for intensities in chromatogram
-        .precursor_intensities
-        .iter()
-        .chain(chromatogram.fragment_intensities.iter())
-    {
-        for &intensity in intensities {
-            if intensity > 0.0 {
-                min_intensity = min_intensity.min(intensity as f64);
-                max_intensity = max_intensity.max(intensity as f64);
-            }
-        }
-    }
+pub struct ChromatogramLines {
+    precursor_lines: Vec<LineData>,
+    fragment_lines: Vec<LineData>,
+    reference_id: u64,
+    reference_ook0: f64,
+    reference_rt_seconds: f64,
+    intensity_range: (f64, f64),
+    rt_seconds_range: (f64, f64),
+}
 
-    // Add some padding
-    let rt_padding = (max_rt - min_rt) * 0.05;
-    let intensity_padding = (max_intensity - min_intensity) * 0.05;
-
-    // Create the plot with box select zoom enabled
-    let mut plot = Plot::new("chromatogram_plot")
-        .legend(Legend::default())
-        .allow_boxed_zoom(true)
-        .allow_drag(egui::Vec2b::new(true, true))
-        .show_axes([true, true])
-        .x_axis_label("Retention Time (s)")
-        .y_axis_label("Intensity");
-
-    // Apply reset if requested
-    if *reset_bounds {
-        plot = plot.include_x(min_rt - rt_padding);
-        plot = plot.include_x(max_rt + rt_padding);
-        plot = plot.include_y(min_intensity - intensity_padding);
-        plot = plot.include_y(max_intensity + intensity_padding);
-        plot = plot.auto_bounds(egui::Vec2b::new(true, true));
-        *reset_bounds = false;
-        *reset_x = false;
-        *reset_y = false;
-    } else if *reset_x {
-        plot = plot.include_x(min_rt - rt_padding);
-        plot = plot.include_x(max_rt + rt_padding);
-        plot = plot.auto_bounds(egui::Vec2b::new(true, false));
-        *reset_x = false;
-    } else if *reset_y {
-        plot = plot.include_y(min_intensity - intensity_padding);
-        plot = plot.include_y(max_intensity + intensity_padding);
-        plot = plot.auto_bounds(egui::Vec2b::new(false, true));
-        *reset_y = false;
-    }
-
-    plot.show(ui, |plot_ui| {
-        // Plot precursor intensities
-        for (i, (mz, intensities)) in chromatogram
+impl ChromatogramLines {
+    #[instrument(skip(chromatogram))]
+    pub(crate) fn from_chromatogram(chromatogram: &ChromatogramOutput) -> Self {
+        let precursor_lines = chromatogram
             .precursor_mzs
             .iter()
             .zip(chromatogram.precursor_intensities.iter())
             .enumerate()
-        {
-            let points: PlotPoints = chromatogram
-                .retention_time_results_seconds
-                .iter()
-                .zip(intensities.iter())
-                .map(|(&rt, &intensity)| [rt as f64, intensity as f64])
-                .collect();
+            .map(|(i, (mz, intensities))| {
+                let points: Vec<PlotPoint> = chromatogram
+                    .retention_time_results_seconds
+                    .iter()
+                    .zip(intensities.iter())
+                    .map(|(&rt, &intensity)| PlotPoint::new(rt as f64, intensity as f64))
+                    .collect();
 
-            let color = get_precursor_color(i);
-            let line = Line::new(points)
-                .name(format!("Precursor m/z {:.4}", mz))
-                .stroke(egui::Stroke::new(2.0, color));
+                let color = get_precursor_color(i);
+                LineData {
+                    points,
+                    name: format!("Precursor m/z {:.4}", mz),
+                    stroke: egui::Stroke::new(2.0, color),
+                }
+            })
+            .collect();
 
-            plot_ui.line(line);
-        }
-
-        // Plot fragment intensities
-        for (i, (mz, intensities)) in chromatogram
+        let fragment_lines = chromatogram
             .fragment_mzs
             .iter()
             .zip(chromatogram.fragment_intensities.iter())
             .enumerate()
-        {
-            let points: PlotPoints = chromatogram
+            .map(|(i, (mz, intensities))| {
+                let points: Vec<PlotPoint> = chromatogram
+                    .retention_time_results_seconds
+                    .iter()
+                    .zip(intensities.iter())
+                    .map(|(&rt, &intensity)| PlotPoint::new(rt as f64, intensity as f64))
+                    .collect();
+
+                let color = get_fragment_color(i);
+                LineData {
+                    points,
+                    name: format!("Fragment m/z {:.4}", mz),
+                    stroke: egui::Stroke::new(1.5, color),
+                }
+            })
+            .collect();
+
+        let rt_seconds_range = (
+            chromatogram
                 .retention_time_results_seconds
                 .iter()
-                .zip(intensities.iter())
-                .map(|(&rt, &intensity)| [rt as f64, intensity as f64])
-                .collect();
+                .cloned()
+                .fold(f32::INFINITY, f32::min) as f64,
+            chromatogram
+                .retention_time_results_seconds
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max) as f64,
+        );
 
-            let color = get_fragment_color(i);
-            let line = Line::new(points)
-                .name(format!("Fragment m/z {:.4}", mz))
-                .stroke(egui::Stroke::new(1.5, color));
+        let intensity_range = {
+            let mut min_intensity = f64::INFINITY;
+            let mut max_intensity = f64::NEG_INFINITY;
 
-            plot_ui.line(line);
+            for intensities in chromatogram
+                .precursor_intensities
+                .iter()
+                .chain(chromatogram.fragment_intensities.iter())
+            {
+                for &intensity in intensities {
+                    if intensity > 0.0 {
+                        min_intensity = min_intensity.min(intensity as f64);
+                        max_intensity = max_intensity.max(intensity as f64);
+                    }
+                }
+            }
+
+            (min_intensity, max_intensity)
+        };
+
+        Self {
+            precursor_lines,
+            fragment_lines,
+            reference_id: chromatogram.id,
+            reference_ook0: chromatogram.mobility_ook0 as f64,
+            reference_rt_seconds: chromatogram.rt_seconds as f64,
+            intensity_range,
+            rt_seconds_range,
         }
+    }
+}
+
+/// Renders a chromatogram plot using egui_plot
+pub fn render_chromatogram_plot(
+    ui: &mut egui::Ui,
+    chromatogram: &ChromatogramLines,
+) {
+    ui.label(format!("Elution Group ID: {}", chromatogram.reference_id));
+    ui.label(format!(
+        "RT: {:.2} s, Mobility: {:.4}",
+        chromatogram.reference_rt_seconds, chromatogram.reference_ook0
+    ));
+    ui.separator();
+
+    // Create the plot with box select zoom enabled
+    let plot = Plot::new("chromatogram_plot")
+        .legend(Legend::default())
+        .show_axes([true, true])
+        .x_axis_label("Retention Time (s)")
+        .y_axis_label("Intensity");
+
+    plot.show(ui, |plot_ui| {
+        for x in chromatogram.precursor_lines.iter() {
+            plot_ui.line(x.to_plot_line());
+        }
+
+        for y in chromatogram.fragment_lines.iter() {
+            plot_ui.line(y.to_plot_line());
+        }
+
     });
 }
 

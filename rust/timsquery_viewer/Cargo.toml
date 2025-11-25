@@ -14,10 +14,10 @@ timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 
 # GUI dependencies
-egui = "0.30"
-eframe = { version = "0.30", default-features = true, features = ["default_fonts"] }
-egui_plot = "0.30"
-egui_extras = { version = "0.30", features = ["serde"] }
+egui = "0.33"
+eframe = { version = "0.33", default-features = true, features = ["default_fonts"] }
+egui_plot = "0.34"
+egui_extras = { version = "0.33", features = ["serde"] }
 rfd = "0.15"
 
 # Workspace-inherited deps

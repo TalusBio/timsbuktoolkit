@@ -1,7 +1,6 @@
 use eframe::egui;
 use timsquery::models::elution_group::ElutionGroup;
 
-/// Renders the precursor table with selectable rows (filtered version)
 pub fn render_precursor_table_filtered(
     ui: &mut egui::Ui,
     filtered_groups: &[(usize, &ElutionGroup<usize>)],
@@ -38,13 +37,17 @@ pub fn render_precursor_table_filtered(
                 ui.strong("Fragments");
             });
         })
-        .body(|mut body| {
-            for &(idx, eg) in filtered_groups {
-                let row_height = 18.0;
-                let is_selected = Some(idx) == *selected_index;
-
-                body.row(row_height, |mut row| {
-                    // ID column
+        .body(| body| {
+            // for &(idx, eg) in filtered_groups {
+            let row_height = 18.0;
+            body.rows(
+                row_height,
+                filtered_groups.len(),
+                |mut row| {
+                    let idx = row.index();
+                    let eg = filtered_groups[idx].1;
+                    let is_selected = Some(idx) == *selected_index;
+                    // ID column - clickable
                     row.col(|ui| {
                         if ui
                             .selectable_label(is_selected, format!("{}", eg.id))
@@ -54,59 +57,34 @@ pub fn render_precursor_table_filtered(
                         }
                     });
 
-                    // RT column
+                    // RT column - plain text with optional highlighting
                     row.col(|ui| {
-                        if ui
-                            .selectable_label(is_selected, format!("{:.2}", eg.rt_seconds))
-                            .clicked()
-                        {
-                            *selected_index = Some(idx);
-                        }
+                        let text = format!("{:.2}", eg.rt_seconds);
+                        ui.label(text);
                     });
 
-                    // Mobility column
+                    // Mobility column - plain text with optional highlighting
                     row.col(|ui| {
-                        if ui
-                            .selectable_label(is_selected, format!("{:.4}", eg.mobility))
-                            .clicked()
-                        {
-                            *selected_index = Some(idx);
-                        }
+                        let text = format!("{:.4}", eg.mobility);
+                        ui.label(text);
                     });
 
-                    // Precursor m/z column (may have multiple)
+                    // Precursor m/z column - plain text with optional highlighting
                     row.col(|ui| {
-                        let precursor_mzs: Vec<String> = eg
-                            .precursors
-                            .iter()
-                            .map(|(_, mz)| format!("{:.4}", mz))
-                            .collect();
-                        let display_text = if precursor_mzs.len() > 2 {
-                            format!(
-                                "{}, {} (+{})",
-                                precursor_mzs[0],
-                                precursor_mzs[1],
-                                precursor_mzs.len() - 2
-                            )
-                        } else {
-                            precursor_mzs.join(", ")
-                        };
+                        let display_text = format!( "{:.4} ({})",
+                                eg.precursors.first().unwrap().1,
+                                eg.precursors.len(),
+                            );
 
-                        if ui.selectable_label(is_selected, display_text).clicked() {
-                            *selected_index = Some(idx);
-                        }
+                        ui.label(display_text);
                     });
 
-                    // Fragment count column
+                    // Fragment count column - plain text with optional highlighting
                     row.col(|ui| {
-                        if ui
-                            .selectable_label(is_selected, format!("{}", eg.fragments.len()))
-                            .clicked()
-                        {
-                            *selected_index = Some(idx);
-                        }
+                        let text = format!("{}", eg.fragments.len());
+                        ui.label(text);
                     });
                 });
-            }
         });
 }
+

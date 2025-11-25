@@ -14,6 +14,7 @@ use crate::{
     precursor_table,
     tolerance_editor,
 };
+use crate::plot_renderer::ChromatogramLines;
 
 /// Main application state
 pub struct ViewerApp {
@@ -36,7 +37,7 @@ pub struct ViewerApp {
     selected_index: Option<usize>,
 
     /// Computed chromatogram for the selected elution group
-    chromatogram: Option<ChromatogramOutput>,
+    chromatogram: Option<ChromatogramLines>,
 
     /// Track if we need to regenerate the chromatogram
     needs_regeneration: bool,
@@ -291,7 +292,7 @@ impl ViewerApp {
                     chrom.precursor_mzs.len(),
                     chrom.fragment_mzs.len()
                 );
-                self.chromatogram = Some(chrom);
+                self.chromatogram = Some(ChromatogramLines::from_chromatogram(&chrom));
 
                 // Auto-reset zoom when new chromatogram is loaded
                 // TODO: In the future, we might want to add a user toggle for this behavior
@@ -385,9 +386,6 @@ impl ViewerApp {
             plot_renderer::render_chromatogram_plot(
                 ui,
                 chromatogram,
-                &mut self.reset_plot_bounds,
-                &mut self.reset_x_bounds,
-                &mut self.reset_y_bounds,
             );
         } else if self.selected_index.is_some() {
             ui.label("Generating chromatogram...");

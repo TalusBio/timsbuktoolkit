@@ -6,6 +6,7 @@ use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 
 use crate::error::ViewerError;
+use tracing::instrument;
 
 /// Represents the output format for an aggregated chromatogram
 /// (Copied from timsquery_cli for compatibility)
@@ -126,6 +127,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
 }
 
 /// Generates a chromatogram for a single elution group
+#[instrument(skip_all)]
 pub fn generate_chromatogram(
     elution_group: &ElutionGroup<usize>,
     index: &IndexedTimstofPeaks,
