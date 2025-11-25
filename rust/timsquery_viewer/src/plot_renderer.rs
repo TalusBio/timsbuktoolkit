@@ -5,6 +5,7 @@ use egui_plot::{
     Plot,
     PlotPoints,
     PlotPoint,
+    Polygon,
 };
 
 use tracing::instrument;
@@ -94,7 +95,7 @@ impl ChromatogramLines {
         );
 
         let intensity_range = {
-            let mut min_intensity = f64::INFINITY;
+            let mut min_intensity = 0.0f64;
             let mut max_intensity = f64::NEG_INFINITY;
 
             for intensities in chromatogram
@@ -109,6 +110,20 @@ impl ChromatogramLines {
                     }
                 }
             }
+
+            for intensities in chromatogram
+                .fragment_intensities
+                .iter()
+                .chain(chromatogram.fragment_intensities.iter())
+            {
+                for &intensity in intensities {
+                    if intensity > 0.0 {
+                        min_intensity = min_intensity.min(intensity as f64);
+                        max_intensity = max_intensity.max(intensity as f64);
+                    }
+                }
+            }
+            println!("Intensity range: min {}, max {}", min_intensity, max_intensity);
 
             (min_intensity, max_intensity)
         };
@@ -125,7 +140,7 @@ impl ChromatogramLines {
     }
 }
 
-/// Renders a chromatogram plot using egui_plot
+/// Renders a chromatogram plot using egui_plot with custom zoom/pan controls
 pub fn render_chromatogram_plot(
     ui: &mut egui::Ui,
     chromatogram: &ChromatogramLines,
@@ -135,24 +150,104 @@ pub fn render_chromatogram_plot(
         "RT: {:.2} s, Mobility: {:.4}",
         chromatogram.reference_rt_seconds, chromatogram.reference_ook0
     ));
+    ui.label("💡 Scroll: zoom X-axis | Shift+Scroll: zoom Y-axis | Drag: pan");
     ui.separator();
 
-    // Create the plot with box select zoom enabled
+    // Get input state before entering plot closure
+    let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
+    let shift_pressed = ui.input(|i| i.modifiers.shift);
+
+    // Create the plot with custom controls (disable defaults)
+    // Manually set bounds to match data range
     let plot = Plot::new("chromatogram_plot")
         .legend(Legend::default())
         .show_axes([true, true])
         .x_axis_label("Retention Time (s)")
-        .y_axis_label("Intensity");
+        .y_axis_label("Intensity")
+        .allow_zoom(false)
+        .allow_drag(false)
+        .allow_scroll(false)
+        .include_x(chromatogram.rt_seconds_range.0)
+        .include_x(chromatogram.rt_seconds_range.1)
+        .include_y(chromatogram.intensity_range.0)
+        .include_y(chromatogram.intensity_range.1);
 
     plot.show(ui, |plot_ui| {
-        for x in chromatogram.precursor_lines.iter() {
-            plot_ui.line(x.to_plot_line());
+        // Add reference RT band (10 seconds wide, subtle gray)
+        let rt_band_half_width = 5.0;
+        let reference_band = Polygon::new(
+            "Reference RT",
+            PlotPoints::new(vec![
+                [chromatogram.reference_rt_seconds - rt_band_half_width, 0.0],
+                [chromatogram.reference_rt_seconds + rt_band_half_width, 0.0],
+                [chromatogram.reference_rt_seconds + rt_band_half_width, chromatogram.intensity_range.1],
+                [chromatogram.reference_rt_seconds - rt_band_half_width, chromatogram.intensity_range.1],
+            ])
+        )
+        .fill_color(egui::Color32::from_rgba_premultiplied(128, 128, 128, 26)) // 10% opacity gray
+        .stroke(egui::Stroke::NONE);
+
+        plot_ui.polygon(reference_band);
+
+        // Draw precursor lines
+        for line in chromatogram.precursor_lines.iter() {
+            plot_ui.line(line.to_plot_line());
         }
 
-        for y in chromatogram.fragment_lines.iter() {
-            plot_ui.line(y.to_plot_line());
+        // Draw fragment lines
+        for line in chromatogram.fragment_lines.iter() {
+            plot_ui.line(line.to_plot_line());
         }
 
+        // Custom zoom handling (using input state captured before closure)
+        if scroll_delta.length_sq() > 0.0 {
+            // Zoom speed factor
+            let zoom_speed = 0.1;
+            let scroll_y = scroll_delta.y;
+
+            // Calculate zoom factor based on scroll
+            let zoom_amount = (scroll_y * zoom_speed / 10.0).exp();
+
+            // Apply zoom only to x-axis by default, y-axis if Shift is pressed
+            let zoom_factor = if shift_pressed {
+                egui::Vec2::new(1.0, zoom_amount) // Zoom y-axis only
+            } else {
+                egui::Vec2::new(zoom_amount, 1.0) // Zoom x-axis only
+            };
+
+            plot_ui.zoom_bounds_around_hovered(zoom_factor);
+        }
+
+        // Custom pan handling
+        let pointer_drag_delta = plot_ui.pointer_coordinate_drag_delta();
+        if pointer_drag_delta.x != 0.0 || pointer_drag_delta.y != 0.0 {
+            // Invert the drag delta for natural panning
+            let pan_delta = egui::Vec2::new(-pointer_drag_delta.x, -pointer_drag_delta.y);
+            plot_ui.translate_bounds(pan_delta);
+        }
+
+        // Clamp bounds to valid ranges
+        let bounds = plot_ui.plot_bounds();
+
+        // Clamp y-axis to [0, max_intensity]
+        let y_min = bounds.min()[1];
+        let y_max = bounds.max()[1];
+        let clamped_y_min = y_min.max(0.0);
+        let clamped_y_max = y_max.min(chromatogram.intensity_range.1);
+
+        if y_min != clamped_y_min || y_max != clamped_y_max {
+            plot_ui.set_plot_bounds_y(clamped_y_min..=clamped_y_max);
+        }
+
+        // Optional: clamp x-axis to data range
+        let x_min = bounds.min()[0];
+        let x_max = bounds.max()[0];
+        let clamped_x_min = x_min.max(chromatogram.rt_seconds_range.0);
+        let clamped_x_max = x_max.min(chromatogram.rt_seconds_range.1);
+
+        if x_min != clamped_x_min || x_max != clamped_x_max {
+            plot_ui.set_plot_bounds_x(clamped_x_min..=clamped_x_max);
+        }
     });
 }
 

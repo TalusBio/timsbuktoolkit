@@ -4,10 +4,7 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 
-use crate::chromatogram_processor::{
-    self,
-    ChromatogramOutput,
-};
+use crate::chromatogram_processor;
 use crate::file_loader::FileLoader;
 use crate::{
     plot_renderer,
@@ -120,21 +117,100 @@ impl ViewerApp {
         ui.heading("Data Loading");
         ui.separator();
 
-        // Elution groups loading
+        self.render_elution_groups_section(ui);
+        ui.add_space(10.0);
+
+        self.render_raw_data_section(ui);
+        ui.add_space(10.0);
+
+        self.render_tolerance_loading_section(ui);
+
+        ui.add_space(20.0);
+        ui.separator();
+
+        self.render_tolerance_editor_section(ui);
+    }
+
+    fn render_elution_groups_section(&mut self, ui: &mut egui::Ui) {
         ui.label("Elution Groups:");
         if ui.button("Load Elution Groups...").clicked() {
             self.file_loader.open_elution_groups_dialog();
         }
+
         if let Some(path) = &self.file_loader.elution_groups_path {
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown");
-            ui.label(egui::RichText::new(filename).small().italics())
-                .on_hover_text(path.display().to_string());
+            self.display_filename(ui, path);
         }
 
-        // Load the elution groups if a path is set and not yet loaded
+        self.load_elution_groups_if_needed(ui);
+
+        if let Some(egs) = &self.elution_groups {
+            ui.label(format!("✓ Loaded: {} elution groups", egs.len()));
+        }
+    }
+
+    fn render_raw_data_section(&mut self, ui: &mut egui::Ui) {
+        ui.label("Raw Data File (.d):");
+        if ui.button("Load Raw Data...").clicked() {
+            self.file_loader.open_raw_data_dialog();
+        }
+
+        if let Some(path) = &self.file_loader.raw_data_path {
+            self.display_filename(ui, path);
+        }
+
+        self.load_raw_data_if_needed(ui);
+
+        if self.indexed_data.is_some() && !self.is_indexing {
+            ui.label("✓ Raw data indexed");
+        }
+    }
+
+    fn render_tolerance_loading_section(&mut self, ui: &mut egui::Ui) {
+        ui.label("Tolerance Settings:");
+        if ui.button("Load Tolerances...").clicked() {
+            self.file_loader.open_tolerance_dialog();
+        }
+
+        if let Some(path) = &self.file_loader.tolerance_path {
+            self.display_filename(ui, path);
+        }
+
+        self.load_tolerance_if_needed();
+
+        if self.tolerance.is_some() {
+            ui.label("Tolerance settings loaded");
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button("Use Default Tolerance").clicked() {
+                    self.tolerance = Some(Tolerance::default());
+                }
+            });
+        }
+    }
+
+    fn render_tolerance_editor_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Tolerance Settings");
+
+        if let Some(tolerance) = &mut self.tolerance {
+            let changed = tolerance_editor::render_tolerance_editor(ui, tolerance);
+            if changed && self.selected_index.is_some() {
+                self.needs_regeneration = true;
+            }
+        } else {
+            ui.label("Load or create tolerance settings to edit");
+        }
+    }
+
+    fn display_filename(&self, ui: &mut egui::Ui, path: &std::path::Path) {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unknown");
+        ui.label(egui::RichText::new(filename).small().italics())
+            .on_hover_text(path.display().to_string());
+    }
+
+    fn load_elution_groups_if_needed(&mut self, ui: &mut egui::Ui) {
         if let Some(path) = &self.file_loader.elution_groups_path
             && self.elution_groups.is_none() {
                 ui.horizontal(|ui| {
@@ -151,33 +227,13 @@ impl ViewerApp {
                     }
                 }
             }
+    }
 
-        if let Some(egs) = &self.elution_groups {
-            ui.label(format!("✓ Loaded: {} elution groups", egs.len()));
-        }
-
-        ui.add_space(10.0);
-
-        // Raw data file loading
-        ui.label("Raw Data File (.d):");
-        if ui.button("Load Raw Data...").clicked() {
-            self.file_loader.open_raw_data_dialog();
-        }
-        if let Some(path) = &self.file_loader.raw_data_path {
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown");
-            ui.label(egui::RichText::new(filename).small().italics())
-                .on_hover_text(path.display().to_string());
-        }
-
-        // Load the raw data if a path is set and not yet loaded
+    fn load_raw_data_if_needed(&mut self, ui: &mut egui::Ui) {
         if let Some(path) = &self.file_loader.raw_data_path {
             if self.indexed_data.is_none() && !self.is_indexing {
-                // Start indexing
                 self.is_indexing = true;
-                ui.ctx().request_repaint(); // Force UI update
+                ui.ctx().request_repaint();
             }
 
             if self.is_indexing {
@@ -200,28 +256,9 @@ impl ViewerApp {
                 }
             }
         }
+    }
 
-        if self.indexed_data.is_some() && !self.is_indexing {
-            ui.label("✓ Raw data indexed");
-        }
-
-        ui.add_space(10.0);
-
-        // Tolerance settings loading
-        ui.label("Tolerance Settings:");
-        if ui.button("Load Tolerances...").clicked() {
-            self.file_loader.open_tolerance_dialog();
-        }
-        if let Some(path) = &self.file_loader.tolerance_path {
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown");
-            ui.label(egui::RichText::new(filename).small().italics())
-                .on_hover_text(path.display().to_string());
-        }
-
-        // Load the tolerance settings if a path is set and not yet loaded
+    fn load_tolerance_if_needed(&mut self) {
         if let Some(path) = &self.file_loader.tolerance_path
             && self.tolerance.is_none() {
                 match self.file_loader.load_tolerance(path) {
@@ -233,58 +270,44 @@ impl ViewerApp {
                     }
                 }
             }
-
-        if self.tolerance.is_some() {
-            ui.label("Tolerance settings loaded");
-        } else {
-            ui.horizontal(|ui| {
-                if ui.button("Use Default Tolerance").clicked() {
-                    self.tolerance = Some(Tolerance::default());
-                }
-            });
-        }
-
-        ui.add_space(20.0);
-        ui.separator();
-        ui.heading("Tolerance Settings");
-
-        // Render tolerance editor if tolerance is loaded
-        if let Some(tolerance) = &mut self.tolerance {
-            let changed = tolerance_editor::render_tolerance_editor(ui, tolerance);
-            // If tolerance changed, mark that we need to regenerate the chromatogram
-            if changed && self.selected_index.is_some() {
-                self.needs_regeneration = true;
-            }
-        } else {
-            ui.label("Load or create tolerance settings to edit");
-        }
     }
 
     fn generate_chromatogram(&mut self) {
-        // Check if we have all required data
-        let Some(selected_idx) = self.selected_index else {
+        let selected_idx = match self.selected_index {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        // Clone necessary data to avoid borrowing conflicts
+        let eg = match &self.elution_groups {
+            Some(egs) => match egs.get(selected_idx) {
+                Some(eg) => eg.clone(),
+                None => return,
+            },
+            None => return,
+        };
+
+        let Some(index) = self.indexed_data.clone() else {
             return;
         };
-        let Some(elution_groups) = &self.elution_groups else {
+        let Some(ms1_rts) = self.ms1_rts.clone() else {
             return;
         };
-        let Some(index) = &self.indexed_data else {
-            return;
-        };
-        let Some(ms1_rts) = &self.ms1_rts else {
-            return;
-        };
-        let Some(tolerance) = &self.tolerance else {
+        let Some(tolerance) = self.tolerance.clone() else {
             return;
         };
 
-        // Get the selected elution group
-        let Some(eg) = elution_groups.get(selected_idx) else {
-            return;
-        };
+        self.process_chromatogram(&eg, &index, ms1_rts, &tolerance);
+    }
 
-        // Generate the chromatogram
-        match chromatogram_processor::generate_chromatogram(eg, index, ms1_rts.clone(), tolerance) {
+    fn process_chromatogram(
+        &mut self,
+        eg: &ElutionGroup<usize>,
+        index: &Arc<IndexedTimstofPeaks>,
+        ms1_rts: Arc<[u32]>,
+        tolerance: &Tolerance,
+    ) {
+        match chromatogram_processor::generate_chromatogram(eg, index, ms1_rts, tolerance) {
             Ok(chrom) => {
                 tracing::info!(
                     "Generated chromatogram for elution group {} with {} precursors and {} fragments",
@@ -293,10 +316,6 @@ impl ViewerApp {
                     chrom.fragment_mzs.len()
                 );
                 self.chromatogram = Some(ChromatogramLines::from_chromatogram(&chrom));
-
-                // Auto-reset zoom when new chromatogram is loaded
-                // TODO: In the future, we might want to add a user toggle for this behavior
-                // (e.g., "Auto-fit on chromatogram change" checkbox in settings)
                 self.reset_plot_bounds = true;
             }
             Err(e) => {
@@ -310,83 +329,103 @@ impl ViewerApp {
         ui.heading("Precursor Table");
         ui.separator();
 
-        if let Some(egs) = &self.elution_groups {
-            // Add filter box
-            ui.horizontal(|ui| {
-                ui.label("Filter by ID:");
-                ui.text_edit_singleline(&mut self.table_filter);
-                if ui.button("Clear").clicked() {
-                    self.table_filter.clear();
-                }
-            });
-            ui.separator();
-
-            // Filter elution groups
-            let filtered_egs: Vec<(usize, &_)> = egs
-                .iter()
-                .enumerate()
-                .filter(|(_, eg)| {
-                    if self.table_filter.is_empty() {
-                        true
-                    } else {
-                        eg.id.to_string().contains(&self.table_filter)
-                    }
-                })
-                .collect();
-
-            ui.label(format!(
-                "Showing {} of {} precursors",
-                filtered_egs.len(),
-                egs.len()
-            ));
-
-            let old_selection = self.selected_index;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    precursor_table::render_precursor_table_filtered(
-                        ui,
-                        &filtered_egs,
-                        &mut self.selected_index,
-                    );
-                });
-
-            // If selection changed, mark for regeneration
-            if old_selection != self.selected_index && self.selected_index.is_some() {
-                self.needs_regeneration = true;
-            }
-        } else {
+        // Clone elution groups to avoid borrowing conflicts
+        let Some(egs) = self.elution_groups.clone() else {
             ui.label("Load elution groups to see the table");
+            return;
+        };
+
+        self.render_table_filter_ui(ui);
+        ui.separator();
+
+        let filtered_egs = self.apply_table_filter(&egs);
+        let total_count = egs.len();
+
+        ui.label(format!(
+            "Showing {} of {} precursors",
+            filtered_egs.len(),
+            total_count
+        ));
+
+        self.render_precursor_table_with_selection(ui, &filtered_egs);
+    }
+
+    fn render_table_filter_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Filter by ID:");
+            ui.text_edit_singleline(&mut self.table_filter);
+            if ui.button("Clear").clicked() {
+                self.table_filter.clear();
+            }
+        });
+    }
+
+    fn apply_table_filter<'a>(
+        &self,
+        egs: &'a [ElutionGroup<usize>],
+    ) -> Vec<(usize, &'a ElutionGroup<usize>)> {
+        egs.iter()
+            .enumerate()
+            .filter(|(_, eg)| {
+                self.table_filter.is_empty() || eg.id.to_string().contains(&self.table_filter)
+            })
+            .collect()
+    }
+
+    fn render_precursor_table_with_selection(
+        &mut self,
+        ui: &mut egui::Ui,
+        filtered_egs: &[(usize, &ElutionGroup<usize>)],
+    ) {
+        let old_selection = self.selected_index;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                precursor_table::render_precursor_table_filtered(
+                    ui,
+                    filtered_egs,
+                    &mut self.selected_index,
+                );
+            });
+
+        if old_selection != self.selected_index && self.selected_index.is_some() {
+            self.needs_regeneration = true;
         }
     }
 
     fn render_plot_panel(&mut self, ui: &mut egui::Ui) {
+        self.render_plot_header(ui);
+        ui.separator();
+        self.render_plot_content(ui);
+    }
+
+    fn render_plot_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Chromatogram");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Reset All").clicked() {
-                    self.reset_plot_bounds = true;
-                }
-                if ui.button("Reset Y").clicked() {
-                    self.reset_y_bounds = true;
-                }
-                if ui.button("Reset X").clicked() {
-                    self.reset_x_bounds = true;
-                }
+                self.render_plot_reset_buttons(ui);
                 ui.separator();
-                #[cfg(target_os = "macos")]
-                ui.label("💡 Box select to zoom | Right-click to reset");
-                #[cfg(not(target_os = "macos"))]
                 ui.label("💡 Box select to zoom | Right-click to reset");
             });
         });
-        ui.separator();
+    }
 
+    fn render_plot_reset_buttons(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Reset All").clicked() {
+            self.reset_plot_bounds = true;
+        }
+        if ui.button("Reset Y").clicked() {
+            self.reset_y_bounds = true;
+        }
+        if ui.button("Reset X").clicked() {
+            self.reset_x_bounds = true;
+        }
+    }
+
+    fn render_plot_content(&self, ui: &mut egui::Ui) {
         if let Some(chromatogram) = &self.chromatogram {
-            plot_renderer::render_chromatogram_plot(
-                ui,
-                chromatogram,
-            );
+            plot_renderer::render_chromatogram_plot(ui, chromatogram);
         } else if self.selected_index.is_some() {
             ui.label("Generating chromatogram...");
         } else {
