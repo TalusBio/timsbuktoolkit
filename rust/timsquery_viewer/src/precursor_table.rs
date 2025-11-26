@@ -1,9 +1,9 @@
 use eframe::egui;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::{ion::IonAnnot, models::elution_group::ElutionGroup};
 
 pub fn render_precursor_table_filtered(
     ui: &mut egui::Ui,
-    filtered_groups: &[(usize, &ElutionGroup<usize>)],
+    filtered_groups: &[(usize, &ElutionGroup<IonAnnot>)],
     selected_index: &mut Option<usize>,
 ) {
     use egui_extras::{

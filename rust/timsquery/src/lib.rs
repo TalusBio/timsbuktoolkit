@@ -43,3 +43,11 @@ pub use crate::errors::{
     DataReadingError,
     TimsqueryError,
 };
+
+pub mod ion {
+    pub use micromzpaf::{
+        IonAnnot,
+        IonParsingError,
+        IonSeriesTerminality,
+    };
+}

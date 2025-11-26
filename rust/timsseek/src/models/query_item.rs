@@ -1,6 +1,6 @@
+use micromzpaf::IonAnnot;
 use super::{
     DigestSlice,
-    IonAnnot,
 };
 use serde::{
     Deserialize,

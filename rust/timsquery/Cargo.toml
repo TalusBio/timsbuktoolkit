@@ -16,6 +16,7 @@ zstd = "0.13"
 
 # Workspace member deps
 timscentroid = { path = "../timscentroid" }
+micromzpaf = { path = "../micromzpaf" }
 
 # Workspace-inherited deps
 timsrust = { workspace = true }

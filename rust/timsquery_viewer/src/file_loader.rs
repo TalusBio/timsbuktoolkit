@@ -7,7 +7,12 @@ use timscentroid::{
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::load_index_caching;
+use timsquery::ion::{
+    IonAnnot,
+    IonParsingError,
+};
 use timsrust::MSLevel;
+use tracing::warn;
 
 use crate::error::ViewerError;
 
@@ -58,23 +63,24 @@ impl FileLoader {
     pub fn load_elution_groups(
         &self,
         path: &PathBuf,
-    ) -> Result<Vec<ElutionGroup<usize>>, ViewerError> {
+    ) -> Result<Vec<ElutionGroup<IonAnnot>>, ViewerError> {
         let file_content = std::fs::read_to_string(path)?;
 
         // Try parsing as Vec<ElutionGroupInput> first
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-            let out: Vec<ElutionGroup<usize>> = eg_inputs.into_iter().map(|x| x.into()).collect();
+            let out: Vec<ElutionGroup<IonAnnot>> = eg_inputs.into_iter().map(|x| x.into()).collect();
             return Ok(out);
         }
 
         // Try parsing as Vec<ElutionGroup<usize>>
-        if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<usize>>>(&file_content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<IonAnnot>>>(&file_content) {
             return Ok(egs);
         }
 
         // Try parsing as Vec<ElutionGroup<String>> and convert
         let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&file_content)?;
-        let mut out: Vec<ElutionGroup<usize>> = Vec::with_capacity(egs_string.len());
+        warn!("Elution groups contained fragment labels as strings that are not interpretable as labels, will be dropped and replaced with generic labels.");
+        let mut out: Vec<ElutionGroup<IonAnnot>> = Vec::with_capacity(egs_string.len());
         for (i, eg) in egs_string.into_iter().enumerate() {
             let eg_usize = ElutionGroup {
                 id: i as u64,
@@ -86,7 +92,11 @@ impl FileLoader {
                         .iter()
                         .map(|(_lab, mz)| *mz)
                         .enumerate()
-                        .collect::<Vec<(usize, f64)>>(),
+                        .map(|(idx, mz)| {
+                            let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 0).unwrap();
+                            (annot, mz)
+                        })
+                        .collect::<Vec<(IonAnnot, f64)>>(),
                 ),
             };
             out.push(eg_usize);
@@ -128,9 +138,10 @@ pub struct ElutionGroupInput {
     pub rt_seconds: f32,
     pub precursors: Vec<f64>,
     pub fragments: Vec<f64>,
+    pub fragment_labels: Option<Vec<IonAnnot>>,
 }
 
-impl From<ElutionGroupInput> for ElutionGroup<usize> {
+impl From<ElutionGroupInput> for ElutionGroup<IonAnnot> {
     fn from(val: ElutionGroupInput) -> Self {
         let precursors: Arc<[(i8, f64)]> = Arc::from(
             val.precursors
@@ -139,12 +150,33 @@ impl From<ElutionGroupInput> for ElutionGroup<usize> {
                 .map(|(i, mz)| (i as i8, mz))
                 .collect::<Vec<(i8, f64)>>(),
         );
-        let fragments: Arc<[(usize, f64)]> = Arc::from(
-            val.fragments
-                .into_iter()
-                .enumerate()
-                .collect::<Vec<(usize, f64)>>(),
-        );
+        let fragments: Arc<[(IonAnnot, f64)]>  = match val.fragment_labels {
+            Some(labels) => {
+                // TODO: make this a real error and propagate ...
+                assert!(labels.len() == val.fragments.len(), "Fragment labels length does not match fragments length");
+                Arc::from(
+                    val.fragments
+                        .into_iter()
+                        .zip(labels.into_iter())
+                        .map(|(mz, annot)| {
+                            (annot, mz)
+                        })
+                        .collect::<Vec<(IonAnnot, f64)>>(),
+                )
+            },
+            None => {
+                Arc::from(
+                    val.fragments
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, mz)| {
+                            let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 1).unwrap();
+                            (annot, mz)
+                        })
+                        .collect::<Vec<(IonAnnot, f64)>>(),
+                )
+            }
+        };
         ElutionGroup {
             id: val.id,
             mobility: val.mobility,

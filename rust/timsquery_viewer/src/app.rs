@@ -1,4 +1,5 @@
 use eframe::egui;
+use timsquery::ion::IonAnnot;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::elution_group::ElutionGroup;
@@ -19,7 +20,7 @@ pub struct ViewerApp {
     file_loader: FileLoader,
 
     /// Loaded elution groups
-    elution_groups: Option<Vec<ElutionGroup<usize>>>,
+    elution_groups: Option<Vec<ElutionGroup<IonAnnot>>>,
 
     /// Loaded and indexed timsTOF data
     indexed_data: Option<Arc<IndexedTimstofPeaks>>,
@@ -208,7 +209,7 @@ impl ViewerApp {
     fn load_elution_groups_if_needed(
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
-        elution_groups: &mut Option<Vec<ElutionGroup<usize>>>,
+        elution_groups: &mut Option<Vec<ElutionGroup<IonAnnot>>>
     ) {
         if let Some(path) = &file_loader.elution_groups_path
             && elution_groups.is_none()
@@ -312,7 +313,7 @@ impl ViewerApp {
 
     fn process_chromatogram(
         chromatogram: &mut Option<ChromatogramLines>,
-        eg: &ElutionGroup<usize>,
+        eg: &ElutionGroup<IonAnnot>,
         index: &Arc<IndexedTimstofPeaks>,
         ms1_rts: Arc<[u32]>,
         tolerance: &Tolerance,
@@ -376,8 +377,8 @@ impl ViewerApp {
 
     fn apply_table_filter<'a>(
         table_filter: &str,
-        egs: &'a [ElutionGroup<usize>],
-    ) -> Vec<(usize, &'a ElutionGroup<usize>)> {
+        egs: &'a [ElutionGroup<IonAnnot>],
+    ) -> Vec<(usize, &'a ElutionGroup<IonAnnot>)> {
         egs.iter()
             .enumerate()
             .filter(|(_, eg)| {
@@ -388,7 +389,7 @@ impl ViewerApp {
 
     fn render_precursor_table_with_selection(
         ui: &mut egui::Ui,
-        filtered_egs: &[(usize, &ElutionGroup<usize>)],
+        filtered_egs: &[(usize, &ElutionGroup<IonAnnot>)],
         selected_index: &mut Option<usize>,
         needs_regeneration: &mut bool,
     ) {

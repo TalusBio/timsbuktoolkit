@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
+use timsquery::ion::IonAnnot;
 use timsquery::QueriableData;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::elution_group::ElutionGroup;
@@ -19,14 +20,15 @@ pub struct ChromatogramOutput {
     pub fragment_mzs: Vec<f64>,
     pub precursor_intensities: Vec<Vec<f32>>,
     pub fragment_intensities: Vec<Vec<f32>>,
+    pub fragment_labels: Vec<IonAnnot>,
     pub retention_time_results_seconds: Vec<f32>,
 }
 
-impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
+impl TryFrom<ChromatogramCollector<IonAnnot, f32>> for ChromatogramOutput {
     type Error = ViewerError;
 
     fn try_from(
-        mut value: ChromatogramCollector<usize, f32>,
+        mut value: ChromatogramCollector<IonAnnot, f32>,
     ) -> Result<ChromatogramOutput, Self::Error> {
         let mut non_zero_min_idx = value.ref_rt_ms.len();
         let mut non_zero_max_idx = 0usize;
@@ -89,7 +91,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
             .into_iter()
             .unzip();
 
-        let (fragment_mzs, fragment_intensities): (Vec<f64>, Vec<Vec<f32>>) = value
+        let ((fragment_mzs, fragment_intensities), fragment_labels): ((Vec<f64>, Vec<Vec<f32>>), Vec<IonAnnot>) = value
             .iter_mut_fragments()
             .filter_map(|(&(idx, mz), cmg)| {
                 let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
@@ -104,7 +106,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
                 if out_vec.iter().all(|&x| x == 0.0) {
                     return None;
                 }
-                Some(Ok((mz, out_vec)))
+                Some(Ok(((mz, out_vec), idx)))
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -118,6 +120,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
             fragment_mzs,
             precursor_intensities,
             fragment_intensities,
+            fragment_labels,
             retention_time_results_seconds: value.ref_rt_ms[non_zero_min_idx..=non_zero_max_idx]
                 .iter()
                 .map(|&x| x as f32 / 1000.0)
@@ -129,7 +132,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
 /// Generates a chromatogram for a single elution group
 #[instrument(skip_all)]
 pub fn generate_chromatogram(
-    elution_group: &ElutionGroup<usize>,
+    elution_group: &ElutionGroup<IonAnnot>,
     index: &IndexedTimstofPeaks,
     ms1_rts: Arc<[u32]>,
     tolerance: &Tolerance,

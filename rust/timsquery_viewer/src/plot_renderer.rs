@@ -62,8 +62,9 @@ impl ChromatogramLines {
             .fragment_mzs
             .iter()
             .zip(chromatogram.fragment_intensities.iter())
+            .zip(chromatogram.fragment_labels.iter())
             .enumerate()
-            .map(|(i, (mz, intensities))| {
+            .map(|(i, ((mz, intensities), label))| {
                 let points: Vec<PlotPoint> = chromatogram
                     .retention_time_results_seconds
                     .iter()
@@ -74,7 +75,7 @@ impl ChromatogramLines {
                 let color = get_fragment_color(i);
                 LineData {
                     points,
-                    name: format!("Fragment m/z {:.4}", mz),
+                    name: format!("{} mz={:.4}", label, mz),
                     stroke: egui::Stroke::new(1.5, color),
                 }
             })
