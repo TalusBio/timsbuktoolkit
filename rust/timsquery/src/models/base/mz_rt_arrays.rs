@@ -131,8 +131,8 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     /// Iterate over the values of a single column (all values for a RT)
     pub fn iter_column_idx(&self, index: usize) -> impl '_ + Iterator<Item = (&K, V)> {
         let vals = self.arr.iter_column(index);
-        let out = self.mz_order.iter().map(|(k, _mz)| k).zip(vals);
-        out
+        
+        self.mz_order.iter().map(|(k, _mz)| k).zip(vals)
     }
 
     /// Get a single 'row', all the chromatogram for a single mz

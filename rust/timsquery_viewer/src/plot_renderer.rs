@@ -3,13 +3,13 @@ use egui_plot::{
     Legend,
     Line,
     Plot,
-    PlotPoints,
     PlotPoint,
+    PlotPoints,
     Polygon,
 };
 
-use tracing::instrument;
 use crate::chromatogram_processor::ChromatogramOutput;
+use tracing::instrument;
 
 struct LineData {
     points: Vec<PlotPoint>,
@@ -19,8 +19,7 @@ struct LineData {
 
 impl LineData {
     fn to_plot_line<'a>(&'a self) -> Line<'a> {
-        Line::new(&self.name, self.points.as_slice())
-            .stroke(self.stroke)
+        Line::new(&self.name, self.points.as_slice()).stroke(self.stroke)
     }
 }
 
@@ -123,7 +122,10 @@ impl ChromatogramLines {
                     }
                 }
             }
-            println!("Intensity range: min {}, max {}", min_intensity, max_intensity);
+            println!(
+                "Intensity range: min {}, max {}",
+                min_intensity, max_intensity
+            );
 
             (min_intensity, max_intensity)
         };
@@ -141,17 +143,12 @@ impl ChromatogramLines {
 }
 
 /// Renders a chromatogram plot using egui_plot with custom zoom/pan controls
-pub fn render_chromatogram_plot(
-    ui: &mut egui::Ui,
-    chromatogram: &ChromatogramLines,
-) {
+pub fn render_chromatogram_plot(ui: &mut egui::Ui, chromatogram: &ChromatogramLines) {
     ui.label(format!("Elution Group ID: {}", chromatogram.reference_id));
     ui.label(format!(
         "RT: {:.2} s, Mobility: {:.4}",
         chromatogram.reference_rt_seconds, chromatogram.reference_ook0
     ));
-    ui.label("💡 Scroll: zoom X-axis | Shift+Scroll: zoom Y-axis | Drag: pan");
-    ui.separator();
 
     // Get input state before entering plot closure
     let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
@@ -180,9 +177,15 @@ pub fn render_chromatogram_plot(
             PlotPoints::new(vec![
                 [chromatogram.reference_rt_seconds - rt_band_half_width, 0.0],
                 [chromatogram.reference_rt_seconds + rt_band_half_width, 0.0],
-                [chromatogram.reference_rt_seconds + rt_band_half_width, chromatogram.intensity_range.1],
-                [chromatogram.reference_rt_seconds - rt_band_half_width, chromatogram.intensity_range.1],
-            ])
+                [
+                    chromatogram.reference_rt_seconds + rt_band_half_width,
+                    chromatogram.intensity_range.1,
+                ],
+                [
+                    chromatogram.reference_rt_seconds - rt_band_half_width,
+                    chromatogram.intensity_range.1,
+                ],
+            ]),
         )
         .fill_color(egui::Color32::from_rgba_premultiplied(128, 128, 128, 26)) // 10% opacity gray
         .stroke(egui::Stroke::NONE);
@@ -199,10 +202,11 @@ pub fn render_chromatogram_plot(
             plot_ui.line(line.to_plot_line());
         }
 
-        // Custom zoom handling (using input state captured before closure)
-        if scroll_delta.length_sq() > 0.0 {
+        // Custom zoom handling - only when hovering over plot
+        let plot_hovered = plot_ui.response().hovered();
+        if plot_hovered && scroll_delta.length_sq() > 0.0 {
             // Zoom speed factor
-            let zoom_speed = 0.1;
+            let zoom_speed = 0.05;
             let scroll_y = scroll_delta.y;
 
             // Calculate zoom factor based on scroll
@@ -232,7 +236,8 @@ pub fn render_chromatogram_plot(
         // Clamp y-axis to [0, max_intensity]
         let y_min = bounds.min()[1];
         let y_max = bounds.max()[1];
-        let clamped_y_min = y_min.max(0.0);
+        // let clamped_y_min = y_min.max(0.0);
+        let clamped_y_min = 0.0;
         let clamped_y_max = y_max.min(chromatogram.intensity_range.1);
 
         if y_min != clamped_y_min || y_max != clamped_y_max {

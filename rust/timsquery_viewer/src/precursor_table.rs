@@ -37,54 +37,51 @@ pub fn render_precursor_table_filtered(
                 ui.strong("Fragments");
             });
         })
-        .body(| body| {
+        .body(|body| {
             // for &(idx, eg) in filtered_groups {
             let row_height = 18.0;
-            body.rows(
-                row_height,
-                filtered_groups.len(),
-                |mut row| {
-                    let idx = row.index();
-                    let eg = filtered_groups[idx].1;
-                    let is_selected = Some(idx) == *selected_index;
-                    // ID column - clickable
-                    row.col(|ui| {
-                        if ui
-                            .selectable_label(is_selected, format!("{}", eg.id))
-                            .clicked()
-                        {
-                            *selected_index = Some(idx);
-                        }
-                    });
-
-                    // RT column - plain text with optional highlighting
-                    row.col(|ui| {
-                        let text = format!("{:.2}", eg.rt_seconds);
-                        ui.label(text);
-                    });
-
-                    // Mobility column - plain text with optional highlighting
-                    row.col(|ui| {
-                        let text = format!("{:.4}", eg.mobility);
-                        ui.label(text);
-                    });
-
-                    // Precursor m/z column - plain text with optional highlighting
-                    row.col(|ui| {
-                        let display_text = format!( "{:.4} ({})",
-                                eg.precursors.first().unwrap().1,
-                                eg.precursors.len(),
-                            );
-
-                        ui.label(display_text);
-                    });
-
-                    // Fragment count column - plain text with optional highlighting
-                    row.col(|ui| {
-                        let text = format!("{}", eg.fragments.len());
-                        ui.label(text);
-                    });
+            body.rows(row_height, filtered_groups.len(), |mut row| {
+                let idx = row.index();
+                let eg = filtered_groups[idx].1;
+                let is_selected = Some(idx) == *selected_index;
+                // ID column - clickable
+                row.col(|ui| {
+                    if ui
+                        .selectable_label(is_selected, format!("{}", eg.id))
+                        .clicked()
+                    {
+                        *selected_index = Some(idx);
+                    }
                 });
+
+                // RT column - plain text with optional highlighting
+                row.col(|ui| {
+                    let text = format!("{:.2}", eg.rt_seconds);
+                    ui.label(text);
+                });
+
+                // Mobility column - plain text with optional highlighting
+                row.col(|ui| {
+                    let text = format!("{:.4}", eg.mobility);
+                    ui.label(text);
+                });
+
+                // Precursor m/z column - plain text with optional highlighting
+                row.col(|ui| {
+                    let display_text = format!(
+                        "{:.4} ({})",
+                        eg.precursors.first().unwrap().1,
+                        eg.precursors.len(),
+                    );
+
+                    ui.label(display_text);
+                });
+
+                // Fragment count column - plain text with optional highlighting
+                row.col(|ui| {
+                    let text = format!("{}", eg.fragments.len());
+                    ui.label(text);
+                });
+            });
         });
 }
-

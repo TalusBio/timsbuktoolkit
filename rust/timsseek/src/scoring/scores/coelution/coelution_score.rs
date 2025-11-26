@@ -96,13 +96,13 @@ fn coelution_vref_score_filter_onto(
 /// # Arguments
 ///
 /// * `slices` - An `MzMajorIntensityArray` containing the intensity data. The rows of this
-///              array correspond to different m/z values, and the columns correspond to
-///              different time points or cycles. The `mz_order` field of this struct provides
-///              the mapping from row index to m/z value.
+///   array correspond to different m/z values, and the columns correspond to
+///   different time points or cycles. The `mz_order` field of this struct provides
+///   the mapping from row index to m/z value.
 /// * `ref_slice` - A slice representing the reference chromatogram.
 /// * `window` - The size of the rolling window for the cosine similarity calculation.
 /// * `filter` - A closure that takes a key (of type `K`) from the `mz_order` and returns
-///              `true` if the corresponding chromatogram should be included in the calculation.
+///   `true` if the corresponding chromatogram should be included in the calculation.
 /// * `buffer` - A mutable buffer to store the resulting coelution scores.
 pub fn coelution_vref_score_filter_into<'a, K: Clone + Ord>(
     slices: &'a MzMajorIntensityArray<K, f32>,

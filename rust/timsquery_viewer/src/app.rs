@@ -4,14 +4,14 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 
-use crate::chromatogram_processor;
 use crate::file_loader::FileLoader;
+use crate::plot_renderer::ChromatogramLines;
 use crate::{
+    chromatogram_processor,
     plot_renderer,
     precursor_table,
     tolerance_editor,
 };
-use crate::plot_renderer::ChromatogramLines;
 
 /// Main application state
 pub struct ViewerApp {
@@ -42,15 +42,6 @@ pub struct ViewerApp {
     /// Filter text for precursor table
     table_filter: String,
 
-    /// Flag to reset plot bounds
-    reset_plot_bounds: bool,
-
-    /// Flag to reset only X axis bounds
-    reset_x_bounds: bool,
-
-    /// Flag to reset only Y axis bounds
-    reset_y_bounds: bool,
-
     /// Track if we're currently loading/indexing data
     is_indexing: bool,
 }
@@ -67,9 +58,6 @@ impl ViewerApp {
             chromatogram: None,
             needs_regeneration: false,
             table_filter: String::new(),
-            reset_plot_bounds: false,
-            reset_x_bounds: false,
-            reset_y_bounds: false,
             is_indexing: false,
         }
     }
@@ -212,21 +200,22 @@ impl ViewerApp {
 
     fn load_elution_groups_if_needed(&mut self, ui: &mut egui::Ui) {
         if let Some(path) = &self.file_loader.elution_groups_path
-            && self.elution_groups.is_none() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Loading elution groups...");
-                });
-                match self.file_loader.load_elution_groups(path) {
-                    Ok(egs) => {
-                        tracing::info!("Loaded {} elution groups", egs.len());
-                        self.elution_groups = Some(egs);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load elution groups: {:?}", e);
-                    }
+            && self.elution_groups.is_none()
+        {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading elution groups...");
+            });
+            match self.file_loader.load_elution_groups(path) {
+                Ok(egs) => {
+                    tracing::info!("Loaded {} elution groups", egs.len());
+                    self.elution_groups = Some(egs);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load elution groups: {:?}", e);
                 }
             }
+        }
     }
 
     fn load_raw_data_if_needed(&mut self, ui: &mut egui::Ui) {
@@ -260,16 +249,17 @@ impl ViewerApp {
 
     fn load_tolerance_if_needed(&mut self) {
         if let Some(path) = &self.file_loader.tolerance_path
-            && self.tolerance.is_none() {
-                match self.file_loader.load_tolerance(path) {
-                    Ok(tol) => {
-                        self.tolerance = Some(tol);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load tolerance: {:?}", e);
-                    }
+            && self.tolerance.is_none()
+        {
+            match self.file_loader.load_tolerance(path) {
+                Ok(tol) => {
+                    self.tolerance = Some(tol);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load tolerance: {:?}", e);
                 }
             }
+        }
     }
 
     fn generate_chromatogram(&mut self) {
@@ -316,7 +306,6 @@ impl ViewerApp {
                     chrom.fragment_mzs.len()
                 );
                 self.chromatogram = Some(ChromatogramLines::from_chromatogram(&chrom));
-                self.reset_plot_bounds = true;
             }
             Err(e) => {
                 tracing::error!("Failed to generate chromatogram: {:?}", e);
@@ -403,24 +392,7 @@ impl ViewerApp {
     fn render_plot_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Chromatogram");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.render_plot_reset_buttons(ui);
-                ui.separator();
-                ui.label("💡 Box select to zoom | Right-click to reset");
-            });
         });
-    }
-
-    fn render_plot_reset_buttons(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Reset All").clicked() {
-            self.reset_plot_bounds = true;
-        }
-        if ui.button("Reset Y").clicked() {
-            self.reset_y_bounds = true;
-        }
-        if ui.button("Reset X").clicked() {
-            self.reset_x_bounds = true;
-        }
     }
 
     fn render_plot_content(&self, ui: &mut egui::Ui) {
