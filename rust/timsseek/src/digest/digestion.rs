@@ -60,17 +60,15 @@ impl DigestionParameters {
 
             // Is this needed? Shouldnt I just use the regex?
             // Fun fact ... lookbehinds are not supported so I do need it ...
-            if let Some(skip) = self.pattern.skip_suffix {
-                if right < sequence.len() && sequence[right..].starts_with(skip) {
+            if let Some(skip) = self.pattern.skip_suffix
+                && right < sequence.len() && sequence[right..].starts_with(skip) {
                     continue;
                 }
-            }
 
-            if let Some(skip) = self.pattern.skip_prefix {
-                if left > 0 && sequence[left - 1..].ends_with(skip) {
+            if let Some(skip) = self.pattern.skip_prefix
+                && left > 0 && sequence[left - 1..].ends_with(skip) {
                     continue;
                 }
-            }
             sites.push(left..right);
             left = right;
         }
