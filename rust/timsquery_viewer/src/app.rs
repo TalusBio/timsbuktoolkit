@@ -86,6 +86,11 @@ impl eframe::App for ViewerApp {
                 self.render_left_panel(ui);
             });
 
+        // Center panel for precursor table
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_table_panel(ui);
+        });
+
         // Right panel for chromatogram plot
         egui::SidePanel::right("right_panel")
             .default_width(600.0)
@@ -93,10 +98,6 @@ impl eframe::App for ViewerApp {
                 self.render_plot_panel(ui);
             });
 
-        // Center panel for precursor table
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.render_table_panel(ui);
-        });
     }
 }
 
@@ -126,10 +127,10 @@ impl ViewerApp {
         }
 
         if let Some(path) = &self.file_loader.elution_groups_path {
-            self.display_filename(ui, path);
+            Self::display_filename(ui, path);
         }
 
-        self.load_elution_groups_if_needed(ui);
+        Self::load_elution_groups_if_needed(ui, &mut self.file_loader, &mut self.elution_groups);
 
         if let Some(egs) = &self.elution_groups {
             ui.label(format!("✓ Loaded: {} elution groups", egs.len()));
@@ -143,10 +144,16 @@ impl ViewerApp {
         }
 
         if let Some(path) = &self.file_loader.raw_data_path {
-            self.display_filename(ui, path);
+            Self::display_filename(ui, path);
         }
 
-        self.load_raw_data_if_needed(ui);
+        Self::load_raw_data_if_needed(
+            ui,
+            &mut self.file_loader,
+            &mut self.indexed_data,
+            &mut self.ms1_rts,
+            &mut self.is_indexing,
+        );
 
         if self.indexed_data.is_some() && !self.is_indexing {
             ui.label("✓ Raw data indexed");
@@ -160,10 +167,10 @@ impl ViewerApp {
         }
 
         if let Some(path) = &self.file_loader.tolerance_path {
-            self.display_filename(ui, path);
+            Self::display_filename(ui, path);
         }
 
-        self.load_tolerance_if_needed();
+        Self::load_tolerance_if_needed(&mut self.file_loader, &mut self.tolerance);
 
         if self.tolerance.is_some() {
             ui.label("Tolerance settings loaded");
@@ -189,7 +196,7 @@ impl ViewerApp {
         }
     }
 
-    fn display_filename(&self, ui: &mut egui::Ui, path: &std::path::Path) {
+    fn display_filename(ui: &mut egui::Ui, path: &std::path::Path) {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -198,18 +205,22 @@ impl ViewerApp {
             .on_hover_text(path.display().to_string());
     }
 
-    fn load_elution_groups_if_needed(&mut self, ui: &mut egui::Ui) {
-        if let Some(path) = &self.file_loader.elution_groups_path
-            && self.elution_groups.is_none()
+    fn load_elution_groups_if_needed(
+        ui: &mut egui::Ui,
+        file_loader: &mut FileLoader,
+        elution_groups: &mut Option<Vec<ElutionGroup<usize>>>,
+    ) {
+        if let Some(path) = &file_loader.elution_groups_path
+            && elution_groups.is_none()
         {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label("Loading elution groups...");
             });
-            match self.file_loader.load_elution_groups(path) {
+            match file_loader.load_elution_groups(path) {
                 Ok(egs) => {
                     tracing::info!("Loaded {} elution groups", egs.len());
-                    self.elution_groups = Some(egs);
+                    *elution_groups = Some(egs);
                 }
                 Err(e) => {
                     tracing::error!("Failed to load elution groups: {:?}", e);
@@ -218,42 +229,51 @@ impl ViewerApp {
         }
     }
 
-    fn load_raw_data_if_needed(&mut self, ui: &mut egui::Ui) {
-        if let Some(path) = &self.file_loader.raw_data_path {
-            if self.indexed_data.is_none() && !self.is_indexing {
-                self.is_indexing = true;
+    fn load_raw_data_if_needed(
+        ui: &mut egui::Ui,
+        file_loader: &mut FileLoader,
+        indexed_data: &mut Option<Arc<IndexedTimstofPeaks>>,
+        ms1_rts: &mut Option<Arc<[u32]>>,
+        is_indexing: &mut bool,
+    ) {
+        if let Some(path) = &file_loader.raw_data_path {
+            if indexed_data.is_none() && !*is_indexing {
+                *is_indexing = true;
                 ui.ctx().request_repaint();
             }
 
-            if self.is_indexing {
+            if *is_indexing {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Indexing raw data... (this may take 10-30 seconds)");
                 });
 
-                match self.file_loader.load_raw_data(path) {
+                match file_loader.load_raw_data(path) {
                     Ok((index, rts)) => {
-                        self.indexed_data = Some(index);
-                        self.ms1_rts = Some(rts);
-                        self.is_indexing = false;
+                        *indexed_data = Some(index);
+                        *ms1_rts = Some(rts);
+                        *is_indexing = false;
                         tracing::info!("Raw data indexing completed");
                     }
                     Err(e) => {
                         tracing::error!("Failed to load raw data: {:?}", e);
-                        self.is_indexing = false;
+                        *is_indexing = false;
                     }
                 }
             }
         }
     }
 
-    fn load_tolerance_if_needed(&mut self) {
-        if let Some(path) = &self.file_loader.tolerance_path
-            && self.tolerance.is_none()
+    fn load_tolerance_if_needed(
+        file_loader: &mut FileLoader,
+        tolerance: &mut Option<Tolerance>,
+    ) {
+        if let Some(path) = &file_loader.tolerance_path
+            && tolerance.is_none()
         {
-            match self.file_loader.load_tolerance(path) {
+            match file_loader.load_tolerance(path) {
                 Ok(tol) => {
-                    self.tolerance = Some(tol);
+                    *tolerance = Some(tol);
                 }
                 Err(e) => {
                     tracing::error!("Failed to load tolerance: {:?}", e);
@@ -287,11 +307,11 @@ impl ViewerApp {
             return;
         };
 
-        self.process_chromatogram(&eg, &index, ms1_rts, &tolerance);
+        Self::process_chromatogram(&mut self.chromatogram, &eg, &index, ms1_rts, &tolerance);
     }
 
     fn process_chromatogram(
-        &mut self,
+        chromatogram: &mut Option<ChromatogramLines>,
         eg: &ElutionGroup<usize>,
         index: &Arc<IndexedTimstofPeaks>,
         ms1_rts: Arc<[u32]>,
@@ -305,11 +325,11 @@ impl ViewerApp {
                     chrom.precursor_mzs.len(),
                     chrom.fragment_mzs.len()
                 );
-                self.chromatogram = Some(ChromatogramLines::from_chromatogram(&chrom));
+                *chromatogram = Some(ChromatogramLines::from_chromatogram(&chrom));
             }
             Err(e) => {
                 tracing::error!("Failed to generate chromatogram: {:?}", e);
-                self.chromatogram = None;
+                *chromatogram = None;
             }
         }
     }
@@ -324,10 +344,10 @@ impl ViewerApp {
             return;
         };
 
-        self.render_table_filter_ui(ui);
+        Self::render_table_filter_ui(ui, &mut self.table_filter);
         ui.separator();
 
-        let filtered_egs = self.apply_table_filter(&egs);
+        let filtered_egs = Self::apply_table_filter(&self.table_filter, &egs);
         let total_count = egs.len();
 
         ui.label(format!(
@@ -336,37 +356,43 @@ impl ViewerApp {
             total_count
         ));
 
-        self.render_precursor_table_with_selection(ui, &filtered_egs);
+        Self::render_precursor_table_with_selection(
+            ui,
+            &filtered_egs,
+            &mut self.selected_index,
+            &mut self.needs_regeneration,
+        );
     }
 
-    fn render_table_filter_ui(&mut self, ui: &mut egui::Ui) {
+    fn render_table_filter_ui(ui: &mut egui::Ui, table_filter: &mut String) {
         ui.horizontal(|ui| {
             ui.label("Filter by ID:");
-            ui.text_edit_singleline(&mut self.table_filter);
+            ui.text_edit_singleline(table_filter);
             if ui.button("Clear").clicked() {
-                self.table_filter.clear();
+                table_filter.clear();
             }
         });
     }
 
     fn apply_table_filter<'a>(
-        &self,
+        table_filter: &str,
         egs: &'a [ElutionGroup<usize>],
     ) -> Vec<(usize, &'a ElutionGroup<usize>)> {
         egs.iter()
             .enumerate()
             .filter(|(_, eg)| {
-                self.table_filter.is_empty() || eg.id.to_string().contains(&self.table_filter)
+                table_filter.is_empty() || eg.id.to_string().contains(table_filter)
             })
             .collect()
     }
 
     fn render_precursor_table_with_selection(
-        &mut self,
         ui: &mut egui::Ui,
         filtered_egs: &[(usize, &ElutionGroup<usize>)],
+        selected_index: &mut Option<usize>,
+        needs_regeneration: &mut bool,
     ) {
-        let old_selection = self.selected_index;
+        let old_selection = *selected_index;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -374,22 +400,22 @@ impl ViewerApp {
                 precursor_table::render_precursor_table_filtered(
                     ui,
                     filtered_egs,
-                    &mut self.selected_index,
+                    selected_index,
                 );
             });
 
-        if old_selection != self.selected_index && self.selected_index.is_some() {
-            self.needs_regeneration = true;
+        if old_selection != *selected_index && selected_index.is_some() {
+            *needs_regeneration = true;
         }
     }
 
     fn render_plot_panel(&mut self, ui: &mut egui::Ui) {
-        self.render_plot_header(ui);
+        Self::render_plot_header(ui);
         ui.separator();
         self.render_plot_content(ui);
     }
 
-    fn render_plot_header(&mut self, ui: &mut egui::Ui) {
+    fn render_plot_header(ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Chromatogram");
         });

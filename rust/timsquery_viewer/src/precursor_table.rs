@@ -38,19 +38,18 @@ pub fn render_precursor_table_filtered(
             });
         })
         .body(|body| {
-            // for &(idx, eg) in filtered_groups {
             let row_height = 18.0;
             body.rows(row_height, filtered_groups.len(), |mut row| {
-                let idx = row.index();
-                let eg = filtered_groups[idx].1;
-                let is_selected = Some(idx) == *selected_index;
+                let row_idx = row.index();
+                let (original_idx, eg) = filtered_groups[row_idx];
+                let is_selected = Some(original_idx) == *selected_index;
                 // ID column - clickable
                 row.col(|ui| {
                     if ui
                         .selectable_label(is_selected, format!("{}", eg.id))
                         .clicked()
                     {
-                        *selected_index = Some(idx);
+                        *selected_index = Some(original_idx);
                     }
                 });
 

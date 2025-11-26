@@ -161,7 +161,7 @@ fn render_mobility_tolerance(ui: &mut egui::Ui, tol: &mut MobilityTolerance) -> 
     if selected != old_selected {
         *tol = match selected {
             0 => MobilityTolerance::Absolute((0.01, 0.01)),
-            1 => MobilityTolerance::Pct((10.0, 10.0)),
+            1 => MobilityTolerance::Pct((3.0, 3.0)),
             2 => MobilityTolerance::Unrestricted,
             _ => MobilityTolerance::Unrestricted,
         };
