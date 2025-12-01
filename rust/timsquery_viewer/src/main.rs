@@ -2,6 +2,7 @@ mod app;
 mod chromatogram_processor;
 mod error;
 mod file_loader;
+mod panels;
 mod plot_renderer;
 mod precursor_table;
 mod tolerance_editor;
@@ -21,7 +22,6 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> eframe::Result {
-    // Set up logging
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = Registry::default()
         .with(env_filter)
@@ -29,7 +29,6 @@ fn main() -> eframe::Result {
 
     set_global_default(subscriber).expect("Setting default subscriber failed");
 
-    // Configure native window options
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 800.0])
@@ -37,7 +36,6 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    // Start the app
     eframe::run_native(
         "TimsQuery Viewer",
         options,

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::ion::IonAnnot;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
@@ -10,7 +9,130 @@ use timsquery::{
 };
 
 use crate::error::ViewerError;
+use crate::plot_renderer::MS2Spectrum;
 use tracing::instrument;
+
+/// Smoothing method configuration
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum SmoothingMethod {
+    None,
+    SavitzkyGolay { window: usize, polynomial: usize },
+    Gaussian { sigma: f32 },
+}
+
+impl Default for SmoothingMethod {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Apply smoothing to intensity values
+pub fn apply_smoothing(intensities: &[f32], method: &SmoothingMethod) -> Vec<f32> {
+    match method {
+        SmoothingMethod::None => intensities.to_vec(),
+        SmoothingMethod::SavitzkyGolay { window, polynomial } => {
+            savitzky_golay_smooth(intensities, *window, *polynomial)
+        }
+        SmoothingMethod::Gaussian { sigma } => gaussian_smooth(intensities, *sigma),
+    }
+}
+
+/// Savitzky-Golay smoothing filter
+/// Uses a simplified weighted moving average approximation rather than full least squares
+fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<f32> {
+    if data.len() < window || window < 3 || window % 2 == 0 {
+        return data.to_vec();
+    }
+
+    if polynomial >= window {
+        return data.to_vec();
+    }
+
+    let half_window = window / 2;
+    let mut smoothed = Vec::with_capacity(data.len());
+
+    let weights = compute_savitzky_golay_weights(window, polynomial);
+
+    for i in 0..data.len() {
+        let mut sum = 0.0;
+        let mut weight_sum = 0.0;
+
+        for j in 0..window {
+            let data_idx = (i + j).saturating_sub(half_window);
+            if data_idx < data.len() {
+                sum += data[data_idx] * weights[j];
+                weight_sum += weights[j];
+            }
+        }
+
+        smoothed.push(sum / weight_sum);
+    }
+
+    smoothed
+}
+
+/// Compute Savitzky-Golay filter weights
+/// Simplified version using polynomial-based weight decay from center
+fn compute_savitzky_golay_weights(window: usize, polynomial: usize) -> Vec<f32> {
+    let half = window / 2;
+    let mut weights = vec![0.0; window];
+
+    for i in 0..window {
+        let dist = ((i as isize) - (half as isize)).abs() as f32;
+        let normalized_dist = dist / (half as f32);
+
+        weights[i] = match polynomial {
+            0 | 1 => 1.0 - normalized_dist,
+            2 => (1.0 - normalized_dist * normalized_dist).max(0.0),
+            3 => (1.0 - normalized_dist.powi(3)).max(0.0),
+            _ => (1.0 - normalized_dist.powi(polynomial as i32)).max(0.0),
+        };
+    }
+
+    weights
+}
+
+/// Gaussian smoothing filter
+fn gaussian_smooth(data: &[f32], sigma: f32) -> Vec<f32> {
+    if sigma <= 0.0 || data.len() < 3 {
+        return data.to_vec();
+    }
+
+    let kernel_radius = (3.0 * sigma).ceil() as usize;
+    let kernel_size = 2 * kernel_radius + 1;
+    let mut kernel = vec![0.0; kernel_size];
+
+    let mut sum = 0.0;
+    for i in 0..kernel_size {
+        let x = (i as f32) - (kernel_radius as f32);
+        let value = (-0.5 * (x / sigma).powi(2)).exp();
+        kernel[i] = value;
+        sum += value;
+    }
+
+    for k in kernel.iter_mut() {
+        *k /= sum;
+    }
+
+    let mut smoothed = Vec::with_capacity(data.len());
+
+    for i in 0..data.len() {
+        let mut result = 0.0;
+        let mut weight_sum = 0.0;
+
+        for j in 0..kernel_size {
+            let data_idx = (i + j).saturating_sub(kernel_radius);
+            if data_idx < data.len() {
+                result += data[data_idx] * kernel[j];
+                weight_sum += kernel[j];
+            }
+        }
+
+        smoothed.push(result / weight_sum);
+    }
+
+    smoothed
+}
 
 /// Represents the output format for an aggregated chromatogram
 /// It is pretty ugly performance-wise but I am keeping it as is because
@@ -137,6 +259,25 @@ impl<T: KeyLike + std::fmt::Display> TryFrom<ChromatogramCollector<T, f32>> for 
     }
 }
 
+impl ChromatogramOutput {
+    /// Apply smoothing to all intensity traces in the chromatogram
+    pub fn apply_smoothing(&mut self, method: &SmoothingMethod) {
+        if matches!(method, SmoothingMethod::None) {
+            return;
+        }
+
+        // Smooth precursor intensities
+        for intensities in self.precursor_intensities.iter_mut() {
+            *intensities = apply_smoothing(intensities, method);
+        }
+
+        // Smooth fragment intensities
+        for intensities in self.fragment_intensities.iter_mut() {
+            *intensities = apply_smoothing(intensities, method);
+        }
+    }
+}
+
 /// Generates a chromatogram for a single elution group
 #[instrument(skip_all)]
 pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
@@ -144,14 +285,65 @@ pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
     index: &IndexedTimstofPeaks,
     ms1_rts: Arc<[u32]>,
     tolerance: &Tolerance,
+    smoothing: &SmoothingMethod,
 ) -> Result<ChromatogramOutput, ViewerError> {
-    // Create the chromatogram collector
     let mut collector = ChromatogramCollector::new(elution_group.clone(), ms1_rts)
         .map_err(|e| ViewerError::General(format!("Failed to create collector: {:?}", e)))?;
 
-    // Query the index
     index.add_query(&mut collector, tolerance);
 
-    // Convert to output format
-    ChromatogramOutput::try_from(collector)
+    let mut output = ChromatogramOutput::try_from(collector)?;
+
+    output.apply_smoothing(smoothing);
+
+    Ok(output)
+}
+
+/// Extract MS2 spectrum at a specific retention time from chromatogram data
+#[instrument(skip(chromatogram))]
+pub fn extract_ms2_spectrum_from_chromatogram(
+    chromatogram: &ChromatogramOutput,
+    rt_seconds: f64,
+) -> Result<MS2Spectrum, ViewerError> {
+    let rt_index = chromatogram
+        .retention_time_results_seconds
+        .partition_point(|&rt| (rt as f64) < rt_seconds);
+
+    let rt_index = rt_index.min(chromatogram.retention_time_results_seconds.len().saturating_sub(1));
+
+    let mut mz_values = Vec::new();
+    let mut intensities = Vec::new();
+    let mut labels = Vec::new();
+
+    for (frag_idx, (&mz, intensity_vec)) in chromatogram
+        .fragment_mzs
+        .iter()
+        .zip(chromatogram.fragment_intensities.iter())
+        .enumerate()
+    {
+        if rt_index < intensity_vec.len() {
+            mz_values.push(mz as f64);
+            intensities.push(intensity_vec[rt_index]);
+            labels.push(
+                chromatogram
+                    .fragment_labels
+                    .get(frag_idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Fragment {}", frag_idx + 1)),
+            );
+        }
+    }
+
+    let actual_rt = chromatogram
+        .retention_time_results_seconds
+        .get(rt_index)
+        .copied()
+        .unwrap_or(rt_seconds as f32) as f64;
+
+    Ok(MS2Spectrum {
+        mz_values,
+        intensities,
+        rt_seconds: actual_rt,
+        fragment_labels: labels,
+    })
 }

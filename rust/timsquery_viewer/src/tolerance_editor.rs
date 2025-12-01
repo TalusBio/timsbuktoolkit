@@ -33,7 +33,6 @@ pub fn render_tolerance_editor(ui: &mut egui::Ui, tolerance: &mut Tolerance) -> 
 fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
     let mut changed = false;
 
-    // Selector for tolerance type
     let mut is_ppm = matches!(tol, MzTolerance::Ppm(_));
     let old_is_ppm = is_ppm;
 
@@ -43,7 +42,6 @@ fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
         ui.radio_value(&mut is_ppm, true, "PPM");
     });
 
-    // If type changed, convert
     if is_ppm != old_is_ppm {
         *tol = if is_ppm {
             MzTolerance::Ppm((15.0, 15.0))
@@ -53,7 +51,6 @@ fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
         changed = true;
     }
 
-    // Edit values
     match tol {
         MzTolerance::Ppm((lower, upper)) => {
             ui.horizontal(|ui| {
@@ -83,7 +80,6 @@ fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
 fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
     let mut changed = false;
 
-    // Selector for tolerance type
     let mut selected = match tol {
         RtTolerance::Minutes(_) => 0,
         RtTolerance::Pct(_) => 1,
@@ -98,7 +94,6 @@ fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
         ui.radio_value(&mut selected, 2, "Unrestricted");
     });
 
-    // If type changed, convert
     if selected != old_selected {
         *tol = match selected {
             0 => RtTolerance::Minutes((0.5, 0.5)),
@@ -109,7 +104,6 @@ fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
         changed = true;
     }
 
-    // Edit values
     match tol {
         RtTolerance::Minutes((lower, upper)) => {
             ui.horizontal(|ui| {
@@ -142,7 +136,6 @@ fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
 fn render_mobility_tolerance(ui: &mut egui::Ui, tol: &mut MobilityTolerance) -> bool {
     let mut changed = false;
 
-    // Selector for tolerance type
     let mut selected = match tol {
         MobilityTolerance::Absolute(_) => 0,
         MobilityTolerance::Pct(_) => 1,
@@ -157,7 +150,6 @@ fn render_mobility_tolerance(ui: &mut egui::Ui, tol: &mut MobilityTolerance) -> 
         ui.radio_value(&mut selected, 2, "Unrestricted");
     });
 
-    // If type changed, convert
     if selected != old_selected {
         *tol = match selected {
             0 => MobilityTolerance::Absolute((0.01, 0.01)),
@@ -168,7 +160,6 @@ fn render_mobility_tolerance(ui: &mut egui::Ui, tol: &mut MobilityTolerance) -> 
         changed = true;
     }
 
-    // Edit values
     match tol {
         MobilityTolerance::Absolute((lower, upper)) => {
             ui.horizontal(|ui| {

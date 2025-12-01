@@ -1,6 +1,5 @@
 use eframe::egui;
 use timsquery::KeyLike;
-use timsquery::ion::IonAnnot;
 use timsquery::models::elution_group::ElutionGroup;
 
 pub fn render_precursor_table_filtered<T: KeyLike>(
@@ -47,7 +46,7 @@ pub fn render_precursor_table_filtered<T: KeyLike>(
                 let original_idx = filtered_eg_idxs[row_idx];
                 let eg = &reference_eg_slice[original_idx];
                 let is_selected = Some(original_idx) == *selected_index;
-                // ID column - clickable
+
                 row.col(|ui| {
                     if ui
                         .selectable_label(is_selected, format!("{}", eg.id))
@@ -57,19 +56,16 @@ pub fn render_precursor_table_filtered<T: KeyLike>(
                     }
                 });
 
-                // RT column - plain text with optional highlighting
                 row.col(|ui| {
                     let text = format!("{:.2}", eg.rt_seconds);
                     ui.label(text);
                 });
 
-                // Mobility column - plain text with optional highlighting
                 row.col(|ui| {
                     let text = format!("{:.4}", eg.mobility);
                     ui.label(text);
                 });
 
-                // Precursor m/z column - plain text with optional highlighting
                 row.col(|ui| {
                     let display_text = format!(
                         "{:.4} ({})",
@@ -80,7 +76,6 @@ pub fn render_precursor_table_filtered<T: KeyLike>(
                     ui.label(display_text);
                 });
 
-                // Fragment count column - plain text with optional highlighting
                 row.col(|ui| {
                     let text = format!("{}", eg.fragments.len());
                     ui.label(text);

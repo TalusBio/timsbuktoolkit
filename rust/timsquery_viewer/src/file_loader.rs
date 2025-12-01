@@ -4,10 +4,7 @@ use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
 };
-use timsquery::ion::{
-    IonAnnot,
-    IonParsingError,
-};
+use timsquery::ion::IonAnnot;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::load_index_caching;
@@ -23,6 +20,7 @@ pub struct FileLoader {
     pub tolerance_path: Option<PathBuf>,
 }
 
+#[derive(Debug)]
 pub enum ElutionGroupData {
     StringLabels(Vec<ElutionGroup<String>>),
     MzpafLabels(Vec<ElutionGroup<IonAnnot>>),
@@ -33,6 +31,33 @@ impl ElutionGroupData {
         match self {
             ElutionGroupData::StringLabels(egs) => egs.len(),
             ElutionGroupData::MzpafLabels(egs) => egs.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Filter elution groups by ID string, returning indices that match
+    pub fn filter_by_id(&self, filter: &str) -> Vec<usize> {
+        if filter.is_empty() {
+            return (0..self.len()).collect();
+        }
+
+        match self {
+            ElutionGroupData::StringLabels(egs) => egs
+                .iter()
+                .enumerate()
+                .filter(|(_, eg)| eg.id.to_string().contains(filter))
+                .map(|(idx, _)| idx)
+                .collect(),
+            ElutionGroupData::MzpafLabels(egs) => egs
+                .iter()
+                .enumerate()
+                .filter(|(_, eg)| eg.id.to_string().contains(filter))
+                .map(|(idx, _)| idx)
+                .collect(),
         }
     }
 }
@@ -77,19 +102,16 @@ impl FileLoader {
     pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
         let file_content = std::fs::read_to_string(path)?;
 
-        // Try parsing as Vec<ElutionGroupInput> first
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
             let out: Vec<ElutionGroup<IonAnnot>> =
                 eg_inputs.into_iter().map(|x| x.into()).collect();
             return Ok(ElutionGroupData::MzpafLabels(out));
         }
 
-        // Try parsing as Vec<ElutionGroup<usize>>
         if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<IonAnnot>>>(&file_content) {
             return Ok(ElutionGroupData::MzpafLabels(egs));
         }
 
-        // Try parsing as Vec<ElutionGroup<String>> and convert
         let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&file_content)?;
         warn!(
             "Elution groups contained fragment labels as strings that are not interpretable as mzpaf, this can cause performance degradation."
@@ -102,13 +124,11 @@ impl FileLoader {
         &self,
         path: &PathBuf,
     ) -> Result<(Arc<IndexedTimstofPeaks>, Arc<[u32]>), ViewerError> {
-        // Load and index the data
         let index = load_index_caching(path).map_err(|e| ViewerError::DataLoading {
             path: path.clone(),
             source: Box::new(ViewerError::General(format!("{:?}", e))),
         })?;
 
-        // Extract MS1 retention times
         let rts = get_ms1_rts_as_millis(path)?;
 
         Ok((Arc::new(index), rts))
@@ -180,7 +200,6 @@ impl From<ElutionGroupInput> for ElutionGroup<IonAnnot> {
 }
 
 /// Retrieves MS1 retention times from a TIMS-TOF file, sorted and deduped
-/// (copied from timsquery_cli)
 fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, ViewerError> {
     let ttp = TimsTofPath::new(file).map_err(|e| ViewerError::TimsFileLoad {
         path: file.clone(),
