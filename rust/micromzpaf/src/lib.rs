@@ -52,6 +52,7 @@ pub enum IonSeriesOrdinal {
     x { ordinal: u8 },
     y { ordinal: u8 },
     z { ordinal: u8 },
+    unknown { ordinal: u8 },
     precursor,
 }
 
@@ -67,6 +68,7 @@ impl IonSeriesOrdinal {
             ('x', Some(ordinal)) => Self::x { ordinal },
             ('y', Some(ordinal)) => Self::y { ordinal },
             ('z', Some(ordinal)) => Self::z { ordinal },
+            ('?', Some(ordinal)) => Self::unknown { ordinal },
             ('p', None) => Self::precursor,
             ('p', Some(ordinal)) => {
                 return Err(IonParsingError::OrdinalOutOfRange {
@@ -95,6 +97,7 @@ impl IonSeriesOrdinal {
             IonSeriesOrdinal::x { ordinal: _ } => IonSeriesTerminality::CTerm,
             IonSeriesOrdinal::y { ordinal: _ } => IonSeriesTerminality::CTerm,
             IonSeriesOrdinal::z { ordinal: _ } => IonSeriesTerminality::CTerm,
+            IonSeriesOrdinal::unknown { ordinal: _ } => IonSeriesTerminality::None,
             IonSeriesOrdinal::precursor => IonSeriesTerminality::None,
         }
     }
@@ -112,6 +115,7 @@ impl Display for IonSeriesOrdinal {
             IonSeriesOrdinal::x { ordinal } => write!(f, "x{}", ordinal),
             IonSeriesOrdinal::y { ordinal } => write!(f, "y{}", ordinal),
             IonSeriesOrdinal::z { ordinal } => write!(f, "z{}", ordinal),
+            IonSeriesOrdinal::unknown { ordinal } => write!(f, "?{}", ordinal),
             IonSeriesOrdinal::precursor => write!(f, "p"),
         }
     }
@@ -226,7 +230,7 @@ impl<'de> Deserialize<'de> for IonAnnot {
 }
 
 impl IonAnnot {
-    pub fn new(
+    pub fn try_new(
         ion_type: char,
         ordinal: Option<u8>,
         charge: i8,
@@ -416,11 +420,23 @@ mod tests {
                     isotope: 0,
                 },
             ),
+            (
+                "?12^2",
+                IonAnnot {
+                    series_ordinal: IonSeriesOrdinal::unknown { ordinal: 12 },
+                    charge: 2,
+                    isotope: 0,
+                },
+            ),
         ];
 
         for (input, expected) in serde_pairs {
             let annot = IonAnnot::try_from(input).unwrap();
             assert_eq!(annot, expected);
+
+            // Re-serialize and check that its the same
+            let serialized = format!("{}", annot);
+            assert_eq!(serialized, input);
         }
     }
 }

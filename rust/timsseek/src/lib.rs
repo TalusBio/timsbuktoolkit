@@ -9,6 +9,7 @@ pub mod protein;
 pub mod rt_calibration;
 pub mod scoring;
 pub mod utils;
+pub use micromzpaf;
 
 extern crate parquet;
 #[macro_use]
@@ -18,12 +19,14 @@ pub use data_sources::Speclib;
 pub use models::{
     DigestSlice,
     ExpectedIntensities,
-    IonAnnot,
-    IonParsingError,
-    IonSeriesTerminality,
     QueryItemToScore,
 };
 pub use scoring::{
     IonSearchResults,
     Scorer,
+};
+pub use timsquery::ion::{
+    IonAnnot,
+    IonParsingError,
+    IonSeriesTerminality,
 };

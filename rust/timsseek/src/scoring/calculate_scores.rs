@@ -135,7 +135,7 @@ impl IntensityArrays {
         // runs.
         let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|_o| (-1i8, 867.8309)).collect();
         let ms2_order: Arc<[(IonAnnot, f64)]> = (0..=num_ms2)
-            .map(|_o| (IonAnnot::new('p', None, 1, 0).unwrap(), 867.8309))
+            .map(|_o| (IonAnnot::try_new('p', None, 1, 0).unwrap(), 867.8309))
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
         let num_rts = ref_time_ms.len();

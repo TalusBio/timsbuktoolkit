@@ -172,7 +172,10 @@ mod tests {
             })
             .collect();
 
-        println!("Non-suppressed nodes (row, col, weight): {:?}", non_suppressed);
+        println!(
+            "Non-suppressed nodes (row, col, weight): {:?}",
+            non_suppressed
+        );
         non_suppressed
     }
 
@@ -192,15 +195,15 @@ mod tests {
         let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
 
         let test_data = [
-            (0.5, 0.5, 1.0),  // bin (0,0) = 1
-            (1.5, 0.5, 2.0),  // bin (0,1) = 2
-            (2.5, 0.5, 9.0),  // bin (0,2) = 9
-            (0.5, 1.5, 4.0),  // bin (1,0) = 4
-            (1.5, 1.5, 5.0),  // bin (1,1) = 5
-            (2.5, 1.5, 6.0),  // bin (1,2) = 6
-            (0.5, 2.5, 7.0),  // bin (2,0) = 7
-            (1.5, 2.5, 8.0),  // bin (2,1) = 8
-            (2.5, 2.5, 3.0),  // bin (2,2) = 3
+            (0.5, 0.5, 1.0), // bin (0,0) = 1
+            (1.5, 0.5, 2.0), // bin (0,1) = 2
+            (2.5, 0.5, 9.0), // bin (0,2) = 9
+            (0.5, 1.5, 4.0), // bin (1,0) = 4
+            (1.5, 1.5, 5.0), // bin (1,1) = 5
+            (2.5, 1.5, 6.0), // bin (1,2) = 6
+            (0.5, 2.5, 7.0), // bin (2,0) = 7
+            (1.5, 2.5, 8.0), // bin (2,1) = 8
+            (2.5, 2.5, 3.0), // bin (2,2) = 3
         ];
 
         for (x, y, weight) in test_data.iter() {
@@ -244,13 +247,24 @@ mod tests {
         let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
 
         let test_data = [
-            (0.5, 0.5, 1.0), (1.5, 0.5, 2.0), (2.5, 0.5, 3.0),
-            (0.5, 1.5, 4.0), (1.5, 1.5, 9.0), (2.5, 1.5, 6.0),  // 9 is max
-            (0.5, 2.5, 7.0), (1.5, 2.5, 8.0), (2.5, 2.5, 5.0),
+            (0.5, 0.5, 1.0),
+            (1.5, 0.5, 2.0),
+            (2.5, 0.5, 3.0),
+            (0.5, 1.5, 4.0),
+            (1.5, 1.5, 9.0),
+            (2.5, 1.5, 6.0), // 9 is max
+            (0.5, 2.5, 7.0),
+            (1.5, 2.5, 8.0),
+            (2.5, 2.5, 5.0),
         ];
 
         for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point { x: *x, y: *y, weight: *weight }).unwrap();
+            grid.add_point(&Point {
+                x: *x,
+                y: *y,
+                weight: *weight,
+            })
+            .unwrap();
         }
 
         grid.suppress_nonmax().unwrap();
@@ -277,13 +291,24 @@ mod tests {
         let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
 
         let test_data = [
-            (0.5, 0.5, 9.0), (1.5, 0.5, 1.0), (2.5, 0.5, 1.0),  // (0,0) = 9
-            (0.5, 1.5, 1.0), (1.5, 1.5, 9.0), (2.5, 1.5, 1.0),  // (1,1) = 9
-            (0.5, 2.5, 1.0), (1.5, 2.5, 1.0), (2.5, 2.5, 9.0),  // (2,2) = 9
+            (0.5, 0.5, 9.0),
+            (1.5, 0.5, 1.0),
+            (2.5, 0.5, 1.0), // (0,0) = 9
+            (0.5, 1.5, 1.0),
+            (1.5, 1.5, 9.0),
+            (2.5, 1.5, 1.0), // (1,1) = 9
+            (0.5, 2.5, 1.0),
+            (1.5, 2.5, 1.0),
+            (2.5, 2.5, 9.0), // (2,2) = 9
         ];
 
         for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point { x: *x, y: *y, weight: *weight }).unwrap();
+            grid.add_point(&Point {
+                x: *x,
+                y: *y,
+                weight: *weight,
+            })
+            .unwrap();
         }
 
         grid.suppress_nonmax().unwrap();
@@ -298,8 +323,17 @@ mod tests {
             non_suppressed.len()
         );
 
-        assert!(non_suppressed.contains(&(0, 0, 9.0)), "Diagonal (0,0) should be non-suppressed");
-        assert!(non_suppressed.contains(&(1, 1, 9.0)), "Diagonal (1,1) should be non-suppressed");
-        assert!(non_suppressed.contains(&(2, 2, 9.0)), "Diagonal (2,2) should be non-suppressed");
+        assert!(
+            non_suppressed.contains(&(0, 0, 9.0)),
+            "Diagonal (0,0) should be non-suppressed"
+        );
+        assert!(
+            non_suppressed.contains(&(1, 1, 9.0)),
+            "Diagonal (1,1) should be non-suppressed"
+        );
+        assert!(
+            non_suppressed.contains(&(2, 2, 9.0)),
+            "Diagonal (2,2) should be non-suppressed"
+        );
     }
 }
