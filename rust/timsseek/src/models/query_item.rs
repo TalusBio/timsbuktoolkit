@@ -1,7 +1,5 @@
+use super::DigestSlice;
 use micromzpaf::IonAnnot;
-use super::{
-    DigestSlice,
-};
 use serde::{
     Deserialize,
     Serialize,

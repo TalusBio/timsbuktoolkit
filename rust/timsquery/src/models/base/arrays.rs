@@ -242,7 +242,6 @@ impl<T: ArrayElement> Array2D<T> {
     }
 
     pub fn iter_column(&self, index: usize) -> impl '_ + Iterator<Item = T> {
-        
         self.iter_rows().map(move |row| row[index])
     }
 

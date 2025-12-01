@@ -16,11 +16,6 @@ extern crate parquet;
 extern crate parquet_derive;
 
 pub use data_sources::Speclib;
-pub use timsquery::ion::{
-    IonAnnot,
-    IonParsingError,
-    IonSeriesTerminality,
-};
 pub use models::{
     DigestSlice,
     ExpectedIntensities,
@@ -29,4 +24,9 @@ pub use models::{
 pub use scoring::{
     IonSearchResults,
     Scorer,
+};
+pub use timsquery::ion::{
+    IonAnnot,
+    IonParsingError,
+    IonSeriesTerminality,
 };

@@ -1,9 +1,12 @@
 use eframe::egui;
-use timsquery::{ion::IonAnnot, models::elution_group::ElutionGroup};
+use timsquery::KeyLike;
+use timsquery::ion::IonAnnot;
+use timsquery::models::elution_group::ElutionGroup;
 
-pub fn render_precursor_table_filtered(
+pub fn render_precursor_table_filtered<T: KeyLike>(
     ui: &mut egui::Ui,
-    filtered_groups: &[(usize, &ElutionGroup<IonAnnot>)],
+    filtered_eg_idxs: &[usize],
+    reference_eg_slice: &[ElutionGroup<T>],
     selected_index: &mut Option<usize>,
 ) {
     use egui_extras::{
@@ -39,9 +42,10 @@ pub fn render_precursor_table_filtered(
         })
         .body(|body| {
             let row_height = 18.0;
-            body.rows(row_height, filtered_groups.len(), |mut row| {
+            body.rows(row_height, filtered_eg_idxs.len(), |mut row| {
                 let row_idx = row.index();
-                let (original_idx, eg) = filtered_groups[row_idx];
+                let original_idx = filtered_eg_idxs[row_idx];
+                let eg = &reference_eg_slice[original_idx];
                 let is_selected = Some(original_idx) == *selected_index;
                 // ID column - clickable
                 row.col(|ui| {

@@ -4,13 +4,13 @@ use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
 };
-use timsquery::models::elution_group::ElutionGroup;
-use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_caching;
 use timsquery::ion::{
     IonAnnot,
     IonParsingError,
 };
+use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::tolerance::Tolerance;
+use timsquery::serde::load_index_caching;
 use timsrust::MSLevel;
 use tracing::warn;
 
@@ -21,6 +21,20 @@ pub struct FileLoader {
     pub elution_groups_path: Option<PathBuf>,
     pub raw_data_path: Option<PathBuf>,
     pub tolerance_path: Option<PathBuf>,
+}
+
+pub enum ElutionGroupData {
+    StringLabels(Vec<ElutionGroup<String>>),
+    MzpafLabels(Vec<ElutionGroup<IonAnnot>>),
+}
+
+impl ElutionGroupData {
+    pub fn len(&self) -> usize {
+        match self {
+            ElutionGroupData::StringLabels(egs) => egs.len(),
+            ElutionGroupData::MzpafLabels(egs) => egs.len(),
+        }
+    }
 }
 
 impl FileLoader {
@@ -60,48 +74,27 @@ impl FileLoader {
     }
 
     /// Load elution groups from a JSON file
-    pub fn load_elution_groups(
-        &self,
-        path: &PathBuf,
-    ) -> Result<Vec<ElutionGroup<IonAnnot>>, ViewerError> {
+    pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
         let file_content = std::fs::read_to_string(path)?;
 
         // Try parsing as Vec<ElutionGroupInput> first
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-            let out: Vec<ElutionGroup<IonAnnot>> = eg_inputs.into_iter().map(|x| x.into()).collect();
-            return Ok(out);
+            let out: Vec<ElutionGroup<IonAnnot>> =
+                eg_inputs.into_iter().map(|x| x.into()).collect();
+            return Ok(ElutionGroupData::MzpafLabels(out));
         }
 
         // Try parsing as Vec<ElutionGroup<usize>>
         if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<IonAnnot>>>(&file_content) {
-            return Ok(egs);
+            return Ok(ElutionGroupData::MzpafLabels(egs));
         }
 
         // Try parsing as Vec<ElutionGroup<String>> and convert
         let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&file_content)?;
-        warn!("Elution groups contained fragment labels as strings that are not interpretable as labels, will be dropped and replaced with generic labels.");
-        let mut out: Vec<ElutionGroup<IonAnnot>> = Vec::with_capacity(egs_string.len());
-        for (i, eg) in egs_string.into_iter().enumerate() {
-            let eg_usize = ElutionGroup {
-                id: i as u64,
-                mobility: eg.mobility,
-                rt_seconds: eg.rt_seconds,
-                precursors: eg.precursors,
-                fragments: Arc::from(
-                    eg.fragments
-                        .iter()
-                        .map(|(_lab, mz)| *mz)
-                        .enumerate()
-                        .map(|(idx, mz)| {
-                            let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 0).unwrap();
-                            (annot, mz)
-                        })
-                        .collect::<Vec<(IonAnnot, f64)>>(),
-                ),
-            };
-            out.push(eg_usize);
-        }
-        Ok(out)
+        warn!(
+            "Elution groups contained fragment labels as strings that are not interpretable as mzpaf, this can cause performance degradation."
+        );
+        Ok(ElutionGroupData::StringLabels(egs_string))
     }
 
     /// Load and index raw timsTOF data
@@ -150,32 +143,31 @@ impl From<ElutionGroupInput> for ElutionGroup<IonAnnot> {
                 .map(|(i, mz)| (i as i8, mz))
                 .collect::<Vec<(i8, f64)>>(),
         );
-        let fragments: Arc<[(IonAnnot, f64)]>  = match val.fragment_labels {
+        let fragments: Arc<[(IonAnnot, f64)]> = match val.fragment_labels {
             Some(labels) => {
                 // TODO: make this a real error and propagate ...
-                assert!(labels.len() == val.fragments.len(), "Fragment labels length does not match fragments length");
+                assert!(
+                    labels.len() == val.fragments.len(),
+                    "Fragment labels length does not match fragments length"
+                );
                 Arc::from(
                     val.fragments
                         .into_iter()
                         .zip(labels.into_iter())
-                        .map(|(mz, annot)| {
-                            (annot, mz)
-                        })
-                        .collect::<Vec<(IonAnnot, f64)>>(),
-                )
-            },
-            None => {
-                Arc::from(
-                    val.fragments
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, mz)| {
-                            let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 1).unwrap();
-                            (annot, mz)
-                        })
+                        .map(|(mz, annot)| (annot, mz))
                         .collect::<Vec<(IonAnnot, f64)>>(),
                 )
             }
+            None => Arc::from(
+                val.fragments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, mz)| {
+                        let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 1).unwrap();
+                        (annot, mz)
+                    })
+                    .collect::<Vec<(IonAnnot, f64)>>(),
+            ),
         };
         ElutionGroup {
             id: val.id,

@@ -1,11 +1,15 @@
 use eframe::egui;
-use timsquery::ion::IonAnnot;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
+use timsquery::KeyLike;
+use timsquery::ion::IonAnnot;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 
-use crate::file_loader::FileLoader;
+use crate::file_loader::{
+    ElutionGroupData,
+    FileLoader,
+};
 use crate::plot_renderer::ChromatogramLines;
 use crate::{
     chromatogram_processor,
@@ -20,7 +24,7 @@ pub struct ViewerApp {
     file_loader: FileLoader,
 
     /// Loaded elution groups
-    elution_groups: Option<Vec<ElutionGroup<IonAnnot>>>,
+    elution_groups: Option<ElutionGroupData>,
 
     /// Loaded and indexed timsTOF data
     indexed_data: Option<Arc<IndexedTimstofPeaks>>,
@@ -98,7 +102,6 @@ impl eframe::App for ViewerApp {
             .show(ctx, |ui| {
                 self.render_plot_panel(ui);
             });
-
     }
 }
 
@@ -209,7 +212,7 @@ impl ViewerApp {
     fn load_elution_groups_if_needed(
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
-        elution_groups: &mut Option<Vec<ElutionGroup<IonAnnot>>>
+        elution_groups: &mut Option<ElutionGroupData>,
     ) {
         if let Some(path) = &file_loader.elution_groups_path
             && elution_groups.is_none()
@@ -265,10 +268,7 @@ impl ViewerApp {
         }
     }
 
-    fn load_tolerance_if_needed(
-        file_loader: &mut FileLoader,
-        tolerance: &mut Option<Tolerance>,
-    ) {
+    fn load_tolerance_if_needed(file_loader: &mut FileLoader, tolerance: &mut Option<Tolerance>) {
         if let Some(path) = &file_loader.tolerance_path
             && tolerance.is_none()
         {
@@ -284,20 +284,6 @@ impl ViewerApp {
     }
 
     fn generate_chromatogram(&mut self) {
-        let selected_idx = match self.selected_index {
-            Some(idx) => idx,
-            None => return,
-        };
-
-        // Clone necessary data to avoid borrowing conflicts
-        let eg = match &self.elution_groups {
-            Some(egs) => match egs.get(selected_idx) {
-                Some(eg) => eg.clone(),
-                None => return,
-            },
-            None => return,
-        };
-
         let Some(index) = self.indexed_data.clone() else {
             return;
         };
@@ -308,12 +294,34 @@ impl ViewerApp {
             return;
         };
 
-        Self::process_chromatogram(&mut self.chromatogram, &eg, &index, ms1_rts, &tolerance);
+        let selected_idx = match self.selected_index {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        // Clone necessary data to avoid borrowing conflicts
+        match &self.elution_groups {
+            Some(ElutionGroupData::StringLabels(egs)) => Self::process_chromatogram(
+                &mut self.chromatogram,
+                &egs[selected_idx],
+                &index,
+                ms1_rts,
+                &tolerance,
+            ),
+            Some(ElutionGroupData::MzpafLabels(egs)) => Self::process_chromatogram(
+                &mut self.chromatogram,
+                &egs[selected_idx],
+                &index,
+                ms1_rts,
+                &tolerance,
+            ),
+            None => (),
+        };
     }
 
-    fn process_chromatogram(
+    fn process_chromatogram<T: KeyLike + std::fmt::Display>(
         chromatogram: &mut Option<ChromatogramLines>,
-        eg: &ElutionGroup<IonAnnot>,
+        eg: &ElutionGroup<T>,
         index: &Arc<IndexedTimstofPeaks>,
         ms1_rts: Arc<[u32]>,
         tolerance: &Tolerance,
@@ -340,7 +348,7 @@ impl ViewerApp {
         ui.separator();
 
         // Clone elution groups to avoid borrowing conflicts
-        let Some(egs) = self.elution_groups.clone() else {
+        let Some(egs) = self.elution_groups.as_ref() else {
             ui.label("Load elution groups to see the table");
             return;
         };
@@ -348,7 +356,14 @@ impl ViewerApp {
         Self::render_table_filter_ui(ui, &mut self.table_filter);
         ui.separator();
 
-        let filtered_egs = Self::apply_table_filter(&self.table_filter, &egs);
+        let filtered_egs = match egs {
+            ElutionGroupData::StringLabels(egs) => {
+                Self::apply_table_filter(&self.table_filter, &egs)
+            }
+            ElutionGroupData::MzpafLabels(egs) => {
+                Self::apply_table_filter(&self.table_filter, &egs)
+            }
+        };
         let total_count = egs.len();
 
         ui.label(format!(
@@ -360,6 +375,7 @@ impl ViewerApp {
         Self::render_precursor_table_with_selection(
             ui,
             &filtered_egs,
+            egs,
             &mut self.selected_index,
             &mut self.needs_regeneration,
         );
@@ -375,21 +391,21 @@ impl ViewerApp {
         });
     }
 
-    fn apply_table_filter<'a>(
+    fn apply_table_filter<'a, T: KeyLike>(
         table_filter: &str,
-        egs: &'a [ElutionGroup<IonAnnot>],
-    ) -> Vec<(usize, &'a ElutionGroup<IonAnnot>)> {
+        egs: &'a [ElutionGroup<T>],
+    ) -> Vec<usize> {
         egs.iter()
             .enumerate()
-            .filter(|(_, eg)| {
-                table_filter.is_empty() || eg.id.to_string().contains(table_filter)
-            })
+            .filter(|(_, eg)| table_filter.is_empty() || eg.id.to_string().contains(table_filter))
+            .map(|(idx, _)| idx)
             .collect()
     }
 
     fn render_precursor_table_with_selection(
         ui: &mut egui::Ui,
-        filtered_egs: &[(usize, &ElutionGroup<IonAnnot>)],
+        filtered_eg_idxs: &[usize],
+        reference_egs: &ElutionGroupData,
         selected_index: &mut Option<usize>,
         needs_regeneration: &mut bool,
     ) {
@@ -397,12 +413,23 @@ impl ViewerApp {
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                precursor_table::render_precursor_table_filtered(
-                    ui,
-                    filtered_egs,
-                    selected_index,
-                );
+            .show(ui, |ui| match reference_egs {
+                ElutionGroupData::StringLabels(egs) => {
+                    precursor_table::render_precursor_table_filtered(
+                        ui,
+                        filtered_eg_idxs,
+                        egs,
+                        selected_index,
+                    );
+                }
+                ElutionGroupData::MzpafLabels(egs) => {
+                    precursor_table::render_precursor_table_filtered(
+                        ui,
+                        filtered_eg_idxs,
+                        egs,
+                        selected_index,
+                    );
+                }
             });
 
         if old_selection != *selected_index && selected_index.is_some() {

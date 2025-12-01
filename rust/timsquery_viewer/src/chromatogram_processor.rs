@@ -1,16 +1,20 @@
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::ion::IonAnnot;
-use timsquery::QueriableData;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::elution_group::ElutionGroup;
 use timsquery::models::tolerance::Tolerance;
+use timsquery::{
+    KeyLike,
+    QueriableData,
+};
 
 use crate::error::ViewerError;
 use tracing::instrument;
 
 /// Represents the output format for an aggregated chromatogram
-/// (Copied from timsquery_cli for compatibility)
+/// It is pretty ugly performance-wise but I am keeping it as is because
+/// we are meant to have only one for the whole runtime of the viewer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChromatogramOutput {
     pub id: u64,
@@ -20,15 +24,15 @@ pub struct ChromatogramOutput {
     pub fragment_mzs: Vec<f64>,
     pub precursor_intensities: Vec<Vec<f32>>,
     pub fragment_intensities: Vec<Vec<f32>>,
-    pub fragment_labels: Vec<IonAnnot>,
+    pub fragment_labels: Vec<String>,
     pub retention_time_results_seconds: Vec<f32>,
 }
 
-impl TryFrom<ChromatogramCollector<IonAnnot, f32>> for ChromatogramOutput {
+impl<T: KeyLike + std::fmt::Display> TryFrom<ChromatogramCollector<T, f32>> for ChromatogramOutput {
     type Error = ViewerError;
 
     fn try_from(
-        mut value: ChromatogramCollector<IonAnnot, f32>,
+        mut value: ChromatogramCollector<T, f32>,
     ) -> Result<ChromatogramOutput, Self::Error> {
         let mut non_zero_min_idx = value.ref_rt_ms.len();
         let mut non_zero_max_idx = 0usize;
@@ -91,22 +95,26 @@ impl TryFrom<ChromatogramCollector<IonAnnot, f32>> for ChromatogramOutput {
             .into_iter()
             .unzip();
 
-        let ((fragment_mzs, fragment_intensities), fragment_labels): ((Vec<f64>, Vec<Vec<f32>>), Vec<IonAnnot>) = value
+        let ((fragment_mzs, fragment_intensities), fragment_labels): (
+            (Vec<f64>, Vec<Vec<f32>>),
+            Vec<String>,
+        ) = value
             .iter_mut_fragments()
-            .filter_map(|(&(idx, mz), cmg)| {
+            .filter_map(|(&(ref idx, mz), cmg)| {
                 let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
                     Some(slc) => slc.to_vec(),
                     None => {
                         return Some(Err(ViewerError::General(format!(
-                            "Failed to get slice for fragment mz {} in chromatogram id {}",
-                            mz, idx,
+                            "Failed to get slice for fragment mz {} in chromatogram id {:#?}",
+                            mz,
+                            idx.clone(),
                         ))));
                     }
                 };
                 if out_vec.iter().all(|&x| x == 0.0) {
                     return None;
                 }
-                Some(Ok(((mz, out_vec), idx)))
+                Some(Ok(((mz, out_vec), format!("{}", idx))))
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -131,8 +139,8 @@ impl TryFrom<ChromatogramCollector<IonAnnot, f32>> for ChromatogramOutput {
 
 /// Generates a chromatogram for a single elution group
 #[instrument(skip_all)]
-pub fn generate_chromatogram(
-    elution_group: &ElutionGroup<IonAnnot>,
+pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
+    elution_group: &ElutionGroup<T>,
     index: &IndexedTimstofPeaks,
     ms1_rts: Arc<[u32]>,
     tolerance: &Tolerance,
