@@ -39,17 +39,11 @@ fn main() {
 
     println!("Generated {} initial data points.", points.len());
 
-    // Pre-calculate the ranges, as required by the `calibrate` function signature
-    let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-    let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-    let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-    let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-
     // 2. Define calibration parameters
     let grid_size = 100;
 
-    // 3. Run the Calib-RT algorithm
-    match calibrate(&points, (min_x, max_x), (min_y, max_y), grid_size) {
+    // 3. Run the Calib-RT algorithm (ranges are computed automatically)
+    match calibrate(&points, grid_size) {
         Ok(calibration_curve) => {
             println!("Calibration successful!");
             println!("CalibrationCurve: {:#?}", calibration_curve);
@@ -78,14 +72,7 @@ fn main() {
     // Example with no points
     println!("\n--- Testing error case (no points) ---");
     let empty_points: Vec<Point> = vec![];
-    match calibrate(&empty_points, (0.0, 100.0), (0.0, 100.0), grid_size) {
-        Ok(_) => println!("This should have failed!"),
-        Err(e) => eprintln!("Correctly failed with error: {:?}", e),
-    }
-
-    // Example with zero range
-    println!("\n--- Testing error case (zero range) ---");
-    match calibrate(&points, (50.0, 50.0), (0.0, 100.0), grid_size) {
+    match calibrate(&empty_points, grid_size) {
         Ok(_) => println!("This should have failed!"),
         Err(e) => eprintln!("Correctly failed with error: {:?}", e),
     }

@@ -47,10 +47,4 @@ tasks:
     cmds:
       - cargo clippy {{.CLI_ARGS}}
 
-  plot:
-    deps: [bin-build-release]
-    sources:
-      - "data/*.py"
-    cmds:
-      - cargo run --release --bin timsseek | bunyan
-      - cd data && uv run -p 3.9 plot.py
+

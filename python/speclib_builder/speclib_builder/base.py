@@ -35,13 +35,15 @@ class ElutionGroup(BaseModel):
     id: int
     mobility: float
     rt_seconds: float
-    precursors: list[tuple[int, float]]
-    fragments: list[tuple[str, float]]
+    precursor_mzs: list[float]
+    precursor_labels: list[int]
+    fragment_mzs: list[float]
+    fragment_labels: list[str]
 
     # Note that for the speclib entry, the intensities are required
     # but not for timsquery/as an output
     precursor_intensities: list[float] | None = None
-    fragment_intensities: dict[str, float] | None = None
+    fragment_intensities: list[float] | None = None
 
 
 class SpeclibElement(BaseModel):
@@ -64,7 +66,8 @@ class SpeclibElement(BaseModel):
         other than the fragment m/z values.
         """
         peptide = LinearPeptide(proforma)
-        curr_fragment_mzs = self.elution_group.fragments
+        curr_fragment_mzs = self.elution_group.fragment_mzs
+        curr_fragment_labels = self.elution_group.fragment_labels
         frags = peptide.generate_theoretical_fragments(
             peptide.charge - 1, fragmentation_model
         )
@@ -74,7 +77,7 @@ class SpeclibElement(BaseModel):
         }
 
         keep = {}
-        for k, v in curr_fragment_mzs:
+        for k, v in zip(curr_fragment_labels, curr_fragment_mzs):
             if k in ion_mass_dict:
                 keep[k] = ion_mass_dict[k]
             else:
@@ -85,15 +88,16 @@ class SpeclibElement(BaseModel):
                 sequence=proforma,
                 charge=self.precursor.charge,
                 decoy=decoy,
+                decoy_group=self.precursor.decoy_group,
             ),
             elution_group=ElutionGroup(
                 id=id,
                 mobility=self.elution_group.mobility,
                 rt_seconds=self.elution_group.rt_seconds,
-                precursors=self.elution_group.precursors,
-                fragments=list(keep.items()),
-                precursor_intensities=self.elution_group.precursor_intensities,
-                fragment_intensities=self.elution_group.fragment_intensities,
+                fragment_mzs=[v for v in keep.values()],
+                fragment_labels=[k for k in keep.keys()],
+                precursor_labels=self.elution_group.precursor_labels,
+                precursor_mzs=self.elution_group.precursor_mzs,
             ),
         )
 
@@ -112,9 +116,12 @@ class SpeclibElement(BaseModel):
             fragmentation_model=fragmentation_model,
         )
 
-        new_fragment_mzs = {}
-        for k, v in self.elution_group.fragments:
-            new_fragment_mzs[k] = v + massshift_dict[k]
+        new_fragment_mzs = []
+        for k, v in zip(
+            self.elution_group.fragment_labels,
+            self.elution_group.fragment_mzs,
+        ):
+            new_fragment_mzs.append(v + massshift_dict[k])
 
         return SpeclibElement(
             precursor=PrecursorEntry(
@@ -127,8 +134,10 @@ class SpeclibElement(BaseModel):
                 id=id,
                 mobility=self.elution_group.mobility,
                 rt_seconds=self.elution_group.rt_seconds,
-                precursors=self.elution_group.precursors,
-                fragments=list(new_fragment_mzs.items()),
+                precursor_mzs=self.elution_group.precursor_mzs,
+                fragment_mzs=new_fragment_mzs,
+                precursor_labels=self.elution_group.precursor_labels,
+                fragment_labels=self.elution_group.fragment_labels,
                 precursor_intensities=self.elution_group.precursor_intensities,
                 fragment_intensities=self.elution_group.fragment_intensities,
             ),

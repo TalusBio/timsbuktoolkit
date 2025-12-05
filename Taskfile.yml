@@ -4,7 +4,6 @@ interval: 100ms
 
 # Include child Taskfiles
 includes:
-  timsquery: ./rust/timsquery
   timsseek: ./rust/timsseek
 
 tasks:
@@ -25,10 +24,6 @@ tasks:
   clippy:
     cmds:
       - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
-
-  bench:
-    cmds:
-      - task: timsquery:bench
 
   todos:
     cmds:

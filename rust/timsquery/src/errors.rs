@@ -50,6 +50,7 @@ pub enum DataProcessingError {
     IndexOutOfBoundsError(usize),
     UnexpectedInfiniteError(usize),
     UnexpectedInfiniteErrors(Vec<(usize, f64)>),
+    KeyNotFound,
 }
 
 impl From<DataProcessingError> for TimsqueryError {

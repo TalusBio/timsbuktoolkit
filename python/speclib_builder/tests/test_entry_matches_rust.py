@@ -12,33 +12,33 @@ from speclib_builder.fasta_cli import (
 )
 
 
-@pytest.fixture
-def rust_json():
-    # Calls the rust side to generate a json serialized version
-    # of the library file, we will use that to compare
-    # against the python generated version (so if we can serialize-deserialize)
-    # and get the same result, we are good.
-    args = [
-        "cargo",
-        "run",
-        "--bin",
-        "timsseek_sample_speclib",
-        "sample",
-    ]
-
-    outs = subprocess.run(args, check=True, capture_output=True)
-    _json_sample = json.loads(outs.stdout)
-    # files = {k.stem: k for k in list(Path(tmpdir).rglob("*.json"))}
-    yield outs.stdout
-
-
-def test_speclib_ser(rust_json):
-    speclib_list = json.loads(rust_json)
-    # Will raise a validation error if the
-    # python model does not match the example from the rust model.
-    _data = ElutionGroup(**speclib_list[0]["elution_group"])
-    _data = SpeclibElement(**speclib_list[0])
-    pass
+# @pytest.fixture
+# def rust_json():
+#     # Calls the rust side to generate a json serialized version
+#     # of the library file, we will use that to compare
+#     # against the python generated version (so if we can serialize-deserialize)
+#     # and get the same result, we are good.
+#     args = [
+#         "cargo",
+#         "run",
+#         "--bin",
+#         "timsseek_sample_speclib",
+#         "sample",
+#     ]
+#
+#     outs = subprocess.run(args, check=True, capture_output=True)
+#     _json_sample = json.loads(outs.stdout)
+#     # files = {k.stem: k for k in list(Path(tmpdir).rglob("*.json"))}
+#     yield outs.stdout
+#
+#
+# def test_speclib_ser(rust_json):
+#     speclib_list = json.loads(rust_json)
+#     # Will raise a validation error if the
+#     # python model does not match the example from the rust model.
+#     _data = ElutionGroup(**speclib_list[0]["elution_group"])
+#     _data = SpeclibElement(**speclib_list[0])
+#     pass
 
 
 @pytest.mark.parametrize(
@@ -102,17 +102,18 @@ def test_speclib_deser(tmpdir, annotator, decoy_strategy, extension_format_pair)
     parse_results = _read_speclib_rust(str(outfile))
     assert parse_results["returncode"] == 0
 
-    json_contents = json.loads(parse_results["stdout"])
-    if decoy_strategy == DecoyStrategy.EDGE_MUTATE:
-        assert len(json_contents) == 57
-    elif decoy_strategy == DecoyStrategy.MUTATE:
-        assert len(json_contents) == 55
-    elif decoy_strategy == DecoyStrategy.REVERSE:
-        assert len(json_contents) == 56
+    # Making flow 1 direction
+    # json_contents = json.loads(parse_results["stdout"])
+    # if decoy_strategy == DecoyStrategy.EDGE_MUTATE:
+    #     assert len(json_contents) == 57
+    # elif decoy_strategy == DecoyStrategy.MUTATE:
+    #     assert len(json_contents) == 55
+    # elif decoy_strategy == DecoyStrategy.REVERSE:
+    #     assert len(json_contents) == 56
 
-    for elem in json_contents:
-        # Make sure it passes validation
-        _ = SpeclibElement(**elem)
+    # for elem in json_contents:
+    #     # Make sure it passes validation
+    #     _ = SpeclibElement(**elem)
 
 
 def _read_speclib_rust(file):

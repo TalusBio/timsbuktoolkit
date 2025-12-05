@@ -37,6 +37,7 @@ class DummyAnnotator(PeptideAnnotator):
         seq = elem.peptide
         charge = elem.charge
         decoy = elem.decoy
+        decoy_group = elem.decoy_group
 
         pep = rustyms.LinearPeptide(f"{seq}/{charge}")
         frags = pep.generate_theoretical_fragments(
@@ -51,7 +52,12 @@ class DummyAnnotator(PeptideAnnotator):
             for f in frags
         }
         return EntryElements(
-            peptide=pep, ion_dict=ion_dict, decoy=decoy, rt_seconds=0, id=0
+            peptide=pep,
+            ion_dict=ion_dict,
+            decoy=decoy,
+            decoy_group=decoy_group,
+            rt_seconds=0,
+            id=0,
         )
 
 
@@ -118,8 +124,9 @@ class EntryBuilder:
             and (v.mz < self.max_ion_mz)
         }
 
-        ion_mzs = [(k, v.mz) for k, v in ion_dict.items()]
-        ion_intensities = {k: v.intensity for k, v in ion_dict.items()}
+        ion_mzs = [v.mz for k, v in ion_dict.items()]
+        ion_keys = [k for k, v in ion_dict.items()]
+        ion_intensities = [v.intensity for k, v in ion_dict.items()]
         if len(ion_mzs) < self.min_ions:
             return None
 
@@ -133,11 +140,15 @@ class EntryBuilder:
             "id": id,
             "mobility": ims,
             "rt_seconds": rt_seconds,
-            "precursors": precursor_mzs,
-            "fragments": ion_mzs,
+            # "precursors": precursor_mzs,
+            # "fragments": ion_mzs,
+            "precursor_labels": [v[0] for v in precursor_mzs],
+            "precursor_mzs": [v[1] for v in precursor_mzs],
+            "fragment_labels": ion_keys,
+            "fragment_mzs": ion_mzs,
         }
         expected_intensities = {
-            "precursor_intensities": list(isotope_dist),
+            "precursor_intensities": [v for _k, v in enumerate(isotope_dist)],
             "fragment_intensities": ion_intensities,
         }
 

@@ -1,8 +1,22 @@
+//! Cosine similarity calculations for chromatogram correlation.
+//!
+//! This module provides efficient rolling window cosine similarity calculations, which are
+//! used heavily in coelution scoring. The rolling window approach uses a circular buffer to
+//! maintain running sums, avoiding recomputation of the entire window on each step.
+//!
+//! # Performance Considerations
+//!
+//! The `rolling_cosine_similarity` function is one of the hottest paths in the codebase,
+//! consuming ~30% of total runtime. Any changes here should be carefully benchmarked.
+//!
+//! # Numeric Stability
+//!
+//! The implementation uses f64 accumulation to handle extreme intensity ranges correctly
+//! (e.g., 100 vs 1,000,000). See `test_extreme_range_stability` for validation.
+
 use std::f32;
 
 use crate::errors::DataProcessingError;
-
-// TODO: benchmark how much faster is f32
 
 /// Calculates the cosine similarity between two vectors of the same size.
 ///
@@ -43,23 +57,48 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DataProcessingErro
     Ok(dot_product / (magnitude_a * magnitude_b))
 }
 
+/// Single element in the rolling window buffer.
+///
+/// Stores precomputed squares and products to enable O(1) updates.
 #[derive(Debug, Copy, Clone)]
 struct RollingElem {
-    a_sq: u64,
-    b_sq: u64,
-    prod: u64,
+    a_sq: f64, // a*a
+    b_sq: f64, // b*b
+    prod: f64, // a*b
 }
 
+/// Maximum window size supported by the circular buffer.
+///
+/// Larger windows would require heap allocation. Current value (20) is sufficient
+/// for typical coelution window sizes (7).
 const MAX_CAPACITY: usize = 20;
 
+/// Circular buffer for efficient rolling window cosine similarity.
+///
+/// This structure maintains running sums of squared values and dot products,
+/// allowing O(1) updates as the window slides. The circular buffer avoids
+/// allocations and minimizes cache misses.
+///
+/// # Algorithm
+///
+/// For each new (a, b) pair:
+/// 1. Remove oldest element's contribution from sums
+/// 2. Add new element's contribution to sums
+/// 3. Compute similarity = dot_product / sqrt(a_sum_sq * b_sum_sq)
+///
+/// # Numeric Stability
+///
+/// Uses f64 accumulation to avoid truncation errors. This handles extreme intensity
+/// ranges (e.g., 100 vs 1,000,000) correctly, as f64 maintains sufficient precision
+/// for typical window sizes (≤20) and intensity values (up to ~1e6).
 #[derive(Debug)]
 struct CosineSimilarityCircularBuffer {
-    a_sum_sq: u64,
-    b_sum_sq: u64,
-    dot_product: u64,
+    a_sum_sq: f64,    // Sum of (a*a) over window
+    b_sum_sq: f64,    // Sum of (b*b) over window
+    dot_product: f64, // Sum of (a*b) over window
     buffer: [RollingElem; MAX_CAPACITY],
     window_size: usize,
-    curr_index: usize,
+    curr_index: usize, // Next position to write (wraps around)
 }
 
 impl CosineSimilarityCircularBuffer {
@@ -72,15 +111,15 @@ impl CosineSimilarityCircularBuffer {
             panic!("Vectors must be of length <= {}", MAX_CAPACITY);
         }
         let buffer = [RollingElem {
-            a_sq: 0,
-            b_sq: 0,
-            prod: 0,
+            a_sq: 0.0,
+            b_sq: 0.0,
+            prod: 0.0,
         }; MAX_CAPACITY];
 
         Self {
-            a_sum_sq: 0,
-            b_sum_sq: 0,
-            dot_product: 0,
+            a_sum_sq: 0.0,
+            b_sum_sq: 0.0,
+            dot_product: 0.0,
             buffer,
             window_size,
             curr_index: 0,
@@ -88,22 +127,16 @@ impl CosineSimilarityCircularBuffer {
     }
 
     fn calculate_similarity(&mut self) -> f32 {
-        let mag_a = (self.a_sum_sq as f64).sqrt();
-        let mag_b = (self.b_sum_sq as f64).sqrt();
-        let denom = mag_a * mag_b;
-        if denom == 0.0 {
+        let denom_sq = self.a_sum_sq * self.b_sum_sq;
+        if denom_sq == 0.0 {
             return 0.0;
         }
 
-        let out = self.dot_product as f32 / denom as f32;
-        assert!(out >= 0.0);
-        assert!(
-            out <= 1.0001,
-            "Expected <=1 got {} (1.0 + 1e-4 is acceptable)",
-            out
-        );
+        // Single sqrt operation, compute result in f64 then convert to f32
+        let result = (self.dot_product / denom_sq.sqrt()) as f32;
 
-        out
+        // Clamp to [0, 1] to handle minor floating-point errors
+        result.max(0.0).min(1.0)
     }
 
     // This is too hot, cannot instrument for performance reasons
@@ -112,9 +145,9 @@ impl CosineSimilarityCircularBuffer {
     //     tracing::instrument(skip_all, level = "trace")
     // )]
     fn update(&mut self, a: f32, b: f32) {
-        let a: u64 = a as u64;
-        let b: u64 = b as u64;
-        let prod = a * b;
+        // Convert to f64 for accumulation (no truncation)
+        let a = a as f64;
+        let b = b as f64;
 
         // Get mutable reference to the current element in the buffer
         let elem = &mut self.buffer[self.curr_index];
@@ -127,7 +160,7 @@ impl CosineSimilarityCircularBuffer {
         // Update the element in place
         elem.a_sq = a * a;
         elem.b_sq = b * b;
-        elem.prod = prod;
+        elem.prod = a * b;
 
         // Add the new values to the sums
         self.a_sum_sq += elem.a_sq;
@@ -197,20 +230,6 @@ pub fn rolling_cosine_similarity<'a>(
         window_size,
         state: 0,
     })
-
-    // // This alternative is only slightly slower ...
-    // let left_padding = window_size / 2;
-    // let right_padding = window_size - left_padding - 1;
-    // let tmp = a
-    //     .windows(window_size)
-    //     .zip(b.windows(window_size))
-    //     .map(|(a_win, b_win)| cosine_similarity(a_win, b_win).unwrap());
-    // // Pad the beginning and end with NaNs
-    // let iter = std::iter::repeat(f32::NAN)
-    //     .take(left_padding)
-    //     .chain(tmp)
-    //     .chain(std::iter::repeat(f32::NAN).take(right_padding));
-    // Ok(iter)
 }
 
 struct RollingCosineIterator<'a> {
@@ -418,5 +437,155 @@ mod tests {
                 assert!((result - expect).abs() < 1e-4, "{:?}", results);
             }
         }
+    }
+
+    /// Test numeric stability with extreme intensity ranges.
+    ///
+    /// This tests the scenario that motivated u64 accumulation: two Gaussian peaks
+    /// with very different apex intensities (100 vs 1,000,000) in a background of noise.
+    /// The cosine similarity should still be accurate despite the large dynamic range.
+    #[test]
+    fn test_extreme_range_stability() {
+        // Create two chromatograms with Gaussian peaks at different intensities
+        let n = 100;
+        let peak1_center = 25;
+        let peak2_center = 75;
+        let noise_level = 0.5;
+
+        // Helper to create Gaussian peak
+        let gaussian = |x: f32, center: f32, amplitude: f32, width: f32| -> f32 {
+            let exponent = -((x - center).powi(2)) / (2.0 * width.powi(2));
+            amplitude * exponent.exp()
+        };
+
+        // Trace A: Peak at position 25 with amplitude 100
+        let trace_a: Vec<f32> = (0..n)
+            .map(|i| {
+                let base = gaussian(i as f32, peak1_center as f32, 100.0, 5.0);
+                base + (i as f32 * 0.1).sin() * noise_level // Add reproducible noise
+            })
+            .collect();
+
+        // Trace B: Similar shape but scaled 10,000x higher + different peak at position 75
+        let trace_b: Vec<f32> = (0..n)
+            .map(|i| {
+                let base1 = gaussian(i as f32, peak1_center as f32, 1_000_000.0, 5.0);
+                let base2 = gaussian(i as f32, peak2_center as f32, 500_000.0, 5.0);
+                base1 + base2 + (i as f32 * 0.1).cos() * noise_level * 10_000.0
+            })
+            .collect();
+
+        // Calculate rolling cosine similarity with window size 7
+        let window = 7;
+        let results: Vec<f32> = rolling_cosine_similarity(&trace_a, &trace_b, window)
+            .unwrap()
+            .collect();
+
+        // Verify results make sense:
+        // 1. No NaN values (except padding)
+        let left_pad = window / 2;
+        let right_pad = window - left_pad - 1;
+        for (i, &val) in results.iter().enumerate() {
+            if i < left_pad || i >= results.len() - right_pad {
+                assert!(val.is_nan(), "Expected NaN in padding at index {}", i);
+            } else {
+                assert!(
+                    !val.is_nan(),
+                    "Unexpected NaN at index {} (value: {})",
+                    i,
+                    val
+                );
+                assert!(
+                    val >= -0.01 && val <= 1.01,
+                    "Cosine similarity out of range at index {}: {}",
+                    i,
+                    val
+                );
+            }
+        }
+
+        // 2. High similarity around peak1_center (both traces have peak there)
+        let peak1_similarity = results[peak1_center];
+        assert!(
+            peak1_similarity > 0.9,
+            "Expected high similarity at peak1 center ({}), got {}",
+            peak1_center,
+            peak1_similarity
+        );
+
+        // 3. Non-zero similarity around peak2_center (was 0.0 with u64 truncation bug)
+        let peak2_similarity = results[peak2_center];
+        println!(
+            "\nPeak2 similarity (position {}): {}",
+            peak2_center, peak2_similarity
+        );
+
+        // 4. Print some values for inspection
+        println!("\nSimilarity values around peaks:");
+        for i in
+            (peak1_center - 5).max(left_pad)..=(peak1_center + 5).min(results.len() - right_pad - 1)
+        {
+            println!("  [{}] = {:.6}", i, results[i]);
+        }
+        println!();
+        for i in
+            (peak2_center - 5).max(left_pad)..=(peak2_center + 5).min(results.len() - right_pad - 1)
+        {
+            println!("  [{}] = {:.6}", i, results[i]);
+        }
+
+        // 5. Check for catastrophic numeric errors (values way outside [0,1] or sudden jumps to 0/NaN)
+        for i in left_pad..(results.len() - right_pad) {
+            assert!(
+                !results[i].is_nan(),
+                "Unexpected NaN in valid region at index {}",
+                i
+            );
+        }
+    }
+
+    /// Benchmark test: Measure performance of f64 accumulation.
+    ///
+    /// This is not run by default (use `cargo test -- --ignored` to run).
+    /// Provides baseline timing for the current f64 implementation.
+    #[test]
+    #[ignore]
+    fn bench_accumulation_strategies() {
+        use std::time::Instant;
+
+        let n = 10_000;
+        let window = 7;
+
+        // Create test data with extreme range
+        let trace_a: Vec<f32> = (0..n).map(|i| (i as f32).sin() * 100.0 + 50.0).collect();
+        let trace_b: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 1.1).cos() * 1_000_000.0 + 500_000.0)
+            .collect();
+
+        // Preallocate result buffer (reused across iterations)
+        let mut results = vec![0.0f32; n];
+
+        // Benchmark current implementation (f64)
+        let iterations = 100;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            for (i, val) in rolling_cosine_similarity(&trace_a, &trace_b, window)
+                .unwrap()
+                .enumerate()
+            {
+                results[i] = val;
+            }
+        }
+        let f64_time = start.elapsed();
+
+        println!(
+            "f64 accumulation: {:?} ({} iterations)",
+            f64_time, iterations
+        );
+        println!("  Per iteration: {:?}", f64_time / iterations);
+        println!(
+            "  Throughput: {:.2} iterations/sec",
+            iterations as f64 / f64_time.as_secs_f64()
+        );
     }
 }

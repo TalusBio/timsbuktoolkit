@@ -141,22 +141,22 @@ impl Grid {
         let display_rows = self.bins.div_ceil(y_scale);
         let mut canvas = Canvas::new(display_cols, display_rows);
 
-        for display_r in 0..display_rows {
-            for display_c in 0..display_cols {
+        for display_row in 0..display_rows {
+            for display_col in 0..display_cols {
                 let mut max_node = None;
                 let mut max_freq_in_block = 0.0;
 
-                for y_offset in 0..y_scale {
-                    let r = display_r * y_scale + y_offset;
-                    if r >= self.bins {
+                for row_offset in 0..y_scale {
+                    let grid_row = display_row * y_scale + row_offset;
+                    if grid_row >= self.bins {
                         break;
                     }
-                    for x_offset in 0..x_scale {
-                        let c = display_c * x_scale + x_offset;
-                        if c >= self.bins {
+                    for col_offset in 0..x_scale {
+                        let grid_col = display_col * x_scale + col_offset;
+                        if grid_col >= self.bins {
                             break;
                         }
-                        let idx = r * self.bins + c;
+                        let idx = grid_row * self.bins + grid_col;
                         let node = &self.nodes[idx];
                         if node.center.weight > max_freq_in_block {
                             max_freq_in_block = node.center.weight;
@@ -184,7 +184,7 @@ impl Grid {
                     (0.0, Color::Gray)
                 };
                 let block = get_block_char(intensity);
-                canvas.set(display_c, display_r, Cell::new(block, color));
+                canvas.set(display_col, display_row, Cell::new(block, color));
             }
         }
 

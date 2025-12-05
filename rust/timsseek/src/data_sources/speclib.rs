@@ -22,10 +22,10 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 
 /// This is meant to the be the serializable version of the speclib element
-/// so ... in general should be backwards compatible and implement Into<QueryItemToScore>
+/// so ... in general should be backwards compatible and implement `Into<QueryItemToScore>`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerSpeclibElement {
     precursor: PrecursorEntry,
@@ -34,7 +34,73 @@ pub struct SerSpeclibElement {
 
 impl SerSpeclibElement {
     pub fn sample() -> Self {
-        QueryItemToScore::sample().into()
+        // let eg = TimsElutionGroup::builder()
+        //     .id(42)
+        //     .mobility_ook0(0.75)
+        //     .rt_seconds(123.4)
+        //     .fragment_labels([
+        //         IonAnnot::try_from("y1").unwrap(),
+        //         IonAnnot::try_from("y2").unwrap(),
+        //         IonAnnot::try_from("y3").unwrap(),
+        //         IonAnnot::try_from("y4").unwrap(),
+        //         ].as_slice().into())
+        //     .fragment_mzs(
+        //         vec![450.0,
+        //             650.5,
+        //             751.0,
+        //             751.5,]
+        //     )
+        //     .precursor_labels(tiny_vec!(-1,0,1,2))
+        //     .precursor_mzs(vec![450.0, 450.5, 451.0, 451.5]).try_build().unwrap();
+
+        // let ei = ExpectedIntensities {
+        //     fragment_intensities: HashMap::from_iter(
+        //         [
+        //             (IonAnnot::try_from("y1").unwrap(), 1.0),
+        //             (IonAnnot::try_from("y2").unwrap(), 1.0),
+        //             (IonAnnot::try_from("y3").unwrap(), 1.0),
+        //             (IonAnnot::try_from("y4").unwrap(), 1.0),
+        //         ]
+        //         .iter()
+        //         .cloned(),
+        //     ),
+        //     precursor_intensities: HashMap::from_iter(
+        //         [(-1, 0.5), (0, 1.0), (1, 0.8), (2, 0.3)].iter().cloned(),
+        //     ),
+        // };
+        // let pepseq = "PEPTIDEPINKPEPTIDE".into();
+        // let digest = DigestSlice::from_string(pepseq, false, 1);
+        // let charge = 2;
+        // let query = eg;
+        // let expected_intensity = ei;
+        // QueryItemToScore {
+        //     digest,
+        //     charge,
+        //     query,
+        //     expected_intensity,
+        // }
+        SerSpeclibElement {
+            precursor: PrecursorEntry {
+                sequence: "PEPTIDESEK".into(),
+                charge: 2,
+                decoy: false,
+                decoy_group: 32,
+            },
+            elution_group: ReferenceEG {
+                id: 32,
+                precursor_mzs: vec![512.2, 512.7],
+                precursor_labels: vec![0, 2],
+                fragment_mzs: vec![312.2, 675.7],
+                fragment_labels: vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                precursor_intensities: vec![1.0, 0.5],
+                fragment_intensities: vec![0.8, 0.3],
+                mobility_ook0: 0.75,
+                rt_seconds: 120.0,
+            },
+        }
     }
 }
 
@@ -66,41 +132,107 @@ impl From<SerSpeclibElement> for QueryItemToScore {
     fn from(x: SerSpeclibElement) -> Self {
         let charge = x.precursor.charge;
         let precursor = x.precursor.into();
-        let elution_group = x.elution_group;
+        let ref_eg = x.elution_group;
         QueryItemToScore {
-            expected_intensity: elution_group.expected_intensities,
+            expected_intensity: ExpectedIntensities {
+                fragment_intensities: ref_eg
+                    .fragment_labels
+                    .iter()
+                    .cloned()
+                    .zip(ref_eg.fragment_intensities.iter().cloned())
+                    .collect(),
+                precursor_intensities: ref_eg
+                    .precursor_labels
+                    .iter()
+                    .cloned()
+                    .zip(ref_eg.precursor_intensities.iter().cloned())
+                    .collect(),
+            },
             charge,
-            query: elution_group.elution_group,
+            query: TimsElutionGroup::builder()
+                .id(ref_eg.id as u64)
+                .mobility_ook0(ref_eg.mobility_ook0)
+                .rt_seconds(ref_eg.rt_seconds)
+                .precursor_labels(ref_eg.precursor_labels.as_slice().into())
+                .precursor_mzs(ref_eg.precursor_mzs)
+                .fragment_labels(ref_eg.fragment_labels.as_slice().into())
+                .fragment_mzs(ref_eg.fragment_mzs)
+                .try_build()
+                .unwrap(),
             digest: precursor,
         }
     }
 }
 
-impl From<QueryItemToScore> for SerSpeclibElement {
-    fn from(x: QueryItemToScore) -> Self {
-        let precursor = PrecursorEntry {
-            sequence: x.digest.clone().into(),
-            charge: x.charge,
-            decoy: x.digest.is_decoy(),
-            decoy_group: x.digest.decoy_group,
-        };
-        let elution_group = ReferenceEG {
-            elution_group: x.query.clone(),
-            expected_intensities: x.expected_intensity,
-        };
-        SerSpeclibElement {
-            precursor,
-            elution_group,
-        }
-    }
-}
+// impl From<QueryItemToScore> for SerSpeclibElement {
+//     fn from(x: QueryItemToScore) -> Self {
+//         let precursor = PrecursorEntry {
+//             sequence: x.digest.clone().into(),
+//             charge: x.charge,
+//             decoy: x.digest.is_decoy(),
+//             decoy_group: x.digest.decoy_group,
+//         };
+//         let mut precursor_mzs = Vec::with_capacity(x.query.precursors.len());
+//         let mut precursor_labels = Vec::with_capacity(x.query.precursors.len());
+//         for (label, mz) in x.query.precursors.iter() {
+//             precursor_labels.push(*label);
+//             precursor_mzs.push(*mz);
+//         }
+//         let mut fragment_mzs = Vec::with_capacity(x.query.fragments.len());
+//         let mut fragment_labels = Vec::with_capacity(x.query.fragments.len());
+//         for (label, mz) in x.query.fragments.iter() {
+//             fragment_labels.push(*label);
+//             fragment_mzs.push(*mz);
+//         }
+//         let precursor_intensities: Vec<f32> = precursor_labels
+//             .iter()
+//             .map(|l| {
+//                 *x.expected_intensity
+//                     .precursor_intensities
+//                     .get(l)
+//                     .expect("Correctly built reference eg should have all keys")
+//             })
+//             .collect();
+//         let fragment_intensities: Vec<f32> = fragment_labels
+//             .iter()
+//             .map(|l| {
+//                 *x.expected_intensity
+//                     .fragment_intensities
+//                     .get(l)
+//                     .expect("Correctly built reference eg should have all keys")
+//             })
+//             .collect();
+//         let elution_group = ReferenceEG {
+//             id: x.query.id() as u32,
+//             precursor_mzs,
+//             precursor_labels,
+//             fragment_mzs,
+//             fragment_labels,
+//             precursor_intensities,
+//             fragment_intensities,
+//             precursor_charge: x.charge,
+//             mobility_ook0: x.query.mobility_ook0(),
+//             rt_seconds: x.query.rt_seconds(),
+//         };
+//         SerSpeclibElement {
+//             precursor,
+//             elution_group,
+//         }
+//     }
+// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
-    #[serde(flatten)]
-    pub elution_group: ElutionGroup<IonAnnot>,
-    #[serde(flatten)]
-    pub expected_intensities: ExpectedIntensities,
+    id: u32,
+    precursor_mzs: Vec<f64>,
+    precursor_labels: Vec<i8>,
+    fragment_mzs: Vec<f64>,
+    fragment_labels: Vec<IonAnnot>,
+    precursor_intensities: Vec<f32>,
+    fragment_intensities: Vec<f32>,
+    #[serde(alias = "mobility")]
+    mobility_ook0: f32,
+    rt_seconds: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -131,16 +263,16 @@ impl Iterator for SpeclibIterator<'_> {
     }
 }
 
-impl Serialize for Speclib {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let speclib_ser: Vec<SerSpeclibElement> =
-            self.elems.iter().map(|x| x.clone().into()).collect();
-        speclib_ser.serialize(serializer)
-    }
-}
+// impl Serialize for Speclib {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: serde::Serializer,
+//     {
+//         let speclib_ser: Vec<SerSpeclibElement> =
+//             self.elems.iter().map(|x| x.clone().into()).collect();
+//         speclib_ser.serialize(serializer)
+//     }
+// }
 
 #[derive(Debug, Clone, Copy)]
 pub enum SpeclibFormat {
@@ -478,27 +610,15 @@ mod tests {
                 },
                 "elution_group": {
                     "id": 0,
-                    "precursors": [
-                        [0, 1810.917339999999],
-                        [1, 1810.917339999999]
-                    ],
-                    "fragments": [
-                        ["a1", 123.0],
-                        ["b1", 123.0],
-                        ["c1^2", 123.0]
-                    ],
+                    "precursor_mzs": [ 1810.917339999999, 1810.917339999999 ],
+                    "precursor_labels": [ 0, 1 ],
+                    "fragment_mzs": [ 123.0, 123.0, 123.0 ],
+                    "fragment_labels": ["a1", "b1", "c1^2"],
+                    "precursor_intensities": [1.0, 1.0],
+                    "fragment_intensities": [1.0, 1.0, 1.0],
                     "precursor_charge": 2,
-                    "mobility": 0.8,
-                    "rt_seconds": 0.0,
-                    "precursor_intensities": [
-                        1.0,
-                        1.0
-                    ],
-                    "fragment_intensities": {
-                        "a1": 1.0,
-                        "b1": 1.0,
-                        "c1^2": 1.0
-                    }
+                    "mobility_ook0": 0.8,
+                    "rt_seconds": 0.0
                 }
             }
         ]"#;
@@ -508,6 +628,6 @@ mod tests {
 
         assert_eq!(speclib.elems[0].digest.decoy, DecoyMarking::Target);
         assert_eq!(speclib.elems[0].digest.len(), "PEPTIDEPINK".len());
-        assert_eq!(speclib.elems[0].query.fragments.len(), 3);
+        assert_eq!(speclib.elems[0].query.fragment_count(), 3);
     }
 }

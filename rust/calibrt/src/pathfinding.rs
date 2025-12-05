@@ -2,13 +2,24 @@
 // Module 2: Optimal Ascending Path Identification
 // --------------------------------------------------------------------------------
 
+/// Minimum distance threshold for edge weight calculation.
+/// Distances smaller than this are treated as degenerate to avoid numerical instability.
+const DISTANCE_THRESHOLD: f64 = 1e-6;
+
 /// Finds the highest-weight path through the nodes that satisfies the monotonic constraint.
+///
+/// This implements a dynamic programming solution on a directed acyclic graph (DAG) where:
+/// - Nodes are sorted by (x, y) to ensure topological order
+/// - Edges exist only between nodes where both x and y increase (monotonic constraint)
+/// - Edge weights favor high-confidence nodes that are geometrically close
 pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node]) -> Vec<crate::Point> {
     if nodes.is_empty() {
         return Vec::new();
     }
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
+    // This ensures we can use dynamic programming: when processing node i, all potential
+    // predecessors (with smaller x,y) have already been processed.
     nodes.sort_by(|a, b| {
         a.center
             .x
@@ -25,14 +36,17 @@ pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node]) -> Vec<crate::P
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
 
         for j in 0..i {
-            // 2.1 & 2.2: Check for monotonic edge and calculate weight
+            // Only create edges where both dimensions increase (monotonic constraint)
             if nodes[i].center.x > nodes[j].center.x && nodes[i].center.y > nodes[j].center.y {
                 let dx = nodes[i].center.x - nodes[j].center.x;
                 let dy = nodes[i].center.y - nodes[j].center.y;
                 let dist = (dx * dx + dy * dy).sqrt();
 
-                if dist > 1e-6 {
-                    // Avoid division by zero
+                if dist > DISTANCE_THRESHOLD {
+                    // Edge weight formula: (weight_i * weight_j) / distance
+                    // - Product of weights: Prioritizes paths through high-confidence nodes
+                    // - Division by distance: Penalizes long jumps, encouraging smooth curves
+                    // This balances data fidelity (high weights) with geometric smoothness (short edges)
                     let edge_weight = (nodes[i].center.weight * nodes[j].center.weight) / dist;
                     let new_weight = max_weights[j] + edge_weight;
 

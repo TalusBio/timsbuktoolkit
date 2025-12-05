@@ -17,7 +17,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rayon = { workspace = true }
-indicatif = { workspace = true, features = ["rayon"] }
 half = { workspace = true }
 thiserror = { workspace = true } # User requested
 

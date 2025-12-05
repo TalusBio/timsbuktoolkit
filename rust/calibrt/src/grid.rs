@@ -34,6 +34,7 @@ impl Grid {
         let mut nodes = Vec::with_capacity(bins * bins);
         for r in 0..bins {
             for c in 0..bins {
+                // Add 0.5 to place node center at the midpoint of each bin
                 let center_x = x_range.0 + (c as f64 + 0.5) * (x_span / bins as f64);
                 let center_y = y_range.0 + (r as f64 + 0.5) * (y_span / bins as f64);
                 nodes.push(Node {
@@ -88,8 +89,16 @@ impl Grid {
     }
 
     /// Applies nonmaximal suppression to the grid nodes.
+    ///
+    /// A node is marked as non-suppressed only if it is the maximum weight
+    /// in BOTH its row AND its column. This ensures we keep only the most
+    /// significant alignment points in each dimension.
+    ///
+    /// # Returns
+    /// - `Ok(())` if at least one node remains non-suppressed
+    /// - `Err(CalibRtError::NoPoints)` if all nodes have zero weight
     pub fn suppress_nonmax(&mut self) -> Result<(), CalibRtError> {
-        // We start with 1s to prevent the max being empty in all ...
+        // Initialize with 1.0 to handle empty grids gracefully
         let mut max_in_row = vec![1.; self.bins];
         let mut max_in_col = vec![1.; self.bins];
 

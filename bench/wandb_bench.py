@@ -182,6 +182,14 @@ class TimsseekRunner:
 
     def log_results(self, wandb_experiment, results_loc):
         metrics = self.crunch_metrics(results_loc)
+        with open("latest_metrics.json", "w") as f:
+            serializable_metrics = {
+                k: v
+                for k, v in metrics.items()
+                if isinstance(v, (int, float, str, bool, list, dict))
+            }
+            assert serializable_metrics
+            json.dump(serializable_metrics, f, indent=4)
         wandb_experiment.log(metrics)
 
     @staticmethod
@@ -286,17 +294,17 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
 
 
 def main(wandb_kwargs: dict | None = None):
-    fasta_file = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-    speclib_path = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
+    # fasta_file = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
+    # speclib_path = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
 
-    # fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
-    # speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
+    fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
+    speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [
-        prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
-        prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
-        prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
+        # prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
+        # prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
+        # prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
         prefix / "250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
     ]
 

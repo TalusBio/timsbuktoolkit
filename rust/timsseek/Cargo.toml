@@ -6,10 +6,8 @@ license.workspace = true
 
 [dependencies]
 regex = "1.10.6"
-csv = "1.3.0"
 parquet_derive = "56.1"
 rmp-serde = "1.1"
-arrayvec = "0.7.6"
 zstd = "0.13"
 
 # Gradient boosted tree
@@ -29,10 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 rayon = { workspace = true }
-indicatif = { workspace = true }
 parquet = { workspace = true }
-# This is a test only dependency ...
-tracing-subscriber = { workspace = true }
 
 [features]
 # This enables adding instrumentation to a lot of the scoring

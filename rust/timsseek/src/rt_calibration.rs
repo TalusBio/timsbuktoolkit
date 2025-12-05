@@ -6,7 +6,7 @@ pub use calibrt::{
     CalibRtError,
     CalibrationCurve as RTCalibration,
     Point,
-    calibrate,
+    calibrate_with_ranges,
 };
 use tracing::warn;
 
@@ -60,7 +60,7 @@ pub fn recalibrate_speclib(
         }
     });
 
-    let cal_res = calibrate(
+    let cal_res = calibrate_with_ranges(
         calib_data
             .iter()
             .map(Point::from)
@@ -76,7 +76,7 @@ pub fn recalibrate_speclib(
     match cal_res {
         Ok(cal_curve) => {
             speclib.elems.iter_mut().for_each(|spec| {
-                let pred = cal_curve.predict(spec.query.rt_seconds as f64);
+                let pred = cal_curve.predict(spec.query.rt_seconds() as f64);
                 let pred = match pred {
                     Ok(pred_rt) => {
                         // I can get this by total - oob but this feels safer ... even if its a
@@ -86,7 +86,7 @@ pub fn recalibrate_speclib(
                     }
                     Err(CalibRtError::OutOfBounds(pred_rt)) => {
                         oob_preds.0 += 1;
-                        let query_rt = spec.query.rt_seconds;
+                        let query_rt = spec.query.rt_seconds();
                         oob_preds.1 = oob_preds.1.min(query_rt);
                         oob_preds.2 = oob_preds.2.max(query_rt);
 
@@ -96,7 +96,8 @@ pub fn recalibrate_speclib(
                         panic!("Unexpected error during RT prediction");
                     }
                 };
-                spec.query.rt_seconds = pred;
+                // True impass ...
+                spec.query.set_rt_seconds(pred);
             });
             if oob_preds.0 > 0 {
                 warn!(

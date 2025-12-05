@@ -8,8 +8,8 @@ use crate::utils::streaming_calculators::{
     StreamingAggregatorError,
 };
 use crate::{
-    ElutionGroup,
     KeyLike,
+    TimsElutionGroup,
     ValueLike,
 };
 use std::ops::{
@@ -19,15 +19,15 @@ use std::ops::{
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
-    pub eg: ElutionGroup<T>,
+    pub eg: TimsElutionGroup<T>,
     precursors: Vec<V>,
     fragments: Vec<V>,
 }
 
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
-    pub fn new(eg: ElutionGroup<T>) -> Self {
-        let precursors = vec![Default::default(); eg.precursors.len()];
-        let fragments = vec![Default::default(); eg.fragments.len()];
+    pub fn new(eg: TimsElutionGroup<T>) -> Self {
+        let precursors = vec![Default::default(); eg.precursor_count()];
+        let fragments = vec![Default::default(); eg.fragment_count()];
         Self {
             eg,
             precursors,
@@ -35,20 +35,20 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         }
     }
 
-    pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = (&(i8, f64), &mut V)> {
-        self.eg.precursors.iter().zip(self.precursors.iter_mut())
+    pub fn iter_mut_precursors(&mut self) -> impl Iterator<Item = ((i8, f64), &mut V)> {
+        self.eg.iter_precursors().zip(self.precursors.iter_mut())
     }
 
-    pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = (&(T, f64), &mut V)> {
-        self.eg.fragments.iter().zip(self.fragments.iter_mut())
+    pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = ((&T, &f64), &mut V)> {
+        self.eg.iter_fragments_refs().zip(self.fragments.iter_mut())
     }
 
-    pub fn iter_precursors(&self) -> impl Iterator<Item = (&(i8, f64), &V)> {
-        self.eg.precursors.iter().zip(self.precursors.iter())
+    pub fn iter_precursors(&self) -> impl Iterator<Item = ((i8, f64), &V)> {
+        self.eg.iter_precursors().zip(self.precursors.iter())
     }
 
-    pub fn iter_fragments(&self) -> impl Iterator<Item = (&(T, f64), &V)> {
-        self.eg.fragments.iter().zip(self.fragments.iter())
+    pub fn iter_fragments(&self) -> impl Iterator<Item = ((&T, &f64), &V)> {
+        self.eg.iter_fragments_refs().zip(self.fragments.iter())
     }
 }
 

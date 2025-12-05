@@ -18,6 +18,7 @@ egui = "0.33"
 eframe = { version = "0.33", default-features = true, features = ["default_fonts"] }
 egui_plot = "0.34"
 egui_extras = { version = "0.33", features = ["serde"] }
+egui_dock = "0.18"
 rfd = "0.15"
 
 # Workspace-inherited deps

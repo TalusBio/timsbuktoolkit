@@ -5,11 +5,8 @@ use indicatif::{
 };
 use std::path::PathBuf;
 use std::time::Instant;
-use timsquery::{
-    GenerallyQueriable,
-    IndexedTimstofPeaks,
-};
-use timsseek::IonAnnot;
+use timsquery::IndexedTimstofPeaks;
+use timsseek::ScorerQueriable;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
@@ -18,10 +15,8 @@ use timsseek::rt_calibration::{
     recalibrate_results,
     recalibrate_speclib,
 };
-use timsseek::scoring::scorer::{
-    ScoreTimings,
-    Scorer,
-};
+use timsseek::scoring::ScoreTimings;
+use timsseek::scoring::scorer::Scorer;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
@@ -35,7 +30,7 @@ use tracing::{
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn main_loop<I: GenerallyQueriable<IonAnnot>>(
+pub fn main_loop<I: ScorerQueriable>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
     // # I would like this to be streaming
     mut query_iterator: Speclib,

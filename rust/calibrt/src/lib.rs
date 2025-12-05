@@ -1,13 +1,24 @@
 //! Core implementation of the Calib-RT algorithm.
 //!
-//! Original description
-//! https://doi.org/10.1093/bioinformatics/btae417
+//! Original description: <https://doi.org/10.1093/bioinformatics/btae417>
 
 pub mod grid;
 mod pathfinding;
 pub mod plotting;
 pub use grid::Grid;
-use tracing::info;
+use tracing::{
+    info,
+    warn,
+};
+
+/// Minimum denominator for slope calculations to avoid division by zero.
+const MIN_SLOPE_DENOMINATOR: f64 = 1e-9;
+
+/// Default width for calibration curve plots.
+const CALIBRATION_PLOT_WIDTH: usize = 40;
+
+/// Default height for calibration curve plots.
+const CALIBRATION_PLOT_HEIGHT: usize = 20;
 
 /// Custom error types for the Calib-RT library.
 #[derive(Debug, Clone)]
@@ -56,7 +67,7 @@ impl CalibrationCurve {
 
         let slopes = points
             .windows(2)
-            .map(|p| (p[1].y - p[0].y) / (p[1].x - p[0].x).max(1e-9))
+            .map(|p| (p[1].y - p[0].y) / (p[1].x - p[0].x).max(MIN_SLOPE_DENOMINATOR))
             .collect();
 
         Ok(Self { points, slopes })
@@ -106,29 +117,71 @@ impl CalibrationCurve {
         Ok(self.predict_with_index(x_val, i))
     }
 
-    /// Internal prediction function that assumes x_val is within bounds.
+    /// Internal prediction function that performs linear interpolation using a precomputed slope.
+    ///
+    /// # Arguments
+    /// * `x_val` - The x-coordinate to predict y for
+    /// * `i` - The partition index from the sorted points array (must satisfy: 1 <= i <= points.len())
+    ///
+    /// # Panics
+    /// Panics if `i == 0` or `i > slopes.len()`, as these violate the interpolation invariants.
+    ///
+    /// # Implementation Note
+    /// Uses slope between points[i-1] and points[i] to interpolate.
+    /// When called from `predict()`, `i` is guaranteed valid via partition_point().
+    /// When called for out-of-bounds extrapolation, caller must ensure valid index.
     fn predict_with_index(&self, x_val: f64, i: usize) -> f64 {
-        // `i` must be > 0, because if `i` were 0, it would either be an exact
-        // match on the first element (handled above) or x_val would be smaller
-        // than the first element (caught by the bounds check).
-        // Therefore, `i - 1` is always a valid index here.
+        assert!(
+            i > 0 && i <= self.slopes.len(),
+            "Index {} out of valid range [1, {}] for interpolation",
+            i,
+            self.slopes.len()
+        );
         let p1 = self.points[i - 1];
         let slope = self.slopes[i - 1];
         p1.y + (x_val - p1.x) * slope
     }
 }
 
-/// Calibrates retention times using the Calib-RT algorithm.
+/// Computes the min and max values from an iterator of f64 values.
+///
+/// # Returns
+/// - `Ok((min, max))` if at least one valid value exists
+/// - `Err(CalibRtError::NoPoints)` if no valid values exist
+fn compute_range(values: impl Iterator<Item = f64>) -> Result<(f64, f64), CalibRtError> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut count = 0;
+
+    for val in values {
+        if val.is_finite() {
+            min = min.min(val);
+            max = max.max(val);
+            count += 1;
+        }
+    }
+
+    if count == 0 || !min.is_finite() || !max.is_finite() {
+        return Err(CalibRtError::NoPoints);
+    }
+
+    Ok((min, max))
+}
+
+/// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
+///
+/// This is the lower-level API that requires you to specify the x and y ranges explicitly.
+/// Consider using [`calibrate`] for automatic range detection.
 ///
 /// # Arguments
-/// * `points` - An iterator over `Point` structs representing the data.
+/// * `points` - A slice of `Point` structs representing the data.
 /// * `x_range` - The min and max values for the X dimension.
 /// * `y_range` - The min and max values for the Y dimension.
 /// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
 ///
 /// # Returns
 /// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-pub fn calibrate(
+pub fn calibrate_with_ranges(
     points: &[Point],
     x_range: (f64, f64),
     y_range: (f64, f64),
@@ -151,10 +204,10 @@ pub fn calibrate(
     let optimal_path_points = pathfinding::find_optimal_path(&mut filtered_nodes);
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
-    match calcurve {
-        Ok(ref c) => {
+    match &calcurve {
+        Ok(c) => {
             let wrmse = c.wrmse(points.iter());
-            info!("RMSE: {}", wrmse);
+            info!("Calibration successful, WRMSE: {}", wrmse);
             plotting::plot_function(
                 |x| {
                     c.predict(x).map_err(|e| match e {
@@ -163,12 +216,49 @@ pub fn calibrate(
                     })
                 },
                 (x_range.0, x_range.1),
-                40,
-                20,
+                CALIBRATION_PLOT_WIDTH,
+                CALIBRATION_PLOT_HEIGHT,
             );
         }
-        Err(ref _e) => (),
-    };
+        Err(e) => {
+            warn!("Calibration failed: {:?}", e);
+        }
+    }
 
     calcurve
+}
+
+/// Calibrates retention times using the Calib-RT algorithm with automatic range detection.
+///
+/// This is a convenience wrapper that automatically computes the x and y ranges from the input points.
+/// If you need explicit control over the ranges, use [`calibrate_with_ranges`] instead.
+///
+/// # Arguments
+/// * `points` - A slice of `Point` structs representing the data.
+/// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
+///
+/// # Returns
+/// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
+///
+/// # Example
+/// ```
+/// use calibrt::{Point, calibrate};
+///
+/// let points = vec![
+///     Point { x: 1.0, y: 1.5, weight: 1.0 },
+///     Point { x: 2.0, y: 2.5, weight: 1.0 },
+///     Point { x: 3.0, y: 3.5, weight: 1.0 },
+/// ];
+///
+/// let curve = calibrate(&points, 100).expect("Calibration failed");
+/// ```
+pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve, CalibRtError> {
+    if points.is_empty() {
+        return Err(CalibRtError::NoPoints);
+    }
+
+    let x_range = compute_range(points.iter().map(|p| p.x))?;
+    let y_range = compute_range(points.iter().map(|p| p.y))?;
+
+    calibrate_with_ranges(points, x_range, y_range, grid_size)
 }

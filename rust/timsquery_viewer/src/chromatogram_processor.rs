@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::aggregators::ChromatogramCollector;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::{
     KeyLike,
@@ -20,27 +20,48 @@ pub enum SmoothingMethod {
     Gaussian { sigma: f32 },
 }
 
+impl SmoothingMethod {
+    /// Default sigma value for Gaussian smoothing.
+    pub const DEFAULT_GAUSSIAN_SIGMA: f32 = 2.0;
+    /// Default polynomial order for Savitzky-Golay smoothing.
+    pub const DEFAULT_SG_POLYNOMIAL: usize = 2;
+    /// Default window size for Savitzky-Golay smoothing.
+    pub const DEFAULT_SG_WINDOW: usize = 5;
+
+    pub fn default_savitzky_golay() -> Self {
+        Self::SavitzkyGolay {
+            window: Self::DEFAULT_SG_WINDOW,
+            polynomial: Self::DEFAULT_SG_POLYNOMIAL,
+        }
+    }
+
+    pub fn default_gaussian() -> Self {
+        Self::Gaussian {
+            sigma: Self::DEFAULT_GAUSSIAN_SIGMA,
+        }
+    }
+}
+
 impl Default for SmoothingMethod {
     fn default() -> Self {
         Self::None
     }
 }
 
-/// Apply smoothing to intensity values
-pub fn apply_smoothing(intensities: &[f32], method: &SmoothingMethod) -> Vec<f32> {
+pub fn apply_smoothing(intensities: &[f32], method: &SmoothingMethod) -> Option<Vec<f32>> {
     match method {
-        SmoothingMethod::None => intensities.to_vec(),
+        SmoothingMethod::None => None,
         SmoothingMethod::SavitzkyGolay { window, polynomial } => {
-            savitzky_golay_smooth(intensities, *window, *polynomial)
+            Some(savitzky_golay_smooth(intensities, *window, *polynomial))
         }
-        SmoothingMethod::Gaussian { sigma } => gaussian_smooth(intensities, *sigma),
+        SmoothingMethod::Gaussian { sigma } => Some(gaussian_smooth(intensities, *sigma)),
     }
 }
 
 /// Savitzky-Golay smoothing filter
 /// Uses a simplified weighted moving average approximation rather than full least squares
 fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<f32> {
-    if data.len() < window || window < 3 || window % 2 == 0 {
+    if data.len() < window || window < 3 || window.is_multiple_of(2) {
         return data.to_vec();
     }
 
@@ -53,39 +74,42 @@ fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<
 
     let weights = compute_savitzky_golay_weights(window, polynomial);
 
-    for i in 0..data.len() {
-        let mut sum = 0.0;
-        let mut weight_sum = 0.0;
+    for point_idx in 0..data.len() {
+        let mut weighted_sum = 0.0;
+        let mut weight_total = 0.0;
 
-        for j in 0..window {
-            let data_idx = (i + j).saturating_sub(half_window);
+        for window_offset in 0..window {
+            let data_idx = (point_idx + window_offset).saturating_sub(half_window);
             if data_idx < data.len() {
-                sum += data[data_idx] * weights[j];
-                weight_sum += weights[j];
+                weighted_sum += data[data_idx] * weights[window_offset];
+                weight_total += weights[window_offset];
             }
         }
 
-        smoothed.push(sum / weight_sum);
+        smoothed.push(weighted_sum / weight_total);
     }
 
     smoothed
 }
 
-/// Compute Savitzky-Golay filter weights
-/// Simplified version using polynomial-based weight decay from center
-fn compute_savitzky_golay_weights(window: usize, polynomial: usize) -> Vec<f32> {
-    let half = window / 2;
-    let mut weights = vec![0.0; window];
+/// Compute Savitzky-Golay filter weights.
+///
+/// Simplified version using polynomial-based weight decay from center,
+/// rather than proper least-squares fitting. Suitable for visualization
+/// smoothing but not for precise quantitative analysis.
+fn compute_savitzky_golay_weights(window_size: usize, polynomial_order: usize) -> Vec<f32> {
+    let half_window = window_size / 2;
+    let mut weights = vec![0.0; window_size];
 
-    for i in 0..window {
-        let dist = ((i as isize) - (half as isize)).abs() as f32;
-        let normalized_dist = dist / (half as f32);
+    for position in 0..window_size {
+        let distance_from_center = ((position as isize) - (half_window as isize)).abs() as f32;
+        let normalized_distance = distance_from_center / (half_window as f32);
 
-        weights[i] = match polynomial {
-            0 | 1 => 1.0 - normalized_dist,
-            2 => (1.0 - normalized_dist * normalized_dist).max(0.0),
-            3 => (1.0 - normalized_dist.powi(3)).max(0.0),
-            _ => (1.0 - normalized_dist.powi(polynomial as i32)).max(0.0),
+        weights[position] = match polynomial_order {
+            0 | 1 => 1.0 - normalized_distance,
+            2 => (1.0 - normalized_distance * normalized_distance).max(0.0),
+            3 => (1.0 - normalized_distance.powi(3)).max(0.0),
+            _ => (1.0 - normalized_distance.powi(polynomial_order as i32)).max(0.0),
         };
     }
 
@@ -102,33 +126,36 @@ fn gaussian_smooth(data: &[f32], sigma: f32) -> Vec<f32> {
     let kernel_size = 2 * kernel_radius + 1;
     let mut kernel = vec![0.0; kernel_size];
 
-    let mut sum = 0.0;
-    for i in 0..kernel_size {
-        let x = (i as f32) - (kernel_radius as f32);
-        let value = (-0.5 * (x / sigma).powi(2)).exp();
-        kernel[i] = value;
-        sum += value;
+    // Compute Gaussian kernel weights
+    let mut normalization_sum = 0.0;
+    for kernel_pos in 0..kernel_size {
+        let distance_from_center = (kernel_pos as f32) - (kernel_radius as f32);
+        let gaussian_value = (-0.5 * (distance_from_center / sigma).powi(2)).exp();
+        kernel[kernel_pos] = gaussian_value;
+        normalization_sum += gaussian_value;
     }
 
-    for k in kernel.iter_mut() {
-        *k /= sum;
+    // Normalize kernel so weights sum to 1.0
+    for weight in kernel.iter_mut() {
+        *weight /= normalization_sum;
     }
 
     let mut smoothed = Vec::with_capacity(data.len());
 
-    for i in 0..data.len() {
-        let mut result = 0.0;
-        let mut weight_sum = 0.0;
+    // Apply Gaussian kernel convolution
+    for point_idx in 0..data.len() {
+        let mut weighted_sum = 0.0;
+        let mut weight_total = 0.0;
 
-        for j in 0..kernel_size {
-            let data_idx = (i + j).saturating_sub(kernel_radius);
+        for kernel_offset in 0..kernel_size {
+            let data_idx = (point_idx + kernel_offset).saturating_sub(kernel_radius);
             if data_idx < data.len() {
-                result += data[data_idx] * kernel[j];
-                weight_sum += kernel[j];
+                weighted_sum += data[data_idx] * kernel[kernel_offset];
+                weight_total += kernel[kernel_offset];
             }
         }
 
-        smoothed.push(result / weight_sum);
+        smoothed.push(weighted_sum / weight_total);
     }
 
     smoothed
@@ -192,7 +219,7 @@ impl<T: KeyLike + std::fmt::Display> TryFrom<ChromatogramCollector<T, f32>> for 
         if non_zero_min_idx > non_zero_max_idx {
             return Err(ViewerError::General(format!(
                 "Empty chromatogram for elution group id {}",
-                value.eg.id
+                value.eg.id()
             )));
         }
 
@@ -243,9 +270,9 @@ impl<T: KeyLike + std::fmt::Display> TryFrom<ChromatogramCollector<T, f32>> for 
             .unzip();
 
         Ok(ChromatogramOutput {
-            id: value.eg.id,
-            mobility_ook0: value.eg.mobility,
-            rt_seconds: value.eg.rt_seconds,
+            id: value.eg.id(),
+            mobility_ook0: value.eg.mobility_ook0(),
+            rt_seconds: value.eg.rt_seconds(),
             precursor_mzs,
             fragment_mzs,
             precursor_intensities,
@@ -268,20 +295,23 @@ impl ChromatogramOutput {
 
         // Smooth precursor intensities
         for intensities in self.precursor_intensities.iter_mut() {
-            *intensities = apply_smoothing(intensities, method);
+            if let Some(smoothed) = apply_smoothing(intensities, method) {
+                *intensities = smoothed;
+            }
         }
 
         // Smooth fragment intensities
         for intensities in self.fragment_intensities.iter_mut() {
-            *intensities = apply_smoothing(intensities, method);
+            if let Some(smoothed) = apply_smoothing(intensities, method) {
+                *intensities = smoothed;
+            }
         }
     }
 }
 
-/// Generates a chromatogram for a single elution group
 #[instrument(skip_all)]
 pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
-    elution_group: &ElutionGroup<T>,
+    elution_group: &TimsElutionGroup<T>,
     index: &IndexedTimstofPeaks,
     ms1_rts: Arc<[u32]>,
     tolerance: &Tolerance,
@@ -299,7 +329,6 @@ pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
     Ok(output)
 }
 
-/// Extract MS2 spectrum at a specific retention time from chromatogram data
 #[instrument(skip(chromatogram))]
 pub fn extract_ms2_spectrum_from_chromatogram(
     chromatogram: &ChromatogramOutput,
@@ -307,9 +336,13 @@ pub fn extract_ms2_spectrum_from_chromatogram(
 ) -> Result<MS2Spectrum, ViewerError> {
     let rt_index = chromatogram
         .retention_time_results_seconds
-        .partition_point(|&rt| (rt as f64) < rt_seconds);
-
-    let rt_index = rt_index.min(chromatogram.retention_time_results_seconds.len().saturating_sub(1));
+        .partition_point(|&rt| (rt as f64) < rt_seconds)
+        .min(
+            chromatogram
+                .retention_time_results_seconds
+                .len()
+                .saturating_sub(1),
+        );
 
     let mut mz_values = Vec::new();
     let mut intensities = Vec::new();
@@ -322,7 +355,7 @@ pub fn extract_ms2_spectrum_from_chromatogram(
         .enumerate()
     {
         if rt_index < intensity_vec.len() {
-            mz_values.push(mz as f64);
+            mz_values.push(mz);
             intensities.push(intensity_vec[rt_index]);
             labels.push(
                 chromatogram

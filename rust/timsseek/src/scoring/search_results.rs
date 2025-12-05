@@ -20,13 +20,13 @@ use parquet::record::RecordWriter;
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
-use timsquery::ElutionGroup;
+use timsquery::TimsElutionGroup;
 use tracing::debug;
 
 #[derive(Debug, Default)]
 pub struct SearchResultBuilder<'q> {
     digest_slice: SetField<&'q DigestSlice>,
-    ref_eg: SetField<&'q ElutionGroup<IonAnnot>>,
+    ref_eg: SetField<&'q TimsElutionGroup<IonAnnot>>,
     decoy_marking: SetField<DecoyMarking>,
     library_id: SetField<u32>,
     decoy_group_id: SetField<u32>,
@@ -97,7 +97,7 @@ impl<T> SetField<T> {
 
 impl<'q> SearchResultBuilder<'q> {
     pub fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
-        self.library_id = SetField::Some(pre_score.query_values.eg.id as u32);
+        self.library_id = SetField::Some(pre_score.query_values.eg.id() as u32);
         self.digest_slice = SetField::Some(&pre_score.digest);
         self.ref_eg = SetField::Some(&pre_score.query_values.eg);
         self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
@@ -222,7 +222,7 @@ impl<'q> SearchResultBuilder<'q> {
         let ref_eg = expect_some!(ref_eg);
         // TODO replace this with exhaustive unpacking.
         let obs_rt_seconds = expect_some!(rt_seconds);
-        let delta_theo_rt = obs_rt_seconds - ref_eg.rt_seconds;
+        let delta_theo_rt = obs_rt_seconds - ref_eg.rt_seconds();
         let sq_delta_theo_rt = delta_theo_rt * delta_theo_rt;
 
         let delta_ms1_ms2_mobility = expect_some!(delta_ms1_ms2_mobility);
@@ -232,10 +232,10 @@ impl<'q> SearchResultBuilder<'q> {
             sequence: String::from(expect_some!(digest_slice).clone()),
             library_id: expect_some!(library_id),
             decoy_group_id: expect_some!(decoy_group_id),
-            precursor_mz: ref_eg.get_monoisotopic_precursor_mz().unwrap_or(f64::NAN),
+            precursor_mz: ref_eg.try_get_mono_precursor_mz().unwrap_or(f64::NAN),
             precursor_charge: expect_some!(charge),
-            precursor_mobility_query: ref_eg.mobility,
-            precursor_rt_query_seconds: ref_eg.rt_seconds,
+            precursor_mobility_query: ref_eg.mobility_ook0(),
+            precursor_rt_query_seconds: ref_eg.rt_seconds(),
             nqueries: expect_some!(nqueries),
             is_target: expect_some!(decoy_marking).is_target(),
             main_score: expect_some!(main_score),

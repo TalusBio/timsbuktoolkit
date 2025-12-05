@@ -1,8 +1,17 @@
+#![doc = include_str!("../README.md")]
+
+// Re export stuff from other crates ...
+pub use {
+    micromzpaf,
+    tinyvec,
+};
+
 // Re-export main structures
 pub use crate::models::Tolerance;
 pub use crate::models::aggregators::{
     ChromatogramCollector,
     MzMobilityStatsCollector,
+    PointIntensityAggregator,
     SpectralCollector,
 };
 pub use crate::models::base::{
@@ -10,7 +19,7 @@ pub use crate::models::base::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
-pub use crate::models::elution_group::ElutionGroup;
+pub use crate::models::elution_group::TimsElutionGroup;
 
 // Re-export traits
 pub use crate::models::PeakAddable;

@@ -185,8 +185,8 @@ where
 /// An enum representing a value that can either be restricted to a specific value
 /// or be unrestricted (i.e., no restriction).
 ///
-/// In essence is the same as Option<T> but with different semantics.
-/// since Option<T> could mean either no restriction OR no value allowed.
+/// In essence is the same as `Option<T>` but with different semantics,
+/// since `Option<T>` could mean either no restriction OR no value allowed.
 ///
 /// Mainly meant to be used in cases where I can filter based on a range
 /// This allows for cleaner code when dealing with optional restrictions.

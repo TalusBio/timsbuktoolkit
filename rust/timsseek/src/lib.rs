@@ -8,6 +8,7 @@ pub mod models;
 pub mod protein;
 pub mod rt_calibration;
 pub mod scoring;
+pub mod traits;
 pub mod utils;
 pub use micromzpaf;
 
@@ -30,3 +31,4 @@ pub use timsquery::ion::{
     IonParsingError,
     IonSeriesTerminality,
 };
+pub use traits::ScorerQueriable;

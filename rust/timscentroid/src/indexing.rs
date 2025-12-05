@@ -814,7 +814,6 @@ mod tests {
 
     #[test]
     fn test_peak_bucket_query_rt() {
-        let cycle_to_rt = vec![1000, 2000, 3000, 4000, 5000];
         let test_data = vec![
             (100.0, 200.0, 1.0, 0u32),
             (100.0, 250.0, 1.0, 1u32),

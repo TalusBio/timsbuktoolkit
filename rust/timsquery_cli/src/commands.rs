@@ -18,7 +18,7 @@ use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
 };
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -61,7 +61,8 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let elution_groups: Vec<ElutionGroup<usize>> = read_query_elution_groups(&elution_groups_path)?;
+    let elution_groups: Vec<TimsElutionGroup<u8>> =
+        read_query_elution_groups(&elution_groups_path)?;
     info!("Loaded {} elution groups", elution_groups.len());
 
     let index = load_index_caching(&raw_file_path)
@@ -89,40 +90,25 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 }
 
 /// Reads elution groups from a given path, attempting to parse them in several formats.
-pub fn read_query_elution_groups(path: &PathBuf) -> Result<Vec<ElutionGroup<usize>>, CliError> {
+pub fn read_query_elution_groups(path: &PathBuf) -> Result<Vec<TimsElutionGroup<u8>>, CliError> {
     let file_content = std::fs::read_to_string(path)?;
 
     if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-        let out: Vec<ElutionGroup<usize>> = eg_inputs.into_iter().map(|x| x.into()).collect();
+        let out: Vec<TimsElutionGroup<u8>> = eg_inputs.into_iter().map(|x| x.into()).collect();
         return Ok(out);
     }
-    if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<usize>>>(&file_content) {
+    if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u8>>>(&file_content) {
         return Ok(egs);
     }
 
     warn!(
-        "Failed to parse elution groups using standard formats. Attempting to read as ElutionGroup<String> from {}. Original string IDs will be replaced with integer indices.",
+        "Failed to parse elution groups using standard formats. from {}",
         path.display()
     );
-    let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&file_content)?;
-    let mut out: Vec<ElutionGroup<usize>> = Vec::with_capacity(egs_string.len());
-    for (i, eg) in egs_string.into_iter().enumerate() {
-        let eg_usize = ElutionGroup {
-            id: i as u64,
-            mobility: eg.mobility,
-            rt_seconds: eg.rt_seconds,
-            precursors: eg.precursors,
-            fragments: Arc::from(
-                eg.fragments
-                    .iter()
-                    .map(|(_lab, mz)| *mz)
-                    .enumerate()
-                    .collect::<Vec<(usize, f64)>>(),
-            ),
-        };
-        out.push(eg_usize);
-    }
-    Ok(out)
+    Err(CliError::DataReading(format!(
+        "Failed to parse elution groups from {}",
+        path.display()
+    )))
 }
 
 /// Main function for the 'write-template' subcommand.
@@ -209,7 +195,7 @@ pub fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, CliError> {
 /// Streams and processes elution groups in batches, then serializes the results.
 #[instrument(skip_all)]
 pub fn stream_process_batches(
-    elution_groups: Vec<ElutionGroup<usize>>,
+    elution_groups: Vec<TimsElutionGroup<u8>>,
     aggregator_use: PossibleAggregator,
     rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,
@@ -270,7 +256,7 @@ pub fn stream_process_batches(
 /// Processes batches of elution groups and serializes the aggregated results.
 #[instrument(skip_all)]
 pub fn process_and_serialize<S>(
-    elution_groups: Vec<ElutionGroup<usize>>,
+    elution_groups: Vec<TimsElutionGroup<u8>>,
     aggregator_use: PossibleAggregator,
     rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,

@@ -19,7 +19,7 @@ use rustyms::{
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 use tracing::{
     error,
     warn,
@@ -107,7 +107,7 @@ impl SequenceToElutionGroupConverter {
         id: u64,
     ) -> Result<
         (
-            Vec<Arc<ElutionGroup<IonAnnot>>>,
+            Vec<Arc<TimsElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -128,10 +128,11 @@ impl SequenceToElutionGroupConverter {
         };
         let (ncarbon, nsulphur) = count_carbon_sulphur(&pep_formula);
         let pep_isotope = peptide_isotopes(ncarbon, nsulphur);
-        let mut expected_prec_inten = vec![1e-3f32; 4];
+        let mut expected_prec_inten: HashMap<i8, f32> = HashMap::new();
+        expected_prec_inten.insert(-1, 0.0);
 
         for (ii, isot) in pep_isotope.iter().enumerate() {
-            expected_prec_inten[1 + ii] = *isot
+            expected_prec_inten.insert(ii as i8, *isot);
         }
 
         let mut out_eg = Vec::new();
@@ -154,36 +155,45 @@ impl SequenceToElutionGroupConverter {
                 .fragment_buildder
                 .fragment_mzs_from_linear_peptide(&peptide)
                 .unwrap();
+
             fragment_mzs
                 .retain(|(_pos, mz, _)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
-
             fragment_mzs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
+            let ((fragment_labels, fragment_mzs), fragment_intensities): (
+                (Vec<_>, Vec<_>),
+                Vec<_>,
+            ) = fragment_mzs
+                .into_iter()
+                .map(|(label, mz, intensity)| ((label, mz), intensity))
+                .unzip();
+
             let mobility = supersimpleprediction(precursor_mz, charge as i32);
-            let mut precursor_mzs = vec![(0, precursor_mz); 4];
+            let mut precursor_mzs = vec![precursor_mz; 4];
+            let precursor_labels = vec![-1, 0, 1, 2];
 
-            // This just assigns the "numeral" and mass
-            // to the isotopes.
-            precursor_mzs[0].1 -= nmf;
-            precursor_mzs[0].0 = -1;
+            // This just assigns mass to the isotopes.
+            precursor_mzs[0] -= nmf;
+            precursor_mzs[2] += nmf;
+            precursor_mzs[3] += 2. * nmf;
 
-            precursor_mzs[2].1 += nmf;
-            precursor_mzs[2].0 = 1;
+            let fragment_expect_inten = HashMap::from_iter(
+                fragment_labels
+                    .iter()
+                    .cloned()
+                    .zip(fragment_intensities.iter().cloned()),
+            );
+            let eg = TimsElutionGroup::builder()
+                .id(id)
+                .mobility_ook0(mobility as f32)
+                .rt_seconds(0.0f32)
+                .precursor_labels(precursor_labels.as_slice().into())
+                .precursor_mzs(precursor_mzs)
+                .fragment_mzs(fragment_mzs)
+                .fragment_labels(fragment_labels.as_slice().into())
+                .try_build()
+                .unwrap();
 
-            precursor_mzs[3].1 += 2. * nmf;
-            precursor_mzs[3].0 += 2;
-
-            let fragment_expect_inten =
-                HashMap::from_iter(fragment_mzs.iter().map(|(k, _, v)| (*k, *v)));
-            let fragment_mzs = Vec::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
-            let eg = ElutionGroup {
-                id,
-                precursors: precursor_mzs.into(),
-                mobility: mobility as f32,
-                rt_seconds: 0.0f32,
-                // precursor_charge: charge,
-                fragments: fragment_mzs.into(),
-            };
             let ei = ExpectedIntensities {
                 fragment_intensities: fragment_expect_inten,
                 precursor_intensities: expected_prec_inten.clone(),
@@ -203,7 +213,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<Arc<ElutionGroup<IonAnnot>>>,
+            Vec<Arc<TimsElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),
@@ -238,7 +248,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<&'a DigestSlice>,
-            Vec<Arc<ElutionGroup<IonAnnot>>>,
+            Vec<Arc<TimsElutionGroup<IonAnnot>>>,
             Vec<ExpectedIntensities>,
             Vec<u8>,
         ),

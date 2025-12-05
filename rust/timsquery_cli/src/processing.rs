@@ -17,7 +17,7 @@ use timsquery::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use tracing::warn;
 
@@ -31,28 +31,30 @@ pub struct ElutionGroupInput {
     pub fragments: Vec<f64>,
 }
 
-impl From<ElutionGroupInput> for ElutionGroup<usize> {
+impl From<ElutionGroupInput> for TimsElutionGroup<u8> {
     fn from(val: ElutionGroupInput) -> Self {
-        let precursors: Arc<[(i8, f64)]> = Arc::from(
-            val.precursors
-                .into_iter()
-                .enumerate()
-                .map(|(i, mz)| (i as i8, mz))
-                .collect::<Vec<(i8, f64)>>(),
-        );
-        let fragments: Arc<[(usize, f64)]> = Arc::from(
-            val.fragments
-                .into_iter()
-                .enumerate()
-                .collect::<Vec<(usize, f64)>>(),
-        );
-        ElutionGroup {
-            id: val.id,
-            mobility: val.mobility,
-            rt_seconds: val.rt_seconds,
-            precursors,
-            fragments,
-        }
+        let builder = TimsElutionGroup::builder()
+            .id(val.id)
+            .mobility_ook0(val.mobility)
+            .rt_seconds(val.rt_seconds)
+            .precursor_labels(
+                val.precursors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| i as i8)
+                    .collect(),
+            )
+            .fragment_labels(
+                val.fragments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| i as u8)
+                    .collect(),
+            )
+            .precursor_mzs(val.precursors)
+            .fragment_mzs(val.fragments);
+
+        builder.try_build().unwrap()
     }
 }
 
@@ -81,14 +83,14 @@ pub struct ChromatogramOutput {
     retention_time_results_seconds: Vec<f32>,
 }
 
-impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
+impl TryFrom<ChromatogramCollector<u8, f32>> for ChromatogramOutput {
     type Error = CliError;
 
     fn try_from(
-        mut value: ChromatogramCollector<usize, f32>,
+        mut value: ChromatogramCollector<u8, f32>,
     ) -> Result<ChromatogramOutput, Self::Error> {
         let mut non_zero_min_idx = value.ref_rt_ms.len();
-        let mut non_zero_max_idx = 0usize;
+        let mut non_zero_max_idx = 0;
 
         value.iter_mut_precursors().for_each(|((_idx, _mz), cmg)| {
             let slc = cmg.as_slice();
@@ -121,7 +123,7 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
         });
 
         if non_zero_min_idx > non_zero_max_idx {
-            return Err(CliError::EmptyChromatogram(value.eg.id));
+            return Err(CliError::EmptyChromatogram(value.eg.id()));
         }
 
         let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = value
@@ -167,9 +169,9 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
             .unzip();
 
         Ok(ChromatogramOutput {
-            id: value.eg.id,
-            mobility_ook0: value.eg.mobility,
-            rt_seconds: value.eg.rt_seconds,
+            id: value.eg.id(),
+            mobility_ook0: value.eg.mobility_ook0(),
+            rt_seconds: value.eg.rt_seconds(),
             precursor_mzs,
             fragment_mzs,
             precursor_intensities,
@@ -182,8 +184,8 @@ impl TryFrom<ChromatogramCollector<usize, f32>> for ChromatogramOutput {
     }
 }
 
-impl From<&SpectralCollector<usize, f32>> for SpectrumOutput {
-    fn from(agg: &SpectralCollector<usize, f32>) -> Self {
+impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
+    fn from(agg: &SpectralCollector<u8, f32>) -> Self {
         let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<f32>) = agg
             .iter_precursors()
             .map(|((_idx, mz), inten)| (mz, inten))
@@ -194,9 +196,9 @@ impl From<&SpectralCollector<usize, f32>> for SpectrumOutput {
             .unzip();
 
         SpectrumOutput {
-            id: agg.eg.id,
-            mobility_ook0: agg.eg.mobility,
-            rt_seconds: agg.eg.rt_seconds,
+            id: agg.eg.id(),
+            mobility_ook0: agg.eg.mobility_ook0(),
+            rt_seconds: agg.eg.rt_seconds(),
             precursor_mzs,
             fragment_mzs,
             precursor_intensities,
@@ -206,14 +208,14 @@ impl From<&SpectralCollector<usize, f32>> for SpectrumOutput {
 }
 
 pub enum AggregatorContainer {
-    Point(Vec<PointIntensityAggregator<usize>>),
-    Chromatogram(Vec<ChromatogramCollector<usize, f32>>),
-    Spectrum(Vec<SpectralCollector<usize, f32>>),
+    Point(Vec<PointIntensityAggregator<u8>>),
+    Chromatogram(Vec<ChromatogramCollector<u8, f32>>),
+    Spectrum(Vec<SpectralCollector<u8, f32>>),
 }
 
 impl AggregatorContainer {
     pub fn new(
-        queries: Vec<ElutionGroup<usize>>,
+        queries: Vec<TimsElutionGroup<u8>>,
         aggregator: PossibleAggregator,
         ref_rts: Arc<[u32]>,
     ) -> Result<Self, CliError> {
@@ -268,7 +270,7 @@ impl AggregatorContainer {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
                     .filter_map(|agg| {
-                        let agg_id = agg.eg.id;
+                        let agg_id = agg.eg.id();
                         match ChromatogramOutput::try_from(agg) {
                             Ok(output) => Some(output),
                             Err(e) => {

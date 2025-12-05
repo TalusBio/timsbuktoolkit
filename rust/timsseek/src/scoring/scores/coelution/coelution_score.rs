@@ -75,7 +75,7 @@ fn coelution_vref_score_filter_onto(
                 if v.is_nan() {
                     continue;
                 }
-                buffer[i] += v.max(0.0) // * norm_factor;
+                buffer[i] += v.max(0.0)
             }
             Ok(())
         });

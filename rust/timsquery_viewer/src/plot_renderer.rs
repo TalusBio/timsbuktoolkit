@@ -9,8 +9,13 @@ use egui_plot::{
 };
 
 use crate::chromatogram_processor::ChromatogramOutput;
-use tracing::instrument;
-use tracing::info;
+use tracing::{
+    info,
+    instrument,
+};
+
+/// Width of the visual band around reference retention time (in seconds)
+const REFERENCE_RT_BAND_WIDTH_SECONDS: f64 = 10.0;
 
 #[derive(Debug)]
 struct LineData {
@@ -37,19 +42,27 @@ pub enum PlotMode {
 }
 
 #[derive(Debug)]
+pub struct ChromatogramLine {
+    data: LineData,
+    intensity_max: f64,
+}
+
+#[derive(Debug)]
 pub struct ChromatogramLines {
-    precursor_lines: Vec<LineData>,
-    fragment_lines: Vec<LineData>,
+    precursor_lines: Vec<ChromatogramLine>,
+    fragment_lines: Vec<ChromatogramLine>,
     pub reference_id: u64,
     pub reference_ook0: f64,
     pub reference_rt_seconds: f64,
-    intensity_range: (f64, f64),
+    intensity_max: f64,
     rt_seconds_range: (f64, f64),
 }
 
 impl ChromatogramLines {
     #[instrument(skip(chromatogram))]
     pub(crate) fn from_chromatogram(chromatogram: &ChromatogramOutput) -> Self {
+        let mut global_max_intensity = f32::NEG_INFINITY;
+
         let precursor_lines = chromatogram
             .precursor_mzs
             .iter()
@@ -63,11 +76,20 @@ impl ChromatogramLines {
                     .map(|(&rt, &intensity)| PlotPoint::new(rt as f64, intensity as f64))
                     .collect();
 
+                let intensity_max = intensities
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max) as f64;
+                global_max_intensity = global_max_intensity.max(intensity_max as f32);
+
                 let color = get_precursor_color(i);
-                LineData {
-                    points,
-                    name: format!("Precursor m/z {:.4}", mz),
-                    stroke: egui::Stroke::new(2.0, color),
+                ChromatogramLine {
+                    data: LineData {
+                        points,
+                        name: format!("Precursor m/z {:.4}", mz),
+                        stroke: egui::Stroke::new(2.0, color),
+                    },
+                    intensity_max,
                 }
             })
             .collect();
@@ -86,11 +108,20 @@ impl ChromatogramLines {
                     .map(|(&rt, &intensity)| PlotPoint::new(rt as f64, intensity as f64))
                     .collect();
 
+                let intensity_max = intensities
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max) as f64;
+                global_max_intensity = global_max_intensity.max(intensity_max as f32);
+
                 let color = get_fragment_color(i);
-                LineData {
-                    points,
-                    name: format!("{} mz={:.4}", label, mz),
-                    stroke: egui::Stroke::new(1.5, color),
+                ChromatogramLine {
+                    data: LineData {
+                        points,
+                        name: format!("{} mz={:.4}", label, mz),
+                        stroke: egui::Stroke::new(1.5, color),
+                    },
+                    intensity_max,
                 }
             })
             .collect();
@@ -108,52 +139,29 @@ impl ChromatogramLines {
                 .fold(f32::NEG_INFINITY, f32::max) as f64,
         );
 
-        let intensity_range = {
-            let mut min_intensity = 0.0f64;
-            let mut max_intensity = f64::NEG_INFINITY;
-
-            for intensities in chromatogram
-                .precursor_intensities
-                .iter()
-                .chain(chromatogram.fragment_intensities.iter())
-            {
-                for &intensity in intensities {
-                    if intensity > 0.0 {
-                        min_intensity = min_intensity.min(intensity as f64);
-                        max_intensity = max_intensity.max(intensity as f64);
-                    }
-                }
-            }
-
-            for intensities in chromatogram
-                .fragment_intensities
-                .iter()
-                .chain(chromatogram.fragment_intensities.iter())
-            {
-                for &intensity in intensities {
-                    if intensity > 0.0 {
-                        min_intensity = min_intensity.min(intensity as f64);
-                        max_intensity = max_intensity.max(intensity as f64);
-                    }
-                }
-            }
-            println!(
-                "Intensity range: min {}, max {}",
-                min_intensity, max_intensity
-            );
-
-            (min_intensity, max_intensity)
-        };
-
         Self {
             precursor_lines,
             fragment_lines,
             reference_id: chromatogram.id,
             reference_ook0: chromatogram.mobility_ook0 as f64,
             reference_rt_seconds: chromatogram.rt_seconds as f64,
-            intensity_range,
+            intensity_max: global_max_intensity as f64,
             rt_seconds_range,
         }
+    }
+
+    fn get_fragment_intensity_max(&self) -> f64 {
+        self.fragment_lines
+            .iter()
+            .map(|line| line.intensity_max)
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn get_precursor_intensity_max(&self) -> f64 {
+        self.precursor_lines
+            .iter()
+            .map(|line| line.intensity_max)
+            .fold(f64::NEG_INFINITY, f64::max)
     }
 }
 
@@ -171,6 +179,7 @@ pub struct MS2Spectrum {
 ///
 /// If `link_group_id` is provided, the X-axis will be linked to other plots with the same ID
 /// If `show_header` is false, the elution group ID and reference RT/mobility labels are not shown
+/// If `reset_bounds` is true, the plot bounds will be reset to show the full data range
 pub fn render_chromatogram_plot(
     ui: &mut egui::Ui,
     chromatogram: &ChromatogramLines,
@@ -203,18 +212,20 @@ pub fn render_chromatogram_plot(
         .y_axis_label("Intensity")
         .allow_zoom(false)
         .allow_drag(false)
-        .allow_scroll(false)
-        .include_x(chromatogram.rt_seconds_range.0)
-        .include_x(chromatogram.rt_seconds_range.1)
-        .include_y(chromatogram.intensity_range.0)
-        .include_y(chromatogram.intensity_range.1);
+        .allow_scroll(false);
 
     if let Some(link_id) = link_group_id {
         plot = plot.link_axis(link_id.to_string(), [true, false]);
     }
 
     plot.show(ui, |plot_ui| {
-        let rt_band_half_width = 5.0;
+        let rt_band_half_width = REFERENCE_RT_BAND_WIDTH_SECONDS / 2.0;
+        let max_polygon_height = match mode {
+            PlotMode::All => chromatogram.intensity_max,
+            PlotMode::PrecursorsOnly => chromatogram.get_precursor_intensity_max(),
+            PlotMode::FragmentsOnly => chromatogram.get_fragment_intensity_max(),
+        };
+
         let reference_band = Polygon::new(
             "Reference RT",
             PlotPoints::new(vec![
@@ -222,11 +233,11 @@ pub fn render_chromatogram_plot(
                 [chromatogram.reference_rt_seconds + rt_band_half_width, 0.0],
                 [
                     chromatogram.reference_rt_seconds + rt_band_half_width,
-                    chromatogram.intensity_range.1,
+                    max_polygon_height,
                 ],
                 [
                     chromatogram.reference_rt_seconds - rt_band_half_width,
-                    chromatogram.intensity_range.1,
+                    max_polygon_height,
                 ],
             ]),
         )
@@ -238,7 +249,7 @@ pub fn render_chromatogram_plot(
         match mode {
             PlotMode::All | PlotMode::PrecursorsOnly => {
                 for line in chromatogram.precursor_lines.iter() {
-                    plot_ui.line(line.to_plot_line());
+                    plot_ui.line(line.data.to_plot_line());
                 }
             }
             _ => {}
@@ -247,7 +258,7 @@ pub fn render_chromatogram_plot(
         match mode {
             PlotMode::All | PlotMode::FragmentsOnly => {
                 for line in chromatogram.fragment_lines.iter() {
-                    plot_ui.line(line.to_plot_line());
+                    plot_ui.line(line.data.to_plot_line());
                 }
             }
             _ => {}
@@ -278,7 +289,7 @@ pub fn render_chromatogram_plot(
         let y_min = bounds.min()[1];
         let y_max = bounds.max()[1];
         let clamped_y_min = 0.0;
-        let clamped_y_max = y_max.min(chromatogram.intensity_range.1);
+        let clamped_y_max = y_max.min(max_polygon_height);
 
         if y_min != clamped_y_min || y_max != clamped_y_max {
             plot_ui.set_plot_bounds_y(clamped_y_min..=clamped_y_max);
@@ -293,11 +304,11 @@ pub fn render_chromatogram_plot(
             plot_ui.set_plot_bounds_x(clamped_x_min..=clamped_x_max);
         }
 
-        if plot_ui.response().clicked() {
-            if let Some(pointer_pos) = plot_ui.pointer_coordinate() {
-                clicked_rt = Some(pointer_pos.x);
-                info!("Plot clicked at RT: {:.2}s", pointer_pos.x);
-            }
+        if plot_ui.response().clicked()
+            && let Some(pointer_pos) = plot_ui.pointer_coordinate()
+        {
+            clicked_rt = Some(pointer_pos.x);
+            info!("Plot clicked at RT: {:.2}s", pointer_pos.x);
         }
     });
 

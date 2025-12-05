@@ -1,3 +1,68 @@
+//! Query execution implementations for indexed timsTOF data.
+//!
+//! This module implements the [`QueriableData`] trait for [`IndexedTimstofPeaks`],
+//! defining how different aggregators extract and accumulate peak data.
+//!
+//! # Query Flow
+//!
+//! The query pattern follows these steps:
+//!
+//! 1. **Tolerance Application**: The [`Tolerance`] struct defines search windows
+//!    for m/z, retention time, ion mobility, and quadrupole isolation
+//! 2. **Range Calculation**: For each dimension, calculate the query range based
+//!    on the target value and tolerance (e.g., `mz ± ppm` or `rt ± minutes`)
+//! 3. **Peak Filtering**: Query the indexed data structure for peaks within all ranges
+//! 4. **Aggregation**: Accumulate filtered peaks into the aggregator (sum intensities,
+//!    build profiles, compute statistics, etc.)
+//!
+//! # Aggregator-Specific Behavior
+//!
+//! ## PointIntensityAggregator
+//!
+//! Sums total intensity across all matching peaks (both MS1 and MS2).
+//!
+//! - **Precursors**: Queries MS1 data without quadrupole filtering
+//! - **Fragments**: Queries MS2 data with quadrupole isolation constraints
+//! - **Result**: Single f64 intensity sum
+//!
+//! ## ChromatogramCollector
+//!
+//! Builds retention time profiles by binning intensities across RT dimension.
+//!
+//! - **Binning**: Maps each peak to RT bin based on reference RT array
+//! - **Precursors**: MS1 chromatogram trace
+//! - **Fragments**: MS2 chromatogram trace per fragment ion
+//! - **Result**: Vector of intensities indexed by RT bin
+//!
+//! ## SpectralCollector
+//!
+//! Builds m/z spectra by accumulating intensities across mass dimension.
+//!
+//! - **Binning**: Maps each peak to m/z bin based on reference m/z array
+//! - **Precursors**: MS1 spectrum
+//! - **Fragments**: MS2 spectrum per fragment ion
+//! - **Result**: 2D array (precursor/fragment × m/z bins)
+//!
+//! # Quadrupole Filtering
+//!
+//! For MS2 data (fragments), peaks are filtered by quadrupole isolation window:
+//!
+//! 1. Get quadrupole isolation range from tolerance
+//! 2. Filter precursor frames that overlap this range
+//! 3. For overlapping frames, constrain ion mobility range to actual isolation window
+//! 4. Query peaks within constrained ranges
+//!
+//! This ensures fragment queries only include peaks from appropriate precursor isolations.
+//!
+//! # OptionallyRestricted Ranges
+//!
+//! Some tolerance dimensions use `OptionallyRestricted<TupleRange>` (from `timscentroid::utils`):
+//!
+//! - `Restricted(range)`: Normal bounded range (e.g., RT window)
+//! - `Unrestricted`: No filtering on this dimension (match all values)
+//!
+//! This allows queries like "all retention times" while still filtering by m/z and mobility.
+
 use crate::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -25,8 +90,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
             aggregator.eg.get_precursor_mz_limits().try_into().unwrap();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.start() as f32, prec_mz_limits.end() as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility);
-        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility_ook0());
+        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds());
         let cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
                 TupleRange::try_new(
@@ -37,8 +102,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
             ),
             Unrestricted => Unrestricted,
         };
-        aggregator.eg.precursors.iter().for_each(|(_idx, mz)| {
-            let mz_range = tolerance.mz_range_f32(*mz as f32);
+        aggregator.eg.iter_precursors().for_each(|(_idx, mz)| {
+            let mz_range = tolerance.mz_range_f32(mz as f32);
             self.query_peaks_ms1(mz_range, cycle_range, im_range)
                 .for_each(|peak| {
                     aggregator.intensity += peak.intensity as f64;
@@ -59,7 +124,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
                         .try_into()
                         .unwrap()
                 });
-                aggregator.eg.fragments.iter().for_each(|(_idx, mz)| {
+                aggregator.eg.iter_fragments_refs().for_each(|(_idx, mz)| {
                     let mz_range = tolerance.mz_range_f32(*mz as f32);
                     peaks
                         .query_peaks(mz_range, cycle_range, constrained_im)
@@ -77,9 +142,10 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
         let prec_mz_limits = aggregator.eg.get_precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility);
+        let im_range: timscentroid::utils::OptionallyRestricted<TupleRange<f16>> =
+            tolerance.mobility_range_f16(aggregator.eg.mobility_ook0());
         let rt_range_milliseconds = match tolerance
-            .rt_range_as_milis(aggregator.eg.rt_seconds)
+            .rt_range_as_milis(aggregator.eg.rt_seconds())
             .map(|x| x.try_intercept(agg_rt_limits_seconds))
         {
             Restricted(Some(x)) => Restricted(x),
@@ -141,8 +207,8 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
         let prec_mz_limits = aggregator.eg.get_precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility);
-        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility_ook0());
+        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds());
         let cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
                 TupleRange::try_new(
@@ -156,7 +222,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), ion)| {
-                let mz_range = tolerance.mz_range_f32(*mz as f32);
+                let mz_range = tolerance.mz_range_f32(mz as f32);
                 self.query_peaks_ms1(mz_range, cycle_range, im_range)
                     .for_each(|peak| {
                         *ion += peak.intensity;
@@ -200,8 +266,8 @@ impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>> for In
         let prec_mz_limits = aggregator.eg.get_precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility);
-        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds);
+        let im_range = tolerance.mobility_range_f16(aggregator.eg.mobility_ook0());
+        let rt_range_milliseconds = tolerance.rt_range_as_milis(aggregator.eg.rt_seconds());
         let cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
                 TupleRange::try_new(
@@ -215,7 +281,7 @@ impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>> for In
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), ion)| {
-                let mz_range = tolerance.mz_range_f32(*mz as f32);
+                let mz_range = tolerance.mz_range_f32(mz as f32);
                 self.query_peaks_ms1(mz_range, cycle_range, im_range)
                     .for_each(|peak| {
                         *ion += *peak;

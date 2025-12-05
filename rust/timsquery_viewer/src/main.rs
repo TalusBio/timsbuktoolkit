@@ -2,10 +2,8 @@ mod app;
 mod chromatogram_processor;
 mod error;
 mod file_loader;
-mod panels;
 mod plot_renderer;
-mod precursor_table;
-mod tolerance_editor;
+mod ui;
 
 use eframe::egui;
 use tracing::subscriber::set_global_default;

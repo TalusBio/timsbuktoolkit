@@ -5,10 +5,12 @@ use timscentroid::{
     TimsTofPath,
 };
 use timsquery::ion::IonAnnot;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::load_index_caching;
+use timsquery::tinyvec::TinyVec;
 use timsrust::MSLevel;
+
 use tracing::warn;
 
 use crate::error::ViewerError;
@@ -22,8 +24,8 @@ pub struct FileLoader {
 
 #[derive(Debug)]
 pub enum ElutionGroupData {
-    StringLabels(Vec<ElutionGroup<String>>),
-    MzpafLabels(Vec<ElutionGroup<IonAnnot>>),
+    StringLabels(Vec<TimsElutionGroup<String>>),
+    MzpafLabels(Vec<TimsElutionGroup<IonAnnot>>),
 }
 
 impl ElutionGroupData {
@@ -39,8 +41,11 @@ impl ElutionGroupData {
         self.len() == 0
     }
 
-    /// Filter elution groups by ID string, returning indices that match
-    pub fn filter_by_id(&self, filter: &str) -> Vec<usize> {
+    /// Returns indices of all elution groups matching the ID filter.
+    ///
+    /// If filter is an empty string, returns ALL indices (no filtering applied).
+    /// This allows seamless toggling between filtered and unfiltered views.
+    pub fn matching_indices_for_id_filter(&self, filter: &str) -> Vec<usize> {
         if filter.is_empty() {
             return (0..self.len()).collect();
         }
@@ -49,13 +54,13 @@ impl ElutionGroupData {
             ElutionGroupData::StringLabels(egs) => egs
                 .iter()
                 .enumerate()
-                .filter(|(_, eg)| eg.id.to_string().contains(filter))
+                .filter(|(_, eg)| eg.id().to_string().contains(filter))
                 .map(|(idx, _)| idx)
                 .collect(),
             ElutionGroupData::MzpafLabels(egs) => egs
                 .iter()
                 .enumerate()
-                .filter(|(_, eg)| eg.id.to_string().contains(filter))
+                .filter(|(_, eg)| eg.id().to_string().contains(filter))
                 .map(|(idx, _)| idx)
                 .collect(),
         }
@@ -103,16 +108,16 @@ impl FileLoader {
         let file_content = std::fs::read_to_string(path)?;
 
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-            let out: Vec<ElutionGroup<IonAnnot>> =
-                eg_inputs.into_iter().map(|x| x.into()).collect();
-            return Ok(ElutionGroupData::MzpafLabels(out));
+            let out: Result<Vec<TimsElutionGroup<IonAnnot>>, ViewerError> =
+                eg_inputs.into_iter().map(|x| x.try_into()).collect();
+            return Ok(ElutionGroupData::MzpafLabels(out?));
         }
 
-        if let Ok(egs) = serde_json::from_str::<Vec<ElutionGroup<IonAnnot>>>(&file_content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(&file_content) {
             return Ok(ElutionGroupData::MzpafLabels(egs));
         }
 
-        let egs_string: Vec<ElutionGroup<String>> = serde_json::from_str(&file_content)?;
+        let egs_string: Vec<TimsElutionGroup<String>> = serde_json::from_str(&file_content)?;
         warn!(
             "Elution groups contained fragment labels as strings that are not interpretable as mzpaf, this can cause performance degradation."
         );
@@ -154,48 +159,44 @@ pub struct ElutionGroupInput {
     pub fragment_labels: Option<Vec<IonAnnot>>,
 }
 
-impl From<ElutionGroupInput> for ElutionGroup<IonAnnot> {
-    fn from(val: ElutionGroupInput) -> Self {
-        let precursors: Arc<[(i8, f64)]> = Arc::from(
-            val.precursors
-                .into_iter()
-                .enumerate()
-                .map(|(i, mz)| (i as i8, mz))
-                .collect::<Vec<(i8, f64)>>(),
-        );
-        let fragments: Arc<[(IonAnnot, f64)]> = match val.fragment_labels {
-            Some(labels) => {
-                // TODO: make this a real error and propagate ...
-                assert!(
-                    labels.len() == val.fragments.len(),
-                    "Fragment labels length does not match fragments length"
-                );
-                Arc::from(
-                    val.fragments
-                        .into_iter()
-                        .zip(labels.into_iter())
-                        .map(|(mz, annot)| (annot, mz))
-                        .collect::<Vec<(IonAnnot, f64)>>(),
-                )
-            }
-            None => Arc::from(
-                val.fragments
-                    .into_iter()
+impl TryFrom<ElutionGroupInput> for TimsElutionGroup<IonAnnot> {
+    type Error = ViewerError;
+
+    fn try_from(val: ElutionGroupInput) -> Result<Self, Self::Error> {
+        let builder = TimsElutionGroup::builder()
+            .id(val.id)
+            .mobility_ook0(val.mobility)
+            .rt_seconds(val.rt_seconds)
+            .precursor_labels(
+                val.precursors
+                    .iter()
                     .enumerate()
-                    .map(|(idx, mz)| {
-                        let annot = IonAnnot::try_new('?', Some(idx as u8), 1, 1).unwrap();
-                        (annot, mz)
-                    })
-                    .collect::<Vec<(IonAnnot, f64)>>(),
+                    .map(|(i, _)| i as i8)
+                    .collect(),
+            )
+            .precursor_mzs(val.precursors.clone());
+
+        let num_fragments = val.fragments.len();
+        let builder = builder.fragment_mzs(val.fragments.clone());
+        let builder = match val.fragment_labels {
+            Some(ref labels) => {
+                if labels.len() != num_fragments {
+                    return Err(ViewerError::General(format!(
+                        "Fragment labels length {} does not match fragments length {}",
+                        labels.len(),
+                        num_fragments
+                    )));
+                }
+                builder.fragment_labels(TinyVec::Heap(labels.clone()))
+            }
+            None => builder.fragment_labels(
+                (0..num_fragments)
+                    .map(|i| IonAnnot::try_new('?', Some(i as u8), 1, 1).unwrap())
+                    .collect(),
             ),
         };
-        ElutionGroup {
-            id: val.id,
-            mobility: val.mobility,
-            rt_seconds: val.rt_seconds,
-            precursors,
-            fragments,
-        }
+
+        Ok(builder.try_build().expect("I checked the sizes!"))
     }
 }
 

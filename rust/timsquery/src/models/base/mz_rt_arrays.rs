@@ -9,7 +9,6 @@ use serde::ser::{
     SerializeStruct,
     Serializer,
 };
-use std::sync::Arc;
 
 /// Array representation of a series of chromatograms
 /// In this representation all elements with the same retention time
@@ -17,7 +16,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RTMajorIntensityArray<K: Clone, V: ArrayElement> {
     pub arr: Array2D<V>,
-    pub mz_order: Arc<[(K, f64)]>,
+    pub mz_order: Vec<(K, f64)>,
     pub cycle_offset: usize,
 }
 
@@ -27,7 +26,7 @@ pub struct RTMajorIntensityArray<K: Clone, V: ArrayElement> {
 #[derive(Debug, Clone)]
 pub struct MzMajorIntensityArray<K: Clone + Eq, V: ArrayElement> {
     pub arr: Array2D<V>,
-    pub mz_order: Arc<[(K, f64)]>,
+    pub mz_order: Vec<(K, f64)>,
     pub cycle_offset: usize,
 }
 
@@ -68,6 +67,20 @@ impl<V: ArrayElement> Chromatogram<'_, V> {
         self.slc
     }
 
+    /// Get a slice of the chromatogram between start and end indices,
+    /// adjusting for cycle offset.
+    ///
+    /// In other words, lets imagine that we have a "global" retention time
+    /// with indices [0 .. N], and this chromatogram starts at index `cycle_offset`.
+    /// When requesting a slice from `start` to `end`, we adjust those indices
+    /// by subtracting `cycle_offset` to get the correct slice within this chromatogram.
+    /// THUS if the offset is 5, and we request slice(7, 10), we will actually return
+    /// slice(2, 5) of the underlying data.
+    ///
+    /// In other words ... use the global RT indices, and the function will adjust
+    /// them to the local chromatogram indices.
+    ///
+    /// Returns None if the adjusted indices are out of bounds.
     pub fn try_get_slice(&self, start: usize, end: usize) -> Option<&[V]> {
         // add index offsetting
         let start = start.saturating_sub(self.cycle_offset);
@@ -102,7 +115,7 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     ///
     /// Errors will be returned if the data is empty.
     pub fn try_new_empty(
-        mz_order: Arc<[(K, f64)]>,
+        mz_order: Vec<(K, f64)>,
         rt_cycles: usize,
         cycle_offset: usize,
     ) -> Result<Self, DataProcessingError> {
@@ -131,7 +144,6 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     /// Iterate over the values of a single column (all values for a RT)
     pub fn iter_column_idx(&self, index: usize) -> impl '_ + Iterator<Item = (&K, V)> {
         let vals = self.arr.iter_column(index);
-
         self.mz_order.iter().map(|(k, _mz)| k).zip(vals)
     }
 
@@ -164,29 +176,6 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
             mz_order: self.mz_order.clone(),
             cycle_offset: self.cycle_offset,
         }
-    }
-
-    /// In-place reorder the array by swapping the chromatograms
-    /// to match the passed order.
-    pub fn reorder_with(&mut self, order: Arc<[(K, f64)]>) {
-        // TODO: make this an error and consume the `self`
-        //
-        // This is essentially bubble sort ...
-        assert_eq!(self.arr.nrows(), self.mz_order.len());
-        // Q: Should I check there are no dupes? 2025-Apr-20
-        let mut local_order: Vec<_> = self.mz_order.iter().cloned().collect();
-        for (i, (k, _mz)) in order.iter().enumerate() {
-            let j = local_order.iter().position(|(k2, _)| k2 == k).unwrap();
-            if i != j {
-                local_order.swap(i, j);
-                self.arr.try_swap_rows(i, j).expect("Array in bounds");
-            }
-        }
-
-        for (l, r) in local_order.iter().zip(order.iter()) {
-            assert_eq!(l, r);
-        }
-        self.mz_order = order;
     }
 
     /// The main purpose of this function is to preserve the allocation
@@ -234,11 +223,71 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
     pub fn num_ions(&self) -> usize {
         self.mz_order.len()
     }
+
+    pub fn drop_row_idx(&mut self, idx: usize) -> Result<(K, f64), DataProcessingError> {
+        if idx >= self.mz_order.len() {
+            return Err(DataProcessingError::IndexOutOfBoundsError(idx));
+        }
+        let dropped = self.mz_order.remove(idx);
+        self.arr.drop_row(idx); // ?;
+        Ok(dropped)
+    }
+
+    /// Remove rows that don't pass the predicate.
+    ///
+    /// The predicate receives a chromatogram slice and returns true to KEEP.
+    /// Returns an iterator over the removed keys + m/z pairs.
+    pub fn drain_non_matching<F>(&mut self, predicate: F) -> impl Iterator<Item = (K, f64)>
+    where
+        F: FnMut(&[V]) -> bool,
+    {
+        struct FilterRowsIter<'a, K: KeyLike, V: ArrayElement, F>
+        where
+            F: FnMut(&[V]) -> bool,
+        {
+            array: &'a mut MzMajorIntensityArray<K, V>,
+            predicate: F,
+            current_idx: i32,
+        }
+
+        impl<'a, K: KeyLike, V: ArrayElement, F> Iterator for FilterRowsIter<'a, K, V, F>
+        where
+            F: FnMut(&[V]) -> bool,
+        {
+            type Item = (K, f64);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                // In theory going backwards would be more efficient,
+                // Since removing an element from the end does not require shifting
+                // all the other elements.
+                while self.current_idx > 0 {
+                    self.current_idx -= 1;
+                    let idx = self.current_idx as usize;
+                    let chrom_slc = self.array.arr.get_row(idx).unwrap();
+                    if !(self.predicate)(chrom_slc) {
+                        return Some(self.array.drop_row_idx(idx).expect("In Bounds checked"));
+                    }
+                }
+                None
+            }
+        }
+
+        let len_use = self
+            .mz_order
+            .len()
+            .try_into()
+            .expect("We should never have more ions than 2^31 ...");
+        FilterRowsIter {
+            array: self,
+            predicate,
+            current_idx: len_use,
+        }
+    }
 }
 
 impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
     pub fn try_new_empty(
-        order: Arc<[(FH, f64)]>,
+        order: Vec<(FH, f64)>,
         num_cycles: usize,
         cycle_offset: usize,
     ) -> Result<Self, DataProcessingError> {
@@ -255,7 +304,7 @@ impl<FH: KeyLike, V: ArrayElement> RTMajorIntensityArray<FH, V> {
             .expect("CMG array should already be size checked");
         Ok(Self {
             arr: out_arr,
-            mz_order: order.clone(),
+            mz_order: order,
             cycle_offset,
         })
     }
@@ -316,8 +365,7 @@ mod tests {
     fn test_array2d_int_mz_major() {
         // let array = sample_cmg_array();
         let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
-        let order: Arc<[(String, f64)]> =
-            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let order: Vec<(String, f64)> = vec![("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)];
         let mut arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
         assert_eq!(arr.arr.values, vec![0.0; 8]);
@@ -340,8 +388,7 @@ mod tests {
     #[test]
     fn test_array2d_int_rt_major() {
         let rts_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
-        let mz_order: Arc<[(String, f64)]> =
-            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let mz_order: Vec<(String, f64)> = vec![("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)];
         let vals = vec![
             8.0, 0.0, 0.0, 4.0, // Foo
             0.0, 0.0, 4.0, 2.0, // bar
@@ -365,13 +412,12 @@ mod tests {
     #[test]
     fn test_array2d_reset_resize_larger() {
         let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
-        let order: Arc<[(String, f64)]> =
-            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let order: Vec<(String, f64)> = vec![("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)];
         let mut arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
-        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let order_tgt: Vec<(String, f64)> = [("TOMATO".into(), 123.5f64)].into();
         let mut target_arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
@@ -407,13 +453,12 @@ mod tests {
     #[test]
     fn test_array2d_reset_resize_smaller() {
         let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
-        let order: Arc<[(String, f64)]> =
-            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let order: Vec<(String, f64)> = vec![("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)];
         let mut arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
-        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let order_tgt: Vec<(String, f64)> = [("TOMATO".into(), 123.5f64)].into();
         let target_arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
@@ -427,13 +472,12 @@ mod tests {
     #[test]
     fn test_array2d_reset_resize_larger_to_rt() {
         let rt_ms: Arc<[u32]> = [10u32, 20, 30, 40].into();
-        let order: Arc<[(String, f64)]> =
-            [("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)].into();
+        let order: Vec<(String, f64)> = vec![("FOO".into(), 123.5f64), ("BAR".into(), 456.3f64)];
         let mut arr: MzMajorIntensityArray<String, f32> =
             MzMajorIntensityArray::try_new_empty(order, rt_ms.len(), 0).unwrap();
 
         let rt_ms_tgt: Arc<[u32]> = [8678309u32].into();
-        let order_tgt: Arc<[(String, f64)]> = [("TOMATO".into(), 123.5f64)].into();
+        let order_tgt: Vec<(String, f64)> = [("TOMATO".into(), 123.5f64)].into();
         let mut target_arr: RTMajorIntensityArray<String, f32> =
             RTMajorIntensityArray::try_new_empty(order_tgt, rt_ms_tgt.len(), 0).unwrap();
 
@@ -449,5 +493,68 @@ mod tests {
             target_arr.arr.values,
             vec![8.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 2.0]
         );
+    }
+
+    #[test]
+    fn test_filter_rows_with_closure() {
+        // Create a 3-ion array with distinct chromatograms
+        let order: Vec<(String, f64)> = vec![
+            ("ION1".into(), 100.0),
+            ("ION2".into(), 200.0),
+            ("ION3".into(), 300.0),
+        ];
+        let mut arr: MzMajorIntensityArray<String, f32> =
+            MzMajorIntensityArray::try_new_empty(order, 4, 0).unwrap();
+
+        // Populate with different patterns
+        arr.arr.values = vec![
+            1.0, 2.0, 3.0, 4.0, // ION1: sum = 10.0
+            0.0, 0.0, 0.0, 0.0, // ION2: sum = 0.0 (should be removed)
+            5.0, 6.0, 7.0, 8.0, // ION3: sum = 26.0
+        ];
+
+        // Filter: keep only rows with sum > 0.0
+        let removed_keys: Vec<_> = arr
+            .drain_non_matching(|chromatogram| chromatogram.iter().sum::<f32>() > 0.0)
+            .collect();
+
+        assert_eq!(removed_keys.len(), 1);
+        assert_eq!(arr.num_ions(), 2);
+        assert_eq!(arr.mz_order.len(), 2);
+        assert_eq!(arr.arr.nrows(), 2);
+
+        // Check remaining ions
+        assert_eq!(arr.mz_order[0].0, "ION1");
+        assert_eq!(arr.mz_order[1].0, "ION3");
+
+        // Check values
+        assert_eq!(
+            arr.arr.values,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,]
+        );
+    }
+
+    #[test]
+    fn test_filter_rows_removes_expected_ions() {
+        // Create a 5-ion array
+        let order: Vec<(usize, f64)> =
+            vec![(0, 100.0), (1, 200.0), (2, 300.0), (3, 400.0), (4, 500.0)];
+        let mut arr: MzMajorIntensityArray<usize, f32> =
+            MzMajorIntensityArray::try_new_empty(order, 3, 0).unwrap();
+
+        // Set specific patterns: keep ions 0, 2, 4 (odd indices will be removed)
+        arr.arr.values = vec![
+            1.0, 0.0, 0.0, // ION 0: has signal
+            0.0, 0.0, 0.0, // ION 1: zero
+            2.0, 0.0, 0.0, // ION 2: has signal
+            0.0, 0.0, 0.0, // ION 3: zero
+            3.0, 0.0, 0.0, // ION 4: has signal
+        ];
+
+        let removed_keys: Vec<_> = arr.drain_non_matching(|chrom| chrom[0] > 0.0).collect();
+
+        assert_eq!(removed_keys.len(), 2);
+        assert_eq!(arr.num_ions(), 3);
+        assert_eq!(arr.mz_order, vec![(0, 100.0), (2, 300.0), (4, 500.0)]);
     }
 }

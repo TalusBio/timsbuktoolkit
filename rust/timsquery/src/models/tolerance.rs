@@ -12,11 +12,6 @@ use timscentroid::utils::{
     OptionallyRestricted,
     TupleRange,
 };
-use timsrust::converters::{
-    ConvertableDomain,
-    Scan2ImConverter,
-    Tof2MzConverter,
-};
 
 /// Tolerance settings for the search.
 ///
@@ -93,6 +88,43 @@ impl Default for Tolerance {
 }
 
 impl Tolerance {
+    // ============================================================================
+    // M/Z Tolerance Methods
+    // ============================================================================
+
+    /// Calculate m/z tolerance range (primary method, returns f64).
+    ///
+    /// This is the canonical m/z range method. All other m/z methods delegate to this.
+    ///
+    /// # Arguments
+    ///
+    /// * `mz` - Target m/z value in daltons
+    ///
+    /// # Returns
+    ///
+    /// A `TupleRange<f64>` representing `[mz - tolerance_low, mz + tolerance_high]`.
+    /// The range is always restricted (m/z must have bounds).
+    ///
+    /// # Tolerance Types
+    ///
+    /// - `MzTolerance::Absolute((low, high))`: Fixed dalton range
+    /// - `MzTolerance::Ppm((low, high))`: Parts-per-million range
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use timsquery::Tolerance;
+    ///
+    /// let tol = Tolerance::default();  // 20 ppm default
+    /// let range = tol.mz_range(500.0);
+    ///
+    /// // For 500 Da at 20 ppm: ±0.01 Da
+    /// assert!((range.start() - 499.99).abs() < 0.001);
+    /// assert!((range.end() - 500.01).abs() < 0.001);
+    ///
+    /// // Range is always bounded for m/z
+    /// assert!(range.start() < range.end());
+    /// ```
     pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
         match self.ms {
             MzTolerance::Absolute((low, high)) => (mz - low, mz + high).try_into().expect(
@@ -108,11 +140,26 @@ impl Tolerance {
         }
     }
 
+    /// Calculate m/z tolerance range (convenience method, returns f32).
+    ///
+    /// Same as [`mz_range`](Self::mz_range) but accepts and returns `f32`.
     pub fn mz_range_f32(&self, mz: f32) -> TupleRange<f32> {
         let tmp = self.mz_range(mz as f64);
         (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
     }
 
+    // ============================================================================
+    // Retention Time Tolerance Methods
+    // ============================================================================
+    //
+    // Note: RT methods return OptionallyRestricted because RT can be Unrestricted
+    // (match all retention times), unlike m/z which must always have bounds.
+
+    /// Calculate RT tolerance range in seconds as f16 (convenience method).
+    ///
+    /// Accepts RT in **seconds**, returns range in **seconds** as half-precision floats.
+    ///
+    /// Delegates to [`rt_range_minutes`](Self::rt_range_minutes) internally.
     pub fn rt_range_seconds_f16(&self, rt_seconds: f32) -> OptionallyRestricted<TupleRange<f16>> {
         let minutes = rt_seconds / 60.0;
         let tmp = self.rt_range_minutes(minutes);
@@ -132,6 +179,24 @@ impl Tolerance {
         }
     }
 
+    /// Calculate RT tolerance range in minutes (primary method, returns f32).
+    ///
+    /// This is the canonical RT range method. All other RT methods delegate to this.
+    ///
+    /// # Arguments
+    ///
+    /// * `rt_minutes` - Target retention time in **minutes**
+    ///
+    /// # Returns
+    ///
+    /// - `Restricted(range)` - RT tolerance window in minutes
+    /// - `Unrestricted` - No RT filtering (match all retention times)
+    ///
+    /// # Tolerance Types
+    ///
+    /// - `RtTolerance::Minutes((low, high))`: Fixed minute range
+    /// - `RtTolerance::Pct((low, high))`: Percentage of RT value
+    /// - `RtTolerance::Unrestricted`: No RT bounds
     pub fn rt_range_minutes(&self, rt_minutes: f32) -> OptionallyRestricted<TupleRange<f32>> {
         match self.rt {
             RtTolerance::Minutes((low, high)) => {
@@ -146,6 +211,12 @@ impl Tolerance {
         }
     }
 
+    /// Calculate RT tolerance range in milliseconds as u32 (convenience method).
+    ///
+    /// Accepts RT in **seconds**, returns range in **milliseconds** as unsigned integers.
+    /// Useful when working with frame/cycle indices that are stored as millisecond timestamps.
+    ///
+    /// **Unit conversions**: seconds → minutes → tolerance calc → seconds → milliseconds
     pub fn rt_range_as_milis(&self, rt_seconds: f32) -> OptionallyRestricted<TupleRange<u32>> {
         let minutes = rt_seconds / 60.0;
         let tmp = self.rt_range_minutes(minutes);
@@ -166,6 +237,31 @@ impl Tolerance {
         }
     }
 
+    // ============================================================================
+    // Ion Mobility Tolerance Methods
+    // ============================================================================
+    //
+    // Note: Mobility methods return OptionallyRestricted because mobility can be
+    // Unrestricted (match all mobilities).
+
+    /// Calculate ion mobility tolerance range (primary method, returns f32).
+    ///
+    /// This is the canonical mobility range method.
+    ///
+    /// # Arguments
+    ///
+    /// * `mobility` - Target ion mobility value (1/K0 in V*s/cm^2)
+    ///
+    /// # Returns
+    ///
+    /// - `Restricted(range)` - Mobility tolerance window
+    /// - `Unrestricted` - No mobility filtering
+    ///
+    /// # Tolerance Types
+    ///
+    /// - `MobilityTolerance::Absolute((low, high))`: Fixed mobility range
+    /// - `MobilityTolerance::Pct((low, high))`: Percentage of mobility value
+    /// - `MobilityTolerance::Unrestricted`: No mobility bounds
     pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f32>> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => {
@@ -180,6 +276,10 @@ impl Tolerance {
         }
     }
 
+    /// Calculate ion mobility tolerance range (convenience method, returns f16).
+    ///
+    /// Same as [`mobility_range`](Self::mobility_range) but returns half-precision floats.
+    /// Useful for memory-efficient storage of mobility ranges.
     pub fn mobility_range_f16(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f16>> {
         let tmp = self.mobility_range(mobility);
         match tmp {
@@ -192,11 +292,42 @@ impl Tolerance {
         }
     }
 
+    // ============================================================================
+    // Quadrupole Isolation Tolerance Methods
+    // ============================================================================
+    //
+    // Quadrupole methods expand precursor isolation windows by the quad tolerance.
+    // Always returns restricted ranges (quad isolation must have bounds).
+
+    /// Calculate quadrupole isolation range (convenience method, returns f32).
+    ///
+    /// Accepts precursor m/z range as `(f32, f32)`, delegates to [`quad_range`](Self::quad_range).
     pub fn quad_range_f32(&self, precursor_mz_range: (f32, f32)) -> TupleRange<f32> {
         let tmp = self.quad_range((precursor_mz_range.0 as f64, precursor_mz_range.1 as f64));
         (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
     }
 
+    /// Calculate quadrupole isolation range (primary method, returns f64).
+    ///
+    /// Expands the precursor m/z isolation window by the quad tolerance.
+    ///
+    /// # Arguments
+    ///
+    /// * `precursor_mz_range` - Tuple of `(min_mz, max_mz)` for precursor isolation window
+    ///
+    /// # Returns
+    ///
+    /// Expanded quadrupole range: `[(min - tol_low), (max + tol_high)]`
+    ///
+    /// # Tolerance Types
+    ///
+    /// - `QuadTolerance::Absolute((low, high))`: Fixed dalton expansion
+    ///
+    /// # Usage
+    ///
+    /// In dia PASEF, the quadrupole isolates a precursor m/z window.
+    /// This method expands that window by the tolerance to account for
+    /// quad isolation inaccuracy.
     pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> TupleRange<f64> {
         match self.quad {
             QuadTolerance::Absolute((low, high)) => {
@@ -214,41 +345,59 @@ impl Tolerance {
         }
     }
 
-    pub fn indexed_tof_range(&self, mz: f64, converter: &Tof2MzConverter) -> TupleRange<u32> {
-        let mz_rng = self.mz_range(mz);
-        (
-            converter.invert(mz_rng.start()) as u32,
-            converter.invert(mz_rng.end()) as u32,
-        )
-            .try_into()
-            .unwrap()
-    }
+    // ============================================================================
+    // Indexed Domain Conversion Methods
+    // ============================================================================
+    //
+    // These methods convert tolerance ranges from physical units (Da, 1/K0)
+    // to instrument-specific integer indices (TOF, scan number).
 
-    pub fn indexed_scan_range(
-        &self,
-        mobility: f64,
-        converter: &Scan2ImConverter,
-    ) -> OptionallyRestricted<TupleRange<u16>> {
-        match self.mobility_range(mobility as f32) {
-            Restricted(im_rng) => {
-                let im_rng = (im_rng.start() as f64, im_rng.end() as f64);
-                Restricted(
-                    (
-                        converter.invert(im_rng.0) as u16,
-                        converter.invert(im_rng.1) as u16,
-                    )
-                        .try_into()
-                        .unwrap(),
-                )
-            }
-            Unrestricted => Unrestricted,
-        }
-    }
+    // ============================================================================
+    // Builder Methods
+    // ============================================================================
 
+    /// Create a new `Tolerance` with modified RT tolerance (builder pattern).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use timsquery::Tolerance;
+    /// use timsquery::models::tolerance::RtTolerance;
+    /// use timscentroid::utils::OptionallyRestricted;
+    ///
+    /// let tol = Tolerance::default()
+    ///     .with_rt_tolerance(RtTolerance::Unrestricted);
+    ///
+    /// // Verify RT is now unrestricted
+    /// let rt_range = tol.rt_range_minutes(10.0);
+    /// assert!(matches!(rt_range, OptionallyRestricted::Unrestricted));
+    /// ```
     pub fn with_rt_tolerance(self, rt: RtTolerance) -> Self {
         Self { rt, ..self }
     }
 
+    /// Create a new `Tolerance` with modified mobility tolerance (builder pattern).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use timsquery::Tolerance;
+    /// use timsquery::models::tolerance::MobilityTolerance;
+    /// use timscentroid::utils::OptionallyRestricted;
+    ///
+    /// let tol = Tolerance::default()
+    ///     .with_mobility_tolerance(MobilityTolerance::Absolute((0.05, 0.05)));
+    ///
+    /// // Verify mobility tolerance is applied
+    /// let mob_range = tol.mobility_range(1.0);
+    /// match mob_range {
+    ///     OptionallyRestricted::Restricted(range) => {
+    ///         assert_eq!(range.start(), 0.95);
+    ///         assert_eq!(range.end(), 1.05);
+    ///     }
+    ///     OptionallyRestricted::Unrestricted => panic!("Expected restricted range"),
+    /// }
+    /// ```
     pub fn with_mobility_tolerance(self, tol: MobilityTolerance) -> Self {
         Self {
             mobility: tol,

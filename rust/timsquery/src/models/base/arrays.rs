@@ -255,6 +255,17 @@ impl<T: ArrayElement> Array2D<T> {
         for (i, j) in range_1.zip(range_2) {
             self.values.swap(i, j);
         }
+
+        // Maybe using swap_with_slice would be faster?
+        // My inclination is to believe that the compiler would optimize
+        // to the same code, but we can benchmark it later.
+        // let mut slice = [1, 2, 3, 4, 5];
+        // {
+        //     let (left, right) = slice.split_at_mut(2);
+        //     left.swap_with_slice(&mut right[1..]);
+        // }
+        // assert_eq!(slice, [4, 5, 3, 1, 2]);
+
         Ok(())
     }
 
@@ -304,6 +315,38 @@ impl<T: ArrayElement> Array2D<T> {
         self.values.resize(ncols * nrows, value);
         self.n_col = ncols;
         self.n_row = nrows;
+    }
+
+    /// Remove a row by rotating it to the end and truncating.
+    ///
+    /// This is an O(n) operation that maintains the order of remaining rows.
+    /// Uses slice rotation for better performance than multiple swaps.
+    /// Panics if the index is out of bounds.
+    pub fn drop_row(&mut self, idx: usize) {
+        assert!(
+            idx < self.n_row,
+            "Index {} out of bounds (nrows: {})",
+            idx,
+            self.n_row
+        );
+
+        // Calculate byte ranges for the rotation
+        let start_byte = idx * self.n_col;
+        let end_byte = self.n_row * self.n_col;
+
+        // Rotate the slice [idx..nrows) right by (nrows - idx - 1) rows
+        // This moves row[idx] to the end while maintaining order of other rows
+        // Example: [a, b, c, d, e] with idx=1 -> [a, c, d, e, b]
+        let num_rows_to_rotate = self.n_row - idx;
+        if num_rows_to_rotate > 1 {
+            let rotation_amount = (num_rows_to_rotate - 1) * self.n_col;
+            self.values[start_byte..end_byte].rotate_right(rotation_amount);
+        }
+
+        // Truncate the last row
+        let new_len = (self.n_row - 1) * self.n_col;
+        self.values.truncate(new_len);
+        self.n_row -= 1;
     }
 }
 
@@ -536,5 +579,106 @@ mod tests {
         if array.try_swap_rows(1, 2).is_ok() {
             panic!("Should not have succeeded")
         };
+    }
+
+    // ===== TDD Tests for drop_row() =====
+
+    #[test]
+    fn test_drop_row_removes_correct_row() {
+        // Create a 3x3 array with distinct values in each row
+        let mut array = Array2D::new(vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]).unwrap();
+
+        // Remove the middle row
+        array.drop_row(1);
+
+        // Check dimensions updated
+        assert_eq!(array.nrows(), 2);
+        assert_eq!(array.ncols(), 3);
+
+        // Check remaining rows are correct
+        assert_eq!(array.get_row(0), Some([1, 2, 3].as_ref()));
+        assert_eq!(array.get_row(1), Some([7, 8, 9].as_ref()));
+
+        // Check flat values
+        assert_eq!(array.values, vec![1, 2, 3, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_drop_row_maintains_order() {
+        // Create a 5x2 array
+        let mut array = Array2D::new(vec![
+            vec![10, 20],
+            vec![30, 40],
+            vec![50, 60],
+            vec![70, 80],
+            vec![90, 100],
+        ])
+        .unwrap();
+
+        // Remove row at index 2 (50, 60)
+        array.drop_row(2);
+
+        // Verify rows maintain their order
+        assert_eq!(array.nrows(), 4);
+        assert_eq!(array.get_row(0), Some([10, 20].as_ref()));
+        assert_eq!(array.get_row(1), Some([30, 40].as_ref()));
+        assert_eq!(array.get_row(2), Some([70, 80].as_ref())); // Was row 3
+        assert_eq!(array.get_row(3), Some([90, 100].as_ref())); // Was row 4
+    }
+
+    #[test]
+    fn test_drop_row_first() {
+        // Create a 3x2 array
+        let mut array = Array2D::new(vec![vec![1, 2], vec![3, 4], vec![5, 6]]).unwrap();
+
+        // Remove first row
+        array.drop_row(0);
+
+        // Check dimensions
+        assert_eq!(array.nrows(), 2);
+        assert_eq!(array.ncols(), 2);
+
+        // Check remaining rows
+        assert_eq!(array.get_row(0), Some([3, 4].as_ref()));
+        assert_eq!(array.get_row(1), Some([5, 6].as_ref()));
+        assert_eq!(array.values, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_drop_row_last() {
+        // Create a 3x2 array
+        let mut array = Array2D::new(vec![vec![1, 2], vec![3, 4], vec![5, 6]]).unwrap();
+
+        // Remove last row
+        array.drop_row(2);
+
+        // Check dimensions
+        assert_eq!(array.nrows(), 2);
+        assert_eq!(array.ncols(), 2);
+
+        // Check remaining rows
+        assert_eq!(array.get_row(0), Some([1, 2].as_ref()));
+        assert_eq!(array.get_row(1), Some([3, 4].as_ref()));
+        assert_eq!(array.values, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_drop_row_only() {
+        // Create a 1x3 array (single row)
+        let mut array = Array2D::new(vec![vec![10, 20, 30]]).unwrap();
+
+        assert_eq!(array.nrows(), 1);
+        assert_eq!(array.ncols(), 3);
+
+        // Remove the only row
+        array.drop_row(0);
+
+        // Check dimensions - should be 0 rows
+        assert_eq!(array.nrows(), 0);
+        assert_eq!(array.ncols(), 3); // cols unchanged
+        assert_eq!(array.values.len(), 0);
+
+        // get_row should return None for index 0
+        assert_eq!(array.get_row(0), None);
     }
 }

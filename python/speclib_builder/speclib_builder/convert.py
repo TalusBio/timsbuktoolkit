@@ -64,7 +64,7 @@ class DiannTransitionGroup:
                 ],
                 fragment_mzs={k: v.mz for k, v in self.ion_dict.items()},
                 fragment_intensities={k: v.intensity for k, v in self.ion_dict.items()},
-                precursor_intensities=iso_dist,
+                precursor_intensities={i: id for i, id in zip(iso_dist, [-1, 0, 1, 2])},
             ),
         )
 

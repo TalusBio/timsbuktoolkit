@@ -133,8 +133,8 @@ impl IntensityArrays {
     ) -> Result<Self, DataProcessingError> {
         // This is mainly used to pre-allocated the memory that will be used later by several.
         // runs.
-        let ms1_order: Arc<[(i8, f64)]> = (0..=num_ms1).map(|_o| (-1i8, 867.8309)).collect();
-        let ms2_order: Arc<[(IonAnnot, f64)]> = (0..=num_ms2)
+        let ms1_order: Vec<(i8, f64)> = (0..=num_ms1).map(|_o| (-1i8, 867.8309)).collect();
+        let ms2_order: Vec<(IonAnnot, f64)> = (0..=num_ms2)
             .map(|_o| (IonAnnot::try_new('p', None, 1, 0).unwrap(), 867.8309))
             .collect();
         let ms2_ref_vec: Vec<f32> = (0..=num_ms2).map(|_| 0.0).collect();
@@ -170,19 +170,23 @@ impl IntensityArrays {
             .try_reset_with(&intensity_arrays.fragments)?;
         self.ms2_mzmajor
             .try_reset_with(&intensity_arrays.fragments)?;
-        self.ms1_expected_intensities = expected_intensities.precursor_intensities.clone();
-        let ms2_ref_vec: Vec<_> = self
-            .ms2_mzmajor
-            .mz_order
-            .iter()
-            .map(|&(k, _)| {
+        self.ms1_expected_intensities.clear();
+        self.ms1_expected_intensities
+            .extend(self.ms1_mzmajor.mz_order.iter().map(|&(k, _)| {
+                *expected_intensities
+                    .precursor_intensities
+                    .get(&k)
+                    .expect("Failed to find expected intensity for precursor")
+            }));
+
+        self.ms2_expected_intensities.clear();
+        self.ms2_expected_intensities
+            .extend(self.ms2_mzmajor.mz_order.iter().map(|&(k, _)| {
                 *expected_intensities
                     .fragment_intensities
                     .get(&k)
                     .expect("Failed to find expected intensity for fragment")
-            })
-            .collect();
-        self.ms2_expected_intensities = ms2_ref_vec;
+            }));
         Ok(())
     }
 }
@@ -951,7 +955,7 @@ impl RelativeIntensities {
         agg.iter_precursors().for_each(|((k, _mz), v)| {
             // Note isotope keys < 0 mean 'decoy' isotopes
             let weight = v.weight();
-            if *k >= 0i8 && weight > 0.0 {
+            if k >= 0i8 && weight > 0.0 {
                 ms1.push((weight.ln_1p() - tot_l1p_ms1) as f32);
             }
         });

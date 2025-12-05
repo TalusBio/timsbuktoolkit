@@ -42,10 +42,10 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// perfect. Thus if the initial value passes if very far off the real
 /// mean, the final estimate will be off.
 ///
-/// Ref impl in javascript ...
-/// https://nestedsoftware.com/2018/03/27/calculating-standard-deviation-on-streaming-data-253l.23919.html
-/// https://nestedsoftware.com/2019/09/26/incremental-average-and-standard-deviation-with-sliding-window-470k.176143.html
-/// Read the blog ... its amazing.
+/// # References
+///
+/// - <https://nestedsoftware.com/2018/03/27/calculating-standard-deviation-on-streaming-data-253l.23919.html>
+/// - <https://nestedsoftware.com/2019/09/26/incremental-average-and-standard-deviation-with-sliding-window-470k.176143.html>
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunningStatsCalculator {
     weight: f64,

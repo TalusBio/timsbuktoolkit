@@ -1,5 +1,9 @@
 use eframe::egui;
-use egui_plot::{Bar, BarChart, Plot};
+use egui_plot::{
+    Bar,
+    BarChart,
+    Plot,
+};
 
 use crate::plot_renderer::MS2Spectrum;
 
@@ -11,6 +15,11 @@ impl SpectrumPanel {
         Self
     }
 
+    /// Renders the MS2 spectrum display panel.
+    ///
+    /// Reads: `spectrum` (optional MS2 spectrum data with m/z, intensities, labels)
+    /// Writes: None (read-only display)
+    /// Returns: None
     pub fn render(&self, ui: &mut egui::Ui, spectrum: Option<&MS2Spectrum>) {
         ui.heading("MS2 Spectrum");
 

@@ -1,6 +1,7 @@
 use calibrt::{
     Point,
     calibrate,
+    calibrate_with_ranges,
 };
 
 #[test]
@@ -14,7 +15,7 @@ fn test_calibrate_with_linear_data() {
         })
         .collect();
 
-    let result = calibrate(&points, (0.0, 99.0), (10.0, 109.0), 50);
+    let result = calibrate(&points, 50);
     assert!(result.is_ok());
 
     let curve = result.unwrap();
@@ -26,7 +27,7 @@ fn test_calibrate_with_linear_data() {
 fn test_calibrate_empty_points() {
     // Test: Empty input should return error
     let empty: Vec<Point> = vec![];
-    let result = calibrate(&empty, (0.0, 100.0), (0.0, 100.0), 50);
+    let result = calibrate(&empty, 50);
     assert!(result.is_err());
 }
 
@@ -38,7 +39,7 @@ fn test_calibrate_zero_x_range() {
         y: 60.0,
         weight: 1.0,
     }];
-    let result = calibrate(&points, (50.0, 50.0), (0.0, 100.0), 50);
+    let result = calibrate_with_ranges(&points, (50.0, 50.0), (0.0, 100.0), 50);
     assert!(result.is_err());
 }
 
@@ -50,7 +51,7 @@ fn test_calibrate_zero_y_range() {
         y: 60.0,
         weight: 1.0,
     }];
-    let result = calibrate(&points, (0.0, 100.0), (60.0, 60.0), 50);
+    let result = calibrate_with_ranges(&points, (0.0, 100.0), (60.0, 60.0), 50);
     assert!(result.is_err());
 }
 
@@ -65,7 +66,7 @@ fn test_predict_within_range() {
         })
         .collect();
 
-    let curve = calibrate(&points, (0.0, 49.0), (0.0, 98.0), 30).unwrap();
+    let curve = calibrate(&points, 30).unwrap();
     let result = curve.predict(25.0);
     assert!(result.is_ok());
 }
@@ -81,7 +82,7 @@ fn test_predict_outside_range() {
         })
         .collect();
 
-    let curve = calibrate(&points, (0.0, 49.0), (0.0, 49.0), 30).unwrap();
+    let curve = calibrate(&points, 30).unwrap();
     let result = curve.predict(100.0);
     assert!(result.is_err());
 }
@@ -94,7 +95,7 @@ fn test_calibrate_single_point() {
         y: 10.0,
         weight: 1.0,
     }];
-    let result = calibrate(&points, (0.0, 10.0), (0.0, 20.0), 10);
+    let result = calibrate(&points, 10);
     // Verify it doesn't panic
     let _ = result;
 }
@@ -122,6 +123,6 @@ fn test_calibrate_weighted_points() {
         });
     }
 
-    let result = calibrate(&points, (0.0, 20.0), (0.0, 40.0), 20);
+    let result = calibrate(&points, 20);
     assert!(result.is_ok());
 }

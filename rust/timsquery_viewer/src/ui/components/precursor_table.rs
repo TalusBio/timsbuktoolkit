@@ -1,11 +1,11 @@
 use eframe::egui;
 use timsquery::KeyLike;
-use timsquery::models::elution_group::ElutionGroup;
+use timsquery::models::elution_group::TimsElutionGroup;
 
 pub fn render_precursor_table_filtered<T: KeyLike>(
     ui: &mut egui::Ui,
     filtered_eg_idxs: &[usize],
-    reference_eg_slice: &[ElutionGroup<T>],
+    reference_eg_slice: &[TimsElutionGroup<T>],
     selected_index: &mut Option<usize>,
 ) {
     use egui_extras::{
@@ -49,7 +49,7 @@ pub fn render_precursor_table_filtered<T: KeyLike>(
 
                 row.col(|ui| {
                     if ui
-                        .selectable_label(is_selected, format!("{}", eg.id))
+                        .selectable_label(is_selected, format!("{}", eg.id()))
                         .clicked()
                     {
                         *selected_index = Some(original_idx);
@@ -57,27 +57,24 @@ pub fn render_precursor_table_filtered<T: KeyLike>(
                 });
 
                 row.col(|ui| {
-                    let text = format!("{:.2}", eg.rt_seconds);
+                    let text = format!("{:.2}", eg.rt_seconds());
                     ui.label(text);
                 });
 
                 row.col(|ui| {
-                    let text = format!("{:.4}", eg.mobility);
+                    let text = format!("{:.4}", eg.mobility_ook0());
                     ui.label(text);
                 });
 
                 row.col(|ui| {
-                    let display_text = format!(
-                        "{:.4} ({})",
-                        eg.precursors.first().unwrap().1,
-                        eg.precursors.len(),
-                    );
+                    let lims = eg.get_precursor_mz_limits();
+                    let display_text = format!("{:.4} - {:.4}", lims.0, lims.1);
 
                     ui.label(display_text);
                 });
 
                 row.col(|ui| {
-                    let text = format!("{}", eg.fragments.len());
+                    let text = format!("{}", eg.fragment_count());
                     ui.label(text);
                 });
             });

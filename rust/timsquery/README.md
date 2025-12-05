@@ -1,43 +1,36 @@
 
 # Timsquery
 
-## Where are we in the life cycle?
+A library for querying and aggregating timsTOF mass spectrometry data with flexible tolerances.
 
-- The library is in a very early stage of development.
-    - I cannot assure stability or bug-freeness.
-    - We are still deciding what the API should be and what the scope of the project overall is.
+## Status
 
-1. Push to main.
-2. Branched but fast moving <- **We are here**
-3. Stable api but features might be dropped without notice.
-4. Stable api and deprecations on changes.
+Early development - API is fast-moving and may change without notice.
 
-## What is this?
+## Overview
 
-Timsquery is a library that allows querying TIMS data in a generic way.
-Basically, pick a way in which you want your data to be aggregated, pick how you want to query it and pick
-your file, and you get back results that match those three things!
+Timsquery provides modular components for querying indexed timsTOF peak data:
 
-For a command-line interface to use this library, see the `timsquery_cli` crate.
+- **Aggregators**: Different ways to collect and aggregate peaks
+  - `ChromatogramCollector` - retention time profiles
+  - `SpectralCollector` - m/z spectra
+  - `MzMobilityStatsCollector` - statistical aggregations over m/z and ion mobility
+  - `PointIntensityAggregator` - raw peak intensities
 
-More explicitly:
-- The main design is to have modular components:
-    - aggregators
-    - indices
-    - queries
-    - tolerances
+- **Tolerances**: Configure m/z, retention time, ion mobility, and quadrupole isolation tolerances via the `Tolerance` struct
 
-Thus, depending on the access pattern and purpose, the data can be queried in
-different ways and aggregated in different ways (if you need random
-access, use the index that works for that, if you need bulk
-sequential, use that).
+- **Query traits**: `QueriableData` and `GenerallyQueriable` traits allow flexible querying of `IndexedTimstofPeaks` (from `timscentroid` crate)
 
-## What does the cli look like right now?
+- **Elution groups**: Group related precursor queries for efficient batch processing
 
+## Usage
 
-##  TODO:
+Peak indexing and centroiding is handled by the `timscentroid` crate. This crate focuses on querying already-indexed data with different aggregation strategies.
 
-- Add logging levels to instrumentations.
-- Add missing_docks_in_private_items to clippy.
-- Implement predicate pushdown on the setup of indices.
-- Implement predicate pushdown on query execution for raw index.
+For a command-line interface, see the `timsquery_cli` crate.
+
+## Dependencies
+
+- `timscentroid` - peak detection and indexing
+- `micromzpaf` - ion annotation utilities
+- `timsrust` - raw timsTOF file reading

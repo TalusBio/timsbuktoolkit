@@ -5,7 +5,7 @@ use crate::app::{
     DataState,
 };
 use crate::chromatogram_processor::SmoothingMethod;
-use crate::tolerance_editor;
+use crate::ui::tolerance_editor;
 
 /// Panel for data loading and settings on the left side
 pub struct LeftPanel;
@@ -15,8 +15,11 @@ impl LeftPanel {
         Self
     }
 
-    /// Render tolerance editor section
-    /// Returns commands if settings changed
+    /// Renders tolerance editor section.
+    ///
+    /// Reads: `data.tolerance` (all tolerance settings)
+    /// Writes: `data.tolerance` (modifies in-place via UI)
+    /// Returns: Commands to trigger chromatogram regeneration if changed
     pub fn render_tolerance_editor(
         &self,
         ui: &mut egui::Ui,
@@ -34,13 +37,12 @@ impl LeftPanel {
         commands
     }
 
-    /// Render smoothing section
-    /// Returns commands if settings changed
-    pub fn render_smoothing(
-        &self,
-        ui: &mut egui::Ui,
-        data: &mut DataState,
-    ) -> Vec<AppCommand> {
+    /// Renders smoothing configuration section.
+    ///
+    /// Reads: `data.smoothing` (current smoothing method and parameters)
+    /// Writes: `data.smoothing` (method, window, polynomial, sigma as modified)
+    /// Returns: Commands to trigger chromatogram regeneration if changed
+    pub fn render_smoothing(&self, ui: &mut egui::Ui, data: &mut DataState) -> Vec<AppCommand> {
         let mut commands = Vec::new();
         ui.heading("Smoothing");
 
@@ -70,14 +72,11 @@ impl LeftPanel {
                     .selectable_value(&mut selected, 1, "Savitzky-Golay")
                     .clicked()
                 {
-                    data.smoothing = SmoothingMethod::SavitzkyGolay {
-                        window: 5,
-                        polynomial: 2,
-                    };
+                    data.smoothing = SmoothingMethod::default_savitzky_golay();
                     changed = true;
                 }
                 if ui.selectable_value(&mut selected, 2, "Gaussian").clicked() {
-                    data.smoothing = SmoothingMethod::Gaussian { sigma: 2.0 };
+                    data.smoothing = SmoothingMethod::default_gaussian();
                     changed = true;
                 }
             });
