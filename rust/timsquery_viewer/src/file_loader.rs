@@ -11,7 +11,10 @@ use timsquery::serde::load_index_caching;
 use timsquery::tinyvec::TinyVec;
 use timsrust::MSLevel;
 
-use tracing::warn;
+use tracing::{
+    info,
+    warn,
+};
 
 use crate::error::ViewerError;
 
@@ -106,17 +109,21 @@ impl FileLoader {
     /// Load elution groups from a JSON file
     pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
         let file_content = std::fs::read_to_string(path)?;
+        info!("Read file content from {}", path.display());
 
+        info!("Attempting to parse elution group inputs with mzpaf labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
             let out: Result<Vec<TimsElutionGroup<IonAnnot>>, ViewerError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupData::MzpafLabels(out?));
         }
 
+        info!("Attempting to parse elution groups with mzpaf labels directly");
         if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(&file_content) {
             return Ok(ElutionGroupData::MzpafLabels(egs));
         }
 
+        info!("Falling back to parsing elution groups with string labels");
         let egs_string: Vec<TimsElutionGroup<String>> = serde_json::from_str(&file_content)?;
         warn!(
             "Elution groups contained fragment labels as strings that are not interpretable as mzpaf, this can cause performance degradation."

@@ -287,11 +287,12 @@ where
             last_progress = Instant::now();
         }
 
-        let mut container = AggregatorContainer::new(chunk.to_vec(), aggregator_use, rts.clone())?;
+        let mut container =
+            AggregatorContainer::new(chunk.to_vec(), aggregator_use, rts.clone(), tolerance)?;
 
         container.add_query(index, tolerance);
 
-        container.serialize_to_seq(&mut seq)?;
+        container.serialize_to_seq(&mut seq, &rts)?;
     }
 
     seq.end().unwrap();

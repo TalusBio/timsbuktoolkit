@@ -50,6 +50,7 @@ use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
     MzMobilityStatsCollector,
+    OptionallyRestricted,
     SpectralCollector,
     Tolerance,
 };
@@ -209,17 +210,49 @@ pub struct Scorer<I: ScorerQueriable> {
     pub fragmented_range: TupleRange<f64>,
 }
 
+enum SkippingReason {
+    RetentionTimeOutOfBounds,
+}
+
 impl<I: ScorerQueriable> Scorer<I> {
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn _build_prescore(&self, item: &QueryItemToScore) -> PreScore {
+    fn _build_prescore(&self, item: &QueryItemToScore) -> Result<PreScore, SkippingReason> {
         let span = tracing::span!(tracing::Level::TRACE, "build_prescore::new_collector").entered();
         // TODO: pass the collector as a buffer!!!
         // Note: This is surprisingly cheap to do compared to adding the query.
-        let mut agg =
-            ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+        let max_range = TupleRange::try_new(
+            *self.index_cycle_rt_ms.first().unwrap(),
+            *self.index_cycle_rt_ms.last().unwrap(),
+        )
+        .expect("Reference RTs should be sorted and valid");
+        let rt_range = match self.tolerance.rt_range_as_milis(item.query.rt_seconds()) {
+            OptionallyRestricted::Unrestricted => max_range,
+            OptionallyRestricted::Restricted(r) => r,
+        };
+
+        if !max_range.intersects(rt_range) {
+            return Err(SkippingReason::RetentionTimeOutOfBounds);
+        }
+
+        let mut agg = match ChromatogramCollector::new(
+            item.query.clone(),
+            rt_range,
+            &self.index_cycle_rt_ms,
+        ) {
+            Ok(collector) => collector,
+            Err(e) => {
+                let tol_range = self.tolerance.rt_range_as_milis(item.query.rt_seconds());
+                // This is a panic to make debugging easier. In theory we have already checked
+                // that we have valid RT ranges and we should not have elution groups without ions.
+                panic!(
+                    "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
+                    item.query, e, tol_range,
+                )
+            }
+        };
         span.exit();
 
         self.index.add_query(&mut agg, &self.tolerance);
@@ -228,12 +261,12 @@ impl<I: ScorerQueriable> Scorer<I> {
         let mut expected_intensities = item.expected_intensity.clone();
         filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
 
-        PreScore {
+        Ok(PreScore {
             charge: item.charge,
             digest: item.digest.clone(),
             expected_intensities,
             query_values: agg,
-        }
+        })
     }
 
     /// Calculates the weighted mean ion mobility across fragments and precursors.
@@ -416,6 +449,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         let prescore = self._build_prescore(&item);
         timings.prescore += st.elapsed();
 
+        let prescore = match prescore {
+            Ok(p) => p,
+            Err(SkippingReason::RetentionTimeOutOfBounds) => {
+                // TODO: return counters for skipped queries
+                return None;
+            }
+        };
+
         if prescore
             .expected_intensities
             .fragment_intensities
@@ -476,8 +517,17 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
+        let rt_range = match self.tolerance.rt_range_as_milis(item.query.rt_seconds()) {
+            OptionallyRestricted::Unrestricted => TupleRange::try_new(
+                *self.index_cycle_rt_ms.first().unwrap(),
+                *self.index_cycle_rt_ms.last().unwrap(),
+            )
+            .expect("Reference RTs should be sorted and valid"),
+            OptionallyRestricted::Restricted(r) => r,
+        };
         let mut chromatogram_collector =
-            ChromatogramCollector::new(item.query.clone(), self.index_cycle_rt_ms.clone()).unwrap();
+            ChromatogramCollector::new(item.query.clone(), rt_range, &self.index_cycle_rt_ms)
+                .unwrap();
         self.index
             .add_query(&mut chromatogram_collector, &self.tolerance);
         let pre_score = PreScore {

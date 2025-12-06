@@ -19,7 +19,11 @@ use timsquery::models::aggregators::{
 };
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
-use tracing::warn;
+use timsquery::serde::ChromatogramOutput;
+use tracing::{
+    error,
+    warn,
+};
 
 /// Represents a user-friendly format for specifying elution groups in an input file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,120 +74,6 @@ pub struct SpectrumOutput {
     fragment_intensities: Vec<f32>,
 }
 
-/// Represents the output format for an aggregated chromatogram.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChromatogramOutput {
-    id: u64,
-    mobility_ook0: f32,
-    rt_seconds: f32,
-    precursor_mzs: Vec<f64>,
-    fragment_mzs: Vec<f64>,
-    precursor_intensities: Vec<Vec<f32>>,
-    fragment_intensities: Vec<Vec<f32>>,
-    retention_time_results_seconds: Vec<f32>,
-}
-
-impl TryFrom<ChromatogramCollector<u8, f32>> for ChromatogramOutput {
-    type Error = CliError;
-
-    fn try_from(
-        mut value: ChromatogramCollector<u8, f32>,
-    ) -> Result<ChromatogramOutput, Self::Error> {
-        let mut non_zero_min_idx = value.ref_rt_ms.len();
-        let mut non_zero_max_idx = 0;
-
-        value.iter_mut_precursors().for_each(|((_idx, _mz), cmg)| {
-            let slc = cmg.as_slice();
-            for (i, &inten) in slc.iter().enumerate() {
-                if inten > 0.0 {
-                    let abs_idx = i;
-                    if abs_idx < non_zero_min_idx {
-                        non_zero_min_idx = abs_idx;
-                    }
-                    if abs_idx > non_zero_max_idx {
-                        non_zero_max_idx = abs_idx;
-                    }
-                }
-            }
-        });
-
-        value.iter_mut_fragments().for_each(|((_idx, _mz), cmg)| {
-            let slc = cmg.as_slice();
-            for (i, &inten) in slc.iter().enumerate() {
-                if inten > 0.0 {
-                    let abs_idx = i;
-                    if abs_idx < non_zero_min_idx {
-                        non_zero_min_idx = abs_idx;
-                    }
-                    if abs_idx > non_zero_max_idx {
-                        non_zero_max_idx = abs_idx;
-                    }
-                }
-            }
-        });
-
-        if non_zero_min_idx > non_zero_max_idx {
-            return Err(CliError::EmptyChromatogram(value.eg.id()));
-        }
-
-        let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = value
-            .iter_mut_precursors()
-            .filter_map(|(&(idx, mz), cmg)| {
-                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
-                    Some(slc) => slc.to_vec(),
-                    None => {
-                        return Some(Err(CliError::NonRecoverableError(format!(
-                            "Failed to get slice for precursor mz {} in chromatogram id {}",
-                            mz, idx,
-                        ))));
-                    }
-                };
-                if out_vec.iter().all(|&x| x == 0.0) {
-                    return None;
-                }
-                Some(Ok((mz, out_vec)))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-
-        let (fragment_mzs, fragment_intensities): (Vec<f64>, Vec<Vec<f32>>) = value
-            .iter_mut_fragments()
-            .filter_map(|(&(idx, mz), cmg)| {
-                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
-                    Some(slc) => slc.to_vec(),
-                    None => {
-                        return Some(Err(CliError::NonRecoverableError(format!(
-                            "Failed to get slice for fragment mz {} in chromatogram id {}",
-                            mz, idx,
-                        ))));
-                    }
-                };
-                if out_vec.iter().all(|&x| x == 0.0) {
-                    return None;
-                }
-                Some(Ok((mz, out_vec)))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-
-        Ok(ChromatogramOutput {
-            id: value.eg.id(),
-            mobility_ook0: value.eg.mobility_ook0(),
-            rt_seconds: value.eg.rt_seconds(),
-            precursor_mzs,
-            fragment_mzs,
-            precursor_intensities,
-            fragment_intensities,
-            retention_time_results_seconds: value.ref_rt_ms[non_zero_min_idx..=non_zero_max_idx]
-                .iter()
-                .map(|&x| x as f32 / 1000.0)
-                .collect(),
-        })
-    }
-}
-
 impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
     fn from(agg: &SpectralCollector<u8, f32>) -> Self {
         let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<f32>) = agg
@@ -218,6 +108,7 @@ impl AggregatorContainer {
         queries: Vec<TimsElutionGroup<u8>>,
         aggregator: PossibleAggregator,
         ref_rts: Arc<[u32]>,
+        tolerance: &Tolerance,
     ) -> Result<Self, CliError> {
         Ok(match aggregator {
             PossibleAggregator::PointIntensityAggregator => AggregatorContainer::Point(
@@ -230,7 +121,17 @@ impl AggregatorContainer {
                 let collectors = queries
                     .into_iter()
                     .map(|x| {
-                        ChromatogramCollector::new(x, ref_rts.clone())
+                        let rt_range = match tolerance.rt_range_as_milis(x.rt_seconds()) {
+                            timsquery::OptionallyRestricted::Unrestricted => {
+                                timsquery::TupleRange::try_new(
+                                    *ref_rts.first().unwrap(),
+                                    *ref_rts.last().unwrap(),
+                                )
+                                .expect("Reference RTs should be sorted and valid")
+                            }
+                            timsquery::OptionallyRestricted::Restricted(r) => r,
+                        };
+                        ChromatogramCollector::new(x, rt_range, &ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -256,7 +157,7 @@ impl AggregatorContainer {
         }
     }
 
-    pub fn serialize_to_seq<S>(&mut self, seq: &mut S) -> Result<(), CliError>
+    pub fn serialize_to_seq<S>(&mut self, seq: &mut S, ref_rts: &[u32]) -> Result<(), CliError>
     where
         S: SerializeSeq,
     {
@@ -271,16 +172,32 @@ impl AggregatorContainer {
                     .par_drain(..)
                     .filter_map(|agg| {
                         let agg_id = agg.eg.id();
-                        match ChromatogramOutput::try_from(agg) {
+                        match ChromatogramOutput::try_new(agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
-                                if !matches!(e, CliError::EmptyChromatogram(_)) {
-                                    warn!(
-                                        "Skipping chromatogram for elution group id {}: {}",
-                                        agg_id, e
-                                    );
+                                // if !matches!(e, CliError::EmptyChromatogram(_)) {
+                                //     warn!(
+                                //         "Skipping chromatogram for elution group id {}: {}",
+                                //         agg_id, e
+                                //     );
+                                // }
+                                // None
+                                match e {
+                                    timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
+                                        warn!(
+                                            "Skipping chromatogram for elution group id {}: {:?}",
+                                            agg_id, e
+                                        );
+                                        None
+                                    }
+                                    _ => {
+                                        error!(
+                                            "Error generating chromatogram for elution group id {}: {:?}",
+                                            agg_id, e
+                                        );
+                                        panic!("Terminating due to unexpected error");
+                                    }
                                 }
-                                None
                             }
                         }
                     })

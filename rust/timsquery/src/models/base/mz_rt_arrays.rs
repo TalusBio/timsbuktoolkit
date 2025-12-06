@@ -224,6 +224,10 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         self.mz_order.len()
     }
 
+    pub fn num_cycles(&self) -> usize {
+        self.arr.ncols()
+    }
+
     pub fn drop_row_idx(&mut self, idx: usize) -> Result<(K, f64), DataProcessingError> {
         if idx >= self.mz_order.len() {
             return Err(DataProcessingError::IndexOutOfBoundsError(idx));

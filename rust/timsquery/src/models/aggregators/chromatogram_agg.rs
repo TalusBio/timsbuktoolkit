@@ -11,7 +11,6 @@ use crate::{
     TimsElutionGroup,
     ValueLike,
 };
-use std::sync::Arc;
 use timscentroid::utils::TupleRange;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,31 +18,42 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub eg: TimsElutionGroup<T>,
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
-    pub ref_rt_ms: Arc<[u32]>, // TODO: replace with TupleRange?
+    pub rt_range_ms: TupleRange<u32>,
 }
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
         eg: TimsElutionGroup<T>,
-        ref_rt_ms: Arc<[u32]>,
+        rt_range_ms: TupleRange<u32>,
+        ref_rt_ms: &[u32],
     ) -> Result<Self, DataProcessingError> {
-        let precursors = MzMajorIntensityArray::try_new_empty(
-            eg.iter_precursors().collect(),
-            ref_rt_ms.len(),
-            0,
-        )?;
-        let fragments = MzMajorIntensityArray::try_new_empty(
-            eg.iter_fragments_refs()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            ref_rt_ms.len(),
-            0,
-        )?;
+        // We binary search the start and end rt to calculate the length
+        // and the offset of the reference rt array
+        let start = ref_rt_ms.partition_point(|&rt| rt < rt_range_ms.start());
+        let end = ref_rt_ms.partition_point(|&rt| rt <= rt_range_ms.end());
+        let length = end - start;
+
+        let precursor_order: Vec<_> = eg.iter_precursors().collect();
+        let fragment_order: Vec<_> = eg
+            .iter_fragments_refs()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        if precursor_order.is_empty() && fragment_order.is_empty() {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+        if length == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+
+        let precursors = MzMajorIntensityArray::try_new_empty(precursor_order, length, start)
+            .expect("Already checked non-empty");
+        let fragments = MzMajorIntensityArray::try_new_empty(fragment_order, length, start)?;
         Ok(Self {
             eg,
             precursors,
             fragments,
-            ref_rt_ms,
+            rt_range_ms,
         })
     }
 
@@ -58,9 +68,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     }
 
     pub fn rt_range_milis(&self) -> TupleRange<u32> {
-        let min = self.ref_rt_ms.first().unwrap();
-        let max = self.ref_rt_ms.last().unwrap();
-        (*min, *max).try_into().expect("rt range should be sorted")
+        self.rt_range_ms
     }
 
     /// Filter ions using a predicate closure.
@@ -100,6 +108,23 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn is_empty(&self) -> bool {
         self.fragments.num_ions() == 0
     }
+
+    pub fn num_cycles(&self) -> usize {
+        assert_eq!(
+            self.precursors.num_cycles(),
+            self.fragments.num_cycles(),
+            "Precursors and fragments must have the same number of cycles"
+        );
+        self.precursors.num_cycles()
+    }
+
+    pub fn cycle_offset(&self) -> usize {
+        assert_eq!(
+            self.precursors.cycle_offset, self.fragments.cycle_offset,
+            "Precursors and fragments must have the same cycle offset"
+        );
+        self.precursors.cycle_offset
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +146,12 @@ mod tests {
             .expect("I passed valid vec lengths!");
 
         let rt_ms: Arc<[u32]> = vec![10, 20].into();
-        let mut collector = ChromatogramCollector::<usize, f32>::new(eg, rt_ms).unwrap();
+        let mut collector = ChromatogramCollector::<usize, f32>::new(
+            eg,
+            TupleRange::try_new(9, 20).unwrap(),
+            &rt_ms,
+        )
+        .unwrap();
 
         // Set different intensities
         collector

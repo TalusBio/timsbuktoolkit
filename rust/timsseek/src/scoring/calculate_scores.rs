@@ -189,6 +189,14 @@ impl IntensityArrays {
             }));
         Ok(())
     }
+
+    pub fn cycle_offset(&self) -> usize {
+        let out = self.ms1_rtmajor.cycle_offset;
+        assert_eq!(out, self.ms2_rtmajor.cycle_offset);
+        assert_eq!(out, self.ms1_mzmajor.cycle_offset);
+        assert_eq!(out, self.ms2_mzmajor.cycle_offset);
+        out
+    }
 }
 
 /// Applies a 1D Gaussian blur in-place with a fixed kernel [0.5, 1.0, 0.5].
@@ -785,7 +793,10 @@ impl PeptideScorer {
         let delta_second_next = max_val - second_next.0;
 
         let (ms1_loc, ms2_loc) = (max_loc, max_loc);
-        let ref_time_ms = prescore.query_values.ref_rt_ms[max_loc];
+
+        let global_loc = max_loc + self.intensity_arrays.cycle_offset();
+        let ref_time_ms = self.intensity_arrays.ref_time_ms[global_loc];
+        // let ref_time_ms = prescore.query_values.ref_rt_ms[max_loc];
 
         let summed_ms1_int: f32 = match self.intensity_arrays.ms1_rtmajor.arr.get_row(ms1_loc) {
             Some(row) => row.iter().sum(),

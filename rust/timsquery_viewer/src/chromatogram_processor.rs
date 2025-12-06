@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::models::aggregators::ChromatogramCollector;
+pub use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::{
@@ -10,6 +10,7 @@ use timsquery::{
 
 use crate::error::ViewerError;
 use crate::plot_renderer::MS2Spectrum;
+pub use timsquery::serde::ChromatogramOutput;
 use tracing::instrument;
 
 /// Smoothing method configuration
@@ -161,150 +162,26 @@ fn gaussian_smooth(data: &[f32], sigma: f32) -> Vec<f32> {
     smoothed
 }
 
-/// Represents the output format for an aggregated chromatogram
-/// It is pretty ugly performance-wise but I am keeping it as is because
-/// we are meant to have only one for the whole runtime of the viewer.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChromatogramOutput {
-    pub id: u64,
-    pub mobility_ook0: f32,
-    pub rt_seconds: f32,
-    pub precursor_mzs: Vec<f64>,
-    pub fragment_mzs: Vec<f64>,
-    pub precursor_intensities: Vec<Vec<f32>>,
-    pub fragment_intensities: Vec<Vec<f32>>,
-    pub fragment_labels: Vec<String>,
-    pub retention_time_results_seconds: Vec<f32>,
-}
-
-impl<T: KeyLike + std::fmt::Display> TryFrom<ChromatogramCollector<T, f32>> for ChromatogramOutput {
-    type Error = ViewerError;
-
-    fn try_from(
-        mut value: ChromatogramCollector<T, f32>,
-    ) -> Result<ChromatogramOutput, Self::Error> {
-        let mut non_zero_min_idx = value.ref_rt_ms.len();
-        let mut non_zero_max_idx = 0usize;
-
-        value.iter_mut_precursors().for_each(|((_idx, _mz), cmg)| {
-            let slc = cmg.as_slice();
-            for (i, &inten) in slc.iter().enumerate() {
-                if inten > 0.0 {
-                    let abs_idx = i;
-                    if abs_idx < non_zero_min_idx {
-                        non_zero_min_idx = abs_idx;
-                    }
-                    if abs_idx > non_zero_max_idx {
-                        non_zero_max_idx = abs_idx;
-                    }
-                }
-            }
-        });
-
-        value.iter_mut_fragments().for_each(|((_idx, _mz), cmg)| {
-            let slc = cmg.as_slice();
-            for (i, &inten) in slc.iter().enumerate() {
-                if inten > 0.0 {
-                    let abs_idx = i;
-                    if abs_idx < non_zero_min_idx {
-                        non_zero_min_idx = abs_idx;
-                    }
-                    if abs_idx > non_zero_max_idx {
-                        non_zero_max_idx = abs_idx;
-                    }
-                }
-            }
-        });
-
-        if non_zero_min_idx > non_zero_max_idx {
-            return Err(ViewerError::General(format!(
-                "Empty chromatogram for elution group id {}",
-                value.eg.id()
-            )));
-        }
-
-        let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = value
-            .iter_mut_precursors()
-            .filter_map(|(&(idx, mz), cmg)| {
-                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
-                    Some(slc) => slc.to_vec(),
-                    None => {
-                        return Some(Err(ViewerError::General(format!(
-                            "Failed to get slice for precursor mz {} in chromatogram id {}",
-                            mz, idx,
-                        ))));
-                    }
-                };
-                if out_vec.iter().all(|&x| x == 0.0) {
-                    return None;
-                }
-                Some(Ok((mz, out_vec)))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-
-        let ((fragment_mzs, fragment_intensities), fragment_labels): (
-            (Vec<f64>, Vec<Vec<f32>>),
-            Vec<String>,
-        ) = value
-            .iter_mut_fragments()
-            .filter_map(|(&(ref idx, mz), cmg)| {
-                let out_vec = match cmg.try_get_slice(non_zero_min_idx, non_zero_max_idx + 1) {
-                    Some(slc) => slc.to_vec(),
-                    None => {
-                        return Some(Err(ViewerError::General(format!(
-                            "Failed to get slice for fragment mz {} in chromatogram id {:#?}",
-                            mz,
-                            idx.clone(),
-                        ))));
-                    }
-                };
-                if out_vec.iter().all(|&x| x == 0.0) {
-                    return None;
-                }
-                Some(Ok(((mz, out_vec), format!("{}", idx))))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-
-        Ok(ChromatogramOutput {
-            id: value.eg.id(),
-            mobility_ook0: value.eg.mobility_ook0(),
-            rt_seconds: value.eg.rt_seconds(),
-            precursor_mzs,
-            fragment_mzs,
-            precursor_intensities,
-            fragment_intensities,
-            fragment_labels,
-            retention_time_results_seconds: value.ref_rt_ms[non_zero_min_idx..=non_zero_max_idx]
-                .iter()
-                .map(|&x| x as f32 / 1000.0)
-                .collect(),
-        })
+/// Apply smoothing to all intensity traces in the chromatogram
+pub fn apply_smoothing_chromatogram(
+    chromatogram: &mut ChromatogramOutput,
+    method: &SmoothingMethod,
+) {
+    if matches!(method, SmoothingMethod::None) {
+        return;
     }
-}
 
-impl ChromatogramOutput {
-    /// Apply smoothing to all intensity traces in the chromatogram
-    pub fn apply_smoothing(&mut self, method: &SmoothingMethod) {
-        if matches!(method, SmoothingMethod::None) {
-            return;
+    // Smooth precursor intensities
+    for intensities in chromatogram.precursor_intensities.iter_mut() {
+        if let Some(smoothed) = apply_smoothing(intensities, method) {
+            *intensities = smoothed;
         }
+    }
 
-        // Smooth precursor intensities
-        for intensities in self.precursor_intensities.iter_mut() {
-            if let Some(smoothed) = apply_smoothing(intensities, method) {
-                *intensities = smoothed;
-            }
-        }
-
-        // Smooth fragment intensities
-        for intensities in self.fragment_intensities.iter_mut() {
-            if let Some(smoothed) = apply_smoothing(intensities, method) {
-                *intensities = smoothed;
-            }
+    // Smooth fragment intensities
+    for intensities in chromatogram.fragment_intensities.iter_mut() {
+        if let Some(smoothed) = apply_smoothing(intensities, method) {
+            *intensities = smoothed;
         }
     }
 }
@@ -317,14 +194,29 @@ pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
     tolerance: &Tolerance,
     smoothing: &SmoothingMethod,
 ) -> Result<ChromatogramOutput, ViewerError> {
-    let mut collector = ChromatogramCollector::new(elution_group.clone(), ms1_rts)
+    let rt_range_ms = match tolerance.rt_range_as_milis(elution_group.rt_seconds()) {
+        timsquery::OptionallyRestricted::Unrestricted => {
+            timsquery::TupleRange::try_new(*ms1_rts.first().unwrap(), *ms1_rts.last().unwrap())
+                .expect("Reference RTs should be sorted and valid")
+        }
+        timsquery::OptionallyRestricted::Restricted(r) => r,
+    };
+    let mut collector = ChromatogramCollector::new(elution_group.clone(), rt_range_ms, &ms1_rts)
         .map_err(|e| ViewerError::General(format!("Failed to create collector: {:?}", e)))?;
 
     index.add_query(&mut collector, tolerance);
 
-    let mut output = ChromatogramOutput::try_from(collector)?;
+    let mut output = match ChromatogramOutput::try_new(collector, &ms1_rts) {
+        Ok(cmg) => cmg,
+        Err(e) => {
+            return Err(ViewerError::General(format!(
+                "Failed to generate chromatogram output: {:?}",
+                e
+            )));
+        }
+    };
 
-    output.apply_smoothing(smoothing);
+    apply_smoothing_chromatogram(&mut output, smoothing);
 
     Ok(output)
 }

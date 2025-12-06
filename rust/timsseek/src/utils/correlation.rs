@@ -136,7 +136,16 @@ impl CosineSimilarityCircularBuffer {
         let result = (self.dot_product / denom_sq.sqrt()) as f32;
 
         // Clamp to [0, 1] to handle minor floating-point errors
-        result.max(0.0).min(1.0)
+        if result > 2.0 {
+            // I am leaving this here because I am terrified of silent
+            // cases where numeric instability causes this to go wrong
+            // and really weird bugs down the road.
+            panic!(
+                "Cosine similarity computation messed up: dot_product={}, a_sum_sq={}, b_sum_sq={}",
+                self.dot_product, self.a_sum_sq, self.b_sum_sq
+            );
+        }
+        result.clamp(0.0, 1.0)
     }
 
     // This is too hot, cannot instrument for performance reasons
