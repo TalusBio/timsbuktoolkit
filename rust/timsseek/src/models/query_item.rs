@@ -21,7 +21,6 @@ pub struct ExpectedIntensities {
 pub struct QueryItemToScore {
     // Kinda hate this
     pub digest: DigestSlice,
-    pub charge: u8,
     pub query: TimsElutionGroup<IonAnnot>,
     pub expected_intensity: ExpectedIntensities,
 }
@@ -44,7 +43,7 @@ impl QueryItemToScore {
             )
             .fragment_mzs(vec![450.0, 650.5, 751.0, 751.5])
             .precursor_labels(tiny_vec!(-1, 0, 1, 2))
-            .precursor_mzs(vec![450.0, 450.5, 451.0, 451.5])
+            .precursor(450.5, 2)
             .try_build()
             .unwrap();
 
@@ -65,12 +64,10 @@ impl QueryItemToScore {
         };
         let pepseq = "PEPTIDEPINKPEPTIDE".into();
         let digest = DigestSlice::from_string(pepseq, false, 1);
-        let charge = 2;
         let query = eg;
         let expected_intensity = ei;
         QueryItemToScore {
             digest,
-            charge,
             query,
             expected_intensity,
         }

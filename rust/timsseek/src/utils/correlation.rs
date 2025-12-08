@@ -128,7 +128,7 @@ impl CosineSimilarityCircularBuffer {
 
     fn calculate_similarity(&mut self) -> f32 {
         let denom_sq = self.a_sum_sq * self.b_sum_sq;
-        if denom_sq == 0.0 {
+        if denom_sq <= 1e-4 {
             return 0.0;
         }
 

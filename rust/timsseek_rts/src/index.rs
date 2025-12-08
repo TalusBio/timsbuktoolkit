@@ -4,14 +4,17 @@ use timsquery::{
     IndexedTimstofPeaks,
     Tolerance,
 };
-use timsseek::Scorer;
 use timsseek::errors::Result;
 use timsseek::utils::tdf::get_ms1_frame_times_ms;
+use timsseek::{
+    ScoringPipeline,
+    ToleranceHierarchy,
+};
 
 pub fn new_index(
     dotd_file_location: std::path::PathBuf,
     tolerance: Tolerance,
-) -> Result<Scorer<IndexedTimstofPeaks>> {
+) -> Result<ScoringPipeline<IndexedTimstofPeaks>> {
     let st = Instant::now();
     // Can use centroided for faster queries ...
     //
@@ -28,13 +31,15 @@ pub fn new_index(
     let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
     let fragmented_range = index.fragmented_range();
 
-    Ok(Scorer {
+    Ok(ScoringPipeline {
         index_cycle_rt_ms: ref_time_ms,
         index,
-        tolerance: tolerance.clone(),
-        secondary_tolerance: tolerance.with_rt_tolerance(
-            timsquery::models::tolerance::RtTolerance::Minutes((0.1, 0.1)),
-        ),
+        tolerances: ToleranceHierarchy {
+            prescore: tolerance.clone(),
+            secondary: tolerance.with_rt_tolerance(
+                timsquery::models::tolerance::RtTolerance::Minutes((0.1, 0.1)),
+            ),
+        },
         fragmented_range,
     })
 }

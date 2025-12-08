@@ -130,6 +130,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tinyvec::tiny_vec;
 
     #[test]
@@ -138,7 +139,7 @@ mod tests {
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)
-            .precursor_mzs(vec![400.0])
+            .precursor(400.0, 1u8)
             .precursor_labels(tiny_vec!(0))
             .fragment_mzs(vec![600.0, 700.0, 800.0])
             .fragment_labels(tiny_vec!(0, 1, 2))

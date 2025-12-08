@@ -25,74 +25,42 @@ use tracing::{
     warn,
 };
 
-/// Represents a user-friendly format for specifying elution groups in an input file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ElutionGroupInput {
-    pub id: u64,
-    pub mobility: f32,
-    pub rt_seconds: f32,
-    pub precursors: Vec<f64>,
-    pub fragments: Vec<f64>,
-}
-
-impl From<ElutionGroupInput> for TimsElutionGroup<u8> {
-    fn from(val: ElutionGroupInput) -> Self {
-        let builder = TimsElutionGroup::builder()
-            .id(val.id)
-            .mobility_ook0(val.mobility)
-            .rt_seconds(val.rt_seconds)
-            .precursor_labels(
-                val.precursors
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| i as i8)
-                    .collect(),
-            )
-            .fragment_labels(
-                val.fragments
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| i as u8)
-                    .collect(),
-            )
-            .precursor_mzs(val.precursors)
-            .fragment_mzs(val.fragments);
-
-        builder.try_build().unwrap()
-    }
-}
-
 /// Represents the output format for an aggregated spectrum.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SpectrumOutput {
     id: u64,
     mobility_ook0: f32,
     rt_seconds: f32,
-    precursor_mzs: Vec<f64>,
+    precursor_mz: f64,
+    precursor_charge: i8,
     fragment_mzs: Vec<f64>,
-    precursor_intensities: Vec<f32>,
     fragment_intensities: Vec<f32>,
+    precursor_intensities: Vec<f32>,
+    precursor_labels: Vec<i8>,
 }
 
 impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
     fn from(agg: &SpectralCollector<u8, f32>) -> Self {
-        let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<f32>) = agg
-            .iter_precursors()
-            .map(|((_idx, mz), inten)| (mz, inten))
-            .unzip();
         let (fragment_mzs, fragment_intensities) = agg
             .iter_fragments()
             .map(|((_idx, mz), inten)| (mz, inten))
+            .unzip();
+
+        let (precursor_labels, precursor_intensities) = agg
+            .iter_precursors()
+            .map(|((idx, _mz), inten)| (idx, inten))
             .unzip();
 
         SpectrumOutput {
             id: agg.eg.id(),
             mobility_ook0: agg.eg.mobility_ook0(),
             rt_seconds: agg.eg.rt_seconds(),
-            precursor_mzs,
+            precursor_mz: agg.eg.precursor_mz(),
             fragment_mzs,
             precursor_intensities,
             fragment_intensities,
+            precursor_labels,
+            precursor_charge: agg.eg.precursor_charge() as i8,
         }
     }
 }

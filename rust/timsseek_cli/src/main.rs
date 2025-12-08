@@ -8,7 +8,10 @@ use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::serde::load_index_caching;
 use timsquery::utils::TupleRange;
-use timsseek::scoring::Scorer;
+use timsseek::scoring::{
+    ScoringPipeline,
+    ToleranceHierarchy,
+};
 use tracing::{
     error,
     info,
@@ -215,19 +218,26 @@ fn main() -> std::result::Result<(), errors::CliError> {
         //     //     .unwrap();
         // }
         Some(InputConfig::Speclib { path }) => {
-            let scorer = Scorer {
+            let pipeline = ScoringPipeline {
                 index_cycle_rt_ms,
                 index,
-                tolerance: config.analysis.tolerance.clone(),
-                secondary_tolerance: config
-                    .analysis
-                    .tolerance
-                    .clone()
-                    .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
+                tolerances: ToleranceHierarchy {
+                    prescore: config.analysis.tolerance.clone(),
+                    secondary: config
+                        .analysis
+                        .tolerance
+                        .clone()
+                        .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
+                },
                 fragmented_range,
             };
-            processing::process_speclib(path, &scorer, config.analysis.chunk_size, &output_config)
-                .unwrap();
+            processing::process_speclib(
+                path,
+                &pipeline,
+                config.analysis.chunk_size,
+                &output_config,
+            )
+            .unwrap();
         }
         None => {
             return Err(errors::CliError::Config {

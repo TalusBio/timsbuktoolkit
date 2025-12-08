@@ -88,7 +88,7 @@ impl SerSpeclibElement {
             },
             elution_group: ReferenceEG {
                 id: 32,
-                precursor_mzs: vec![512.2, 512.7],
+                precursor_mz: 512.2,
                 precursor_labels: vec![0, 2],
                 fragment_mzs: vec![312.2, 675.7],
                 fragment_labels: vec![
@@ -148,13 +148,12 @@ impl From<SerSpeclibElement> for QueryItemToScore {
                     .zip(ref_eg.precursor_intensities.iter().cloned())
                     .collect(),
             },
-            charge,
             query: TimsElutionGroup::builder()
                 .id(ref_eg.id as u64)
                 .mobility_ook0(ref_eg.mobility_ook0)
                 .rt_seconds(ref_eg.rt_seconds)
                 .precursor_labels(ref_eg.precursor_labels.as_slice().into())
-                .precursor_mzs(ref_eg.precursor_mzs)
+                .precursor(ref_eg.precursor_mz, charge)
                 .fragment_labels(ref_eg.fragment_labels.as_slice().into())
                 .fragment_mzs(ref_eg.fragment_mzs)
                 .try_build()
@@ -224,7 +223,7 @@ impl From<SerSpeclibElement> for QueryItemToScore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
     id: u32,
-    precursor_mzs: Vec<f64>,
+    precursor_mz: f64,
     precursor_labels: Vec<i8>,
     fragment_mzs: Vec<f64>,
     fragment_labels: Vec<IonAnnot>,

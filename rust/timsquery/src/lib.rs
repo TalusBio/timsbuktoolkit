@@ -57,6 +57,9 @@ pub mod ion {
     pub use micromzpaf::{
         IonAnnot,
         IonParsingError,
+        IonSeriesOrdinal,
         IonSeriesTerminality,
     };
 }
+
+pub use ion::IonAnnot;

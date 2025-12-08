@@ -24,7 +24,8 @@ pub use models::{
 };
 pub use scoring::{
     IonSearchResults,
-    Scorer,
+    ScoringPipeline,
+    ToleranceHierarchy,
 };
 pub use timsquery::ion::{
     IonAnnot,

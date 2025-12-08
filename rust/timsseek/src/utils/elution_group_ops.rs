@@ -1,8 +1,7 @@
 use timsquery::TimsElutionGroup;
+use timsquery::utils::constants::NEUTRON_MASS;
 
 use crate::IonAnnot;
-
-const NEUTRON_MASS: f64 = 1.00866491588;
 
 pub fn isotope_offset_fragments(
     item: &TimsElutionGroup<IonAnnot>,

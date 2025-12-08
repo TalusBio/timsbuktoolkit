@@ -16,7 +16,7 @@ use timsseek::rt_calibration::{
     recalibrate_speclib,
 };
 use timsseek::scoring::ScoreTimings;
-use timsseek::scoring::scorer::Scorer;
+use timsseek::scoring::scorer::ScoringPipeline;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
@@ -34,7 +34,7 @@ pub fn main_loop<I: ScorerQueriable>(
     // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
     // # I would like this to be streaming
     mut query_iterator: Speclib,
-    scorer: &Scorer<I>,
+    pipeline: &ScoringPipeline<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
 ) -> std::result::Result<ScoreTimings, TimsSeekError> {
@@ -68,8 +68,8 @@ pub fn main_loop<I: ScorerQueriable>(
         .progress_with_style(style)
         .for_each(|chunk| {
             nqueried += chunk.len();
-            // Parallelism happens here within the score_iter function
-            let (mut out, timings): (Vec<IonSearchResults>, ScoreTimings) = scorer.score_iter(chunk);
+            // Parallelism happens here within the process_batch function
+            let (mut out, timings): (Vec<IonSearchResults>, ScoreTimings) = pipeline.process_batch(chunk);
             all_timings += timings;
             nwritten += out.len();
             out.sort_unstable_by(|x, y| x.main_score.partial_cmp(&y.main_score).unwrap());
@@ -228,7 +228,7 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
 
 pub fn process_speclib(
     path: PathBuf,
-    scorer: &Scorer<IndexedTimstofPeaks>,
+    pipeline: &ScoringPipeline<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
 ) -> std::result::Result<(), TimsSeekError> {
@@ -244,7 +244,7 @@ pub fn process_speclib(
         elap_time,
         path.display()
     );
-    let timings = main_loop(speclib, scorer, chunk_size, output)?;
+    let timings = main_loop(speclib, pipeline, chunk_size, output)?;
     let perf_report =
         serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
             msg: format!("Error serializing performance report to JSON: {}", e),

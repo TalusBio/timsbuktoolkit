@@ -20,18 +20,18 @@ use timsseek::errors::{
     Result,
     TimsSeekError,
 };
-use timsseek::scoring::Scorer;
+use timsseek::scoring::ScoringPipeline;
 
 mod cli;
 mod index;
 
 struct DaemonServer {
-    index: Arc<Scorer<IndexedTimstofPeaks>>,
+    index: Arc<ScoringPipeline<IndexedTimstofPeaks>>,
     running: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonServer {
-    pub fn new(index: Scorer<IndexedTimstofPeaks>) -> std::io::Result<Self> {
+    pub fn new(index: ScoringPipeline<IndexedTimstofPeaks>) -> std::io::Result<Self> {
         Ok(Self {
             index: Arc::new(index),
             running: std::sync::atomic::AtomicBool::new(true),
@@ -69,7 +69,7 @@ impl DaemonServer {
 
 fn handle_connection(
     mut stream: TcpStream,
-    index: Arc<Scorer<IndexedTimstofPeaks>>,
+    index: Arc<ScoringPipeline<IndexedTimstofPeaks>>,
     _running: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -109,7 +109,7 @@ fn handle_connection(
         };
 
         let start = std::time::Instant::now();
-        let query_res = index.as_ref().score_full(query.into());
+        let query_res = index.as_ref().process_query_full(query.into());
         let elap_time = start.elapsed();
         println!("Querying took {:#?} for query", elap_time);
         let response = match query_res {
@@ -150,7 +150,7 @@ fn main() -> Result<()> {
     );
 
     let st = std::time::Instant::now();
-    match index.score_full(sample.into()) {
+    match index.process_query_full(sample.into()) {
         Ok(_q) => {
             println!("Query OK");
         }

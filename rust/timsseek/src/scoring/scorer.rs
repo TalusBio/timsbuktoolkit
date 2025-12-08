@@ -5,25 +5,25 @@
 //! The scoring pipeline processes thousands of peptide queries per second. To achieve this
 //! throughput, it's critical to minimize allocations in the hot path.
 //!
-//! ## Why `buffered_score()` Exists
+//! ## Why `process_query()` Exists
 //!
 //! Each scoring operation requires several buffers:
-//! - `PeptideScorer` holds time-series feature buffers (size varies with query)
+//! - `LocalizationBuffer` holds time-series feature buffers (size varies with query)
 //! - Chromatogram collectors (size varies with query complexity)
 //!
-//! Creating a new `PeptideScorer` for every query incurs allocation overhead. The solution
+//! Creating a new `LocalizationBuffer` for every query incurs allocation overhead. The solution
 //! is **buffer reuse**:
 //!
-//! 1. `buffered_score()` accepts a mutable `&mut PeptideScorer` reference
-//! 2. `score_iter()` uses Rayon's `map_init()` to create one scorer per thread
-//! 3. Each thread reuses its scorer across thousands of queries
+//! 1. `process_query()` accepts a mutable `&mut LocalizationBuffer` reference
+//! 2. `process_batch()` uses Rayon's `map_init()` to create one buffer per thread
+//! 3. Each thread reuses its buffer across thousands of queries
 //!
 //! ```rust,,ignore
-//! use timsseek::{Scorer, QueryItemToScore};
-//! let scorer: Scorer<_> = unimplemented!();
+//! use timsseek::{ScoringPipeline, QueryItemToScore};
+//! let pipeline: ScoringPipeline<_> = unimplemented!();
 //! let items: Vec<QueryItemToScore> = vec![];
-//! // Each thread gets its own reusable PeptideScorer buffer
-//! let (results, timings) = scorer.score_iter(&items);
+//! // Each thread gets its own reusable LocalizationBuffer
+//! let (results, timings) = pipeline.process_batch(&items);
 //! ```
 //!
 //! ## Scoring Pipeline
@@ -57,8 +57,8 @@ use timsquery::{
 
 use super::accumulator::IonSearchAccumulator;
 use super::calculate_scores::{
+    LocalizationBuffer,
     MainScore,
-    PeptideScorer,
     PreScore,
     RelativeIntensities,
 };
@@ -71,18 +71,38 @@ use super::search_results::{
 };
 use super::timings::ScoreTimings;
 use tracing::{
-    debug,
     info,
     warn,
 };
 
-/// Default buffer size for precursor ions in PeptideScorer.
+/// Default buffer size for precursor ions in LocalizationBuffer.
 /// Sufficient for most peptides with isotopic envelope (M+0, M+1, M+2, M+3, M+4).
 const DEFAULT_PRECURSOR_BUFFER_SIZE: usize = 5;
 
-/// Default buffer size for fragment ions in PeptideScorer.
+/// Default buffer size for fragment ions in LocalizationBuffer.
 /// Sufficient for typical y/b ion series in most peptides.
 const DEFAULT_FRAGMENT_BUFFER_SIZE: usize = 10;
+
+/// Hierarchical tolerance configuration for the scoring pipeline.
+///
+/// Progressive refinement: prescore (broad RT) -> secondary (narrow RT) -> tertiary (tight mobility).
+#[derive(Debug, Clone)]
+pub struct ToleranceHierarchy {
+    /// Broad search for prescore phase (full RT range, e.g., +/- 5 min).
+    pub prescore: Tolerance,
+
+    /// Refined search at detected apex (narrow RT window, e.g., +/- 30-60s).
+    pub secondary: Tolerance,
+}
+
+impl ToleranceHierarchy {
+    /// Creates tertiary tolerance with 3% mobility constraints for isotope matching.
+    pub fn tertiary_tolerance(&self) -> Tolerance {
+        self.secondary
+            .clone()
+            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
+    }
+}
 
 /// Filter out zero-intensity ions and update expected intensities in one pass.
 ///
@@ -157,70 +177,36 @@ impl SecondaryQuery {
     }
 }
 
-/// Peptide scoring engine that searches indexed MS data for spectral library matches.
+/// Multi-stage pipeline for scoring peptide queries against indexed MS data.
 ///
-/// The scorer implements a multi-stage pipeline to identify and score peptide candidates:
-/// 1. Prescore: Collect chromatographic data across full RT range
-/// 2. Localize: Find peak apex using time-series features
-/// 3. Secondary Query: Refine search at detected apex with narrow tolerances
-/// 4. Finalize: Calculate offsets and assemble results
-///
-/// # Tolerance Hierarchy
-///
-/// The scorer uses three tolerance levels for progressive refinement:
-///
-/// - **`tolerance`**: Initial broad search (full RT range, e.g., ±5 minutes)
-///   - Used in prescore phase to collect chromatographic profiles
-///   - Captures the entire elution profile including peak tails
-///
-/// - **`secondary_tolerance`**: Refined search (narrow RT window, e.g., ±30-60 seconds)
-///   - Used after localization identifies the peak apex
-///   - Focuses on the apex region to reduce noise and improve S/N
-///   - Typically has same m/z tolerance but much narrower RT window
-///
-/// - **Tertiary tolerance** (created inline in `_secondary_query`): Isotope-specific
-///   - Derived from `secondary_tolerance` with tighter mobility constraints (5%)
-///   - Used for isotope pattern matching where mobility must be very precise
-///
-/// # Performance Considerations
-///
-/// This struct is designed for batch processing via `score_iter()`. Creating a new
-/// `Scorer` per query is acceptable, but creating new `PeptideScorer` buffers per
-/// query adds allocation overhead (exact cost not recently profiled). Use `score_iter()`
-/// for production workloads to benefit from buffer reuse.
-pub struct Scorer<I: ScorerQueriable> {
-    /// Retention time (in milliseconds) for each index cycle.
-    /// Shared across all queries to reduce memory overhead.
+/// Pipeline stages: prescore → localize → secondary query → finalize.
+/// Uses progressive tolerance refinement and buffer reuse for high throughput.
+pub struct ScoringPipeline<I: ScorerQueriable> {
+    /// Retention time in milliseconds for each index cycle.
     pub index_cycle_rt_ms: Arc<[u32]>,
 
     /// Indexed peak data that implements the required query aggregators.
     pub index: I,
 
-    /// Initial broad search tolerance (full RT range).
-    /// Used in prescore phase to collect chromatographic data.
-    pub tolerance: Tolerance,
-
-    /// Refined search tolerance (narrow RT window around detected apex).
-    /// Used in secondary query phase after localization. Typically has same
-    /// m/z tolerance as `tolerance` but narrower RT window (e.g., ±30-60s vs ±5min).
-    pub secondary_tolerance: Tolerance,
+    /// Hierarchical tolerance configuration for progressive refinement.
+    pub tolerances: ToleranceHierarchy,
 
     /// m/z range where peptides were fragmented.
-    /// Used to filter out queries with precursors outside the acquisition window.
+    /// Queries with precursors outside this range are filtered out.
     pub fragmented_range: TupleRange<f64>,
 }
 
 enum SkippingReason {
+    // TODO: Implement more options and a counter ...
     RetentionTimeOutOfBounds,
 }
 
-impl<I: ScorerQueriable> Scorer<I> {
+impl<I: ScorerQueriable> ScoringPipeline<I> {
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn _build_prescore(&self, item: &QueryItemToScore) -> Result<PreScore, SkippingReason> {
-        let span = tracing::span!(tracing::Level::TRACE, "build_prescore::new_collector").entered();
+    fn build_prescore(&self, item: &QueryItemToScore) -> Result<PreScore, SkippingReason> {
         // TODO: pass the collector as a buffer!!!
         // Note: This is surprisingly cheap to do compared to adding the query.
         let max_range = TupleRange::try_new(
@@ -228,7 +214,11 @@ impl<I: ScorerQueriable> Scorer<I> {
             *self.index_cycle_rt_ms.last().unwrap(),
         )
         .expect("Reference RTs should be sorted and valid");
-        let rt_range = match self.tolerance.rt_range_as_milis(item.query.rt_seconds()) {
+        let rt_range = match self
+            .tolerances
+            .prescore
+            .rt_range_as_milis(item.query.rt_seconds())
+        {
             OptionallyRestricted::Unrestricted => max_range,
             OptionallyRestricted::Restricted(r) => r,
         };
@@ -236,33 +226,38 @@ impl<I: ScorerQueriable> Scorer<I> {
         if !max_range.intersects(rt_range) {
             return Err(SkippingReason::RetentionTimeOutOfBounds);
         }
-
-        let mut agg = match ChromatogramCollector::new(
-            item.query.clone(),
-            rt_range,
-            &self.index_cycle_rt_ms,
-        ) {
-            Ok(collector) => collector,
-            Err(e) => {
-                let tol_range = self.tolerance.rt_range_as_milis(item.query.rt_seconds());
-                // This is a panic to make debugging easier. In theory we have already checked
-                // that we have valid RT ranges and we should not have elution groups without ions.
-                panic!(
-                    "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
-                    item.query, e, tol_range,
-                )
+        let mut agg = tracing::span!(
+            tracing::Level::TRACE,
+            "build_prescore::new_collector"
+        ).in_scope(|| {
+            match ChromatogramCollector::new(
+                item.query.clone(),
+                rt_range,
+                &self.index_cycle_rt_ms,
+            ) {
+                Ok(collector) => collector,
+                Err(e) => {
+                    let tol_range = self.tolerances.prescore.rt_range_as_milis(item.query.rt_seconds());
+                    // This is a panic to make debugging easier. In theory we have already checked
+                    // that we have valid RT ranges and we should not have elution groups without ions.
+                    panic!(
+                        "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
+                        item.query, e, tol_range,
+                    )
+                }
             }
-        };
-        span.exit();
+        });
 
-        self.index.add_query(&mut agg, &self.tolerance);
+        tracing::span!(tracing::Level::TRACE, "build_prescore::add_query").in_scope(|| {
+            self.index.add_query(&mut agg, &self.tolerances.prescore);
+        });
 
         // Filter out zero-intensity ions and update expected intensities in one pass
         let mut expected_intensities = item.expected_intensity.clone();
         filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
 
         Ok(PreScore {
-            charge: item.charge,
+            charge: item.query.precursor_charge(),
             digest: item.digest.clone(),
             expected_intensities,
             query_values: agg,
@@ -372,14 +367,18 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip(self, item, main_score), level = "trace")
     )]
-    fn _secondary_query(&self, item: &QueryItemToScore, main_score: &MainScore) -> SecondaryQuery {
+    fn execute_secondary_query(
+        &self,
+        item: &QueryItemToScore,
+        main_score: &MainScore,
+    ) -> SecondaryQuery {
         let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
 
         // **Pass 1**: Query at apex RT to determine observed mobility
         let new_query = item.query.clone().with_rt_seconds(new_rt_seconds);
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
-        self.index.add_query(&mut agg, &self.secondary_tolerance);
+        self.index.add_query(&mut agg, &self.tolerances.secondary);
 
         // Calculate weighted mean mobility from observed data
         let mobility = Self::get_mobility(&agg);
@@ -399,11 +398,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
 
-        // TODO: Consider caching this tolerance to avoid repeated allocation
-        let tol_use = self
-            .secondary_tolerance
-            .clone()
-            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)));
+        let tol_use = self.tolerances.tertiary_tolerance();
 
         self.index.add_query(&mut agg, &tol_use);
         self.index.add_query(&mut isotope_agg, &tol_use);
@@ -417,7 +412,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn _finalize_step(
+    fn finalize_results(
         &self,
         item: &QueryItemToScore,
         main_score: &MainScore,
@@ -438,15 +433,15 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 }
 
-impl<I: ScorerQueriable> Scorer<I> {
-    pub fn buffered_score(
+impl<I: ScorerQueriable> ScoringPipeline<I> {
+    pub fn process_query(
         &self,
         item: QueryItemToScore,
-        scorer: &mut PeptideScorer,
+        buffer: &mut LocalizationBuffer,
         timings: &mut ScoreTimings,
     ) -> Option<IonSearchResults> {
         let st = Instant::now();
-        let prescore = self._build_prescore(&item);
+        let prescore = self.build_prescore(&item);
         timings.prescore += st.elapsed();
 
         let prescore = match prescore {
@@ -467,7 +462,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         }
 
         let st = Instant::now();
-        let main_score = match scorer.score(&prescore) {
+        let main_score = match buffer.score(&prescore) {
             Ok(score) => score,
             Err(_e) => {
                 // TODO: trim what errors I should log and which are
@@ -480,11 +475,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings.localize += st.elapsed();
 
         let st = Instant::now();
-        let secondary_query = self._secondary_query(&item, &main_score);
+        let secondary_query = self.execute_secondary_query(&item, &main_score);
         timings.secondary_query += st.elapsed();
 
         let st = Instant::now();
-        let out = self._finalize_step(&item, &main_score, &prescore, &secondary_query);
+        let out = self.finalize_results(&item, &main_score, &prescore, &secondary_query);
         timings.finalization += st.elapsed();
         match out {
             Ok(res) => Some(res),
@@ -500,24 +495,15 @@ impl<I: ScorerQueriable> Scorer<I> {
         }
     }
 
-    pub fn score(&self, item: QueryItemToScore) -> Option<IonSearchResults> {
-        let mut scorer = PeptideScorer::new(
-            item.query.precursor_count(),
-            item.query.fragment_count(),
-            self.index_cycle_rt_ms.clone(),
-        )
-        .ok()?;
-        let mut timings = ScoreTimings::default();
-        let maybe_score = self.buffered_score(item, &mut scorer, &mut timings);
-        debug!("{:?}", timings);
-        maybe_score
-    }
-
-    pub fn score_full(
+    pub fn process_query_full(
         &self,
         item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
-        let rt_range = match self.tolerance.rt_range_as_milis(item.query.rt_seconds()) {
+        let rt_range = match self
+            .tolerances
+            .prescore
+            .rt_range_as_milis(item.query.rt_seconds())
+        {
             OptionallyRestricted::Unrestricted => TupleRange::try_new(
                 *self.index_cycle_rt_ms.first().unwrap(),
                 *self.index_cycle_rt_ms.last().unwrap(),
@@ -529,26 +515,26 @@ impl<I: ScorerQueriable> Scorer<I> {
             ChromatogramCollector::new(item.query.clone(), rt_range, &self.index_cycle_rt_ms)
                 .unwrap();
         self.index
-            .add_query(&mut chromatogram_collector, &self.tolerance);
+            .add_query(&mut chromatogram_collector, &self.tolerances.prescore);
         let pre_score = PreScore {
-            charge: item.charge,
+            charge: item.query.precursor_charge(),
             digest: item.digest.clone(),
             expected_intensities: item.expected_intensity.clone(),
             query_values: chromatogram_collector.clone(),
         };
 
-        let mut scorer = PeptideScorer::new(
+        let mut buffer = LocalizationBuffer::new(
             item.query.precursor_count(),
             item.query.fragment_count(),
             self.index_cycle_rt_ms.clone(),
         )?;
-        let main_score = scorer.score(&pre_score)?;
+        let main_score = buffer.score(&pre_score)?;
 
-        let secondary_query = self._secondary_query(&item, &main_score);
+        let secondary_query = self.execute_secondary_query(&item, &main_score);
         let search_results =
-            self._finalize_step(&item, &main_score, &pre_score, &secondary_query)?;
+            self.finalize_results(&item, &main_score, &pre_score, &secondary_query)?;
 
-        let time_resolved_scores = scorer.last_time_resolved_scores();
+        let time_resolved_scores = buffer.last_time_resolved_scores();
         let longitudinal_main_score = time_resolved_scores.main_score_iter().collect();
 
         Ok(FullQueryResult {
@@ -563,7 +549,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip(self, items_to_score), level = "trace")
     )]
-    pub fn score_iter(
+    pub fn process_batch(
         &self,
         items_to_score: &[QueryItemToScore],
     ) -> (Vec<IonSearchResults>, ScoreTimings) {
@@ -571,7 +557,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let loc_score_start = Instant::now();
 
         let init_fn = || {
-            PeptideScorer::new(
+            LocalizationBuffer::new(
                 DEFAULT_PRECURSOR_BUFFER_SIZE,
                 DEFAULT_FRAGMENT_BUFFER_SIZE,
                 self.index_cycle_rt_ms.clone(),
@@ -593,7 +579,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .filter(filter_fn)
                 .map_init(init_fn, |scorer, item| {
                     let mut timings = ScoreTimings::default();
-                    let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
+                    let maybe_score = self.process_query(item.clone(), scorer, &mut timings);
                     (maybe_score, timings)
                 })
                 .collect()

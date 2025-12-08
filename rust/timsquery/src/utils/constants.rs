@@ -1,0 +1,2 @@
+pub const NEUTRON_MASS: f64 = 1.00866491588;
+pub const PROTON_MASS: f64 = 1.007276466;

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use timsquery::models::elution_group::TimsElutionGroup;
+use timsquery::utils::constants::PROTON_MASS;
 use tracing::{
     error,
     warn,
@@ -75,11 +76,6 @@ impl Default for SequenceToElutionGroupConverter {
         }
     }
 }
-
-const PROTON_MASS: f64 = 1.007276466;
-
-// TODO: Find right way ...
-const NEUTRON_MASS: f64 = 1.00;
 
 fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
     let mut ncarbon = 0;
@@ -143,7 +139,6 @@ impl SequenceToElutionGroupConverter {
             // Q: Why am I adding the charge here manually instead of using the calculator in the
             // Formula?
             let precursor_mz = (pep_mono_mass + (charge as f64 * PROTON_MASS)) / charge as f64;
-            let nmf = NEUTRON_MASS / (charge as f64);
 
             if precursor_mz < self.min_precursor_mz || precursor_mz > self.max_precursor_mz {
                 continue;
@@ -169,13 +164,7 @@ impl SequenceToElutionGroupConverter {
                 .unzip();
 
             let mobility = supersimpleprediction(precursor_mz, charge as i32);
-            let mut precursor_mzs = vec![precursor_mz; 4];
             let precursor_labels = vec![-1, 0, 1, 2];
-
-            // This just assigns mass to the isotopes.
-            precursor_mzs[0] -= nmf;
-            precursor_mzs[2] += nmf;
-            precursor_mzs[3] += 2. * nmf;
 
             let fragment_expect_inten = HashMap::from_iter(
                 fragment_labels
@@ -188,7 +177,7 @@ impl SequenceToElutionGroupConverter {
                 .mobility_ook0(mobility as f32)
                 .rt_seconds(0.0f32)
                 .precursor_labels(precursor_labels.as_slice().into())
-                .precursor_mzs(precursor_mzs)
+                .precursor(precursor_mz, charge)
                 .fragment_mzs(fragment_mzs)
                 .fragment_labels(fragment_labels.as_slice().into())
                 .try_build()

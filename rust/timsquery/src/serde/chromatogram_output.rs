@@ -6,6 +6,9 @@ use crate::{
 /// Represents the output format for an aggregated chromatogram
 /// It is pretty ugly performance-wise but I am keeping it as is because
 /// we are meant to have only one for the whole runtime of the viewer.
+/// and not that many in the cli (RN max == batch size) so it should be fine.
+/// I can optimize it as needed but probably the biggest gain will be
+/// in the logic so we keep them as buffers, so only 1 exists at a time.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChromatogramOutput {
     pub id: u64,
@@ -24,8 +27,8 @@ impl ChromatogramOutput {
         mut collector: ChromatogramCollector<T, f32>,
         reference_cycles: &[u32],
     ) -> Result<Self, crate::errors::DataProcessingError> {
-        let mut non_zero_min_idx = reference_cycles.len();
-        let mut non_zero_max_idx = 0usize;
+        let mut local_non_zero_min_idx = collector.num_cycles();
+        let mut local_non_zero_max_idx = 0usize;
 
         collector
             .iter_mut_precursors()
@@ -34,11 +37,11 @@ impl ChromatogramOutput {
                 for (i, &inten) in slc.iter().enumerate() {
                     if inten > 0.0 {
                         let abs_idx = i;
-                        if abs_idx < non_zero_min_idx {
-                            non_zero_min_idx = abs_idx;
+                        if abs_idx < local_non_zero_min_idx {
+                            local_non_zero_min_idx = abs_idx;
                         }
-                        if abs_idx > non_zero_max_idx {
-                            non_zero_max_idx = abs_idx;
+                        if abs_idx > local_non_zero_max_idx {
+                            local_non_zero_max_idx = abs_idx;
                         }
                     }
                 }
@@ -51,17 +54,17 @@ impl ChromatogramOutput {
                 for (i, &inten) in slc.iter().enumerate() {
                     if inten > 0.0 {
                         let abs_idx = i;
-                        if abs_idx < non_zero_min_idx {
-                            non_zero_min_idx = abs_idx;
+                        if abs_idx < local_non_zero_min_idx {
+                            local_non_zero_min_idx = abs_idx;
                         }
-                        if abs_idx > non_zero_max_idx {
-                            non_zero_max_idx = abs_idx;
+                        if abs_idx > local_non_zero_max_idx {
+                            local_non_zero_max_idx = abs_idx;
                         }
                     }
                 }
             });
 
-        if non_zero_min_idx > non_zero_max_idx {
+        if local_non_zero_min_idx > local_non_zero_max_idx {
             return Err(crate::errors::DataProcessingError::ExpectedNonEmptyData);
         }
 
@@ -69,7 +72,7 @@ impl ChromatogramOutput {
             .iter_mut_precursors()
             .filter_map(|(&(idx, mz), cmg)| {
                 let out_vec = cmg
-                    .try_get_slice(non_zero_min_idx, non_zero_max_idx + 1)
+                    .try_get_slice(local_non_zero_min_idx, local_non_zero_max_idx + 1)
                     .unwrap();
                 if out_vec.iter().all(|&x| x == 0.0) {
                     return None;
@@ -77,6 +80,9 @@ impl ChromatogramOutput {
                 Some((mz, out_vec.to_vec()))
             })
             .unzip();
+
+        let non_zero_min_idx = local_non_zero_min_idx + collector.cycle_offset();
+        let non_zero_max_idx = local_non_zero_max_idx + collector.cycle_offset();
 
         let ((fragment_mzs, fragment_intensities), fragment_labels): (
             (Vec<f64>, Vec<Vec<f32>>),
@@ -86,7 +92,7 @@ impl ChromatogramOutput {
             .filter_map(|(&(ref idx, mz), cmg)| {
                 let out_slc = cmg
                     .try_get_slice(non_zero_min_idx, non_zero_max_idx + 1)
-                    .unwrap();
+                    .expect("Failed to get slice from chromatogram");
                 if out_slc.iter().all(|&x| x == 0.0) {
                     return None;
                 }

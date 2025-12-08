@@ -594,26 +594,37 @@ impl ViewerApp {
             None => return,
         };
 
-        match &self.data.elution_groups {
-            Some(ElutionGroupData::StringLabels(egs)) => Self::process_chromatogram(
-                &mut self.computed.chromatogram,
-                &mut self.computed.chromatogram_output,
-                &egs[selected_idx],
-                index,
-                ms1_rts,
-                &self.data.tolerance,
-                &self.data.smoothing,
-            ),
-            Some(ElutionGroupData::MzpafLabels(egs)) => Self::process_chromatogram(
-                &mut self.computed.chromatogram,
-                &mut self.computed.chromatogram_output,
-                &egs[selected_idx],
-                index,
-                ms1_rts,
-                &self.data.tolerance,
-                &self.data.smoothing,
-            ),
-            None => (),
+        macro_rules! process_chromatogram {
+            ($egs:expr) => {
+                Self::process_chromatogram(
+                    &mut self.computed.chromatogram,
+                    &mut self.computed.chromatogram_output,
+                    &$egs[selected_idx],
+                    index,
+                    ms1_rts,
+                    &self.data.tolerance,
+                    &self.data.smoothing,
+                );
+            };
+        }
+
+        if let Some(x) = &self.data.elution_groups {
+            // This feels pretty dirty ... I am pretty sure I can implement a getter
+            // that just casts to the lowest common denominator trait object or something
+            match &x.inner {
+                timsquery::serde::ElutionGroupCollection::StringLabels(egs) => {
+                    process_chromatogram!(egs);
+                }
+                timsquery::serde::ElutionGroupCollection::MzpafLabels(egs) => {
+                    process_chromatogram!(egs);
+                }
+                timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs) => {
+                    process_chromatogram!(egs);
+                }
+                timsquery::serde::ElutionGroupCollection::IntLabels(egs) => {
+                    process_chromatogram!(egs);
+                }
+            }
         };
         self.computed.chromatogram_auto_zoom_applied = false;
 

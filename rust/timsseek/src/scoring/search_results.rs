@@ -232,7 +232,7 @@ impl<'q> SearchResultBuilder<'q> {
             sequence: String::from(expect_some!(digest_slice).clone()),
             library_id: expect_some!(library_id),
             decoy_group_id: expect_some!(decoy_group_id),
-            precursor_mz: ref_eg.try_get_mono_precursor_mz().unwrap_or(f64::NAN),
+            precursor_mz: ref_eg.mono_precursor_mz(),
             precursor_charge: expect_some!(charge),
             precursor_mobility_query: ref_eg.mobility_ook0(),
             precursor_rt_query_seconds: ref_eg.rt_seconds(),

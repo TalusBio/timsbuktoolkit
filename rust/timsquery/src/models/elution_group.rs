@@ -1,4 +1,9 @@
+use crate::models::elution_group::tims_elution_group_builder::{
+    SetPrecursorCharge,
+    SetPrecursorMonoMz,
+};
 use crate::traits::KeyLike;
+use crate::utils::constants::NEUTRON_MASS;
 use bon::builder;
 use serde::{
     Deserialize,
@@ -17,6 +22,8 @@ pub struct TimsElutionGroup<T: KeyLike> {
     id: u64,
     mobility_ook0: f32,
     rt_seconds: f32,
+    precursor_mono_mz: f64,
+    precursor_charge: u8,
 
     // The baseline size of TinyVec<T> is 24 bits. (due to the stack size of a Vec<T>)
     // NOTE: This ca be different on different architectures. (would be 16 bytes on 32-bit
@@ -38,10 +45,9 @@ pub struct TimsElutionGroup<T: KeyLike> {
     // the concrete type TimsElutionGroup<IonAnnot> but 408 bytes for TimsElutionGroup<String>
     //
     // In theory I can make this lighter if it was a genetic ...
-    precursor_mzs: Vec<f64>,
     fragment_mzs: Vec<f64>,
-    precursor_labels: TinyVec<[i8; 13]>,
     fragment_labels: TinyVec<[T; 13]>,
+    precursor_labels: TinyVec<[i8; 13]>,
 }
 
 impl<T: KeyLike + Default, S: tims_elution_group_builder::IsComplete>
@@ -52,14 +58,25 @@ impl<T: KeyLike + Default, S: tims_elution_group_builder::IsComplete>
         if candidate.fragment_labels.is_empty() | candidate.precursor_labels.is_empty() {
             return Err(crate::DataProcessingError::ExpectedNonEmptyData);
         }
-        if candidate.precursor_labels.len() != candidate.precursor_mzs.len() {
-            return Err(crate::DataProcessingError::ExpectedVectorSameLength);
-        }
         if candidate.fragment_mzs.len() != candidate.fragment_labels.len() {
             return Err(crate::DataProcessingError::ExpectedVectorSameLength);
         }
 
         Ok(candidate)
+    }
+}
+
+impl<T: KeyLike + Default, S: tims_elution_group_builder::State> TimsElutionGroupBuilder<T, S> {
+    pub fn precursor(
+        self,
+        mz_mono: f64,
+        charge: u8,
+    ) -> TimsElutionGroupBuilder<T, SetPrecursorCharge<SetPrecursorMonoMz<S>>>
+    where
+        S::PrecursorCharge: tims_elution_group_builder::IsUnset,
+        S::PrecursorMonoMz: tims_elution_group_builder::IsUnset,
+    {
+        self.precursor_mono_mz(mz_mono).precursor_charge(charge)
     }
 }
 
@@ -69,7 +86,7 @@ impl<T: KeyLike> TimsElutionGroup<T> {
     }
 
     pub fn precursor_count(&self) -> usize {
-        self.precursor_mzs.len()
+        self.precursor_labels.len()
     }
 
     pub fn fragment_count(&self) -> usize {
@@ -78,6 +95,14 @@ impl<T: KeyLike> TimsElutionGroup<T> {
 
     pub fn rt_seconds(&self) -> f32 {
         self.rt_seconds
+    }
+
+    pub fn precursor_charge(&self) -> u8 {
+        self.precursor_charge
+    }
+
+    pub fn precursor_mz(&self) -> f64 {
+        self.precursor_mono_mz
     }
 
     // NOTE: I am thinking about removing this and leave the rest as a trait
@@ -112,42 +137,45 @@ impl<T: KeyLike> TimsElutionGroup<T> {
             .ok_or(crate::DataProcessingError::KeyNotFound)?;
 
         self.precursor_labels.remove(idx);
-        self.precursor_mzs.remove(idx);
         Ok(())
+    }
+
+    fn precursor_mz_iter(&self) -> impl Iterator<Item = f64> + '_ {
+        let offset = NEUTRON_MASS / self.precursor_charge as f64;
+        self.precursor_labels.iter().map(move |isotope_index| {
+            let idx = *isotope_index;
+            self.precursor_mono_mz + (offset * idx as f64)
+        })
     }
 
     pub fn get_precursor_mz_limits(&self) -> (f64, f64) {
         let mut min_precursor_mz = f64::MAX;
         let mut max_precursor_mz = f64::MIN;
         for (isotope_index, precursor_mz) in
-            self.precursor_labels.iter().zip(self.precursor_mzs.iter())
+            self.precursor_labels.iter().zip(self.precursor_mz_iter())
         {
             if *isotope_index < 0 {
                 continue;
             }
-            if *precursor_mz < min_precursor_mz {
-                min_precursor_mz = *precursor_mz;
+            if precursor_mz < min_precursor_mz {
+                min_precursor_mz = precursor_mz;
             }
-            if *precursor_mz > max_precursor_mz {
-                max_precursor_mz = *precursor_mz;
+            if precursor_mz > max_precursor_mz {
+                max_precursor_mz = precursor_mz;
             }
         }
         (min_precursor_mz, max_precursor_mz)
     }
 
-    pub fn try_get_mono_precursor_mz(&self) -> Option<f64> {
-        let idx = self
-            .precursor_labels
-            .iter()
-            .find(|isotope_index| **isotope_index == 0i8)?;
-        self.precursor_mzs.get(*idx as usize).copied()
+    pub fn mono_precursor_mz(&self) -> f64 {
+        self.precursor_mono_mz
     }
 
     pub fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
         self.precursor_labels
             .iter()
-            .zip(self.precursor_mzs.iter())
-            .map(|(label, mz)| (*label, *mz))
+            .zip(self.precursor_mz_iter())
+            .map(|(label, mz)| (*label, mz))
     }
 
     pub fn iter_fragments_refs(&self) -> impl Iterator<Item = (&T, &f64)> {

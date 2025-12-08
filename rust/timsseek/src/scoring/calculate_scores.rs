@@ -39,12 +39,10 @@
 //!     These are all collected into the final `MainScore` struct, which is the ultimate output of the
 //!     scoring process.
 //!
-//! ## Planned Refactoring
+//! ## Design Notes
 //!
-//! The current implementation has several design issues, including high coupling between structs and
-//! an unclear API. A refactoring is planned to introduce a `PeptideScorer` struct that will
-//! encapsulate the scoring logic and manage internal buffers, providing a cleaner and more ergonomic
-//! interface.
+//! The `LocalizationBuffer` struct encapsulates the scoring logic and manages internal buffers
+//! for efficient reuse across multiple queries.
 
 use super::scores::coelution::coelution_score;
 use super::scores::corr_v_ref::calculate_cosine_with_ref_gaussian_into;
@@ -86,7 +84,7 @@ use tracing::warn;
 ///
 /// This struct acts as a data container, bundling the theoretical information about a peptide
 /// with the corresponding raw experimental data necessary for scoring. It is the primary input
-/// to the [`PeptideScorer::score`] method.
+/// to the [`LocalizationBuffer::score`] method.
 #[derive(Debug)]
 pub struct PreScore {
     /// The peptide sequence and modification information.
@@ -585,28 +583,12 @@ fn count_falling_steps(start: usize, step: i32, slc: &[f32]) -> u8 {
     count
 }
 
-/// The primary entry point for scoring peptide candidates.
+/// Reusable buffer for apex localization in chromatographic data.
 ///
-/// `PeptideScorer` encapsulates the complex scoring logic and manages reusable memory buffers
-/// for efficiency. It is designed to be created once and then used to score multiple peptide
-/// candidates (`PreScore` objects) against the raw data from a single mass spectrometry run.
-///
-/// # Example
-///
-/// ```ignore
-/// // 1. Create a scorer instance.
-/// let mut scorer = PeptideScorer::new()?;
-///
-/// // 2. Create a PreScore object with peptide info and raw data.
-/// let prescore = PreScore { ... };
-///
-/// // 3. Score the peptide.
-/// let main_score = scorer.score(&prescore)?;
-///
-/// // 4. Use the results.
-/// println!("Score for peptide: {}", main_score.score);
-/// ```
-pub struct PeptideScorer {
+/// This buffer manages internal state for scoring peptide candidates, including time-resolved
+/// features and intensity arrays. Designed for reuse across multiple queries to minimize
+/// allocations in the hot path.
+pub struct LocalizationBuffer {
     intensity_arrays: IntensityArrays,
     time_resolved_scores: TimeResolvedScores,
 }
@@ -667,11 +649,10 @@ fn find_top_with_exclusions<'a>(
     }
 }
 
-impl PeptideScorer {
-    /// Creates a new `PeptideScorer`.
+impl LocalizationBuffer {
+    /// Creates a new buffer with pre-allocated capacity.
     ///
-    /// This initializes the scorer and pre-allocates internal buffers. For performance,
-    /// you should create one `PeptideScorer` per analysis run and reuse it for all peptides.
+    /// For optimal performance, create one buffer per thread and reuse it across queries.
     pub fn new(
         n_ms1: usize,
         n_ms2: usize,
@@ -889,7 +870,7 @@ impl PeptideScorer {
 
 /// Contains the final scores and features for a peptide candidate at its detected apex.
 ///
-/// This struct is the output of the [`PeptideScorer::score`] method. It provides a comprehensive
+/// This struct is the output of the [`LocalizationBuffer::score`] method. It provides a comprehensive
 /// set of metrics to evaluate the quality of a peptide-spectrum match. The primary metric is
 /// `score`, with other fields providing detailed diagnostic information.
 #[derive(Debug, Clone, Copy)]

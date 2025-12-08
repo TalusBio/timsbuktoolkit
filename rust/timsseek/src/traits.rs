@@ -8,7 +8,7 @@ use timsquery::{
     SpectralCollector,
 };
 
-/// Trait for indexed data that supports the aggregators needed by [`crate::Scorer`].
+/// Trait for indexed data that supports the aggregators needed by [`crate::ScoringPipeline`].
 ///
 /// This trait is a convenience bound that documents exactly what query capabilities
 /// the scoring engine requires. It's more specific than [`timsquery::GenerallyQueriable`]
@@ -25,36 +25,38 @@ use timsquery::{
 /// # Why This Trait?
 ///
 /// Instead of using the general `GenerallyQueriable<IonAnnot>` trait (which includes
-/// `PointIntensityAggregator` that Scorer doesn't use), this trait:
+/// `PointIntensityAggregator` that ScoringPipeline doesn't use), this trait:
 ///
-/// - Documents exactly what Scorer needs
+/// - Documents exactly what ScoringPipeline needs
 /// - Makes function signatures more explicit
-/// - Allows future scorer variants to have different requirements
+/// - Allows future pipeline variants to have different requirements
 ///
 /// # Example
 ///
 /// ```ignore
-/// use timsseek::{Scorer, ScorerQueriable};
+/// use timsseek::{ScoringPipeline, ScorerQueriable, ToleranceHierarchy};
 /// use timscentroid::IndexedTimstofPeaks;
 /// use timsquery::Tolerance;
 /// use std::sync::Arc;
 ///
 /// # let peaks: IndexedTimstofPeaks = unimplemented!();
 /// # let ref_rt = Arc::new(vec![0u32; 100]);
-/// # let tolerance = Tolerance::default();
-/// # let secondary_tolerance = Tolerance::default();
+/// # let prescore_tol = Tolerance::default();
+/// # let secondary_tol = Tolerance::default();
 /// # let fragmented_range = (400.0, 1200.0).try_into().unwrap();
 ///
 /// // IndexedTimstofPeaks implements ScorerQueriable
-/// let scorer = Scorer {
+/// let pipeline = ScoringPipeline {
 ///     index_cycle_rt_ms: ref_rt,
 ///     index: peaks,
-///     tolerance,
-///     secondary_tolerance,
+///     tolerances: ToleranceHierarchy {
+///         prescore: prescore_tol,
+///         secondary: secondary_tol,
+///     },
 ///     fragmented_range,
 /// };
 ///
-/// // Scorer can now use ChromatogramCollector, SpectralCollector variants
+/// // ScoringPipeline can now use ChromatogramCollector, SpectralCollector variants
 /// ```
 ///
 /// # Implementation Note

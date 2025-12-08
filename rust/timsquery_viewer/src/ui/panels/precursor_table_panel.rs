@@ -6,7 +6,7 @@ use crate::app::{
 };
 use crate::file_loader::ElutionGroupData;
 use crate::ui::components::precursor_table;
-
+use timsquery::serde::ElutionGroupCollection;
 /// Panel for displaying and filtering the precursor table
 pub struct TablePanel;
 
@@ -88,22 +88,30 @@ impl TablePanel {
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
-            .show(ui, |ui| match elution_groups {
-                ElutionGroupData::StringLabels(egs) => {
-                    precursor_table::render_precursor_table_filtered(
-                        ui,
-                        filtered_indices,
-                        egs,
-                        &mut ui_state.selected_index,
-                    );
+            .show(ui, |ui| {
+                macro_rules! render_table {
+                    ($egs: expr) => {
+                        precursor_table::render_precursor_table_filtered(
+                            ui,
+                            filtered_indices,
+                            $egs,
+                            &mut ui_state.selected_index,
+                        )
+                    };
                 }
-                ElutionGroupData::MzpafLabels(egs) => {
-                    precursor_table::render_precursor_table_filtered(
-                        ui,
-                        filtered_indices,
-                        egs,
-                        &mut ui_state.selected_index,
-                    );
+                match elution_groups {
+                    ElutionGroupData {
+                        inner: ElutionGroupCollection::StringLabels(egs),
+                    } => render_table!(egs),
+                    ElutionGroupData {
+                        inner: ElutionGroupCollection::MzpafLabels(egs),
+                    } => render_table!(egs),
+                    ElutionGroupData {
+                        inner: ElutionGroupCollection::TinyIntLabels(egs),
+                    } => render_table!(egs),
+                    ElutionGroupData {
+                        inner: ElutionGroupCollection::IntLabels(egs),
+                    } => render_table!(egs),
                 }
             });
 

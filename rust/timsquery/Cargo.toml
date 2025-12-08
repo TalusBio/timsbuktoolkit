@@ -8,6 +8,8 @@ license.workspace = true
 bincode = "1.3"
 zstd = "0.13"
 
+
+
 # Workspace member deps
 timscentroid = { path = "../timscentroid" }
 micromzpaf = { path = "../micromzpaf" }
@@ -15,11 +17,14 @@ micromzpaf = { path = "../micromzpaf" }
 # Workspace-inherited deps
 timsrust = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
 tinyvec = { workspace = true, features = ["alloc", "serde"] }
 tracing = { workspace = true }
 rayon = { workspace = true }
 half = { workspace = true }
 bon = { workspace = true }
+csv = { workspace = true }
+
 
 [lib]
 

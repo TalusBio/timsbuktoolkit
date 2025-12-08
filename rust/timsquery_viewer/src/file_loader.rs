@@ -4,17 +4,14 @@ use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
 };
-use timsquery::ion::IonAnnot;
-use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_caching;
-use timsquery::tinyvec::TinyVec;
+use timsquery::serde::{
+    ElutionGroupCollection,
+    load_index_caching,
+};
 use timsrust::MSLevel;
 
-use tracing::{
-    info,
-    warn,
-};
+use tracing::info;
 
 use crate::error::ViewerError;
 
@@ -26,17 +23,13 @@ pub struct FileLoader {
 }
 
 #[derive(Debug)]
-pub enum ElutionGroupData {
-    StringLabels(Vec<TimsElutionGroup<String>>),
-    MzpafLabels(Vec<TimsElutionGroup<IonAnnot>>),
+pub struct ElutionGroupData {
+    pub inner: ElutionGroupCollection,
 }
 
 impl ElutionGroupData {
     pub fn len(&self) -> usize {
-        match self {
-            ElutionGroupData::StringLabels(egs) => egs.len(),
-            ElutionGroupData::MzpafLabels(egs) => egs.len(),
-        }
+        self.inner.len()
     }
 
     #[must_use]
@@ -53,19 +46,22 @@ impl ElutionGroupData {
             return (0..self.len()).collect();
         }
 
-        match self {
-            ElutionGroupData::StringLabels(egs) => egs
-                .iter()
-                .enumerate()
-                .filter(|(_, eg)| eg.id().to_string().contains(filter))
-                .map(|(idx, _)| idx)
-                .collect(),
-            ElutionGroupData::MzpafLabels(egs) => egs
-                .iter()
-                .enumerate()
-                .filter(|(_, eg)| eg.id().to_string().contains(filter))
-                .map(|(idx, _)| idx)
-                .collect(),
+        macro_rules! get_ids {
+            ($self:expr) => {
+                $self
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, eg)| eg.id().to_string().contains(filter))
+                    .map(|(idx, _)| idx)
+                    .collect()
+            };
+        }
+
+        match &self.inner {
+            ElutionGroupCollection::StringLabels(egs) => get_ids!(egs),
+            ElutionGroupCollection::MzpafLabels(egs) => get_ids!(egs),
+            ElutionGroupCollection::TinyIntLabels(egs) => get_ids!(egs),
+            ElutionGroupCollection::IntLabels(egs) => get_ids!(egs),
         }
     }
 }
@@ -82,7 +78,7 @@ impl FileLoader {
     /// Open a file dialog for elution groups JSON file
     pub fn open_elution_groups_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("JSON", &["json"])
+            .add_filter("Elution Groups File (json/diann txt)", &["json", "txt"])
             .pick_file()
         {
             self.elution_groups_path = Some(path);
@@ -108,27 +104,13 @@ impl FileLoader {
 
     /// Load elution groups from a JSON file
     pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
-        let file_content = std::fs::read_to_string(path)?;
-        info!("Read file content from {}", path.display());
-
-        info!("Attempting to parse elution group inputs with mzpaf labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-            let out: Result<Vec<TimsElutionGroup<IonAnnot>>, ViewerError> =
-                eg_inputs.into_iter().map(|x| x.try_into()).collect();
-            return Ok(ElutionGroupData::MzpafLabels(out?));
-        }
-
-        info!("Attempting to parse elution groups with mzpaf labels directly");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(&file_content) {
-            return Ok(ElutionGroupData::MzpafLabels(egs));
-        }
-
-        info!("Falling back to parsing elution groups with string labels");
-        let egs_string: Vec<TimsElutionGroup<String>> = serde_json::from_str(&file_content)?;
-        warn!(
-            "Elution groups contained fragment labels as strings that are not interpretable as mzpaf, this can cause performance degradation."
+        let res = timsquery::serde::read_library_file(path)?;
+        info!(
+            "Loaded {} elution groups from {}",
+            res.len(),
+            path.display()
         );
-        Ok(ElutionGroupData::StringLabels(egs_string))
+        Ok(ElutionGroupData { inner: res })
     }
 
     /// Load and index raw timsTOF data
@@ -151,59 +133,6 @@ impl FileLoader {
         let file_content = std::fs::read_to_string(path)?;
         let tolerance: Tolerance = serde_json::from_str(&file_content)?;
         Ok(tolerance)
-    }
-}
-
-/// User-friendly format for specifying elution groups in an input file
-/// (copied from timsquery_cli for compatibility)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ElutionGroupInput {
-    pub id: u64,
-    pub mobility: f32,
-    pub rt_seconds: f32,
-    pub precursors: Vec<f64>,
-    pub fragments: Vec<f64>,
-    pub fragment_labels: Option<Vec<IonAnnot>>,
-}
-
-impl TryFrom<ElutionGroupInput> for TimsElutionGroup<IonAnnot> {
-    type Error = ViewerError;
-
-    fn try_from(val: ElutionGroupInput) -> Result<Self, Self::Error> {
-        let builder = TimsElutionGroup::builder()
-            .id(val.id)
-            .mobility_ook0(val.mobility)
-            .rt_seconds(val.rt_seconds)
-            .precursor_labels(
-                val.precursors
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| i as i8)
-                    .collect(),
-            )
-            .precursor_mzs(val.precursors.clone());
-
-        let num_fragments = val.fragments.len();
-        let builder = builder.fragment_mzs(val.fragments.clone());
-        let builder = match val.fragment_labels {
-            Some(ref labels) => {
-                if labels.len() != num_fragments {
-                    return Err(ViewerError::General(format!(
-                        "Fragment labels length {} does not match fragments length {}",
-                        labels.len(),
-                        num_fragments
-                    )));
-                }
-                builder.fragment_labels(TinyVec::Heap(labels.clone()))
-            }
-            None => builder.fragment_labels(
-                (0..num_fragments)
-                    .map(|i| IonAnnot::try_new('?', Some(i as u8), 1, 1).unwrap())
-                    .collect(),
-            ),
-        };
-
-        Ok(builder.try_build().expect("I checked the sizes!"))
     }
 }
 

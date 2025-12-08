@@ -41,10 +41,7 @@ use crate::cli::{
     WriteTemplateArgs,
 };
 use crate::error::CliError;
-use crate::processing::{
-    AggregatorContainer,
-    ElutionGroupInput,
-};
+use crate::processing::AggregatorContainer;
 
 /// Main function for the 'query-index' subcommand.
 #[instrument]
@@ -91,87 +88,23 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 
 /// Reads elution groups from a given path, attempting to parse them in several formats.
 pub fn read_query_elution_groups(path: &PathBuf) -> Result<Vec<TimsElutionGroup<u8>>, CliError> {
-    let file_content = std::fs::read_to_string(path)?;
-
-    if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput>>(&file_content) {
-        let out: Vec<TimsElutionGroup<u8>> = eg_inputs.into_iter().map(|x| x.into()).collect();
-        return Ok(out);
+    match timsquery::serde::read_library_file(path) {
+        Ok(timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs)) => Ok(egs),
+        Ok(other) => Err(CliError::DataReading(format!(
+            "Expected elution groups with u8 labels, but got different label type: {:?}",
+            other
+        ))),
+        Err(e) => Err(CliError::DataReading(format!(
+            "Failed to read elution groups from {}: {:?}",
+            path.display(),
+            e
+        ))),
     }
-    if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u8>>>(&file_content) {
-        return Ok(egs);
-    }
-
-    warn!(
-        "Failed to parse elution groups using standard formats. from {}",
-        path.display()
-    );
-    Err(CliError::DataReading(format!(
-        "Failed to parse elution groups from {}",
-        path.display()
-    )))
 }
 
 /// Main function for the 'write-template' subcommand.
 pub fn main_write_template(args: WriteTemplateArgs) -> Result<(), CliError> {
-    let output_path = args.output_path;
-    let num_elution_groups = args.num_elution_groups;
-    let egs = template_elution_groups(num_elution_groups);
-    let tolerance = template_tolerance_settings();
-
-    let egs_json = serde_json::to_string_pretty(&egs)?;
-    let tolerance_json = serde_json::to_string_pretty(&tolerance)?;
-    let tolerance_json_narrow = serde_json::to_string_pretty(
-        &tolerance.with_rt_tolerance(RtTolerance::Minutes((5.0, 5.0))),
-    )?;
-
-    std::fs::create_dir_all(&output_path)?;
-    println!("Writing to {}", output_path.display());
-    let egs_json_path = output_path.join("elution_groups.json");
-    let tolerance_json_path = output_path.join("tolerance_settings.json");
-    let tolerance_json_narrow_path = output_path.join("tolerance_settings_narrow.json");
-
-    std::fs::write(&egs_json_path, egs_json)?;
-    std::fs::write(&tolerance_json_path, tolerance_json)?;
-    std::fs::write(&tolerance_json_narrow_path, tolerance_json_narrow)?;
-    println!(
-        "use as `timsquery query-index --output-path '.' --raw-file-path 'your_file.d' --tolerance-settings-path {:#?} --elution-groups-path {:#?}`",
-        tolerance_json_path.display(),
-        egs_json_path.display(),
-    );
-    Ok(())
-}
-
-/// Generates a vector of dummy `ElutionGroupInput` for template purposes.
-pub fn template_elution_groups(num: usize) -> Vec<ElutionGroupInput> {
-    let mut egs = Vec::with_capacity(num);
-
-    let min_mz = 400.0;
-    let max_mz = 900.0;
-    let max_mobility = 0.8;
-    let min_mobility = 0.6;
-    let min_rt = 66.0;
-    let max_rt = 11.0 * 60.0;
-
-    let rt_step = (max_rt - min_rt) / (num as f32);
-    let mobility_step = (max_mobility - min_mobility) / (num as f32);
-    let mz_step = (max_mz - min_mz) / (num as f64);
-
-    for i in 1..num {
-        let rt = min_rt + (i as f32 * rt_step);
-        let mobility = min_mobility + (i as f32 * mobility_step);
-        let mz = min_mz + (i as f64 * mz_step);
-        let fragments = (0..10).map(|x| mz + x as f64).collect();
-        let precursors = (0..2).map(|x| mz + x as f64).collect();
-        egs.push(ElutionGroupInput {
-            id: i as u64,
-            rt_seconds: rt,
-            mobility,
-            fragments,
-            precursors,
-        });
-    }
-
-    egs
+    todo!("Ooops, this feature is not yet implemented.");
 }
 
 /// Retrieves MS1 retention times from a TIMS-TOF file, sorted and deduped.

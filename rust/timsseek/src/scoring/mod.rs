@@ -13,7 +13,10 @@ pub use scores::{
     hyperscore,
 };
 
-pub use scorer::Scorer;
+pub use scorer::{
+    ScoringPipeline,
+    ToleranceHierarchy,
+};
 pub use search_results::IonSearchResults;
 pub use timings::ScoreTimings;
 
