@@ -16,6 +16,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+parquet = { workspace = true }
+arrow = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
 
 # Example dependencies
 tracing-subscriber = { workspace = true, features = ["env-filter"], default-features = true}

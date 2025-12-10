@@ -105,10 +105,8 @@ pub struct TimeResolvedScores {
     pub ms2_cosine_ref_sim: Vec<f32>,
     pub ms2_coelution_score: Vec<f32>,
     pub ms2_lazyscore: Vec<f32>,
-    // pub ms2_lazyscore_vs_baseline: Vec<f32>,
     pub ms2_corr_v_gauss: Vec<f32>,
     pub main_score: Vec<f32>,
-    // pub ms2_lazyscore_vs_baseline_std: f32,
 }
 
 #[derive(Debug)]
@@ -262,7 +260,6 @@ impl TimeResolvedScores {
         self.calculate_gaussian_correlation_scores(intensity_arrays)?;
         self.smooth_scores();
         self.compute_main_scores();
-        // self.calculate_baseline_scores(intensity_arrays);
         self.check_lengths()?;
         Ok(())
     }
@@ -384,35 +381,6 @@ impl TimeResolvedScores {
         gaussblur_in_place(&mut self.ms2_corr_v_gauss);
         gaussblur_in_place(&mut self.ms1_corr_v_gauss);
     }
-
-    // #[cfg_attr(
-    //     feature = "instrumentation",
-    //     tracing::instrument(skip_all, level = "trace")
-    // )]
-    // fn calculate_baseline_scores(&mut self, intensity_arrays: &IntensityArrays) {
-    //     let rt_len = intensity_arrays.ref_time_ms.len();
-    //     let five_pct_index = rt_len * 5 / 100;
-    //     let half_five_pct_index = five_pct_index / 2;
-
-    //     if five_pct_index > 100 {
-    //         warn!(
-    //             "High five_pct_index: {} (from rt_len: {})",
-    //             five_pct_index, rt_len
-    //         );
-    //     }
-
-    //     calculate_value_vs_baseline_into(
-    //         &self.ms2_lazyscore,
-    //         five_pct_index,
-    //         &mut self.ms2_lazyscore_vs_baseline,
-    //     );
-
-    //     let baseline_slice = &self.ms2_lazyscore_vs_baseline
-    //         [half_five_pct_index..(self.ms2_lazyscore_vs_baseline.len() - half_five_pct_index)];
-    //     let lzb_std = calculate_centered_std(baseline_slice);
-
-    //     self.ms2_lazyscore_vs_baseline_std = lzb_std.max(1.0);
-    // }
 
     fn check_lengths(&self) -> Result<(), DataProcessingError> {
         let len = self.ms1_cosine_ref_sim.len();

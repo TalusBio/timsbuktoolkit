@@ -5,7 +5,10 @@ use egui_plot::{
     Plot,
 };
 
-use crate::plot_renderer::MS2Spectrum;
+use crate::ui::{
+    Panel,
+    PanelContext,
+};
 
 /// Panel for displaying MS2 spectrum
 pub struct SpectrumPanel;
@@ -14,16 +17,11 @@ impl SpectrumPanel {
     pub fn new() -> Self {
         Self
     }
+}
 
-    /// Renders the MS2 spectrum display panel.
-    ///
-    /// Reads: `spectrum` (optional MS2 spectrum data with m/z, intensities, labels)
-    /// Writes: None (read-only display)
-    /// Returns: None
-    pub fn render(&self, ui: &mut egui::Ui, spectrum: Option<&MS2Spectrum>) {
-        ui.heading("MS2 Spectrum");
-
-        if let Some(spec) = spectrum {
+impl Panel for SpectrumPanel {
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
+        if let Some(spec) = &ctx.computed.ms2_spectrum {
             ui.label(format!("RT: {:.2} seconds", spec.rt_seconds));
             ui.separator();
 
@@ -52,6 +50,10 @@ impl SpectrumPanel {
                 ui.label("Click on XIC plot to view MS2 spectrum");
             });
         }
+    }
+
+    fn title(&self) -> &str {
+        "MS2"
     }
 }
 

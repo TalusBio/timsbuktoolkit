@@ -5,10 +5,9 @@ use egui_dock::{
     Style,
     TabViewer,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::KeyLike;
-use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 
 use crate::chromatogram_processor::{
@@ -16,6 +15,7 @@ use crate::chromatogram_processor::{
     ChromatogramOutput,
     SmoothingMethod,
 };
+use crate::domain::ChromatogramService;
 use crate::file_loader::{
     ElutionGroupData,
     FileLoader,
@@ -29,28 +29,10 @@ use crate::ui::panels::{
     SpectrumPanel,
     TablePanel,
 };
-
-/// Pane types for the tile layout
-#[derive(Debug)]
-enum Pane {
-    LeftPanel,
-    TablePanel,
-    MS2Spectrum,
-    PrecursorPlot,
-    FragmentPlot,
-}
-
-/// TabViewer implementation for the dock layout
-struct AppTabViewer<'a> {
-    file_loader: &'a mut FileLoader,
-    data: &'a mut DataState,
-    ui: &'a mut UiState,
-    computed: &'a mut ComputedState,
-    pending_commands: &'a mut Vec<AppCommand>,
-    left_panel: &'a mut LeftPanel,
-    table_panel: &'a mut TablePanel,
-    spectrum_panel: &'a mut SpectrumPanel,
-}
+use crate::ui::{
+    Panel,
+    PanelContext,
+};
 
 /// Commands that trigger state changes in the application
 #[derive(Debug, Clone)]
@@ -67,15 +49,40 @@ pub enum AppCommand {
     QueryMS2Spectrum(f64),
 }
 
+/// Pane types for the tile layout
+#[derive(Debug)]
+enum Pane {
+    LeftPanel,
+    TablePanel,
+    MS2Spectrum,
+    PrecursorPlot,
+    FragmentPlot,
+}
+
+/// State of indexed raw data loading
+#[derive(Debug, Default)]
+pub enum IndexedDataState {
+    /// No data loaded
+    #[default]
+    None,
+    /// Currently loading data from path
+    Loading(PathBuf),
+    /// Loading failed with error message
+    Failed(PathBuf, String),
+    /// Data successfully loaded
+    Loaded {
+        index: Arc<IndexedTimstofPeaks>,
+        ms1_rts: Arc<[u32]>,
+    },
+}
+
 /// Domain/data state - represents loaded data and analysis parameters
 #[derive(Debug, Default)]
 pub struct DataState {
     /// Loaded elution groups
     pub elution_groups: Option<ElutionGroupData>,
-    /// Loaded and indexed timsTOF data
-    pub indexed_data: Option<Arc<IndexedTimstofPeaks>>,
-    /// MS1 retention times (in milliseconds)
-    pub ms1_rts: Option<Arc<[u32]>>,
+    /// Indexed timsTOF data with loading state
+    pub indexed_data: IndexedDataState,
     /// Tolerance settings
     pub tolerance: Tolerance,
     /// Smoothing method configuration
@@ -93,8 +100,6 @@ pub struct UiState {
     pub search_mode: bool,
     /// Vim mode: search input buffer
     pub search_input: String,
-    /// Track if we're currently loading/indexing data
-    pub is_indexing: bool,
     /// Master toggle for MS2 spectrum feature
     pub show_ms2_spectrum: bool,
 }
@@ -106,7 +111,6 @@ impl Default for UiState {
             selected_index: None,
             search_mode: false,
             search_input: String::new(),
-            is_indexing: false,
             show_ms2_spectrum: true, // Enable MS2 by default
         }
     }
@@ -117,12 +121,14 @@ impl Default for UiState {
 pub struct ComputedState {
     /// Computed chromatogram for the selected elution group (plot data)
     pub chromatogram: Option<ChromatogramLines>,
-    /// Whether auto-zoom has been applied to the current chromatogram
-    pub chromatogram_auto_zoom_applied: bool,
+    /// X-axis bounds to apply on next plot render (min_rt, max_rt)
+    pub chromatogram_x_bounds: Option<(f64, f64)>,
     /// Raw chromatogram output data (for MS2 extraction)
     pub chromatogram_output: Option<ChromatogramOutput>,
     /// Computed MS2 spectrum at selected RT
     pub ms2_spectrum: Option<MS2Spectrum>,
+    /// Whether the chromatogram has been automatically zoomed to data range
+    pub chromatogram_auto_zoom_applied: bool,
 }
 
 /// Main application state
@@ -176,160 +182,7 @@ impl ViewerApp {
             spectrum_panel: SpectrumPanel::new(),
         }
     }
-}
 
-impl<'a> AppTabViewer<'a> {
-    fn render_left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Data Loading");
-        ui.separator();
-
-        ViewerApp::render_elution_groups_section_static(ui, self.file_loader, self.data);
-        ui.add_space(10.0);
-
-        ViewerApp::render_raw_data_section_static(ui, self.file_loader, self.data, self.ui);
-        ui.add_space(10.0);
-
-        ViewerApp::render_tolerance_loading_section_static(ui, self.file_loader, self.data);
-
-        ui.add_space(20.0);
-        ui.separator();
-
-        let commands = self.left_panel.render_tolerance_editor(ui, self.data);
-        self.pending_commands.extend(commands);
-
-        ui.add_space(20.0);
-        ui.separator();
-
-        let commands = self.left_panel.render_smoothing(ui, self.data);
-        self.pending_commands.extend(commands);
-
-        ui.add_space(20.0);
-        ui.separator();
-
-        // Plot visibility controls
-        ui.heading("Plot Settings");
-        ui.checkbox(&mut self.ui.show_ms2_spectrum, "Show MS2 Spectrum");
-    }
-}
-
-impl<'a> TabViewer for AppTabViewer<'a> {
-    type Tab = Pane;
-
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        match tab {
-            Pane::LeftPanel => "Settings".into(),
-            Pane::TablePanel => "Table".into(),
-            Pane::MS2Spectrum => "MS2".into(),
-            Pane::PrecursorPlot => "Precursors".into(),
-            Pane::FragmentPlot => "Fragments".into(),
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        match tab {
-            Pane::LeftPanel => {
-                // Wrap settings in a scroll area
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.render_left_panel(ui);
-                    });
-            }
-            Pane::TablePanel => {
-                if let Some(egs) = &self.data.elution_groups {
-                    if let Some(cmd) = self.table_panel.render(ui, egs, self.ui) {
-                        self.pending_commands.push(cmd);
-                    }
-                } else {
-                    ui.heading("Precursor Table");
-                    ui.separator();
-                    ui.label("Load elution groups to see the table");
-                }
-            }
-            Pane::MS2Spectrum => {
-                self.spectrum_panel
-                    .render(ui, self.computed.ms2_spectrum.as_ref());
-            }
-            Pane::PrecursorPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram {
-                    // Use shared link_id for synchronized X-axis with Fragments
-                    let click_response = crate::plot_renderer::render_chromatogram_plot(
-                        ui,
-                        chromatogram,
-                        crate::plot_renderer::PlotMode::PrecursorsOnly,
-                        Some("precursor_fragment_x_axis"),
-                        true,
-                    );
-                    if let Some(clicked_rt) = click_response {
-                        self.pending_commands
-                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
-                    }
-                } else if self.ui.selected_index.is_some() {
-                    ui.label("Generating chromatogram...");
-                } else {
-                    ui.label("Select a precursor from the table to view chromatogram");
-                }
-            }
-            Pane::FragmentPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram {
-                    // Use shared link_id for synchronized X-axis with Precursors
-                    let response = crate::plot_renderer::render_chromatogram_plot(
-                        ui,
-                        chromatogram,
-                        crate::plot_renderer::PlotMode::FragmentsOnly,
-                        Some("precursor_fragment_x_axis"),
-                        !self.computed.chromatogram_auto_zoom_applied,
-                    );
-                    self.computed.chromatogram_auto_zoom_applied = true;
-                    if let Some(clicked_rt) = response {
-                        self.pending_commands
-                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
-                    }
-                } else if self.ui.selected_index.is_some() {
-                    ui.label("Generating chromatogram...");
-                } else {
-                    ui.label("Select a precursor to view fragment traces");
-                }
-            }
-        }
-    }
-
-    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
-        false // Tabs cannot be closed
-    }
-}
-
-impl eframe::App for ViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_vim_keys(ctx);
-        self.handle_commands();
-
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.heading("TimsQuery Viewer");
-            ui.separator();
-        });
-
-        let mut tab_viewer = AppTabViewer {
-            file_loader: &mut self.file_loader,
-            data: &mut self.data,
-            ui: &mut self.ui,
-            computed: &mut self.computed,
-            pending_commands: &mut self.pending_commands,
-            left_panel: &mut self.left_panel,
-            table_panel: &mut self.table_panel,
-            spectrum_panel: &mut self.spectrum_panel,
-        };
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            DockArea::new(&mut self.dock_state)
-                .style(Style::from_egui(ui.style().as_ref()))
-                .show_inside(ui, &mut tab_viewer);
-        });
-    }
-}
-
-impl ViewerApp {
-    /// Process all pending commands
     fn handle_commands(&mut self) {
         let commands = std::mem::take(&mut self.pending_commands);
 
@@ -439,6 +292,56 @@ impl ViewerApp {
         });
     }
 
+    fn generate_chromatogram(&mut self) {
+        let IndexedDataState::Loaded { index, ms1_rts } = &self.data.indexed_data else {
+            return;
+        };
+
+        let selected_idx = match self.ui.selected_index {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        if let Some(elution_groups) = &self.data.elution_groups {
+            macro_rules! process_chromatogram {
+                ($egs:expr) => {
+                    match ChromatogramService::generate(
+                        &$egs[selected_idx],
+                        index,
+                        Arc::clone(ms1_rts),
+                        &self.data.tolerance,
+                        &self.data.smoothing,
+                    ) {
+                        Ok(chrom) => {
+                            let chrom_lines = ChromatogramLines::from_chromatogram(&chrom);
+                            self.computed.chromatogram_x_bounds =
+                                Some(chrom_lines.rt_seconds_range);
+                            self.computed.chromatogram = Some(chrom_lines);
+                            self.computed.chromatogram_output = Some(chrom);
+                            self.computed.chromatogram_auto_zoom_applied = false;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to generate chromatogram: {:?}", e);
+                            self.computed.chromatogram = None;
+                            self.computed.chromatogram_output = None;
+                            self.computed.chromatogram_x_bounds = None;
+                        }
+                    }
+                };
+            }
+
+            crate::with_elution_collection!(elution_groups, process_chromatogram);
+        };
+
+        if self.ui.show_ms2_spectrum
+            && let Some(chrom_output) = &self.computed.chromatogram_output
+        {
+            let reference_rt = chrom_output.rt_seconds as f64;
+            self.pending_commands
+                .push(AppCommand::QueryMS2Spectrum(reference_rt));
+        }
+    }
+
     fn render_elution_groups_section_static(
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
@@ -475,9 +378,9 @@ impl ViewerApp {
             Self::display_filename(ui, path);
         }
 
-        Self::load_raw_data_if_needed(ui, file_loader, data, ui_state);
+        Self::load_raw_data_if_needed(ui, file_loader, data);
 
-        if data.indexed_data.is_some() && !ui_state.is_indexing {
+        if matches!(data.indexed_data, IndexedDataState::Loaded { .. }) {
             ui.label("✓ Raw data indexed");
         }
     }
@@ -538,33 +441,50 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
-        ui_state: &mut UiState,
     ) {
         if let Some(path) = &file_loader.raw_data_path {
-            if data.indexed_data.is_none() && !ui_state.is_indexing {
-                ui_state.is_indexing = true;
+            // Transition from None to Loading
+            if matches!(data.indexed_data, IndexedDataState::None) {
+                data.indexed_data = IndexedDataState::Loading(path.clone());
                 ui.ctx().request_repaint();
             }
+        }
 
-            if ui_state.is_indexing {
+        match &data.indexed_data {
+            IndexedDataState::Loading(path) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Indexing raw data... (this may take 10-30 seconds)");
                 });
 
                 match file_loader.load_raw_data(path) {
-                    Ok((index, rts)) => {
-                        data.indexed_data = Some(index);
-                        data.ms1_rts = Some(rts);
-                        ui_state.is_indexing = false;
+                    Ok((index, ms1_rts)) => {
+                        data.indexed_data = IndexedDataState::Loaded { index, ms1_rts };
+                        file_loader.raw_data_path = None;
                         tracing::info!("Raw data indexing completed");
                     }
                     Err(e) => {
-                        tracing::error!("Failed to load raw data: {:?}", e);
-                        ui_state.is_indexing = false;
+                        let error_msg = format!("{:?}", e);
+                        tracing::error!("Failed to load raw data: {}", error_msg);
+                        data.indexed_data = IndexedDataState::Failed(path.clone(), error_msg);
+                        file_loader.raw_data_path = None;
                     }
                 }
             }
+            IndexedDataState::Failed(path, error) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Failed to load raw data from {}:",
+                        path.display()
+                    ))
+                    .color(egui::Color32::RED),
+                );
+                ui.label(egui::RichText::new(error).color(egui::Color32::RED).small());
+                if ui.button("Clear Error").clicked() {
+                    data.indexed_data = IndexedDataState::None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -577,96 +497,6 @@ impl ViewerApp {
                 Err(e) => {
                     tracing::error!("Failed to load tolerance: {:?}", e);
                 }
-            }
-        }
-    }
-
-    fn generate_chromatogram(&mut self) {
-        let Some(index) = &self.data.indexed_data else {
-            return;
-        };
-        let Some(ms1_rts) = &self.data.ms1_rts else {
-            return;
-        };
-
-        let selected_idx = match self.ui.selected_index {
-            Some(idx) => idx,
-            None => return,
-        };
-
-        macro_rules! process_chromatogram {
-            ($egs:expr) => {
-                Self::process_chromatogram(
-                    &mut self.computed.chromatogram,
-                    &mut self.computed.chromatogram_output,
-                    &$egs[selected_idx],
-                    index,
-                    ms1_rts,
-                    &self.data.tolerance,
-                    &self.data.smoothing,
-                );
-            };
-        }
-
-        if let Some(x) = &self.data.elution_groups {
-            // This feels pretty dirty ... I am pretty sure I can implement a getter
-            // that just casts to the lowest common denominator trait object or something
-            match &x.inner {
-                timsquery::serde::ElutionGroupCollection::StringLabels(egs) => {
-                    process_chromatogram!(egs);
-                }
-                timsquery::serde::ElutionGroupCollection::MzpafLabels(egs) => {
-                    process_chromatogram!(egs);
-                }
-                timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs) => {
-                    process_chromatogram!(egs);
-                }
-                timsquery::serde::ElutionGroupCollection::IntLabels(egs) => {
-                    process_chromatogram!(egs);
-                }
-            }
-        };
-        self.computed.chromatogram_auto_zoom_applied = false;
-
-        if self.ui.show_ms2_spectrum
-            && let Some(chrom_output) = &self.computed.chromatogram_output
-        {
-            let reference_rt = chrom_output.rt_seconds as f64;
-            self.pending_commands
-                .push(AppCommand::QueryMS2Spectrum(reference_rt));
-        }
-    }
-
-    fn process_chromatogram<T: KeyLike + std::fmt::Display>(
-        chromatogram_lines: &mut Option<ChromatogramLines>,
-        chromatogram_output: &mut Option<ChromatogramOutput>,
-        eg: &TimsElutionGroup<T>,
-        index: &Arc<IndexedTimstofPeaks>,
-        ms1_rts: &Arc<[u32]>,
-        tolerance: &Tolerance,
-        smoothing: &SmoothingMethod,
-    ) {
-        match chromatogram_processor::generate_chromatogram(
-            eg,
-            index,
-            Arc::clone(ms1_rts),
-            tolerance,
-            smoothing,
-        ) {
-            Ok(chrom) => {
-                tracing::info!(
-                    "Generated chromatogram for elution group {} with {} precursors and {} fragments",
-                    chrom.id,
-                    chrom.precursor_mzs.len(),
-                    chrom.fragment_mzs.len()
-                );
-                *chromatogram_lines = Some(ChromatogramLines::from_chromatogram(&chrom));
-                *chromatogram_output = Some(chrom);
-            }
-            Err(e) => {
-                tracing::error!("Failed to generate chromatogram: {:?}", e);
-                *chromatogram_lines = None;
-                *chromatogram_output = None;
             }
         }
     }
@@ -724,5 +554,165 @@ impl ViewerApp {
     fn select_elution_group(&mut self, idx: usize) {
         self.pending_commands
             .push(AppCommand::SelectElutionGroup(idx));
+    }
+}
+
+impl eframe::App for ViewerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_vim_keys(ctx);
+        self.handle_commands();
+
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.heading("TimsQuery Viewer");
+            ui.separator();
+        });
+
+        let mut tab_viewer = AppTabViewer {
+            file_loader: &mut self.file_loader,
+            data: &mut self.data,
+            ui: &mut self.ui,
+            computed: &mut self.computed,
+            pending_commands: &mut self.pending_commands,
+            left_panel: &mut self.left_panel,
+            table_panel: &mut self.table_panel,
+            spectrum_panel: &mut self.spectrum_panel,
+        };
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            DockArea::new(&mut self.dock_state)
+                .style(Style::from_egui(ui.style().as_ref()))
+                .show_inside(ui, &mut tab_viewer);
+        });
+    }
+}
+
+struct AppTabViewer<'a> {
+    file_loader: &'a mut FileLoader,
+    data: &'a mut DataState,
+    ui: &'a mut UiState,
+    computed: &'a mut ComputedState,
+    pending_commands: &'a mut Vec<AppCommand>,
+    left_panel: &'a mut LeftPanel,
+    table_panel: &'a mut TablePanel,
+    spectrum_panel: &'a mut SpectrumPanel,
+}
+
+impl<'a> AppTabViewer<'a> {
+    fn render_left_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Data Loading");
+        ui.separator();
+
+        ViewerApp::render_elution_groups_section_static(ui, self.file_loader, self.data);
+        ui.add_space(10.0);
+
+        ViewerApp::render_raw_data_section_static(ui, self.file_loader, self.data, self.ui);
+        ui.add_space(10.0);
+
+        ViewerApp::render_tolerance_loading_section_static(ui, self.file_loader, self.data);
+
+        ui.add_space(20.0);
+        ui.separator();
+
+        let mut ctx = PanelContext::new(
+            self.data,
+            self.ui,
+            self.computed,
+            self.file_loader,
+            self.pending_commands,
+        );
+        self.left_panel.render(ui, &mut ctx);
+    }
+}
+
+impl<'a> TabViewer for AppTabViewer<'a> {
+    type Tab = Pane;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            Pane::LeftPanel => self.left_panel.title().into(),
+            Pane::TablePanel => self.table_panel.title().into(),
+            Pane::MS2Spectrum => self.spectrum_panel.title().into(),
+            Pane::PrecursorPlot => "Precursors".into(),
+            Pane::FragmentPlot => "Fragments".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            Pane::LeftPanel => {
+                // Wrap settings in a scroll area
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.render_left_panel(ui);
+                    });
+            }
+            Pane::TablePanel => {
+                let mut ctx = PanelContext::new(
+                    self.data,
+                    self.ui,
+                    self.computed,
+                    self.file_loader,
+                    self.pending_commands,
+                );
+                self.table_panel.render(ui, &mut ctx);
+            }
+            Pane::MS2Spectrum => {
+                let mut ctx = PanelContext::new(
+                    self.data,
+                    self.ui,
+                    self.computed,
+                    self.file_loader,
+                    self.pending_commands,
+                );
+                self.spectrum_panel.render(ui, &mut ctx);
+            }
+            Pane::PrecursorPlot => {
+                if let Some(chromatogram) = &self.computed.chromatogram {
+                    // Use shared link_id for synchronized X-axis with Fragments
+                    let click_response = crate::plot_renderer::render_chromatogram_plot(
+                        ui,
+                        chromatogram,
+                        crate::plot_renderer::PlotMode::PrecursorsOnly,
+                        Some("precursor_fragment_x_axis"),
+                        true,
+                        &mut self.computed.chromatogram_auto_zoom_applied,
+                    );
+                    if let Some(clicked_rt) = click_response {
+                        self.pending_commands
+                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
+                    }
+                } else if self.ui.selected_index.is_some() {
+                    ui.label("Generating chromatogram...");
+                } else {
+                    ui.label("Select a precursor from the table to view chromatogram");
+                }
+            }
+            Pane::FragmentPlot => {
+                if let Some(chromatogram) = &self.computed.chromatogram {
+                    // Use shared link_id for synchronized X-axis with Precursors
+                    let response = crate::plot_renderer::render_chromatogram_plot(
+                        ui,
+                        chromatogram,
+                        crate::plot_renderer::PlotMode::FragmentsOnly,
+                        Some("precursor_fragment_x_axis"),
+                        false,
+                        &mut self.computed.chromatogram_auto_zoom_applied,
+                    );
+                    if let Some(clicked_rt) = response {
+                        self.pending_commands
+                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
+                    }
+                } else if self.ui.selected_index.is_some() {
+                    ui.label("Generating chromatogram...");
+                } else {
+                    ui.label("Select a precursor to view fragment traces");
+                }
+            }
+        }
+    }
+
+    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
+        false // Tabs cannot be closed
     }
 }

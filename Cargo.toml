@@ -32,7 +32,12 @@ rusqlite = "0.37.0"
 rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
+
+# Parquet and arrow usually need to be kept in sync
+# Its not needed but makes binaries smaller
 parquet = { version = "57.1" }
+arrow = { version = "57.1" }
+
 mimalloc = { version = "0.1.46", features = ["secure"] }
 thiserror = "2"
 insta = { version = "1.34.0" }

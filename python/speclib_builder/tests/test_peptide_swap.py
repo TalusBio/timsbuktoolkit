@@ -26,12 +26,8 @@ def _sample_element():
                 2,
                 3,
             ],
-            "precursor_mzs": [
-                722.8980675419999,
-                723.4024,
-                723.906732458,
-                724.411064916,
-            ],
+            "precursor_mz": 722.8980675419999,
+            "precursor_charge": 2,
             "fragment_mzs": [
                 1004.5382,
                 623.34436,
@@ -103,7 +99,7 @@ def test_peptide_swap_same():
     assert elem_bkp.elution_group.id == 4
     assert elem.elution_group.id == 4
 
-    assert elem.elution_group.precursor_mzs == new_elem.elution_group.precursor_mzs
+    assert elem.elution_group.precursor_mz == new_elem.elution_group.precursor_mz
     assert (
         elem.elution_group.precursor_labels == new_elem.elution_group.precursor_labels
     )

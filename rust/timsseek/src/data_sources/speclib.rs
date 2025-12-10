@@ -102,6 +102,29 @@ impl SerSpeclibElement {
             },
         }
     }
+
+    pub fn sample_json() -> &'static str {
+        r#"{
+            "precursor": {
+                "sequence": "PEPTIDEPINK",
+                "charge": 2,
+                "decoy": false,
+                "decoy_group": 0
+            },
+            "elution_group": {
+                "id": 0,
+                "precursor_mz": 876.5432,
+                "precursor_labels": [ 0, 1 ],
+                "fragment_mzs": [ 123.0, 123.0, 123.0 ],
+                "fragment_labels": ["a1", "b1", "c1^2"],
+                "precursor_intensities": [1.0, 1.0],
+                "fragment_intensities": [1.0, 1.0, 1.0],
+                "precursor_charge": 2,
+                "mobility_ook0": 0.8,
+                "rt_seconds": 0.0
+            }
+        }"#
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +248,7 @@ pub struct ReferenceEG {
     id: u32,
     precursor_mz: f64,
     precursor_labels: Vec<i8>,
+    #[serde(alias = "fragment_mz")]
     fragment_mzs: Vec<f64>,
     fragment_labels: Vec<IonAnnot>,
     precursor_intensities: Vec<f32>,
@@ -609,7 +633,7 @@ mod tests {
                 },
                 "elution_group": {
                     "id": 0,
-                    "precursor_mzs": [ 1810.917339999999, 1810.917339999999 ],
+                    "precursor_mz": 876.5432,
                     "precursor_labels": [ 0, 1 ],
                     "fragment_mzs": [ 123.0, 123.0, 123.0 ],
                     "fragment_labels": ["a1", "b1", "c1^2"],
@@ -628,5 +652,15 @@ mod tests {
         assert_eq!(speclib.elems[0].digest.decoy, DecoyMarking::Target);
         assert_eq!(speclib.elems[0].digest.len(), "PEPTIDEPINK".len());
         assert_eq!(speclib.elems[0].query.fragment_count(), 3);
+    }
+
+    #[test]
+    fn test_sample_elution_group_deserialization() {
+        let json = SerSpeclibElement::sample_json();
+        let elem: SerSpeclibElement = serde_json::from_str(json).unwrap();
+        let query_item: QueryItemToScore = elem.into();
+
+        assert_eq!(query_item.digest.len(), "PEPTIDEPINK".len());
+        assert_eq!(query_item.query.fragment_count(), 3);
     }
 }

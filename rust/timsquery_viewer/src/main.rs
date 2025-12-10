@@ -1,5 +1,6 @@
 mod app;
 mod chromatogram_processor;
+mod domain;
 mod error;
 mod file_loader;
 mod plot_renderer;

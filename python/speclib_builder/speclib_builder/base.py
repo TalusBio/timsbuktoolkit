@@ -35,7 +35,8 @@ class ElutionGroup(BaseModel):
     id: int
     mobility: float
     rt_seconds: float
-    precursor_mzs: list[float]
+    precursor_mz: float
+    precursor_charge: int
     precursor_labels: list[int]
     fragment_mzs: list[float]
     fragment_labels: list[str]
@@ -97,7 +98,10 @@ class SpeclibElement(BaseModel):
                 fragment_mzs=[v for v in keep.values()],
                 fragment_labels=[k for k in keep.keys()],
                 precursor_labels=self.elution_group.precursor_labels,
-                precursor_mzs=self.elution_group.precursor_mzs,
+                precursor_mz=self.elution_group.precursor_mz,
+                precursor_charge=self.elution_group.precursor_charge,
+                precursor_intensities=self.elution_group.precursor_intensities,
+                fragment_intensities=self.elution_group.fragment_intensities,
             ),
         )
 
@@ -134,7 +138,8 @@ class SpeclibElement(BaseModel):
                 id=id,
                 mobility=self.elution_group.mobility,
                 rt_seconds=self.elution_group.rt_seconds,
-                precursor_mzs=self.elution_group.precursor_mzs,
+                precursor_mz=self.elution_group.precursor_mz,
+                precursor_charge=self.elution_group.precursor_charge,
                 fragment_mzs=new_fragment_mzs,
                 precursor_labels=self.elution_group.precursor_labels,
                 fragment_labels=self.elution_group.fragment_labels,

@@ -81,10 +81,10 @@ impl<V: ArrayElement> Chromatogram<'_, V> {
     /// them to the local chromatogram indices.
     ///
     /// Returns None if the adjusted indices are out of bounds.
-    pub fn try_get_slice(&self, start: usize, end: usize) -> Option<&[V]> {
+    pub fn try_get_slice(&self, global_start: usize, global_end: usize) -> Option<&[V]> {
         // add index offsetting
-        let start = start.saturating_sub(self.cycle_offset);
-        let end = end.saturating_sub(self.cycle_offset);
+        let start = global_start.saturating_sub(self.cycle_offset);
+        let end = global_end.saturating_sub(self.cycle_offset);
         if start >= self.slc.len() || end > self.slc.len() || start >= end {
             return None;
         }

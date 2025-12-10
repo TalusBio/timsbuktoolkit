@@ -14,21 +14,7 @@ use tracing::{
     instrument,
 };
 
-/// Width of the visual band around reference retention time (in seconds)
 const REFERENCE_RT_BAND_WIDTH_SECONDS: f64 = 10.0;
-
-#[derive(Debug)]
-struct LineData {
-    points: Vec<PlotPoint>,
-    name: String,
-    stroke: egui::Stroke,
-}
-
-impl LineData {
-    fn to_plot_line<'a>(&'a self) -> Line<'a> {
-        Line::new(&self.name, self.points.as_slice()).stroke(self.stroke)
-    }
-}
 
 /// Specifies which traces to render in the chromatogram plot
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +28,6 @@ pub enum PlotMode {
 }
 
 #[derive(Debug)]
-pub struct ChromatogramLine {
-    data: LineData,
-    intensity_max: f64,
-}
-
-#[derive(Debug)]
 pub struct ChromatogramLines {
     precursor_lines: Vec<ChromatogramLine>,
     fragment_lines: Vec<ChromatogramLine>,
@@ -55,7 +35,7 @@ pub struct ChromatogramLines {
     pub reference_ook0: f64,
     pub reference_rt_seconds: f64,
     intensity_max: f64,
-    rt_seconds_range: (f64, f64),
+    pub rt_seconds_range: (f64, f64),
 }
 
 impl ChromatogramLines {
@@ -179,13 +159,14 @@ pub struct MS2Spectrum {
 ///
 /// If `link_group_id` is provided, the X-axis will be linked to other plots with the same ID
 /// If `show_header` is false, the elution group ID and reference RT/mobility labels are not shown
-/// If `reset_bounds` is true, the plot bounds will be reset to show the full data range
+/// If `reset_bounds_applied` is false, the plot bounds will be reset to show the full data range, and the flag will be set to true
 pub fn render_chromatogram_plot(
     ui: &mut egui::Ui,
     chromatogram: &ChromatogramLines,
     mode: PlotMode,
     link_group_id: Option<&str>,
     show_header: bool,
+    reset_bounds_applied: &mut bool,
 ) -> Option<f64> {
     let mut clicked_rt = None;
 
@@ -284,24 +265,32 @@ pub fn render_chromatogram_plot(
             plot_ui.translate_bounds(pan_delta);
         }
 
-        let bounds = plot_ui.plot_bounds();
+        if !*reset_bounds_applied {
+            plot_ui.set_plot_bounds_x(
+                chromatogram.rt_seconds_range.0..=chromatogram.rt_seconds_range.1,
+            );
+            plot_ui.set_plot_bounds_y(0.0..=max_polygon_height);
+            *reset_bounds_applied = true;
+        } else {
+            let bounds = plot_ui.plot_bounds();
 
-        let y_min = bounds.min()[1];
-        let y_max = bounds.max()[1];
-        let clamped_y_min = 0.0;
-        let clamped_y_max = y_max.min(max_polygon_height);
+            let y_min = bounds.min()[1];
+            let y_max = bounds.max()[1];
+            let clamped_y_min = 0.0;
+            let clamped_y_max = y_max.min(max_polygon_height);
 
-        if y_min != clamped_y_min || y_max != clamped_y_max {
-            plot_ui.set_plot_bounds_y(clamped_y_min..=clamped_y_max);
-        }
+            if y_min != clamped_y_min || y_max != clamped_y_max {
+                plot_ui.set_plot_bounds_y(clamped_y_min..=clamped_y_max);
+            }
 
-        let x_min = bounds.min()[0];
-        let x_max = bounds.max()[0];
-        let clamped_x_min = x_min.max(chromatogram.rt_seconds_range.0);
-        let clamped_x_max = x_max.min(chromatogram.rt_seconds_range.1);
+            let x_min = bounds.min()[0];
+            let x_max = bounds.max()[0];
+            let clamped_x_min = x_min.max(chromatogram.rt_seconds_range.0);
+            let clamped_x_max = x_max.min(chromatogram.rt_seconds_range.1);
 
-        if x_min != clamped_x_min || x_max != clamped_x_max {
-            plot_ui.set_plot_bounds_x(clamped_x_min..=clamped_x_max);
+            if x_min != clamped_x_min || x_max != clamped_x_max {
+                plot_ui.set_plot_bounds_x(clamped_x_min..=clamped_x_max);
+            }
         }
 
         if plot_ui.response().clicked()
@@ -315,7 +304,25 @@ pub fn render_chromatogram_plot(
     clicked_rt
 }
 
-/// Get a color for precursor traces (blue-ish tones)
+#[derive(Debug)]
+struct LineData {
+    points: Vec<PlotPoint>,
+    name: String,
+    stroke: egui::Stroke,
+}
+
+impl LineData {
+    fn to_plot_line<'a>(&'a self) -> Line<'a> {
+        Line::new(&self.name, self.points.as_slice()).stroke(self.stroke)
+    }
+}
+
+#[derive(Debug)]
+pub struct ChromatogramLine {
+    data: LineData,
+    intensity_max: f64,
+}
+
 fn get_precursor_color(index: usize) -> egui::Color32 {
     let colors = [
         egui::Color32::from_rgb(0, 114, 178),   // Blue
@@ -327,7 +334,6 @@ fn get_precursor_color(index: usize) -> egui::Color32 {
     colors[index % colors.len()]
 }
 
-/// Get a color for fragment traces (orange/red tones)
 fn get_fragment_color(index: usize) -> egui::Color32 {
     let colors = [
         egui::Color32::from_rgb(230, 159, 0),   // Orange

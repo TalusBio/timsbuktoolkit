@@ -1,12 +1,12 @@
 use eframe::egui;
 
-use crate::app::{
-    AppCommand,
-    UiState,
-};
+use crate::app::AppCommand;
 use crate::file_loader::ElutionGroupData;
 use crate::ui::components::precursor_table;
-use timsquery::serde::ElutionGroupCollection;
+use crate::ui::{
+    Panel,
+    PanelContext,
+};
 /// Panel for displaying and filtering the precursor table
 pub struct TablePanel;
 
@@ -15,57 +15,22 @@ impl TablePanel {
         Self
     }
 
-    /// Renders the precursor table panel with filtering and selection.
-    ///
-    /// Reads: `elution_groups` (all elution group data)
-    ///        `ui_state.table_filter` (current filter string)
-    ///        `ui_state.search_mode` (whether search is active)
-    ///        `ui_state.selected_index` (currently selected row)
-    /// Writes: `ui_state.selected_index` (if user clicks a row)
-    /// Returns: Command to select elution group if selection changed
-    pub fn render(
-        &self,
-        ui: &mut egui::Ui,
-        elution_groups: &ElutionGroupData,
-        ui_state: &mut UiState,
-    ) -> Option<AppCommand> {
-        ui.heading("Precursor Table");
-        ui.separator();
-
-        if ui_state.search_mode {
-            self.render_search_ui(ui, ui_state);
-        } else {
-            self.render_filter_ui(ui, ui_state);
-        }
-
-        let filtered_indices =
-            elution_groups.matching_indices_for_id_filter(&ui_state.table_filter);
-
-        ui.label(format!(
-            "Showing {} of {} precursors",
-            filtered_indices.len(),
-            elution_groups.len()
-        ));
-
-        self.render_table(ui, &filtered_indices, elution_groups, ui_state)
-    }
-
-    fn render_search_ui(&self, ui: &mut egui::Ui, ui_state: &mut UiState) {
+    fn render_search_ui(&self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
         ui.horizontal(|ui| {
             ui.label("Search:");
-            let response = ui.text_edit_singleline(&mut ui_state.search_input);
+            let response = ui.text_edit_singleline(&mut ctx.ui.search_input);
             response.request_focus();
             ui.label("(Enter to apply, Esc to cancel)");
         });
         ui.separator();
     }
 
-    fn render_filter_ui(&self, ui: &mut egui::Ui, ui_state: &mut UiState) {
+    fn render_filter_ui(&self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
         ui.horizontal(|ui| {
             ui.label("Filter by ID:");
-            ui.text_edit_singleline(&mut ui_state.table_filter);
+            ui.text_edit_singleline(&mut ctx.ui.table_filter);
             if ui.button("Clear").clicked() {
-                ui_state.table_filter.clear();
+                ctx.ui.table_filter.clear();
             }
         });
         ui.add_space(5.0);
@@ -82,44 +47,74 @@ impl TablePanel {
         ui: &mut egui::Ui,
         filtered_indices: &[usize],
         elution_groups: &ElutionGroupData,
-        ui_state: &mut UiState,
-    ) -> Option<AppCommand> {
-        let old_selection = ui_state.selected_index;
+        selected_index: &mut Option<usize>,
+        commands: &mut crate::ui::CommandSink,
+    ) {
+        let old_selection = *selected_index;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 macro_rules! render_table {
-                    ($egs: expr) => {
+                    ($egs:expr) => {
                         precursor_table::render_precursor_table_filtered(
                             ui,
                             filtered_indices,
                             $egs,
-                            &mut ui_state.selected_index,
+                            selected_index,
                         )
                     };
                 }
-                match elution_groups {
-                    ElutionGroupData {
-                        inner: ElutionGroupCollection::StringLabels(egs),
-                    } => render_table!(egs),
-                    ElutionGroupData {
-                        inner: ElutionGroupCollection::MzpafLabels(egs),
-                    } => render_table!(egs),
-                    ElutionGroupData {
-                        inner: ElutionGroupCollection::TinyIntLabels(egs),
-                    } => render_table!(egs),
-                    ElutionGroupData {
-                        inner: ElutionGroupCollection::IntLabels(egs),
-                    } => render_table!(egs),
-                }
+                crate::with_elution_collection!(elution_groups, render_table);
             });
 
-        if old_selection != ui_state.selected_index {
-            ui_state.selected_index.map(AppCommand::SelectElutionGroup)
-        } else {
-            None
+        if old_selection != *selected_index
+            && let Some(new_idx) = *selected_index
+        {
+            commands.push(AppCommand::SelectElutionGroup(new_idx));
         }
+    }
+}
+
+impl Panel for TablePanel {
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
+        ui.heading("Precursor Table");
+        ui.separator();
+
+        // Check if we have data first
+        if ctx.data.elution_groups.is_none() {
+            ui.label("Load elution groups to see the table");
+            return;
+        }
+
+        // Render search/filter UI (needs mutable ctx, doesn't need elution_groups)
+        if ctx.ui.search_mode {
+            self.render_search_ui(ui, ctx);
+        } else {
+            self.render_filter_ui(ui, ctx);
+        }
+
+        // Now borrow elution_groups for the rest
+        let elution_groups = ctx.data.elution_groups.as_ref().unwrap();
+        let filtered_indices = elution_groups.matching_indices_for_id_filter(&ctx.ui.table_filter);
+
+        ui.label(format!(
+            "Showing {} of {} precursors",
+            filtered_indices.len(),
+            elution_groups.len()
+        ));
+
+        self.render_table(
+            ui,
+            &filtered_indices,
+            elution_groups,
+            &mut ctx.ui.selected_index,
+            &mut ctx.commands,
+        );
+    }
+
+    fn title(&self) -> &str {
+        "Table"
     }
 }
 

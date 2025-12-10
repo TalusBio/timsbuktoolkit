@@ -589,11 +589,11 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let results: IonSearchAccumulator = {
             let mut scorer = init_fn();
             items_to_score
-                .into_iter()
+                .iter()
                 .filter(filter_fn)
                 .map(|item| {
                     let mut timings = ScoreTimings::default();
-                    let maybe_score = self.buffered_score(item.clone(), &mut scorer, &mut timings);
+                    let maybe_score = self.process_query(item.clone(), &mut scorer, &mut timings);
                     (maybe_score, timings)
                 })
                 .collect()

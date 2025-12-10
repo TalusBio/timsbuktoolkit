@@ -60,8 +60,8 @@ pub struct IndexedPeak {
 /// 2. Query the peaks using [IndexedTimstofPeaks::query_peaks_ms1] or [IndexedTimstofPeaks::query_peaks_ms2]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexedTimstofPeaks {
-    ms2_window_groups: Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
-    ms1_peaks: IndexedPeakGroup,
+    pub(crate) ms2_window_groups: Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
+    pub(crate) ms1_peaks: IndexedPeakGroup,
 }
 
 /// Statistics about the indexing process.
@@ -306,10 +306,10 @@ impl IndexedTimstofPeaks {
 /// Each bucket internally sorted by retention time (rt).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexedPeakGroup {
-    peaks: Vec<IndexedPeak>,
-    bucket_mz_ranges: Vec<TupleRange<f32>>,
-    bucket_size: usize,
-    cycle_to_rt_ms: Vec<u32>,
+    pub(crate) peaks: Vec<IndexedPeak>,
+    pub(crate) bucket_mz_ranges: Vec<TupleRange<f32>>,
+    pub(crate) bucket_size: usize,
+    pub(crate) cycle_to_rt_ms: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,7 +419,7 @@ impl IndexedPeakGroup {
     ///
     /// NOTE: This internally uses `par_sort_unstable` to sort the peaks
     /// so in theory it should not be called within a parallel loop.
-    fn new(
+    pub(crate) fn new(
         mut peaks: Vec<IndexedPeak>,
         cycle_to_rt_ms: Vec<u32>,
         bucket_size: usize,
@@ -759,11 +759,16 @@ impl<'a> QueryPeaksIterator<'a> {
     }
 
     fn next_in_current_bucket(&mut self) -> Option<&'a IndexedPeak> {
-        if let Some(bucket) = self.current_bucket.as_ref()
-            && self.position_in_bucket < self.end_of_current_bucket
-        {
+        // Use a loop instead of recursion to avoid stack overflow when many
+        // consecutive peaks don't match the filter criteria (common in dense spectra).
+        while let Some(bucket) = self.current_bucket.as_ref() {
+            if self.position_in_bucket >= self.end_of_current_bucket {
+                return None;
+            }
+
             let peak = &bucket.inner[self.position_in_bucket];
             self.position_in_bucket += 1;
+
             if self.mz_range.contains(peak.mz)
                 && self
                     .im_range
@@ -771,9 +776,8 @@ impl<'a> QueryPeaksIterator<'a> {
                     .is_unrestricted_or(|r| r.contains(peak.mobility_ook0))
             {
                 return Some(peak);
-            } else {
-                return self.next_in_current_bucket();
             }
+            // Continue loop to check next peak
         }
         None
     }

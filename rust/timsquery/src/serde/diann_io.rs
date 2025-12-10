@@ -4,7 +4,6 @@ use crate::ion::{
     IonParsingError,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
@@ -95,19 +94,16 @@ struct DiannLibraryRow {
 }
 
 impl DiannLibraryRow {
-    /// Create a grouping key for precursor-level aggregation
-    /// Format: "ModifiedPeptide|PrecursorMz|Charge|RT|Mobility|ProteinID|Decoy"
-    fn precursor_key(&self) -> String {
-        format!(
-            "{}|{:.10}|{}|{:.10}|{:.10}|{}|{}",
-            self.modified_peptide,
-            self.precursor_mz,
-            self.precursor_charge,
-            self.tr_recalibrated,
-            self.ion_mobility,
-            self.protein_id,
-            self.decoy
-        )
+    /// Check if this row belongs to the same precursor as another row
+    /// This is much faster than generating the string key
+    fn is_same_precursor(&self, other: &DiannLibraryRow) -> bool {
+        self.modified_peptide == other.modified_peptide
+            && self.precursor_mz == other.precursor_mz
+            && self.precursor_charge == other.precursor_charge
+            && self.tr_recalibrated == other.tr_recalibrated
+            && self.ion_mobility == other.ion_mobility
+            && self.protein_id == other.protein_id
+            && self.decoy == other.decoy
     }
 }
 
@@ -161,6 +157,10 @@ pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
         .all(|col| columns.contains(&col.to_string()))
 }
 
+struct ParsingBuffers {
+    fragment_labels: Vec<IonAnnot>,
+}
+
 pub fn read_library_file<T: AsRef<Path>>(
     file: T,
 ) -> Result<Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
@@ -172,21 +172,37 @@ pub fn read_library_file<T: AsRef<Path>>(
 
     info!("Reading file content from {}", file.as_ref().display());
 
-    // Group rows by precursor key
-    let mut grouped_rows: HashMap<String, Vec<DiannLibraryRow>> = HashMap::new();
+    // Optimization: Stream rows and group adjacent ones instead of loading everything into memory
+    let mut elution_groups = Vec::new();
+    let mut current_group: Vec<DiannLibraryRow> = Vec::with_capacity(20);
+    // Reuse buffer for fragment labels to avoid allocation per group
+    let mut buffers = ParsingBuffers {
+        fragment_labels: Vec::with_capacity(20),
+    };
+
+    let mut group_id = 0;
 
     for result in rdr.deserialize() {
         let row: DiannLibraryRow = result?;
-        let key = row.precursor_key();
-        grouped_rows.entry(key).or_default().push(row);
+
+        if let Some(last_row) = current_group.first()
+            && !row.is_same_precursor(last_row)
+        {
+            // New group found, parse the collected group
+            let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
+            elution_groups.push(eg);
+
+            // Start new group
+            group_id += 1;
+            current_group.clear();
+        }
+
+        current_group.push(row);
     }
 
-    info!("Found {} unique precursors", grouped_rows.len());
-
-    let mut elution_groups = Vec::with_capacity(grouped_rows.len());
-
-    for (id, (_key, rows)) in grouped_rows.into_iter().enumerate() {
-        let eg = parse_precursor_group(id as u64, rows)?;
+    // Process the last group
+    if !current_group.is_empty() {
+        let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
         elution_groups.push(eg);
     }
 
@@ -196,7 +212,8 @@ pub fn read_library_file<T: AsRef<Path>>(
 
 fn parse_precursor_group(
     id: u64,
-    rows: Vec<DiannLibraryRow>,
+    rows: &[DiannLibraryRow],
+    buffers: &mut ParsingBuffers,
 ) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
         return Err(DiannPrecursorParsingError::Other(
@@ -207,7 +224,10 @@ fn parse_precursor_group(
     // All rows in this group share the same precursor info, so take first row
     let first_row = &rows[0];
     let mobility = first_row.ion_mobility as f32;
-    let rt_seconds = first_row.tr_recalibrated as f32;
+
+    // In diann retention times are usually in either biognosys-iRT times (which is loosely minutes)
+    // or actual minutes - either way we convert to seconds here
+    let rt_seconds = first_row.tr_recalibrated as f32 * 60.0;
     let precursor_mz = first_row.precursor_mz;
     let precursor_charge: u8 =
         first_row
@@ -222,7 +242,7 @@ fn parse_precursor_group(
 
     // Extract fragment information from all rows
     let mut fragment_mzs = Vec::with_capacity(rows.len());
-    let mut fragment_labels = Vec::with_capacity(rows.len());
+    buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(rows.len());
     let mut num_unknown_losses = 0;
 
@@ -248,30 +268,27 @@ fn parse_precursor_group(
 
             num_unknown_losses += 1;
             let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
-            fragment_labels.push(ion_annot);
+            buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
             continue;
         }
 
-        let frag_type = &row.fragment_type;
-        let frag_num = row.fragment_number as i8;
+        let frag_char =
+            row.fragment_type.chars().next().ok_or_else(|| {
+                DiannPrecursorParsingError::Other("Empty fragment type".to_string())
+            })?;
 
-        // Build ion annotation string like "y4" or "b3^2" for charge > 1
-        let ion_str = if frag_charge == 1 {
-            format!("{}{}", frag_type, frag_num)
-        } else {
-            format!("{}{}^{}", frag_type, frag_num, frag_charge)
-        };
-
-        let ion_annot = IonAnnot::try_from(ion_str.as_str()).map_err(|e| {
-            DiannPrecursorParsingError::IonAnnotParseError(format!(
-                "Failed to parse ion annotation '{}': {:?}",
-                ion_str, e
+        let frag_num = row.fragment_number.try_into().map_err(|_| {
+            DiannPrecursorParsingError::Other(format!(
+                "Invalid fragment number: {}",
+                row.fragment_number
             ))
         })?;
 
-        fragment_labels.push(ion_annot);
+        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
+
+        buffers.fragment_labels.push(ion_annot);
         fragment_mzs.push(fragment_mz);
         relative_intensities.push((ion_annot, rel_intensity));
     }
@@ -299,8 +316,8 @@ fn parse_precursor_group(
         .id(id)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
-        .fragment_labels(fragment_labels.as_slice().into())
-        .fragment_mzs(fragment_mzs.into_iter().collect())
+        .fragment_labels(buffers.fragment_labels.as_slice().into())
+        .fragment_mzs(fragment_mzs)
         .precursor_labels(tiny_vec![0]) // Single monoisotopic precursor
         .precursor(precursor_mz, precursor_charge)
         .try_build()
@@ -367,12 +384,12 @@ mod tests {
         // More specific assertions if we can identify groups by ID or other means:
         let mgrysgk = &elution_groups[1].0;
         assert_eq!(mgrysgk.fragment_count(), 5);
-        assert!((mgrysgk.rt_seconds() - 3.78).abs() < 0.01);
+        assert!((mgrysgk.rt_seconds() - 3.78 * 60.).abs() < 0.01);
         assert!((mgrysgk.mobility_ook0() - 0.7825).abs() < 0.001);
 
         let hgdtgrr = &elution_groups[0].0;
         assert_eq!(hgdtgrr.fragment_count(), 4);
-        assert!((hgdtgrr.rt_seconds() - 3.51).abs() < 0.01);
+        assert!((hgdtgrr.rt_seconds() - 3.51 * 60.).abs() < 0.01);
         assert!((hgdtgrr.mobility_ook0() - 0.7709).abs() < 0.001);
     }
 

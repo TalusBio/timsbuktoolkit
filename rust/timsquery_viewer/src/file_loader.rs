@@ -1,18 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use timscentroid::{
-    IndexedTimstofPeaks,
-    TimsTofPath,
-};
+use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::{
-    ElutionGroupCollection,
-    load_index_caching,
-};
-use timsrust::MSLevel;
+use timsquery::serde::ElutionGroupCollection;
 
-use tracing::info;
-
+use crate::domain::FileService;
 use crate::error::ViewerError;
 
 /// Handles file dialogs and file loading operations
@@ -20,6 +12,61 @@ pub struct FileLoader {
     pub elution_groups_path: Option<PathBuf>,
     pub raw_data_path: Option<PathBuf>,
     pub tolerance_path: Option<PathBuf>,
+}
+
+impl FileLoader {
+    pub fn new() -> Self {
+        Self {
+            elution_groups_path: None,
+            raw_data_path: None,
+            tolerance_path: None,
+        }
+    }
+
+    /// Open a file dialog for elution groups JSON file
+    pub fn open_elution_groups_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Elution Groups File (json/diann txt)", &["json", "txt"])
+            .pick_file()
+        {
+            self.elution_groups_path = Some(path);
+        }
+    }
+
+    /// Open a file dialog for raw data .d directory
+    pub fn open_raw_data_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            self.raw_data_path = Some(path);
+        }
+    }
+
+    /// Open a file dialog for tolerance settings JSON file
+    pub fn open_tolerance_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        {
+            self.tolerance_path = Some(path);
+        }
+    }
+
+    /// Load elution groups from a JSON file
+    pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
+        FileService::load_elution_groups(path)
+    }
+
+    /// Load and index raw timsTOF data
+    pub fn load_raw_data(
+        &self,
+        path: &PathBuf,
+    ) -> Result<(Arc<IndexedTimstofPeaks>, Arc<[u32]>), ViewerError> {
+        FileService::load_raw_data(path)
+    }
+
+    /// Load tolerance settings from a JSON file
+    pub fn load_tolerance(&self, path: &PathBuf) -> Result<Tolerance, ViewerError> {
+        FileService::load_tolerance(path)
+    }
 }
 
 #[derive(Debug)]
@@ -66,90 +113,25 @@ impl ElutionGroupData {
     }
 }
 
-impl FileLoader {
-    pub fn new() -> Self {
-        Self {
-            elution_groups_path: None,
-            raw_data_path: None,
-            tolerance_path: None,
+/// Execute a macro with the appropriate elution group collection variant.
+///
+/// # Example
+/// ```ignore
+/// macro_rules! process {
+///     ($egs:expr) => {{
+///         ChromatogramService::generate(&$egs[idx], ...)
+///     }};
+/// }
+/// with_elution_collection!(elution_groups, process)
+/// ```
+#[macro_export]
+macro_rules! with_elution_collection {
+    ($data:expr, $macro_name:ident) => {
+        match &$data.inner {
+            timsquery::serde::ElutionGroupCollection::StringLabels(egs) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::MzpafLabels(egs) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::IntLabels(egs) => $macro_name!(egs),
         }
-    }
-
-    /// Open a file dialog for elution groups JSON file
-    pub fn open_elution_groups_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Elution Groups File (json/diann txt)", &["json", "txt"])
-            .pick_file()
-        {
-            self.elution_groups_path = Some(path);
-        }
-    }
-
-    /// Open a file dialog for raw data .d directory
-    pub fn open_raw_data_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.raw_data_path = Some(path);
-        }
-    }
-
-    /// Open a file dialog for tolerance settings JSON file
-    pub fn open_tolerance_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("JSON", &["json"])
-            .pick_file()
-        {
-            self.tolerance_path = Some(path);
-        }
-    }
-
-    /// Load elution groups from a JSON file
-    pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
-        let res = timsquery::serde::read_library_file(path)?;
-        info!(
-            "Loaded {} elution groups from {}",
-            res.len(),
-            path.display()
-        );
-        Ok(ElutionGroupData { inner: res })
-    }
-
-    /// Load and index raw timsTOF data
-    pub fn load_raw_data(
-        &self,
-        path: &PathBuf,
-    ) -> Result<(Arc<IndexedTimstofPeaks>, Arc<[u32]>), ViewerError> {
-        let index = load_index_caching(path).map_err(|e| ViewerError::DataLoading {
-            path: path.clone(),
-            source: Box::new(ViewerError::General(format!("{:?}", e))),
-        })?;
-
-        let rts = get_ms1_rts_as_millis(path)?;
-
-        Ok((Arc::new(index), rts))
-    }
-
-    /// Load tolerance settings from a JSON file
-    pub fn load_tolerance(&self, path: &PathBuf) -> Result<Tolerance, ViewerError> {
-        let file_content = std::fs::read_to_string(path)?;
-        let tolerance: Tolerance = serde_json::from_str(&file_content)?;
-        Ok(tolerance)
-    }
-}
-
-/// Retrieves MS1 retention times from a TIMS-TOF file, sorted and deduped
-fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, ViewerError> {
-    let ttp = TimsTofPath::new(file).map_err(|e| ViewerError::TimsFileLoad {
-        path: file.clone(),
-        source: e,
-    })?;
-    let reader = ttp.load_frame_reader()?;
-    let mut rts: Vec<_> = reader
-        .frame_metas
-        .iter()
-        .filter(|x| x.ms_level == MSLevel::MS1)
-        .map(|f| (f.rt_in_seconds * 1000.0).round() as u32)
-        .collect();
-    rts.sort_unstable();
-    rts.dedup();
-    Ok(rts.into())
+    };
 }

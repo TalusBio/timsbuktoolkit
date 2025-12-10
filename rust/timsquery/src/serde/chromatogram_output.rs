@@ -68,12 +68,17 @@ impl ChromatogramOutput {
             return Err(crate::errors::DataProcessingError::ExpectedNonEmptyData);
         }
 
+        let cycle_offset = collector.cycle_offset();
         let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = collector
             .iter_mut_precursors()
             .filter_map(|(&(idx, mz), cmg)| {
                 let out_vec = cmg
-                    .try_get_slice(local_non_zero_min_idx, local_non_zero_max_idx + 1)
+                    .try_get_slice(
+                        local_non_zero_min_idx + cycle_offset,
+                        local_non_zero_max_idx + 1 + cycle_offset,
+                    )
                     .unwrap();
+
                 if out_vec.iter().all(|&x| x == 0.0) {
                     return None;
                 }

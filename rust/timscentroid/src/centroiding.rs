@@ -47,6 +47,17 @@ pub struct CentroidingConfig {
     pub early_stop_iterations: u32,
 }
 
+impl Default for CentroidingConfig {
+    fn default() -> Self {
+        Self {
+            max_peaks: 20_000,
+            mz_ppm_tol: 5.0,
+            im_pct_tol: 3.0,
+            early_stop_iterations: 200,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PeakAggregator {
     weighed_tof_sum: u64,
@@ -72,9 +83,24 @@ impl PeakAggregator {
         assert!(peak.corrected_intensity >= 0.0);
 
         let weight = peak.corrected_intensity as u64;
-        self.weighed_tof_sum += peak.tof_index as u64 * weight;
-        self.weighed_im_sum += peak.scan_index as u64 * weight;
-        self.total_weight += weight;
+
+        // Use checked arithmetic to prevent silent overflow in weight accumulation.
+        // With ~500k peaks at high intensities, overflow is theoretically possible.
+        self.weighed_tof_sum = self
+            .weighed_tof_sum
+            .checked_add(peak.tof_index as u64 * weight)
+            .expect("Weight sum overflow: tof_index * weight exceeded u64::MAX");
+
+        self.weighed_im_sum = self
+            .weighed_im_sum
+            .checked_add(peak.scan_index as u64 * weight)
+            .expect("Weight sum overflow: scan_index * weight exceeded u64::MAX");
+
+        self.total_weight = self
+            .total_weight
+            .checked_add(weight)
+            .expect("Total weight overflow: accumulated weight exceeded u64::MAX");
+
         self.total_intensity += peak.corrected_intensity;
     }
 
@@ -251,6 +277,8 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     }
 
     fn im_index_bounds(&self, im_index: u16) -> (u16, u16) {
+        // Invariant: ims_ranges is populated by maybe_extend_ims_ranges() in with_frame()
+        // before any lookups occur. If this panics, it indicates a logic bug in cache setup.
         self.ims_ranges[im_index as usize]
     }
 

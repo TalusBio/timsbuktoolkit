@@ -101,10 +101,8 @@ class EntryBuilder:
         ims = float(supersimpleprediction(precursor_mz, peptide.charge))
 
         neutron_fraction = NEUTRON_MASS / peptide.charge
-        precursor_mzs = [
-            (isotope, float(precursor_mz + (neutron_fraction * isotope)))
-            for isotope in [0, 1, 2]
-        ]
+        isotopes = [0, 1, 2]
+        precursor_mz = float(precursor_mz)
 
         intensities = [v.intensity for v in ion_dict.values()]
         intensities.sort(reverse=True)
@@ -142,8 +140,9 @@ class EntryBuilder:
             "rt_seconds": rt_seconds,
             # "precursors": precursor_mzs,
             # "fragments": ion_mzs,
-            "precursor_labels": [v[0] for v in precursor_mzs],
-            "precursor_mzs": [v[1] for v in precursor_mzs],
+            "precursor_labels": isotopes,
+            "precursor_mz": precursor_mz,
+            "precursor_charge": peptide.charge,
             "fragment_labels": ion_keys,
             "fragment_mzs": ion_mzs,
         }
