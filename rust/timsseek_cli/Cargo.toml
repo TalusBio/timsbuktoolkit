@@ -9,10 +9,10 @@ timsseek = { path = "../timsseek" }
 timsquery = { path = "../timsquery" }
 
 regex = "1.11.1"
+# tracing-profile = { version="0.10.11",features=["perfetto"] }
+tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common" }
 
 # Workspace-inherited deps
-# tracing-profile = { version="0.10.11",features=["perfetto"] }
-tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common", features=["perfetto"] }
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
