@@ -16,7 +16,7 @@ use timsseek::rt_calibration::{
     recalibrate_speclib,
 };
 use timsseek::scoring::ScoreTimings;
-use timsseek::scoring::scorer::ScoringPipeline;
+use timsseek::scoring::pipeline::ScoringPipeline;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,

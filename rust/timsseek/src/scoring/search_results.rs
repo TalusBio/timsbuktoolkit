@@ -1,10 +1,10 @@
-use super::calculate_scores::{
-    MainScore,
-    PreScore,
+use super::apex_finding::{
+    ApexScore,
+    CandidateContext,
     RelativeIntensities,
 };
 use super::offsets::MzMobilityOffsets;
-use super::scorer::SecondaryLazyScores;
+use super::pipeline::SecondaryLazyScores;
 use super::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
@@ -32,6 +32,11 @@ pub struct SearchResultBuilder<'q> {
     decoy_group_id: SetField<u32>,
     charge: SetField<u8>,
     nqueries: SetField<u8>,
+
+    // Reference values for new metadata-based approach
+    ref_precursor_mz: SetField<f64>,
+    ref_rt_seconds: SetField<f32>,
+    ref_mobility: SetField<f32>,
 
     main_score: SetField<f32>,
     delta_next: SetField<f32>,
@@ -96,14 +101,34 @@ impl<T> SetField<T> {
 }
 
 impl<'q> SearchResultBuilder<'q> {
-    pub fn with_pre_score(mut self, pre_score: &'q PreScore) -> Self {
-        self.library_id = SetField::Some(pre_score.query_values.eg.id() as u32);
-        self.digest_slice = SetField::Some(&pre_score.digest);
-        self.ref_eg = SetField::Some(&pre_score.query_values.eg);
-        self.nqueries = SetField::Some(pre_score.query_values.fragments.num_ions() as u8);
-        self.decoy_marking = SetField::Some(pre_score.digest.decoy);
-        self.charge = SetField::Some(pre_score.charge);
-        self.decoy_group_id = SetField::Some(pre_score.digest.decoy_group);
+    pub fn with_candidate_context(mut self, candidate_context: &'q CandidateContext) -> Self {
+        self.library_id = SetField::Some(candidate_context.query_values.eg.id() as u32);
+        self.digest_slice = SetField::Some(&candidate_context.digest);
+        self.ref_eg = SetField::Some(&candidate_context.query_values.eg);
+        self.nqueries = SetField::Some(candidate_context.query_values.fragments.num_ions() as u8);
+        self.decoy_marking = SetField::Some(candidate_context.digest.decoy);
+        self.charge = SetField::Some(candidate_context.charge);
+        self.decoy_group_id = SetField::Some(candidate_context.digest.decoy_group);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: &'q super::apex_finding::PeptideMetadata) -> Self {
+        self.library_id = SetField::Some(metadata.library_id);
+        self.digest_slice = SetField::Some(&metadata.digest);
+        self.decoy_marking = SetField::Some(metadata.digest.decoy);
+        self.charge = SetField::Some(metadata.charge);
+        self.decoy_group_id = SetField::Some(metadata.digest.decoy_group);
+
+        // Store ref values for later use in finalize()
+        self.ref_precursor_mz = SetField::Some(metadata.ref_precursor_mz);
+        self.ref_rt_seconds = SetField::Some(metadata.ref_rt_seconds);
+        self.ref_mobility = SetField::Some(metadata.ref_mobility_ook0);
+
+        self
+    }
+
+    pub fn with_nqueries(mut self, nqueries: u8) -> Self {
+        self.nqueries = SetField::Some(nqueries);
         self
     }
 
@@ -137,10 +162,8 @@ impl<'q> SearchResultBuilder<'q> {
         self
     }
 
-    pub fn with_main_score(mut self, main_score: MainScore) -> Self {
-        // TODO use exhaustive unpacking to make more explicit any values
-        // I Might be ignoring.
-        let MainScore {
+    pub fn with_apex_score(mut self, main_score: &ApexScore) -> Self {
+        let ApexScore {
             score,
             delta_next,
             delta_second_next,
@@ -159,8 +182,7 @@ impl<'q> SearchResultBuilder<'q> {
             retention_time_ms,
             raising_cycles,
             falling_cycles,
-            // top_ions: _,
-        } = main_score;
+        } = *main_score;
         {
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
@@ -219,10 +241,30 @@ impl<'q> SearchResultBuilder<'q> {
             int2_e6,
         ] = relints.ms2.get_values();
 
-        let ref_eg = expect_some!(ref_eg);
-        // TODO replace this with exhaustive unpacking.
+        // Use stored ref values or fallback to ref_eg if available
+        let ref_mz = if self.ref_precursor_mz.is_some() {
+            expect_some!(ref_precursor_mz)
+        } else {
+            let ref_eg = expect_some!(ref_eg);
+            ref_eg.mono_precursor_mz()
+        };
+
+        let ref_rt = if self.ref_rt_seconds.is_some() {
+            expect_some!(ref_rt_seconds)
+        } else {
+            let ref_eg = expect_some!(ref_eg);
+            ref_eg.rt_seconds()
+        };
+
+        let ref_mob = if self.ref_mobility.is_some() {
+            expect_some!(ref_mobility)
+        } else {
+            let ref_eg = expect_some!(ref_eg);
+            ref_eg.mobility_ook0()
+        };
+
         let obs_rt_seconds = expect_some!(rt_seconds);
-        let delta_theo_rt = obs_rt_seconds - ref_eg.rt_seconds();
+        let delta_theo_rt = obs_rt_seconds - ref_rt;
         let sq_delta_theo_rt = delta_theo_rt * delta_theo_rt;
 
         let delta_ms1_ms2_mobility = expect_some!(delta_ms1_ms2_mobility);
@@ -232,10 +274,10 @@ impl<'q> SearchResultBuilder<'q> {
             sequence: String::from(expect_some!(digest_slice).clone()),
             library_id: expect_some!(library_id),
             decoy_group_id: expect_some!(decoy_group_id),
-            precursor_mz: ref_eg.mono_precursor_mz(),
+            precursor_mz: ref_mz,
             precursor_charge: expect_some!(charge),
-            precursor_mobility_query: ref_eg.mobility_ook0(),
-            precursor_rt_query_seconds: ref_eg.rt_seconds(),
+            precursor_mobility_query: ref_mob,
+            precursor_rt_query_seconds: ref_rt,
             nqueries: expect_some!(nqueries),
             is_target: expect_some!(decoy_marking).is_target(),
             main_score: expect_some!(main_score),

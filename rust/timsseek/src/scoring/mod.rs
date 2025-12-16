@@ -1,8 +1,8 @@
 mod accumulator;
-pub mod calculate_scores;
+pub mod apex_finding;
 pub mod full_results;
 mod offsets;
-pub mod scorer;
+pub mod pipeline;
 mod scores;
 pub mod search_results;
 pub mod timings;
@@ -13,13 +13,13 @@ pub use scores::{
     hyperscore,
 };
 
-pub use scorer::{
+pub use pipeline::{
     ScoringPipeline,
     ToleranceHierarchy,
 };
 pub use search_results::IonSearchResults;
 pub use timings::ScoreTimings;
 
-const NUM_MS2_IONS: usize = 7;
-const NUM_MS1_IONS: usize = 3;
-const COELUTION_WINDOW_WIDTH: usize = 7;
+pub const NUM_MS2_IONS: usize = 7;
+pub const NUM_MS1_IONS: usize = 3;
+pub const COELUTION_WINDOW_WIDTH: usize = 7;

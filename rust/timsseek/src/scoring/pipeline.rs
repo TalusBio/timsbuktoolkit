@@ -1,4 +1,4 @@
-//! Peptide scoring engine with buffer reuse optimization.
+//! Peptide scoring pipeline.
 //!
 //! # Performance-Critical Design: Buffer Reuse
 //!
@@ -8,32 +8,24 @@
 //! ## Why `process_query()` Exists
 //!
 //! Each scoring operation requires several buffers:
-//! - `LocalizationBuffer` holds time-series feature buffers (size varies with query)
+//! - `ApexFinder` holds time-series feature buffers (size varies with query)
 //! - Chromatogram collectors (size varies with query complexity)
 //!
-//! Creating a new `LocalizationBuffer` for every query incurs allocation overhead. The solution
+//! Creating a new `ApexFinder` for every query incurs allocation overhead. The solution
 //! is **buffer reuse**:
 //!
-//! 1. `process_query()` accepts a mutable `&mut LocalizationBuffer` reference
+//! 1. `process_query()` accepts a mutable `&mut ApexFinder` reference
 //! 2. `process_batch()` uses Rayon's `map_init()` to create one buffer per thread
 //! 3. Each thread reuses its buffer across thousands of queries
 //!
-//! ```rust,,ignore
-//! use timsseek::{ScoringPipeline, QueryItemToScore};
-//! let pipeline: ScoringPipeline<_> = unimplemented!();
-//! let items: Vec<QueryItemToScore> = vec![];
-//! // Each thread gets its own reusable LocalizationBuffer
-//! let (results, timings) = pipeline.process_batch(&items);
-//! ```
-//!
 //! ## Scoring Pipeline
 //!
-//! The scoring process has four stages (percentages from benchmark on 225k queries):
+//! The scoring process has four stages with separated metadata and scoring data:
 //!
-//! 1. **Prescore** (27% of time): Extract chromatograms and compute initial intensity scores
-//! 2. **Localization** (62% of time): Find peak apex using time-series features (bottleneck)
-//! 3. **Secondary Query** (11% of time): Refine search at detected apex with narrow tolerances
-//! 4. **Finalization** (<1% of time): Assemble final results with calculated offsets
+//! 1. **Context Build** (27% of time): Extract chromatograms, separate metadata from scoring data
+//! 2. **Apex Finding** (62% of time): Find peak apex using time-series features (bottleneck)
+//! 3. **Refinement** (11% of time): Two-pass query at detected apex with narrow tolerances
+//! 4. **Finalization** (<1% of time): Assemble final results with calculated offsets and metadata
 
 use crate::errors::DataProcessingError;
 use crate::utils::elution_group_ops::isotope_offset_fragments;
@@ -56,12 +48,12 @@ use timsquery::{
 };
 
 use super::accumulator::IonSearchAccumulator;
-use super::calculate_scores::{
-    LocalizationBuffer,
-    MainScore,
-    PreScore,
+use super::apex_finding::{
+    ApexFinder,
+    ApexScore,
     RelativeIntensities,
 };
+// use super::calculate_scores::RelativeIntensities; // Removed
 use super::full_results::FullQueryResult;
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
@@ -74,14 +66,6 @@ use tracing::{
     info,
     warn,
 };
-
-/// Default buffer size for precursor ions in LocalizationBuffer.
-/// Sufficient for most peptides with isotopic envelope (M+0, M+1, M+2, M+3, M+4).
-const DEFAULT_PRECURSOR_BUFFER_SIZE: usize = 5;
-
-/// Default buffer size for fragment ions in LocalizationBuffer.
-/// Sufficient for typical y/b ion series in most peptides.
-const DEFAULT_FRAGMENT_BUFFER_SIZE: usize = 10;
 
 /// Hierarchical tolerance configuration for the scoring pipeline.
 ///
@@ -147,40 +131,37 @@ fn filter_zero_intensity_ions(
     );
 }
 
-#[derive(Debug, Clone)]
-pub struct SecondaryQuery {
-    inner: SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
-    isotope: SpectralCollector<IonAnnot, f32>,
-}
-
+#[derive(Debug, Clone, Copy)]
 pub struct SecondaryLazyScores {
     pub lazyscore: f32,
     pub iso_lazyscore: f32,
     pub ratio: f32,
 }
 
-impl SecondaryQuery {
-    fn lazyscores(&self) -> SecondaryLazyScores {
-        let lazyscore = single_lazyscore(
-            self.inner
-                .iter_fragments()
-                .map(|((_k, _mz), v)| v.weight() as f32),
-        );
-        let iso_lazyscore =
-            single_lazyscore(self.isotope.iter_fragments().map(|((_k, _mz), v)| *v));
-        let ratio = iso_lazyscore / lazyscore.max(1.0);
-        SecondaryLazyScores {
-            lazyscore,
-            iso_lazyscore,
-            ratio,
-        }
+/// Compute lazyscores from inner and isotope collectors.
+fn compute_secondary_lazyscores(
+    inner: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+    isotope: &SpectralCollector<IonAnnot, f32>,
+) -> SecondaryLazyScores {
+    let lazyscore = single_lazyscore(
+        inner
+            .iter_fragments()
+            .map(|((_k, _mz), v)| v.weight() as f32),
+    );
+    let iso_lazyscore =
+        single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v));
+    let ratio = iso_lazyscore / lazyscore.max(1.0);
+    SecondaryLazyScores {
+        lazyscore,
+        iso_lazyscore,
+        ratio,
     }
 }
 
 /// Multi-stage pipeline for scoring peptide queries against indexed MS data.
 ///
-/// Pipeline stages: prescore → localize → secondary query → finalize.
-/// Uses progressive tolerance refinement and buffer reuse for high throughput.
+/// Pipeline stages: build context → find apex → refine → finalize.
+/// Uses progressive tolerance refinement, metadata separation, and buffer reuse for high throughput.
 pub struct ScoringPipeline<I: ScorerQueriable> {
     /// Retention time in milliseconds for each index cycle.
     pub index_cycle_rt_ms: Arc<[u32]>,
@@ -206,9 +187,10 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn build_prescore(&self, item: &QueryItemToScore) -> Result<PreScore, SkippingReason> {
-        // TODO: pass the collector as a buffer!!!
-        // Note: This is surprisingly cheap to do compared to adding the query.
+    fn build_candidate_context(
+        &self,
+        item: &QueryItemToScore,
+    ) -> Result<(super::apex_finding::PeptideMetadata, super::apex_finding::ScoringContext), SkippingReason> {
         let max_range = TupleRange::try_new(
             *self.index_cycle_rt_ms.first().unwrap(),
             *self.index_cycle_rt_ms.last().unwrap(),
@@ -228,7 +210,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         }
         let mut agg = tracing::span!(
             tracing::Level::TRACE,
-            "build_prescore::new_collector"
+            "build_candidate_context::new_collector"
         ).in_scope(|| {
             match ChromatogramCollector::new(
                 item.query.clone(),
@@ -238,8 +220,6 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
                 Ok(collector) => collector,
                 Err(e) => {
                     let tol_range = self.tolerances.prescore.rt_range_as_milis(item.query.rt_seconds());
-                    // This is a panic to make debugging easier. In theory we have already checked
-                    // that we have valid RT ranges and we should not have elution groups without ions.
                     panic!(
                         "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
                         item.query, e, tol_range,
@@ -248,7 +228,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
             }
         });
 
-        tracing::span!(tracing::Level::TRACE, "build_prescore::add_query").in_scope(|| {
+        tracing::span!(tracing::Level::TRACE, "build_candidate_context::add_query").in_scope(|| {
             self.index.add_query(&mut agg, &self.tolerances.prescore);
         });
 
@@ -256,44 +236,24 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let mut expected_intensities = item.expected_intensity.clone();
         filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
 
-        Ok(PreScore {
-            charge: item.query.precursor_charge(),
+        let metadata = super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
+            charge: item.query.precursor_charge(),
+            library_id: agg.eg.id() as u32,
+            ref_rt_seconds: item.query.rt_seconds(),
+            ref_mobility_ook0: item.query.mobility_ook0(),
+            ref_precursor_mz: item.query.mono_precursor_mz(),
+        };
+
+        let scoring_ctx = super::apex_finding::ScoringContext {
             expected_intensities,
             query_values: agg,
-        })
+        };
+
+        Ok((metadata, scoring_ctx))
     }
 
     /// Calculates the weighted mean ion mobility across fragments and precursors.
-    ///
-    /// # Algorithm
-    ///
-    /// Uses log2 weighting to reduce bias from high-abundance ions:
-    /// ```text
-    /// mobility = Σ(intensity_log2 × mobility) / Σ(intensity_log2)
-    /// ```
-    ///
-    /// # Why Log2 Weighting?
-    ///
-    /// Linear weighting by intensity can be dominated by one or two very bright ions,
-    /// which may have measurement artifacts or be outliers. Log2 weighting:
-    /// - Reduces influence of extremely bright ions
-    /// - Preserves relative differences in low-abundance signals
-    /// - Improves robustness when ion intensity spans orders of magnitude
-    ///
-    /// For example, with intensities [1000, 100, 10]:
-    /// - Linear weights: [1000, 100, 10] → dominated by first ion
-    /// - Log2 weights: [9.97, 6.64, 3.32] → more balanced contribution
-    ///
-    /// # Returns
-    ///
-    /// Weighted mean mobility in inverse reduced mobility units (1/K0).
-    /// Returns 0.0 if no mobility information is available.
-    ///
-    /// # Panics
-    ///
-    /// Asserts that mobility is in valid range [0.0, 2.0]. This should always hold
-    /// for real MS data; assertion failures indicate data corruption or indexing bugs.
     fn get_mobility(item: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> f64 {
         // Calculate weighted mean mobility from fragments
         let (sum_weights, sum_mobilities) = item
@@ -335,34 +295,6 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     }
 
     /// Performs refined secondary query at detected apex with two-pass strategy.
-    ///
-    /// # Algorithm
-    ///
-    /// After localization identifies the peak apex, this method refines the search
-    /// using progressively tighter tolerances:
-    ///
-    /// **Pass 1: Determine Observed Mobility**
-    /// 1. Query at apex RT using `secondary_tolerance` (narrow RT, relaxed mobility)
-    /// 2. Calculate weighted mean mobility from observed fragments/precursors
-    ///
-    /// **Pass 2: Final Refined Query**
-    /// 1. Query at apex RT + observed mobility using tight tolerance (3% mobility)
-    /// 2. Also query isotope pattern (+1 neutron offset) for ratio calculation
-    ///
-    /// # Why Two Passes?
-    ///
-    /// Mobility predictions from spectral libraries can have systematic errors. By first
-    /// querying with relaxed mobility to observe the actual signal, then refining with
-    /// tight mobility constraints around the observed value, we:
-    /// - Reduce noise from off-target ions
-    /// - Improve isotope pattern matching
-    /// - Correct for mobility calibration drift
-    ///
-    /// # Returns
-    ///
-    /// A `SecondaryQuery` containing:
-    /// - Refined spectral data with mobility statistics
-    /// - Isotope pattern (+1 neutron) for ratio scoring
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, item, main_score), level = "trace")
@@ -370,8 +302,11 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     fn execute_secondary_query(
         &self,
         item: &QueryItemToScore,
-        main_score: &MainScore,
-    ) -> SecondaryQuery {
+        main_score: &ApexScore,
+    ) -> (
+        SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+        SpectralCollector<IonAnnot, f32>,
+    ) {
         let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
 
         // **Pass 1**: Query at apex RT to determine observed mobility
@@ -402,10 +337,8 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
 
         self.index.add_query(&mut agg, &tol_use);
         self.index.add_query(&mut isotope_agg, &tol_use);
-        SecondaryQuery {
-            inner: agg,
-            isotope: isotope_agg,
-        }
+
+        (agg, isotope_agg)
     }
 
     #[cfg_attr(
@@ -414,21 +347,25 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     )]
     fn finalize_results(
         &self,
-        item: &QueryItemToScore,
-        main_score: &MainScore,
-        pre_score: &PreScore,
-        secondary_query: &SecondaryQuery,
+        metadata: &super::apex_finding::PeptideMetadata,
+        nqueries: u8,
+        main_score: &ApexScore,
+        inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+        isotope_collector: &SpectralCollector<IonAnnot, f32>,
     ) -> Result<IonSearchResults, DataProcessingError> {
-        let offsets =
-            MzMobilityOffsets::new(&secondary_query.inner, item.query.mobility_ook0() as f64);
-        let rel_inten = RelativeIntensities::new(&secondary_query.inner);
+        let offsets = MzMobilityOffsets::new(inner_collector, metadata.ref_mobility_ook0 as f64);
+        let rel_inten = RelativeIntensities::new(inner_collector);
+        let lazyscores = compute_secondary_lazyscores(inner_collector, isotope_collector);
+
         let builder = SearchResultBuilder::default();
+
         builder
-            .with_pre_score(pre_score)
+            .with_metadata(metadata)
+            .with_nqueries(nqueries)
             .with_sorted_offsets(&offsets)
             .with_relative_intensities(rel_inten)
-            .with_secondary_lazyscores(secondary_query.lazyscores())
-            .with_main_score(*main_score)
+            .with_secondary_lazyscores(lazyscores)
+            .with_apex_score(main_score)
             .finalize()
     }
 }
@@ -437,58 +374,51 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     pub fn process_query(
         &self,
         item: QueryItemToScore,
-        buffer: &mut LocalizationBuffer,
+        buffer: &mut ApexFinder,
         timings: &mut ScoreTimings,
     ) -> Option<IonSearchResults> {
         let st = Instant::now();
-        let prescore = self.build_prescore(&item);
-        timings.prescore += st.elapsed();
-
-        let prescore = match prescore {
-            Ok(p) => p,
+        let (metadata, scoring_ctx) = match self.build_candidate_context(&item) {
+            Ok(result) => result,
             Err(SkippingReason::RetentionTimeOutOfBounds) => {
-                // TODO: return counters for skipped queries
                 return None;
             }
         };
+        timings.prescore += st.elapsed();
 
-        if prescore
-            .expected_intensities
-            .fragment_intensities
-            .is_empty()
-        {
-            // No fragments with intensity - cannot score
+        if scoring_ctx.expected_intensities.fragment_intensities.is_empty() {
             return None;
         }
 
         let st = Instant::now();
-        let main_score = match buffer.score(&prescore) {
+        let apex_score = match buffer.find_apex(&scoring_ctx) {
             Ok(score) => score,
             Err(_e) => {
-                // TODO: trim what errors I should log and which are
-                // accepted here
-                // info!("Error in localization: {:?}", e);
-                // info!("Query id: {:#?}", item.query.id);
                 return None;
             }
         };
         timings.localize += st.elapsed();
 
         let st = Instant::now();
-        let secondary_query = self.execute_secondary_query(&item, &main_score);
+        let (inner_collector, isotope_collector) =
+            self.execute_secondary_query(&item, &apex_score);
         timings.secondary_query += st.elapsed();
 
+        let nqueries = scoring_ctx.query_values.fragments.num_ions() as u8;
+
         let st = Instant::now();
-        let out = self.finalize_results(&item, &main_score, &prescore, &secondary_query);
+        let out = self.finalize_results(
+            &metadata,
+            nqueries,
+            &apex_score,
+            &inner_collector,
+            &isotope_collector,
+        );
         timings.finalization += st.elapsed();
+
         match out {
             Ok(res) => Some(res),
             Err(e) => {
-                // I think I can panic here ... since the only
-                // possible errors from finalizing are code errors, not recoverable
-                // or data ones ...
-                // But since this happens in a non-main thread ...
-                // not sure if it really matters ...
                 warn!("Error in scoring: {:?}", e);
                 None
             }
@@ -499,48 +429,36 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         &self,
         item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
-        let rt_range = match self
-            .tolerances
-            .prescore
-            .rt_range_as_milis(item.query.rt_seconds())
-        {
-            OptionallyRestricted::Unrestricted => TupleRange::try_new(
-                *self.index_cycle_rt_ms.first().unwrap(),
-                *self.index_cycle_rt_ms.last().unwrap(),
-            )
-            .expect("Reference RTs should be sorted and valid"),
-            OptionallyRestricted::Restricted(r) => r,
-        };
-        let mut chromatogram_collector =
-            ChromatogramCollector::new(item.query.clone(), rt_range, &self.index_cycle_rt_ms)
-                .unwrap();
-        self.index
-            .add_query(&mut chromatogram_collector, &self.tolerances.prescore);
-        let pre_score = PreScore {
-            charge: item.query.precursor_charge(),
-            digest: item.digest.clone(),
-            expected_intensities: item.expected_intensity.clone(),
-            query_values: chromatogram_collector.clone(),
-        };
+        let mut buffer = ApexFinder::new(self.index_cycle_rt_ms.clone());
 
-        let mut buffer = LocalizationBuffer::new(
-            item.query.precursor_count(),
-            item.query.fragment_count(),
-            self.index_cycle_rt_ms.clone(),
+        // Re-implementing logic here because process_query consumes `item` and returns `Option`.
+        // We want intermediate results for `FullQueryResult`.
+
+        let (metadata, scoring_ctx) = self
+            .build_candidate_context(&item)
+            .map_err(|_| DataProcessingError::ExpectedNonEmptyData {
+                context: Some("RT out of bounds".into()),
+            })?;
+
+        let apex_score = buffer.find_apex(&scoring_ctx)?;
+        let (inner_collector, isotope_collector) = self.execute_secondary_query(&item, &apex_score);
+
+        let nqueries = scoring_ctx.query_values.fragments.num_ions() as u8;
+        let search_results = self.finalize_results(
+            &metadata,
+            nqueries,
+            &apex_score,
+            &inner_collector,
+            &isotope_collector,
         )?;
-        let main_score = buffer.score(&pre_score)?;
 
-        let secondary_query = self.execute_secondary_query(&item, &main_score);
-        let search_results =
-            self.finalize_results(&item, &main_score, &pre_score, &secondary_query)?;
-
-        let time_resolved_scores = buffer.last_time_resolved_scores();
-        let longitudinal_main_score = time_resolved_scores.main_score_iter().collect();
+        // Extract query_values before it's consumed
+        let extractions = scoring_ctx.query_values;
 
         Ok(FullQueryResult {
-            main_score_elements: time_resolved_scores.clone(),
-            longitudinal_main_score,
-            extractions: chromatogram_collector,
+            main_score_elements: buffer.traces.clone(),
+            longitudinal_main_score: buffer.traces.main_score.clone(),
+            extractions,
             search_results,
         })
     }
@@ -557,12 +475,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let loc_score_start = Instant::now();
 
         let init_fn = || {
-            LocalizationBuffer::new(
-                DEFAULT_PRECURSOR_BUFFER_SIZE,
-                DEFAULT_FRAGMENT_BUFFER_SIZE,
-                self.index_cycle_rt_ms.clone(),
-            )
-            .unwrap()
+            ApexFinder::new(self.index_cycle_rt_ms.clone())
         };
 
         let filter_fn = |x: &&QueryItemToScore| {
@@ -598,22 +511,6 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
                 })
                 .collect()
         };
-        // let results: IonSearchAccumulator = items_to_score
-        //     .into_par_iter()
-        //     .with_min_len(512)
-        //     .filter(|x| {
-        //         let tmp = x.query.get_precursor_mz_limits();
-        //         let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should alredy be ordered");
-        //         self.fragmented_range.intersects(lims)
-        //     })
-        //     .map_init(init_fn, |scorer, item| {
-        //         // The pre-score is essentually just the collected intensities.
-        //         // TODO: Figure out how to remove this clone ...
-        //         let mut timings = ScoreTimings::default();
-        //         let maybe_score = self.buffered_score(item.clone(), scorer, &mut timings);
-        //         (maybe_score, timings)
-        //     })
-        //     .collect();
 
         let elapsed = loc_score_start.elapsed();
         let avg_speed =
