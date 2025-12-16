@@ -14,12 +14,13 @@ timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 
 # GUI dependencies
-egui = "0.33"
-eframe = { version = "0.33", default-features = true, features = ["default_fonts"] }
+egui = {version = "0.33", features = ["persistence", "rayon"]}
+eframe = { version = "0.33", default-features = true, features = ["default_fonts", "persistence"] }
 egui_plot = "0.34"
 egui_extras = { version = "0.33", features = ["serde"] }
-egui_dock = "0.18"
-rfd = "0.15"
+egui_dock = { version = "0.18", features = ["serde"] }
+rfd = "0.16" # File dialogs dependency
+ron = "0.12.0" # Yet another serialization format ...
 
 # Workspace-inherited deps
 serde = { workspace = true }
@@ -29,6 +30,7 @@ tracing-subscriber = { workspace = true }
 timsrust = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }

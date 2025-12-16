@@ -8,6 +8,7 @@ use crate::domain::FileService;
 use crate::error::ViewerError;
 
 /// Handles file dialogs and file loading operations
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct FileLoader {
     pub elution_groups_path: Option<PathBuf>,
     pub raw_data_path: Option<PathBuf>,
