@@ -5,6 +5,7 @@ use egui_dock::{
     Style,
     TabViewer,
 };
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
@@ -35,7 +36,7 @@ use crate::ui::{
 };
 
 /// Commands that trigger state changes in the application
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AppCommand {
     /// Regenerate the chromatogram for the current selection
     RegenerateChromatogram,
@@ -50,13 +51,23 @@ pub enum AppCommand {
 }
 
 /// Pane types for the tile layout
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 enum Pane {
     LeftPanel,
     TablePanel,
     MS2Spectrum,
     PrecursorPlot,
     FragmentPlot,
+}
+
+/// State to be persisted across restarts
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentState {
+    file_loader: FileLoader,
+    ui_state: UiState,
+    tolerance: Tolerance,
+    smoothing: SmoothingMethod,
+    dock_state: DockState<Pane>,
 }
 
 /// State of indexed raw data loading
@@ -81,6 +92,8 @@ pub enum IndexedDataState {
 pub struct DataState {
     /// Loaded elution groups
     pub elution_groups: Option<ElutionGroupData>,
+    /// Path from which the elution groups were loaded
+    pub elution_groups_source: Option<PathBuf>,
     /// Indexed timsTOF data with loading state
     pub indexed_data: IndexedDataState,
     /// Tolerance settings
@@ -90,7 +103,7 @@ pub struct DataState {
 }
 
 /// UI-specific state - transient UI state that doesn't affect data
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct UiState {
     /// Filter text for precursor table
     pub table_filter: String,
@@ -127,8 +140,8 @@ pub struct ComputedState {
     pub chromatogram_output: Option<ChromatogramOutput>,
     /// Computed MS2 spectrum at selected RT
     pub ms2_spectrum: Option<MS2Spectrum>,
-    /// Whether the chromatogram has been automatically zoomed to data range
-    pub chromatogram_auto_zoom_applied: bool,
+    /// Frame counter for auto-zooming the chromatogram
+    pub auto_zoom_frame_counter: u8,
 }
 
 /// Main application state
@@ -155,10 +168,94 @@ pub struct ViewerApp {
     left_panel: LeftPanel,
     table_panel: TablePanel,
     spectrum_panel: SpectrumPanel,
+
+    /// Optional session log writer
+    session_log: Option<Box<dyn Write + Send + Sync>>,
 }
 
 impl ViewerApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    /// Create a new test instance without eframe context
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        let tabs = vec![
+            Pane::LeftPanel,
+            Pane::TablePanel,
+            Pane::PrecursorPlot,
+            Pane::FragmentPlot,
+            Pane::MS2Spectrum,
+        ];
+
+        let dock_state = DockState::new(tabs);
+
+        Self {
+            file_loader: FileLoader::new(),
+            data: DataState::default(),
+            ui: UiState::default(),
+            computed: ComputedState::default(),
+            pending_commands: Vec::new(),
+            dock_state,
+            left_panel: LeftPanel::new(),
+            table_panel: TablePanel::new(),
+            spectrum_panel: SpectrumPanel::new(),
+            session_log: None,
+        }
+    }
+
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        session_log: Option<Box<dyn Write + Send + Sync>>,
+    ) -> Self {
+        // Try to load previous state
+        if let Some(storage) = cc.storage {
+            if let Some(state_string) = storage.get_string(eframe::APP_KEY) {
+                // Try RON first (new format), then fallback to JSON (legacy)
+                let state = match ron::from_str::<PersistentState>(&state_string) {
+                    Ok(state) => {
+                        tracing::info!("Loaded persistent state successfully (RON).");
+                        Some(state)
+                    }
+                    Err(ron_err) => {
+                        // Fallback to JSON for backward compatibility
+                        match serde_json::from_str::<PersistentState>(&state_string) {
+                            Ok(state) => {
+                                tracing::info!("Loaded persistent state successfully (JSON).");
+                                Some(state)
+                            }
+                            Err(json_err) => {
+                                tracing::warn!(
+                                    "Failed to deserialize persistent state. RON: {:?}, JSON: {:?}",
+                                    ron_err,
+                                    json_err
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+
+                if let Some(state) = state {
+                    return Self {
+                        file_loader: state.file_loader,
+                        data: DataState {
+                            tolerance: state.tolerance,
+                            smoothing: state.smoothing,
+                            ..DataState::default()
+                        },
+                        ui: state.ui_state,
+                        computed: ComputedState::default(),
+                        pending_commands: Vec::new(),
+                        dock_state: state.dock_state,
+                        left_panel: LeftPanel::new(),
+                        table_panel: TablePanel::new(),
+                        spectrum_panel: SpectrumPanel::new(),
+                        session_log,
+                    };
+                }
+            } else {
+                tracing::info!("No persistent state found.");
+            }
+        }
+
         // Create initial tabs: Settings, Table, Precursors, Fragments, MS2
         let tabs = vec![
             Pane::LeftPanel,
@@ -180,14 +277,21 @@ impl ViewerApp {
             left_panel: LeftPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
+            session_log,
         }
     }
 
-    fn handle_commands(&mut self) {
+    pub(crate) fn handle_commands(&mut self) {
         let commands = std::mem::take(&mut self.pending_commands);
 
         for cmd in commands {
             tracing::debug!("Handling command: {:?}", cmd);
+
+            if let Some(logger) = &mut self.session_log {
+                if let Ok(json) = serde_json::to_string(&cmd) {
+                    let _ = writeln!(logger, "{}", json);
+                }
+            }
 
             match cmd {
                 AppCommand::RegenerateChromatogram => {
@@ -318,7 +422,8 @@ impl ViewerApp {
                                 Some(chrom_lines.rt_seconds_range);
                             self.computed.chromatogram = Some(chrom_lines);
                             self.computed.chromatogram_output = Some(chrom);
-                            self.computed.chromatogram_auto_zoom_applied = false;
+                            // Reset auto zoom frame counter to 5 to force bounds update for a few frames
+                            self.computed.auto_zoom_frame_counter = 5;
                         }
                         Err(e) => {
                             tracing::error!("Failed to generate chromatogram: {:?}", e);
@@ -367,7 +472,7 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
-        ui_state: &mut UiState,
+        _ui_state: &mut UiState,
     ) {
         ui.label("Raw Data File (.d):");
         if ui.button("Load Raw Data...").clicked() {
@@ -418,20 +523,26 @@ impl ViewerApp {
         file_loader: &mut FileLoader,
         data: &mut DataState,
     ) {
-        if let Some(path) = &file_loader.elution_groups_path
-            && data.elution_groups.is_none()
-        {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Loading elution groups...");
-            });
-            match file_loader.load_elution_groups(path) {
-                Ok(egs) => {
-                    tracing::info!("Loaded {} elution groups", egs.len());
-                    data.elution_groups = Some(egs);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load elution groups: {:?}", e);
+        if let Some(path) = &file_loader.elution_groups_path {
+            let should_load = match &data.elution_groups_source {
+                Some(current_path) => current_path != path,
+                None => true,
+            };
+
+            if should_load {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading elution groups...");
+                });
+                match file_loader.load_elution_groups(path) {
+                    Ok(egs) => {
+                        tracing::info!("Loaded {} elution groups", egs.len());
+                        data.elution_groups = Some(egs);
+                        data.elution_groups_source = Some(path.clone());
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load elution groups: {:?}", e);
+                    }
                 }
             }
         }
@@ -558,6 +669,37 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        tracing::info!("Saving application state...");
+        let state = PersistentState {
+            file_loader: FileLoader {
+                elution_groups_path: self.file_loader.elution_groups_path.clone(),
+                raw_data_path: self.file_loader.raw_data_path.clone(),
+                tolerance_path: self.file_loader.tolerance_path.clone(),
+            },
+            ui_state: UiState {
+                table_filter: self.ui.table_filter.clone(),
+                selected_index: self.ui.selected_index,
+                search_mode: self.ui.search_mode,
+                search_input: self.ui.search_input.clone(),
+                show_ms2_spectrum: self.ui.show_ms2_spectrum,
+            },
+            tolerance: self.data.tolerance.clone(),
+            smoothing: self.data.smoothing.clone(),
+            dock_state: self.dock_state.clone(),
+        };
+
+        if let Ok(value) = ron::to_string(&state) {
+            storage.set_string(eframe::APP_KEY, value);
+        } else {
+            tracing::error!("Failed to serialize state to RON");
+        }
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_vim_keys(ctx);
         self.handle_commands();
@@ -676,7 +818,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         crate::plot_renderer::PlotMode::PrecursorsOnly,
                         Some("precursor_fragment_x_axis"),
                         true,
-                        &mut self.computed.chromatogram_auto_zoom_applied,
+                        &mut self.computed.auto_zoom_frame_counter,
                     );
                     if let Some(clicked_rt) = click_response {
                         self.pending_commands
@@ -697,7 +839,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         crate::plot_renderer::PlotMode::FragmentsOnly,
                         Some("precursor_fragment_x_axis"),
                         false,
-                        &mut self.computed.chromatogram_auto_zoom_applied,
+                        &mut self.computed.auto_zoom_frame_counter,
                     );
                     if let Some(clicked_rt) = response {
                         self.pending_commands
@@ -716,3 +858,6 @@ impl<'a> TabViewer for AppTabViewer<'a> {
         false // Tabs cannot be closed
     }
 }
+
+#[cfg(test)]
+mod tests;

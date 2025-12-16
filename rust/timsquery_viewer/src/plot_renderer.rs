@@ -159,14 +159,14 @@ pub struct MS2Spectrum {
 ///
 /// If `link_group_id` is provided, the X-axis will be linked to other plots with the same ID
 /// If `show_header` is false, the elution group ID and reference RT/mobility labels are not shown
-/// If `reset_bounds_applied` is false, the plot bounds will be reset to show the full data range, and the flag will be set to true
+/// If `auto_zoom_frame_counter` is greater than 0, the plot bounds will be reset to show the full data range, and the counter will be decremented
 pub fn render_chromatogram_plot(
     ui: &mut egui::Ui,
     chromatogram: &ChromatogramLines,
     mode: PlotMode,
     link_group_id: Option<&str>,
     show_header: bool,
-    reset_bounds_applied: &mut bool,
+    auto_zoom_frame_counter: &mut u8,
 ) -> Option<f64> {
     let mut clicked_rt = None;
 
@@ -265,12 +265,12 @@ pub fn render_chromatogram_plot(
             plot_ui.translate_bounds(pan_delta);
         }
 
-        if !*reset_bounds_applied {
+        if *auto_zoom_frame_counter > 0 {
             plot_ui.set_plot_bounds_x(
                 chromatogram.rt_seconds_range.0..=chromatogram.rt_seconds_range.1,
             );
             plot_ui.set_plot_bounds_y(0.0..=max_polygon_height);
-            *reset_bounds_applied = true;
+            *auto_zoom_frame_counter -= 1;
         } else {
             let bounds = plot_ui.plot_bounds();
 
