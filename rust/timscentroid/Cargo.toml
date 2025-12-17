@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Example dependencies
 tracing-subscriber = { workspace = true, features = ["env-filter"], default-features = true}
+rand = "0.8"
 
 # Not using it RN but looks like a super solid way to make
 # builder patterns

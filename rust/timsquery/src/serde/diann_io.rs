@@ -66,6 +66,7 @@ struct DiannLibraryRow {
     #[serde(rename = "ModifiedPeptide")]
     modified_peptide: String,
     #[serde(rename = "StrippedPeptide")]
+    #[serde(alias = "PeptideSequence")]
     stripped_peptide: String,
     #[serde(rename = "PrecursorMz")]
     precursor_mz: f64,
@@ -76,20 +77,25 @@ struct DiannLibraryRow {
     #[serde(rename = "IonMobility")]
     ion_mobility: f64,
     #[serde(rename = "ProteinID")]
+    #[serde(alias = "ProteinGroup")]
     protein_id: String,
     #[serde(rename = "Decoy")]
+    #[serde(alias = "decoy")]
     decoy: i32,
     #[serde(rename = "FragmentMz")]
+    #[serde(alias = "ProductMz")]
     fragment_mz: f64,
     #[serde(rename = "FragmentType")]
     fragment_type: String,
     #[serde(rename = "FragmentNumber")]
+    #[serde(alias = "FragmentSeriesNumber")]
     fragment_number: i32,
     #[serde(rename = "FragmentCharge")]
     fragment_charge: i32,
     #[serde(rename = "FragmentLossType")]
     fragment_loss_type: String,
     #[serde(rename = "RelativeIntensity")]
+    #[serde(alias = "LibraryIntensity")]
     relative_intensity: f32,
 }
 
@@ -105,25 +111,6 @@ impl DiannLibraryRow {
             && self.protein_id == other.protein_id
             && self.decoy == other.decoy
     }
-}
-
-fn required_columns() -> Vec<&'static str> {
-    vec![
-        "ModifiedPeptide",
-        "StrippedPeptide",
-        "PrecursorMz",
-        "PrecursorCharge",
-        "Tr_recalibrated",
-        "IonMobility",
-        "ProteinID",
-        "Decoy",
-        "FragmentMz",
-        "FragmentType",
-        "FragmentNumber",
-        "FragmentCharge",
-        "FragmentLossType",
-        "RelativeIntensity",
-    ]
 }
 
 pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
@@ -149,12 +136,29 @@ pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
     };
 
     let columns: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-    let required = required_columns();
 
-    // Check if all required columns are present
-    required
+    // Define required columns with their aliases
+    let required_with_aliases = vec![
+        vec!["ModifiedPeptide"],
+        vec!["StrippedPeptide", "PeptideSequence"],
+        vec!["PrecursorMz"],
+        vec!["PrecursorCharge"],
+        vec!["Tr_recalibrated"],
+        vec!["IonMobility"],
+        vec!["ProteinID", "ProteinGroup"],
+        vec!["Decoy", "decoy"],
+        vec!["FragmentMz", "ProductMz"],
+        vec!["FragmentType"],
+        vec!["FragmentNumber", "FragmentSeriesNumber"],
+        vec!["FragmentCharge"],
+        vec!["FragmentLossType"],
+        vec!["RelativeIntensity", "LibraryIntensity"],
+    ];
+
+    // Check if all required columns (or their aliases) are present
+    required_with_aliases
         .iter()
-        .all(|col| columns.contains(&col.to_string()))
+        .all(|aliases| aliases.iter().any(|col| columns.contains(&col.to_string())))
 }
 
 struct ParsingBuffers {
@@ -443,5 +447,21 @@ mod tests {
 
         let _elution_groups = read_library_file(file_path).expect("Failed to read library");
         // TODO ... implement the actual assertions
+    }
+
+    #[test]
+    fn test_speclib2_tsv_parsing() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.tsv");
+
+        // Check that sniff detects it correctly
+        let is_diann = sniff_diann_library_file(&file_path);
+        assert!(is_diann, "speclib2 TSV file should be detected as DIA-NN library");
+
+        // This test mainly checks that the name aliases wotk correctly
+        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
     }
 }

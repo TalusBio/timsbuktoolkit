@@ -87,6 +87,33 @@ impl std::fmt::Display for IndexBuildingStats {
 }
 
 impl IndexedTimstofPeaks {
+    /// Create an IndexedTimstofPeaks from pre-built components.
+    ///
+    /// This is useful for testing - you can build the MS1 and MS2 groups
+    /// using `IndexedPeakGroup::new()` with mock data, then combine them here.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ms1_peaks = vec![/* ... */];
+    /// let (ms1_group, _) = IndexedPeakGroup::new(ms1_peaks, cycle_to_rt, 4096);
+    ///
+    /// let ms2_groups = vec![
+    ///     (quad_geometry1, ms2_group1),
+    ///     (quad_geometry2, ms2_group2),
+    /// ];
+    ///
+    /// let index = IndexedTimstofPeaks::from_parts(ms1_group, ms2_groups);
+    /// ```
+    pub fn from_parts(
+        ms1_peaks: IndexedPeakGroup,
+        ms2_window_groups: Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
+    ) -> Self {
+        Self {
+            ms1_peaks,
+            ms2_window_groups,
+        }
+    }
+
     pub fn from_timstof_file(
         file: &TimsTofPath,
         centroiding_config: CentroidingConfig,
@@ -191,7 +218,7 @@ impl IndexedTimstofPeaks {
     > {
         self.filter_precursor_ranges(precursor_range_mz, im_range)
             .map(move |(wg_info, peak_group)| {
-                let im_range = im_range.map(|r| {
+                let local_im_range = im_range.map(|r| {
                     wg_info
                         .intersects_ranges(
                             (
@@ -209,7 +236,7 @@ impl IndexedTimstofPeaks {
 
                 (
                     wg_info,
-                    peak_group.query_peaks(mz_range, cycle_range, im_range),
+                    peak_group.query_peaks(mz_range, cycle_range, local_im_range),
                 )
             })
     }
@@ -417,6 +444,9 @@ impl IndexedPeakGroup {
 
     /// Create a new IndexedPeakGroup from a vector of peaks.
     ///
+    /// This is the **canonical** way to build an IndexedPeakGroup - all bucketing
+    /// logic lives here to ensure consistency.
+    ///
     /// NOTE: This internally uses `par_sort_unstable` to sort the peaks
     /// so in theory it should not be called within a parallel loop.
     pub(crate) fn new(
@@ -467,6 +497,32 @@ impl IndexedPeakGroup {
             bucketing_time: bucket_time,
         };
         (tmp, stats)
+    }
+
+    pub fn unpack(self) -> (Vec<IndexedPeak>, Vec<u32>, usize, Vec<TupleRange<f32>>) {
+        let Self {
+            peaks,
+            bucket_mz_ranges,
+            bucket_size,
+            cycle_to_rt_ms,
+        } = self;
+        (peaks, cycle_to_rt_ms, bucket_size, bucket_mz_ranges)
+    }
+
+    /// Create a new IndexedPeakGroup for testing purposes.
+    ///
+    /// I only make this public for testing - in real use cases
+    /// You should never be used
+    #[doc(hidden)]
+    pub fn testing_new(
+        peaks: Vec<IndexedPeak>,
+        cycle_to_rt_ms: Vec<u32>,
+        bucket_size: usize,
+    ) -> (Self, IndexedPeakGroupStats) {
+        if cfg!(test) {
+            panic!("Not intended to run in production code")
+        }
+        Self::new(peaks, cycle_to_rt_ms, bucket_size)
     }
 
     fn aproximate_memory_usage(&self) -> usize {
@@ -523,10 +579,7 @@ impl IndexedPeakGroup {
     }
 
     /// Read frames from a FrameReader that match a given filter function.
-    #[tracing::instrument(
-        level = "debug",
-        skip(frame_reader, metadata, filter, centroiding_config)
-    )]
+    #[tracing::instrument(level = "debug", skip_all)]
     fn read_with_filter(
         frame_reader: &FrameReader,
         metadata: &Metadata,

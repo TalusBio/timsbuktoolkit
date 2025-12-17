@@ -136,7 +136,16 @@ impl QuadrupoleIsolationScheme {
     }
 
     pub(crate) fn from_quad(quad: &QuadrupoleSettings, ims_converter: impl Fn(f64) -> f64) -> Self {
-        let geom = quad_to_geometry(quad, ims_converter);
+        let xxyys = quad_to_xxyy(quad, ims_converter);
+        let geom = xxyys_to_geometry(&xxyys);
+        Self { inner: geom }
+    }
+
+    /// Creates a QuadrupoleIsolationScheme from an iterator of (mz_start, mz_end, im_start, im_end) tuples.
+    /// Each tuple represents a quadrupole window.
+    pub fn from_xxyy<T: Iterator<Item = (f64, f64, f64, f64)>>(iter: T) -> Self {
+        let xxyys: Vec<(f64, f64, f64, f64)> = iter.collect();
+        let geom = xxyys_to_geometry(&xxyys);
         Self { inner: geom }
     }
 }
@@ -147,27 +156,15 @@ fn connect_edges(left: &[(f64, f64)], right: &[(f64, f64)]) -> Polygon<f64> {
     Polygon::new(all_points.into(), vec![])
 }
 
-// We let geo-rs do the heavy lifting of geometry operations
-// so we just make possibly a lot of boxes and then let it simplify
-// the geometry for us.
-fn quad_to_geometry(
+fn quad_to_xxyy(
     quad: &QuadrupoleSettings,
     ims_converter: impl Fn(f64) -> f64,
-) -> MultiPolygon<f64> {
+) -> Vec<(f64, f64, f64, f64)> {
     assert!(quad.scan_starts.len() == quad.scan_ends.len());
     assert!(quad.scan_starts.len() == quad.isolation_mz.len());
     assert!(quad.scan_starts.len() == quad.isolation_width.len());
     assert!(quad.scan_starts.len() == quad.collision_energy.len());
-    if quad.scan_starts.is_empty() {
-        return MultiPolygon(vec![]);
-    }
-    let mut polygons = Vec::new();
-    let mut curr_left_edge = Vec::new();
-    let mut curr_right_edge = Vec::new();
-
-    let mut last_scan_end: Option<usize> = None;
-    let mut last_quad_range: Option<(f64, f64)> = None;
-
+    let mut result = Vec::new();
     for i in 0..quad.scan_starts.len() {
         let scan_start = quad.scan_starts[i];
         let scan_end = quad.scan_ends[i];
@@ -177,7 +174,26 @@ fn quad_to_geometry(
         let mz_width = quad.isolation_width[i];
         let mz_start = mz_center - mz_width / 2.0;
         let mz_end = mz_center + mz_width / 2.0;
+        result.push((mz_start, mz_end, im_start, im_end));
+    }
+    result
+}
 
+// We let geo-rs do the heavy lifting of geometry operations
+// so we just make possibly a lot of boxes and then let it simplify
+// the geometry for us.
+fn xxyys_to_geometry(xxyys: &[(f64, f64, f64, f64)]) -> MultiPolygon<f64> {
+    if xxyys.is_empty() {
+        return MultiPolygon(vec![]);
+    }
+    let mut polygons = Vec::new();
+    let mut curr_left_edge = Vec::new();
+    let mut curr_right_edge = Vec::new();
+
+    let mut last_mobility_end: Option<f64> = None;
+    let mut last_quad_range: Option<(f64, f64)> = None;
+
+    for (mz_start, mz_end, im_start, im_end) in xxyys.into_iter().copied() {
         let mut flush_polygon = false;
 
         if let Some((last_mz_start, last_mz_end)) = last_quad_range {
@@ -188,11 +204,11 @@ fn quad_to_geometry(
             }
         }
 
-        if let Some(last_end) = last_scan_end {
+        if let Some(last_end) = last_mobility_end {
             // If the current im_start is less than the last_im_end,
             // we have an overlap in the IMS dimension.
             // We also need the quads to overlap in the mz dimension
-            if scan_start != last_end {
+            if im_start != last_end {
                 flush_polygon = true;
             }
         }
@@ -212,7 +228,7 @@ fn quad_to_geometry(
 
         curr_right_edge.push((mz_end, im_start));
         curr_right_edge.push((mz_end, im_end));
-        last_scan_end = Some(quad.scan_ends[i]);
+        last_mobility_end = Some(im_end);
         last_quad_range = Some((mz_start, mz_end));
     }
 
@@ -250,7 +266,8 @@ mod tests {
             isolation_width: vec![40.0, 40.0],
             collision_energy: vec![20.0, 22.0],
         };
-        let geom = quad_to_geometry(&dia_pasef_window, dummy_ims_converter);
+        let xxyys = quad_to_xxyy(&dia_pasef_window, dummy_ims_converter);
+        let geom = xxyys_to_geometry(&xxyys);
         println!("Geometry: {:?}", geom);
         assert_eq!(geom.0.len(), 2);
     }
@@ -271,9 +288,56 @@ mod tests {
             isolation_width: vec![20., 20., 20., 20., 20., 20.],
             collision_energy: vec![20.0, 22.0, 24.0, 26.0, 28.0, 30.0],
         };
-        let geom = quad_to_geometry(&dia_pasef_window, dummy_ims_converter);
+        let geom = quad_to_xxyy(&dia_pasef_window, dummy_ims_converter);
+        let geom = xxyys_to_geometry(&geom);
         println!("Geometry: {:?}", geom);
         assert_eq!(geom.0.len(), 1);
+
+        // Extract that one polygon
+        let poly = &geom.0[0];
+        let coords: Vec<(f64, f64)> = poly.exterior().coords().map(|c| (c.x, c.y)).collect();
+        println!("Coords: {:?}", coords);
+        let max_ims = dia_pasef_window
+            .scan_starts
+            .first()
+            .map(|s| dummy_ims_converter(*s as f64))
+            .unwrap();
+        let min_ims = dia_pasef_window
+            .scan_ends
+            .last()
+            .map(|s| dummy_ims_converter(*s as f64))
+            .unwrap();
+
+        // Since this layout is in essence a trapezoid, it gets summarized to 5 points
+        // (the simplification removes intermediate points)
+        // The first two edges are the left side (mz 90-110 at max ims to min ims)
+        // The next two edges are the right side (mz 85-105 at min ims to max ims)
+        // (note: this connects the last point of the first edge to the first point of the second edge)
+        // And the last point closes the polygon back to the start
+        let expect = [
+            (90.0, max_ims),
+            (85.0, min_ims),
+            (105.0, min_ims),
+            (110.0, max_ims),
+            (90.0, max_ims),
+        ];
+
+        for i in 0..expect.len() {
+            let (exp_mz, exp_im) = expect[i];
+            let (got_mz, got_im) = coords[i];
+            assert!(
+                (exp_mz - got_mz).abs() < 0.001,
+                "Expected mz {:.2}, got {:.2}",
+                exp_mz,
+                got_mz
+            );
+            assert!(
+                (exp_im - got_im).abs() < 0.001,
+                "Expected im {:.4}, got {:.4}",
+                exp_im,
+                got_im
+            );
+        }
     }
 
     #[test]

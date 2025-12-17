@@ -4873,6 +4873,7 @@ dependencies = [
  "geo-types",
  "half",
  "parquet 57.1.0",
+ "rand 0.8.5",
  "rayon",
  "serde",
  "serde_json",
