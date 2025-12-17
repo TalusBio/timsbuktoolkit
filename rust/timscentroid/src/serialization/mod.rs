@@ -1,24 +1,6 @@
 //! High-performance serialization for indexed timsTOF peaks.
 //!
-//! This module provides efficient Parquet-based serialization of [`IndexedTimstofPeaks`]
-//! with optimizations for mass spectrometry data.
-//!
-//! # Features
-//!
-//! - **Parallel I/O**: MS1 and MS2 groups are written/read concurrently for maximum throughput
-//! - **Native f16 support**: Mobility data stored as Float16 without conversion overhead
-//! - **Optimized encodings**: BYTE_STREAM_SPLIT for floats, DELTA_BINARY_PACKED for integers
-//! - **Configurable compression**: Choose speed vs size tradeoff for your workflow
-//!
-//! # Performance
-//!
-//! The default configuration was optimized through extensive benchmarking across compression
-//! algorithms (ZSTD, SNAPPY, LZ4, uncompressed), compression levels (1-9), and row group sizes
-//! (250K-5M). For typical datasets (~100M peaks):
-//!
-//! - **Write time**: ~3-4 seconds (with parallel I/O)
-//! - **Read time**: ~1-2 seconds (10-20x faster than centroiding)
-//! - **Disk usage**: ~750 MB (20% smaller than uncompressed)
+//! The only struct here that actually matters is [`IndexedTimstofPeaks`]
 //!
 //! # Examples
 //!
@@ -47,13 +29,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Configuration Presets
-//!
-//! - **Default**: ZSTD(1), 2M row groups - best overall balance
-//! - **Speed optimized**: Uncompressed, 5M row groups - fastest load times
-//! - **Balanced**: SNAPPY, 2M row groups - fast decompression, good size
-//! - **Max compression**: ZSTD(6), 2M row groups - smallest files, slower I/O
 
 use crate::geometry::QuadrupoleIsolationScheme;
 use crate::indexing::{
@@ -77,7 +52,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{
     Compression,
     Encoding,
-    ZstdLevel,
+    // ZstdLevel, // Sometimes I want to use zstd level 1.
 };
 use parquet::file::properties::{
     EnabledStatistics,
@@ -188,9 +163,9 @@ const SCHEMA_VERSION: &str = "1.0";
 pub struct SerializationConfig {
     /// Compression algorithm and level
     pub compression: Compression,
-    /// Number of rows per row group (affects memory usage and parallelism)
+    // Number of rows per row group (affects memory usage and parallelism)
     pub row_group_size: usize,
-    /// Write batch size for internal buffering
+    /// Write batch size for internal buffering, the square of this is the row group size
     pub write_batch_size: usize,
 }
 
@@ -200,40 +175,9 @@ impl Default for SerializationConfig {
         // levels, and row group sizes. This configuration provides the best balance
         // of read/write speed and disk space for typical MS data (100M+ peaks).
         Self {
-            compression: Compression::ZSTD(ZstdLevel::try_new(1).expect("ZSTD level 1 is valid")),
-            row_group_size: 2_000_000,
-            write_batch_size: 8192,
-        }
-    }
-}
-
-impl SerializationConfig {
-    /// Maximum read speed (uncompressed, large row groups).
-    /// Use when disk space is not a concern and load speed is critical.
-    pub fn speed_optimized() -> Self {
-        Self {
-            compression: Compression::UNCOMPRESSED,
-            row_group_size: 5_000_000,
-            write_batch_size: 8192,
-        }
-    }
-
-    /// Balanced speed and compression using SNAPPY.
-    /// Faster decompression than ZSTD with moderate compression.
-    pub fn balanced() -> Self {
-        Self {
+            // compression: Compression::ZSTD(ZstdLevel::try_new(1).expect("ZSTD level 1 is valid")),
             compression: Compression::SNAPPY,
-            row_group_size: 2_000_000,
-            write_batch_size: 8192,
-        }
-    }
-
-    /// Maximum compression for archival or network transfer.
-    /// Slower read/write but smallest disk footprint.
-    pub fn max_compression() -> Self {
-        Self {
-            compression: Compression::ZSTD(ZstdLevel::try_new(6).expect("ZSTD level 6 is valid")),
-            row_group_size: 2_000_000,
+            row_group_size: 100_000,
             write_batch_size: 8192,
         }
     }
@@ -262,7 +206,7 @@ pub struct Ms2GroupMetadata {
 }
 
 /// Expected schema for IndexedPeak parquet files
-struct PeakSchema {
+pub(crate) struct PeakSchema {
     mz_idx: usize,
     intensity_idx: usize,
     mobility_idx: usize,
@@ -270,8 +214,24 @@ struct PeakSchema {
 }
 
 impl PeakSchema {
+    pub(crate) fn mz_idx(&self) -> usize {
+        self.mz_idx
+    }
+
+    pub(crate) fn intensity_idx(&self) -> usize {
+        self.intensity_idx
+    }
+
+    pub(crate) fn mobility_idx(&self) -> usize {
+        self.mobility_idx
+    }
+
+    pub(crate) fn cycle_idx(&self) -> usize {
+        self.cycle_idx
+    }
+
     /// Create the canonical Arrow schema for IndexedPeak data
-    fn canonical() -> Schema {
+    pub(crate) fn canonical() -> Schema {
         Schema::new(vec![
             Field::new("mz", DataType::Float32, false),
             Field::new("intensity", DataType::Float32, false),
@@ -281,7 +241,7 @@ impl PeakSchema {
     }
 
     /// Validate that a schema matches our expected format and return column indices
-    fn validate(schema: &Schema) -> Result<Self, SerializationError> {
+    pub(crate) fn validate(schema: &Schema) -> Result<Self, SerializationError> {
         let field_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
 
         let find_col =
@@ -339,6 +299,9 @@ impl IndexedTimstofPeaks {
         }
 
         // Parallel write: MS1 and all MS2 groups written concurrently
+        // I THINK that this is actually making it faster ... but since its IO bound
+        // I wonder if there is any internal step that might be better to do in parallel.
+        // (so we have parallel processing but serial IO.)
         let (ms1_result, ms2_results): (
             Result<_, SerializationError>,
             Vec<Result<_, SerializationError>>,
@@ -468,11 +431,14 @@ fn write_peaks_to_parquet(
     let props = WriterProperties::builder()
         .set_compression(config.compression)
         .set_max_row_group_size(config.row_group_size)
-        .set_write_batch_size(config.write_batch_size)
+        // .set_write_batch_size(config.write_batch_size)
         // Enable statistics for query optimization
         .set_statistics_enabled(EnabledStatistics::Page)
+        // .set_column_encoding(ColumnPath::from("mz"), Encoding::BYTE_STREAM_SPLIT)
+        // RLE seems to be a bit faster. since we sort by m/z
+        .set_column_encoding(ColumnPath::from("mz"), Encoding::RLE)
         // BYTE_STREAM_SPLIT encoding improves compression for float columns
-        .set_column_encoding(ColumnPath::from("mz"), Encoding::BYTE_STREAM_SPLIT)
+        // ... allegedly
         .set_column_encoding(ColumnPath::from("intensity"), Encoding::BYTE_STREAM_SPLIT)
         // DELTA_BINARY_PACKED is efficient for sequential integers
         .set_column_encoding(
@@ -485,7 +451,10 @@ fn write_peaks_to_parquet(
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
 
     // Write peaks in chunks to control memory usage and row group size
+    // Note that the row group size we use here is the same as the one we set above
+    // in the writer properties.
     for chunk in peaks.chunks(config.row_group_size) {
+        // TODO: Optimize array creation to avoid intermediate allocations
         let mz_array = Float32Array::from_iter_values(chunk.iter().map(|p| p.mz));
         let intensity_array = Float32Array::from_iter_values(chunk.iter().map(|p| p.intensity));
         // Use native f16 array - no conversion needed!
@@ -502,6 +471,10 @@ fn write_peaks_to_parquet(
             ],
         )?;
 
+        // From the arrow docs...
+        // If this would cause the current row group to exceed WriterProperties::max_row_group_size
+        // rows, the contents of batch will be written to one or more row groups such that all
+        // but the final row group in the file contain WriterProperties::max_row_group_size rows.
         writer.write(&batch)?;
     }
 

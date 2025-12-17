@@ -27,7 +27,10 @@ impl FileLoader {
     /// Open a file dialog for elution groups JSON file
     pub fn open_elution_groups_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Elution Groups File (json/diann txt)", &["json", "txt"])
+            .add_filter(
+                "Elution Groups File (json/diann txt/tsv)",
+                &["json", "txt", "tsv"],
+            )
             .pick_file()
         {
             self.elution_groups_path = Some(path);

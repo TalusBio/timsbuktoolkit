@@ -35,20 +35,19 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 fn setup_logger() {
     let app_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    let env_filter = match EnvFilter::builder()
-        .parse(&app_level) {
-            Ok(filter) => filter,
-            Err(_) => {
-                let mut warning_msg = String::new();
-                let _ = writeln!(
-                    &mut warning_msg,
-                    "Warning: Invalid RUST_LOG value: {}. Falling back to 'info'.",
-                    app_level
-                );
-                eprintln!("{}", warning_msg);
-                EnvFilter::new("info")
-            }
-        };
+    let env_filter = match EnvFilter::builder().parse(&app_level) {
+        Ok(filter) => filter,
+        Err(_) => {
+            let mut warning_msg = String::new();
+            let _ = writeln!(
+                &mut warning_msg,
+                "Warning: Invalid RUST_LOG value: {}. Falling back to 'info'.",
+                app_level
+            );
+            eprintln!("{}", warning_msg);
+            EnvFilter::new("info")
+        }
+    };
 
     // 5. Initialize Subscriber
     let subscriber = Registry::default()
