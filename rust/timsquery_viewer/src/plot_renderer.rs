@@ -152,6 +152,10 @@ pub struct MS2Spectrum {
     pub intensities: Vec<f32>,
     pub rt_seconds: f64,
     pub fragment_labels: Vec<String>,
+    /// Library (predicted) fragment intensities aligned with `fragment_labels`.
+    /// When present, the spectrum panel renders a mirror plot with observed peaks
+    /// above the x-axis and library peaks below (both max-normalized).
+    pub library_fragment_intensities: Option<Vec<f32>>,
 }
 
 /// Renders a chromatogram plot using egui_plot with custom zoom/pan controls

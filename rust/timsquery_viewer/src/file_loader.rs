@@ -3,6 +3,7 @@ use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::ElutionGroupCollection;
+use std::collections::HashMap;
 
 use crate::domain::FileService;
 use crate::error::ViewerError;
@@ -73,9 +74,15 @@ impl FileLoader {
     }
 }
 
+/// Wrapper around elution group collection with optional library metadata
 #[derive(Debug)]
 pub struct ElutionGroupData {
+    /// The parsed elution groups
     pub inner: ElutionGroupCollection,
+    /// Library fragment intensities from library sidecar file.
+    /// Maps elution group ID → list of (fragment_label, relative_intensity).
+    /// Used for mirror plot visualization comparing observed vs predicted spectra.
+    pub extras: Option<HashMap<u64, Vec<(String, f32)>>>,
 }
 
 impl ElutionGroupData {

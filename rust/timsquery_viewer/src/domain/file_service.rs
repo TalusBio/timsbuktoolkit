@@ -10,6 +10,7 @@ use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::load_index_caching;
 use timsrust::MSLevel;
 use tracing::info;
+use std::collections::HashMap;
 
 use crate::error::ViewerError;
 use crate::file_loader::ElutionGroupData;
@@ -32,7 +33,39 @@ impl FileService {
             res.len(),
             path.display()
         );
-        Ok(ElutionGroupData { inner: res })
+
+        // Attempt to load library extras sidecar if present. Sidecar shape is Vec<{id, labels, intensities}>
+        #[derive(serde::Deserialize)]
+        struct SidecarEntry {
+            id: u64,
+            labels: Vec<String>,
+            intensities: Vec<f32>,
+        }
+
+        let sidecar_path = path.with_extension("library_extras.json");
+        let extras_map: Option<HashMap<u64, Vec<(String, f32)>>> = match std::fs::read_to_string(&sidecar_path) {
+            Ok(s) => match serde_json::from_str::<Vec<SidecarEntry>>(&s) {
+                Ok(entries) => {
+                    let mut map = HashMap::new();
+                    for e in entries.into_iter() {
+                        let pairs = e
+                            .labels
+                            .into_iter()
+                            .zip(e.intensities.into_iter())
+                            .collect::<Vec<(String, f32)>>();
+                        map.insert(e.id, pairs);
+                    }
+                    Some(map)
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to parse sidecar {}: {:?}", sidecar_path.display(), err);
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+
+        Ok(ElutionGroupData { inner: res, extras: extras_map })
     }
 
     /// Load and index raw timsTOF data

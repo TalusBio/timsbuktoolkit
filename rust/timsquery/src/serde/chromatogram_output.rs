@@ -20,6 +20,11 @@ pub struct ChromatogramOutput {
     pub fragment_intensities: Vec<Vec<f32>>,
     pub fragment_labels: Vec<String>,
     pub retention_time_results_seconds: Vec<f32>,
+    /// Library (predicted) fragment intensities aligned with `fragment_labels`.
+    /// Used for mirror plot visualization to compare observed vs predicted spectra.
+    /// Populated from library sidecar when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_fragment_intensities: Option<Vec<f32>>,
 }
 
 impl ChromatogramOutput {
@@ -121,6 +126,7 @@ impl ChromatogramOutput {
                 .iter()
                 .map(|&x| x as f32 / 1000.0)
                 .collect(),
+            library_fragment_intensities: None,
         })
     }
 }

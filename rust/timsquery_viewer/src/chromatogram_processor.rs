@@ -102,6 +102,7 @@ pub fn extract_ms2_spectrum_from_chromatogram(
     let mut mz_values = Vec::new();
     let mut intensities = Vec::new();
     let mut labels = Vec::new();
+    let mut lib_intensities: Vec<f32> = Vec::new();
 
     for (frag_idx, (&mz, intensity_vec)) in chromatogram
         .fragment_mzs
@@ -119,6 +120,10 @@ pub fn extract_ms2_spectrum_from_chromatogram(
                     .cloned()
                     .unwrap_or_else(|| format!("Fragment {}", frag_idx + 1)),
             );
+            // library_fragment_intensities (if present) are aligned with fragment_labels
+            if let Some(lib) = &chromatogram.library_fragment_intensities {
+                lib_intensities.push(*lib.get(frag_idx).unwrap_or(&0.0));
+            }
         }
     }
 
@@ -133,6 +138,11 @@ pub fn extract_ms2_spectrum_from_chromatogram(
         intensities,
         rt_seconds: actual_rt,
         fragment_labels: labels,
+        library_fragment_intensities: if lib_intensities.is_empty() {
+            None
+        } else {
+            Some(lib_intensities)
+        },
     })
 }
 

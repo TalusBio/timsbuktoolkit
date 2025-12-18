@@ -416,7 +416,25 @@ impl ViewerApp {
                         &self.data.tolerance,
                         &self.data.smoothing,
                     ) {
-                        Ok(chrom) => {
+                        Ok(mut chrom) => {
+                            // If we have library extras sidecar, attach library fragment intensities
+                            if let Some(extras_map) = &elution_groups.extras {
+                                if let Some(entries) = extras_map.get(&chrom.id) {
+                                    let lib_ints: Vec<f32> = chrom
+                                        .fragment_labels
+                                        .iter()
+                                        .map(|lbl| {
+                                            entries
+                                                .iter()
+                                                .find(|(l, _)| l == lbl)
+                                                .map(|(_, v)| *v)
+                                                .unwrap_or(0.0)
+                                        })
+                                        .collect();
+                                    chrom.library_fragment_intensities = Some(lib_ints);
+                                }
+                            }
+
                             let chrom_lines = ChromatogramLines::from_chromatogram(&chrom);
                             self.computed.chromatogram_x_bounds =
                                 Some(chrom_lines.rt_seconds_range);

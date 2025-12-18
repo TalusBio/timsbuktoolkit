@@ -4,6 +4,7 @@ use crate::ion::{
     IonParsingError,
 };
 use serde::Deserialize;
+use serde::Serialize;
 use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
@@ -211,6 +212,44 @@ pub fn read_library_file<T: AsRef<Path>>(
     }
 
     info!("Parsed {} elution groups", elution_groups.len());
+    // Write a small sidecar JSON with fragment label + relative intensity per elution group
+    #[derive(Serialize)]
+    struct SidecarEntry {
+        id: u64,
+        labels: Vec<String>,
+        intensities: Vec<f32>,
+    }
+
+    let sidecar_path = file.as_ref().with_extension("library_extras.json");
+    let mut sidecar = Vec::with_capacity(elution_groups.len());
+    for (eg, extras) in &elution_groups {
+        let labels: Vec<String> = extras
+            .relative_intensities
+            .iter()
+            .map(|(ia, _)| format!("{}", ia))
+            .collect();
+        let intensities: Vec<f32> = extras
+            .relative_intensities
+            .iter()
+            .map(|(_, v)| *v)
+            .collect();
+        sidecar.push(SidecarEntry {
+            id: eg.id(),
+            labels,
+            intensities,
+        });
+    }
+
+    if let Ok(json) = serde_json::to_string_pretty(&sidecar) {
+        if let Err(e) = std::fs::write(&sidecar_path, json) {
+            warn!("Failed to write DIA-NN sidecar {}: {:?}", sidecar_path.display(), e);
+        } else {
+            info!("Wrote DIA-NN extras sidecar to {}", sidecar_path.display());
+        }
+    } else {
+        warn!("Failed to serialize DIA-NN extras sidecar");
+    }
+
     Ok(elution_groups)
 }
 
