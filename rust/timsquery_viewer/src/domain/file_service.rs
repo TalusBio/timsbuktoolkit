@@ -34,16 +34,21 @@ impl FileService {
             path.display()
         );
 
-        // Attempt to load library extras sidecar if present. Sidecar shape is Vec<{id, labels, intensities}>
+        // Attempt to load library extras sidecar if present. Sidecar shape is Vec<{id, modified_peptide, precursor_charge, labels, intensities}>
         #[derive(serde::Deserialize)]
         struct SidecarEntry {
             id: u64,
+            #[serde(default)]
+            modified_peptide: String,
+            #[serde(default)]
+            precursor_charge: u8,
             labels: Vec<String>,
             intensities: Vec<f32>,
         }
 
+        use crate::file_loader::LibraryExtras;
         let sidecar_path = path.with_extension("library_extras.json");
-        let extras_map: Option<HashMap<u64, Vec<(String, f32)>>> = match std::fs::read_to_string(&sidecar_path) {
+        let extras_map: Option<HashMap<u64, LibraryExtras>> = match std::fs::read_to_string(&sidecar_path) {
             Ok(s) => match serde_json::from_str::<Vec<SidecarEntry>>(&s) {
                 Ok(entries) => {
                     let mut map = HashMap::new();
@@ -53,7 +58,11 @@ impl FileService {
                             .into_iter()
                             .zip(e.intensities.into_iter())
                             .collect::<Vec<(String, f32)>>();
-                        map.insert(e.id, pairs);
+                        map.insert(e.id, LibraryExtras {
+                            modified_peptide: e.modified_peptide,
+                            precursor_charge: e.precursor_charge,
+                            fragment_intensities: pairs,
+                        });
                     }
                     Some(map)
                 }

@@ -27,7 +27,7 @@ impl TablePanel {
 
     fn render_filter_ui(&self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
         ui.horizontal(|ui| {
-            ui.label("Filter by ID:");
+            ui.label("Filter:");
             ui.text_edit_singleline(&mut ctx.ui.table_filter);
             if ui.button("Clear").clicked() {
                 ctx.ui.table_filter.clear();
@@ -51,6 +51,7 @@ impl TablePanel {
         commands: &mut crate::ui::CommandSink,
     ) {
         let old_selection = *selected_index;
+        let extras_ref = elution_groups.extras.as_ref();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -62,6 +63,7 @@ impl TablePanel {
                             filtered_indices,
                             $egs,
                             selected_index,
+                            extras_ref,
                         )
                     };
                 }

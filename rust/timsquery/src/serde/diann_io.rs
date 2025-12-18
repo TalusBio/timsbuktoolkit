@@ -216,6 +216,8 @@ pub fn read_library_file<T: AsRef<Path>>(
     #[derive(Serialize)]
     struct SidecarEntry {
         id: u64,
+        modified_peptide: String,
+        precursor_charge: u8,
         labels: Vec<String>,
         intensities: Vec<f32>,
     }
@@ -235,6 +237,8 @@ pub fn read_library_file<T: AsRef<Path>>(
             .collect();
         sidecar.push(SidecarEntry {
             id: eg.id(),
+            modified_peptide: extras.modified_peptide.clone(),
+            precursor_charge: eg.precursor_charge(),
             labels,
             intensities,
         });

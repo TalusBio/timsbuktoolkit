@@ -419,12 +419,12 @@ impl ViewerApp {
                         Ok(mut chrom) => {
                             // If we have library extras sidecar, attach library fragment intensities
                             if let Some(extras_map) = &elution_groups.extras {
-                                if let Some(entries) = extras_map.get(&chrom.id) {
+                                if let Some(extras) = extras_map.get(&chrom.id) {
                                     let lib_ints: Vec<f32> = chrom
                                         .fragment_labels
                                         .iter()
                                         .map(|lbl| {
-                                            entries
+                                            extras.fragment_intensities
                                                 .iter()
                                                 .find(|(l, _)| l == lbl)
                                                 .map(|(_, v)| *v)

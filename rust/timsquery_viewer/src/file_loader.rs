@@ -74,15 +74,23 @@ impl FileLoader {
     }
 }
 
+/// Library extras metadata from sidecar file
+#[derive(Debug, Clone)]
+pub struct LibraryExtras {
+    pub modified_peptide: String,
+    pub precursor_charge: u8,
+    pub fragment_intensities: Vec<(String, f32)>,
+}
+
 /// Wrapper around elution group collection with optional library metadata
 #[derive(Debug)]
 pub struct ElutionGroupData {
     /// The parsed elution groups
     pub inner: ElutionGroupCollection,
-    /// Library fragment intensities from library sidecar file.
-    /// Maps elution group ID → list of (fragment_label, relative_intensity).
-    /// Used for mirror plot visualization comparing observed vs predicted spectra.
-    pub extras: Option<HashMap<u64, Vec<(String, f32)>>>,
+    /// Library extras from sidecar file.
+    /// Maps elution group ID → LibraryExtras (peptide, charge, fragment intensities).
+    /// Used for mirror plot visualization and precursor table display.
+    pub extras: Option<HashMap<u64, LibraryExtras>>,
 }
 
 impl ElutionGroupData {
@@ -95,21 +103,39 @@ impl ElutionGroupData {
         self.len() == 0
     }
 
-    /// Returns indices of all elution groups matching the ID filter.
+    /// Returns indices of all elution groups matching the filter.
     ///
     /// If filter is an empty string, returns ALL indices (no filtering applied).
     /// This allows seamless toggling between filtered and unfiltered views.
+    /// Matches against ID and peptide sequence (if extras are available).
     pub fn matching_indices_for_id_filter(&self, filter: &str) -> Vec<usize> {
         if filter.is_empty() {
             return (0..self.len()).collect();
         }
+
+        let filter_lower = filter.to_lowercase();
+        let extras_ref = self.extras.as_ref();
 
         macro_rules! get_ids {
             ($self:expr) => {
                 $self
                     .iter()
                     .enumerate()
-                    .filter(|(_, eg)| eg.id().to_string().contains(filter))
+                    .filter(|(_, eg)| {
+                        // Match by ID
+                        if eg.id().to_string().contains(filter) {
+                            return true;
+                        }
+                        // Match by peptide sequence (case-insensitive)
+                        if let Some(extras_map) = extras_ref {
+                            if let Some(ext) = extras_map.get(&eg.id()) {
+                                if ext.modified_peptide.to_lowercase().contains(&filter_lower) {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    })
                     .map(|(idx, _)| idx)
                     .collect()
             };
