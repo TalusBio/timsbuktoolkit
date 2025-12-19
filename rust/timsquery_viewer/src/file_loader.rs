@@ -1,11 +1,18 @@
+use crate::domain::FileService;
+use crate::error::ViewerError;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::ElutionGroupCollection;
-
-use crate::domain::FileService;
-use crate::error::ViewerError;
+use timsquery::serde::{
+    ElutionGroupCollection,
+    FileReadingExtras,
+};
+use timsquery::{
+    KeyLike,
+    TimsElutionGroup,
+};
 
 /// Handles file dialogs and file loading operations
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -75,10 +82,14 @@ impl FileLoader {
 
 #[derive(Debug)]
 pub struct ElutionGroupData {
-    pub inner: ElutionGroupCollection,
+    inner: ElutionGroupCollection,
 }
 
 impl ElutionGroupData {
+    pub fn new(inner: ElutionGroupCollection) -> Self {
+        Self { inner }
+    }
+
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -115,27 +126,139 @@ impl ElutionGroupData {
             ElutionGroupCollection::IntLabels(egs, _) => get_ids!(egs),
         }
     }
+
+    pub fn get_elem(
+        &self,
+        index: usize,
+    ) -> (
+        Option<TimsElutionGroup<String>>,
+        Option<HashMap<String, f32>>,
+    ) {
+        let (eg, extras) = match &self.inner {
+            ElutionGroupCollection::StringLabels(egs, ext) => (egs.get(index).cloned(), ext),
+            ElutionGroupCollection::MzpafLabels(egs, ext) => {
+                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
+            }
+            ElutionGroupCollection::TinyIntLabels(egs, ext) => {
+                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
+            }
+            ElutionGroupCollection::IntLabels(egs, ext) => {
+                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
+            }
+        };
+
+        let extra = match extras {
+            Some(FileReadingExtras::Diann(diann_extras)) => diann_extras.get(index).map(|de| {
+                HashMap::from_iter(
+                    de.relative_intensities
+                        .iter()
+                        .cloned()
+                        .map(|(k, v)| (k.clone().to_string(), v)),
+                )
+            }),
+            _ => None,
+        };
+        (eg, extra)
+    }
+
+    pub fn render_table(
+        &self,
+        ui: &mut egui::Ui,
+        filtered_eg_idxs: &[usize],
+        selected_index: &mut Option<usize>,
+    ) {
+        match &self.inner {
+            ElutionGroupCollection::StringLabels(egs, _) => {
+                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
+            }
+            ElutionGroupCollection::MzpafLabels(egs, _) => {
+                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
+            }
+            ElutionGroupCollection::TinyIntLabels(egs, _) => {
+                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
+            }
+            ElutionGroupCollection::IntLabels(egs, _) => {
+                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
+            }
+        }
+    }
 }
 
-/// Execute a macro with the appropriate elution group collection variant.
-///
-/// # Example
-/// ```ignore
-/// macro_rules! process {
-///     ($egs:expr) => {{
-///         ChromatogramService::generate(&$egs[idx], ...)
-///     }};
-/// }
-/// with_elution_collection!(elution_groups, process)
-/// ```
-#[macro_export]
-macro_rules! with_elution_collection {
-    ($data:expr, $macro_name:ident) => {
-        match &$data.inner {
-            timsquery::serde::ElutionGroupCollection::StringLabels(egs, _) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::MzpafLabels(egs, _) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs, _) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::IntLabels(egs, _) => $macro_name!(egs),
-        }
+fn render_precursor_table_filtered<T: KeyLike>(
+    ui: &mut egui::Ui,
+    filtered_eg_idxs: &[usize],
+    reference_eg_slice: &[TimsElutionGroup<T>],
+    selected_index: &mut Option<usize>,
+) {
+    use egui_extras::{
+        Column,
+        TableBuilder,
     };
+
+    TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::auto().at_least(60.0)) // ID
+        .column(Column::auto().at_least(80.0)) // RT
+        .column(Column::auto().at_least(80.0)) // Mobility
+        .column(Column::auto().at_least(120.0)) // Precursor m/z
+        .column(Column::auto().at_least(100.0)) // Fragment count
+        .header(20.0, |mut header| {
+            header.col(|ui| {
+                ui.strong("ID");
+            });
+            header.col(|ui| {
+                ui.strong("RT (s)");
+            });
+            header.col(|ui| {
+                ui.strong("Mobility");
+            });
+            header.col(|ui| {
+                ui.strong("Precursor m/z");
+            });
+            header.col(|ui| {
+                ui.strong("Fragments");
+            });
+        })
+        .body(|body| {
+            let row_height = 18.0;
+            body.rows(row_height, filtered_eg_idxs.len(), |mut row| {
+                let row_idx = row.index();
+                let original_idx = filtered_eg_idxs[row_idx];
+                let eg = &reference_eg_slice[original_idx];
+                let is_selected = Some(original_idx) == *selected_index;
+
+                row.col(|ui| {
+                    if ui
+                        .selectable_label(is_selected, format!("{}", eg.id()))
+                        .clicked()
+                    {
+                        *selected_index = Some(original_idx);
+                    }
+                });
+
+                row.col(|ui| {
+                    let text = format!("{:.2}", eg.rt_seconds());
+                    ui.label(text);
+                });
+
+                row.col(|ui| {
+                    let text = format!("{:.4}", eg.mobility_ook0());
+                    ui.label(text);
+                });
+
+                row.col(|ui| {
+                    let lims = eg.get_precursor_mz_limits();
+                    let display_text = format!("{:.4} - {:.4}", lims.0, lims.1);
+
+                    ui.label(display_text);
+                });
+
+                row.col(|ui| {
+                    let text = format!("{}", eg.fragment_count());
+                    ui.label(text);
+                });
+            });
+        });
 }

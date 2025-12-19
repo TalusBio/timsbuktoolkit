@@ -47,10 +47,6 @@ use timsquery::{
     MzMobilityStatsCollector,
     SpectralCollector,
 };
-use tracing::{
-    trace,
-    warn,
-};
 
 /// Represents a peptide candidate context required for scoring.
 ///

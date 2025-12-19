@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{
@@ -27,6 +28,10 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::load_index_caching;
+use timsquery::{
+    IonAnnot,
+    KeyLike,
+};
 use timsrust::MSLevel;
 use tracing::{
     info,
@@ -58,7 +63,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let elution_groups: Vec<TimsElutionGroup<u8>> =
+    let elution_groups: Vec<TimsElutionGroup<IonAnnot>> =
         read_query_elution_groups(&elution_groups_path)?;
     info!("Loaded {} elution groups", elution_groups.len());
 
@@ -87,11 +92,13 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 }
 
 /// Reads elution groups from a given path, attempting to parse them in several formats.
-pub fn read_query_elution_groups(path: &PathBuf) -> Result<Vec<TimsElutionGroup<u8>>, CliError> {
+pub fn read_query_elution_groups(
+    path: &PathBuf,
+) -> Result<Vec<TimsElutionGroup<IonAnnot>>, CliError> {
     match timsquery::serde::read_library_file(path) {
-        Ok(timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs, _)) => Ok(egs),
+        Ok(timsquery::serde::ElutionGroupCollection::MzpafLabels(egs, _)) => Ok(egs),
         Ok(other) => Err(CliError::DataReading(format!(
-            "Expected elution groups with u8 labels, but got different label type: {:?}",
+            "Expected elution groups with IonAnnot (basic mzpaf) labels, but got different label type: '{:?}'",
             other
         ))),
         Err(e) => Err(CliError::DataReading(format!(
@@ -127,8 +134,8 @@ pub fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, CliError> {
 
 /// Streams and processes elution groups in batches, then serializes the results.
 #[instrument(skip_all)]
-pub fn stream_process_batches(
-    elution_groups: Vec<TimsElutionGroup<u8>>,
+pub fn stream_process_batches<T: KeyLike + Display>(
+    elution_groups: Vec<TimsElutionGroup<T>>,
     aggregator_use: PossibleAggregator,
     rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,
@@ -188,8 +195,8 @@ pub fn stream_process_batches(
 
 /// Processes batches of elution groups and serializes the aggregated results.
 #[instrument(skip_all)]
-pub fn process_and_serialize<S>(
-    elution_groups: Vec<TimsElutionGroup<u8>>,
+pub fn process_and_serialize<S, T: KeyLike + Display>(
+    elution_groups: Vec<TimsElutionGroup<T>>,
     aggregator_use: PossibleAggregator,
     rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,

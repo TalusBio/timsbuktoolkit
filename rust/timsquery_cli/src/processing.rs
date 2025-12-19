@@ -9,9 +9,9 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::fmt::Display;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::QueriableData;
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -20,6 +20,10 @@ use timsquery::models::aggregators::{
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::ChromatogramOutput;
+use timsquery::{
+    KeyLike,
+    QueriableData,
+};
 use tracing::{
     error,
     warn,
@@ -39,8 +43,8 @@ pub struct SpectrumOutput {
     precursor_labels: Vec<i8>,
 }
 
-impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
-    fn from(agg: &SpectralCollector<u8, f32>) -> Self {
+impl<T: KeyLike + Display> From<&SpectralCollector<T, f32>> for SpectrumOutput {
+    fn from(agg: &SpectralCollector<T, f32>) -> Self {
         let (fragment_mzs, fragment_intensities) = agg
             .iter_fragments()
             .map(|((_idx, mz), inten)| (mz, inten))
@@ -65,15 +69,15 @@ impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
     }
 }
 
-pub enum AggregatorContainer {
-    Point(Vec<PointIntensityAggregator<u8>>),
-    Chromatogram(Vec<ChromatogramCollector<u8, f32>>),
-    Spectrum(Vec<SpectralCollector<u8, f32>>),
+pub enum AggregatorContainer<T: KeyLike + Display> {
+    Point(Vec<PointIntensityAggregator<T>>),
+    Chromatogram(Vec<ChromatogramCollector<T, f32>>),
+    Spectrum(Vec<SpectralCollector<T, f32>>),
 }
 
-impl AggregatorContainer {
+impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn new(
-        queries: Vec<TimsElutionGroup<u8>>,
+        queries: Vec<TimsElutionGroup<T>>,
         aggregator: PossibleAggregator,
         ref_rts: Arc<[u32]>,
         tolerance: &Tolerance,

@@ -193,7 +193,7 @@ fn xxyys_to_geometry(xxyys: &[(f64, f64, f64, f64)]) -> MultiPolygon<f64> {
     let mut last_mobility_end: Option<f64> = None;
     let mut last_quad_range: Option<(f64, f64)> = None;
 
-    for (mz_start, mz_end, im_start, im_end) in xxyys.into_iter().copied() {
+    for (mz_start, mz_end, im_start, im_end) in xxyys.iter().copied() {
         let mut flush_polygon = false;
 
         if let Some((last_mz_start, last_mz_end)) = last_quad_range {

@@ -1,5 +1,6 @@
 mod app;
 mod chromatogram_processor;
+mod computed_state;
 mod domain;
 mod error;
 mod file_loader;
@@ -61,17 +62,6 @@ fn main() -> eframe::Result {
     let args = Cli::parse();
 
     setup_logger();
-
-    let session_log_writer: Option<Box<dyn IOWrite + Send + Sync>> =
-        match args.record_session.as_deref() {
-            Some("-") => Some(Box::new(std::io::stdout())),
-            Some(path) => {
-                let file = File::create(path).expect("Failed to create session log file");
-                Some(Box::new(file))
-            }
-            None => None,
-        };
-
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 800.0])
@@ -83,6 +73,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "TimsQuery Viewer",
         options,
-        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, session_log_writer)))),
+        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc)))),
     )
 }

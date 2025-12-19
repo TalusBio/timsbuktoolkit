@@ -15,6 +15,9 @@ use crate::error::ViewerError;
 use crate::file_loader::ElutionGroupData;
 
 /// Service for loading files
+///
+/// JSPP: NGL ... this file is stupid ... should refactor to just have free functions
+/// instead of a struct with no state
 pub struct FileService;
 
 impl FileService {
@@ -32,7 +35,7 @@ impl FileService {
             res.len(),
             path.display()
         );
-        Ok(ElutionGroupData { inner: res })
+        Ok(ElutionGroupData::new(res))
     }
 
     /// Load and index raw timsTOF data
