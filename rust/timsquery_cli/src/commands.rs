@@ -47,6 +47,7 @@ use crate::cli::{
 };
 use crate::error::CliError;
 use crate::processing::AggregatorContainer;
+use timsquery::serde::ElutionGroupCollection;
 
 /// Main function for the 'query-index' subcommand.
 #[instrument]
@@ -63,8 +64,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let elution_groups: Vec<TimsElutionGroup<IonAnnot>> =
-        read_query_elution_groups(&elution_groups_path)?;
+    let elution_groups: ElutionGroupCollection = read_query_elution_groups(&elution_groups_path)?;
     info!("Loaded {} elution groups", elution_groups.len());
 
     let index = load_index_caching(&raw_file_path)
@@ -78,29 +78,55 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&output_path)?;
     let put_path = output_path.join("results.json");
 
-    stream_process_batches(
-        elution_groups,
-        aggregator_use,
-        rts,
-        &index,
-        &tolerance_settings,
-        serialization_format,
-        &put_path,
-        batch_size,
-    )?;
+    match elution_groups {
+        ElutionGroupCollection::StringLabels(egs, _) => stream_process_batches(
+            egs,
+            aggregator_use,
+            rts,
+            &index,
+            &tolerance_settings,
+            serialization_format,
+            &put_path,
+            batch_size,
+        ),
+        ElutionGroupCollection::MzpafLabels(egs, _) => stream_process_batches(
+            egs,
+            aggregator_use,
+            rts,
+            &index,
+            &tolerance_settings,
+            serialization_format,
+            &put_path,
+            batch_size,
+        ),
+        ElutionGroupCollection::TinyIntLabels(egs, _) => stream_process_batches(
+            egs,
+            aggregator_use,
+            rts,
+            &index,
+            &tolerance_settings,
+            serialization_format,
+            &put_path,
+            batch_size,
+        ),
+        ElutionGroupCollection::IntLabels(egs, _) => stream_process_batches(
+            egs,
+            aggregator_use,
+            rts,
+            &index,
+            &tolerance_settings,
+            serialization_format,
+            &put_path,
+            batch_size,
+        ),
+    }?;
     Ok(())
 }
 
 /// Reads elution groups from a given path, attempting to parse them in several formats.
-pub fn read_query_elution_groups(
-    path: &PathBuf,
-) -> Result<Vec<TimsElutionGroup<IonAnnot>>, CliError> {
+pub fn read_query_elution_groups(path: &PathBuf) -> Result<ElutionGroupCollection, CliError> {
     match timsquery::serde::read_library_file(path) {
-        Ok(timsquery::serde::ElutionGroupCollection::MzpafLabels(egs, _)) => Ok(egs),
-        Ok(other) => Err(CliError::DataReading(format!(
-            "Expected elution groups with IonAnnot (basic mzpaf) labels, but got different label type: '{:?}'",
-            other
-        ))),
+        Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
             "Failed to read elution groups from {}: {:?}",
             path.display(),
@@ -253,5 +279,23 @@ pub fn template_tolerance_settings() -> Tolerance {
         rt: RtTolerance::Unrestricted,
         mobility: MobilityTolerance::Pct((10.0, 10.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_we_can_read_data_contract() {
+        let manifest_path = env!("CARGO_MANIFEST_DIR");
+        let elution_groups_path =
+            PathBuf::from(manifest_path).join("data_contracts/single_elution_group.json");
+
+        let elution_groups = read_query_elution_groups(&elution_groups_path).unwrap();
+        // Do not change that file, it means its a data contract test
+        // AKA, we promised we would be compatible with that file.
+        // IF you do want to change it contact the Carafe developers first.
+        assert!(elution_groups.len() == 1);
     }
 }

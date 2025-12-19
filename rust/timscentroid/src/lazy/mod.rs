@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use timscentroid::lazy_indexing::LazyIndexedTimstofPeaks;
+//! use timscentroid::lazy::LazyIndexedTimstofPeaks;
 //! use timscentroid::utils::{TupleRange, OptionallyRestricted::*};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {

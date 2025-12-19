@@ -21,11 +21,6 @@
 //! // Load from disk (much faster than re-indexing)
 //! let loaded = IndexedTimstofPeaks::load_from_directory("indexed_peaks/")?;
 //!
-//! // Use custom settings for specific needs
-//! index.save_to_directory_with_config(
-//!     "fast_peaks/",
-//!     SerializationConfig::speed_optimized()
-//! )?;
 //! # Ok(())
 //! # }
 //! ```
