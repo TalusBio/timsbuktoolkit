@@ -9,9 +9,9 @@ use crate::ui::{
 };
 
 /// Panel for data loading and settings on the left side
-pub struct LeftPanel;
+pub struct ConfigPanel;
 
-impl LeftPanel {
+impl ConfigPanel {
     pub fn new() -> Self {
         Self
     }
@@ -110,7 +110,7 @@ impl LeftPanel {
     }
 }
 
-impl Panel for LeftPanel {
+impl Panel for ConfigPanel {
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
         self.render_tolerance_editor(ui, ctx);
         ui.add_space(20.0);
@@ -130,7 +130,7 @@ impl Panel for LeftPanel {
     }
 }
 
-impl Default for LeftPanel {
+impl Default for ConfigPanel {
     fn default() -> Self {
         Self::new()
     }

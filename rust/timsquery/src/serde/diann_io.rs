@@ -459,7 +459,10 @@ mod tests {
 
         // Check that sniff detects it correctly
         let is_diann = sniff_diann_library_file(&file_path);
-        assert!(is_diann, "speclib2 TSV file should be detected as DIA-NN library");
+        assert!(
+            is_diann,
+            "speclib2 TSV file should be detected as DIA-NN library"
+        );
 
         // This test mainly checks that the name aliases wotk correctly
         let _elution_groups = read_library_file(file_path).expect("Failed to read library");
