@@ -1,36 +1,35 @@
 use eframe::egui;
 
-use crate::app::AppCommand;
 use crate::file_loader::ElutionGroupData;
-use crate::ui::components::precursor_table;
-use crate::ui::{
-    Panel,
-    PanelContext,
-};
 /// Panel for displaying and filtering the precursor table
 pub struct TablePanel;
+
+pub enum TablePanelMessage {
+    SelectElutionGroup(usize),
+    None,
+}
 
 impl TablePanel {
     pub fn new() -> Self {
         Self
     }
 
-    fn render_search_ui(&self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
+    fn render_search_ui(&self, ui: &mut egui::Ui, search_line: &mut String) {
         ui.horizontal(|ui| {
             ui.label("Search:");
-            let response = ui.text_edit_singleline(&mut ctx.ui.search_input);
+            let response = ui.text_edit_singleline(search_line);
             response.request_focus();
             ui.label("(Enter to apply, Esc to cancel)");
         });
         ui.separator();
     }
 
-    fn render_filter_ui(&self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
+    fn render_filter_ui(&self, ui: &mut egui::Ui, table_filter: &mut String) {
         ui.horizontal(|ui| {
             ui.label("Filter by ID:");
-            ui.text_edit_singleline(&mut ctx.ui.table_filter);
+            ui.text_edit_singleline(table_filter);
             if ui.button("Clear").clicked() {
-                ctx.ui.table_filter.clear();
+                table_filter.clear();
             }
         });
         ui.add_space(5.0);
@@ -48,55 +47,52 @@ impl TablePanel {
         filtered_indices: &[usize],
         elution_groups: &ElutionGroupData,
         selected_index: &mut Option<usize>,
-        commands: &mut crate::ui::CommandSink,
-    ) {
+    ) -> TablePanelMessage {
         let old_selection = *selected_index;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                macro_rules! render_table {
-                    ($egs:expr) => {
-                        precursor_table::render_precursor_table_filtered(
-                            ui,
-                            filtered_indices,
-                            $egs,
-                            selected_index,
-                        )
-                    };
-                }
-                crate::with_elution_collection!(elution_groups, render_table);
+                elution_groups.render_table(ui, filtered_indices, selected_index);
             });
 
         if old_selection != *selected_index
             && let Some(new_idx) = *selected_index
         {
-            commands.push(AppCommand::SelectElutionGroup(new_idx));
+            TablePanelMessage::SelectElutionGroup(new_idx)
+        } else {
+            TablePanelMessage::None
         }
     }
-}
 
-impl Panel for TablePanel {
-    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut PanelContext) {
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        // ctx: &mut PanelContext,
+        elution_groups: &Option<ElutionGroupData>,
+        search_mode: bool,
+        search_line: &mut String,
+        selected_index: &mut Option<usize>,
+    ) {
         ui.heading("Precursor Table");
         ui.separator();
 
         // Check if we have data first
-        if ctx.data.elution_groups.is_none() {
+        if elution_groups.is_none() {
             ui.label("Load elution groups to see the table");
             return;
         }
 
         // Render search/filter UI (needs mutable ctx, doesn't need elution_groups)
-        if ctx.ui.search_mode {
-            self.render_search_ui(ui, ctx);
+        if search_mode {
+            self.render_search_ui(ui, search_line);
         } else {
-            self.render_filter_ui(ui, ctx);
+            self.render_filter_ui(ui, search_line);
         }
 
         // Now borrow elution_groups for the rest
-        let elution_groups = ctx.data.elution_groups.as_ref().unwrap();
-        let filtered_indices = elution_groups.matching_indices_for_id_filter(&ctx.ui.table_filter);
+        let elution_groups = elution_groups.as_ref().unwrap();
+        let filtered_indices = elution_groups.matching_indices_for_id_filter(search_line);
 
         ui.label(format!(
             "Showing {} of {} precursors",
@@ -104,16 +100,10 @@ impl Panel for TablePanel {
             elution_groups.len()
         ));
 
-        self.render_table(
-            ui,
-            &filtered_indices,
-            elution_groups,
-            &mut ctx.ui.selected_index,
-            &mut ctx.commands,
-        );
+        self.render_table(ui, &filtered_indices, elution_groups, selected_index);
     }
 
-    fn title(&self) -> &str {
+    pub fn title(&self) -> &str {
         "Table"
     }
 }

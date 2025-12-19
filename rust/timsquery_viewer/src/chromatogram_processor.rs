@@ -256,21 +256,20 @@ fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<
 /// smoothing but not for precise quantitative analysis.
 fn compute_savitzky_golay_weights(window_size: usize, polynomial_order: usize) -> Vec<f32> {
     let half_window = window_size / 2;
-    let mut weights = vec![0.0; window_size];
 
-    for position in 0..window_size {
-        let distance_from_center = ((position as isize) - (half_window as isize)).abs() as f32;
-        let normalized_distance = distance_from_center / (half_window as f32);
+    (0..window_size)
+        .map(|position| {
+            let distance_from_center = ((position as isize) - (half_window as isize)).abs() as f32;
+            let normalized_distance = distance_from_center / (half_window as f32);
 
-        weights[position] = match polynomial_order {
-            0 | 1 => 1.0 - normalized_distance,
-            2 => (1.0 - normalized_distance * normalized_distance).max(0.0),
-            3 => (1.0 - normalized_distance.powi(3)).max(0.0),
-            _ => (1.0 - normalized_distance.powi(polynomial_order as i32)).max(0.0),
-        };
-    }
-
-    weights
+            match polynomial_order {
+                0 | 1 => 1.0 - normalized_distance,
+                2 => (1.0 - normalized_distance * normalized_distance).max(0.0),
+                3 => (1.0 - normalized_distance.powi(3)).max(0.0),
+                _ => (1.0 - normalized_distance.powi(polynomial_order as i32)).max(0.0),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

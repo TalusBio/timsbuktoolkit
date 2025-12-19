@@ -34,7 +34,7 @@ use timscentroid::utils::{
 /// in terms of positive values. For instance, here a tolerance of (1,1) on a value
 /// of 10 means a range of (9,11) while in some software the same range would be defined
 /// as (-1,1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tolerance {
     pub ms: MzTolerance,
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct Tolerance {
     pub quad: QuadTolerance,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MzTolerance {
     #[serde(rename = "da")]
     Absolute((f64, f64)),
@@ -51,7 +51,7 @@ pub enum MzTolerance {
     Ppm((f64, f64)),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum RtTolerance {
     #[serde(rename = "minutes")]
     Minutes((f32, f32)),
@@ -61,7 +61,7 @@ pub enum RtTolerance {
     Unrestricted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MobilityTolerance {
     #[serde(rename = "absolute")]
     Absolute((f32, f32)),
@@ -70,7 +70,7 @@ pub enum MobilityTolerance {
     Unrestricted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QuadTolerance {
     #[serde(rename = "absolute")]
     Absolute((f32, f32)),

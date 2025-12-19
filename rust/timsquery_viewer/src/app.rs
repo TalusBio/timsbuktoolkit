@@ -9,46 +9,20 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
+use timsquery::models::elution_group;
 use timsquery::models::tolerance::Tolerance;
 
-use crate::chromatogram_processor::{
-    self,
-    ChromatogramOutput,
-    SmoothingMethod,
-};
-use crate::domain::ChromatogramService;
+use crate::chromatogram_processor::SmoothingMethod;
+use crate::computed_state::ComputedState;
 use crate::file_loader::{
     ElutionGroupData,
     FileLoader,
-};
-use crate::plot_renderer::{
-    ChromatogramLines,
-    MS2Spectrum,
 };
 use crate::ui::panels::{
     ConfigPanel,
     SpectrumPanel,
     TablePanel,
 };
-use crate::ui::{
-    Panel,
-    PanelContext,
-};
-
-/// Commands that trigger state changes in the application
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum AppCommand {
-    /// Regenerate the chromatogram for the current selection
-    RegenerateChromatogram,
-    /// Select a specific elution group by index
-    SelectElutionGroup(usize),
-    /// Update the tolerance settings
-    UpdateTolerance,
-    /// Update the smoothing settings
-    UpdateSmoothing,
-    /// Query MS2 spectrum at given RT (seconds)
-    QueryMS2Spectrum(f64),
-}
 
 /// Pane types for the tile layout
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -129,21 +103,6 @@ impl Default for UiState {
     }
 }
 
-/// Computed/cached state - derived from data and UI state
-#[derive(Debug, Default)]
-pub struct ComputedState {
-    /// Computed chromatogram for the selected elution group (plot data)
-    pub chromatogram: Option<ChromatogramLines>,
-    /// X-axis bounds to apply on next plot render (min_rt, max_rt)
-    pub chromatogram_x_bounds: Option<(f64, f64)>,
-    /// Raw chromatogram output data (for MS2 extraction)
-    pub chromatogram_output: Option<ChromatogramOutput>,
-    /// Computed MS2 spectrum at selected RT
-    pub ms2_spectrum: Option<MS2Spectrum>,
-    /// Frame counter for auto-zooming the chromatogram
-    pub auto_zoom_frame_counter: u8,
-}
-
 /// Main application state
 pub struct ViewerApp {
     /// File loader for handling file dialogs and loading
@@ -158,9 +117,6 @@ pub struct ViewerApp {
     /// Computed/cached state
     computed: ComputedState,
 
-    /// Pending commands to be executed
-    pending_commands: Vec<AppCommand>,
-
     /// Dock state for layout management
     dock_state: DockState<Pane>,
 
@@ -168,9 +124,6 @@ pub struct ViewerApp {
     config_panel: ConfigPanel,
     table_panel: TablePanel,
     spectrum_panel: SpectrumPanel,
-
-    /// Optional session log writer
-    session_log: Option<Box<dyn Write + Send + Sync>>,
 }
 
 impl ViewerApp {
@@ -192,19 +145,14 @@ impl ViewerApp {
             data: DataState::default(),
             ui: UiState::default(),
             computed: ComputedState::default(),
-            pending_commands: Vec::new(),
             dock_state,
             config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
-            session_log: None,
         }
     }
 
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        session_log: Option<Box<dyn Write + Send + Sync>>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Try to load previous state
         if let Some(storage) = cc.storage {
             if let Some(state_string) = storage.get_string(eframe::APP_KEY) {
@@ -243,12 +191,10 @@ impl ViewerApp {
                         },
                         ui: state.ui_state,
                         computed: ComputedState::default(),
-                        pending_commands: Vec::new(),
                         dock_state: state.dock_state,
                         config_panel: ConfigPanel::new(),
                         table_panel: TablePanel::new(),
                         spectrum_panel: SpectrumPanel::new(),
-                        session_log,
                     };
                 }
             } else {
@@ -272,73 +218,10 @@ impl ViewerApp {
             data: DataState::default(),
             ui: UiState::default(),
             computed: ComputedState::default(),
-            pending_commands: Vec::new(),
             dock_state,
             config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
-            session_log,
-        }
-    }
-
-    pub(crate) fn handle_commands(&mut self) {
-        let commands = std::mem::take(&mut self.pending_commands);
-
-        for cmd in commands {
-            tracing::debug!("Handling command: {:?}", cmd);
-
-            if let Some(logger) = &mut self.session_log {
-                if let Ok(json) = serde_json::to_string(&cmd) {
-                    let _ = writeln!(logger, "{}", json);
-                }
-            }
-
-            match cmd {
-                AppCommand::RegenerateChromatogram => {
-                    self.generate_chromatogram();
-                }
-                AppCommand::SelectElutionGroup(idx) => {
-                    self.ui.selected_index = Some(idx);
-                    self.pending_commands
-                        .push(AppCommand::RegenerateChromatogram);
-                }
-                AppCommand::UpdateTolerance => {
-                    if self.ui.selected_index.is_some() {
-                        self.pending_commands
-                            .push(AppCommand::RegenerateChromatogram);
-                    }
-                }
-                AppCommand::UpdateSmoothing => {
-                    if self.ui.selected_index.is_some() {
-                        self.pending_commands
-                            .push(AppCommand::RegenerateChromatogram);
-                    }
-                }
-                AppCommand::QueryMS2Spectrum(rt_seconds) => {
-                    if let Some(chrom_output) = &self.computed.chromatogram_output {
-                        match chromatogram_processor::extract_ms2_spectrum_from_chromatogram(
-                            chrom_output,
-                            rt_seconds,
-                        ) {
-                            Ok(spectrum) => {
-                                let num_peaks = spectrum.mz_values.len();
-                                self.computed.ms2_spectrum = Some(spectrum);
-                                tracing::info!(
-                                    "Extracted MS2 spectrum at RT {:.2}s with {} peaks",
-                                    rt_seconds,
-                                    num_peaks
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to extract MS2 spectrum: {:?}", e);
-                                self.computed.ms2_spectrum = None;
-                            }
-                        }
-                    } else {
-                        tracing::warn!("No chromatogram data available for MS2 extraction");
-                    }
-                }
-            }
         }
     }
 
@@ -407,44 +290,15 @@ impl ViewerApp {
         };
 
         if let Some(elution_groups) = &self.data.elution_groups {
-            macro_rules! process_chromatogram {
-                ($egs:expr) => {
-                    match ChromatogramService::generate(
-                        &$egs[selected_idx],
-                        index,
-                        Arc::clone(ms1_rts),
-                        &self.data.tolerance,
-                        &self.data.smoothing,
-                    ) {
-                        Ok(chrom) => {
-                            let chrom_lines = ChromatogramLines::from_chromatogram(&chrom);
-                            self.computed.chromatogram_x_bounds =
-                                Some(chrom_lines.rt_seconds_range);
-                            self.computed.chromatogram = Some(chrom_lines);
-                            self.computed.chromatogram_output = Some(chrom);
-                            // Reset auto zoom frame counter to 5 to force bounds update for a few frames
-                            self.computed.auto_zoom_frame_counter = 5;
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to generate chromatogram: {:?}", e);
-                            self.computed.chromatogram = None;
-                            self.computed.chromatogram_output = None;
-                            self.computed.chromatogram_x_bounds = None;
-                        }
-                    }
-                };
-            }
-
-            crate::with_elution_collection!(elution_groups, process_chromatogram);
+            self.computed.update(
+                &elution_groups,
+                selected_idx,
+                index,
+                Arc::clone(ms1_rts),
+                &self.data.tolerance,
+                &self.data.smoothing,
+            )
         };
-
-        if self.ui.show_ms2_spectrum
-            && let Some(chrom_output) = &self.computed.chromatogram_output
-        {
-            let reference_rt = chrom_output.rt_seconds as f64;
-            self.pending_commands
-                .push(AppCommand::QueryMS2Spectrum(reference_rt));
-        }
     }
 
     fn render_elution_groups_section_static(
@@ -663,8 +517,7 @@ impl ViewerApp {
     }
 
     fn select_elution_group(&mut self, idx: usize) {
-        self.pending_commands
-            .push(AppCommand::SelectElutionGroup(idx));
+        self.ui.selected_index = Some(idx);
     }
 }
 
@@ -685,7 +538,7 @@ impl eframe::App for ViewerApp {
                 show_ms2_spectrum: self.ui.show_ms2_spectrum,
             },
             tolerance: self.data.tolerance.clone(),
-            smoothing: self.data.smoothing.clone(),
+            smoothing: self.data.smoothing,
             dock_state: self.dock_state.clone(),
         };
 
@@ -702,19 +555,18 @@ impl eframe::App for ViewerApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_vim_keys(ctx);
-        self.handle_commands();
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.heading("TimsQuery Viewer");
             ui.separator();
         });
+        self.generate_chromatogram();
 
         let mut tab_viewer = AppTabViewer {
             file_loader: &mut self.file_loader,
             data: &mut self.data,
             ui: &mut self.ui,
             computed: &mut self.computed,
-            pending_commands: &mut self.pending_commands,
             left_panel: &mut self.config_panel,
             table_panel: &mut self.table_panel,
             spectrum_panel: &mut self.spectrum_panel,
@@ -733,7 +585,6 @@ struct AppTabViewer<'a> {
     data: &'a mut DataState,
     ui: &'a mut UiState,
     computed: &'a mut ComputedState,
-    pending_commands: &'a mut Vec<AppCommand>,
     left_panel: &'a mut ConfigPanel,
     table_panel: &'a mut TablePanel,
     spectrum_panel: &'a mut SpectrumPanel,
@@ -755,14 +606,12 @@ impl<'a> AppTabViewer<'a> {
         ui.add_space(20.0);
         ui.separator();
 
-        let mut ctx = PanelContext::new(
-            self.data,
-            self.ui,
-            self.computed,
-            self.file_loader,
-            self.pending_commands,
+        self.left_panel.render(
+            ui,
+            &mut self.data.tolerance,
+            &mut self.data.smoothing,
+            &mut self.ui.show_ms2_spectrum,
         );
-        self.left_panel.render(ui, &mut ctx);
     }
 }
 
@@ -790,24 +639,20 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                     });
             }
             Pane::TablePanel => {
-                let mut ctx = PanelContext::new(
-                    self.data,
-                    self.ui,
-                    self.computed,
-                    self.file_loader,
-                    self.pending_commands,
+                self.table_panel.render(
+                    ui,
+                    &self.data.elution_groups,
+                    self.ui.search_mode,
+                    &mut self.ui.search_input,
+                    &mut self.ui.selected_index,
                 );
-                self.table_panel.render(ui, &mut ctx);
             }
             Pane::MS2Spectrum => {
-                let mut ctx = PanelContext::new(
-                    self.data,
-                    self.ui,
-                    self.computed,
-                    self.file_loader,
-                    self.pending_commands,
+                self.spectrum_panel.render(
+                    ui,
+                    &self.computed.ms2_spectrum,
+                    &self.computed.expected_intensities,
                 );
-                self.spectrum_panel.render(ui, &mut ctx);
             }
             Pane::PrecursorPlot => {
                 if let Some(chromatogram) = &self.computed.chromatogram {
@@ -821,8 +666,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         &mut self.computed.auto_zoom_frame_counter,
                     );
                     if let Some(clicked_rt) = click_response {
-                        self.pending_commands
-                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
+                        self.computed.clicked_rt = Some(clicked_rt);
                     }
                 } else if self.ui.selected_index.is_some() {
                     ui.label("Generating chromatogram...");
@@ -842,8 +686,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         &mut self.computed.auto_zoom_frame_counter,
                     );
                     if let Some(clicked_rt) = response {
-                        self.pending_commands
-                            .push(AppCommand::QueryMS2Spectrum(clicked_rt));
+                        self.computed.clicked_rt = Some(clicked_rt);
                     }
                 } else if self.ui.selected_index.is_some() {
                     ui.label("Generating chromatogram...");
@@ -858,6 +701,3 @@ impl<'a> TabViewer for AppTabViewer<'a> {
         false // Tabs cannot be closed
     }
 }
-
-#[cfg(test)]
-mod tests;

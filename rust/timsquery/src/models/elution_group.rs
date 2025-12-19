@@ -205,4 +205,20 @@ impl<T: KeyLike> TimsElutionGroup<T> {
             ..self
         }
     }
+
+    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> TimsElutionGroup<U> {
+        let fragment_labels_converted: TinyVec<[U; 13]> =
+            self.fragment_labels.iter().map(|label| f(label)).collect();
+
+        TimsElutionGroup {
+            id: self.id,
+            mobility_ook0: self.mobility_ook0,
+            rt_seconds: self.rt_seconds,
+            precursor_mono_mz: self.precursor_mono_mz,
+            precursor_charge: self.precursor_charge,
+            fragment_mzs: self.fragment_mzs.clone(),
+            fragment_labels: fragment_labels_converted,
+            precursor_labels: self.precursor_labels.clone(),
+        }
+    }
 }

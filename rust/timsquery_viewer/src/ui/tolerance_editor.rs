@@ -8,29 +8,25 @@ use timsquery::models::tolerance::{
 };
 
 /// Renders the tolerance editor UI
-pub fn render_tolerance_editor(ui: &mut egui::Ui, tolerance: &mut Tolerance) -> bool {
-    let mut changed = false;
-
+pub fn render_tolerance_editor(ui: &mut egui::Ui, tolerance: &mut Tolerance) {
     ui.collapsing("M/Z Tolerance", |ui| {
-        changed |= render_mz_tolerance(ui, &mut tolerance.ms);
+        render_mz_tolerance(ui, &mut tolerance.ms);
     });
 
     ui.collapsing("RT Tolerance", |ui| {
-        changed |= render_rt_tolerance(ui, &mut tolerance.rt);
+        render_rt_tolerance(ui, &mut tolerance.rt);
     });
 
     ui.collapsing("Mobility Tolerance", |ui| {
-        changed |= render_mobility_tolerance(ui, &mut tolerance.mobility);
+        render_mobility_tolerance(ui, &mut tolerance.mobility);
     });
 
     ui.collapsing("Quadrupole Tolerance", |ui| {
-        changed |= render_quad_tolerance(ui, &mut tolerance.quad);
+        render_quad_tolerance(ui, &mut tolerance.quad);
     });
-
-    changed
 }
 
-fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
+fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) {
     let mut changed = false;
 
     let mut is_ppm = matches!(tol, MzTolerance::Ppm(_));
@@ -73,13 +69,9 @@ fn render_mz_tolerance(ui: &mut egui::Ui, tol: &mut MzTolerance) -> bool {
             });
         }
     }
-
-    changed
 }
 
-fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
-    let mut changed = false;
-
+fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) {
     let mut selected = match tol {
         RtTolerance::Minutes(_) => 0,
         RtTolerance::Pct(_) => 1,
@@ -101,36 +93,33 @@ fn render_rt_tolerance(ui: &mut egui::Ui, tol: &mut RtTolerance) -> bool {
             2 => RtTolerance::Unrestricted,
             _ => RtTolerance::Unrestricted,
         };
-        changed = true;
     }
 
     match tol {
         RtTolerance::Minutes((lower, upper)) => {
             ui.horizontal(|ui| {
                 ui.label("Lower (min):");
-                changed |= ui.add(egui::DragValue::new(lower).speed(0.1)).changed();
+                ui.add(egui::DragValue::new(lower).speed(0.1));
             });
             ui.horizontal(|ui| {
                 ui.label("Upper (min):");
-                changed |= ui.add(egui::DragValue::new(upper).speed(0.1)).changed();
+                ui.add(egui::DragValue::new(upper).speed(0.1));
             });
         }
         RtTolerance::Pct((lower, upper)) => {
             ui.horizontal(|ui| {
                 ui.label("Lower (%):");
-                changed |= ui.add(egui::DragValue::new(lower).speed(0.5)).changed();
+                ui.add(egui::DragValue::new(lower).speed(0.5));
             });
             ui.horizontal(|ui| {
                 ui.label("Upper (%):");
-                changed |= ui.add(egui::DragValue::new(upper).speed(0.5)).changed();
+                ui.add(egui::DragValue::new(upper).speed(0.5));
             });
         }
         RtTolerance::Unrestricted => {
             ui.label("No RT restriction");
         }
     }
-
-    changed
 }
 
 fn render_mobility_tolerance(ui: &mut egui::Ui, tol: &mut MobilityTolerance) -> bool {

@@ -1,10 +1,7 @@
 use arrow::array::RecordBatchReader;
 use std::fs::File;
 use std::ops::Range;
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -13,7 +10,6 @@ use arrow::array::{
     BooleanArray,
     Float16Array,
     Float32Array,
-    Int32Array,
 };
 use arrow::compute::kernels::cmp as array_cmp;
 use arrow::compute::{
@@ -21,10 +17,8 @@ use arrow::compute::{
     concat_batches,
 };
 use arrow::datatypes::{
-    DataType,
     Float16Type,
     Float32Type,
-    Schema,
 };
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
@@ -34,16 +28,9 @@ use parquet::arrow::arrow_reader::{
     ArrowPredicate,
     RowFilter,
 };
-use parquet::file::metadata::FileMetaData;
 
-use crate::serialization::{
-    PeakSchema,
-    SerializationError,
-};
-use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn,
-    ParquetRecordBatchReaderBuilder,
-};
+use crate::serialization::PeakSchema;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use parquet::file::metadata::ParquetMetaData;
 
@@ -136,7 +123,7 @@ impl ParquetQuerier {
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
         let peak_schema =
-            PeakSchema::validate(&schema).map_err(|e| format!("Schema validation error: {}", e))?;
+            PeakSchema::validate(schema).map_err(|e| format!("Schema validation error: {}", e))?;
 
         let file_metadata = builder.metadata().clone();
 

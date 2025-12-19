@@ -54,7 +54,6 @@ use crate::utils::{
     TupleRange,
 };
 use half::f16;
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::{
     Path,
@@ -212,15 +211,15 @@ impl LazyIndexedTimstofPeaks {
                     let cycle_u32: u32 = cycle;
 
                     // Apply cycle range filter if specified
-                    if let OptionallyRestricted::Restricted(cycle_range) = &cycle_range {
-                        if !cycle_range.contains(cycle_u32) {
-                            return None;
-                        }
+                    if let OptionallyRestricted::Restricted(cycle_range) = &cycle_range
+                        && !cycle_range.contains(cycle_u32)
+                    {
+                        return None;
                     }
 
                     Some(IndexedPeak {
-                        mz: mz,
-                        intensity: intensity,
+                        mz,
+                        intensity,
                         mobility_ook0: mobility_f16,
                         cycle_index: cycle_u32,
                     })
@@ -281,12 +280,7 @@ impl LazyIndexedTimstofPeaks {
             });
 
             let ms2_path = self.base_directory.join(&group_metadata.relative_path);
-            let peaks_iter = self.query_peaks_file(
-                ms2_path,
-                mz_range,
-                cycle_range.clone(),
-                local_im_range.clone(),
-            );
+            let peaks_iter = self.query_peaks_file(ms2_path, mz_range, cycle_range, local_im_range);
             results.push((isolation_scheme.clone(), peaks_iter.collect()));
         }
 
