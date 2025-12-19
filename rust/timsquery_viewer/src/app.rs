@@ -26,7 +26,7 @@ use crate::plot_renderer::{
     MS2Spectrum,
 };
 use crate::ui::panels::{
-    LeftPanel,
+    ConfigPanel,
     SpectrumPanel,
     TablePanel,
 };
@@ -53,7 +53,7 @@ pub enum AppCommand {
 /// Pane types for the tile layout
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 enum Pane {
-    LeftPanel,
+    ConfigPanel,
     TablePanel,
     MS2Spectrum,
     PrecursorPlot,
@@ -165,7 +165,7 @@ pub struct ViewerApp {
     dock_state: DockState<Pane>,
 
     /// UI Panels
-    left_panel: LeftPanel,
+    config_panel: ConfigPanel,
     table_panel: TablePanel,
     spectrum_panel: SpectrumPanel,
 
@@ -178,7 +178,7 @@ impl ViewerApp {
     #[cfg(test)]
     pub fn new_test() -> Self {
         let tabs = vec![
-            Pane::LeftPanel,
+            Pane::ConfigPanel,
             Pane::TablePanel,
             Pane::PrecursorPlot,
             Pane::FragmentPlot,
@@ -194,7 +194,7 @@ impl ViewerApp {
             computed: ComputedState::default(),
             pending_commands: Vec::new(),
             dock_state,
-            left_panel: LeftPanel::new(),
+            config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
             session_log: None,
@@ -245,7 +245,7 @@ impl ViewerApp {
                         computed: ComputedState::default(),
                         pending_commands: Vec::new(),
                         dock_state: state.dock_state,
-                        left_panel: LeftPanel::new(),
+                        config_panel: ConfigPanel::new(),
                         table_panel: TablePanel::new(),
                         spectrum_panel: SpectrumPanel::new(),
                         session_log,
@@ -258,7 +258,7 @@ impl ViewerApp {
 
         // Create initial tabs: Settings, Table, Precursors, Fragments, MS2
         let tabs = vec![
-            Pane::LeftPanel,
+            Pane::ConfigPanel,
             Pane::TablePanel,
             Pane::PrecursorPlot,
             Pane::FragmentPlot,
@@ -274,7 +274,7 @@ impl ViewerApp {
             computed: ComputedState::default(),
             pending_commands: Vec::new(),
             dock_state,
-            left_panel: LeftPanel::new(),
+            config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
             session_log,
@@ -715,7 +715,7 @@ impl eframe::App for ViewerApp {
             ui: &mut self.ui,
             computed: &mut self.computed,
             pending_commands: &mut self.pending_commands,
-            left_panel: &mut self.left_panel,
+            left_panel: &mut self.config_panel,
             table_panel: &mut self.table_panel,
             spectrum_panel: &mut self.spectrum_panel,
         };
@@ -734,7 +734,7 @@ struct AppTabViewer<'a> {
     ui: &'a mut UiState,
     computed: &'a mut ComputedState,
     pending_commands: &'a mut Vec<AppCommand>,
-    left_panel: &'a mut LeftPanel,
+    left_panel: &'a mut ConfigPanel,
     table_panel: &'a mut TablePanel,
     spectrum_panel: &'a mut SpectrumPanel,
 }
@@ -771,7 +771,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
-            Pane::LeftPanel => self.left_panel.title().into(),
+            Pane::ConfigPanel => self.left_panel.title().into(),
             Pane::TablePanel => self.table_panel.title().into(),
             Pane::MS2Spectrum => self.spectrum_panel.title().into(),
             Pane::PrecursorPlot => "Precursors".into(),
@@ -781,7 +781,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            Pane::LeftPanel => {
+            Pane::ConfigPanel => {
                 // Wrap settings in a scroll area
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])

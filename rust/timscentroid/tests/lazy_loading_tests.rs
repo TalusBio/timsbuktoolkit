@@ -4,7 +4,7 @@ use timscentroid::indexing::{
     IndexedPeakGroup,
     IndexedTimstofPeaks,
 };
-use timscentroid::lazy_indexing::LazyIndexedTimstofPeaks;
+use timscentroid::lazy::LazyIndexedTimstofPeaks;
 use timscentroid::utils::OptionallyRestricted::*;
 use timscentroid::utils::TupleRange;
 

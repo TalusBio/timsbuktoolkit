@@ -89,7 +89,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 /// Reads elution groups from a given path, attempting to parse them in several formats.
 pub fn read_query_elution_groups(path: &PathBuf) -> Result<Vec<TimsElutionGroup<u8>>, CliError> {
     match timsquery::serde::read_library_file(path) {
-        Ok(timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs)) => Ok(egs),
+        Ok(timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs, _)) => Ok(egs),
         Ok(other) => Err(CliError::DataReading(format!(
             "Expected elution groups with u8 labels, but got different label type: {:?}",
             other

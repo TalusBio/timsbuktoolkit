@@ -109,10 +109,10 @@ impl ElutionGroupData {
         }
 
         match &self.inner {
-            ElutionGroupCollection::StringLabels(egs) => get_ids!(egs),
-            ElutionGroupCollection::MzpafLabels(egs) => get_ids!(egs),
-            ElutionGroupCollection::TinyIntLabels(egs) => get_ids!(egs),
-            ElutionGroupCollection::IntLabels(egs) => get_ids!(egs),
+            ElutionGroupCollection::StringLabels(egs, _) => get_ids!(egs),
+            ElutionGroupCollection::MzpafLabels(egs, _) => get_ids!(egs),
+            ElutionGroupCollection::TinyIntLabels(egs, _) => get_ids!(egs),
+            ElutionGroupCollection::IntLabels(egs, _) => get_ids!(egs),
         }
     }
 }
@@ -132,10 +132,10 @@ impl ElutionGroupData {
 macro_rules! with_elution_collection {
     ($data:expr, $macro_name:ident) => {
         match &$data.inner {
-            timsquery::serde::ElutionGroupCollection::StringLabels(egs) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::MzpafLabels(egs) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs) => $macro_name!(egs),
-            timsquery::serde::ElutionGroupCollection::IntLabels(egs) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::StringLabels(egs, _) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::MzpafLabels(egs, _) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::TinyIntLabels(egs, _) => $macro_name!(egs),
+            timsquery::serde::ElutionGroupCollection::IntLabels(egs, _) => $macro_name!(egs),
         }
     };
 }
