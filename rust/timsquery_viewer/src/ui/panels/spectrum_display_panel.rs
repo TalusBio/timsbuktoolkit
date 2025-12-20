@@ -70,14 +70,14 @@ impl SpectrumPanel {
                         let color = Self::get_fragment_color(label_str);
                         let y_value = (intensity / norm_factor) as f64;
 
-                        let points = PlotPoints::new(vec![[mz, 0.0], [mz, y_value as f64]]);
+                        let points = PlotPoints::new(vec![[mz, 0.0], [mz, y_value]]);
                         let line = Line::new(label_str, points).color(color);
                         plot_ui.line(line);
 
                         // Add label above the peak with offset
                         let label = Text::new(
                             label_str,
-                            PlotPoint::new(mz, y_value as f64 + label_offset),
+                            PlotPoint::new(mz, y_value + label_offset),
                             label_str,
                         )
                         .color(color);
@@ -85,21 +85,20 @@ impl SpectrumPanel {
 
                         // If expected intensities are provided, draw them as dashed lines
                         // in the negative direction
-                        if let Some(expected) = expected_intensities {
-                            if let Some(&expected_intensity) = expected.get(label_str) {
+                        if let Some(expected) = expected_intensities
+                            && let Some(&expected_intensity) = expected.get(label_str) {
                                 let y_ref_value =
                                     (expected_intensity / expected_norm_factor.expect("Expected norm factor calculated if we have expected intensities"))
                                         as f64;
                                 let expected_points = PlotPoints::new(vec![
                                     [mz, 0.0],
-                                    [mz, -(y_ref_value as f64)],
+                                    [mz, -y_ref_value],
                                 ]);
                                 let expected_line =
-                                    Line::new(&format!("expected_{}", label_str), expected_points)
+                                    Line::new(format!("expected_{}", label_str), expected_points)
                                         .color(color);
                                 plot_ui.line(expected_line);
                             }
-                        }
                     }
                 });
         } else {

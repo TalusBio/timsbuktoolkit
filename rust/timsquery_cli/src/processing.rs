@@ -1,15 +1,16 @@
 use crate::cli::PossibleAggregator;
+use crate::commands::JsonStreamSerializer;
 use crate::error::CliError;
 use rayon::iter::{
     ParallelDrainRange,
     ParallelIterator,
 };
-use serde::ser::SerializeSeq;
 use serde::{
     Deserialize,
     Serialize,
 };
 use std::fmt::Display;
+use std::io::Write;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::aggregators::{
@@ -129,14 +130,15 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
         }
     }
 
-    pub fn serialize_to_seq<S>(&mut self, seq: &mut S, ref_rts: &[u32]) -> Result<(), CliError>
-    where
-        S: SerializeSeq,
-    {
+    pub fn serialize_to_seq<W: Write>(
+        &mut self,
+        seq: &mut JsonStreamSerializer<W>,
+        ref_rts: &[u32],
+    ) -> Result<(), CliError> {
         match self {
             AggregatorContainer::Point(aggregators) => {
                 for agg in aggregators {
-                    seq.serialize_element(agg).unwrap();
+                    seq.serialize(agg).unwrap();
                 }
             }
             AggregatorContainer::Chromatogram(aggregators) => {
@@ -176,13 +178,13 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                     .collect();
 
                 for ser_agg in converted_results {
-                    seq.serialize_element(&ser_agg).unwrap();
+                    seq.serialize(&ser_agg).unwrap();
                 }
             }
             AggregatorContainer::Spectrum(aggregators) => {
                 for agg in aggregators.iter() {
                     let ser_agg = SpectrumOutput::from(agg);
-                    seq.serialize_element(&ser_agg).unwrap();
+                    seq.serialize(&ser_agg).unwrap();
                 }
             }
         }

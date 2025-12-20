@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::models::elution_group::{
-    self,
-    TimsElutionGroup,
-};
+use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::{
     KeyLike,

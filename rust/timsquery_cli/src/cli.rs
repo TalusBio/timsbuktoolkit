@@ -32,7 +32,7 @@ pub enum SerializationFormat {
     Json,
     #[default]
     PrettyJson,
-    // Ndjson,
+    Ndjson,
 }
 
 #[derive(Parser, Debug, Clone)]

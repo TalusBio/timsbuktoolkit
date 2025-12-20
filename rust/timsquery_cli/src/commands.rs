@@ -1,6 +1,11 @@
+use serde::Serialize;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{
+    self,
+    BufWriter,
+    Write,
+};
 use std::path::{
     Path,
     PathBuf,
@@ -11,10 +16,6 @@ use std::time::{
     Instant,
 };
 
-use serde::ser::{
-    SerializeSeq,
-    Serializer,
-};
 use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
@@ -28,10 +29,7 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::load_index_caching;
-use timsquery::{
-    IonAnnot,
-    KeyLike,
-};
+use timsquery::KeyLike;
 use timsrust::MSLevel;
 use tracing::{
     info,
@@ -158,6 +156,65 @@ pub fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, CliError> {
     Ok(rts.into())
 }
 
+pub struct JsonStreamSerializer<W: Write> {
+    writer: W,
+    format: SerializationFormat,
+    is_first: bool,
+}
+
+impl<W: Write> JsonStreamSerializer<W> {
+    pub fn new(writer: W, format: SerializationFormat) -> Self {
+        Self {
+            writer,
+            format,
+            is_first: true,
+        }
+    }
+
+    /// Serializes an item based on the selected format.
+    pub fn serialize<T: Serialize>(&mut self, item: &T) -> io::Result<()> {
+        match self.format {
+            SerializationFormat::Ndjson => {
+                serde_json::to_writer(&mut self.writer, item)
+                    .map_err(|e| io::Error::other(e))?;
+                self.writer.write_all(b"\n")?;
+            }
+            SerializationFormat::Json | SerializationFormat::PrettyJson => {
+                if self.is_first {
+                    self.writer.write_all(b"[")?;
+                    self.is_first = false;
+                } else {
+                    self.writer.write_all(b",")?;
+                }
+
+                if matches!(self.format, SerializationFormat::PrettyJson) {
+                    serde_json::to_writer_pretty(&mut self.writer, item)
+                } else {
+                    serde_json::to_writer(&mut self.writer, item)
+                }
+                .map_err(|e| io::Error::other(e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalizes the output (crucial for closing JSON arrays).
+    pub fn finish(mut self) -> io::Result<()> {
+        match self.format {
+            SerializationFormat::Json | SerializationFormat::PrettyJson => {
+                if self.is_first {
+                    // Handle case where no items were ever serialized
+                    self.writer.write_all(b"[]")?;
+                } else {
+                    self.writer.write_all(b"]")?;
+                }
+            }
+            SerializationFormat::Ndjson => {} // No closing tag needed
+        }
+        self.writer.flush()
+    }
+}
+
 /// Streams and processes elution groups in batches, then serializes the results.
 #[instrument(skip_all)]
 pub fn stream_process_batches<T: KeyLike + Display>(
@@ -184,15 +241,14 @@ pub fn stream_process_batches<T: KeyLike + Display>(
 
     match serialization_format {
         SerializationFormat::PrettyJson => {
-            let mut ser = serde_json::Serializer::pretty(writer);
+            let ser = JsonStreamSerializer::new(writer, SerializationFormat::PrettyJson);
             process_and_serialize(
                 elution_groups,
                 aggregator_use,
                 rts,
                 index,
                 tolerance,
-                &mut ser,
-                total_groups,
+                ser,
                 total_batches,
                 batch_size,
                 serialization_start,
@@ -200,15 +256,29 @@ pub fn stream_process_batches<T: KeyLike + Display>(
             )?;
         }
         SerializationFormat::Json => {
-            let mut ser = serde_json::Serializer::new(writer);
+            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Json);
             process_and_serialize(
                 elution_groups,
                 aggregator_use,
                 rts,
                 index,
                 tolerance,
-                &mut ser,
-                total_groups,
+                ser,
+                total_batches,
+                batch_size,
+                serialization_start,
+                output_path,
+            )?;
+        }
+        SerializationFormat::Ndjson => {
+            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Ndjson);
+            process_and_serialize(
+                elution_groups,
+                aggregator_use,
+                rts,
+                index,
+                tolerance,
+                ser,
                 total_batches,
                 batch_size,
                 serialization_start,
@@ -221,24 +291,18 @@ pub fn stream_process_batches<T: KeyLike + Display>(
 
 /// Processes batches of elution groups and serializes the aggregated results.
 #[instrument(skip_all)]
-pub fn process_and_serialize<S, T: KeyLike + Display>(
+pub fn process_and_serialize<T: KeyLike + Display>(
     elution_groups: Vec<TimsElutionGroup<T>>,
     aggregator_use: PossibleAggregator,
     rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
-    ser: S,
-    total_groups: usize,
+    mut ser: JsonStreamSerializer<impl Write>,
     total_batches: usize,
     batch_size: usize,
     serialization_start: Instant,
     output_path: &Path,
-) -> Result<(), CliError>
-where
-    S: Serializer,
-{
-    let mut seq = ser.serialize_seq(Some(total_groups)).unwrap();
-
+) -> Result<(), CliError> {
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
@@ -257,12 +321,10 @@ where
             AggregatorContainer::new(chunk.to_vec(), aggregator_use, rts.clone(), tolerance)?;
 
         container.add_query(index, tolerance);
-
-        container.serialize_to_seq(&mut seq, &rts)?;
+        container.serialize_to_seq(&mut ser, &rts)?;
     }
 
-    seq.end().unwrap();
-
+    ser.finish()?;
     let serialization_elapsed = serialization_start.elapsed();
     println!("Wrote to {}", output_path.display());
     println!(
