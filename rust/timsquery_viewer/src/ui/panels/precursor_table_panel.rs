@@ -66,7 +66,6 @@ impl TablePanel {
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
-        // ctx: &mut PanelContext,
         elution_groups: &Option<ElutionGroupData>,
         search_mode: bool,
         search_line: &mut String,
@@ -81,15 +80,16 @@ impl TablePanel {
             return;
         }
 
-        // Render search/filter UI (needs mutable ctx, doesn't need elution_groups)
         if search_mode {
             self.render_search_ui(ui, search_line);
         } else {
             self.render_filter_ui(ui, search_line);
         }
 
-        // Now borrow elution_groups for the rest
         let elution_groups = elution_groups.as_ref().unwrap();
+        // Invalidate cache if search line changed
+        // TODO: I think I can optimize search using the fact that when typing
+        // letters are added, so I can filter from previous results.
         if self.last_search.as_ref() != Some(search_line) {
             // Update filtered indices
             elution_groups.matching_indices_for_id_filter(
