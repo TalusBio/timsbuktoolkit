@@ -5,11 +5,9 @@ use egui_dock::{
     Style,
     TabViewer,
 };
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::models::elution_group;
 use timsquery::models::tolerance::Tolerance;
 
 use crate::chromatogram_processor::SmoothingMethod;
@@ -291,7 +289,7 @@ impl ViewerApp {
 
         if let Some(elution_groups) = &self.data.elution_groups {
             self.computed.update(
-                &elution_groups,
+                elution_groups,
                 selected_idx,
                 index,
                 Arc::clone(ms1_rts),

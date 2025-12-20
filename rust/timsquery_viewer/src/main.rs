@@ -14,7 +14,6 @@ use tracing_subscriber::registry::Registry;
 
 use clap::Parser;
 use std::fmt::Write as FMTWrite;
-use std::fs::File;
 use std::io::Write as IOWrite;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
