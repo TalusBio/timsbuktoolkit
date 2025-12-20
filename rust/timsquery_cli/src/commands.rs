@@ -20,6 +20,7 @@ use timscentroid::{
     IndexedTimstofPeaks,
     TimsTofPath,
 };
+use timsquery::KeyLike;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::{
     MobilityTolerance,
@@ -29,7 +30,6 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::load_index_caching;
-use timsquery::KeyLike;
 use timsrust::MSLevel;
 use tracing::{
     info,
@@ -175,8 +175,7 @@ impl<W: Write> JsonStreamSerializer<W> {
     pub fn serialize<T: Serialize>(&mut self, item: &T) -> io::Result<()> {
         match self.format {
             SerializationFormat::Ndjson => {
-                serde_json::to_writer(&mut self.writer, item)
-                    .map_err(|e| io::Error::other(e))?;
+                serde_json::to_writer(&mut self.writer, item).map_err(io::Error::other)?;
                 self.writer.write_all(b"\n")?;
             }
             SerializationFormat::Json | SerializationFormat::PrettyJson => {
@@ -192,7 +191,7 @@ impl<W: Write> JsonStreamSerializer<W> {
                 } else {
                     serde_json::to_writer(&mut self.writer, item)
                 }
-                .map_err(|e| io::Error::other(e))?;
+                .map_err(io::Error::other)?;
             }
         }
         Ok(())
