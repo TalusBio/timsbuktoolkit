@@ -21,7 +21,10 @@ use timsquery::{
     KeyLike,
     TimsElutionGroup,
 };
-use tracing::instrument;
+use tracing::{
+    info,
+    instrument,
+};
 
 /// Handles file dialogs and file loading operations
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -215,12 +218,26 @@ impl ElutionGroupData {
         ui: &mut egui::Ui,
         filtered_eg_idxs: &[usize],
         selected_index: &mut Option<usize>,
+        scroll_to_selection: bool,
     ) {
         let builder = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-        let builder = self.add_columns(builder);
+        let mut builder = self.add_columns(builder);
+        if let Some(row_index) = selected_index.as_ref() {
+            // Since the index is the original index, we need to find its position
+            // in the filtered list first
+            let local_index = filtered_eg_idxs.binary_search(&row_index);
+            if let Ok(local_idx) = local_index {
+                // we want to scroll to this row only once
+                if scroll_to_selection {
+                    builder = builder.scroll_to_row(local_idx, None);
+                }
+            } else {
+                info!("Selected index {} not found in filtered indices", row_index);
+            }
+        }
         let builder = self.add_headers(builder);
 
         builder.body(|body| {
@@ -310,7 +327,20 @@ impl ElutionGroupData {
     ) -> bool {
         let mut clicked = false;
         let mut add_col = |ui: &mut egui::Ui, text: &str| {
-            if ui.selectable_label(is_selected, text).clicked() {
+            // Highlight if selected
+            let maybe_highlighted_text = if is_selected {
+                egui::RichText::new(text).background_color(ui.visuals().selection.bg_fill)
+            } else {
+                egui::RichText::new(text)
+            };
+            let label = ui.selectable_label(is_selected, maybe_highlighted_text);
+            let label = if is_selected {
+                label.highlight()
+            } else {
+                label
+            };
+
+            if label.clicked() {
                 clicked = true;
             }
         };
