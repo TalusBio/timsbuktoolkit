@@ -1,10 +1,18 @@
 use eframe::egui;
 
 use crate::file_loader::ElutionGroupData;
+
+enum Modes {
+    Insert,
+    Normal,
+}
+
 /// Panel for displaying and filtering the precursor table
 pub struct TablePanel {
     filtered_indices: Option<Vec<usize>>,
     last_search: Option<String>,
+    last_displayed_mode: Modes,
+    last_selected_index: Option<usize>,
 }
 
 impl TablePanel {
@@ -12,6 +20,8 @@ impl TablePanel {
         Self {
             filtered_indices: None,
             last_search: None,
+            last_displayed_mode: Modes::Normal,
+            last_selected_index: None,
         }
     }
 
@@ -22,30 +32,26 @@ impl TablePanel {
         }
     }
 
-    fn render_search_ui(&self, ui: &mut egui::Ui, search_line: &mut String) {
+    fn render_search_ui(&mut self, ui: &mut egui::Ui, search_line: &mut String, search_mode: bool) {
         ui.horizontal(|ui| {
             ui.label("Search:");
             let response = ui.text_edit_singleline(search_line);
-            response.request_focus();
-            ui.label("(Enter to apply, Esc to cancel)");
+            // TODO make some color change to indicate mode
+
+            let last_mode = &mut self.last_displayed_mode;
+            if search_mode {
+                response.request_focus();
+                *last_mode = Modes::Insert;
+            } else if let Modes::Insert = last_mode {
+                // Just exited insert mode
+                *last_mode = Modes::Normal;
+            }
         });
         ui.separator();
     }
 
-    fn render_filter_ui(&self, ui: &mut egui::Ui, table_filter: &mut String) {
-        ui.horizontal(|ui| {
-            ui.label("Filter by ID:");
-            ui.text_edit_singleline(table_filter);
-            if ui.button("Clear").clicked() {
-                table_filter.clear();
-            }
-        });
-        ui.add_space(5.0);
-        ui.label(
-            egui::RichText::new("Vim keys: j/k=navigate, /=search, g/G=first/last")
-                .small()
-                .italics(),
-        );
+    fn render_keybinding_ui(&self, ui: &mut egui::Ui) {
+        // TODO: Add ...
         ui.separator();
     }
 
@@ -55,11 +61,17 @@ impl TablePanel {
         filtered_indices: &[usize],
         elution_groups: &ElutionGroupData,
         selected_index: &mut Option<usize>,
+        scroll_to_selection: bool,
     ) {
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                elution_groups.render_table(ui, filtered_indices, selected_index);
+                elution_groups.render_table(
+                    ui,
+                    filtered_indices,
+                    selected_index,
+                    scroll_to_selection,
+                );
             });
     }
 
@@ -80,11 +92,8 @@ impl TablePanel {
             return;
         }
 
-        if search_mode {
-            self.render_search_ui(ui, search_line);
-        } else {
-            self.render_filter_ui(ui, search_line);
-        }
+        self.render_search_ui(ui, search_line, search_mode);
+        self.render_keybinding_ui(ui);
 
         let elution_groups = elution_groups.as_ref().unwrap();
         // Invalidate cache if search line changed
@@ -107,7 +116,23 @@ impl TablePanel {
             elution_groups.len()
         ));
 
-        self.render_table(ui, filtered_indices, elution_groups, selected_index);
+        // We scroll to selection only if the selection changed
+        let scroll_to_selection = match (self.last_selected_index, *selected_index) {
+            (Some(last), Some(current)) => last != current,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if scroll_to_selection {
+            self.last_selected_index = *selected_index;
+        }
+
+        self.render_table(
+            ui,
+            filtered_indices,
+            elution_groups,
+            selected_index,
+            scroll_to_selection,
+        );
     }
 
     pub fn title(&self) -> &str {

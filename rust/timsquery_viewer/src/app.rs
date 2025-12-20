@@ -232,12 +232,9 @@ impl ViewerApp {
             if self.ui.search_mode {
                 if i.key_pressed(egui::Key::Escape) {
                     self.ui.search_mode = false;
-                    self.ui.search_input.clear();
                 }
                 if i.key_pressed(egui::Key::Enter) {
-                    self.ui.table_filter = self.ui.search_input.clone();
                     self.ui.search_mode = false;
-                    self.ui.search_input.clear();
                 }
                 return;
             }
