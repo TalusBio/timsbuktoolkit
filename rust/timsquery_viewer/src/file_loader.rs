@@ -1,11 +1,19 @@
 use crate::domain::FileService;
 use crate::error::ViewerError;
+use egui_extras::{
+    Table,
+    TableBuilder,
+};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{
+    Path,
+    PathBuf,
+};
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::{
+    DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
 };
@@ -13,6 +21,7 @@ use timsquery::{
     KeyLike,
     TimsElutionGroup,
 };
+use tracing::instrument;
 
 /// Handles file dialogs and file loading operations
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -62,7 +71,7 @@ impl FileLoader {
     }
 
     /// Load elution groups from a JSON file
-    pub fn load_elution_groups(&self, path: &PathBuf) -> Result<ElutionGroupData, ViewerError> {
+    pub fn load_elution_groups(&self, path: &Path) -> Result<ElutionGroupData, ViewerError> {
         FileService::load_elution_groups(path)
     }
 
@@ -84,6 +93,16 @@ impl FileLoader {
 pub struct ElutionGroupData {
     inner: ElutionGroupCollection,
 }
+const BASE_LABELS: [&str; 6] = [
+    "ID",
+    "RT (s)",
+    "Mobility",
+    "Precursor m/z",
+    "Precursor Charge",
+    "Fragments",
+];
+
+const DIANN_EXTRA_LABELS: [&str; 3] = ["Modified Peptide", "Protein ID(s)", "Is Decoy"];
 
 impl ElutionGroupData {
     pub fn new(inner: ElutionGroupCollection) -> Self {
@@ -103,28 +122,58 @@ impl ElutionGroupData {
     ///
     /// If filter is an empty string, returns ALL indices (no filtering applied).
     /// This allows seamless toggling between filtered and unfiltered views.
-    pub fn matching_indices_for_id_filter(&self, filter: &str) -> Vec<usize> {
+    #[instrument(skip(self, buffer))]
+    pub fn matching_indices_for_id_filter(&self, filter: &str, buffer: &mut Vec<usize>) {
+        buffer.clear();
         if filter.is_empty() {
-            return (0..self.len()).collect();
+            buffer.extend(0..self.len());
+            return;
         }
 
-        macro_rules! get_ids {
-            ($self:expr) => {
-                $self
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, eg)| eg.id().to_string().contains(filter))
-                    .map(|(idx, _)| idx)
-                    .collect()
-            };
+        let mut str_buffer = String::new();
+        for i in 0..self.len() {
+            if self.key_onto(i, &mut str_buffer).is_ok() && str_buffer.contains(filter) {
+                buffer.push(i);
+            }
         }
+    }
 
+    /// Adds the key contents to the string, the idea here is to avoid allocations
+    fn key_onto(&self, idx: usize, buffer: &mut String) -> Result<(), ()> {
+        use std::fmt::Write;
+        buffer.clear();
         match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, _) => get_ids!(egs),
-            ElutionGroupCollection::MzpafLabels(egs, _) => get_ids!(egs),
-            ElutionGroupCollection::TinyIntLabels(egs, _) => get_ids!(egs),
-            ElutionGroupCollection::IntLabels(egs, _) => get_ids!(egs),
+            ElutionGroupCollection::StringLabels(egs, _) => {
+                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
+            }
+            ElutionGroupCollection::MzpafLabels(egs, _) => {
+                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
+            }
+            ElutionGroupCollection::TinyIntLabels(egs, _) => {
+                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
+            }
+            ElutionGroupCollection::IntLabels(egs, _) => {
+                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
+            }
         }
+        let extras = match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
+                Some(FileReadingExtras::Diann(diann_extras)) => Some(&diann_extras[idx]),
+                _ => None,
+            },
+        };
+        if let Some(diann_extra) = extras {
+            write!(
+                buffer,
+                "|{}|{}|{}",
+                diann_extra.modified_peptide, diann_extra.protein_id, diann_extra.is_decoy
+            )
+            .map_err(|_| ())?;
+        }
+        Ok(())
     }
 
     pub fn get_elem(
@@ -167,98 +216,176 @@ impl ElutionGroupData {
         filtered_eg_idxs: &[usize],
         selected_index: &mut Option<usize>,
     ) {
-        match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, _) => {
-                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
-            }
-            ElutionGroupCollection::MzpafLabels(egs, _) => {
-                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
-            }
-            ElutionGroupCollection::TinyIntLabels(egs, _) => {
-                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
-            }
-            ElutionGroupCollection::IntLabels(egs, _) => {
-                render_precursor_table_filtered(ui, filtered_eg_idxs, egs, selected_index)
-            }
-        }
-    }
-}
+        let builder = TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        let builder = self.add_columns(builder);
+        let builder = self.add_headers(builder);
 
-fn render_precursor_table_filtered<T: KeyLike>(
-    ui: &mut egui::Ui,
-    filtered_eg_idxs: &[usize],
-    reference_eg_slice: &[TimsElutionGroup<T>],
-    selected_index: &mut Option<usize>,
-) {
-    use egui_extras::{
-        Column,
-        TableBuilder,
-    };
-
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().at_least(60.0)) // ID
-        .column(Column::auto().at_least(80.0)) // RT
-        .column(Column::auto().at_least(80.0)) // Mobility
-        .column(Column::auto().at_least(120.0)) // Precursor m/z
-        .column(Column::auto().at_least(100.0)) // Fragment count
-        .header(20.0, |mut header| {
-            header.col(|ui| {
-                ui.strong("ID");
-            });
-            header.col(|ui| {
-                ui.strong("RT (s)");
-            });
-            header.col(|ui| {
-                ui.strong("Mobility");
-            });
-            header.col(|ui| {
-                ui.strong("Precursor m/z");
-            });
-            header.col(|ui| {
-                ui.strong("Fragments");
-            });
-        })
-        .body(|body| {
+        builder.body(|body| {
             let row_height = 18.0;
             body.rows(row_height, filtered_eg_idxs.len(), |mut row| {
                 let row_idx = row.index();
                 let original_idx = filtered_eg_idxs[row_idx];
-                let eg = &reference_eg_slice[original_idx];
-                let is_selected = Some(original_idx) == *selected_index;
-
-                row.col(|ui| {
-                    if ui
-                        .selectable_label(is_selected, format!("{}", eg.id()))
-                        .clicked()
-                    {
-                        *selected_index = Some(original_idx);
-                    }
-                });
-
-                row.col(|ui| {
-                    let text = format!("{:.2}", eg.rt_seconds());
-                    ui.label(text);
-                });
-
-                row.col(|ui| {
-                    let text = format!("{:.4}", eg.mobility_ook0());
-                    ui.label(text);
-                });
-
-                row.col(|ui| {
-                    let lims = eg.get_precursor_mz_limits();
-                    let display_text = format!("{:.4} - {:.4}", lims.0, lims.1);
-
-                    ui.label(display_text);
-                });
-
-                row.col(|ui| {
-                    let text = format!("{}", eg.fragment_count());
-                    ui.label(text);
-                });
+                self.add_row_content(original_idx, selected_index, &mut row);
             });
         });
+    }
+
+    fn add_columns<'a>(&self, mut table: TableBuilder<'a>) -> TableBuilder<'a> {
+        let has_diann_extras = match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
+                Some(FileReadingExtras::Diann(_)) => true,
+                _ => false,
+            },
+        };
+        if has_diann_extras {
+            for _ in DIANN_EXTRA_LABELS.iter() {
+                table = table.column(egui_extras::Column::auto().at_least(100.0));
+            }
+        }
+        for _ in BASE_LABELS.iter() {
+            table = table.column(egui_extras::Column::auto().at_least(80.0));
+        }
+        table
+    }
+
+    fn add_headers<'a>(&self, builder: TableBuilder<'a>) -> Table<'a> {
+        let has_diann_extras = match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
+                Some(FileReadingExtras::Diann(_)) => true,
+                _ => false,
+            },
+        };
+
+        builder.header(20.0, |mut header| {
+            if has_diann_extras {
+                for label in DIANN_EXTRA_LABELS.iter() {
+                    header.col(|ui| {
+                        ui.strong(*label);
+                    });
+                }
+            }
+            for label in BASE_LABELS.iter() {
+                header.col(|ui| {
+                    ui.strong(*label);
+                });
+            }
+        })
+    }
+
+    fn get_column_strings(&self, index: usize) -> Vec<String> {
+        match &self.inner {
+            ElutionGroupCollection::StringLabels(egs, _) => {
+                egs.iter().map(|eg| eg.id().to_string()).collect()
+            }
+            ElutionGroupCollection::MzpafLabels(egs, _) => {
+                egs.iter().map(|eg| eg.id().to_string()).collect()
+            }
+            ElutionGroupCollection::TinyIntLabels(egs, _) => {
+                egs.iter().map(|eg| eg.id().to_string()).collect()
+            }
+            ElutionGroupCollection::IntLabels(egs, _) => {
+                egs.iter().map(|eg| eg.id().to_string()).collect()
+            }
+        }
+    }
+
+    /// Helper function to add row content
+    /// `is_selected` indicates if the row is currently selected
+    /// This function adds the appropriate columns based on available extras
+    /// Returns true if any of the content was clicked (for selection handling)
+    fn add_row_content_inner<T: KeyLike>(
+        eg: &TimsElutionGroup<T>,
+        extras: Option<DiannPrecursorExtras>,
+        table_row: &mut egui_extras::TableRow,
+        is_selected: bool,
+    ) -> bool {
+        let mut clicked = false;
+        let mut add_col = |ui: &mut egui::Ui, text: &str| {
+            if ui.selectable_label(is_selected, text).clicked() {
+                clicked = true;
+            }
+        };
+        match extras {
+            Some(diann_extra) => {
+                table_row.col(|ui| {
+                    add_col(ui, &diann_extra.modified_peptide);
+                });
+                table_row.col(|ui| {
+                    add_col(ui, &diann_extra.protein_id);
+                });
+                table_row.col(|ui| {
+                    add_col(ui, if diann_extra.is_decoy { "Yes" } else { "No" });
+                });
+            }
+            None => { /* No extra columns */ }
+        }
+        table_row.col(|ui| {
+            add_col(ui, &eg.id().to_string());
+        });
+        table_row.col(|ui| {
+            let text = format!("{:.2}", eg.rt_seconds());
+            add_col(ui, &text);
+        });
+        table_row.col(|ui| {
+            let text = format!("{:.4}", eg.mobility_ook0());
+            add_col(ui, &text);
+        });
+        table_row.col(|ui| {
+            let display_text = format!("{:.4}", eg.mono_precursor_mz());
+            add_col(ui, &display_text);
+        });
+        table_row.col(|ui| {
+            let text = format!("{}", eg.precursor_charge());
+            add_col(ui, &text);
+        });
+        table_row.col(|ui| {
+            let text = format!("{}", eg.fragment_count());
+            add_col(ui, &text);
+        });
+        clicked
+    }
+
+    fn add_row_content(
+        &self,
+        idx: usize,
+        selected_index: &mut Option<usize>,
+        table_row: &mut egui_extras::TableRow,
+    ) {
+        let diann_extra = match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
+                Some(FileReadingExtras::Diann(diann_extras)) => Some(diann_extras[idx].clone()),
+                _ => None,
+            },
+        };
+        let is_selected = Some(idx) == *selected_index;
+        let clicked = match &self.inner {
+            ElutionGroupCollection::StringLabels(egs, _) => {
+                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+            }
+            ElutionGroupCollection::MzpafLabels(egs, _) => {
+                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+            }
+            ElutionGroupCollection::TinyIntLabels(egs, _) => {
+                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+            }
+            ElutionGroupCollection::IntLabels(egs, _) => {
+                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+            }
+        };
+        if clicked {
+            *selected_index = Some(idx);
+        }
+    }
 }

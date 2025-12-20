@@ -253,26 +253,23 @@ impl ViewerApp {
             };
 
             // Cache filtered indices - computed once and reused
-            let filtered_indices = egs.matching_indices_for_id_filter(&self.ui.table_filter);
-
-            if filtered_indices.is_empty() {
-                return;
-            }
+            let filtered_indices = &self.table_panel.filtered_indices();
+            let cursor = &mut self.ui.selected_index;
 
             if i.key_pressed(egui::Key::J) && !i.modifiers.any() {
-                self.move_selection_down(&filtered_indices);
+                Self::move_selection_down(cursor, filtered_indices);
             }
 
             if i.key_pressed(egui::Key::K) && !i.modifiers.any() {
-                self.move_selection_up(&filtered_indices);
+                Self::move_selection_up(cursor, filtered_indices);
             }
 
             if i.key_pressed(egui::Key::G) && !i.modifiers.any() {
-                self.move_selection_to_first(&filtered_indices);
+                Self::move_selection_to_first(cursor, filtered_indices);
             }
 
             if i.key_pressed(egui::Key::G) && i.modifiers.shift_only() {
-                self.move_selection_to_last(&filtered_indices);
+                Self::move_selection_to_last(cursor, filtered_indices);
             }
         });
     }
@@ -464,58 +461,58 @@ impl ViewerApp {
         }
     }
 
-    fn move_selection_down(&mut self, filtered_indices: &[usize]) {
+    fn move_selection_down(cursor: &mut Option<usize>, filtered_indices: &[usize]) {
         if filtered_indices.is_empty() {
             return;
         }
 
-        match self.ui.selected_index {
+        match cursor {
             None => {
-                self.select_elution_group(filtered_indices[0]);
+                Self::select_elution_group(cursor, filtered_indices[0]);
             }
             Some(current) => {
-                if let Some(pos) = filtered_indices.iter().position(|&idx| idx == current)
+                if let Some(pos) = filtered_indices.iter().position(|&idx| idx == *current)
                     && pos + 1 < filtered_indices.len()
                 {
-                    self.select_elution_group(filtered_indices[pos + 1]);
+                    Self::select_elution_group(cursor, filtered_indices[pos + 1]);
                 }
             }
         }
     }
 
-    fn move_selection_up(&mut self, filtered_indices: &[usize]) {
+    fn move_selection_up(cursor: &mut Option<usize>, filtered_indices: &[usize]) {
         if filtered_indices.is_empty() {
             return;
         }
 
-        match self.ui.selected_index {
+        match cursor {
             None => {
-                self.select_elution_group(filtered_indices[0]);
+                Self::select_elution_group(cursor, filtered_indices[0]);
             }
             Some(current) => {
-                if let Some(pos) = filtered_indices.iter().position(|&idx| idx == current)
+                if let Some(pos) = filtered_indices.iter().position(|&idx| idx == *current)
                     && pos > 0
                 {
-                    self.select_elution_group(filtered_indices[pos - 1]);
+                    Self::select_elution_group(cursor, filtered_indices[pos - 1]);
                 }
             }
         }
     }
 
-    fn move_selection_to_first(&mut self, filtered_indices: &[usize]) {
+    fn move_selection_to_first(cursor: &mut Option<usize>, filtered_indices: &[usize]) {
         if !filtered_indices.is_empty() {
-            self.select_elution_group(filtered_indices[0]);
+            Self::select_elution_group(cursor, filtered_indices[0]);
         }
     }
 
-    fn move_selection_to_last(&mut self, filtered_indices: &[usize]) {
+    fn move_selection_to_last(cursor: &mut Option<usize>, filtered_indices: &[usize]) {
         if !filtered_indices.is_empty() {
-            self.select_elution_group(filtered_indices[filtered_indices.len() - 1]);
+            Self::select_elution_group(cursor, filtered_indices[filtered_indices.len() - 1]);
         }
     }
 
-    fn select_elution_group(&mut self, idx: usize) {
-        self.ui.selected_index = Some(idx);
+    fn select_elution_group(cursor: &mut Option<usize>, idx: usize) {
+        *cursor = Some(idx);
     }
 }
 
