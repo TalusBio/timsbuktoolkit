@@ -11,6 +11,11 @@ use crate::{
     TimsElutionGroup,
     ValueLike,
 };
+use timscentroid::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+    RTIndex, // Trait needed for the index method.
+};
 use timscentroid::utils::TupleRange;
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,36 +30,70 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
         eg: TimsElutionGroup<T>,
         rt_range_ms: TupleRange<u32>,
-        ref_rt_ms: &[u32],
+        ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, DataProcessingError> {
         // We binary search the start and end rt to calculate the length
         // and the offset of the reference rt array
-        let start = ref_rt_ms.partition_point(|&rt| rt < rt_range_ms.start());
-        let end = ref_rt_ms.partition_point(|&rt| rt <= rt_range_ms.end());
-        let length = end - start;
+        let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
+        let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
+        let num_cycles = end.index() - start.index() + 1;
 
         let precursor_order: Vec<_> = eg.iter_precursors().collect();
         let fragment_order: Vec<_> = eg
             .iter_fragments_refs()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-
         if precursor_order.is_empty() && fragment_order.is_empty() {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
-        if length == 0 {
+        if num_cycles == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        let precursors = MzMajorIntensityArray::try_new_empty(precursor_order, length, start)
-            .expect("Already checked non-empty");
-        let fragments = MzMajorIntensityArray::try_new_empty(fragment_order, length, start)?;
+        let precursors =
+            MzMajorIntensityArray::try_new_empty(precursor_order, num_cycles, start.index())
+                .expect("Already checked non-empty");
+        let fragments =
+            MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
             eg,
             precursors,
             fragments,
             rt_range_ms,
         })
+    }
+
+    pub fn try_reset_with(
+        &mut self,
+        eg: TimsElutionGroup<T>,
+        rt_range_ms: TupleRange<u32>,
+        ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
+    ) -> Result<(), DataProcessingError> {
+        // We binary search the start and end rt to calculate the length
+        // and the offset of the reference rt array
+        let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
+        let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
+        let num_cycles = end.index() - start.index() + 1;
+
+        let precursor_order: Vec<_> = eg.iter_precursors().collect();
+        let fragment_order: Vec<_> = eg
+            .iter_fragments_refs()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        if precursor_order.is_empty() && fragment_order.is_empty() {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+        if num_cycles == 0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData);
+        }
+
+        self.eg = eg;
+        self.rt_range_ms = rt_range_ms;
+        self.precursors
+            .clear_with_order(precursor_order, num_cycles, start.index());
+        self.fragments
+            .clear_with_order(fragment_order, num_cycles, start.index());
+        Ok(())
     }
 
     pub fn iter_mut_precursors(
@@ -146,7 +185,7 @@ mod tests {
             .try_build()
             .expect("I passed valid vec lengths!");
 
-        let rt_ms: Arc<[u32]> = vec![10, 20].into();
+        let rt_ms = CycleToRTMapping::new(vec![10, 20]);
         let mut collector = ChromatogramCollector::<usize, f32>::new(
             eg,
             TupleRange::try_new(9, 20).unwrap(),

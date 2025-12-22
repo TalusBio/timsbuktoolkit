@@ -4941,6 +4941,7 @@ dependencies = [
  "timscentroid",
  "timsquery",
  "timsrust",
+ "timsseek",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4979,6 +4980,7 @@ dependencies = [
  "rustyms",
  "serde",
  "serde_json",
+ "timscentroid",
  "timsquery",
  "timsrust",
  "tracing",

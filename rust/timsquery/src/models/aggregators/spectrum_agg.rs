@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 use timscentroid::indexing::IndexedPeak;
+use timscentroid::rt_mapping::RTIndex;
 
 use crate::traits::queriable_data::PeakAddable;
 use crate::utils::streaming_calculators::{
@@ -118,8 +119,8 @@ impl MzMobilityStatsCollector {
     }
 }
 
-impl AddAssign<IndexedPeak> for MzMobilityStatsCollector {
-    fn add_assign(&mut self, other: IndexedPeak) {
+impl<T: RTIndex> AddAssign<IndexedPeak<T>> for MzMobilityStatsCollector {
+    fn add_assign(&mut self, other: IndexedPeak<T>) {
         self.add(
             other.intensity as f64,
             other.mz as f64,
@@ -128,7 +129,7 @@ impl AddAssign<IndexedPeak> for MzMobilityStatsCollector {
     }
 }
 
-impl PeakAddable for MzMobilityStatsCollector {}
+impl<T: RTIndex> PeakAddable<T> for MzMobilityStatsCollector {}
 
 impl Add for MzMobilityStatsCollector {
     type Output = Self;

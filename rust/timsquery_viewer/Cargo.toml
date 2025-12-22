@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
+timsseek = { path = "../timsseek" }
 
 # GUI dependencies
 egui = {version = "0.33", features = ["persistence", "rayon"]}
@@ -31,6 +32,9 @@ timsrust = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+
+[features]
+instrumentation = ["timsseek/instrumentation"]
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }

@@ -35,12 +35,16 @@ use crate::{
     ScorerQueriable,
 };
 use rayon::prelude::*;
-use std::sync::Arc;
 use std::time::Instant;
+use timscentroid::rt_mapping::{
+    MS1CycleIndex,
+    RTIndex,
+};
 use timsquery::models::tolerance::MobilityTolerance;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
+    KeyLike,
     MzMobilityStatsCollector,
     OptionallyRestricted,
     SpectralCollector,
@@ -96,9 +100,9 @@ impl ToleranceHierarchy {
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-fn filter_zero_intensity_ions(
-    agg: &mut ChromatogramCollector<IonAnnot, f32>,
-    expected: &mut crate::ExpectedIntensities,
+fn filter_zero_intensity_ions<T: KeyLike>(
+    agg: &mut ChromatogramCollector<T, f32>,
+    expected: &mut crate::ExpectedIntensities<T>,
 ) {
     // Early-exit predicate: stop at first non-zero value (much faster than summing)
     let predicate = |chrom: &[f32]| chrom.iter().any(|&x| x > 0.0);
@@ -162,9 +166,6 @@ fn compute_secondary_lazyscores(
 /// Pipeline stages: build context → find apex → refine → finalize.
 /// Uses progressive tolerance refinement, metadata separation, and buffer reuse for high throughput.
 pub struct ScoringPipeline<I: ScorerQueriable> {
-    /// Retention time in milliseconds for each index cycle.
-    pub index_cycle_rt_ms: Arc<[u32]>,
-
     /// Indexed peak data that implements the required query aggregators.
     pub index: I,
 
@@ -192,15 +193,13 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     ) -> Result<
         (
             super::apex_finding::PeptideMetadata,
-            super::apex_finding::ScoringContext,
+            super::apex_finding::ScoringContext<IonAnnot>,
         ),
         SkippingReason,
     > {
-        let max_range = TupleRange::try_new(
-            *self.index_cycle_rt_ms.first().unwrap(),
-            *self.index_cycle_rt_ms.last().unwrap(),
-        )
-        .expect("Reference RTs should be sorted and valid");
+        let max_range = self.index.ms1_cycle_mapping().range_milis();
+        let max_range = TupleRange::try_new(max_range.0, max_range.1)
+            .expect("Reference RTs should be sorted and valid");
         let rt_range = match self
             .tolerances
             .prescore
@@ -220,7 +219,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
             match ChromatogramCollector::new(
                 item.query.clone(),
                 rt_range,
-                &self.index_cycle_rt_ms,
+                self.index.ms1_cycle_mapping(),
             ) {
                 Ok(collector) => collector,
                 Err(e) => {
@@ -402,12 +401,13 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         }
 
         let st = Instant::now();
-        let apex_score = match buffer.find_apex(&scoring_ctx) {
-            Ok(score) => score,
-            Err(_e) => {
-                return None;
-            }
-        };
+        let apex_score =
+            match buffer.find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx)) {
+                Ok(score) => score,
+                Err(_e) => {
+                    return None;
+                }
+            };
         timings.localize += st.elapsed();
 
         let st = Instant::now();
@@ -439,7 +439,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         &self,
         item: QueryItemToScore,
     ) -> Result<FullQueryResult, DataProcessingError> {
-        let mut buffer = ApexFinder::new(self.index_cycle_rt_ms.clone());
+        let mut buffer = ApexFinder::new(self.num_cycles());
 
         // Re-implementing logic here because process_query consumes `item` and returns `Option`.
         // We want intermediate results for `FullQueryResult`.
@@ -450,7 +450,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
             }
         })?;
 
-        let apex_score = buffer.find_apex(&scoring_ctx)?;
+        let apex_score = buffer.find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
         let (inner_collector, isotope_collector) = self.execute_secondary_query(&item, &apex_score);
 
         let nqueries = scoring_ctx.query_values.fragments.num_ions() as u8;
@@ -484,7 +484,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let num_input_items = items_to_score.len();
         let loc_score_start = Instant::now();
 
-        let init_fn = || ApexFinder::new(self.index_cycle_rt_ms.clone());
+        let init_fn = || ApexFinder::new(self.num_cycles());
 
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
@@ -533,5 +533,16 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         info!("{:?}", results.timings);
 
         (results.res, results.timings)
+    }
+
+    fn map_rt_index_to_milis(&self, rt_index: usize) -> u32 {
+        self.index
+            .ms1_cycle_mapping()
+            .rt_milis_for_index(&MS1CycleIndex::new(rt_index as u32))
+            .unwrap_or(0)
+    }
+
+    fn num_cycles(&self) -> usize {
+        self.index.ms1_cycle_mapping().len()
     }
 }

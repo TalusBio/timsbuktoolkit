@@ -21,6 +21,7 @@ use timsquery::{
     KeyLike,
     TimsElutionGroup,
 };
+use timsseek::ExpectedIntensities;
 use tracing::{
     info,
     instrument,
@@ -79,10 +80,7 @@ impl FileLoader {
     }
 
     /// Load and index raw timsTOF data
-    pub fn load_raw_data(
-        &self,
-        path: &PathBuf,
-    ) -> Result<(Arc<IndexedTimstofPeaks>, Arc<[u32]>), ViewerError> {
+    pub fn load_raw_data(&self, path: &PathBuf) -> Result<Arc<IndexedTimstofPeaks>, ViewerError> {
         FileService::load_raw_data(path)
     }
 
@@ -182,10 +180,7 @@ impl ElutionGroupData {
     pub fn get_elem(
         &self,
         index: usize,
-    ) -> (
-        Option<TimsElutionGroup<String>>,
-        Option<HashMap<String, f32>>,
-    ) {
+    ) -> Result<(TimsElutionGroup<String>, ExpectedIntensities<String>), ViewerError> {
         let (eg, extras) = match &self.inner {
             ElutionGroupCollection::StringLabels(egs, ext) => (egs.get(index).cloned(), ext),
             ElutionGroupCollection::MzpafLabels(egs, ext) => {
@@ -198,19 +193,43 @@ impl ElutionGroupData {
                 (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
             }
         };
+        let eg = eg.ok_or(ViewerError::General(format!(
+            "Elution group index {} out of bounds",
+            index
+        )))?;
 
         let extra = match extras {
-            Some(FileReadingExtras::Diann(diann_extras)) => diann_extras.get(index).map(|de| {
-                HashMap::from_iter(
+            Some(FileReadingExtras::Diann(diann_extras)) => {
+                let de = diann_extras.get(index).ok_or(ViewerError::General(format!(
+                    "Diann extras index {} out of bounds",
+                    index
+                )))?;
+                let fragment_intensities = HashMap::from_iter(
                     de.relative_intensities
                         .iter()
                         .cloned()
                         .map(|(k, v)| (k.clone().to_string(), v)),
-                )
-            }),
-            _ => None,
+                );
+
+                // TODO: Actually get expected intensities ... I could make
+                // The simple isotope calculation from number of carbons + sulphur.
+                let precursor_intensities: HashMap<i8, f32> =
+                    eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect();
+
+                ExpectedIntensities {
+                    precursor_intensities,
+                    fragment_intensities,
+                }
+            }
+            None => ExpectedIntensities {
+                precursor_intensities: eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect(),
+                fragment_intensities: eg
+                    .iter_fragments()
+                    .map(|(label, _mz)| (label.to_string(), 1.0))
+                    .collect(),
+            },
         };
-        (eg, extra)
+        Ok((eg, extra))
     }
 
     pub fn render_table(
@@ -228,14 +247,22 @@ impl ElutionGroupData {
         if let Some(row_index) = selected_index.as_ref() {
             // Since the index is the original index, we need to find its position
             // in the filtered list first
-            let local_index = filtered_eg_idxs.binary_search(&row_index);
-            if let Ok(local_idx) = local_index {
-                // we want to scroll to this row only once
-                if scroll_to_selection {
-                    builder = builder.scroll_to_row(local_idx, None);
+            let local_index = match filtered_eg_idxs.binary_search(row_index) {
+                Ok(idx) => idx,
+                Err(insert_idx) => {
+                    info!("Selected index {} not found in filtered indices", row_index);
+                    // Set the selection to the closest match
+                    let clamped_idx = if insert_idx >= filtered_eg_idxs.len() {
+                        filtered_eg_idxs.len() - 1
+                    } else {
+                        insert_idx
+                    };
+                    *selected_index = Some(filtered_eg_idxs[clamped_idx]);
+                    clamped_idx
                 }
-            } else {
-                info!("Selected index {} not found in filtered indices", row_index);
+            };
+            if scroll_to_selection {
+                builder = builder.scroll_to_row(local_index, None);
             }
         }
         let builder = self.add_headers(builder);

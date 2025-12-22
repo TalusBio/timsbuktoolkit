@@ -2,6 +2,11 @@ use crate::{
     ChromatogramCollector,
     KeyLike,
 };
+use timscentroid::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+    RTIndex, // Trait needed for the index method.
+};
 
 /// Represents the output format for an aggregated chromatogram
 /// It is pretty ugly performance-wise but I am keeping it as is because
@@ -23,9 +28,15 @@ pub struct ChromatogramOutput {
 }
 
 impl ChromatogramOutput {
+    /// Create a new ChromatogramOutput from a ChromatogramCollector
+    /// and a reference CycleToRTMapping
+    ///
+    /// In theory the original collector does not need to be mutable,
+    /// but I have not implemented a nice way to iterate over
+    /// the internal chromatograms without mutability yet.
     pub fn try_new<T: KeyLike + std::fmt::Display>(
-        mut collector: ChromatogramCollector<T, f32>,
-        reference_cycles: &[u32],
+        collector: &mut ChromatogramCollector<T, f32>,
+        reference_cycles: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, crate::errors::DataProcessingError> {
         let mut local_non_zero_min_idx = collector.num_cycles();
         let mut local_non_zero_max_idx = 0usize;
@@ -117,7 +128,12 @@ impl ChromatogramOutput {
             precursor_intensities,
             fragment_intensities,
             fragment_labels,
-            retention_time_results_seconds: reference_cycles[non_zero_min_idx..=non_zero_max_idx]
+            retention_time_results_seconds: reference_cycles
+                .get_inclusive_slice(
+                    MS1CycleIndex::new(non_zero_min_idx as u32)
+                        ..=MS1CycleIndex::new(non_zero_max_idx as u32),
+                )
+                .unwrap()
                 .iter()
                 .map(|&x| x as f32 / 1000.0)
                 .collect(),

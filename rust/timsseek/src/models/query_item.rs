@@ -5,15 +5,18 @@ use serde::{
     Serialize,
 };
 use std::collections::HashMap;
-use timsquery::TimsElutionGroup;
 use timsquery::tinyvec::tiny_vec;
+use timsquery::{
+    KeyLike,
+    TimsElutionGroup,
+};
 
 // TODO: reimplement my own "keyed_vec" (essentially a vec that enforces
 // unique keys on insertion) to avoid the HashMap overhead here.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpectedIntensities {
-    pub fragment_intensities: HashMap<IonAnnot, f32>,
+pub struct ExpectedIntensities<T: KeyLike> {
+    pub fragment_intensities: HashMap<T, f32>,
     pub precursor_intensities: HashMap<i8, f32>,
 }
 
@@ -22,7 +25,7 @@ pub struct QueryItemToScore {
     // Kinda hate this
     pub digest: DigestSlice,
     pub query: TimsElutionGroup<IonAnnot>,
-    pub expected_intensity: ExpectedIntensities,
+    pub expected_intensity: ExpectedIntensities<IonAnnot>,
 }
 
 impl QueryItemToScore {

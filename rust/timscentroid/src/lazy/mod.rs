@@ -44,6 +44,11 @@ mod query;
 use crate::geometry::QuadrupoleIsolationScheme;
 use crate::indexing::IndexedPeak;
 use crate::lazy::query::ParquetQuerier;
+use crate::rt_mapping::{
+    MS1CycleIndex,
+    RTIndex,
+    WindowCycleIndex,
+};
 use crate::serialization::{
     PeakGroupMetadata,
     SerializationError,
@@ -63,8 +68,11 @@ use std::path::{
 /// Lazy-loading indexed peaks with on-demand row group loading
 pub struct LazyIndexedTimstofPeaks {
     base_directory: PathBuf,
-    ms1_metadata: PeakGroupMetadata,
-    ms2_metadata: Vec<(QuadrupoleIsolationScheme, PeakGroupMetadata)>,
+    ms1_metadata: PeakGroupMetadata<MS1CycleIndex>,
+    ms2_metadata: Vec<(
+        QuadrupoleIsolationScheme,
+        PeakGroupMetadata<WindowCycleIndex>,
+    )>,
 }
 
 impl LazyIndexedTimstofPeaks {
@@ -134,18 +142,18 @@ impl LazyIndexedTimstofPeaks {
         mz_range: TupleRange<f32>,
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> impl Iterator<Item = IndexedPeak> {
+    ) -> impl Iterator<Item = IndexedPeak<MS1CycleIndex>> {
         let ms1_path = self.base_directory.join(&self.ms1_metadata.relative_path);
         self.query_peaks_file(ms1_path, mz_range, cycle_range, im_range)
     }
 
-    fn query_peaks_file(
+    fn query_peaks_file<T: RTIndex>(
         &self,
         path: impl AsRef<Path>,
         mz_range: TupleRange<f32>,
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> impl Iterator<Item = IndexedPeak> {
+    ) -> impl Iterator<Item = IndexedPeak<T>> {
         let querier = match ParquetQuerier::new(path.as_ref()) {
             Ok(q) => q,
             Err(e) => {
@@ -221,7 +229,7 @@ impl LazyIndexedTimstofPeaks {
                         mz,
                         intensity,
                         mobility_ook0: mobility_f16,
-                        cycle_index: cycle_u32,
+                        cycle_index: T::new(cycle_u32),
                     })
                 } else {
                     None
@@ -242,7 +250,10 @@ impl LazyIndexedTimstofPeaks {
         mz_range: TupleRange<f32>,
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> Vec<(QuadrupoleIsolationScheme, Vec<IndexedPeak>)> {
+    ) -> Vec<(
+        QuadrupoleIsolationScheme,
+        Vec<IndexedPeak<WindowCycleIndex>>,
+    )> {
         // TODO: most of this logic should be re-implemented as an iterator, and we can just return
         // the opaque iterator type.
 

@@ -49,15 +49,16 @@ fn coelution_vref_score_filter_onto(
     }
 
     let num_elems = (0..slices.nrows()).filter(|&i| filter(i)).count();
-    let norm_factor = 1f32 / (num_elems as f32).max(1.0);
-    if norm_factor == 1.0 {
+    if num_elems == 0 {
         trace!("No valid slices after filtering");
         return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
     }
+    let norm_factor = 1f32 / num_elems as f32;
     if num_elems > 50 {
         trace!(
             "There are too many valid slices after filtering, probably an mz-major and an rt-major array got mixed up"
         );
+        // TODO: make this a more specific error
         return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
     }
     buffer.clear();
@@ -104,7 +105,7 @@ fn coelution_vref_score_filter_onto(
 /// * `filter` - A closure that takes a key (of type `K`) from the `mz_order` and returns
 ///   `true` if the corresponding chromatogram should be included in the calculation.
 /// * `buffer` - A mutable buffer to store the resulting coelution scores.
-pub fn coelution_vref_score_filter_into<'a, K: Clone + Ord>(
+pub fn coelution_vref_score_filter_into<'a, K: Clone + Eq>(
     slices: &'a MzMajorIntensityArray<K, f32>,
     ref_slice: &'a [f32],
     window: usize,
