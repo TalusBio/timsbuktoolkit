@@ -36,7 +36,6 @@ use config::{
     InputConfig,
     OutputConfig,
 };
-use std::sync::Arc;
 // use tracing_profile::PerfettoLayer;
 
 #[cfg(target_os = "windows")]
@@ -45,21 +44,6 @@ use mimalloc::MiMalloc;
 #[cfg(target_os = "windows")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-
-fn get_ms1_rts_as_millis(file: &TimsTofPath) -> Arc<[u32]> {
-    let reader = file.load_frame_reader().unwrap();
-    let mut rts: Vec<_> = reader
-        .frame_metas
-        .iter()
-        .filter_map(|f| match f.ms_level {
-            timsrust::MSLevel::MS1 => Some((f.rt_in_seconds * 1000.0).round() as u32),
-            _ => None,
-        })
-        .collect();
-    rts.sort_unstable();
-    rts.dedup();
-    rts.into()
-}
 
 fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
     let reader = file.load_frame_reader().unwrap();
@@ -205,7 +189,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
     };
 
     let index = load_index_caching(file_loc).unwrap();
-    let index_cycle_rt_ms = get_ms1_rts_as_millis(&timstofpath);
     let fragmented_range = get_frag_range(&timstofpath);
 
     // Process based on input type
@@ -219,7 +202,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
         // }
         Some(InputConfig::Speclib { path }) => {
             let pipeline = ScoringPipeline {
-                index_cycle_rt_ms,
                 index,
                 tolerances: ToleranceHierarchy {
                     prescore: config.analysis.tolerance.clone(),

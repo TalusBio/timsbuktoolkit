@@ -31,6 +31,12 @@ use crate::indexing::{
     IndexedPeakGroup,
     IndexedTimstofPeaks,
 };
+use crate::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+    RTIndex,
+    WindowCycleIndex,
+};
 use arrow::array::{
     Array,
     Float16Array,
@@ -182,14 +188,14 @@ impl Default for SerializationConfig {
 pub struct TimscentroidMetadata {
     pub version: String,
     pub created_at: String,
-    pub ms1_peaks: PeakGroupMetadata,
+    pub ms1_peaks: PeakGroupMetadata<MS1CycleIndex>,
     pub ms2_window_groups: Vec<Ms2GroupMetadata>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PeakGroupMetadata {
+pub struct PeakGroupMetadata<T: RTIndex> {
     pub relative_path: PathBuf,
-    pub cycle_to_rt_ms: Vec<u32>,
+    pub cycle_to_rt_ms: CycleToRTMapping<T>,
     pub bucket_size: usize,
 }
 
@@ -197,7 +203,7 @@ pub struct PeakGroupMetadata {
 pub struct Ms2GroupMetadata {
     pub id: usize,
     pub quadrupole_isolation: QuadrupoleIsolationScheme,
-    pub group_info: PeakGroupMetadata,
+    pub group_info: PeakGroupMetadata<WindowCycleIndex>,
 }
 
 /// Expected schema for IndexedPeak parquet files
@@ -415,8 +421,8 @@ impl IndexedTimstofPeaks {
     }
 }
 
-fn write_peaks_to_parquet(
-    peaks: &[IndexedPeak],
+fn write_peaks_to_parquet<T: RTIndex>(
+    peaks: &[IndexedPeak<T>],
     path: &Path,
     config: SerializationConfig,
 ) -> Result<(), SerializationError> {
@@ -454,7 +460,8 @@ fn write_peaks_to_parquet(
         let intensity_array = Float32Array::from_iter_values(chunk.iter().map(|p| p.intensity));
         // Use native f16 array - no conversion needed!
         let mobility_array = Float16Array::from_iter_values(chunk.iter().map(|p| p.mobility_ook0));
-        let cycle_array = UInt32Array::from_iter_values(chunk.iter().map(|p| p.cycle_index));
+        let cycle_array =
+            UInt32Array::from_iter_values(chunk.iter().map(|p| p.cycle_index.as_u32()));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -477,7 +484,9 @@ fn write_peaks_to_parquet(
     Ok(())
 }
 
-fn read_peaks_from_parquet(path: &Path) -> Result<Vec<IndexedPeak>, SerializationError> {
+fn read_peaks_from_parquet<T: RTIndex>(
+    path: &Path,
+) -> Result<Vec<IndexedPeak<T>>, SerializationError> {
     let file = File::open(path)?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
 
@@ -543,7 +552,7 @@ fn read_peaks_from_parquet(path: &Path) -> Result<Vec<IndexedPeak>, Serializatio
                 mz: mz.value(i),
                 intensity: intensity.value(i),
                 mobility_ook0: mobility.value(i), // No conversion needed!
-                cycle_index: cycle.value(i),
+                cycle_index: T::new(cycle.value(i)),
             });
         }
     }

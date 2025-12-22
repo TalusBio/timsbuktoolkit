@@ -9,6 +9,7 @@ use egui_plot::{
     PlotPoints,
     Text,
 };
+use timsseek::ExpectedIntensities;
 
 use crate::plot_renderer::MS2Spectrum;
 
@@ -38,9 +39,12 @@ impl SpectrumPanel {
         &mut self,
         ui: &mut egui::Ui,
         ms2_spectrum: &Option<MS2Spectrum>,
-        expected_intensities: &Option<std::collections::HashMap<String, f32>>,
+        expected_intensities: &Option<ExpectedIntensities<String>>,
     ) {
         if let Some(spec) = ms2_spectrum {
+            let expected_intensities = expected_intensities
+                .as_ref()
+                .expect("If a spectrum is present we should also have expected intensities.");
             ui.label(format!("RT: {:.2} seconds", spec.rt_seconds));
             ui.separator();
 
@@ -49,9 +53,12 @@ impl SpectrumPanel {
             let norm_factor = max_intensity.max(1.0);
             let label_offset = 0.03f64; // 3% of max intensity
 
-            let expected_intensities = expected_intensities.as_ref();
             let expected_norm_factor = expected_intensities
-                .map(|exp| exp.values().cloned().fold(0.0f32, f32::max).max(1.0));
+                .fragment_intensities
+                .values()
+                .cloned()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or(1.0);
 
             Plot::new("ms2_spectrum")
                 .height(ui.available_height())
@@ -85,20 +92,16 @@ impl SpectrumPanel {
 
                         // If expected intensities are provided, draw them as dashed lines
                         // in the negative direction
-                        if let Some(expected) = expected_intensities
-                            && let Some(&expected_intensity) = expected.get(label_str) {
-                                let y_ref_value =
-                                    (expected_intensity / expected_norm_factor.expect("Expected norm factor calculated if we have expected intensities"))
-                                        as f64;
-                                let expected_points = PlotPoints::new(vec![
-                                    [mz, 0.0],
-                                    [mz, -y_ref_value],
-                                ]);
-                                let expected_line =
-                                    Line::new(format!("expected_{}", label_str), expected_points)
-                                        .color(color);
-                                plot_ui.line(expected_line);
-                            }
+                        let ei = expected_intensities.fragment_intensities.get(label_str);
+                        if let Some(&expected_intensity) = ei {
+                            let y_ref_value = (expected_intensity / expected_norm_factor) as f64;
+                            let expected_points =
+                                PlotPoints::new(vec![[mz, 0.0], [mz, -y_ref_value]]);
+                            let expected_line =
+                                Line::new(format!("expected_{}", label_str), expected_points)
+                                    .color(color);
+                            plot_ui.line(expected_line);
+                        }
                     }
                 });
         } else {

@@ -5,6 +5,11 @@ use timscentroid::indexing::{
     IndexedTimstofPeaks,
 };
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
+use timscentroid::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+    RTIndex,
+};
 use timscentroid::utils::OptionallyRestricted::*;
 use timscentroid::utils::TupleRange;
 
@@ -22,7 +27,7 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
             mz: 400.0 + (i as f32) * 10.0, // 400, 410, 420, ..., 490
             intensity: 100.0 * (i as f32 + 1.0),
             mobility_ook0: f16::from_f32(1.0 + (i as f32) * 0.01),
-            cycle_index: i % 3, // Cycles 0, 1, 2
+            cycle_index: MS1CycleIndex::new(i % 3), // Cycles 0, 1, 2
         });
     }
 
@@ -30,7 +35,8 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
     let bucket_size = 4; // Small buckets: 4 peaks each
 
     // Build MS1 group using canonical constructor
-    let (ms1_group, stats) = IndexedPeakGroup::testing_new(peaks, cycle_to_rt_ms, bucket_size);
+    let (ms1_group, stats) =
+        IndexedPeakGroup::testing_new(peaks, CycleToRTMapping::new(cycle_to_rt_ms), bucket_size);
 
     println!(
         "Created MS1 group: {} peaks, {} buckets",
@@ -97,7 +103,7 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
     println!("\nEager peaks:");
     for peak in &eager_results {
         println!(
-            "  mz={:.1}, intensity={:.1}, mobility={:.3}, cycle={}",
+            "  mz={:.1}, intensity={:.1}, mobility={:.3}, cycle={:?}",
             peak.mz, peak.intensity, peak.mobility_ook0, peak.cycle_index
         );
     }
@@ -105,7 +111,7 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
     println!("\nLazy peaks:");
     for peak in &lazy_results {
         println!(
-            "  mz={:.1}, intensity={:.1}, mobility={:.3}, cycle={}",
+            "  mz={:.1}, intensity={:.1}, mobility={:.3}, cycle={:?}",
             peak.mz, peak.intensity, peak.mobility_ook0, peak.cycle_index
         );
     }
@@ -146,14 +152,18 @@ fn test_bucket_boundary_case() {
             mz: 400.0 + (i as f32) * 10.0,
             intensity: 100.0,
             mobility_ook0: f16::from_f32(1.0),
-            cycle_index: 0,
+            cycle_index: MS1CycleIndex::new(0),
         })
         .collect();
 
     let cycle_to_rt_ms = vec![0];
     let bucket_size = 4;
 
-    let (group, stats) = IndexedPeakGroup::testing_new(peaks, cycle_to_rt_ms, bucket_size);
+    let (group, stats) = IndexedPeakGroup::testing_new(
+        peaks,
+        CycleToRTMapping::<MS1CycleIndex>::new(cycle_to_rt_ms),
+        bucket_size,
+    );
 
     // Should have 3 buckets: [0-3], [4-7], [8-9]
     assert_eq!(stats.num_buckets, 3, "Should have 3 buckets");

@@ -104,7 +104,7 @@ impl SequenceToElutionGroupConverter {
     ) -> Result<
         (
             Vec<Arc<TimsElutionGroup<IonAnnot>>>,
-            Vec<ExpectedIntensities>,
+            Vec<ExpectedIntensities<IonAnnot>>,
             Vec<u8>,
         ),
         CustomError,
@@ -203,7 +203,7 @@ impl SequenceToElutionGroupConverter {
         (
             Vec<&'a DigestSlice>,
             Vec<Arc<TimsElutionGroup<IonAnnot>>>,
-            Vec<ExpectedIntensities>,
+            Vec<ExpectedIntensities<IonAnnot>>,
             Vec<u8>,
         ),
         CustomError,
@@ -238,7 +238,7 @@ impl SequenceToElutionGroupConverter {
         (
             Vec<&'a DigestSlice>,
             Vec<Arc<TimsElutionGroup<IonAnnot>>>,
-            Vec<ExpectedIntensities>,
+            Vec<ExpectedIntensities<IonAnnot>>,
             Vec<u8>,
         ),
         CustomError,

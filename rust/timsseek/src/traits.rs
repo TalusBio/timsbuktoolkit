@@ -67,6 +67,7 @@ pub trait ScorerQueriable:
     QueriableData<ChromatogramCollector<IonAnnot, f32>>
     + QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>
     + QueriableData<SpectralCollector<IonAnnot, f32>>
+    + MappableRTCycles
 {
 }
 
@@ -75,5 +76,20 @@ impl<I> ScorerQueriable for I where
     I: QueriableData<ChromatogramCollector<IonAnnot, f32>>
         + QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>
         + QueriableData<SpectralCollector<IonAnnot, f32>>
+        + MappableRTCycles
 {
+}
+
+pub trait MappableRTCycles {
+    fn ms1_cycle_mapping(
+        &self,
+    ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>;
+}
+
+impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
+    fn ms1_cycle_mapping(
+        &self,
+    ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex> {
+        self.ms1_cycle_mapping()
+    }
 }

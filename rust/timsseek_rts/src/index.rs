@@ -5,7 +5,6 @@ use timsquery::{
     Tolerance,
 };
 use timsseek::errors::Result;
-use timsseek::utils::tdf::get_ms1_frame_times_ms;
 use timsseek::{
     ScoringPipeline,
     ToleranceHierarchy,
@@ -27,12 +26,9 @@ pub fn new_index(
         dotd_file_location.display()
     );
 
-    let tdf_path = &dotd_file_location.clone().join("analysis.tdf");
-    let ref_time_ms = get_ms1_frame_times_ms(tdf_path.to_str().unwrap()).unwrap();
     let fragmented_range = index.fragmented_range();
 
     Ok(ScoringPipeline {
-        index_cycle_rt_ms: ref_time_ms,
         index,
         tolerances: ToleranceHierarchy {
             prescore: tolerance.clone(),

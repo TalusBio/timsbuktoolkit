@@ -11,8 +11,11 @@ use serde::{
 };
 use std::fmt::Display;
 use std::io::Write;
-use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
+use timscentroid::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+};
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -80,7 +83,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn new(
         queries: Vec<TimsElutionGroup<T>>,
         aggregator: PossibleAggregator,
-        ref_rts: Arc<[u32]>,
+        ref_rts: &CycleToRTMapping<MS1CycleIndex>,
         tolerance: &Tolerance,
     ) -> Result<Self, CliError> {
         Ok(match aggregator {
@@ -96,15 +99,13 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                     .map(|x| {
                         let rt_range = match tolerance.rt_range_as_milis(x.rt_seconds()) {
                             timsquery::OptionallyRestricted::Unrestricted => {
-                                timsquery::TupleRange::try_new(
-                                    *ref_rts.first().unwrap(),
-                                    *ref_rts.last().unwrap(),
-                                )
-                                .expect("Reference RTs should be sorted and valid")
+                                let range = ref_rts.range_milis();
+                                timsquery::TupleRange::try_new(range.0, range.1)
+                                    .expect("Reference RTs should be sorted and valid")
                             }
                             timsquery::OptionallyRestricted::Restricted(r) => r,
                         };
-                        ChromatogramCollector::new(x, rt_range, &ref_rts)
+                        ChromatogramCollector::new(x, rt_range, ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -133,7 +134,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn serialize_to_seq<W: Write>(
         &mut self,
         seq: &mut JsonStreamSerializer<W>,
-        ref_rts: &[u32],
+        ref_rts: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<(), CliError> {
         match self {
             AggregatorContainer::Point(aggregators) => {
@@ -144,9 +145,9 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
             AggregatorContainer::Chromatogram(aggregators) => {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
-                    .filter_map(|agg| {
+                    .filter_map(|mut agg| {
                         let agg_id = agg.eg.id();
-                        match ChromatogramOutput::try_new(agg, ref_rts) {
+                        match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
                                 // if !matches!(e, CliError::EmptyChromatogram(_)) {

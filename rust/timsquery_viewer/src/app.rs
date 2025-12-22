@@ -16,6 +16,7 @@ use crate::file_loader::{
     ElutionGroupData,
     FileLoader,
 };
+use crate::plot_renderer::AutoZoomMode;
 use crate::ui::panels::{
     ConfigPanel,
     SpectrumPanel,
@@ -30,6 +31,7 @@ enum Pane {
     MS2Spectrum,
     PrecursorPlot,
     FragmentPlot,
+    ScoresPlot,
 }
 
 /// State to be persisted across restarts
@@ -53,10 +55,7 @@ pub enum IndexedDataState {
     /// Loading failed with error message
     Failed(PathBuf, String),
     /// Data successfully loaded
-    Loaded {
-        index: Arc<IndexedTimstofPeaks>,
-        ms1_rts: Arc<[u32]>,
-    },
+    Loaded { index: Arc<IndexedTimstofPeaks> },
 }
 
 /// Domain/data state - represents loaded data and analysis parameters
@@ -207,6 +206,7 @@ impl ViewerApp {
             Pane::PrecursorPlot,
             Pane::FragmentPlot,
             Pane::MS2Spectrum,
+            Pane::ScoresPlot,
         ];
 
         let dock_state = DockState::new(tabs);
@@ -272,7 +272,7 @@ impl ViewerApp {
     }
 
     fn generate_chromatogram(&mut self) {
-        let IndexedDataState::Loaded { index, ms1_rts } = &self.data.indexed_data else {
+        let IndexedDataState::Loaded { index } = &self.data.indexed_data else {
             return;
         };
 
@@ -286,7 +286,6 @@ impl ViewerApp {
                 elution_groups,
                 selected_idx,
                 index,
-                Arc::clone(ms1_rts),
                 &self.data.tolerance,
                 &self.data.smoothing,
             )
@@ -415,8 +414,8 @@ impl ViewerApp {
                 });
 
                 match file_loader.load_raw_data(path) {
-                    Ok((index, ms1_rts)) => {
-                        data.indexed_data = IndexedDataState::Loaded { index, ms1_rts };
+                    Ok(index) => {
+                        data.indexed_data = IndexedDataState::Loaded { index };
                         file_loader.raw_data_path = None;
                         tracing::info!("Raw data indexing completed");
                     }
@@ -617,10 +616,20 @@ impl<'a> TabViewer for AppTabViewer<'a> {
             Pane::MS2Spectrum => self.spectrum_panel.title().into(),
             Pane::PrecursorPlot => "Precursors".into(),
             Pane::FragmentPlot => "Fragments".into(),
+            Pane::ScoresPlot => "Scores".into(),
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        let mode = AutoZoomMode::PeakApex;
+
+        // TODO: figure out how to prevent this allocation per frame...
+        let ref_lines: Vec<(String, f64)> = self
+            .computed
+            .reference_lines()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
         match tab {
             Pane::ConfigPanel => {
                 // Wrap settings in a scroll area
@@ -647,7 +656,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 );
             }
             Pane::PrecursorPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram {
+                if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Fragments
                     let click_response = crate::plot_renderer::render_chromatogram_plot(
                         ui,
@@ -656,6 +665,8 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         Some("precursor_fragment_x_axis"),
                         true,
                         &mut self.computed.auto_zoom_frame_counter,
+                        &mode,
+                        &ref_lines,
                     );
                     if let Some(clicked_rt) = click_response {
                         self.computed.clicked_rt = Some(clicked_rt);
@@ -667,7 +678,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 }
             }
             Pane::FragmentPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram {
+                if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Precursors
                     let response = crate::plot_renderer::render_chromatogram_plot(
                         ui,
@@ -676,6 +687,8 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         Some("precursor_fragment_x_axis"),
                         false,
                         &mut self.computed.auto_zoom_frame_counter,
+                        &mode,
+                        &ref_lines,
                     );
                     if let Some(clicked_rt) = response {
                         self.computed.clicked_rt = Some(clicked_rt);
@@ -684,6 +697,24 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                     ui.label("Generating chromatogram...");
                 } else {
                     ui.label("Select a precursor to view fragment traces");
+                }
+            }
+            Pane::ScoresPlot => {
+                if let Some(score_lines) = &self.computed.score_lines {
+                    let response = score_lines.render(
+                        ui,
+                        Some("precursor_fragment_x_axis"),
+                        &mut self.computed.auto_zoom_frame_counter,
+                        &mode,
+                        &ref_lines,
+                    );
+                    if let Some(clicked_rt) = response {
+                        self.computed.clicked_rt = Some(clicked_rt);
+                    }
+                } else if self.ui.selected_index.is_some() {
+                    ui.label("Generating score plot...");
+                } else {
+                    ui.label("Select a precursor to view score traces");
                 }
             }
         }

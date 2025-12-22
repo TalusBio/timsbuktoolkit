@@ -12,6 +12,7 @@ use crate::{
 use rayon::prelude::*;
 use std::ops::AddAssign;
 use timscentroid::indexing::IndexedPeak;
+use timscentroid::rt_mapping::RTIndex;
 
 /// Trait indicating that indexed data can be queried with a specific aggregator type.
 ///
@@ -107,7 +108,7 @@ where
 /// - Implement `Default` for initialization
 ///
 /// Common implementations: `f32`, custom statistics collectors.
-pub trait PeakAddable: AddAssign<IndexedPeak> + ValueLike + Default {}
+pub trait PeakAddable<T: RTIndex>: AddAssign<IndexedPeak<T>> + ValueLike + Default {}
 
 /// Convenience trait for indexed data that supports all common aggregator types.
 ///

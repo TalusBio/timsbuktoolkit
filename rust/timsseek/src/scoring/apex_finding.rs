@@ -10,7 +10,7 @@
 //! use timsseek::scoring::apex_finding::{ApexFinder, CandidateContext};
 //!
 //! // 1. Create a reusable finder (one per thread)
-//! let mut finder = ApexFinder::new(rt_ms_arc.clone());
+//! let mut finder = ApexFinder::new(chromatogram_collector.num_cycles());
 //!
 //! // 2. Create the context for a specific query
 //! let context = CandidateContext {
@@ -21,9 +21,11 @@
 //! };
 //!
 //! // 3. Score (reusing the finder's internal buffers)
-//! let score = finder.find_apex(&context).unwrap();
+//! let score = finder.find_apex(&context, rt_mapping_fn).unwrap();
 //! println!("Found apex at RT: {} ms with score {}", score.retention_time_ms, score.score);
 //! ```
+
+use std::fmt::Display;
 
 use super::{
     COELUTION_WINDOW_WIDTH,
@@ -40,7 +42,6 @@ use crate::scoring::scores::coelution::coelution_score::coelution_vref_score_fil
 use crate::scoring::scores::corr_v_ref;
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
-use std::sync::Arc;
 use timsquery::models::aggregators::ChromatogramCollector;
 use timsquery::traits::KeyLike;
 use timsquery::{
@@ -52,16 +53,19 @@ use timsquery::{
 ///
 /// This bundles the theoretical peptide info (digest, expected intensities)
 /// with the raw extracted data (`ChromatogramCollector`).
+///
+/// The label is in essence anything that identifies the peptide sequence and modifications,
+/// so it can be a string, or a more complex struct. (or a simpler one like a smart pointer)
 #[derive(Debug)]
-pub struct CandidateContext {
+pub struct CandidateContext<T: KeyLike, L: Display> {
     /// The peptide sequence and modification information.
-    pub digest: DigestSlice,
+    pub label: L,
     /// The precursor charge state.
     pub charge: u8,
     /// The expected theoretical intensities of precursor and fragment ions.
-    pub expected_intensities: ExpectedIntensities,
+    pub expected_intensities: ExpectedIntensities<T>,
     /// The observed chromatogram data collected from the instrument.
-    pub query_values: ChromatogramCollector<IonAnnot, f32>,
+    pub query_values: ChromatogramCollector<T, f32>,
 }
 
 /// Immutable peptide metadata that never changes during scoring.
@@ -94,12 +98,12 @@ pub struct PeptideMetadata {
 /// This contains only the data needed for scoring calculations,
 /// separated from metadata for clarity and efficiency.
 #[derive(Debug)]
-pub struct ScoringContext {
+pub struct ScoringContext<T: KeyLike> {
     /// The expected theoretical intensities of precursor and fragment ions.
-    pub expected_intensities: ExpectedIntensities,
+    pub expected_intensities: ExpectedIntensities<T>,
 
     /// The observed chromatogram data collected from the instrument.
-    pub query_values: ChromatogramCollector<IonAnnot, f32>,
+    pub query_values: ChromatogramCollector<T, f32>,
 }
 
 /// The result of the apex finding process.
@@ -186,16 +190,30 @@ impl ScoreTraces {
         // but for safety we can resize it too.
         self.main_score.resize(len, 0.0);
     }
+
+    pub fn iter_scores(&self) -> impl Iterator<Item = (&'static str, &[f32])> + '_ {
+        vec![
+            ("ms1_cosine_ref_sim", &self.ms1_cosine_ref_sim[..]),
+            ("ms1_coelution_score", &self.ms1_coelution_score[..]),
+            ("ms1_corr_v_gauss", &self.ms1_corr_v_gauss[..]),
+            ("ms2_cosine_ref_sim", &self.ms2_cosine_ref_sim[..]),
+            ("ms2_coelution_score", &self.ms2_coelution_score[..]),
+            ("ms2_lazyscore", &self.ms2_lazyscore[..]),
+            ("ms2_corr_v_gauss", &self.ms2_corr_v_gauss[..]),
+            ("main_score", &self.main_score[..]),
+        ]
+        .into_iter()
+    }
 }
 
 /// The core engine for finding peptide apexes.
+#[derive(Debug)]
 pub struct ApexFinder {
     pub traces: ScoreTraces,
     buffers: ApexFinderBuffers,
-    /// Reference to the global retention time array (for index -> RT mapping).
-    rt_ms_arc: Arc<[u32]>,
 }
 
+#[derive(Debug)]
 struct ApexFinderBuffers {
     temp_ms2_dot_prod: Vec<f32>,
     temp_ms2_norm_sq_obs: Vec<f32>,
@@ -233,22 +251,22 @@ impl ApexFinderBuffers {
 }
 
 impl ApexFinder {
-    pub fn new(rt_ms_arc: Arc<[u32]>) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
-            traces: ScoreTraces::new_with_capacity(rt_ms_arc.len()),
-            buffers: ApexFinderBuffers::new(rt_ms_arc.len()),
-            rt_ms_arc,
+            traces: ScoreTraces::new_with_capacity(capacity),
+            buffers: ApexFinderBuffers::new(capacity),
         }
     }
 
     /// Find the peptide apex within the provided scoring context.
     #[cfg_attr(
         feature = "instrumentation",
-        tracing::instrument(skip(self, scoring_ctx), level = "trace")
+        tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
     )]
-    pub fn find_apex(
+    pub fn find_apex<T: KeyLike>(
         &mut self,
-        scoring_ctx: &ScoringContext,
+        scoring_ctx: &ScoringContext<T>,
+        rt_mapper: &dyn Fn(usize) -> u32,
     ) -> Result<ApexScore, DataProcessingError> {
         let collector = &scoring_ctx.query_values;
         let n_cycles = collector.num_cycles();
@@ -270,18 +288,23 @@ impl ApexFinder {
         self.compute_main_score_trace();
 
         // 5. Find Apex and Extract Features
-        self.extract_apex_score(scoring_ctx)
+        self.extract_apex_score(scoring_ctx, &rt_mapper)
     }
 
     /// Pass 1: Scores that depend only on individual ion traces.
     /// - Lazyscore (Hyperscore approximation)
     /// - Cosine Similarity vs Expected Intensities
     /// - Gaussian Shape Correlation
+    ///
+    /// Can be an error if no valid ions are found for scoring.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn compute_pass_1(&mut self, scoring_ctx: &ScoringContext) -> Result<(), DataProcessingError> {
+    fn compute_pass_1<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &ScoringContext<T>,
+    ) -> Result<(), DataProcessingError> {
         let collector = &scoring_ctx.query_values;
 
         // --- MS2 (Fragments) ---
@@ -402,7 +425,10 @@ impl ApexFinder {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn compute_pass_2(&mut self, scoring_ctx: &ScoringContext) -> Result<(), DataProcessingError> {
+    fn compute_pass_2<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &ScoringContext<T>,
+    ) -> Result<(), DataProcessingError> {
         let collector = &scoring_ctx.query_values;
 
         // Apply smoothing to Lazyscore BEFORE using it as a reference for Coelution
@@ -476,9 +502,10 @@ impl ApexFinder {
         }
     }
 
-    fn extract_apex_score(
+    fn extract_apex_score<T: KeyLike>(
         &self,
-        scoring_ctx: &ScoringContext,
+        scoring_ctx: &ScoringContext<T>,
+        rt_mapper: &dyn Fn(usize) -> u32,
     ) -> Result<ApexScore, DataProcessingError> {
         let mut peak_picker = PeakPicker::new(&self.traces.main_score);
 
@@ -519,7 +546,7 @@ impl ApexFinder {
         // Extract features at max_loc
         let cycle_offset = scoring_ctx.query_values.cycle_offset();
         let global_loc = max_loc + cycle_offset;
-        let retention_time_ms = self.rt_ms_arc.get(global_loc).copied().unwrap_or(0);
+        let retention_time_ms = rt_mapper(global_loc);
 
         let (ms1_summed_intensity, _ms1_npeaks) =
             self.sum_intensities_at(&scoring_ctx.query_values.precursors, max_loc);

@@ -10,16 +10,12 @@ use std::path::{
     Path,
     PathBuf,
 };
-use std::sync::Arc;
 use std::time::{
     Duration,
     Instant,
 };
 
-use timscentroid::{
-    IndexedTimstofPeaks,
-    TimsTofPath,
-};
+use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::{
@@ -30,7 +26,6 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::load_index_caching;
-use timsrust::MSLevel;
 use tracing::{
     info,
     instrument,
@@ -67,7 +62,6 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 
     let index = load_index_caching(&raw_file_path)
         .map_err(|e| CliError::DataReading(format!("{:?}", e)))?;
-    let rts = get_ms1_rts_as_millis(&raw_file_path)?;
 
     let output_path = args.output_path;
     let serialization_format = args.format;
@@ -80,7 +74,6 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         ElutionGroupCollection::StringLabels(egs, _) => stream_process_batches(
             egs,
             aggregator_use,
-            rts,
             &index,
             &tolerance_settings,
             serialization_format,
@@ -90,7 +83,6 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         ElutionGroupCollection::MzpafLabels(egs, _) => stream_process_batches(
             egs,
             aggregator_use,
-            rts,
             &index,
             &tolerance_settings,
             serialization_format,
@@ -100,7 +92,6 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         ElutionGroupCollection::TinyIntLabels(egs, _) => stream_process_batches(
             egs,
             aggregator_use,
-            rts,
             &index,
             &tolerance_settings,
             serialization_format,
@@ -110,7 +101,6 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         ElutionGroupCollection::IntLabels(egs, _) => stream_process_batches(
             egs,
             aggregator_use,
-            rts,
             &index,
             &tolerance_settings,
             serialization_format,
@@ -136,24 +126,6 @@ pub fn read_query_elution_groups(path: &PathBuf) -> Result<ElutionGroupCollectio
 /// Main function for the 'write-template' subcommand.
 pub fn main_write_template(args: WriteTemplateArgs) -> Result<(), CliError> {
     todo!("Ooops, this feature is not yet implemented.");
-}
-
-/// Retrieves MS1 retention times from a TIMS-TOF file, sorted and deduped.
-pub fn get_ms1_rts_as_millis(file: &PathBuf) -> Result<Arc<[u32]>, CliError> {
-    let ttp = TimsTofPath::new(file).map_err(|e| CliError::TimsFileLoad {
-        path: file.clone(),
-        source: e,
-    })?;
-    let reader = ttp.load_frame_reader()?;
-    let mut rts: Vec<_> = reader
-        .frame_metas
-        .iter()
-        .filter(|x| x.ms_level == MSLevel::MS1)
-        .map(|f| (f.rt_in_seconds * 1000.0).round() as u32)
-        .collect();
-    rts.sort_unstable();
-    rts.dedup();
-    Ok(rts.into())
 }
 
 pub struct JsonStreamSerializer<W: Write> {
@@ -219,7 +191,6 @@ impl<W: Write> JsonStreamSerializer<W> {
 pub fn stream_process_batches<T: KeyLike + Display>(
     elution_groups: Vec<TimsElutionGroup<T>>,
     aggregator_use: PossibleAggregator,
-    rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
     serialization_format: SerializationFormat,
@@ -244,7 +215,6 @@ pub fn stream_process_batches<T: KeyLike + Display>(
             process_and_serialize(
                 elution_groups,
                 aggregator_use,
-                rts,
                 index,
                 tolerance,
                 ser,
@@ -259,7 +229,6 @@ pub fn stream_process_batches<T: KeyLike + Display>(
             process_and_serialize(
                 elution_groups,
                 aggregator_use,
-                rts,
                 index,
                 tolerance,
                 ser,
@@ -274,7 +243,6 @@ pub fn stream_process_batches<T: KeyLike + Display>(
             process_and_serialize(
                 elution_groups,
                 aggregator_use,
-                rts,
                 index,
                 tolerance,
                 ser,
@@ -293,7 +261,6 @@ pub fn stream_process_batches<T: KeyLike + Display>(
 pub fn process_and_serialize<T: KeyLike + Display>(
     elution_groups: Vec<TimsElutionGroup<T>>,
     aggregator_use: PossibleAggregator,
-    rts: Arc<[u32]>,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
     mut ser: JsonStreamSerializer<impl Write>,
@@ -316,11 +283,15 @@ pub fn process_and_serialize<T: KeyLike + Display>(
             last_progress = Instant::now();
         }
 
-        let mut container =
-            AggregatorContainer::new(chunk.to_vec(), aggregator_use, rts.clone(), tolerance)?;
+        let mut container = AggregatorContainer::new(
+            chunk.to_vec(),
+            aggregator_use,
+            index.ms1_cycle_mapping(),
+            tolerance,
+        )?;
 
         container.add_query(index, tolerance);
-        container.serialize_to_seq(&mut ser, &rts)?;
+        container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping())?;
     }
 
     ser.finish()?;
