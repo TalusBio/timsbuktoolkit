@@ -3,154 +3,82 @@ name: Release
 on:
   push:
     tags:
-      - 'v?[0-9]+.*' # Trigger on version tags
+      - 'v?[0-9]+.*'
+  pull_request:
+    types: [labeled]
 
 env:
   CARGO_TERM_COLOR: always
-  # Define the binaries to package
-  # TODO: use our taskfile to centralize the build
-  RELEASE_BINARIES: timsseek timsquery_cli #  timsseek_rts
+  RELEASE_BINARIES: timsseek timsquery_cli
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
+  build-and-release:
+    # Run on tags OR if the PR has the 'build-artifact' label
+    if: >
+      github.event_name == 'push' || 
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'build-artifact'))
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x64
+
     steps:
-      - name: Create Release
-        id: create_release
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Build Binaries
+        shell: bash
+        run: |
+          for binary in $RELEASE_BINARIES; do
+            cargo build --release --bin $binary --target ${{ matrix.target }}
+          done
+
+      - name: Package Artifacts
+        shell: bash
+        run: |
+          mkdir dist
+          for binary in $RELEASE_BINARIES; do
+            [ "${{ matrix.os }}" = "windows-latest" ] && EXT=".exe" || EXT=""
+            cp "target/${{ matrix.target }}/release/${binary}${EXT}" dist/
+          done
+          
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "${{ matrix.artifact_name }}.zip" ./dist/*
+          else
+            tar -czf "${{ matrix.artifact_name }}.tar.gz" -C dist .
+          fi
+
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
+          # Use the tag name for pushes, or a special 'pr-#' tag for PRs
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('pr-build-{0}', github.event.pull_request.number) }}
+          name: ${{ github.event_name == 'push' && github.ref_name || format('Pre-release Build (PR #{0})', github.event.pull_request.number) }}
+          # Mark as prerelease if it's a PR
+          prerelease: ${{ github.event_name == 'pull_request' }}
           draft: false
-          prerelease: false
-
-  linux-builds:
-    needs: create-release
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          # - aarch64-unknown-linux-gnu
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: ${{ matrix.target }}
-          cache: true
-
-      - name: Build
-        run: |
-            rustup target add ${{ matrix.target }}
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --target ${{ matrix.target }}
-            done
-
-      - name: Prepare binaries
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/${{ matrix.target }}/release/$binary" artifacts/
-          done
-          cd artifacts
-          tar czf ../${{ matrix.target }}.tar.gz *
-
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
+          make_latest: ${{ github.event_name == 'push' && 'true' || 'false' }}
+          files: |
+            *.tar.gz
+            *.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ matrix.target }}.tar.gz
-          asset_name: ${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
-
-  macos-builds:
-    needs: create-release
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: ${{ matrix.target }}
-          cache: true
-
-
-      - name: Build
-        run: |
-            rustup target add ${{ matrix.target }}
-            for binary in $RELEASE_BINARIES; do
-                cargo build --release --bin $binary --target ${{ matrix.target }}
-            done
-
-      - name: Prepare binaries
-        run: |
-          mkdir artifacts
-          for binary in $RELEASE_BINARIES; do
-            cp "target/${{ matrix.target }}/release/$binary" artifacts/
-          done
-          cd artifacts
-          tar czf ../${{ matrix.target }}.tar.gz *
-
-      - name: Upload Release Assets
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ matrix.target }}.tar.gz
-          asset_name: ${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
-
-  # windows-builds:
-  #   needs: create-release
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-
-  #     - name: Install Rust
-  #       uses: actions-rust-lang/setup-rust-toolchain@v1
-  #       with:
-  #         target: x86_64-pc-windows-msvc
-  #         cache: true
-
-  #     - name: Build
-  #       run: |
-  #           rustup target add x86_64-pc-windows-msvc
-  #           for binary in $RELEASE_BINARIES; do
-  #               cargo build --release --bin $binary --features="build-binary" --target x86_64-pc-windows-msvc
-  #           done
-
-  #     - name: Prepare binaries
-  #       shell: bash
-  #       run: |
-  #         mkdir artifacts
-  #         for binary in $RELEASE_BINARIES; do
-  #           cp "target/x86_64-pc-windows-msvc/release/$binary.exe" artifacts/
-  #         done
-  #         cd artifacts
-  #         tar czf ../x86_64-pc-windows-msvc.tar.gz *
-
-  #     - name: Upload Release Assets
-  #       uses: actions/upload-release-asset@v1
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #       with:
-  #         upload_url: ${{ needs.create-release.outputs.upload_url }}
-  #         asset_path: x86_64-pc-windows-msvc.tar.gz
-  #         asset_name: x86_64-pc-windows-msvc.tar.gz
-  #         asset_content_type: application/gzip
-
