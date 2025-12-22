@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui::Color32;
 use egui_dock::{
     DockArea,
     DockState,
@@ -11,6 +12,7 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 
 use crate::chromatogram_processor::SmoothingMethod;
+use crate::cli::Cli;
 use crate::computed_state::ComputedState;
 use crate::file_loader::{
     ElutionGroupData,
@@ -74,7 +76,7 @@ pub struct DataState {
 }
 
 /// UI-specific state - transient UI state that doesn't affect data
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Default)]
 pub struct UiState {
     /// Filter text for precursor table
     pub table_filter: String,
@@ -84,20 +86,6 @@ pub struct UiState {
     pub search_mode: bool,
     /// Vim mode: search input buffer
     pub search_input: String,
-    /// Master toggle for MS2 spectrum feature
-    pub show_ms2_spectrum: bool,
-}
-
-impl Default for UiState {
-    fn default() -> Self {
-        Self {
-            table_filter: String::new(),
-            selected_index: None,
-            search_mode: false,
-            search_input: String::new(),
-            show_ms2_spectrum: true, // Enable MS2 by default
-        }
-    }
 }
 
 /// Main application state
@@ -149,7 +137,7 @@ impl ViewerApp {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, args: &Cli) -> Self {
         // Try to load previous state
         if let Some(storage) = cc.storage {
             if let Some(state_string) = storage.get_string(eframe::APP_KEY) {
@@ -180,7 +168,9 @@ impl ViewerApp {
 
                 if let Some(state) = state {
                     return Self {
-                        file_loader: state.file_loader,
+                        file_loader: state
+                            .file_loader
+                            .with_initial_paths(&args.raw_data_path, &args.elution_groups_path),
                         data: DataState {
                             tolerance: state.tolerance,
                             smoothing: state.smoothing,
@@ -212,7 +202,8 @@ impl ViewerApp {
         let dock_state = DockState::new(tabs);
 
         Self {
-            file_loader: FileLoader::new(),
+            file_loader: FileLoader::new()
+                .with_initial_paths(&args.raw_data_path, &args.elution_groups_path),
             data: DataState::default(),
             ui: UiState::default(),
             computed: ComputedState::default(),
@@ -526,7 +517,6 @@ impl eframe::App for ViewerApp {
                 selected_index: self.ui.selected_index,
                 search_mode: self.ui.search_mode,
                 search_input: self.ui.search_input.clone(),
-                show_ms2_spectrum: self.ui.show_ms2_spectrum,
             },
             tolerance: self.data.tolerance.clone(),
             smoothing: self.data.smoothing,
@@ -597,12 +587,8 @@ impl<'a> AppTabViewer<'a> {
         ui.add_space(20.0);
         ui.separator();
 
-        self.left_panel.render(
-            ui,
-            &mut self.data.tolerance,
-            &mut self.data.smoothing,
-            &mut self.ui.show_ms2_spectrum,
-        );
+        self.left_panel
+            .render(ui, &mut self.data.tolerance, &mut self.data.smoothing);
     }
 }
 
@@ -624,11 +610,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
         let mode = AutoZoomMode::PeakApex;
 
         // TODO: figure out how to prevent this allocation per frame...
-        let ref_lines: Vec<(String, f64)> = self
+        let ref_lines: Vec<(String, f64, Color32)> = self
             .computed
             .reference_lines()
             .iter()
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| (k.clone(), v.0, v.1))
             .collect();
         match tab {
             Pane::ConfigPanel => {

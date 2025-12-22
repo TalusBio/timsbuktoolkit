@@ -22,9 +22,11 @@ use timsquery::{
     TimsElutionGroup,
 };
 use timsseek::ExpectedIntensities;
+use timsseek::fragment_mass::elution_group_converter::isotope_dist_from_seq;
 use tracing::{
     info,
     instrument,
+    warn,
 };
 
 /// Handles file dialogs and file loading operations
@@ -42,6 +44,21 @@ impl FileLoader {
             raw_data_path: None,
             tolerance_path: None,
         }
+    }
+
+    pub fn with_initial_paths(
+        mut self,
+        raw_data_path: &Option<PathBuf>,
+        elution_groups_path: &Option<PathBuf>,
+    ) -> Self {
+        if let Some(raw_data_path) = raw_data_path {
+            self.raw_data_path = Some(raw_data_path.clone());
+        }
+        if let Some(elution_groups_path) = elution_groups_path {
+            self.elution_groups_path = Some(elution_groups_path.clone());
+        }
+
+        self
     }
 
     /// Open a file dialog for elution groups JSON file
@@ -193,7 +210,7 @@ impl ElutionGroupData {
                 (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
             }
         };
-        let eg = eg.ok_or(ViewerError::General(format!(
+        let mut eg = eg.ok_or(ViewerError::General(format!(
             "Elution group index {} out of bounds",
             index
         )))?;
@@ -213,8 +230,23 @@ impl ElutionGroupData {
 
                 // TODO: Actually get expected intensities ... I could make
                 // The simple isotope calculation from number of carbons + sulphur.
-                let precursor_intensities: HashMap<i8, f32> =
-                    eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect();
+                let isotopes = match isotope_dist_from_seq(&de.stripped_peptide) {
+                    Ok(isotopes) => isotopes,
+                    Err(e) => {
+                        warn!(
+                            "Failed to calculate isotope distribution for sequence {}: {}",
+                            &de.stripped_peptide, e
+                        );
+                        [1.0, 0.0, 0.0]
+                    }
+                };
+                eg.set_precursor_labels([0, 1, 2].iter().cloned());
+                let precursor_intensities: HashMap<i8, f32> = isotopes
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, intensity)| (i as i8, intensity))
+                    .collect();
 
                 ExpectedIntensities {
                     precursor_intensities,
@@ -253,15 +285,17 @@ impl ElutionGroupData {
                     info!("Selected index {} not found in filtered indices", row_index);
                     // Set the selection to the closest match
                     let clamped_idx = if insert_idx >= filtered_eg_idxs.len() {
-                        filtered_eg_idxs.len() - 1
+                        filtered_eg_idxs.len().saturating_sub(1) // Prevents underflow
                     } else {
                         insert_idx
                     };
-                    *selected_index = Some(filtered_eg_idxs[clamped_idx]);
+                    if !filtered_eg_idxs.is_empty() {
+                        *selected_index = Some(filtered_eg_idxs[clamped_idx]);
+                    };
                     clamped_idx
                 }
             };
-            if scroll_to_selection {
+            if scroll_to_selection && !filtered_eg_idxs.is_empty() {
                 builder = builder.scroll_to_row(local_index, None);
             }
         }

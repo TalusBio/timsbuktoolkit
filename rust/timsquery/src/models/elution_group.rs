@@ -105,6 +105,11 @@ impl<T: KeyLike> TimsElutionGroup<T> {
         self.precursor_mono_mz
     }
 
+    pub fn set_precursor_labels(&mut self, labels: impl Iterator<Item = i8>) {
+        self.precursor_labels.clear();
+        self.precursor_labels.extend(labels);
+    }
+
     // NOTE: I am thinking about removing this and leave the rest as a trait
     pub fn set_rt_seconds(&mut self, rt_seconds: f32) {
         self.rt_seconds = rt_seconds;

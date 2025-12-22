@@ -89,7 +89,6 @@ impl ConfigPanel {
         ui: &mut egui::Ui,
         tolerance: &mut Tolerance,
         smoothing_method: &mut SmoothingMethod,
-        ms2_spec_toggle: &mut bool,
     ) {
         self.render_tolerance_editor(ui, tolerance);
         ui.add_space(20.0);
@@ -99,9 +98,9 @@ impl ConfigPanel {
         ui.add_space(20.0);
         ui.separator();
 
-        // Plot visibility controls
-        ui.heading("Plot Settings");
-        ui.checkbox(ms2_spec_toggle, "Show MS2 Spectrum");
+        // // Plot visibility controls
+        // ui.heading("Plot Settings");
+        // ui.checkbox(ms2_spec_toggle, "Show MS2 Spectrum");
     }
 
     pub fn title(&self) -> &str {
