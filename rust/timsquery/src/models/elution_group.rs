@@ -4,7 +4,6 @@ use crate::models::elution_group::tims_elution_group_builder::{
 };
 use crate::traits::KeyLike;
 use crate::utils::constants::NEUTRON_MASS;
-use bon::builder;
 use serde::{
     Deserialize,
     Serialize,
