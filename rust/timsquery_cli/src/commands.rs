@@ -18,13 +18,7 @@ use std::time::{
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
 use timsquery::models::elution_group::TimsElutionGroup;
-use timsquery::models::tolerance::{
-    MobilityTolerance,
-    MzTolerance,
-    QuadTolerance,
-    RtTolerance,
-    Tolerance,
-};
+use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::load_index_caching;
 use tracing::{
     info,
@@ -123,9 +117,66 @@ pub fn read_query_elution_groups(path: &PathBuf) -> Result<ElutionGroupCollectio
     }
 }
 
+const NARROW_TOLERANCE_TEMPLATE: &str = r#"{
+  "ms": { "ppm": [10.0, 10.0] },
+  "rt": { "minutes": [0.5, 0.5] },
+  "mobility": { "pct": [5.0, 5.0] },
+  "quad": { "da": [1.05, 1.05] }
+}"#;
+
+const WIDE_TOLERANCE_TEMPLATE: &str = r#"{
+  "ms": { "da": [0.04, 0.04] },
+  "rt": "Unrestricted",
+  "mobility": { "pct": [20.0, 20.0] },
+  "quad": { "da": [0.2, 0.2] }
+}"#;
+
+const ELUTION_GROUP_TEMPLATE: &str = r#"[
+    {
+		"fragment_labels":[ "y1", "y1^2", "y2", "y2^2", "b1", "b1^2", "p^2" ],
+		"fragments":[ 147.1128, 74.06004, 248.1604, 124.58387, 347.22889, 174.11808, 418.26601 ],
+		"id":0,
+		"mobility":0.9851410984992981,
+		"precursor_mz":723.844601280237,
+		"precursor_charge":2,
+		"precursor_isotopes":[0,1,2],
+		"rt_seconds":302.2712
+	},
+    {
+		"fragment_labels":[ "y1", "y1^2", "y2", "y2^2", "b1", "b1^2", "p^2" ],
+		"fragments":[ 147.1128, 74.06004, 248.1604, 124.58387, 347.22889, 174.11808, 418.26601 ],
+		"id":1,
+		"mobility":0.9851410984992981,
+		"precursor_mz":723.844601280237,
+		"precursor_charge":1,
+		"precursor_isotopes":[0],
+		"rt_seconds":354.2712
+	}
+]"#;
+
 /// Main function for the 'write-template' subcommand.
 pub fn main_write_template(args: WriteTemplateArgs) -> Result<(), CliError> {
-    todo!("Ooops, this feature is not yet implemented.");
+    let target_dir = args.output_path;
+    std::fs::create_dir_all(&target_dir)?;
+
+    let narrow_path = target_dir.join("narrow_tolerance_template.json");
+    let wide_path = target_dir.join("wide_tolerance_template.json");
+    std::fs::write(&narrow_path, NARROW_TOLERANCE_TEMPLATE)?;
+    std::fs::write(&wide_path, WIDE_TOLERANCE_TEMPLATE)?;
+    println!(
+        "Wrote tolerance templates to:\n- {}\n- {}",
+        narrow_path.display(),
+        wide_path.display()
+    );
+
+    // Elution group template
+    let elution_group_path = target_dir.join("elution_group_template.json");
+    std::fs::write(&elution_group_path, ELUTION_GROUP_TEMPLATE)?;
+    println!(
+        "Wrote elution group template to: {}",
+        elution_group_path.display()
+    );
+    Ok(())
 }
 
 pub struct JsonStreamSerializer<W: Write> {
@@ -304,19 +355,16 @@ pub fn process_and_serialize<T: KeyLike + Display>(
     Ok(())
 }
 
-/// Generates a default set of tolerance settings.
-pub fn template_tolerance_settings() -> Tolerance {
-    Tolerance {
-        ms: MzTolerance::Ppm((15.0, 15.0)),
-        rt: RtTolerance::Unrestricted,
-        mobility: MobilityTolerance::Pct((10.0, 10.0)),
-        quad: QuadTolerance::Absolute((0.1, 0.1)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use timsquery::models::tolerance::{
+        MobilityTolerance,
+        MzTolerance,
+        QuadTolerance,
+        RtTolerance,
+        Tolerance,
+    };
 
     #[test]
     fn test_we_can_read_data_contract() {
@@ -329,5 +377,35 @@ mod tests {
         // AKA, we promised we would be compatible with that file.
         // IF you do want to change it contact the Carafe developers first.
         assert!(elution_groups.len() == 1);
+    }
+
+    #[test]
+    fn test_templates_tolerance_deserializable() {
+        let narrow: Tolerance = serde_json::from_str(NARROW_TOLERANCE_TEMPLATE).unwrap();
+        let wide: Tolerance = serde_json::from_str(WIDE_TOLERANCE_TEMPLATE).unwrap();
+
+        assert!(matches!(narrow.ms, MzTolerance::Ppm(_)));
+        assert!(matches!(narrow.rt, RtTolerance::Minutes(_)));
+        assert!(matches!(narrow.mobility, MobilityTolerance::Pct(_)));
+        assert!(matches!(narrow.quad, QuadTolerance::Absolute(_)));
+
+        assert!(matches!(wide.ms, MzTolerance::Absolute(_)));
+        assert!(matches!(wide.rt, RtTolerance::Unrestricted));
+        assert!(matches!(wide.mobility, MobilityTolerance::Pct(_)));
+        assert!(matches!(wide.quad, QuadTolerance::Absolute(_)));
+    }
+
+    #[test]
+    fn test_elution_group_template_deserializable() {
+        use timsquery::IonAnnot;
+        let elution_groups =
+            serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(ELUTION_GROUP_TEMPLATE)
+                .unwrap();
+        assert!(elution_groups.len() == 2);
+        // Write to a temp file ... while I implement direct reading api
+        let tmp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp_file.path(), ELUTION_GROUP_TEMPLATE).unwrap();
+        let elution_groups = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
+        assert!(elution_groups.len() == 2);
     }
 }

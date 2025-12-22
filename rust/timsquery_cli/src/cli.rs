@@ -21,8 +21,8 @@ pub enum Commands {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum PossibleAggregator {
-    #[default]
     PointIntensityAggregator,
+    #[default]
     ChromatogramAggregator,
     SpectrumAggregator,
 }
@@ -71,8 +71,4 @@ pub struct WriteTemplateArgs {
     /// The path to the output files.
     #[arg(short, long)]
     pub output_path: PathBuf,
-
-    /// The number of elution groups to generate.
-    #[arg(short, long, default_value_t = 10)]
-    pub num_elution_groups: usize,
 }

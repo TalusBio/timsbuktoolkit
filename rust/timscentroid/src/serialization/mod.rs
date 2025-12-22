@@ -219,6 +219,7 @@ impl PeakSchema {
         self.mz_idx
     }
 
+    #[allow(dead_code)]
     pub(crate) fn intensity_idx(&self) -> usize {
         self.intensity_idx
     }
@@ -227,6 +228,7 @@ impl PeakSchema {
         self.mobility_idx
     }
 
+    #[allow(dead_code)]
     pub(crate) fn cycle_idx(&self) -> usize {
         self.cycle_idx
     }

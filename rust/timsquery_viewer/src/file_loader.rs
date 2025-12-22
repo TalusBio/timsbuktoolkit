@@ -132,6 +132,7 @@ impl ElutionGroupData {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -357,23 +358,6 @@ impl ElutionGroupData {
                 });
             }
         })
-    }
-
-    fn get_column_strings(&self, index: usize) -> Vec<String> {
-        match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, _) => {
-                egs.iter().map(|eg| eg.id().to_string()).collect()
-            }
-            ElutionGroupCollection::MzpafLabels(egs, _) => {
-                egs.iter().map(|eg| eg.id().to_string()).collect()
-            }
-            ElutionGroupCollection::TinyIntLabels(egs, _) => {
-                egs.iter().map(|eg| eg.id().to_string()).collect()
-            }
-            ElutionGroupCollection::IntLabels(egs, _) => {
-                egs.iter().map(|eg| eg.id().to_string()).collect()
-            }
-        }
     }
 
     /// Helper function to add row content

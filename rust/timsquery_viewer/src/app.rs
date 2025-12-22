@@ -73,6 +73,8 @@ pub struct DataState {
     pub tolerance: Tolerance,
     /// Smoothing method configuration
     pub smoothing: SmoothingMethod,
+    /// Auto-zoom mode for plots
+    pub auto_zoom_mode: AutoZoomMode,
 }
 
 /// UI-specific state - transient UI state that doesn't affect data
@@ -236,9 +238,9 @@ impl ViewerApp {
                 return;
             }
 
-            let Some(egs) = &self.data.elution_groups else {
+            if self.data.elution_groups.is_none() {
                 return;
-            };
+            }
 
             // Cache filtered indices - computed once and reused
             let filtered_indices = &self.table_panel.filtered_indices();
@@ -587,8 +589,12 @@ impl<'a> AppTabViewer<'a> {
         ui.add_space(20.0);
         ui.separator();
 
-        self.left_panel
-            .render(ui, &mut self.data.tolerance, &mut self.data.smoothing);
+        self.left_panel.render(
+            ui,
+            &mut self.data.tolerance,
+            &mut self.data.smoothing,
+            &mut self.data.auto_zoom_mode,
+        );
     }
 }
 
@@ -607,7 +613,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        let mode = AutoZoomMode::PeakApex;
+        let mode = self.data.auto_zoom_mode;
 
         // TODO: figure out how to prevent this allocation per frame...
         let ref_lines: Vec<(String, f64, Color32)> = self

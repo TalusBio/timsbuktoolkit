@@ -1,9 +1,9 @@
 use eframe::egui;
 
 use crate::chromatogram_processor::SmoothingMethod;
+use crate::plot_renderer::AutoZoomMode;
 use crate::ui::tolerance_editor;
 use timsquery::Tolerance;
-
 /// Panel for data loading and settings on the left side
 pub struct ConfigPanel;
 
@@ -89,6 +89,7 @@ impl ConfigPanel {
         ui: &mut egui::Ui,
         tolerance: &mut Tolerance,
         smoothing_method: &mut SmoothingMethod,
+        auto_zoom_mode: &mut AutoZoomMode,
     ) {
         self.render_tolerance_editor(ui, tolerance);
         ui.add_space(20.0);
@@ -101,6 +102,38 @@ impl ConfigPanel {
         // // Plot visibility controls
         // ui.heading("Plot Settings");
         // ui.checkbox(ms2_spec_toggle, "Show MS2 Spectrum");
+
+        // Auto Zoom toggle
+        ui.heading("Auto Zoom");
+        ui.horizontal(|ui| {
+            ui.label("Mode:");
+            egui::ComboBox::from_id_salt("auto_zoom_mode")
+                .selected_text(match auto_zoom_mode {
+                    AutoZoomMode::Disabled => "None",
+                    AutoZoomMode::PeakApex => "Peak Score Apex",
+                    AutoZoomMode::QueryRange => "Query Range",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(auto_zoom_mode, AutoZoomMode::Disabled, "None")
+                        .clicked()
+                    {
+                        *auto_zoom_mode = AutoZoomMode::Disabled;
+                    }
+                    if ui
+                        .selectable_value(auto_zoom_mode, AutoZoomMode::PeakApex, "Peak Score Apex")
+                        .clicked()
+                    {
+                        *auto_zoom_mode = AutoZoomMode::PeakApex;
+                    }
+                    if ui
+                        .selectable_value(auto_zoom_mode, AutoZoomMode::QueryRange, "Query Range")
+                        .clicked()
+                    {
+                        *auto_zoom_mode = AutoZoomMode::QueryRange;
+                    }
+                });
+        });
     }
 
     pub fn title(&self) -> &str {

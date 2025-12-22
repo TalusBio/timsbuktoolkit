@@ -8,46 +8,50 @@ use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
     debug,
+    error,
     info,
     warn,
 };
 
 #[derive(Debug)]
 pub enum DiannReadingError {
-    IoError(std::io::Error),
-    CsvError(csv::Error),
-    DiannPrecursorParsingError(DiannPrecursorParsingError),
-    UnableToParseElutionGroups,
+    IoError,
+    CsvError,
+    DiannPrecursorParsingError,
 }
 
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
-    IonParsingError(IonParsingError),
-    IonAnnotParseError(String),
-    Other(String),
+    IonParsingError,
+    IonOverCapacity,
+    EmptyIonString,
+    Other,
 }
 
 impl From<IonParsingError> for DiannPrecursorParsingError {
     fn from(err: IonParsingError) -> Self {
-        DiannPrecursorParsingError::IonParsingError(err)
+        error!("Ion parsing error: {:?}", err);
+        DiannPrecursorParsingError::IonParsingError
     }
 }
 
 impl From<DiannPrecursorParsingError> for DiannReadingError {
-    fn from(err: DiannPrecursorParsingError) -> Self {
-        DiannReadingError::DiannPrecursorParsingError(err)
+    fn from(_err: DiannPrecursorParsingError) -> Self {
+        DiannReadingError::DiannPrecursorParsingError
     }
 }
 
 impl From<csv::Error> for DiannReadingError {
     fn from(err: csv::Error) -> Self {
-        DiannReadingError::CsvError(err)
+        error!("CSV reading error: {:?}", err);
+        DiannReadingError::CsvError
     }
 }
 
 impl From<std::io::Error> for DiannReadingError {
     fn from(err: std::io::Error) -> Self {
-        DiannReadingError::IoError(err)
+        error!("IO error: {:?}", err);
+        DiannReadingError::IoError
     }
 }
 
@@ -220,9 +224,8 @@ fn parse_precursor_group(
     buffers: &mut ParsingBuffers,
 ) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
-        return Err(DiannPrecursorParsingError::Other(
-            "Empty precursor group".to_string(),
-        ));
+        error!("Empty precursor group encountered on {id}");
+        return Err(DiannPrecursorParsingError::Other);
     }
 
     // All rows in this group share the same precursor info, so take first row
@@ -238,10 +241,8 @@ fn parse_precursor_group(
             .precursor_charge
             .try_into()
             .map_err(|e: std::num::TryFromIntError| {
-                DiannPrecursorParsingError::Other(format!(
-                    "Failed to convert PrecursorCharge to u8: {:?}",
-                    e
-                ))
+                error!("Failed to convert PrecursorCharge to u8: {:?}", e);
+                DiannPrecursorParsingError::IonOverCapacity
             })?;
 
     // Extract fragment information from all rows
@@ -256,10 +257,8 @@ fn parse_precursor_group(
             row.fragment_charge
                 .try_into()
                 .map_err(|e: std::num::TryFromIntError| {
-                    DiannPrecursorParsingError::Other(format!(
-                        "Failed to convert FragmentCharge to u8: {:?}",
-                        e
-                    ))
+                    error!("Failed to convert FragmentCharge to u8: {:?}", e);
+                    DiannPrecursorParsingError::IonOverCapacity
                 })?;
         let rel_intensity = row.relative_intensity;
 
@@ -278,16 +277,20 @@ fn parse_precursor_group(
             continue;
         }
 
-        let frag_char =
-            row.fragment_type.chars().next().ok_or_else(|| {
-                DiannPrecursorParsingError::Other("Empty fragment type".to_string())
-            })?;
+        let frag_char = row.fragment_type.chars().next().ok_or_else(|| {
+            error!(
+                "Empty FragmentType at row {}; cannot parse ion annotation",
+                i
+            );
+            DiannPrecursorParsingError::EmptyIonString
+        })?;
 
         let frag_num = row.fragment_number.try_into().map_err(|_| {
-            DiannPrecursorParsingError::Other(format!(
-                "Invalid fragment number: {}",
+            error!(
+                "Invalid fragment number (I expect all of then < 255): {}",
                 row.fragment_number
-            ))
+            );
+            DiannPrecursorParsingError::IonOverCapacity
         })?;
 
         let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
@@ -301,10 +304,8 @@ fn parse_precursor_group(
         0 => false,
         1 => true,
         other => {
-            return Err(DiannPrecursorParsingError::Other(format!(
-                "Unexpected Decoy value: {}",
-                other
-            )));
+            error!("Unexpected Decoy value: {}", other);
+            return Err(DiannPrecursorParsingError::Other);
         }
     };
 

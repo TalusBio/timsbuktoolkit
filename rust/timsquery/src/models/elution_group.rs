@@ -20,9 +20,13 @@ use tinyvec::TinyVec;
 #[builder(finish_fn(vis = "", name = try_build_internal))]
 pub struct TimsElutionGroup<T: KeyLike> {
     id: u64,
+    #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
+    #[serde(alias = "precursor")]
+    #[serde(alias = "precursor_mz")]
     precursor_mono_mz: f64,
+    #[serde(alias = "charge")]
     precursor_charge: u8,
 
     // The baseline size of TinyVec<T> is 24 bits. (due to the stack size of a Vec<T>)
@@ -45,8 +49,10 @@ pub struct TimsElutionGroup<T: KeyLike> {
     // the concrete type TimsElutionGroup<IonAnnot> but 408 bytes for TimsElutionGroup<String>
     //
     // In theory I can make this lighter if it was a genetic ...
+    #[serde(alias = "fragments")]
     fragment_mzs: Vec<f64>,
     fragment_labels: TinyVec<[T; 13]>,
+    #[serde(alias = "precursor_isotopes")]
     precursor_labels: TinyVec<[i8; 13]>,
 }
 

@@ -82,7 +82,7 @@ impl ChromatogramOutput {
         let cycle_offset = collector.cycle_offset();
         let (precursor_mzs, precursor_intensities): (Vec<f64>, Vec<Vec<f32>>) = collector
             .iter_mut_precursors()
-            .filter_map(|(&(idx, mz), cmg)| {
+            .filter_map(|(&(_idx, mz), cmg)| {
                 let out_vec = cmg
                     .try_get_slice(
                         local_non_zero_min_idx + cycle_offset,

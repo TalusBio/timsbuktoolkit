@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array,
     AsArray,
     BooleanArray,
     Float16Array,
@@ -43,9 +42,6 @@ pub struct ParquetQuerier {
 struct FilterPredicate {
     mz_range: Range<f32>,
     ims_range: Option<Range<f16>>,
-    index_mz: usize,
-    index_ims: usize,
-    file_metadata: Arc<ParquetMetaData>,
     projection_mask: parquet::arrow::ProjectionMask,
 }
 
@@ -66,9 +62,6 @@ impl FilterPredicate {
         Self {
             mz_range,
             ims_range,
-            index_mz,
-            index_ims,
-            file_metadata,
             projection_mask,
         }
     }

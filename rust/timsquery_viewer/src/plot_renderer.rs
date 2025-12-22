@@ -30,6 +30,7 @@ const REFERENCE_RT_BAND_WIDTH_SECONDS: f64 = 10.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlotMode {
     /// Show all traces (precursors + fragments)
+    #[allow(dead_code)]
     All,
     /// Show only precursor traces
     PrecursorsOnly,
@@ -37,10 +38,12 @@ pub enum PlotMode {
     FragmentsOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AutoZoomMode {
     Disabled,
+    #[default]
     PeakApex,
-    Range,
+    QueryRange,
 }
 
 #[derive(Debug)]
@@ -242,7 +245,7 @@ impl ScoreLines {
             if *auto_zoom_frame_counter > 0 {
                 // plot_ui.set_plot_bounds_x(self.rt_seconds_range.0..=self.rt_seconds_range.1);
                 match auto_zoom_mode {
-                    AutoZoomMode::Range => {
+                    AutoZoomMode::QueryRange => {
                         plot_ui
                             .set_plot_bounds_x(self.rt_seconds_range.0..=self.rt_seconds_range.1);
                         plot_ui.set_plot_bounds_y(0.0..=max_y);
@@ -484,7 +487,7 @@ pub fn render_chromatogram_plot(
         zoom_behavior(plot_ui, &scroll_delta);
         if *auto_zoom_frame_counter > 0 {
             match auto_zoom_mode {
-                AutoZoomMode::Range => {
+                AutoZoomMode::QueryRange => {
                     plot_ui.set_plot_bounds_x(
                         chromatogram.rt_seconds_range.0..=chromatogram.rt_seconds_range.1,
                     );
