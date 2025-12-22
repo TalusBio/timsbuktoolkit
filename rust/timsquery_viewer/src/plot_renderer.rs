@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui::Color32;
 use egui_plot::{
     Legend,
     Line,
@@ -146,7 +147,7 @@ impl ScoreLines {
         auto_zoom_frame_counter: &mut u8,
         auto_zoom_mode: &AutoZoomMode,
         // Lines to add vertical markers for
-        label_lines: &[(String, f64)],
+        label_lines: &[(String, f64, Color32)],
     ) -> Option<f64> {
         let (plot_id_top, plot_id_bot) = match link_group_id {
             Some(id) => (
@@ -193,8 +194,8 @@ impl ScoreLines {
         let mut clicked_rt = None;
 
         top_plot.include_y(0.0).show(ui, |plot_ui| {
-            for line in &self.lines {
-                plot_ui.line(line.to_plot_line());
+            for (idx, line) in self.lines.iter().enumerate() {
+                plot_ui.line(line.to_plot_line().color(get_palette1_colors(idx)));
             }
             plot_reflines(label_lines, plot_ui, 0.0, 1.0);
             zoom_behavior(plot_ui, &scroll_delta);
@@ -400,7 +401,7 @@ pub fn render_chromatogram_plot(
     auto_zoom_frame_counter: &mut u8,
     auto_zoom_mode: &AutoZoomMode,
     // Lines to add vertical markers for
-    label_lines: &[(String, f64)],
+    label_lines: &[(String, f64, Color32)],
 ) -> Option<f64> {
     let mut clicked_rt = None;
 
@@ -525,10 +526,70 @@ fn zoom_behavior(plot_ui: &mut egui_plot::PlotUi, scroll_delta: &egui::Vec2) {
         plot_ui.zoom_bounds_around_hovered(zoom_factor);
     }
 
-    let pointer_drag_delta = plot_ui.pointer_coordinate_drag_delta();
-    if pointer_drag_delta.x != 0.0 || pointer_drag_delta.y != 0.0 {
-        let pan_delta = egui::Vec2::new(-pointer_drag_delta.x, -pointer_drag_delta.y);
-        plot_ui.translate_bounds(pan_delta);
+    let shift_pressed = plot_ui.ctx().input(|i| i.modifiers.shift);
+
+    if shift_pressed {
+        // Shift-drag to zoom to selected x-axis region
+        if plot_ui.response().drag_started()
+            && let Some(start_pos) = plot_ui.pointer_coordinate()
+        {
+            plot_ui.ctx().data_mut(|d| {
+                d.insert_temp(egui::Id::new("zoom_drag_start"), start_pos.x);
+            });
+        }
+
+        if plot_ui.response().dragged() {
+            // Visual feedback - draw selection rectangle
+            if let Some(current_pos) = plot_ui.pointer_coordinate() {
+                let start_x = plot_ui
+                    .ctx()
+                    .data(|d| d.get_temp::<f64>(egui::Id::new("zoom_drag_start")));
+
+                if let Some(start_x) = start_x {
+                    let bounds = plot_ui.plot_bounds();
+                    let selection_rect = Polygon::new(
+                        "Zoom Selection",
+                        PlotPoints::new(vec![
+                            [start_x, bounds.min()[1]],
+                            [current_pos.x, bounds.min()[1]],
+                            [current_pos.x, bounds.max()[1]],
+                            [start_x, bounds.max()[1]],
+                        ]),
+                    )
+                    .fill_color(egui::Color32::from_rgba_premultiplied(100, 150, 255, 50))
+                    .stroke(egui::Stroke::new(
+                        1.5,
+                        egui::Color32::from_rgb(100, 150, 255),
+                    ));
+
+                    plot_ui.polygon(selection_rect);
+                }
+            }
+        }
+
+        if plot_ui.response().drag_stopped()
+            && let Some(end_pos) = plot_ui.pointer_coordinate()
+        {
+            let start_x = plot_ui
+                .ctx()
+                .data(|d| d.get_temp::<f64>(egui::Id::new("zoom_drag_start")));
+
+            if let Some(start_x) = start_x {
+                let x_min = start_x.min(end_pos.x);
+                let x_max = start_x.max(end_pos.x);
+
+                if (x_max - x_min).abs() > 1e-6 {
+                    plot_ui.set_plot_bounds_x(x_min..=x_max);
+                }
+            }
+        }
+    } else {
+        // Normal pan behavior when shift is not pressed
+        let pointer_drag_delta = plot_ui.pointer_coordinate_drag_delta();
+        if pointer_drag_delta.x != 0.0 || pointer_drag_delta.y != 0.0 {
+            let pan_delta = egui::Vec2::new(-pointer_drag_delta.x, -pointer_drag_delta.y);
+            plot_ui.translate_bounds(pan_delta);
+        }
     }
 }
 
@@ -555,18 +616,18 @@ fn clamp_bounds(plot_ui: &mut egui_plot::PlotUi, y_max_clamp: f64, x: (f64, f64)
 }
 
 fn plot_reflines(
-    label_lines: &[(String, f64)],
+    label_lines: &[(String, f64, Color32)],
     plot_ui: &mut egui_plot::PlotUi,
     min_y: f64,
     max_y: f64,
 ) {
-    for (label, rt_seconds) in label_lines {
+    for (label, rt_seconds, color) in label_lines {
         let vertical_line = Line::new(
             label.as_str(),
             PlotPoints::new(vec![[*rt_seconds, min_y], [*rt_seconds, max_y]]),
         )
-        .color(egui::Color32::from_rgb(254, 0, 0))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(254, 0, 0)))
+        .color(*color)
+        .stroke(egui::Stroke::new(1.0, *color))
         .style(egui_plot::LineStyle::dashed_loose());
         plot_ui.line(vertical_line);
     }
@@ -614,4 +675,13 @@ fn get_fragment_color(index: usize) -> egui::Color32 {
         egui::Color32::from_rgb(255, 140, 0),   // Dark Orange
     ];
     colors[index % colors.len()]
+}
+
+fn get_palette1_colors(idx: usize) -> egui::Color32 {
+    const COLORS: [&str; 5] = ["eac435", "345995", "03cea4", "fb4d3d", "ca1551"];
+    let color = COLORS[idx % COLORS.len()];
+    let r = u8::from_str_radix(&color[0..2], 16).unwrap();
+    let g = u8::from_str_radix(&color[2..4], 16).unwrap();
+    let b = u8::from_str_radix(&color[4..6], 16).unwrap();
+    egui::Color32::from_rgb(r, g, b)
 }

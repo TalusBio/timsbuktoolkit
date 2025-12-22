@@ -1,3 +1,4 @@
+use egui::Color32;
 use std::collections::HashMap;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::elution_group::TimsElutionGroup;
@@ -58,7 +59,7 @@ pub struct ComputedState {
     apex_finder_buffer: Option<ApexFinder>,
     cache_key: Option<(u64, Tolerance, SmoothingMethod)>,
     last_requested_rt: Option<f64>,
-    reference_lines: HashMap<String, f64>,
+    reference_lines: HashMap<String, (f64, Color32)>,
 }
 
 impl ComputedState {
@@ -83,11 +84,11 @@ impl ComputedState {
             }
             self.generate_spectrum(requested_rt);
             self.reference_lines
-                .insert("Clicked RT".into(), requested_rt);
+                .insert("Clicked RT".into(), (requested_rt, Color32::GREEN));
         }
     }
 
-    pub fn reference_lines(&self) -> &HashMap<String, f64> {
+    pub fn reference_lines(&self) -> &HashMap<String, (f64, Color32)> {
         &self.reference_lines
     }
 
@@ -138,7 +139,7 @@ impl ComputedState {
         self.expected_intensities = Some(expected_intensities.clone());
         self.reference_lines
             .entry("Library RT".into())
-            .or_insert(elution_group.rt_seconds() as f64);
+            .or_insert((elution_group.rt_seconds() as f64, Color32::BLUE));
 
         let collector = match self.chromatogram_collector_buffer.as_mut() {
             // I can probably clean this statement...
@@ -212,7 +213,7 @@ impl ComputedState {
         self.clicked_rt = Some(apex_score.retention_time_ms as f64 / 1000.0);
         self.reference_lines
             .entry("Apex RT".into())
-            .or_insert(apex_score.retention_time_ms as f64 / 1000.0);
+            .or_insert((apex_score.retention_time_ms as f64 / 1000.0, Color32::RED));
         self.score_lines = Some(ScoreLines::from_scores(
             apex_score,
             &apex_finder.traces,

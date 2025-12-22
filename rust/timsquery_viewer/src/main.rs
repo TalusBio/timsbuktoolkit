@@ -1,5 +1,6 @@
 mod app;
 mod chromatogram_processor;
+mod cli;
 mod computed_state;
 mod domain;
 mod error;
@@ -17,14 +18,6 @@ use std::fmt::Write as FMTWrite;
 use std::io::Write as IOWrite;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    /// Path to record session events to (or "-" for stdout)
-    #[arg(long)]
-    record_session: Option<String>,
-}
 
 #[cfg(target_os = "windows")]
 use mimalloc::MiMalloc;
@@ -58,7 +51,7 @@ fn setup_logger() {
 }
 
 fn main() -> eframe::Result {
-    let args = Cli::parse();
+    let args = cli::Cli::parse();
 
     setup_logger();
     let options = eframe::NativeOptions {
@@ -72,6 +65,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "TimsQuery Viewer",
         options,
-        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, &args)))),
     )
 }
