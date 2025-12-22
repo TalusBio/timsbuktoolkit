@@ -1,6 +1,6 @@
 [project]
 name = "timsseek-workspace"
-version = "0.19.0"
+version = "0.21.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "speclib_builder[ml]",
@@ -53,7 +53,7 @@ packages = [
 ]
 
 [tool.bumpver]
-current_version = "0.19.0"
+current_version = "0.21.0"
 version_pattern = "MAJOR.MINOR.PATCH[-PYTAGNUM]"
 tag_message = "v{new_version}"
 commit_message = "chore: bump version to {new_version}"
@@ -65,4 +65,3 @@ push = true
 "python/*/pyproject.toml" = ['version = "{version}"$']
 "pyproject.toml" = ['version = "{version}"$']
 "Cargo.toml" = ['version = "{version}"$']
-"rust/*/Cargo.toml" = ['version = "{version}"$']
