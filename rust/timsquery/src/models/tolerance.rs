@@ -45,17 +45,17 @@ pub struct Tolerance {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MzTolerance {
-    #[serde(rename = "da")]
+    #[serde(alias = "da")]
     Absolute((f64, f64)),
-    #[serde(rename = "ppm")]
+    #[serde(alias = "ppm")]
     Ppm((f64, f64)),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum RtTolerance {
-    #[serde(rename = "minutes")]
+    #[serde(alias = "minutes")]
     Minutes((f32, f32)),
-    #[serde(rename = "percent")]
+    #[serde(alias = "percent")]
     Pct((f32, f32)),
     #[default]
     Unrestricted,
@@ -63,16 +63,18 @@ pub enum RtTolerance {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MobilityTolerance {
-    #[serde(rename = "absolute")]
+    #[serde(alias = "absolute")]
     Absolute((f32, f32)),
-    #[serde(rename = "percent")]
+    #[serde(alias = "percent")]
+    #[serde(alias = "pct")]
     Pct((f32, f32)),
     Unrestricted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum QuadTolerance {
-    #[serde(rename = "absolute")]
+    #[serde(alias = "absolute")]
+    #[serde(alias = "da")]
     Absolute((f32, f32)),
 }
 

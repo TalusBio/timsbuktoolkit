@@ -1,5 +1,4 @@
 use crate::isotopes::peptide_isotopes;
-use rayon::prelude::*;
 use rustyms::prelude::{
     Element,
     MolecularFormula,
