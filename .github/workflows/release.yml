@@ -5,11 +5,13 @@ on:
     tags:
       - 'v?[0-9]+.*'
   pull_request:
-    types: [labeled]
+    # 'synchronize' triggers on every push to the PR
+    # 'reopened' triggers if you close and open the PR again
+    types: [labeled, synchronize, reopened]
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_BINARIES: timsseek timsquery_cli
+  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer
 
 jobs:
   build-and-release:
@@ -26,12 +28,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: linux-x86_64
-          - os: macos-latest
+          - os: macos-latest # M-series
             target: aarch64-apple-darwin
             artifact_name: macos-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: macos-x86_64
+          # - os: macos-latest
+          #   target: x86_64-apple-darwin
+          #   artifact_name: macos-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: windows-x64
@@ -71,8 +73,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           # Use the tag name for pushes, or a special 'pr-#' tag for PRs
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('pr-build-{0}', github.event.pull_request.number) }}
-          name: ${{ github.event_name == 'push' && github.ref_name || format('Pre-release Build (PR #{0})', github.event.pull_request.number) }}
+          tag_name: "${{ github.event_name == 'push' && github.ref_name || format('pr-build-{0}', github.event.pull_request.number) }}"
+          name: "${{ github.event_name == 'push' && github.ref_name || format('Pre-release Build (PR #{0})', github.event.pull_request.number) }}"
           # Mark as prerelease if it's a PR
           prerelease: ${{ github.event_name == 'pull_request' }}
           draft: false
