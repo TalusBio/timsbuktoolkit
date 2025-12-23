@@ -5,9 +5,6 @@ use serde::{
 use std::path::PathBuf;
 use timsquery::Tolerance;
 
-use crate::cli::Cli;
-use crate::errors;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub input: Option<InputConfig>,
@@ -38,30 +35,4 @@ pub struct AnalysisConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OutputConfig {
     pub directory: PathBuf,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DigestionConfig {
-    pub min_length: u32,
-    pub max_length: u32,
-    pub max_missed_cleavages: u32,
-    pub build_decoys: bool,
-}
-
-impl Default for DigestionConfig {
-    fn default() -> Self {
-        Self {
-            min_length: 7,
-            max_length: 30,
-            max_missed_cleavages: 2,
-            build_decoys: true,
-        }
-    }
-}
-
-impl Config {
-    #![allow(dead_code)]
-    pub fn with_cli_args(_config: Cli) -> Result<Self, errors::CliError> {
-        unimplemented!()
-    }
 }

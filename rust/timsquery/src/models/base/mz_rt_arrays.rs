@@ -178,6 +178,20 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         }
     }
 
+    pub fn clear_with_order(
+        &mut self,
+        order: Vec<(K, f64)>,
+        num_cycles: usize,
+        cycle_offset: usize,
+    ) {
+        let minor_dim = num_cycles;
+        let major_dim = order.len();
+        self.arr
+            .reset_with_value(minor_dim, major_dim, V::default());
+        self.mz_order = order;
+        self.cycle_offset = cycle_offset;
+    }
+
     /// The main purpose of this function is to preserve the allocation
     /// of the array but replace the data contained in it.
     pub fn try_reset_with(

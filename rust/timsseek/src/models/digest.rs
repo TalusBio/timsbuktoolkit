@@ -4,6 +4,7 @@ use super::decoy::{
 };
 use serde::Serialize;
 use std::collections::HashSet;
+use std::fmt::Display as FmtDisplay;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -82,6 +83,13 @@ impl DigestSlice {
             self.decoy,
             DecoyMarking::ReversedDecoy | DecoyMarking::NonReversedDecoy
         )
+    }
+}
+
+impl FmtDisplay for DigestSlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let local_str: String = self.clone().into();
+        write!(f, "{}", local_str)
     }
 }
 

@@ -1,22 +1,7 @@
 use crate::errors::DataProcessingError;
 use crate::utils::correlation::cosine_similarity;
-use timsquery::models::{
-    MzMajorIntensityArray,
-    RTMajorIntensityArray,
-};
+use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::key_like::KeyLike;
-
-// This is used to calculate the correlation with the theoretical intensity.
-// of either the isotope pattern or the predicted fragment intensities.
-pub fn calculate_cosine_with_ref<FH: KeyLike>(
-    slices: &RTMajorIntensityArray<FH, f32>,
-    ref_slice: &[f32],
-) -> Result<Vec<f32>, DataProcessingError> {
-    slices
-        .arr
-        .row_apply(|slice| cosine_similarity(slice, ref_slice))
-        .collect()
-}
 
 // From https://doi.org/10.1101/2024.11.19.624419
 const REF_GAUSSIAN: [f32; 7] = [0.0044, 0.054, 0.242, 0.399, 0.242, 0.054, 0.0044];

@@ -20,5 +20,8 @@ rayon = { workspace = true }
 half = { workspace = true }
 thiserror = { workspace = true } # User requested
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }

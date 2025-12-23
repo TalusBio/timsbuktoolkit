@@ -8,46 +8,50 @@ use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
     debug,
+    error,
     info,
     warn,
 };
 
 #[derive(Debug)]
 pub enum DiannReadingError {
-    IoError(std::io::Error),
-    CsvError(csv::Error),
-    DiannPrecursorParsingError(DiannPrecursorParsingError),
-    UnableToParseElutionGroups,
+    IoError,
+    CsvError,
+    DiannPrecursorParsingError,
 }
 
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
-    IonParsingError(IonParsingError),
-    IonAnnotParseError(String),
-    Other(String),
+    IonParsingError,
+    IonOverCapacity,
+    EmptyIonString,
+    Other,
 }
 
 impl From<IonParsingError> for DiannPrecursorParsingError {
     fn from(err: IonParsingError) -> Self {
-        DiannPrecursorParsingError::IonParsingError(err)
+        error!("Ion parsing error: {:?}", err);
+        DiannPrecursorParsingError::IonParsingError
     }
 }
 
 impl From<DiannPrecursorParsingError> for DiannReadingError {
-    fn from(err: DiannPrecursorParsingError) -> Self {
-        DiannReadingError::DiannPrecursorParsingError(err)
+    fn from(_err: DiannPrecursorParsingError) -> Self {
+        DiannReadingError::DiannPrecursorParsingError
     }
 }
 
 impl From<csv::Error> for DiannReadingError {
     fn from(err: csv::Error) -> Self {
-        DiannReadingError::CsvError(err)
+        error!("CSV reading error: {:?}", err);
+        DiannReadingError::CsvError
     }
 }
 
 impl From<std::io::Error> for DiannReadingError {
     fn from(err: std::io::Error) -> Self {
-        DiannReadingError::IoError(err)
+        error!("IO error: {:?}", err);
+        DiannReadingError::IoError
     }
 }
 
@@ -66,6 +70,7 @@ struct DiannLibraryRow {
     #[serde(rename = "ModifiedPeptide")]
     modified_peptide: String,
     #[serde(rename = "StrippedPeptide")]
+    #[serde(alias = "PeptideSequence")]
     stripped_peptide: String,
     #[serde(rename = "PrecursorMz")]
     precursor_mz: f64,
@@ -76,20 +81,25 @@ struct DiannLibraryRow {
     #[serde(rename = "IonMobility")]
     ion_mobility: f64,
     #[serde(rename = "ProteinID")]
+    #[serde(alias = "ProteinGroup")]
     protein_id: String,
     #[serde(rename = "Decoy")]
+    #[serde(alias = "decoy")]
     decoy: i32,
     #[serde(rename = "FragmentMz")]
+    #[serde(alias = "ProductMz")]
     fragment_mz: f64,
     #[serde(rename = "FragmentType")]
     fragment_type: String,
     #[serde(rename = "FragmentNumber")]
+    #[serde(alias = "FragmentSeriesNumber")]
     fragment_number: i32,
     #[serde(rename = "FragmentCharge")]
     fragment_charge: i32,
     #[serde(rename = "FragmentLossType")]
     fragment_loss_type: String,
     #[serde(rename = "RelativeIntensity")]
+    #[serde(alias = "LibraryIntensity")]
     relative_intensity: f32,
 }
 
@@ -105,25 +115,6 @@ impl DiannLibraryRow {
             && self.protein_id == other.protein_id
             && self.decoy == other.decoy
     }
-}
-
-fn required_columns() -> Vec<&'static str> {
-    vec![
-        "ModifiedPeptide",
-        "StrippedPeptide",
-        "PrecursorMz",
-        "PrecursorCharge",
-        "Tr_recalibrated",
-        "IonMobility",
-        "ProteinID",
-        "Decoy",
-        "FragmentMz",
-        "FragmentType",
-        "FragmentNumber",
-        "FragmentCharge",
-        "FragmentLossType",
-        "RelativeIntensity",
-    ]
 }
 
 pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
@@ -149,12 +140,29 @@ pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
     };
 
     let columns: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-    let required = required_columns();
 
-    // Check if all required columns are present
-    required
+    // Define required columns with their aliases
+    let required_with_aliases = vec![
+        vec!["ModifiedPeptide"],
+        vec!["StrippedPeptide", "PeptideSequence"],
+        vec!["PrecursorMz"],
+        vec!["PrecursorCharge"],
+        vec!["Tr_recalibrated"],
+        vec!["IonMobility"],
+        vec!["ProteinID", "ProteinGroup"],
+        vec!["Decoy", "decoy"],
+        vec!["FragmentMz", "ProductMz"],
+        vec!["FragmentType"],
+        vec!["FragmentNumber", "FragmentSeriesNumber"],
+        vec!["FragmentCharge"],
+        vec!["FragmentLossType"],
+        vec!["RelativeIntensity", "LibraryIntensity"],
+    ];
+
+    // Check if all required columns (or their aliases) are present
+    required_with_aliases
         .iter()
-        .all(|col| columns.contains(&col.to_string()))
+        .all(|aliases| aliases.iter().any(|col| columns.contains(&col.to_string())))
 }
 
 struct ParsingBuffers {
@@ -216,9 +224,8 @@ fn parse_precursor_group(
     buffers: &mut ParsingBuffers,
 ) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
-        return Err(DiannPrecursorParsingError::Other(
-            "Empty precursor group".to_string(),
-        ));
+        error!("Empty precursor group encountered on {id}");
+        return Err(DiannPrecursorParsingError::Other);
     }
 
     // All rows in this group share the same precursor info, so take first row
@@ -234,10 +241,8 @@ fn parse_precursor_group(
             .precursor_charge
             .try_into()
             .map_err(|e: std::num::TryFromIntError| {
-                DiannPrecursorParsingError::Other(format!(
-                    "Failed to convert PrecursorCharge to u8: {:?}",
-                    e
-                ))
+                error!("Failed to convert PrecursorCharge to u8: {:?}", e);
+                DiannPrecursorParsingError::IonOverCapacity
             })?;
 
     // Extract fragment information from all rows
@@ -252,10 +257,8 @@ fn parse_precursor_group(
             row.fragment_charge
                 .try_into()
                 .map_err(|e: std::num::TryFromIntError| {
-                    DiannPrecursorParsingError::Other(format!(
-                        "Failed to convert FragmentCharge to u8: {:?}",
-                        e
-                    ))
+                    error!("Failed to convert FragmentCharge to u8: {:?}", e);
+                    DiannPrecursorParsingError::IonOverCapacity
                 })?;
         let rel_intensity = row.relative_intensity;
 
@@ -274,16 +277,20 @@ fn parse_precursor_group(
             continue;
         }
 
-        let frag_char =
-            row.fragment_type.chars().next().ok_or_else(|| {
-                DiannPrecursorParsingError::Other("Empty fragment type".to_string())
-            })?;
+        let frag_char = row.fragment_type.chars().next().ok_or_else(|| {
+            error!(
+                "Empty FragmentType at row {}; cannot parse ion annotation",
+                i
+            );
+            DiannPrecursorParsingError::EmptyIonString
+        })?;
 
         let frag_num = row.fragment_number.try_into().map_err(|_| {
-            DiannPrecursorParsingError::Other(format!(
-                "Invalid fragment number: {}",
+            error!(
+                "Invalid fragment number (I expect all of then < 255): {}",
                 row.fragment_number
-            ))
+            );
+            DiannPrecursorParsingError::IonOverCapacity
         })?;
 
         let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
@@ -297,10 +304,8 @@ fn parse_precursor_group(
         0 => false,
         1 => true,
         other => {
-            return Err(DiannPrecursorParsingError::Other(format!(
-                "Unexpected Decoy value: {}",
-                other
-            )));
+            error!("Unexpected Decoy value: {}", other);
+            return Err(DiannPrecursorParsingError::Other);
         }
     };
 
@@ -443,5 +448,24 @@ mod tests {
 
         let _elution_groups = read_library_file(file_path).expect("Failed to read library");
         // TODO ... implement the actual assertions
+    }
+
+    #[test]
+    fn test_speclib2_tsv_parsing() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.tsv");
+
+        // Check that sniff detects it correctly
+        let is_diann = sniff_diann_library_file(&file_path);
+        assert!(
+            is_diann,
+            "speclib2 TSV file should be detected as DIA-NN library"
+        );
+
+        // This test mainly checks that the name aliases wotk correctly
+        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
     }
 }

@@ -3,6 +3,7 @@ use timscentroid::utils::OptionallyRestricted;
 use timscentroid::{
     CentroidingConfig,
     IndexedTimstofPeaks,
+    StorageLocation,
 };
 use timsrust::TimsTofPath;
 
@@ -66,7 +67,8 @@ fn main() {
     // Deserialize from disk
     println!("\n=== Deserialization ===");
     let start_read = std::time::Instant::now();
-    let index_loaded = IndexedTimstofPeaks::load_from_directory(output_dir).unwrap();
+    let location = StorageLocation::from_path(output_dir);
+    let index_loaded = IndexedTimstofPeaks::load_from_storage(location).unwrap();
     let read_time = start_read.elapsed();
 
     println!("Deserialization time: {:?}", read_time);
@@ -80,7 +82,10 @@ fn main() {
         "Speedup (load vs centroid): {:.1}x faster",
         centroid_time.as_secs_f64() / read_time.as_secs_f64()
     );
+    compare_results(&index_original, &index_loaded);
+}
 
+fn compare_results(index_original: &IndexedTimstofPeaks, index_loaded: &IndexedTimstofPeaks) {
     // Test querying on both to ensure functional equivalence
     println!("\n=== Query Test (Original) ===");
     let original_result = test_querying(&index_original);

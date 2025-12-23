@@ -6,14 +6,13 @@ members = [
     "rust/timscentroid",
     "rust/timsseek",
     "rust/timsseek_cli",
-    "rust/timsseek_rts",
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer"
 ]
 
 [workspace.package]
-version = "0.20.1"
+version = "0.22.0"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "Apache-2.0"
@@ -43,8 +42,10 @@ thiserror = "2"
 insta = { version = "1.34.0" }
 bon = "3.8.1"
 tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
-rustyms = "0.8.3"
+rustyms = "0.11.0"
 csv = "1.3"
+
+tempfile = "3.23.0"
 
 [profile.release]
 lto = 'thin'

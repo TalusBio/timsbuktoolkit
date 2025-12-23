@@ -101,14 +101,17 @@ impl<T> SetField<T> {
 }
 
 impl<'q> SearchResultBuilder<'q> {
-    pub fn with_candidate_context(mut self, candidate_context: &'q CandidateContext) -> Self {
+    pub fn with_candidate_context(
+        mut self,
+        candidate_context: &'q CandidateContext<IonAnnot, DigestSlice>,
+    ) -> Self {
         self.library_id = SetField::Some(candidate_context.query_values.eg.id() as u32);
-        self.digest_slice = SetField::Some(&candidate_context.digest);
+        self.digest_slice = SetField::Some(&candidate_context.label);
         self.ref_eg = SetField::Some(&candidate_context.query_values.eg);
         self.nqueries = SetField::Some(candidate_context.query_values.fragments.num_ions() as u8);
-        self.decoy_marking = SetField::Some(candidate_context.digest.decoy);
+        self.decoy_marking = SetField::Some(candidate_context.label.decoy);
         self.charge = SetField::Some(candidate_context.charge);
-        self.decoy_group_id = SetField::Some(candidate_context.digest.decoy_group);
+        self.decoy_group_id = SetField::Some(candidate_context.label.decoy_group);
         self
     }
 

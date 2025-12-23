@@ -1,17 +1,21 @@
 use crate::cli::PossibleAggregator;
+use crate::commands::JsonStreamSerializer;
 use crate::error::CliError;
 use rayon::iter::{
     ParallelDrainRange,
     ParallelIterator,
 };
-use serde::ser::SerializeSeq;
 use serde::{
     Deserialize,
     Serialize,
 };
-use std::sync::Arc;
+use std::fmt::Display;
+use std::io::Write;
 use timscentroid::IndexedTimstofPeaks;
-use timsquery::QueriableData;
+use timscentroid::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+};
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
@@ -20,6 +24,10 @@ use timsquery::models::aggregators::{
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::ChromatogramOutput;
+use timsquery::{
+    KeyLike,
+    QueriableData,
+};
 use tracing::{
     error,
     warn,
@@ -39,8 +47,8 @@ pub struct SpectrumOutput {
     precursor_labels: Vec<i8>,
 }
 
-impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
-    fn from(agg: &SpectralCollector<u8, f32>) -> Self {
+impl<T: KeyLike + Display> From<&SpectralCollector<T, f32>> for SpectrumOutput {
+    fn from(agg: &SpectralCollector<T, f32>) -> Self {
         let (fragment_mzs, fragment_intensities) = agg
             .iter_fragments()
             .map(|((_idx, mz), inten)| (mz, inten))
@@ -65,17 +73,17 @@ impl From<&SpectralCollector<u8, f32>> for SpectrumOutput {
     }
 }
 
-pub enum AggregatorContainer {
-    Point(Vec<PointIntensityAggregator<u8>>),
-    Chromatogram(Vec<ChromatogramCollector<u8, f32>>),
-    Spectrum(Vec<SpectralCollector<u8, f32>>),
+pub enum AggregatorContainer<T: KeyLike + Display> {
+    Point(Vec<PointIntensityAggregator<T>>),
+    Chromatogram(Vec<ChromatogramCollector<T, f32>>),
+    Spectrum(Vec<SpectralCollector<T, f32>>),
 }
 
-impl AggregatorContainer {
+impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn new(
-        queries: Vec<TimsElutionGroup<u8>>,
+        queries: Vec<TimsElutionGroup<T>>,
         aggregator: PossibleAggregator,
-        ref_rts: Arc<[u32]>,
+        ref_rts: &CycleToRTMapping<MS1CycleIndex>,
         tolerance: &Tolerance,
     ) -> Result<Self, CliError> {
         Ok(match aggregator {
@@ -91,15 +99,13 @@ impl AggregatorContainer {
                     .map(|x| {
                         let rt_range = match tolerance.rt_range_as_milis(x.rt_seconds()) {
                             timsquery::OptionallyRestricted::Unrestricted => {
-                                timsquery::TupleRange::try_new(
-                                    *ref_rts.first().unwrap(),
-                                    *ref_rts.last().unwrap(),
-                                )
-                                .expect("Reference RTs should be sorted and valid")
+                                let range = ref_rts.range_milis();
+                                timsquery::TupleRange::try_new(range.0, range.1)
+                                    .expect("Reference RTs should be sorted and valid")
                             }
                             timsquery::OptionallyRestricted::Restricted(r) => r,
                         };
-                        ChromatogramCollector::new(x, rt_range, &ref_rts)
+                        ChromatogramCollector::new(x, rt_range, ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -125,22 +131,23 @@ impl AggregatorContainer {
         }
     }
 
-    pub fn serialize_to_seq<S>(&mut self, seq: &mut S, ref_rts: &[u32]) -> Result<(), CliError>
-    where
-        S: SerializeSeq,
-    {
+    pub fn serialize_to_seq<W: Write>(
+        &mut self,
+        seq: &mut JsonStreamSerializer<W>,
+        ref_rts: &CycleToRTMapping<MS1CycleIndex>,
+    ) -> Result<(), CliError> {
         match self {
             AggregatorContainer::Point(aggregators) => {
                 for agg in aggregators {
-                    seq.serialize_element(agg).unwrap();
+                    seq.serialize(agg).unwrap();
                 }
             }
             AggregatorContainer::Chromatogram(aggregators) => {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
-                    .filter_map(|agg| {
+                    .filter_map(|mut agg| {
                         let agg_id = agg.eg.id();
-                        match ChromatogramOutput::try_new(agg, ref_rts) {
+                        match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
                                 // if !matches!(e, CliError::EmptyChromatogram(_)) {
@@ -172,13 +179,13 @@ impl AggregatorContainer {
                     .collect();
 
                 for ser_agg in converted_results {
-                    seq.serialize_element(&ser_agg).unwrap();
+                    seq.serialize(&ser_agg).unwrap();
                 }
             }
             AggregatorContainer::Spectrum(aggregators) => {
                 for agg in aggregators.iter() {
                     let ser_agg = SpectrumOutput::from(agg);
-                    seq.serialize_element(&ser_agg).unwrap();
+                    seq.serialize(&ser_agg).unwrap();
                 }
             }
         }

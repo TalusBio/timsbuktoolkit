@@ -2,19 +2,18 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use timscentroid::{
-    IndexedTimstofPeaks,
-    TimsTofPath,
-};
+use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_caching;
-use timsrust::MSLevel;
+use timsquery::serde::load_index_auto;
 use tracing::info;
 
 use crate::error::ViewerError;
 use crate::file_loader::ElutionGroupData;
 
 /// Service for loading files
+///
+/// JSPP: NGL ... this file is stupid ... should refactor to just have free functions
+/// instead of a struct with no state
 pub struct FileService;
 
 impl FileService {
@@ -32,29 +31,39 @@ impl FileService {
             res.len(),
             path.display()
         );
-        Ok(ElutionGroupData { inner: res })
+        Ok(ElutionGroupData::new(res))
     }
 
     /// Load and index raw timsTOF data
     ///
-    /// Note: This operation may take 10-30 seconds for large datasets.
+    /// Supports both local paths and cloud URLs (s3://, gs://, az://).
+    /// Automatically detects input type and loads appropriately.
+    ///
+    /// Note: This operation may take 10-30 seconds for large datasets when
+    /// loading from raw .d files. Cached .idx files load much faster.
     ///
     /// # Arguments
-    /// * `path` - Path to the .d directory
+    /// * `path` - Path to the .d directory, .idx cache, or cloud URL
     ///
     /// # Returns
-    /// A tuple of (indexed peaks, MS1 retention times in milliseconds)
-    pub fn load_raw_data(
-        path: &Path,
-    ) -> Result<(Arc<IndexedTimstofPeaks>, Arc<[u32]>), ViewerError> {
-        let index = load_index_caching(path).map_err(|e| ViewerError::DataLoading {
-            path: path.to_path_buf(),
-            source: Box::new(ViewerError::General(format!("{:?}", e))),
-        })?;
+    /// Indexed peaks loaded into memory
+    pub fn load_raw_data(path: &Path) -> Result<Arc<IndexedTimstofPeaks>, ViewerError> {
+        let path_str = path.to_str().ok_or_else(|| ViewerError::General(
+            "Invalid path encoding".to_string()
+        ))?;
 
-        let rts = Self::get_ms1_rts_as_millis(path)?;
+        let index = load_index_auto(path_str, None)
+            .map_err(|e| ViewerError::DataLoading {
+                path: path.to_path_buf(),
+                source: Box::new(ViewerError::General(format!("{:?}", e))),
+            })?
+            .into_eager()
+            .map_err(|e| ViewerError::DataLoading {
+                path: path.to_path_buf(),
+                source: Box::new(ViewerError::General(format!("{:?}", e))),
+            })?;
 
-        Ok((Arc::new(index), rts))
+        Ok(Arc::new(index))
     }
 
     /// Load tolerance settings from a JSON file
@@ -68,30 +77,6 @@ impl FileService {
         let file_content = std::fs::read_to_string(path)?;
         let tolerance: Tolerance = serde_json::from_str(&file_content)?;
         Ok(tolerance)
-    }
-
-    /// Retrieves MS1 retention times from a TIMS-TOF file, sorted and deduped
-    ///
-    /// # Arguments
-    /// * `path` - Path to the .d directory
-    ///
-    /// # Returns
-    /// MS1 retention times in milliseconds
-    fn get_ms1_rts_as_millis(path: &Path) -> Result<Arc<[u32]>, ViewerError> {
-        let ttp = TimsTofPath::new(path).map_err(|e| ViewerError::TimsFileLoad {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-        let reader = ttp.load_frame_reader()?;
-        let mut rts: Vec<_> = reader
-            .frame_metas
-            .iter()
-            .filter(|x| x.ms_level == MSLevel::MS1)
-            .map(|f| (f.rt_in_seconds * 1000.0).round() as u32)
-            .collect();
-        rts.sort_unstable();
-        rts.dedup();
-        Ok(rts.into())
     }
 }
 

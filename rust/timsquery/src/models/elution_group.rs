@@ -4,7 +4,6 @@ use crate::models::elution_group::tims_elution_group_builder::{
 };
 use crate::traits::KeyLike;
 use crate::utils::constants::NEUTRON_MASS;
-use bon::builder;
 use serde::{
     Deserialize,
     Serialize,
@@ -20,9 +19,13 @@ use tinyvec::TinyVec;
 #[builder(finish_fn(vis = "", name = try_build_internal))]
 pub struct TimsElutionGroup<T: KeyLike> {
     id: u64,
+    #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
+    #[serde(alias = "precursor")]
+    #[serde(alias = "precursor_mz")]
     precursor_mono_mz: f64,
+    #[serde(alias = "charge")]
     precursor_charge: u8,
 
     // The baseline size of TinyVec<T> is 24 bits. (due to the stack size of a Vec<T>)
@@ -45,8 +48,10 @@ pub struct TimsElutionGroup<T: KeyLike> {
     // the concrete type TimsElutionGroup<IonAnnot> but 408 bytes for TimsElutionGroup<String>
     //
     // In theory I can make this lighter if it was a genetic ...
+    #[serde(alias = "fragments")]
     fragment_mzs: Vec<f64>,
     fragment_labels: TinyVec<[T; 13]>,
+    #[serde(alias = "precursor_isotopes")]
     precursor_labels: TinyVec<[i8; 13]>,
 }
 
@@ -103,6 +108,11 @@ impl<T: KeyLike> TimsElutionGroup<T> {
 
     pub fn precursor_mz(&self) -> f64 {
         self.precursor_mono_mz
+    }
+
+    pub fn set_precursor_labels(&mut self, labels: impl Iterator<Item = i8>) {
+        self.precursor_labels.clear();
+        self.precursor_labels.extend(labels);
     }
 
     // NOTE: I am thinking about removing this and leave the rest as a trait
@@ -203,6 +213,22 @@ impl<T: KeyLike> TimsElutionGroup<T> {
         Self {
             mobility_ook0: mobility,
             ..self
+        }
+    }
+
+    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> TimsElutionGroup<U> {
+        let fragment_labels_converted: TinyVec<[U; 13]> =
+            self.fragment_labels.iter().map(f).collect();
+
+        TimsElutionGroup {
+            id: self.id,
+            mobility_ook0: self.mobility_ook0,
+            rt_seconds: self.rt_seconds,
+            precursor_mono_mz: self.precursor_mono_mz,
+            precursor_charge: self.precursor_charge,
+            fragment_mzs: self.fragment_mzs.clone(),
+            fragment_labels: fragment_labels_converted,
+            precursor_labels: self.precursor_labels.clone(),
         }
     }
 }

@@ -7,7 +7,9 @@ mod library_file;
 pub use chromatogram_output::*;
 pub use index_serde::*;
 pub use library_file::{
+    DiannPrecursorExtras,
     ElutionGroupCollection,
+    FileReadingExtras,
     LibraryReadingError,
     read_library_file,
 };

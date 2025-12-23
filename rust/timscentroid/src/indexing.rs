@@ -14,7 +14,14 @@ use timsrust::{
     FramePeaks,
     Metadata,
 };
+use tracing::instrument;
 
+use crate::rt_mapping::{
+    CycleToRTMapping,
+    MS1CycleIndex,
+    RTIndex,
+    WindowCycleIndex,
+};
 use crate::utils::OptionallyRestricted::{
     Restricted,
     Unrestricted,
@@ -43,11 +50,11 @@ use crate::geometry::QuadrupoleIsolationScheme;
 // Which is not horrendous tbh ...
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IndexedPeak {
+pub struct IndexedPeak<T: RTIndex> {
     pub mz: f32,
     pub intensity: f32,
     pub mobility_ook0: f16,
-    pub cycle_index: u32,
+    pub cycle_index: T,
 }
 
 /// Main struct of the whole crate.
@@ -60,8 +67,11 @@ pub struct IndexedPeak {
 /// 2. Query the peaks using [IndexedTimstofPeaks::query_peaks_ms1] or [IndexedTimstofPeaks::query_peaks_ms2]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexedTimstofPeaks {
-    pub(crate) ms2_window_groups: Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
-    pub(crate) ms1_peaks: IndexedPeakGroup,
+    pub(crate) ms2_window_groups: Vec<(
+        QuadrupoleIsolationScheme,
+        IndexedPeakGroup<WindowCycleIndex>,
+    )>,
+    pub(crate) ms1_peaks: IndexedPeakGroup<MS1CycleIndex>,
 }
 
 /// Statistics about the indexing process.
@@ -87,6 +97,36 @@ impl std::fmt::Display for IndexBuildingStats {
 }
 
 impl IndexedTimstofPeaks {
+    /// Create an IndexedTimstofPeaks from pre-built components.
+    ///
+    /// This is useful for testing - you can build the MS1 and MS2 groups
+    /// using `IndexedPeakGroup::new()` with mock data, then combine them here.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ms1_peaks = vec![/* ... */];
+    /// let (ms1_group, _) = IndexedPeakGroup::new(ms1_peaks, cycle_to_rt, 4096);
+    ///
+    /// let ms2_groups = vec![
+    ///     (quad_geometry1, ms2_group1),
+    ///     (quad_geometry2, ms2_group2),
+    /// ];
+    ///
+    /// let index = IndexedTimstofPeaks::from_parts(ms1_group, ms2_groups);
+    /// ```
+    pub fn from_parts(
+        ms1_peaks: IndexedPeakGroup<MS1CycleIndex>,
+        ms2_window_groups: Vec<(
+            QuadrupoleIsolationScheme,
+            IndexedPeakGroup<WindowCycleIndex>,
+        )>,
+    ) -> Self {
+        Self {
+            ms1_peaks,
+            ms2_window_groups,
+        }
+    }
+
     pub fn from_timstof_file(
         file: &TimsTofPath,
         centroiding_config: CentroidingConfig,
@@ -159,9 +199,9 @@ impl IndexedTimstofPeaks {
     pub fn query_peaks_ms1(
         &self,
         mz_range: TupleRange<f32>,
-        cycle_range: OptionallyRestricted<TupleRange<u32>>,
+        cycle_range: OptionallyRestricted<TupleRange<MS1CycleIndex>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> impl Iterator<Item = &IndexedPeak> {
+    ) -> impl Iterator<Item = &IndexedPeak<MS1CycleIndex>> {
         self.ms1_peaks.query_peaks(mz_range, cycle_range, im_range)
     }
 
@@ -181,17 +221,17 @@ impl IndexedTimstofPeaks {
         &self,
         precursor_range_mz: TupleRange<f32>,
         mz_range: TupleRange<f32>,
-        cycle_range: OptionallyRestricted<TupleRange<u32>>,
+        cycle_range: OptionallyRestricted<TupleRange<WindowCycleIndex>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<
         Item = (
             &QuadrupoleIsolationScheme,
-            impl Iterator<Item = &IndexedPeak>,
+            impl Iterator<Item = &IndexedPeak<WindowCycleIndex>>,
         ),
     > {
         self.filter_precursor_ranges(precursor_range_mz, im_range)
             .map(move |(wg_info, peak_group)| {
-                let im_range = im_range.map(|r| {
+                let local_im_range = im_range.map(|r| {
                     wg_info
                         .intersects_ranges(
                             (
@@ -209,7 +249,7 @@ impl IndexedTimstofPeaks {
 
                 (
                     wg_info,
-                    peak_group.query_peaks(mz_range, cycle_range, im_range),
+                    peak_group.query_peaks(mz_range, cycle_range, local_im_range),
                 )
             })
     }
@@ -218,7 +258,12 @@ impl IndexedTimstofPeaks {
         &self,
         precursor_range_mz: TupleRange<f32>,
         ion_mobility_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> impl Iterator<Item = &(QuadrupoleIsolationScheme, IndexedPeakGroup)> {
+    ) -> impl Iterator<
+        Item = &(
+            QuadrupoleIsolationScheme,
+            IndexedPeakGroup<WindowCycleIndex>,
+        ),
+    > {
         let f64_mz_range = (
             precursor_range_mz.start() as f64,
             precursor_range_mz.end() as f64,
@@ -230,11 +275,12 @@ impl IndexedTimstofPeaks {
         })
     }
 
-    pub fn rt_ms_to_cycle_index(&self, rt_ms: u32) -> u32 {
-        // Q: do I need to clamp to 0-max cycle index?
-        self.ms1_peaks
-            .cycle_to_rt_ms
-            .partition_point(|x| *x <= rt_ms) as u32
+    pub fn ms1_cycle_mapping(&self) -> &CycleToRTMapping<MS1CycleIndex> {
+        &self.ms1_peaks.cycle_to_rt_ms
+    }
+
+    pub fn rt_ms_to_cycle_index(&self, rt_ms: u32) -> MS1CycleIndex {
+        self.ms1_peaks.cycle_to_rt_ms.ms_to_closest_index(rt_ms)
     }
 
     /// Read MS1 frames and return an IndexedPeakGroup along with building stats.
@@ -244,7 +290,10 @@ impl IndexedTimstofPeaks {
         frame_reader: &FrameReader,
         metadata: &Metadata,
         centroiding_config: CentroidingConfig,
-    ) -> (IndexedPeakGroup, IndexedPeakGroupBuildingStats) {
+    ) -> (
+        IndexedPeakGroup<MS1CycleIndex>,
+        IndexedPeakGroupBuildingStats,
+    ) {
         IndexedPeakGroup::read_with_filter(
             frame_reader,
             metadata,
@@ -259,7 +308,10 @@ impl IndexedTimstofPeaks {
         centroiding_config: CentroidingConfig,
     ) -> Result<
         (
-            Vec<(QuadrupoleIsolationScheme, IndexedPeakGroup)>,
+            Vec<(
+                QuadrupoleIsolationScheme,
+                IndexedPeakGroup<WindowCycleIndex>,
+            )>,
             IndexedPeakGroupBuildingStats,
         ),
         (),
@@ -305,20 +357,22 @@ impl IndexedTimstofPeaks {
 /// Represents a group of indexed peaks, organized into buckets based on m/z ranges.
 /// Each bucket internally sorted by retention time (rt).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct IndexedPeakGroup {
-    pub(crate) peaks: Vec<IndexedPeak>,
+pub struct IndexedPeakGroup<T: RTIndex> {
+    pub(crate) peaks: Vec<IndexedPeak<T>>,
     pub(crate) bucket_mz_ranges: Vec<TupleRange<f32>>,
     pub(crate) bucket_size: usize,
-    pub(crate) cycle_to_rt_ms: Vec<u32>,
+    pub(crate) cycle_to_rt_ms: CycleToRTMapping<T>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PeakBucket<'a> {
-    inner: &'a [IndexedPeak],
+struct PeakBucket<'a, T: RTIndex> {
+    inner: &'a [IndexedPeak<T>],
 }
 
-impl<'a> PeakBucket<'a> {
-    fn find_cycle_range(&'a self, cycle_range: TupleRange<u32>) -> std::ops::Range<usize> {
+impl<'a, T: RTIndex> PeakBucket<'a, T> {
+    // Returns a range such that all peaks within self.inner[range]
+    // have cycle_index within the provided cycle_range.
+    fn find_cycle_range(&'a self, cycle_range: TupleRange<T>) -> std::ops::Range<usize> {
         let start_idx = self
             .inner
             .partition_point(|x| x.cycle_index < cycle_range.start());
@@ -332,8 +386,11 @@ impl<'a> PeakBucket<'a> {
     }
 }
 
-impl<'a> From<&'a [IndexedPeak]> for PeakBucket<'a> {
-    fn from(value: &'a [IndexedPeak]) -> Self {
+impl<'a, T: RTIndex> From<&'a [IndexedPeak<T>]> for PeakBucket<'a, T> {
+    /// NOTE: by calling this you are ASSURING that the input slice is sorted by cycle_index
+    /// If this is not the case the behavior of methods on PeakBucket is undefined.
+    /// or will panic!
+    fn from(value: &'a [IndexedPeak<T>]) -> Self {
         assert!(value.first().unwrap().cycle_index <= value.last().unwrap().cycle_index);
         Self { inner: value }
     }
@@ -404,52 +461,98 @@ impl IndexedPeakGroupBuildingStats {
     }
 }
 
-impl IndexedPeakGroup {
+impl<T: RTIndex> IndexedPeakGroup<T> {
     /// Query peaks based on m/z, rt, and im ranges.
     pub fn query_peaks(
         &self,
         mz_range: TupleRange<f32>,
-        cycle_range: OptionallyRestricted<TupleRange<u32>>,
+        cycle_range: OptionallyRestricted<TupleRange<T>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
-    ) -> impl Iterator<Item = &IndexedPeak> {
+    ) -> impl Iterator<Item = &IndexedPeak<T>> {
         QueryPeaksIterator::new(self, mz_range, cycle_range, im_range)
     }
 
     /// Create a new IndexedPeakGroup from a vector of peaks.
     ///
+    /// This is the **canonical** way to build an IndexedPeakGroup - all bucketing
+    /// logic lives here to ensure consistency.
+    ///
     /// NOTE: This internally uses `par_sort_unstable` to sort the peaks
     /// so in theory it should not be called within a parallel loop.
+    #[instrument(level = "info", skip_all, fields(num_peaks = peaks.len()))]
     pub(crate) fn new(
-        mut peaks: Vec<IndexedPeak>,
-        cycle_to_rt_ms: Vec<u32>,
+        mut peaks: Vec<IndexedPeak<T>>,
+        cycle_to_rt_ms: CycleToRTMapping<T>,
         bucket_size: usize,
     ) -> (Self, IndexedPeakGroupStats) {
+        // TODO: Implement a "try_from_parts" that does not do any sorting or bucketing
+        // but requires the user to pass the ranges.
+        // I need to add serialization to that so we can read it.
         let st = std::time::Instant::now();
-        peaks.par_sort_unstable_by(|x, y| x.mz.partial_cmp(&y.mz).unwrap());
-        let sort_time = st.elapsed();
-        assert!(peaks.first().unwrap().mz <= peaks.last().unwrap().mz);
+
+        // This is meant to be a "fast-pass-check" in case the peaks had been previously sorted
+        // into buckets (like using ::new and then ::unpack/::pack or serialization/deserialization)
+        let needs_sorting = !Self::check_bucket_sorted_heuristic(&peaks, bucket_size);
+        // let needs_sorting = true;
+        if needs_sorting {
+            peaks.par_sort_unstable_by(|x, y| x.mz.partial_cmp(&y.mz).unwrap());
+            // If we have a single bucket that has already been sorted in "index order"
+            // the last can be less than the first! (since the re-sort internally sorts by cycle_index)
+            assert!(
+                peaks.first().unwrap().mz <= peaks.last().unwrap().mz,
+                "Peaks should be sorted by m/z after sorting step {:?} - {:?} [{};{}]",
+                peaks.first().unwrap(),
+                peaks.last().unwrap(),
+                peaks.len(),
+                bucket_size
+            );
+        }
+        // These are a bit slow tbh ...
+        // But I really want to be alerted if something is wrong
+        // and at the end of the day its less than 40ms even for large datasets
+        // and happens max 20 times per file.
         assert!(peaks.iter().all(|x| x.intensity >= 0.0));
-        assert!(
-            peaks
-                .iter()
-                .all(|x| x.cycle_index < cycle_to_rt_ms.len() as u32)
-        );
+        let max_cycle = T::new(cycle_to_rt_ms.len() as u32 - 1);
+        assert!(peaks.iter().all(|x| x.cycle_index <= max_cycle));
+        let sort_time = st.elapsed();
 
         let st = std::time::Instant::now();
         let bucket_mz_ranges: Vec<_> = peaks
             .par_chunks_mut(bucket_size)
             .map(|chunk| {
-                let start = chunk.first().unwrap().mz;
-                let end = chunk.last().unwrap().mz;
-                chunk.sort_unstable_by(|x, y| {
-                    x.cycle_index
-                        .partial_cmp(&y.cycle_index)
-                        .unwrap()
-                        .then(x.mobility_ook0.partial_cmp(&y.mobility_ook0).unwrap())
-                });
+                let (start, end) = if needs_sorting {
+                    let start = chunk.first().unwrap().mz;
+                    let end = chunk.last().unwrap().mz;
+                    chunk.sort_unstable_by(|x, y| {
+                        x.cycle_index
+                            .partial_cmp(&y.cycle_index)
+                            .unwrap()
+                            .then(x.mobility_ook0.partial_cmp(&y.mobility_ook0).unwrap())
+                    });
+                    (start, end)
+                } else {
+                    let mut start = f32::MAX;
+                    let mut end = f32::MIN;
+                    for peak in chunk.iter() {
+                        if peak.mz < start {
+                            start = peak.mz;
+                        }
+                        if peak.mz > end {
+                            end = peak.mz;
+                        }
+                    }
+                    (start, end)
+                };
                 TupleRange::try_new(start, end).expect("Incoming vec should have been sorted")
             })
             .collect();
+
+        if needs_sorting {
+            assert!(
+                Self::check_bucket_sorted_heuristic(&peaks, bucket_size),
+                "Peaks should be bucket sorted after bucketing step"
+            );
+        }
 
         let bucket_time = st.elapsed();
 
@@ -469,11 +572,87 @@ impl IndexedPeakGroup {
         (tmp, stats)
     }
 
+    #[instrument(level = "info", skip_all, fields(num_peaks = peaks.len(), result))]
+    /// After some benchmarking this can take ~30ms in the worst case for large datasets.
+    /// where the data is already in the correct order.
+    /// The fail fast path (most first-time builds will be unsorted) is 17us.
+    pub fn check_bucket_sorted_heuristic(peaks: &[IndexedPeak<T>], bucket_size: usize) -> bool {
+        // We check that:
+        // 1. the max value of each bucket is <= min value of the next bucket
+        // 2. each bucket is sorted by cycle_index
+        let mut last_max = f32::MIN;
+        let buckets_ordered = peaks.chunks(bucket_size).all(|bucket| {
+            let curr_min = bucket
+                .iter()
+                .map(|x| x.mz)
+                .fold(f32::INFINITY, |a, b| a.min(b));
+            if curr_min < last_max {
+                return false;
+            }
+            let curr_max = bucket
+                .iter()
+                .map(|x| x.mz)
+                .fold(f32::NEG_INFINITY, |a, b| a.max(b));
+            last_max = curr_max;
+            true
+        });
+        if !buckets_ordered {
+            tracing::Span::current().record("result", false);
+            return false;
+        }
+
+        let internally_sorted_heuristic: bool =
+            peaks.chunks(bucket_size).enumerate().all(|(i, x)| {
+                if i == 0 {
+                    // Do the full check for the first bucket
+                    return x.windows(2).all(|w| w[0].cycle_index <= w[1].cycle_index);
+                }
+                let first_val = x.first().unwrap().cycle_index;
+                let last_val = x.last().unwrap().cycle_index;
+                last_val >= first_val
+            });
+
+        let res = internally_sorted_heuristic && buckets_ordered;
+        tracing::Span::current().record("result", res);
+        res
+    }
+
+    pub fn unpack(self) -> (Vec<IndexedPeak<T>>, Vec<u32>, usize, Vec<TupleRange<f32>>) {
+        let Self {
+            peaks,
+            bucket_mz_ranges,
+            bucket_size,
+            cycle_to_rt_ms,
+        } = self;
+        (
+            peaks,
+            cycle_to_rt_ms.unpack(),
+            bucket_size,
+            bucket_mz_ranges,
+        )
+    }
+
+    /// Create a new IndexedPeakGroup for testing purposes.
+    ///
+    /// I only make this public for testing - in real use cases
+    /// You should never be used
+    #[doc(hidden)]
+    pub fn testing_new(
+        peaks: Vec<IndexedPeak<T>>,
+        cycle_to_rt_ms: CycleToRTMapping<T>,
+        bucket_size: usize,
+    ) -> (Self, IndexedPeakGroupStats) {
+        if cfg!(test) {
+            panic!("Not intended to run in production code")
+        }
+        Self::new(peaks, cycle_to_rt_ms, bucket_size)
+    }
+
     fn aproximate_memory_usage(&self) -> usize {
         let self_mem = std::mem::size_of::<Self>();
         let bucket_mem =
             std::mem::size_of::<TupleRange<f32>>() * (self.bucket_mz_ranges.capacity());
-        let peak_mem = self.peaks.capacity() * std::mem::size_of::<IndexedPeak>();
+        let peak_mem = self.peaks.capacity() * std::mem::size_of::<IndexedPeak<T>>();
         self_mem + bucket_mem + peak_mem
     }
 
@@ -523,10 +702,7 @@ impl IndexedPeakGroup {
     }
 
     /// Read frames from a FrameReader that match a given filter function.
-    #[tracing::instrument(
-        level = "debug",
-        skip(frame_reader, metadata, filter, centroiding_config)
-    )]
+    #[tracing::instrument(level = "debug", skip_all)]
     fn read_with_filter(
         frame_reader: &FrameReader,
         metadata: &Metadata,
@@ -599,13 +775,13 @@ impl IndexedPeakGroup {
                             mz,
                             intensity,
                             mobility_ook0,
-                            cycle_index,
+                            cycle_index: T::new(cycle_index),
                         }
                     });
                     // let res_arc = all_peaks.clone();
                     // let mut res = res_arc.lock().unwrap();
                     // res.extend(tmp);
-                    Ok((tmp.collect::<Vec<IndexedPeak>>(), reason))
+                    Ok((tmp.collect::<Vec<IndexedPeak<T>>>(), reason))
                 },
             )
             .map(|x| match x {
@@ -640,7 +816,8 @@ impl IndexedPeakGroup {
         // In theory there should be no zeros ...
 
         // 2**12 = 4096 peaks per bucket
-        let (out, stats) = IndexedPeakGroup::new(inner_vec, cycle_to_rt_ms, 2usize.pow(12));
+        let cycle_mapping = CycleToRTMapping::new(cycle_to_rt_ms);
+        let (out, stats) = IndexedPeakGroup::new(inner_vec, cycle_mapping, 2usize.pow(12));
         (
             out,
             IndexedPeakGroupBuildingStats {
@@ -664,7 +841,7 @@ impl IndexedPeakGroup {
 
     /// Get a specific bucket by its index.
     /// Returns None if the index is out of bounds.
-    fn get_bucket(&self, bucket_idx: usize) -> Option<PeakBucket<'_>> {
+    fn get_bucket(&self, bucket_idx: usize) -> Option<PeakBucket<'_, T>> {
         self.get_bucket_range(bucket_idx)
             .map(|r| PeakBucket::from(&self.peaks[r]))
     }
@@ -682,7 +859,7 @@ impl IndexedPeakGroup {
     fn print_glimpse(&self) {
         let num_buckets = self.bucket_mz_ranges.len();
         let num_peaks = self.peaks.len();
-        let mem_usage = num_peaks * std::mem::size_of::<IndexedPeak>();
+        let mem_usage = num_peaks * std::mem::size_of::<IndexedPeak<T>>();
         println!("IndexedPeakGroup Glimpse:");
         println!("  Number of peaks: {}", num_peaks);
         println!("  Number of buckets: {}", num_buckets);
@@ -698,23 +875,23 @@ impl IndexedPeakGroup {
 /// from attempting a flat map over multiple iterators that borrow from self
 /// when querying the peaks.
 #[derive(Debug)]
-struct QueryPeaksIterator<'a> {
-    indexed_window_group: &'a IndexedPeakGroup,
+struct QueryPeaksIterator<'a, T: RTIndex> {
+    indexed_window_group: &'a IndexedPeakGroup<T>,
     mz_range: TupleRange<f32>,
-    cycle_range: OptionallyRestricted<TupleRange<u32>>,
+    cycle_range: OptionallyRestricted<TupleRange<T>>,
     im_range: OptionallyRestricted<TupleRange<f16>>,
     bucket_idx: usize,
     bucket_end: usize,
     position_in_bucket: usize,
     end_of_current_bucket: usize,
-    current_bucket: Option<PeakBucket<'a>>,
+    current_bucket: Option<PeakBucket<'a, T>>,
 }
 
-impl<'a> QueryPeaksIterator<'a> {
+impl<'a, T: RTIndex> QueryPeaksIterator<'a, T> {
     pub fn new(
-        indexed_window_group: &'a IndexedPeakGroup,
+        indexed_window_group: &'a IndexedPeakGroup<T>,
         mz_range: TupleRange<f32>,
-        cycle_range: OptionallyRestricted<TupleRange<u32>>,
+        cycle_range: OptionallyRestricted<TupleRange<T>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> Self {
         let bucket_range = indexed_window_group.query_bucket_range(mz_range);
@@ -733,7 +910,10 @@ impl<'a> QueryPeaksIterator<'a> {
     }
 }
 
-impl<'a> QueryPeaksIterator<'a> {
+impl<'a, T: RTIndex> QueryPeaksIterator<'a, T> {
+    // Advance to the next bucket that matches the m/z range.
+    // None if there are no more buckets.
+    // Returns the index of the advanced bucket.
     fn advance_bucket(&mut self) -> Option<usize> {
         if self.bucket_idx >= self.bucket_end {
             return None;
@@ -758,7 +938,7 @@ impl<'a> QueryPeaksIterator<'a> {
         Some(self.bucket_idx - 1)
     }
 
-    fn next_in_current_bucket(&mut self) -> Option<&'a IndexedPeak> {
+    fn next_in_current_bucket(&mut self) -> Option<&'a IndexedPeak<T>> {
         // Use a loop instead of recursion to avoid stack overflow when many
         // consecutive peaks don't match the filter criteria (common in dense spectra).
         while let Some(bucket) = self.current_bucket.as_ref() {
@@ -783,8 +963,8 @@ impl<'a> QueryPeaksIterator<'a> {
     }
 }
 
-impl<'a> Iterator for QueryPeaksIterator<'a> {
-    type Item = &'a IndexedPeak;
+impl<'a, T: RTIndex> Iterator for QueryPeaksIterator<'a, T> {
+    type Item = &'a IndexedPeak<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -805,13 +985,13 @@ mod tests {
     use super::*;
     use half::f16;
 
-    fn tuples_to_peaks(data: &[(f32, f32, f32, u32)]) -> Vec<IndexedPeak> {
+    fn tuples_to_peaks<T: RTIndex>(data: &[(f32, f32, f32, u32)]) -> Vec<IndexedPeak<T>> {
         data.iter()
-            .map(|&(mz, intensity, im, cycle_index)| IndexedPeak {
+            .map(|&(mz, intensity, im, cycle_index)| IndexedPeak::<T> {
                 mz,
                 intensity,
                 mobility_ook0: f16::from_f32(im),
-                cycle_index,
+                cycle_index: T::new(cycle_index),
             })
             .collect()
     }
@@ -828,13 +1008,13 @@ mod tests {
             (100.0, 400.0, 1.0, 4u32),
         ];
 
-        let peaks = tuples_to_peaks(&test_data);
-        let bucket = PeakBucket::from(&peaks[..]);
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&test_data);
+        let bucket = PeakBucket::<MS1CycleIndex>::from(&peaks[..]);
         // let rt_range: std::ops::Range<u32> = 1900..4100;
-        let cycle_range = (1, 3);
+        let cycle_range = (MS1CycleIndex::new(1), MS1CycleIndex::new(3));
         let rt_idx_range = bucket.find_cycle_range(cycle_range.try_into().unwrap());
         let out: Vec<_> = bucket.inner[rt_idx_range].to_vec();
-        let expected = tuples_to_peaks(&[
+        let expected = tuples_to_peaks::<MS1CycleIndex>(&[
             (100.0, 250.0, 1.0, 1),
             (100.0, 250.0, 1.0, 1),
             (100.0, 250.0, 1.0, 1),
@@ -843,5 +1023,55 @@ mod tests {
         ]);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_checking_bucketing() {
+        let test_data = vec![
+            // mz, intensity, im, cycle_index
+            // So everything here is sorted by both mz and cycle_index
+            (100.0, 200.0, 1.0, 0u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (150.0, 300.0, 1.0, 2u32),
+            (150.0, 350.0, 1.0, 3u32),
+            (200.0, 400.0, 1.0, 4u32),
+        ];
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&test_data);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 4);
+        assert!(check_res);
+
+        let test_data = vec![
+            // mz, intensity, im, cycle_index
+            // all mz's from bucket N are less than (or equal to) all mz's from bucket N+1
+            (200.0, 200.0, 1.0, 0u32),
+            (100.0, 250.0, 1.0, 2u32),
+            (50.0, 250.0, 1.0, 23u32),
+            // End bucket 1 (internally sorted by cycle, not mz)
+            (2000.0, 250.0, 1.0, 1u32),
+            (1900.0, 300.0, 1.0, 2u32),
+            (1800.0, 350.0, 1.0, 3u32),
+            // End bucket 2
+            (20_000.0, 400.0, 1.0, 4u32),
+        ];
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&test_data);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 3);
+        assert!(check_res);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 2);
+        // This should fail because in bucket 2 we have mz's less than in bucket 1
+        assert!(!check_res);
+        // Any bucket number other than 3 should fail
+        for bucket_size in [1, 2, 4, 5, 10] {
+            if bucket_size != 3 {
+                let check_res =
+                    IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, bucket_size);
+                assert!(
+                    !check_res,
+                    "Bucket size {} should fail the check",
+                    bucket_size
+                );
+            }
+        }
     }
 }

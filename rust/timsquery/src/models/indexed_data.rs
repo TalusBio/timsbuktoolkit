@@ -74,10 +74,16 @@ use crate::traits::{
 };
 use crate::{
     KeyLike,
+    OptionallyRestricted,
     Tolerance,
 };
 use half::f16;
 use timscentroid::IndexedTimstofPeaks;
+use timscentroid::rt_mapping::{
+    MS1CycleIndex,
+    RTIndex,
+    WindowCycleIndex,
+};
 use timscentroid::utils::OptionallyRestricted::{
     Restricted,
     Unrestricted,
@@ -110,6 +116,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
                 });
         });
 
+        let ms2_cycle_range = ms1_to_ms2_cycle_range(&cycle_range);
         self.filter_precursor_ranges(quad_range, im_range)
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = im_range.map(|x| {
@@ -127,7 +134,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
                 aggregator.eg.iter_fragments_refs().for_each(|(_idx, mz)| {
                     let mz_range = tolerance.mz_range_f32(*mz as f32);
                     peaks
-                        .query_peaks(mz_range, cycle_range, constrained_im)
+                        .query_peaks(mz_range, ms2_cycle_range, constrained_im)
                         .for_each(|peak| {
                             aggregator.intensity += peak.intensity as f64;
                         });
@@ -167,9 +174,10 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
             .for_each(|((_idx, mz), mut chr)| {
                 let mz_range = tolerance.mz_range_f32(*mz as f32);
                 self.query_peaks_ms1(mz_range, cycle_range, im_range)
-                    .for_each(|peak| chr.add_at_index(peak.cycle_index, peak.intensity));
+                    .for_each(|peak| chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity));
             });
 
+        let ms2_cycle_range = ms1_to_ms2_cycle_range(&cycle_range);
         self.filter_precursor_ranges(quad_range, im_range)
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = im_range.map(|x| {
@@ -193,9 +201,9 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
 
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
                         peaks
-                            .query_peaks(mz_range, cycle_range, constrained_im)
+                            .query_peaks(mz_range, ms2_cycle_range, constrained_im)
                             .for_each(|x| {
-                                chr.add_at_index(x.cycle_index, x.intensity);
+                                chr.add_at_index(x.cycle_index.as_u32(), x.intensity);
                             });
                     });
             })
@@ -229,6 +237,8 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
                     });
             });
 
+        let ms2_cycle_range = ms1_to_ms2_cycle_range(&cycle_range);
+
         self.filter_precursor_ranges(quad_range, im_range)
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = im_range.map(|x| {
@@ -251,7 +261,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
                         // TODO: Fix later ...
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
                         peaks
-                            .query_peaks(mz_range, cycle_range, constrained_im)
+                            .query_peaks(mz_range, ms2_cycle_range, constrained_im)
                             .for_each(|x| {
                                 *ion += x.intensity;
                             });
@@ -261,7 +271,9 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
 }
 
 // This is some ugly copy-pasted code but I will fix it later if I have to ...
-impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>> for IndexedTimstofPeaks {
+impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
+    QueriableData<SpectralCollector<FH, V>> for IndexedTimstofPeaks
+{
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
         let prec_mz_limits = aggregator.eg.get_precursor_mz_limits();
         let quad_range =
@@ -288,6 +300,8 @@ impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>> for In
                     });
             });
 
+        let ms2_cycle_range = ms1_to_ms2_cycle_range(&cycle_range);
+
         self.filter_precursor_ranges(quad_range, im_range)
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = im_range.map(|x| {
@@ -310,11 +324,29 @@ impl<FH: KeyLike, V: PeakAddable> QueriableData<SpectralCollector<FH, V>> for In
                         // TODO: Fix later ...
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
                         peaks
-                            .query_peaks(mz_range, cycle_range, constrained_im)
+                            .query_peaks(mz_range, ms2_cycle_range, constrained_im)
                             .for_each(|x| {
                                 *ion += *x;
                             });
                     });
             });
+    }
+}
+
+fn ms1_to_ms2_cycle_range(
+    cycle_range: &OptionallyRestricted<TupleRange<MS1CycleIndex>>,
+) -> OptionallyRestricted<TupleRange<WindowCycleIndex>> {
+    // FOR NOW we are assuming that the cycle for MS1 will be the same as MS2 ...
+    // This is not true in some acquisition schemes but we can fix it later ...
+    // This expression is pretty verbose ...
+    match cycle_range {
+        Restricted(x) => Restricted(
+            TupleRange::try_new(
+                WindowCycleIndex::new(x.start().as_u32()),
+                WindowCycleIndex::new(x.end().as_u32()),
+            )
+            .unwrap(),
+        ),
+        Unrestricted => Unrestricted,
     }
 }

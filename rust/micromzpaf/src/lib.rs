@@ -392,34 +392,34 @@ impl TryFrom<FragmentType> for IonSeriesOrdinal {
                 })
         }
         let tmp = match value {
-            FragmentType::a(ordinal) => IonSeriesOrdinal::a {
+            FragmentType::a(ordinal, _) => IonSeriesOrdinal::a {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'a')?,
             },
-            FragmentType::b(ordinal) => IonSeriesOrdinal::b {
+            FragmentType::b(ordinal, _) => IonSeriesOrdinal::b {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'b')?,
             },
-            FragmentType::c(ordinal) => IonSeriesOrdinal::c {
+            FragmentType::c(ordinal, _) => IonSeriesOrdinal::c {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'c')?,
             },
-            FragmentType::d(ordinal) => IonSeriesOrdinal::d {
+            FragmentType::d(ordinal, _, _, _, _) => IonSeriesOrdinal::d {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'd')?,
             },
-            FragmentType::v(ordinal) => IonSeriesOrdinal::v {
+            FragmentType::v(ordinal, _, _, _) => IonSeriesOrdinal::v {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'v')?,
             },
-            FragmentType::w(ordinal) => IonSeriesOrdinal::w {
+            FragmentType::w(ordinal, _, _, _, _) => IonSeriesOrdinal::w {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'w')?,
             },
-            FragmentType::x(ordinal) => IonSeriesOrdinal::x {
+            FragmentType::x(ordinal, _) => IonSeriesOrdinal::x {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'x')?,
             },
-            FragmentType::y(ordinal) => IonSeriesOrdinal::y {
+            FragmentType::y(ordinal, _) => IonSeriesOrdinal::y {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'y')?,
             },
-            FragmentType::z(ordinal) => IonSeriesOrdinal::z {
+            FragmentType::z(ordinal, _) => IonSeriesOrdinal::z {
                 ordinal: try_convert_ordinal(ordinal.series_number, 'z')?,
             },
-            FragmentType::precursor => IonSeriesOrdinal::precursor,
+            FragmentType::Precursor => IonSeriesOrdinal::precursor,
             _ => {
                 return Err(IonParsingError::Custom {
                     error: format!("Unsupported fragment type: {value:?}"),

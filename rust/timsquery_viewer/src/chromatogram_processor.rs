@@ -1,12 +1,4 @@
-use std::sync::Arc;
-use timscentroid::IndexedTimstofPeaks;
 pub use timsquery::models::aggregators::ChromatogramCollector;
-use timsquery::models::elution_group::TimsElutionGroup;
-use timsquery::models::tolerance::Tolerance;
-use timsquery::{
-    KeyLike,
-    QueriableData,
-};
 
 use crate::error::ViewerError;
 use crate::plot_renderer::MS2Spectrum;
@@ -47,41 +39,6 @@ impl SmoothingMethod {
             sigma: Self::DEFAULT_GAUSSIAN_SIGMA,
         }
     }
-}
-
-#[instrument(skip_all)]
-pub fn generate_chromatogram<T: KeyLike + std::fmt::Display>(
-    elution_group: &TimsElutionGroup<T>,
-    index: &IndexedTimstofPeaks,
-    ms1_rts: Arc<[u32]>,
-    tolerance: &Tolerance,
-    smoothing: &SmoothingMethod,
-) -> Result<ChromatogramOutput, ViewerError> {
-    let rt_range_ms = match tolerance.rt_range_as_milis(elution_group.rt_seconds()) {
-        timsquery::OptionallyRestricted::Unrestricted => {
-            timsquery::TupleRange::try_new(*ms1_rts.first().unwrap(), *ms1_rts.last().unwrap())
-                .expect("Reference RTs should be sorted and valid")
-        }
-        timsquery::OptionallyRestricted::Restricted(r) => r,
-    };
-    let mut collector = ChromatogramCollector::new(elution_group.clone(), rt_range_ms, &ms1_rts)
-        .map_err(|e| ViewerError::General(format!("Failed to create collector: {:?}", e)))?;
-
-    index.add_query(&mut collector, tolerance);
-
-    let mut output = match ChromatogramOutput::try_new(collector, &ms1_rts) {
-        Ok(cmg) => cmg,
-        Err(e) => {
-            return Err(ViewerError::General(format!(
-                "Failed to generate chromatogram output: {:?}",
-                e
-            )));
-        }
-    };
-
-    apply_smoothing_chromatogram(&mut output, smoothing);
-
-    Ok(output)
 }
 
 #[instrument(skip(chromatogram))]
@@ -256,21 +213,20 @@ fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<
 /// smoothing but not for precise quantitative analysis.
 fn compute_savitzky_golay_weights(window_size: usize, polynomial_order: usize) -> Vec<f32> {
     let half_window = window_size / 2;
-    let mut weights = vec![0.0; window_size];
 
-    for position in 0..window_size {
-        let distance_from_center = ((position as isize) - (half_window as isize)).abs() as f32;
-        let normalized_distance = distance_from_center / (half_window as f32);
+    (0..window_size)
+        .map(|position| {
+            let distance_from_center = ((position as isize) - (half_window as isize)).abs() as f32;
+            let normalized_distance = distance_from_center / (half_window as f32);
 
-        weights[position] = match polynomial_order {
-            0 | 1 => 1.0 - normalized_distance,
-            2 => (1.0 - normalized_distance * normalized_distance).max(0.0),
-            3 => (1.0 - normalized_distance.powi(3)).max(0.0),
-            _ => (1.0 - normalized_distance.powi(polynomial_order as i32)).max(0.0),
-        };
-    }
-
-    weights
+            match polynomial_order {
+                0 | 1 => 1.0 - normalized_distance,
+                2 => (1.0 - normalized_distance * normalized_distance).max(0.0),
+                3 => (1.0 - normalized_distance.powi(3)).max(0.0),
+                _ => (1.0 - normalized_distance.powi(polynomial_order as i32)).max(0.0),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
