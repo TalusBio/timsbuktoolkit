@@ -1,8 +1,16 @@
-use arrow::array::RecordBatchReader;
-use std::fs::File;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::storage::{
+    RUNTIME,
+    StorageProvider,
+};
+use futures::stream::StreamExt;
+use object_store::path::Path as ObjectPath;
+use parquet::arrow::async_reader::{
+    ParquetObjectReader,
+    ParquetRecordBatchStreamBuilder,
+};
 
 use arrow::array::{
     AsArray,
@@ -22,19 +30,17 @@ use arrow::datatypes::{
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use half::f16;
-// use parquet::arrow::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_reader::{
     ArrowPredicate,
     RowFilter,
 };
 
 use crate::serialization::PeakSchema;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
 use parquet::file::metadata::ParquetMetaData;
 
 pub struct ParquetQuerier {
-    path: PathBuf,
+    storage: StorageProvider,
+    relative_path: String,
     peak_schema: PeakSchema,
     file_metadata: Arc<ParquetMetaData>,
 }
@@ -107,87 +113,82 @@ impl ArrowPredicate for FilterPredicate {
 }
 
 impl ParquetQuerier {
-    /// 1. Initialize with path, load metadata, and validate hard-coded schema.
-    pub fn new(path: impl Into<PathBuf>) -> Result<Self, Box<dyn std::error::Error>> {
-        let path = path.into();
-        let file = File::open(&path)?;
+    /// Initialize with storage provider and relative path, load metadata, and validate schema.
+    pub fn new(
+        storage: StorageProvider,
+        relative_path: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let object_store = storage.as_object_store();
+        let object_path = ObjectPath::from(relative_path);
 
-        // Create a builder just to inspect the schema from the file metadata
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema();
-        let peak_schema =
-            PeakSchema::validate(schema).map_err(|e| format!("Schema validation error: {}", e))?;
+        // Fetch metadata (just the footer - lightweight operation)
+        let (file_metadata, peak_schema) = RUNTIME.block_on(async {
+            let reader = ParquetObjectReader::new(object_store, object_path.clone());
+            let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
 
-        let file_metadata = builder.metadata().clone();
+            let schema = builder.schema();
+            let peak_schema = PeakSchema::validate(schema)
+                .map_err(|e| format!("Schema validation error: {}", e))?;
+
+            let file_metadata = builder.metadata().clone();
+
+            Ok::<_, Box<dyn std::error::Error>>((file_metadata, peak_schema))
+        })?;
 
         Ok(Self {
-            path,
+            storage,
+            relative_path: relative_path.to_string(),
             peak_schema,
             file_metadata,
         })
     }
 
-    /// Single exposed query method
+    /// Query parquet file with predicates
     pub fn query(
         &self,
         mz_range: Range<f32>,
         ims_range: Option<Range<f16>>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let file = File::open(&self.path)?;
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let object_store = self.storage.as_object_store();
+        let object_path = ObjectPath::from(self.relative_path.as_str());
 
-        // 1. Build the predicate
-        let pred = FilterPredicate::new(
-            mz_range,
-            ims_range,
-            self.peak_schema.mz_idx(),
-            self.peak_schema.mobility_idx(),
-            self.file_metadata.clone(),
-        );
-        let filter = RowFilter::new(vec![Box::new(pred)]);
+        RUNTIME.block_on(async {
+            // Create async reader
+            let reader = ParquetObjectReader::new(object_store, object_path);
+            let mut builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
 
-        // 2. Apply the filter to the builder
-        builder = builder.with_row_filter(filter);
+            // Build and apply filter predicate
+            let pred = FilterPredicate::new(
+                mz_range,
+                ims_range,
+                self.peak_schema.mz_idx(),
+                self.peak_schema.mobility_idx(),
+                self.file_metadata.clone(),
+            );
+            let filter = RowFilter::new(vec![Box::new(pred)]);
+            builder = builder.with_row_filter(filter);
 
-        // 3. Create the reader
-        let reader = builder.build()?;
-        let schema = reader.schema();
+            // Build stream and collect batches
+            // Parquet will automatically:
+            // 1. Use row group statistics to skip irrelevant row groups
+            // 2. Fetch only needed row groups via concurrent HTTP range requests
+            // 3. Apply predicates during decoding
+            let mut stream = builder.build()?;
+            let schema = stream.schema().clone();
+            let mut batches = Vec::new();
 
-        // 4. Read all batches
-        let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>()?;
-
-        if batches.is_empty() {
-            // Return an empty batch with the correct schema
-            return Ok(RecordBatch::new_empty(schema));
-        }
-
-        // 5. Concatenate into a single RecordBatch
-        let combined_batch = concat_batches(&schema, &batches)?;
-
-        Ok(combined_batch)
-    }
-}
-
-// --- Example Usage Test ---
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // This test assumes a file exists. It's mostly to show calling syntax.
-    #[test]
-    fn test_signature() {
-        let path = PathBuf::from("dummy.parquet");
-        // We won't actually run this as the file doesn't exist
-        if path.exists() {
-            let querier = ParquetQuerier::new(path).unwrap();
-
-            let range_a = 0.0f32..100.0f32;
-            let range_b = f16::from_f32(0.0)..f16::from_f32(1.0);
-
-            let result = querier.query(range_a, Some(range_b));
-            match result {
-                Ok(batch) => println!("Rows: {}", batch.num_rows()),
-                Err(e) => println!("Error: {}", e),
+            while let Some(batch) = stream.next().await {
+                batches.push(batch?);
             }
-        }
+
+            if batches.is_empty() {
+                return Ok(RecordBatch::new_empty(schema));
+            }
+
+            let combined = concat_batches(&schema, &batches)?;
+            Ok(combined)
+        })
     }
 }
+
+// Tests are in the integration test file

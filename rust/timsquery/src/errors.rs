@@ -3,6 +3,7 @@ use timsrust::{
     TimsRustError,
     TimsTofPathError,
 };
+use timscentroid::serialization::SerializationError;
 
 #[derive(Debug)]
 pub enum TimsqueryError {
@@ -28,6 +29,7 @@ pub enum DataReadingError {
     UnsupportedDataError(UnsupportedDataError),
     TimsTofPathError(TimsTofPathError),
     TimsRustError(TimsRustError), // Why doesnt timsrust error derive clone?
+    SerializationError(SerializationError),
 }
 
 impl From<UnsupportedDataError> for DataReadingError {
@@ -35,6 +37,9 @@ impl From<UnsupportedDataError> for DataReadingError {
         DataReadingError::UnsupportedDataError(e)
     }
 }
+
+// Note: Can't implement From<SerializationError> due to blanket impl conflict
+// Use DataReadingError::SerializationError(e) directly instead
 
 #[derive(Debug)]
 pub enum UnsupportedDataError {

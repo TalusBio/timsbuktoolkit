@@ -16,15 +16,29 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-parquet = { workspace = true }
+parquet = { workspace = true, features = ["async", "object_store"] }
 arrow = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Storage abstraction (always available)
+object_store = "0.12"
+tokio = { version = "1", features = ["rt"] }
+futures = "0.3"
+bytes = "1"
+url = "2"
+once_cell = "1"
 
 # Example dependencies
 tracing-subscriber = { workspace = true, features = ["env-filter"], default-features = true}
 rand = "0.8"
+tempfile = "3"
 
 # Not using it RN but looks like a super solid way to make
 # builder patterns
 # bon = "3.7.2"
+
+[features]
+default = []
+aws = ["object_store/aws"]
+gcp = ["object_store/gcp"]
+azure = ["object_store/azure"]

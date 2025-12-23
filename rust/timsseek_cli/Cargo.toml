@@ -10,7 +10,7 @@ timsquery = { path = "../timsquery" }
 
 regex = "1.11.1"
 # tracing-profile = { version="0.10.11",features=["perfetto"] }
-tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common" }
+tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common", optional = true }
 
 # Workspace-inherited deps
 clap = { workspace = true, features = ["derive"] }
@@ -34,4 +34,4 @@ path = "src/sample_speclib.rs"
 mimalloc = { workspace = true, features = ["secure"] }
 
 [features]
-instrumentation = ["timsseek/instrumentation"]
+instrumentation = ["timsseek/instrumentation", "tracing-profile"]

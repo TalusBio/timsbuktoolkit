@@ -19,7 +19,7 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_caching;
+use timsquery::serde::load_index_auto;
 use tracing::{
     info,
     instrument,
@@ -54,8 +54,15 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     let elution_groups: ElutionGroupCollection = read_query_elution_groups(&elution_groups_path)?;
     info!("Loaded {} elution groups", elution_groups.len());
 
-    let index = load_index_caching(&raw_file_path)
-        .map_err(|e| CliError::DataReading(format!("{:?}", e)))?;
+    let index = load_index_auto(
+        raw_file_path.to_str().ok_or_else(|| {
+            CliError::DataReading("Invalid path encoding".to_string())
+        })?,
+        None,  // Use default config
+    )
+    .map_err(|e| CliError::DataReading(format!("{:?}", e)))?
+    .into_eager()
+    .map_err(|e| CliError::DataReading(format!("{:?}", e)))?;
 
     let output_path = args.output_path;
     let serialization_format = args.format;
