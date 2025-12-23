@@ -12,6 +12,7 @@ use timscentroid::rt_mapping::{
 };
 use timscentroid::utils::OptionallyRestricted::*;
 use timscentroid::utils::TupleRange;
+use timscentroid::StorageLocation;
 
 // For now, we'll skip MS2 geometry tests since QuadrupoleIsolationScheme
 // doesn't have a public constructor. We can test MS1 queries instead.
@@ -61,10 +62,12 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
         .unwrap();
 
     // Load eagerly
-    let eager_index = IndexedTimstofPeaks::load_from_directory(&temp_dir).unwrap();
+    let location = StorageLocation::from_path(&temp_dir);
+    let eager_index = IndexedTimstofPeaks::load_from_storage(location).unwrap();
 
     // Load lazily
-    let lazy_index = LazyIndexedTimstofPeaks::load_from_directory(&temp_dir).unwrap();
+    let location = StorageLocation::from_path(&temp_dir);
+    let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location).unwrap();
 
     // Query both with same parameters
     let mz_range = TupleRange::try_new(420.0, 460.0).unwrap(); // Should match peaks at 420, 430, 440, 450, 460
@@ -159,7 +162,7 @@ fn test_bucket_boundary_case() {
     let cycle_to_rt_ms = vec![0];
     let bucket_size = 4;
 
-    let (group, stats) = IndexedPeakGroup::testing_new(
+    let (_group, stats) = IndexedPeakGroup::testing_new(
         peaks,
         CycleToRTMapping::<MS1CycleIndex>::new(cycle_to_rt_ms),
         bucket_size,
@@ -173,4 +176,79 @@ fn test_bucket_boundary_case() {
         "Test passed: {} peaks organized into {} buckets",
         stats.num_peaks, stats.num_buckets
     );
+}
+
+#[test]
+fn test_storage_abstraction_with_local_filesystem() {
+    // Test that StorageProvider works with local filesystem
+    let temp_dir = std::env::temp_dir().join("timscentroid_storage_test");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    // Create test data - small dataset with 5 peaks
+    let peaks: Vec<_> = (0..5)
+        .map(|i| IndexedPeak {
+            mz: 400.0 + (i as f32) * 20.0, // 400, 420, 440, 460, 480
+            intensity: 100.0 * (i as f32 + 1.0),
+            mobility_ook0: f16::from_f32(1.0 + (i as f32) * 0.01),
+            cycle_index: MS1CycleIndex::new(i % 2), // Cycles 0, 1
+        })
+        .collect();
+
+    let cycle_to_rt_ms = vec![0, 100];
+    let bucket_size = 2;
+
+    let (ms1_group, stats) =
+        IndexedPeakGroup::testing_new(peaks, CycleToRTMapping::new(cycle_to_rt_ms), bucket_size);
+
+    println!(
+        "Created test data: {} peaks, {} buckets",
+        stats.num_peaks, stats.num_buckets
+    );
+
+    let index = IndexedTimstofPeaks::from_parts(ms1_group, vec![]);
+
+    // Test 1: Save using storage abstraction
+    let location = StorageLocation::from_path(&temp_dir);
+    index
+        .save_to_storage(location, Default::default())
+        .unwrap();
+
+    // Verify files were created
+    assert!(temp_dir.join("metadata.json").exists());
+    assert!(temp_dir.join("ms1.parquet").exists());
+
+    // Test 2: Load using storage abstraction
+    let location = StorageLocation::from_path(&temp_dir);
+    let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location).unwrap();
+
+    // Test 3: Query and verify results
+    let mz_range = TupleRange::try_new(420.0, 460.0).unwrap();
+    let results: Vec<_> = lazy_index
+        .query_peaks_ms1(mz_range, Unrestricted, Unrestricted)
+        .collect();
+
+    // Should find peaks at 420, 440, 460
+    assert_eq!(results.len(), 3, "Should find 3 peaks in range");
+    assert!(results.iter().any(|p| (p.mz - 420.0).abs() < 0.01));
+    assert!(results.iter().any(|p| (p.mz - 440.0).abs() < 0.01));
+    assert!(results.iter().any(|p| (p.mz - 460.0).abs() < 0.01));
+
+    println!("Storage abstraction test passed!");
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
+#[test]
+fn test_url_parsing() {
+    // Test file:// URL parsing
+    let location = StorageLocation::from_url("file:///tmp/test").unwrap();
+    assert!(matches!(location, StorageLocation::Local(_)));
+
+    // Test that invalid URLs are rejected
+    assert!(StorageLocation::from_url("not-a-url").is_err());
+
+    println!("URL parsing test passed!");
 }

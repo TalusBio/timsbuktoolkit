@@ -10,6 +10,9 @@ pub enum CliError {
         source: String,
         path: Option<String>,
     },
+    DataReading {
+        source: String,
+    },
 }
 
 impl std::fmt::Display for CliError {
@@ -24,6 +27,15 @@ impl std::fmt::Display for CliError {
                     write!(f, "Error reading file: {}", source)
                 }
             }
+            CliError::DataReading { source } => write!(f, "Error reading data: {}", source),
+        }
+    }
+}
+
+impl From<timsquery::DataReadingError> for CliError {
+    fn from(e: timsquery::DataReadingError) -> Self {
+        CliError::DataReading {
+            source: format!("{:?}", e),
         }
     }
 }

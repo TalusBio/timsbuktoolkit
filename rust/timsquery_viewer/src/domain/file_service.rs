@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_caching;
+use timsquery::serde::load_index_auto;
 use tracing::info;
 
 use crate::error::ViewerError;
@@ -36,18 +36,32 @@ impl FileService {
 
     /// Load and index raw timsTOF data
     ///
-    /// Note: This operation may take 10-30 seconds for large datasets.
+    /// Supports both local paths and cloud URLs (s3://, gs://, az://).
+    /// Automatically detects input type and loads appropriately.
+    ///
+    /// Note: This operation may take 10-30 seconds for large datasets when
+    /// loading from raw .d files. Cached .idx files load much faster.
     ///
     /// # Arguments
-    /// * `path` - Path to the .d directory
+    /// * `path` - Path to the .d directory, .idx cache, or cloud URL
     ///
     /// # Returns
-    /// A tuple of (indexed peaks, MS1 retention times in milliseconds)
+    /// Indexed peaks loaded into memory
     pub fn load_raw_data(path: &Path) -> Result<Arc<IndexedTimstofPeaks>, ViewerError> {
-        let index = load_index_caching(path).map_err(|e| ViewerError::DataLoading {
-            path: path.to_path_buf(),
-            source: Box::new(ViewerError::General(format!("{:?}", e))),
-        })?;
+        let path_str = path.to_str().ok_or_else(|| ViewerError::General(
+            "Invalid path encoding".to_string()
+        ))?;
+
+        let index = load_index_auto(path_str, None)
+            .map_err(|e| ViewerError::DataLoading {
+                path: path.to_path_buf(),
+                source: Box::new(ViewerError::General(format!("{:?}", e))),
+            })?
+            .into_eager()
+            .map_err(|e| ViewerError::DataLoading {
+                path: path.to_path_buf(),
+                source: Box::new(ViewerError::General(format!("{:?}", e))),
+            })?;
 
         Ok(Arc::new(index))
     }

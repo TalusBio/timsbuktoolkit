@@ -14,6 +14,7 @@ use timsrust::{
     FramePeaks,
     Metadata,
 };
+use tracing::instrument;
 
 use crate::rt_mapping::{
     CycleToRTMapping,
@@ -386,6 +387,9 @@ impl<'a, T: RTIndex> PeakBucket<'a, T> {
 }
 
 impl<'a, T: RTIndex> From<&'a [IndexedPeak<T>]> for PeakBucket<'a, T> {
+    /// NOTE: by calling this you are ASSURING that the input slice is sorted by cycle_index
+    /// If this is not the case the behavior of methods on PeakBucket is undefined.
+    /// or will panic!
     fn from(value: &'a [IndexedPeak<T>]) -> Self {
         assert!(value.first().unwrap().cycle_index <= value.last().unwrap().cycle_index);
         Self { inner: value }
@@ -475,34 +479,80 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     ///
     /// NOTE: This internally uses `par_sort_unstable` to sort the peaks
     /// so in theory it should not be called within a parallel loop.
+    #[instrument(level = "info", skip_all, fields(num_peaks = peaks.len()))]
     pub(crate) fn new(
         mut peaks: Vec<IndexedPeak<T>>,
         cycle_to_rt_ms: CycleToRTMapping<T>,
         bucket_size: usize,
     ) -> (Self, IndexedPeakGroupStats) {
+        // TODO: Implement a "try_from_parts" that does not do any sorting or bucketing
+        // but requires the user to pass the ranges.
+        // I need to add serialization to that so we can read it.
         let st = std::time::Instant::now();
-        peaks.par_sort_unstable_by(|x, y| x.mz.partial_cmp(&y.mz).unwrap());
-        let sort_time = st.elapsed();
-        assert!(peaks.first().unwrap().mz <= peaks.last().unwrap().mz);
+
+        // This is meant to be a "fast-pass-check" in case the peaks had been previously sorted
+        // into buckets (like using ::new and then ::unpack/::pack or serialization/deserialization)
+        let needs_sorting = !Self::check_bucket_sorted_heuristic(&peaks, bucket_size);
+        // let needs_sorting = true;
+        if needs_sorting {
+            peaks.par_sort_unstable_by(|x, y| x.mz.partial_cmp(&y.mz).unwrap());
+            // If we have a single bucket that has already been sorted in "index order"
+            // the last can be less than the first! (since the re-sort internally sorts by cycle_index)
+            assert!(
+                peaks.first().unwrap().mz <= peaks.last().unwrap().mz,
+                "Peaks should be sorted by m/z after sorting step {:?} - {:?} [{};{}]",
+                peaks.first().unwrap(),
+                peaks.last().unwrap(),
+                peaks.len(),
+                bucket_size
+            );
+        }
+        // These are a bit slow tbh ...
+        // But I really want to be alerted if something is wrong
+        // and at the end of the day its less than 40ms even for large datasets
+        // and happens max 20 times per file.
         assert!(peaks.iter().all(|x| x.intensity >= 0.0));
         let max_cycle = T::new(cycle_to_rt_ms.len() as u32 - 1);
         assert!(peaks.iter().all(|x| x.cycle_index <= max_cycle));
+        let sort_time = st.elapsed();
 
         let st = std::time::Instant::now();
         let bucket_mz_ranges: Vec<_> = peaks
             .par_chunks_mut(bucket_size)
             .map(|chunk| {
-                let start = chunk.first().unwrap().mz;
-                let end = chunk.last().unwrap().mz;
-                chunk.sort_unstable_by(|x, y| {
-                    x.cycle_index
-                        .partial_cmp(&y.cycle_index)
-                        .unwrap()
-                        .then(x.mobility_ook0.partial_cmp(&y.mobility_ook0).unwrap())
-                });
+                let (start, end) = if needs_sorting {
+                    let start = chunk.first().unwrap().mz;
+                    let end = chunk.last().unwrap().mz;
+                    chunk.sort_unstable_by(|x, y| {
+                        x.cycle_index
+                            .partial_cmp(&y.cycle_index)
+                            .unwrap()
+                            .then(x.mobility_ook0.partial_cmp(&y.mobility_ook0).unwrap())
+                    });
+                    (start, end)
+                } else {
+                    let mut start = f32::MAX;
+                    let mut end = f32::MIN;
+                    for peak in chunk.iter() {
+                        if peak.mz < start {
+                            start = peak.mz;
+                        }
+                        if peak.mz > end {
+                            end = peak.mz;
+                        }
+                    }
+                    (start, end)
+                };
                 TupleRange::try_new(start, end).expect("Incoming vec should have been sorted")
             })
             .collect();
+
+        if needs_sorting {
+            assert!(
+                Self::check_bucket_sorted_heuristic(&peaks, bucket_size),
+                "Peaks should be bucket sorted after bucketing step"
+            );
+        }
 
         let bucket_time = st.elapsed();
 
@@ -520,6 +570,51 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
             bucketing_time: bucket_time,
         };
         (tmp, stats)
+    }
+
+    #[instrument(level = "info", skip_all, fields(num_peaks = peaks.len(), result))]
+    /// After some benchmarking this can take ~30ms in the worst case for large datasets.
+    /// where the data is already in the correct order.
+    /// The fail fast path (most first-time builds will be unsorted) is 17us.
+    pub fn check_bucket_sorted_heuristic(peaks: &[IndexedPeak<T>], bucket_size: usize) -> bool {
+        // We check that:
+        // 1. the max value of each bucket is <= min value of the next bucket
+        // 2. each bucket is sorted by cycle_index
+        let mut last_max = f32::MIN;
+        let buckets_ordered = peaks.chunks(bucket_size).all(|bucket| {
+            let curr_min = bucket
+                .iter()
+                .map(|x| x.mz)
+                .fold(f32::INFINITY, |a, b| a.min(b));
+            if curr_min < last_max {
+                return false;
+            }
+            let curr_max = bucket
+                .iter()
+                .map(|x| x.mz)
+                .fold(f32::NEG_INFINITY, |a, b| a.max(b));
+            last_max = curr_max;
+            true
+        });
+        if !buckets_ordered {
+            tracing::Span::current().record("result", false);
+            return false;
+        }
+
+        let internally_sorted_heuristic: bool =
+            peaks.chunks(bucket_size).enumerate().all(|(i, x)| {
+                if i == 0 {
+                    // Do the full check for the first bucket
+                    return x.windows(2).all(|w| w[0].cycle_index <= w[1].cycle_index);
+                }
+                let first_val = x.first().unwrap().cycle_index;
+                let last_val = x.last().unwrap().cycle_index;
+                last_val >= first_val
+            });
+
+        let res = internally_sorted_heuristic && buckets_ordered;
+        tracing::Span::current().record("result", res);
+        res
     }
 
     pub fn unpack(self) -> (Vec<IndexedPeak<T>>, Vec<u32>, usize, Vec<TupleRange<f32>>) {
@@ -928,5 +1023,55 @@ mod tests {
         ]);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_checking_bucketing() {
+        let test_data = vec![
+            // mz, intensity, im, cycle_index
+            // So everything here is sorted by both mz and cycle_index
+            (100.0, 200.0, 1.0, 0u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (100.0, 250.0, 1.0, 1u32),
+            (150.0, 300.0, 1.0, 2u32),
+            (150.0, 350.0, 1.0, 3u32),
+            (200.0, 400.0, 1.0, 4u32),
+        ];
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&test_data);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 4);
+        assert!(check_res);
+
+        let test_data = vec![
+            // mz, intensity, im, cycle_index
+            // all mz's from bucket N are less than (or equal to) all mz's from bucket N+1
+            (200.0, 200.0, 1.0, 0u32),
+            (100.0, 250.0, 1.0, 2u32),
+            (50.0, 250.0, 1.0, 23u32),
+            // End bucket 1 (internally sorted by cycle, not mz)
+            (2000.0, 250.0, 1.0, 1u32),
+            (1900.0, 300.0, 1.0, 2u32),
+            (1800.0, 350.0, 1.0, 3u32),
+            // End bucket 2
+            (20_000.0, 400.0, 1.0, 4u32),
+        ];
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&test_data);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 3);
+        assert!(check_res);
+        let check_res = IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, 2);
+        // This should fail because in bucket 2 we have mz's less than in bucket 1
+        assert!(!check_res);
+        // Any bucket number other than 3 should fail
+        for bucket_size in [1, 2, 4, 5, 10] {
+            if bucket_size != 3 {
+                let check_res =
+                    IndexedPeakGroup::check_bucket_sorted_heuristic(&peaks, bucket_size);
+                assert!(
+                    !check_res,
+                    "Bucket size {} should fail the check",
+                    bucket_size
+                );
+            }
+        }
     }
 }

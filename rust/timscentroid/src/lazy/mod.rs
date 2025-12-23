@@ -1,25 +1,16 @@
 //! Lazy loading for indexed timsTOF peaks.
 //!
-//! This module provides on-disk querying with minimal memory footprint by loading
-//! only the JSON metadata at initialization, then selectively loading parquet row groups
-//! on-demand during queries.
-//!
-//! # Performance
-//!
-//! - **Initialization**: <50ms (JSON parsing only, no parquet loading)
-//! - **First query (cold cache)**: 20-250ms (loads needed row groups from disk)
-//! - **Subsequent queries (warm cache)**: 2-10ms (similar to eager loading)
-//! - **Memory usage**: ~2.5MB metadata + configurable cache (default 1GB)
-//!
 //! # Example
 //!
 //! ```no_run
 //! use timscentroid::lazy::LazyIndexedTimstofPeaks;
 //! use timscentroid::utils::{TupleRange, OptionallyRestricted::*};
+//! use timscentroid::StorageLocation;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Fast initialization: loads only metadata.json
-//! let lazy_index = LazyIndexedTimstofPeaks::load_from_directory("indexed_peaks/")?;
+//! let location = StorageLocation::from_path("indexed_peaks/");
+//! let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location)?;
 //!
 //! // Query peaks (loads needed row groups on first access)
 //! let peaks: Vec<_> = lazy_index.query_peaks_ms1(
@@ -54,20 +45,20 @@ use crate::serialization::{
     SerializationError,
     TimscentroidMetadata,
 };
+use crate::storage::{
+    StorageLocation,
+    StorageProvider,
+    RUNTIME,
+};
 use crate::utils::{
     OptionallyRestricted,
     TupleRange,
 };
 use half::f16;
-use std::fs::File;
-use std::path::{
-    Path,
-    PathBuf,
-};
 
 /// Lazy-loading indexed peaks with on-demand row group loading
 pub struct LazyIndexedTimstofPeaks {
-    base_directory: PathBuf,
+    storage: StorageProvider,
     ms1_metadata: PeakGroupMetadata<MS1CycleIndex>,
     ms2_metadata: Vec<(
         QuadrupoleIsolationScheme,
@@ -76,38 +67,38 @@ pub struct LazyIndexedTimstofPeaks {
 }
 
 impl LazyIndexedTimstofPeaks {
-    /// Load indexed peaks from directory with lazy loading (JSON metadata only)
-    ///
-    /// This is extremely fast (<50ms) as it only parses the metadata.json file
-    /// without loading any parquet data.
-    ///
-    /// # Arguments
-    ///
-    /// * `directory` - Directory containing metadata.json and parquet files
-    ///
-    /// # Returns
-    ///
-    /// A lazy-loading index ready for querying. Parquet files are loaded on-demand.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Directory doesn't exist
-    /// - metadata.json is missing or malformed
-    /// - Metadata version is not 1.0 (v1.0 not supported for lazy loading)
-    pub fn load_from_directory(directory: impl AsRef<Path>) -> Result<Self, SerializationError> {
-        let directory = directory.as_ref();
-        let meta_path = directory.join("metadata.json");
 
+    /// Load from cloud storage URL (async version)
+    ///
+    /// Supports s3://, gs://, az:// URLs depending on enabled feature flags.
+    pub async fn load_from_url_async(url: impl AsRef<str>) -> Result<Self, SerializationError> {
+        let location = StorageLocation::from_url(url)?;
+        Self::load_from_storage_async(location).await
+    }
+
+    /// Load from cloud storage URL (blocking version)
+    ///
+    /// This blocks the current thread. If you're in an async context,
+    /// prefer `load_from_url_async`.
+    pub fn load_from_url(url: impl AsRef<str>) -> Result<Self, SerializationError> {
+        RUNTIME.block_on(Self::load_from_url_async(url))
+    }
+
+    /// Load from any storage location (async version)
+    pub async fn load_from_storage_async(
+        location: StorageLocation,
+    ) -> Result<Self, SerializationError> {
         let start = std::time::Instant::now();
 
-        // Parse JSON metadata (fast)
-        let file = File::open(&meta_path)?;
-        let meta: TimscentroidMetadata = serde_json::from_reader(file)?;
+        let storage = StorageProvider::new(location)?;
+
+        // Read metadata.json (using async version)
+        let metadata_json = storage.read_to_string_async("metadata.json").await?;
+        let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
         // Validate version
         if meta.version != "1.0" {
-            // This might be over-engineered for not but something tells me we might want to
+            // This might be over-engineered for now but something tells me we might want to
             // support multiple versions in the future ...
             return Err(SerializationError::SchemaVersionMismatch {
                 expected: "1.0",
@@ -125,10 +116,18 @@ impl LazyIndexedTimstofPeaks {
         eprintln!("Lazy loading initialization: {:?}", elapsed);
 
         Ok(Self {
-            base_directory: directory.to_path_buf(),
+            storage,
             ms1_metadata: meta.ms1_peaks,
             ms2_metadata,
         })
+    }
+
+    /// Load from any storage location (blocking version)
+    ///
+    /// This blocks the current thread. If you're in an async context,
+    /// prefer `load_from_storage_async`.
+    pub fn load_from_storage(location: StorageLocation) -> Result<Self, SerializationError> {
+        RUNTIME.block_on(Self::load_from_storage_async(location))
     }
 }
 
@@ -143,34 +142,36 @@ impl LazyIndexedTimstofPeaks {
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<Item = IndexedPeak<MS1CycleIndex>> {
-        let ms1_path = self.base_directory.join(&self.ms1_metadata.relative_path);
-        self.query_peaks_file(ms1_path, mz_range, cycle_range, im_range)
+        let relative_path = self.ms1_metadata.relative_path.to_str().unwrap();
+        self.query_peaks_file(relative_path, mz_range, cycle_range, im_range)
     }
 
     fn query_peaks_file<T: RTIndex>(
         &self,
-        path: impl AsRef<Path>,
+        relative_path: &str,
         mz_range: TupleRange<f32>,
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<Item = IndexedPeak<T>> {
-        let querier = match ParquetQuerier::new(path.as_ref()) {
+        // Create querier with storage provider
+        let querier = match ParquetQuerier::new(self.storage.clone(), relative_path) {
             Ok(q) => q,
             Err(e) => {
                 eprintln!("Error initializing ParquetQuerier: {}", e);
-                eprintln!("Error initializing ParquetQuerier: {}", e);
-                todo!("Sebastian has been to lazy to make this a good error ... fix me!");
+                return vec![].into_iter();
             }
         };
 
-        let mz_range = mz_range.start()..mz_range.end();
-        let im_range = match im_range {
+        let mz_range_range = mz_range.start()..mz_range.end();
+        let im_range_opt = match im_range {
             OptionallyRestricted::Restricted(r) => Some(r.start()..r.end()),
             OptionallyRestricted::Unrestricted => None,
         };
-        let record_batch = match querier.query(mz_range, im_range) {
+        let record_batch = match querier.query(mz_range_range, im_range_opt) {
             Ok(batch) => batch,
             Err(e) => {
+                eprintln!("Error querying Parquet: {}", e);
+                // return vec![].into_iter();
                 eprintln!("Error querying Parquet file: {}", e);
                 todo!("Sebastian has been to lazy to make this a good error ... fix me!");
             }
@@ -290,8 +291,9 @@ impl LazyIndexedTimstofPeaks {
                     .expect("Since we filtered before the precursor range. It should intersect")
             });
 
-            let ms2_path = self.base_directory.join(&group_metadata.relative_path);
-            let peaks_iter = self.query_peaks_file(ms2_path, mz_range, cycle_range, local_im_range);
+            let relative_path = group_metadata.relative_path.to_str().unwrap();
+            let peaks_iter =
+                self.query_peaks_file(relative_path, mz_range, cycle_range, local_im_range);
             results.push((isolation_scheme.clone(), peaks_iter.collect()));
         }
 

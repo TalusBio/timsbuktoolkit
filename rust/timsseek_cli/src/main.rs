@@ -6,7 +6,7 @@ mod processing;
 use clap::Parser;
 use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
-use timsquery::serde::load_index_caching;
+use timsquery::serde::load_index_auto;
 use timsquery::utils::TupleRange;
 use timsseek::scoring::{
     ScoringPipeline,
@@ -16,10 +16,6 @@ use tracing::{
     error,
     info,
 };
-use tracing_profile::{
-    PrintTreeConfig,
-    PrintTreeLayer,
-};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::{
@@ -28,6 +24,12 @@ use tracing_subscriber::fmt::{
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{
     self,
+};
+
+#[cfg(feature = "instrumentation")]
+use tracing_profile::{
+    PrintTreeConfig,
+    PrintTreeLayer,
 };
 
 use cli::Cli;
@@ -77,6 +79,12 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 }
 
 fn main() -> std::result::Result<(), errors::CliError> {
+    let fmt_filter = EnvFilter::builder()
+        .with_default_directive("info".parse().unwrap())
+        .with_env_var("RUST_LOG")
+        .from_env_lossy();
+
+    #[cfg(feature = "instrumentation")]
     let perf_filter = EnvFilter::builder()
         .with_default_directive("trace".parse().unwrap())
         .with_env_var("RUST_PERF_LOG")
@@ -84,13 +92,11 @@ fn main() -> std::result::Result<(), errors::CliError> {
         .add_directive("forust_ml::gradientbooster=warn".parse().unwrap());
 
     // Filter out events but keep spans
+    #[cfg(feature = "instrumentation")]
     let events_filter = tracing_subscriber::filter::filter_fn(|metadata| !metadata.is_event());
 
-    let fmt_filter = EnvFilter::builder()
-        .with_default_directive("info".parse().unwrap())
-        .with_env_var("RUST_LOG")
-        .from_env_lossy();
-
+    // I am aware that this conditional compilation is ugly ...
+    #[cfg(feature = "instrumentation")]
     let (tree_layer, _guard) = PrintTreeLayer::new(PrintTreeConfig {
         attention_above_percent: 25.0,
         relevant_above_percent: 2.5,
@@ -101,6 +107,10 @@ fn main() -> std::result::Result<(), errors::CliError> {
         accumulate_events: false,
         aggregate_similar_siblings: true,
     });
+    #[cfg(feature = "instrumentation")]
+    let tree_layer = tree_layer
+        .with_filter(perf_filter)
+        .with_filter(events_filter);
 
     // let (pf_layer, pf_guard) = PerfettoLayer::new_from_env().unwrap();
 
@@ -108,15 +118,12 @@ fn main() -> std::result::Result<(), errors::CliError> {
         .with_span_events(FmtSpan::CLOSE)
         .with_filter(fmt_filter);
 
-    tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(
-            tree_layer
-                .with_filter(perf_filter)
-                .with_filter(events_filter),
-        )
-        // .with(pf_layer)
-        .init();
+    let reg = tracing_subscriber::registry().with(fmt_layer);
+
+    #[cfg(feature = "instrumentation")]
+    let reg = reg.with(tree_layer);
+
+    let _subscriber = reg.init();
 
     // Parse command line arguments
     let args = Cli::parse();
@@ -188,7 +195,15 @@ fn main() -> std::result::Result<(), errors::CliError> {
         }
     };
 
-    let index = load_index_caching(file_loc).unwrap();
+    let index = load_index_auto(
+        file_loc.to_str().ok_or_else(|| errors::CliError::Io {
+            source: "Invalid path encoding".to_string(),
+            path: None,
+        })?,
+        None, // Use default config - could add cache_location support in config later
+    )?
+    .into_eager()?;
+
     let fragmented_range = get_frag_range(&timstofpath);
 
     // Process based on input type

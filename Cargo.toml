@@ -6,14 +6,13 @@ members = [
     "rust/timscentroid",
     "rust/timsseek",
     "rust/timsseek_cli",
-    "rust/timsseek_rts",
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer"
 ]
 
 [workspace.package]
-version = "0.21.0"
+version = "0.22.0"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "Apache-2.0"
