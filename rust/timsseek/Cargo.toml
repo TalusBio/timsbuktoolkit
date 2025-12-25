@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 regex = "1.10.6"
-parquet_derive = "56.1"
 rmp-serde = "1.1"
 zstd = "0.13"
 
@@ -28,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 rayon = { workspace = true }
+parquet_derive = {  workspace = true }
 parquet = { workspace = true }
 
 [features]

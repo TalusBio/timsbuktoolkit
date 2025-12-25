@@ -44,6 +44,25 @@ impl From<UnsupportedDataError> for DataReadingError {
 #[derive(Debug)]
 pub enum UnsupportedDataError {
     NoMS2DataError,
+    CloudRawDataNotSupported {
+        url: String,
+        suggestion: String,
+    },
+}
+
+impl Display for UnsupportedDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoMS2DataError => write!(f, "No MS2 data found"),
+            Self::CloudRawDataNotSupported { url, suggestion } => {
+                write!(
+                    f,
+                    "Cannot read raw .d files from cloud storage: {}\n\n{}",
+                    url, suggestion
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

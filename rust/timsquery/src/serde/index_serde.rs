@@ -618,13 +618,70 @@ impl Default for TimsIndexReader {
     }
 }
 
+/// Check if a location contains a cached index by looking for metadata.json
+///
+/// This checks the actual directory contents rather than just the path extension.
+fn sniff_cached_index(location: &str) -> bool {
+    let is_cloud = location.contains("://");
+
+    // Try to create storage location and check for metadata.json
+    let storage_result = if is_cloud {
+        StorageLocation::from_url(location)
+    } else {
+        Ok(StorageLocation::from_path(location))
+    };
+
+    let Ok(storage_location) = storage_result else {
+        return false;
+    };
+
+    // Try to read metadata.json as a quick check
+    match timscentroid::storage::StorageProvider::new(storage_location) {
+        Ok(provider) => {
+            // Just try to read a few bytes - if metadata.json exists, it's likely a cached index
+            matches!(provider.read_bytes("metadata.json"), Ok(_))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if a location contains raw .d data by looking for analysis.tdf
+///
+/// This checks the actual directory contents rather than just the path extension.
+fn sniff_raw_tdf(location: &str) -> bool {
+    // For cloud URLs, we can't easily check directory contents without listing
+    // So fall back to path-based detection for now
+    if location.contains("://") {
+        return location.contains(".d") && !location.contains(".idx");
+    }
+
+    // For local paths, check if directory contains analysis.tdf
+    let path = Path::new(location);
+    if !path.is_dir() {
+        return false;
+    }
+
+    // Check for required Bruker timsTOF files
+    path.join("analysis.tdf").exists() && path.join("analysis.tdf_bin").exists()
+}
+
 /// Smart index loader - auto-detects input type and loads appropriately
 ///
 /// This is the unified entry point for loading indexed peaks from any source.
 /// It automatically detects:
 /// - Local vs cloud storage (by checking for "://" in path)
-/// - Raw .d files vs cached .idx files (by checking file extension)
+/// - Raw .d files vs cached .idx files (by sniffing directory contents)
 /// - Whether to load lazily or eagerly (based on config)
+///
+/// # Format Detection
+///
+/// The function intelligently detects the input format by:
+/// 1. Checking for cached index: Looks for `metadata.json` file
+/// 2. Checking for raw data: Looks for `analysis.tdf` and `analysis.tdf_bin` files
+/// 3. Falling back to path-based heuristics for cloud URLs
+///
+/// This is more robust than just checking file extensions, especially for
+/// cloud URLs where paths may not follow standard naming conventions.
 ///
 /// # Arguments
 ///
@@ -633,6 +690,7 @@ impl Default for TimsIndexReader {
 ///   - "/path/to/experiment.d.idx" - Local cached index
 ///   - "s3://bucket/experiment.d" - Cloud raw data
 ///   - "s3://bucket/experiment.idx" - Cloud cached index
+///   - Any directory containing the appropriate files (extension-agnostic)
 /// * `config` - Optional configuration (uses defaults if None)
 ///
 /// # Returns
@@ -647,8 +705,8 @@ impl Default for TimsIndexReader {
 /// // Simple usage - auto-detects everything
 /// let index = load_index_auto("data.d", None)?.into_eager()?;
 ///
-/// // Load from cloud
-/// let index = load_index_auto("s3://bucket/exp.idx", None)?.into_eager()?;
+/// // Load from cloud (works without .idx extension if metadata.json exists)
+/// let index = load_index_auto("s3://bucket/my_experiment", None)?.into_eager()?;
 ///
 /// // Prefer lazy loading
 /// use timsquery::serde::IndexLoadConfig;
@@ -665,9 +723,9 @@ pub fn load_index_auto(
 
     info!("Loading index from: {}", input);
 
-    // Detect input type
-    let is_cached = input.ends_with(".idx") || input.contains(".idx/") || input.contains(".idx?"); // URL with query params
-
+    // Detect input type by actually checking directory contents
+    // This is more robust than just looking at file extensions
+    let is_cached = sniff_cached_index(input);
     let is_cloud = input.contains("://");
 
     info!(
@@ -675,15 +733,43 @@ pub fn load_index_auto(
         is_cached, is_cloud, config.prefer_lazy
     );
 
+    // Early validation: reject cloud raw .d files with helpful error
+    if is_cloud && !is_cached {
+        error!("Attempted to load raw .d file from cloud storage: {}", input);
+        return Err(crate::errors::DataReadingError::UnsupportedDataError(
+            crate::errors::UnsupportedDataError::CloudRawDataNotSupported {
+                url: input.to_string(),
+                suggestion: format!(
+                    "Raw .d files must be processed locally first. Suggested workflow:\n\
+                    1. Download the .d file locally\n\
+                    2. Process it to create a cached index:\n\
+                    \n   \
+                    use timsquery::serde::TimsIndexReader;\n   \
+                    let index = TimsIndexReader::new()\n       \
+                    .with_cloud_cache(\"{}\")\n       \
+                    .read_index(\"/local/path/to/data.d\")?;\n\
+                    \n\
+                    3. Then load from the cloud cache:\n   \
+                    let index = TimsIndexReader::from_cache_url(\"{}\")?;\n\
+                    \n\
+                    Alternatively, use a local cache and upload it manually to your cloud storage.",
+                    input.trim_end_matches(".d").to_string() + ".idx",
+                    input.trim_end_matches(".d").to_string() + ".idx",
+                ),
+            },
+        ));
+    }
+
     match (is_cached, config.prefer_lazy) {
         (true, true) => {
             // Cached index + prefer lazy = load lazy
             info!("Loading as lazy (cached index)");
             let location = if is_cloud {
-                StorageLocation::from_url(input)
-                    .map_err(|e| crate::errors::DataReadingError::SerializationError(
-                        timscentroid::serialization::SerializationError::UrlParse(e)
-                    ))?
+                StorageLocation::from_url(input).map_err(|e| {
+                    crate::errors::DataReadingError::SerializationError(
+                        timscentroid::serialization::SerializationError::UrlParse(e),
+                    )
+                })?
             } else {
                 StorageLocation::from_path(input)
             };

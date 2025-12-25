@@ -20,6 +20,18 @@ pub enum ViewerError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    #[error("Data reading error: {0}")]
+    DataReading(String),
+
+    #[error("Network error while accessing cloud storage: {0}")]
+    Network(String),
+
+    #[error("Cloud storage error: {0}")]
+    CloudStorage(String),
+
+    #[error("Authentication error for cloud storage: {0}")]
+    Authentication(String),
+
     #[error("General error: {0}")]
     General(String),
 }

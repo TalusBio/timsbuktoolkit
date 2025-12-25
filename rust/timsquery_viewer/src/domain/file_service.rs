@@ -4,7 +4,11 @@ use std::path::Path;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::load_index_auto;
+use timsquery::serde::{
+    IndexLoadConfig,
+    IndexedPeaksHandle,
+    load_index_auto,
+};
 use tracing::info;
 
 use crate::error::ViewerError;
@@ -34,7 +38,47 @@ impl FileService {
         Ok(ElutionGroupData::new(res))
     }
 
-    /// Load and index raw timsTOF data
+    /// Load and index raw timsTOF data from a location (path or URL)
+    ///
+    /// Supports both local paths and cloud URLs (s3://, gs://, az://).
+    /// Automatically detects input type and loads appropriately.
+    ///
+    /// For cloud cached indexes (.idx), uses lazy loading for faster initialization
+    /// (loads metadata only, row groups fetched on-demand during queries).
+    ///
+    /// Note: This operation may take 10-30 seconds for large datasets when
+    /// loading from raw .d files. Cached .idx files load much faster.
+    ///
+    /// # Arguments
+    /// * `location` - Path or URL to the .d directory or .idx cache
+    ///
+    /// # Returns
+    /// Indexed peaks loaded into memory
+    pub fn load_raw_data_from_location(
+        location: &str,
+    ) -> Result<Arc<IndexedPeaksHandle>, ViewerError> {
+        // Detect if cloud URL
+        let is_cloud = location.contains("://") && !location.starts_with("file://");
+        // Use lazy loading for cloud cached indexes (fast init, load on query)
+        let prefer_lazy = is_cloud;
+
+        info!(
+            "Loading raw data from {}: is_cloud={}, prefer_lazy={}",
+            location, is_cloud, prefer_lazy
+        );
+
+        let config = IndexLoadConfig {
+            prefer_lazy,
+            ..Default::default()
+        };
+
+        let index = load_index_auto(location, Some(config))
+            .map_err(|e| ViewerError::General(format!("Failed to load index: {:?}", e)))?;
+
+        Ok(Arc::new(index))
+    }
+
+    /// Load and index raw timsTOF data (legacy method for local paths)
     ///
     /// Supports both local paths and cloud URLs (s3://, gs://, az://).
     /// Automatically detects input type and loads appropriately.
@@ -47,23 +91,12 @@ impl FileService {
     ///
     /// # Returns
     /// Indexed peaks loaded into memory
-    pub fn load_raw_data(path: &Path) -> Result<Arc<IndexedTimstofPeaks>, ViewerError> {
-        let path_str = path.to_str().ok_or_else(|| ViewerError::General(
-            "Invalid path encoding".to_string()
-        ))?;
+    pub fn load_raw_data(path: &Path) -> Result<Arc<IndexedPeaksHandle>, ViewerError> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| ViewerError::General("Invalid path encoding".to_string()))?;
 
-        let index = load_index_auto(path_str, None)
-            .map_err(|e| ViewerError::DataLoading {
-                path: path.to_path_buf(),
-                source: Box::new(ViewerError::General(format!("{:?}", e))),
-            })?
-            .into_eager()
-            .map_err(|e| ViewerError::DataLoading {
-                path: path.to_path_buf(),
-                source: Box::new(ViewerError::General(format!("{:?}", e))),
-            })?;
-
-        Ok(Arc::new(index))
+        Self::load_raw_data_from_location(path_str)
     }
 
     /// Load tolerance settings from a JSON file

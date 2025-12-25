@@ -10,12 +10,12 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
-use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::{
     DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
+    IndexedPeaksHandle,
 };
 use timsquery::{
     KeyLike,
@@ -34,6 +34,7 @@ use tracing::{
 pub struct FileLoader {
     pub elution_groups_path: Option<PathBuf>,
     pub raw_data_path: Option<PathBuf>,
+    pub raw_data_url: Option<String>,
     pub tolerance_path: Option<PathBuf>,
 }
 
@@ -42,6 +43,7 @@ impl FileLoader {
         Self {
             elution_groups_path: None,
             raw_data_path: None,
+            raw_data_url: None,
             tolerance_path: None,
         }
     }
@@ -77,7 +79,7 @@ impl FileLoader {
     /// Open a file dialog for raw data .d directory
     pub fn open_raw_data_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.raw_data_path = Some(path);
+            self.set_raw_data_path(path);
         }
     }
 
@@ -96,14 +98,44 @@ impl FileLoader {
         FileService::load_elution_groups(path)
     }
 
-    /// Load and index raw timsTOF data
-    pub fn load_raw_data(&self, path: &PathBuf) -> Result<Arc<IndexedTimstofPeaks>, ViewerError> {
-        FileService::load_raw_data(path)
+    /// Load and index raw timsTOF data from a location (path or URL)
+    pub fn load_raw_data_from_location(
+        &self,
+        location: &str,
+    ) -> Result<Arc<IndexedPeaksHandle>, ViewerError> {
+        FileService::load_raw_data_from_location(location)
     }
 
     /// Load tolerance settings from a JSON file
     pub fn load_tolerance(&self, path: &PathBuf) -> Result<Tolerance, ViewerError> {
         FileService::load_tolerance(path)
+    }
+
+    /// Set raw data URL for cloud storage
+    pub fn set_raw_data_url(&mut self, url: String) {
+        self.raw_data_url = Some(url);
+        // Clear path when URL is set
+        self.raw_data_path = None;
+    }
+
+    /// Set raw data path for local storage
+    pub fn set_raw_data_path(&mut self, path: PathBuf) {
+        self.raw_data_path = Some(path);
+        // Clear URL when path is set
+        self.raw_data_url = None;
+    }
+
+    /// Get the current raw data location (path or URL)
+    pub fn get_raw_data_location(&self) -> Option<String> {
+        self.raw_data_url
+            .clone()
+            .or_else(|| self.raw_data_path.as_ref().map(|p| p.display().to_string()))
+    }
+
+    /// Clear raw data location (both path and URL)
+    pub fn clear_raw_data(&mut self) {
+        self.raw_data_path = None;
+        self.raw_data_url = None;
     }
 }
 

@@ -1,6 +1,7 @@
 pub mod centroiding;
 pub mod geometry;
 pub mod indexing;
+pub mod instrumentation;
 pub mod lazy;
 pub mod rt_mapping;
 pub mod serialization;

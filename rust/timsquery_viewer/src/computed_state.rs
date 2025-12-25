@@ -29,7 +29,7 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
-
+use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
     ApexFinder,
     ApexScore,
@@ -67,7 +67,7 @@ impl ComputedState {
         &mut self,
         elution_groups: &ElutionGroupData,
         selected_idx: usize,
-        index: &IndexedTimstofPeaks,
+        index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
     ) {
@@ -126,7 +126,7 @@ impl ComputedState {
         &mut self,
         elution_groups: &ElutionGroupData,
         selected_idx: usize,
-        index: &IndexedTimstofPeaks,
+        index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
     ) {
@@ -224,7 +224,7 @@ impl ComputedState {
     }
 
     fn build_collector(
-        index: &IndexedTimstofPeaks,
+        index: &IndexedPeaksHandle,
         elution_group: TimsElutionGroup<String>,
     ) -> Result<ChromatogramCollector<String, f32>, ViewerError> {
         let max_range = index.ms1_cycle_mapping().range_milis();
@@ -254,7 +254,7 @@ impl ComputedState {
     fn generate_chromatogram(
         collector: &mut ChromatogramCollector<String, f32>,
         elution_group: &TimsElutionGroup<String>,
-        index: &IndexedTimstofPeaks,
+        index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
     ) -> Result<ChromatogramOutput, ViewerError> {
@@ -284,7 +284,7 @@ impl ComputedState {
     fn find_apex(
         apex_finder: &mut ApexFinder,
         context: &ScoringContext<String>,
-        index: &IndexedTimstofPeaks,
+        index: &IndexedPeaksHandle,
     ) -> Result<ApexScore, ViewerError> {
         apex_finder.find_apex(context, &|idx| {
             index

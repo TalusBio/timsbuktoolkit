@@ -34,6 +34,7 @@ indicatif = { version = "0.18.0", features = ["rayon"] }
 
 # Parquet and arrow usually need to be kept in sync
 # Its not needed but makes binaries smaller
+parquet_derive = { version = "57.1" }
 parquet = { version = "57.1" }
 arrow = { version = "57.1" }
 

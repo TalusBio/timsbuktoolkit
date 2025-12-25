@@ -11,6 +11,7 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::fmt::Debug;
 use std::ops::{
     Range,
     RangeInclusive,
@@ -31,7 +32,7 @@ pub struct WindowCycleIndex {
 }
 
 pub trait RTIndex:
-    Copy + PartialEq + Eq + PartialOrd + Ord + std::fmt::Debug + Send + Sync
+    Copy + PartialEq + Eq + PartialOrd + Ord + std::fmt::Debug + Send + Sync + Debug
 {
     fn index(&self) -> usize;
     fn new(index: u32) -> Self;
@@ -64,12 +65,35 @@ impl RTIndex for WindowCycleIndex {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CycleToRTMapping<T: RTIndex> {
     // Q: Do I want to newtype the u32 to make clear its meant
     // for RT in milliseconds?
     rt_milis: Vec<u32>,
     phantom: std::marker::PhantomData<T>,
+}
+
+fn glimpse_slc_u32(slice: &[u32]) -> String {
+    if slice.len() <= 5 {
+        format!("{:?}", slice)
+    } else {
+        format!(
+            "[{}, {}, ..., {}, {}] (len={})",
+            slice[0],
+            slice[1],
+            slice[slice.len() - 2],
+            slice[slice.len() - 1],
+            slice.len()
+        )
+    }
+}
+
+impl<T: RTIndex> Debug for CycleToRTMapping<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CycleToRTMapping<RTIndex>")
+            .field("rt_milis", &glimpse_slc_u32(&self.rt_milis))
+            .finish()
+    }
 }
 
 impl<T: RTIndex> CycleToRTMapping<T> {
