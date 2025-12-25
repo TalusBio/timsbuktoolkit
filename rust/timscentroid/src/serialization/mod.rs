@@ -71,7 +71,10 @@ use serde::{
     Serialize,
 };
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{
+    Path,
+    PathBuf,
+};
 use std::sync::Arc;
 
 /// Errors that can occur during serialization/deserialization
@@ -209,7 +212,7 @@ pub struct TimscentroidMetadata {
     pub ms2_window_groups: Vec<Ms2GroupMetadata>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PeakGroupMetadata<T: RTIndex> {
     pub relative_path: PathBuf,
     pub cycle_to_rt_ms: CycleToRTMapping<T>,
@@ -518,8 +521,8 @@ impl IndexedTimstofPeaks {
         ) = rayon::join(
             // Load MS1 in parallel thread
             || {
-                let ms1_peaks_vec = storage
-                    .read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
+                let ms1_peaks_vec =
+                    storage.read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
 
                 let (ms1_peaks, _stats) = IndexedPeakGroup::new(
                     ms1_peaks_vec,
@@ -533,8 +536,9 @@ impl IndexedTimstofPeaks {
                 meta.ms2_window_groups
                     .par_iter()
                     .map(|group_meta| {
-                        let peaks_vec = storage
-                            .read_parquet_peaks(group_meta.group_info.relative_path.to_str().unwrap())?;
+                        let peaks_vec = storage.read_parquet_peaks(
+                            group_meta.group_info.relative_path.to_str().unwrap(),
+                        )?;
 
                         let (group, _stats) = IndexedPeakGroup::new(
                             peaks_vec,
@@ -567,8 +571,8 @@ impl IndexedTimstofPeaks {
         meta: TimscentroidMetadata,
     ) -> Result<Self, SerializationError> {
         // Load MS1 first
-        let ms1_peaks_vec = storage
-            .read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
+        let ms1_peaks_vec =
+            storage.read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
         let (ms1_peaks, _stats) = IndexedPeakGroup::new(
             ms1_peaks_vec,
             meta.ms1_peaks.cycle_to_rt_ms.clone(),
@@ -597,7 +601,6 @@ impl IndexedTimstofPeaks {
             ms2_window_groups: ms2_window_groups?,
         })
     }
-
 }
 
 // Helper function to write parquet to bytes (used by cloud storage)
@@ -718,5 +721,3 @@ pub(crate) fn batch_to_peaks<T: RTIndex>(
 
     Ok(peaks)
 }
-
-

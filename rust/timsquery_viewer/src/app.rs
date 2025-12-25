@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
+use timsquery::serde::IndexedPeaksHandle;
 
 use crate::chromatogram_processor::SmoothingMethod;
 use crate::cli::Cli;
@@ -52,12 +53,12 @@ pub enum IndexedDataState {
     /// No data loaded
     #[default]
     None,
-    /// Currently loading data from path
-    Loading(PathBuf),
+    /// Currently loading data from location (path or URL)
+    Loading(String),
     /// Loading failed with error message
-    Failed(PathBuf, String),
+    Failed(String, String),
     /// Data successfully loaded
-    Loaded { index: Arc<IndexedTimstofPeaks> },
+    Loaded { index: Arc<IndexedPeaksHandle> },
 }
 
 /// Domain/data state - represents loaded data and analysis parameters
@@ -77,6 +78,19 @@ pub struct DataState {
     pub auto_zoom_mode: AutoZoomMode,
 }
 
+/// Input mode for raw data loading
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum RawDataInputMode {
+    Local,
+    Cloud,
+}
+
+impl Default for RawDataInputMode {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
 /// UI-specific state - transient UI state that doesn't affect data
 #[derive(Debug, serde::Deserialize, serde::Serialize, Default)]
 pub struct UiState {
@@ -88,6 +102,8 @@ pub struct UiState {
     pub search_mode: bool,
     /// Vim mode: search input buffer
     pub search_input: String,
+    /// Raw data input mode (Local or Cloud)
+    pub raw_data_input_mode: RawDataInputMode,
 }
 
 /// Main application state
@@ -310,21 +326,92 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
-        _ui_state: &mut UiState,
+        ui_state: &mut UiState,
     ) {
-        ui.label("Raw Data File (.d):");
-        if ui.button("Load Raw Data...").clicked() {
-            file_loader.open_raw_data_dialog();
+        ui.label("Raw Data:");
+
+        // Tab selector for Local vs Cloud
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut ui_state.raw_data_input_mode,
+                RawDataInputMode::Local,
+                "📁 Local",
+            );
+            ui.selectable_value(
+                &mut ui_state.raw_data_input_mode,
+                RawDataInputMode::Cloud,
+                "☁️ Cloud URL",
+            );
+        });
+
+        ui.separator();
+
+        match ui_state.raw_data_input_mode {
+            RawDataInputMode::Local => {
+                // Existing folder picker button
+                if ui.button("Load Raw Data...").clicked() {
+                    file_loader.open_raw_data_dialog();
+                }
+            }
+            RawDataInputMode::Cloud => {
+                // URL input field
+                ui.horizontal(|ui| {
+                    ui.label("URL:");
+                    let mut url_buffer = file_loader.raw_data_url.clone().unwrap_or_default();
+                    let response = ui.text_edit_singleline(&mut url_buffer);
+
+                    if response.changed() {
+                        if !url_buffer.is_empty() {
+                            file_loader.set_raw_data_url(url_buffer);
+                        } else {
+                            file_loader.clear_raw_data();
+                        }
+                    }
+                });
+
+                // Show examples
+                ui.label(egui::RichText::new("Examples:").italics().weak().small());
+                ui.label(
+                    egui::RichText::new("s3://bucket/data.d or s3://bucket/data.idx")
+                        .small()
+                        .weak(),
+                );
+                ui.label(
+                    egui::RichText::new("gs://bucket/data.d or gs://bucket/data.idx")
+                        .small()
+                        .weak(),
+                );
+            }
         }
 
-        if let Some(path) = &file_loader.raw_data_path {
-            Self::display_filename(ui, path);
+        // Show current location with clear button
+        if let Some(location) = file_loader.get_raw_data_location() {
+            ui.horizontal(|ui| {
+                let display_text = Self::truncate_middle(&location, 50);
+                ui.label(egui::RichText::new(display_text).weak())
+                    .on_hover_text(&location);
+
+                if ui.small_button("✖").clicked() {
+                    file_loader.clear_raw_data();
+                }
+            });
         }
 
         Self::load_raw_data_if_needed(ui, file_loader, data);
 
         if matches!(data.indexed_data, IndexedDataState::Loaded { .. }) {
             ui.label("✓ Raw data indexed");
+        }
+    }
+
+    /// Helper to truncate long paths/URLs for display
+    fn truncate_middle(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            let start = &s[..max_len / 2 - 2];
+            let end = &s[s.len() - max_len / 2 + 2..];
+            format!("{}...{}", start, end)
         }
     }
 
@@ -391,42 +478,39 @@ impl ViewerApp {
         file_loader: &mut FileLoader,
         data: &mut DataState,
     ) {
-        if let Some(path) = &file_loader.raw_data_path {
+        if let Some(location) = file_loader.get_raw_data_location() {
             // Transition from None to Loading
             if matches!(data.indexed_data, IndexedDataState::None) {
-                data.indexed_data = IndexedDataState::Loading(path.clone());
+                data.indexed_data = IndexedDataState::Loading(location.clone());
                 ui.ctx().request_repaint();
             }
         }
 
         match &data.indexed_data {
-            IndexedDataState::Loading(path) => {
+            IndexedDataState::Loading(location) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Indexing raw data... (this may take 10-30 seconds)");
                 });
 
-                match file_loader.load_raw_data(path) {
+                match file_loader.load_raw_data_from_location(location) {
                     Ok(index) => {
                         data.indexed_data = IndexedDataState::Loaded { index };
-                        file_loader.raw_data_path = None;
+                        file_loader.clear_raw_data();
                         tracing::info!("Raw data indexing completed");
                     }
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
                         tracing::error!("Failed to load raw data: {}", error_msg);
-                        data.indexed_data = IndexedDataState::Failed(path.clone(), error_msg);
-                        file_loader.raw_data_path = None;
+                        data.indexed_data = IndexedDataState::Failed(location.clone(), error_msg);
+                        file_loader.clear_raw_data();
                     }
                 }
             }
-            IndexedDataState::Failed(path, error) => {
+            IndexedDataState::Failed(location, error) => {
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Failed to load raw data from {}:",
-                        path.display()
-                    ))
-                    .color(egui::Color32::RED),
+                    egui::RichText::new(format!("Failed to load raw data from {}:", location))
+                        .color(egui::Color32::RED),
                 );
                 ui.label(egui::RichText::new(error).color(egui::Color32::RED).small());
                 if ui.button("Clear Error").clicked() {
@@ -512,6 +596,7 @@ impl eframe::App for ViewerApp {
             file_loader: FileLoader {
                 elution_groups_path: self.file_loader.elution_groups_path.clone(),
                 raw_data_path: self.file_loader.raw_data_path.clone(),
+                raw_data_url: self.file_loader.raw_data_url.clone(),
                 tolerance_path: self.file_loader.tolerance_path.clone(),
             },
             ui_state: UiState {
@@ -519,6 +604,7 @@ impl eframe::App for ViewerApp {
                 selected_index: self.ui.selected_index,
                 search_mode: self.ui.search_mode,
                 search_input: self.ui.search_input.clone(),
+                raw_data_input_mode: self.ui.raw_data_input_mode,
             },
             tolerance: self.data.tolerance.clone(),
             smoothing: self.data.smoothing,

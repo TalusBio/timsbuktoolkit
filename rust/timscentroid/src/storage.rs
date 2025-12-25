@@ -57,15 +57,49 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+use crate::instrumentation::{
+    InstrumentedStore,
+    StorageMetrics,
+};
 use crate::serialization::SerializationError;
+use tracing::{
+    info,
+    instrument,
+};
 
 /// Global tokio runtime for all async operations (created lazily)
+///
+/// By default, uses 8 worker threads to enable high concurrency for cloud storage I/O.
+/// This is critical for performance when querying multiple parquet files concurrently
+/// from S3 or other cloud providers.
+///
+/// Can be configured via the `TIMSCENTROID_WORKER_THREADS` environment variable.
 pub(crate) static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_current_thread()
+    let worker_threads = std::env::var("TIMSCENTROID_WORKER_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8); // Increased from 2 to 8 for better S3 concurrency
+
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
         .enable_all()
         .build()
         .expect("Failed to create Tokio runtime")
 });
+
+/// Helper to run async code from sync context, handling nested runtime calls
+fn block_on_or_in_place<F: std::future::Future>(future: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // We're already in a runtime, use block_in_place to avoid panic
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        Err(_) => {
+            // Not in a runtime, use our global runtime
+            RUNTIME.block_on(future)
+        }
+    }
+}
 
 /// Storage location - either a local path or a cloud URL
 #[derive(Debug, Clone)]
@@ -96,25 +130,78 @@ impl StorageLocation {
 }
 
 /// Storage provider wrapping an ObjectStore
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StorageProvider {
     store: Arc<dyn ObjectStore>,
     is_local: bool,
+    /// Path prefix to prepend to all file accesses (for cloud URLs with paths)
+    prefix: String,
+    /// Optional metrics if instrumentation is enabled
+    metrics: Option<Arc<StorageMetrics>>,
 }
 
 impl StorageProvider {
     /// Create a new storage provider from a location
     pub fn new(location: StorageLocation) -> Result<Self, SerializationError> {
-        let (store, is_local): (Arc<dyn ObjectStore>, bool) = match location {
+        let (store, is_local, prefix): (Arc<dyn ObjectStore>, bool, String) = match location {
             StorageLocation::Local(path) => {
                 // Create directory if it doesn't exist
                 std::fs::create_dir_all(&path)?;
-                (Arc::new(LocalFileSystem::new_with_prefix(path)?), true)
+                (
+                    Arc::new(LocalFileSystem::new_with_prefix(path)?),
+                    true,
+                    String::new(),
+                )
             }
-            StorageLocation::Url(url) => (parse_url(&url)?, false),
+            StorageLocation::Url(url) => {
+                // Extract path prefix from URL (e.g., s3://bucket/prefix/path -> "prefix/path")
+                let prefix = url.path().trim_start_matches('/').to_string();
+                (block_on_or_in_place(parse_url(&url))?, false, prefix)
+            }
         };
 
-        Ok(Self { store, is_local })
+        Ok(Self {
+            store,
+            is_local,
+            prefix,
+            metrics: None,
+        })
+    }
+
+    /// Enable instrumentation for this storage provider
+    ///
+    /// This wraps the underlying ObjectStore with an InstrumentedStore that tracks:
+    /// - Number of GET/PUT/HEAD operations
+    /// - Bytes transferred
+    /// - Time spent in each operation
+    ///
+    /// Returns a new StorageProvider with instrumentation enabled.
+    pub fn with_instrumentation(self, label: impl Into<String>) -> Self {
+        let metrics = Arc::new(StorageMetrics::new());
+        let instrumented = Arc::new(InstrumentedStore::new(
+            self.store.clone(),
+            metrics.clone(),
+            label.into(),
+        ));
+
+        Self {
+            store: instrumented,
+            is_local: self.is_local,
+            prefix: self.prefix,
+            metrics: Some(metrics),
+        }
+    }
+
+    /// Get metrics if instrumentation is enabled
+    pub fn metrics(&self) -> Option<&StorageMetrics> {
+        self.metrics.as_ref().map(|m| m.as_ref())
+    }
+
+    /// Print metrics report if instrumentation is enabled
+    pub fn print_metrics(&self, label: &str) {
+        if let Some(metrics) = &self.metrics {
+            metrics.snapshot().print_report(label);
+        }
     }
 
     /// Check if this storage provider is backed by local filesystem
@@ -124,9 +211,22 @@ impl StorageProvider {
         self.is_local
     }
 
+    /// Build full path by prepending prefix (for cloud storage)
+    pub fn build_path(&self, path: &str) -> String {
+        if self.prefix.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{}", self.prefix, path)
+        }
+    }
+
     /// Read a file as bytes (async version)
+    #[instrument(skip(self), fields(path = %path))]
     pub async fn read_bytes_async(&self, path: &str) -> Result<Vec<u8>, SerializationError> {
-        let object_path = ObjectPath::from(path);
+        let full_path = self.build_path(path);
+        info!("Reading from full path: {}", full_path);
+        let object_path = ObjectPath::from(full_path.as_str());
+        info!("Object path: {:?}", object_path);
         let result = self.store.get(&object_path).await?;
         let bytes = result.bytes().await?;
         Ok(bytes.to_vec())
@@ -134,7 +234,7 @@ impl StorageProvider {
 
     /// Read a file as bytes (blocking version)
     pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, SerializationError> {
-        RUNTIME.block_on(self.read_bytes_async(path))
+        block_on_or_in_place(self.read_bytes_async(path))
     }
 
     /// Read a file as string (async version)
@@ -147,13 +247,14 @@ impl StorageProvider {
 
     /// Read a file as string (blocking version)
     pub fn read_to_string(&self, path: &str) -> Result<String, SerializationError> {
-        RUNTIME.block_on(self.read_to_string_async(path))
+        block_on_or_in_place(self.read_to_string_async(path))
     }
 
     /// Write bytes to a file
     pub fn write_bytes(&self, path: &str, data: Vec<u8>) -> Result<(), SerializationError> {
-        let object_path = ObjectPath::from(path);
-        RUNTIME.block_on(async {
+        let full_path = self.build_path(path);
+        let object_path = ObjectPath::from(full_path.as_str());
+        block_on_or_in_place(async {
             self.store
                 .put(&object_path, Bytes::from(data).into())
                 .await?;
@@ -183,6 +284,7 @@ impl StorageProvider {
     ///
     /// # Returns
     /// Vector of indexed peaks loaded from the parquet file
+    #[instrument(skip(self), fields(path = %path))]
     pub fn read_parquet_peaks<T: crate::rt_mapping::RTIndex>(
         &self,
         path: &str,
@@ -191,9 +293,10 @@ impl StorageProvider {
         use parquet::arrow::ParquetRecordBatchStreamBuilder;
         use parquet::arrow::async_reader::ParquetObjectReader;
 
-        let object_path = ObjectPath::from(path);
+        let full_path = self.build_path(path);
+        let object_path = ObjectPath::from(full_path.as_str());
 
-        RUNTIME.block_on(async {
+        block_on_or_in_place(async {
             // Create ParquetObjectReader - works for both local and cloud storage
             let reader = ParquetObjectReader::new(self.store.clone(), object_path);
 
@@ -221,10 +324,12 @@ impl StorageProvider {
 /// - s3://bucket/prefix (requires "aws" feature)
 /// - gs://bucket/prefix (requires "gcp" feature)
 /// - az://container/prefix or azure://container/prefix (requires "azure" feature)
-fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, SerializationError> {
+async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, SerializationError> {
     match url.scheme() {
         #[cfg(feature = "aws")]
         "s3" => {
+            use aws_config::BehaviorVersion;
+            use aws_credential_types::provider::ProvideCredentials;
             use object_store::aws::AmazonS3Builder;
 
             let bucket = url.host_str().ok_or_else(|| {
@@ -233,12 +338,41 @@ fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, SerializationError>
                     "Missing bucket in S3 URL",
                 ))
             })?;
+            info!("Creating S3 ObjectStore for bucket: {}", bucket);
 
-            Ok(Arc::new(
-                AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?,
-            ))
+            // 1. Load the AWS configuration from the environment (handles Profile, MFA, SSO, etc.)
+            let sdk_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+
+            // 2. Extract the credentials from the resolved config
+            //    (This executes the chain: Env Vars -> Profile -> Web Identity -> IMDS)
+            let credentials_provider = sdk_config
+                .credentials_provider()
+                .expect("No credentials provider found");
+            let credentials = credentials_provider
+                .provide_credentials()
+                .await
+                .map_err(|e| {
+                    SerializationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+
+            // 3. Initialize the builder using the resolved credentials
+            let mut builder = AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .with_region(
+                    sdk_config
+                        .region()
+                        .map(|r| r.as_ref())
+                        .unwrap_or("us-west-2"),
+                )
+                .with_access_key_id(credentials.access_key_id())
+                .with_secret_access_key(credentials.secret_access_key());
+
+            // 4. Important: Attach the session token if it exists (Critical for MFA/SSO)
+            if let Some(token) = credentials.session_token() {
+                builder = builder.with_token(token);
+            }
+
+            Ok(Arc::new(builder.build()?))
         }
 
         #[cfg(feature = "gcp")]
