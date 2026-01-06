@@ -199,10 +199,10 @@ impl ParquetQuerier {
                 }
 
                 // Check IMS Range (if exists)
-                if let Some(r) = &ims_range {
-                    if !overlap_check_f16(rg_meta, ims_col_idx, r) {
-                        return false;
-                    }
+                if let Some(r) = &ims_range
+                    && !overlap_check_f16(rg_meta, ims_col_idx, r)
+                {
+                    return false;
                 }
 
                 true

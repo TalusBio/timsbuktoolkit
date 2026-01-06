@@ -349,10 +349,9 @@ impl ElutionGroupData {
             ElutionGroupCollection::StringLabels(_, extras)
             | ElutionGroupCollection::MzpafLabels(_, extras)
             | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
-                Some(FileReadingExtras::Diann(_)) => true,
-                _ => false,
-            },
+            | ElutionGroupCollection::IntLabels(_, extras) => {
+                matches!(extras, Some(FileReadingExtras::Diann(_)))
+            }
         };
         if has_diann_extras {
             for _ in DIANN_EXTRA_LABELS.iter() {
@@ -370,10 +369,9 @@ impl ElutionGroupData {
             ElutionGroupCollection::StringLabels(_, extras)
             | ElutionGroupCollection::MzpafLabels(_, extras)
             | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
-                Some(FileReadingExtras::Diann(_)) => true,
-                _ => false,
-            },
+            | ElutionGroupCollection::IntLabels(_, extras) => {
+                matches!(extras, Some(FileReadingExtras::Diann(_)))
+            }
         };
 
         builder.header(20.0, |mut header| {

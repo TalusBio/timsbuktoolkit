@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use thiserror::Error;
 use timsrust::readers::FrameReaderError;
 
@@ -12,25 +11,6 @@ pub enum ViewerError {
 
     #[error("TIMS frame reader error: {0}")]
     FrameReader(#[from] FrameReaderError),
-
-    #[error("Failed to load data from {path}: {source}")]
-    DataLoading {
-        path: PathBuf,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[error("Data reading error: {0}")]
-    DataReading(String),
-
-    #[error("Network error while accessing cloud storage: {0}")]
-    Network(String),
-
-    #[error("Cloud storage error: {0}")]
-    CloudStorage(String),
-
-    #[error("Authentication error for cloud storage: {0}")]
-    Authentication(String),
 
     #[error("General error: {0}")]
     General(String),

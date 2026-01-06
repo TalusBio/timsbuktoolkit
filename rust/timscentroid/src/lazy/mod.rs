@@ -192,10 +192,10 @@ impl LazyIndexedTimstofPeaks {
             ParquetQuerier::new_async(storage.clone(), ms1_relative_path)
                 .await
                 .map_err(|e| {
-                    SerializationError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Error creating MS1 querier: {}", e),
-                    ))
+                    SerializationError::Io(std::io::Error::other(format!(
+                        "Error creating MS1 querier: {}",
+                        e
+                    )))
                 })?,
         );
 
@@ -207,10 +207,10 @@ impl LazyIndexedTimstofPeaks {
                 ParquetQuerier::new_async(storage.clone(), relative_path)
                     .await
                     .map_err(|e| {
-                        SerializationError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Error creating MS2 querier: {}", e),
-                        ))
+                        SerializationError::Io(std::io::Error::other(format!(
+                            "Error creating MS2 querier: {}",
+                            e
+                        )))
                     })?,
             );
             ms2_queriers.push(querier);
@@ -238,6 +238,14 @@ impl LazyIndexedTimstofPeaks {
 
     pub fn ms1_metadata(&self) -> &PeakGroupMetadata<MS1CycleIndex> {
         &self.ms1_metadata
+    }
+
+    pub fn ms1_cycle_mapping(&self) -> &crate::rt_mapping::CycleToRTMapping<MS1CycleIndex> {
+        &self.ms1_metadata.cycle_to_rt_ms
+    }
+
+    pub fn rt_ms_to_cycle_index(&self, rt_ms: u32) -> MS1CycleIndex {
+        self.ms1_metadata.cycle_to_rt_ms.ms_to_closest_index(rt_ms)
     }
 }
 
@@ -280,10 +288,10 @@ impl LazyIndexedTimstofPeaks {
             .query_async(mz_range_range, im_range_opt)
             .await
             .map_err(|e| {
-                SerializationError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Error querying Parquet: {}", e),
-                ))
+                SerializationError::Io(std::io::Error::other(format!(
+                    "Error querying Parquet: {}",
+                    e
+                )))
             })?;
 
         // Convert RecordBatch to Vec of IndexedPeak

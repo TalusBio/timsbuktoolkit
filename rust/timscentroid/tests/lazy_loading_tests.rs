@@ -1,4 +1,5 @@
 use half::f16;
+use timscentroid::StorageLocation;
 use timscentroid::indexing::{
     IndexedPeak,
     IndexedPeakGroup,
@@ -12,7 +13,6 @@ use timscentroid::rt_mapping::{
 };
 use timscentroid::utils::OptionallyRestricted::*;
 use timscentroid::utils::TupleRange;
-use timscentroid::StorageLocation;
 
 // For now, we'll skip MS2 geometry tests since QuadrupoleIsolationScheme
 // doesn't have a public constructor. We can test MS1 queries instead.
@@ -211,9 +211,7 @@ fn test_storage_abstraction_with_local_filesystem() {
 
     // Test 1: Save using storage abstraction
     let location = StorageLocation::from_path(&temp_dir);
-    index
-        .save_to_storage(location, Default::default())
-        .unwrap();
+    index.save_to_storage(location, Default::default()).unwrap();
 
     // Verify files were created
     assert!(temp_dir.join("metadata.json").exists());
@@ -304,7 +302,10 @@ async fn test_async_parquet_querier() {
 
     // Verify results
     assert!(record_batch.num_rows() > 0, "Should find some peaks");
-    println!("Async ParquetQuerier test passed: found {} peaks", record_batch.num_rows());
+    println!(
+        "Async ParquetQuerier test passed: found {} peaks",
+        record_batch.num_rows()
+    );
 
     // Cleanup
     std::fs::remove_dir_all(&temp_dir).unwrap();
@@ -371,11 +372,8 @@ async fn test_concurrent_metadata_caching() {
         })
         .collect();
 
-    let (ms1_group, _) = IndexedPeakGroup::testing_new(
-        peaks,
-        CycleToRTMapping::<MS1CycleIndex>::new(vec![0]),
-        4,
-    );
+    let (ms1_group, _) =
+        IndexedPeakGroup::testing_new(peaks, CycleToRTMapping::<MS1CycleIndex>::new(vec![0]), 4);
 
     let index = IndexedTimstofPeaks::from_parts(ms1_group, vec![]);
     index.save_to_directory(&temp_dir).unwrap();
@@ -447,18 +445,22 @@ fn test_nested_path_prefix_handling() {
 
     // Save to nested path (simulates cloud storage with prefix)
     let location = StorageLocation::from_path(&nested_path);
-    index
-        .save_to_storage(location, Default::default())
-        .unwrap();
+    index.save_to_storage(location, Default::default()).unwrap();
 
     // Verify files were created in the correct nested location
-    assert!(nested_path.join("metadata.json").exists(), "metadata.json should exist");
-    assert!(nested_path.join("ms1.parquet").exists(), "ms1.parquet should exist");
+    assert!(
+        nested_path.join("metadata.json").exists(),
+        "metadata.json should exist"
+    );
+    assert!(
+        nested_path.join("ms1.parquet").exists(),
+        "ms1.parquet should exist"
+    );
 
     // Load from nested path - this tests that prefix handling works correctly
     let location = StorageLocation::from_path(&nested_path);
-    let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location)
-        .expect("Should load from nested path");
+    let lazy_index =
+        LazyIndexedTimstofPeaks::load_from_storage(location).expect("Should load from nested path");
 
     // Query peaks - this is where prefix handling is critical for parquet file access
     let mz_range = TupleRange::try_new(610.0, 630.0).unwrap();
@@ -468,11 +470,23 @@ fn test_nested_path_prefix_handling() {
 
     // Should find peaks at 610, 620, 630
     assert_eq!(results.len(), 3, "Should find 3 peaks in range");
-    assert!(results.iter().any(|p| (p.mz - 610.0).abs() < 0.01), "Should find peak at 610");
-    assert!(results.iter().any(|p| (p.mz - 620.0).abs() < 0.01), "Should find peak at 620");
-    assert!(results.iter().any(|p| (p.mz - 630.0).abs() < 0.01), "Should find peak at 630");
+    assert!(
+        results.iter().any(|p| (p.mz - 610.0).abs() < 0.01),
+        "Should find peak at 610"
+    );
+    assert!(
+        results.iter().any(|p| (p.mz - 620.0).abs() < 0.01),
+        "Should find peak at 620"
+    );
+    assert!(
+        results.iter().any(|p| (p.mz - 630.0).abs() < 0.01),
+        "Should find peak at 630"
+    );
 
-    println!("Path prefix test passed! Successfully loaded and queried from nested path: {:?}", nested_path);
+    println!(
+        "Path prefix test passed! Successfully loaded and queried from nested path: {:?}",
+        nested_path
+    );
 
     // Cleanup
     std::fs::remove_dir_all(&temp_root).unwrap();

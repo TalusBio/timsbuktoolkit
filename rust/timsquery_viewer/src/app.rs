@@ -8,13 +8,15 @@ use egui_dock::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
 use crate::chromatogram_processor::SmoothingMethod;
 use crate::cli::Cli;
-use crate::computed_state::ComputedState;
+use crate::computed_state::{
+    ChromatogramComputationResult,
+    ComputedState,
+};
 use crate::file_loader::{
     ElutionGroupData,
     FileLoader,
@@ -25,6 +27,60 @@ use crate::ui::panels::{
     SpectrumPanel,
     TablePanel,
 };
+use std::sync::Arc as StdArc;
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
+use std::sync::mpsc::{
+    Receiver,
+    channel,
+};
+
+/// Result from background chromatogram computation
+type ChromatogramComputeResult = Result<
+    (
+        crate::chromatogram_processor::ChromatogramOutput,
+        crate::chromatogram_processor::ChromatogramCollector<String, f32>,
+        timsseek::ExpectedIntensities<String>,
+        u64, // selected_idx as cache key
+    ),
+    String,
+>;
+
+/// Handle to cancel a running background computation
+#[derive(Clone)]
+struct CancellationToken {
+    cancelled: StdArc<AtomicBool>,
+}
+
+impl CancellationToken {
+    fn new() -> Self {
+        Self {
+            cancelled: StdArc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+// UI spacing and layout constants
+const SECTION_MARGIN: i8 = 10;
+const SECTION_SPACING: f32 = 12.0;
+const INTERNAL_SPACING: f32 = 8.0;
+const SMALL_SPACING: f32 = 4.0;
+const SMALL_SPACING_VERTICAL: f32 = 6.0;
+const SEPARATOR_SPACING: f32 = 16.0;
+const LOCATION_DISPLAY_MAX_LEN: usize = 40;
+const CORNER_RADIUS: u8 = 4;
+const LOCATION_FRAME_PADDING_H: i8 = 8;
+const LOCATION_FRAME_PADDING_V: i8 = 4;
 
 /// Pane types for the tile layout
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -58,7 +114,10 @@ pub enum IndexedDataState {
     /// Loading failed with error message
     Failed(String, String),
     /// Data successfully loaded
-    Loaded { index: Arc<IndexedPeaksHandle> },
+    Loaded {
+        index: Arc<IndexedPeaksHandle>,
+        source: String,
+    },
 }
 
 /// Domain/data state - represents loaded data and analysis parameters
@@ -79,16 +138,11 @@ pub struct DataState {
 }
 
 /// Input mode for raw data loading
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub enum RawDataInputMode {
+    #[default]
     Local,
     Cloud,
-}
-
-impl Default for RawDataInputMode {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// UI-specific state - transient UI state that doesn't affect data
@@ -127,6 +181,11 @@ pub struct ViewerApp {
     config_panel: ConfigPanel,
     table_panel: TablePanel,
     spectrum_panel: SpectrumPanel,
+
+    /// Receiver for background chromatogram computation
+    chromatogram_receiver: Option<Receiver<ChromatogramComputeResult>>,
+    /// Token to cancel current background computation
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl ViewerApp {
@@ -152,6 +211,8 @@ impl ViewerApp {
             config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
+            chromatogram_receiver: None,
+            cancellation_token: None,
         }
     }
 
@@ -200,6 +261,8 @@ impl ViewerApp {
                         config_panel: ConfigPanel::new(),
                         table_panel: TablePanel::new(),
                         spectrum_panel: SpectrumPanel::new(),
+                        chromatogram_receiver: None,
+                        cancellation_token: None,
                     };
                 }
             } else {
@@ -229,6 +292,8 @@ impl ViewerApp {
             config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
+            chromatogram_receiver: None,
+            cancellation_token: None,
         }
     }
 
@@ -280,8 +345,20 @@ impl ViewerApp {
         });
     }
 
-    fn generate_chromatogram(&mut self) {
-        let IndexedDataState::Loaded { index } = &self.data.indexed_data else {
+    /// Generate MS2 spectrum if user clicked on a new RT position
+    fn generate_ms2_spectrum_if_needed(&mut self) {
+        let Some(requested_rt) = self.computed.clicked_rt else {
+            return;
+        };
+
+        if self.computed.generate_spectrum_at_rt(requested_rt) {
+            self.computed
+                .insert_reference_line("Clicked RT".into(), requested_rt, Color32::GREEN);
+        }
+    }
+
+    fn generate_chromatogram(&mut self, ctx: &egui::Context) {
+        let IndexedDataState::Loaded { index, .. } = &self.data.indexed_data else {
             return;
         };
 
@@ -290,15 +367,201 @@ impl ViewerApp {
             None => return,
         };
 
-        if let Some(elution_groups) = &self.data.elution_groups {
-            self.computed.update(
-                elution_groups,
-                selected_idx,
-                index,
-                &self.data.tolerance,
-                &self.data.smoothing,
-            )
+        let Some(elution_groups) = &self.data.elution_groups else {
+            return;
         };
+
+        if !self
+            .computed
+            .is_cache_valid(selected_idx, &self.data.tolerance, &self.data.smoothing)
+        {
+            let is_new_request = self
+                .computed
+                .computing_index()
+                .map(|computing_idx| computing_idx != selected_idx as u64)
+                .unwrap_or(true);
+
+            if self.computed.is_computing() && !is_new_request {
+                tracing::trace!(
+                    "Chromatogram computation already in progress for index {}, skipping",
+                    selected_idx
+                );
+                return;
+            }
+
+            let Ok((elution_group, expected_intensities)) = elution_groups.get_elem(selected_idx)
+            else {
+                tracing::error!("Invalid elution group index: {}", selected_idx);
+                return;
+            };
+
+            if self.computed.is_computing() && is_new_request {
+                tracing::debug!(
+                    "Cancelling previous chromatogram computation (switching to index {})",
+                    selected_idx
+                );
+                if let Some(token) = &self.cancellation_token {
+                    token.cancel();
+                }
+                self.chromatogram_receiver = None;
+                self.cancellation_token = None;
+            }
+
+            tracing::debug!(
+                "Starting new chromatogram computation for index {}",
+                selected_idx
+            );
+            self.computed.start_computing(selected_idx as u64);
+
+            let cancel_token = CancellationToken::new();
+            self.cancellation_token = Some(cancel_token.clone());
+
+            let (tx, rx) = channel();
+            self.chromatogram_receiver = Some(rx);
+
+            let index_owned = index.clone();
+            let elution_group_owned = elution_group.clone();
+            let expected_intensities_owned = expected_intensities.clone();
+            let tolerance_owned = self.data.tolerance.clone();
+            let smoothing_owned = self.data.smoothing;
+            let ctx_clone = ctx.clone();
+            match std::thread::Builder::new()
+                .name(format!("chrom-{}", selected_idx))
+                .spawn(move || {
+                    tracing::debug!(
+                        "Starting chromatogram computation for elution group {}",
+                        selected_idx
+                    );
+                    let result = Self::compute_chromatogram_background(
+                        elution_group_owned,
+                        expected_intensities_owned,
+                        selected_idx,
+                        index_owned,
+                        tolerance_owned,
+                        smoothing_owned,
+                        cancel_token,
+                    );
+                    if let Err(e) = &result {
+                        tracing::error!("Chromatogram computation failed: {}", e);
+                    } else {
+                        tracing::debug!(
+                            "Chromatogram computation completed for elution group {}",
+                            selected_idx
+                        );
+                    }
+                    let _ = tx.send(result);
+                    ctx_clone.request_repaint();
+                }) {
+                Ok(_) => {
+                    tracing::debug!("Successfully spawned chromatogram computation thread");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to spawn chromatogram thread: {}", e);
+                    self.computed.cancel_computing();
+                    self.chromatogram_receiver = None;
+                    self.cancellation_token = None;
+                }
+            }
+        }
+    }
+
+    /// Compute chromatogram in background thread
+    fn compute_chromatogram_background(
+        elution_group: timsquery::models::elution_group::TimsElutionGroup<String>,
+        expected_intensities: timsseek::ExpectedIntensities<String>,
+        selected_idx: usize,
+        index: Arc<IndexedPeaksHandle>,
+        tolerance: Tolerance,
+        smoothing: SmoothingMethod,
+        cancel_token: CancellationToken,
+    ) -> ChromatogramComputeResult {
+        // Check if cancelled before starting
+        if cancel_token.is_cancelled() {
+            tracing::debug!("Chromatogram computation cancelled before starting");
+            return Err("Computation cancelled".to_string());
+        }
+
+        // Build collector
+        let mut collector = ComputedState::build_collector(&index, elution_group.clone())
+            .map_err(|e| format!("Failed to build collector: {:?}", e))?;
+
+        // Check if cancelled after building collector
+        if cancel_token.is_cancelled() {
+            tracing::debug!("Chromatogram computation cancelled after building collector");
+            return Err("Computation cancelled".to_string());
+        }
+
+        // Generate chromatogram
+        let output = ComputedState::generate_chromatogram(
+            &mut collector,
+            &elution_group,
+            &index,
+            &tolerance,
+            &smoothing,
+        )
+        .map_err(|e| format!("Failed to generate chromatogram: {:?}", e))?;
+
+        // Check if cancelled after generating chromatogram
+        if cancel_token.is_cancelled() {
+            tracing::debug!("Chromatogram computation cancelled after generation");
+            return Err("Computation cancelled".to_string());
+        }
+
+        Ok((output, collector, expected_intensities, selected_idx as u64))
+    }
+
+    /// Check if background chromatogram computation completed
+    fn check_chromatogram_completion(&mut self) {
+        let Some(rx) = &self.chromatogram_receiver else {
+            return;
+        };
+
+        // Try to receive result (non-blocking)
+        if let Ok(result) = rx.try_recv() {
+            self.chromatogram_receiver = None;
+            self.cancellation_token = None;
+
+            match result {
+                Ok((output, collector, expected_intensities, selected_idx)) => {
+                    tracing::debug!(
+                        "Chromatogram computation result received for index {}",
+                        selected_idx
+                    );
+
+                    if let IndexedDataState::Loaded { index, .. } = &self.data.indexed_data {
+                        let result = ChromatogramComputationResult {
+                            selected_idx,
+                            output,
+                            collector,
+                            expected_intensities,
+                        };
+
+                        self.computed.complete_chromatogram_computation(
+                            result,
+                            index,
+                            &self.data.tolerance,
+                            self.data.smoothing,
+                        );
+                    }
+
+                    // Add library RT reference line
+                    if let Some(elution_groups) = &self.data.elution_groups
+                        && let Ok((elution_group, _)) =
+                            elution_groups.get_elem(selected_idx as usize)
+                    {
+                        self.computed.insert_reference_line(
+                            "Library RT".into(),
+                            elution_group.rt_seconds() as f64,
+                            Color32::BLUE,
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Chromatogram computation failed: {}", e);
+                    self.computed.cancel_computing();
+                }
+            }
+        }
     }
 
     fn render_elution_groups_section_static(
@@ -306,20 +569,31 @@ impl ViewerApp {
         file_loader: &mut FileLoader,
         data: &mut DataState,
     ) {
-        ui.label("Elution Groups:");
-        if ui.button("Load Elution Groups...").clicked() {
-            file_loader.open_elution_groups_dialog();
-        }
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(SECTION_MARGIN))
+            .show(ui, |ui| {
+                ui.heading("Elution Groups");
+                ui.add_space(INTERNAL_SPACING);
 
-        if let Some(path) = &file_loader.elution_groups_path {
-            Self::display_filename(ui, path);
-        }
+                if ui.button("Load Elution Groups...").clicked() {
+                    file_loader.open_elution_groups_dialog();
+                }
 
-        Self::load_elution_groups_if_needed(ui, file_loader, data);
+                if let Some(path) = &file_loader.elution_groups_path {
+                    ui.add_space(SMALL_SPACING);
+                    Self::display_filename(ui, path);
+                }
 
-        if let Some(egs) = &data.elution_groups {
-            ui.label(format!("✓ Loaded: {} elution groups", egs.len()));
-        }
+                Self::load_elution_groups_if_needed(ui, file_loader, data);
+
+                if let Some(egs) = &data.elution_groups {
+                    ui.add_space(SMALL_SPACING);
+                    ui.label(
+                        egui::RichText::new(format!("✓ {} groups loaded", egs.len()))
+                            .color(egui::Color32::DARK_GREEN),
+                    );
+                }
+            });
     }
 
     fn render_raw_data_section_static(
@@ -327,81 +601,131 @@ impl ViewerApp {
         file_loader: &mut FileLoader,
         data: &mut DataState,
         ui_state: &mut UiState,
+        computed: &mut ComputedState,
     ) {
-        ui.label("Raw Data:");
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(SECTION_MARGIN))
+            .show(ui, |ui| {
+                ui.heading("Raw Data");
+                ui.add_space(INTERNAL_SPACING);
 
-        // Tab selector for Local vs Cloud
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut ui_state.raw_data_input_mode,
-                RawDataInputMode::Local,
-                "📁 Local",
-            );
-            ui.selectable_value(
-                &mut ui_state.raw_data_input_mode,
-                RawDataInputMode::Cloud,
-                "☁️ Cloud URL",
-            );
-        });
-
-        ui.separator();
-
-        match ui_state.raw_data_input_mode {
-            RawDataInputMode::Local => {
-                // Existing folder picker button
-                if ui.button("Load Raw Data...").clicked() {
-                    file_loader.open_raw_data_dialog();
-                }
-            }
-            RawDataInputMode::Cloud => {
-                // URL input field
+                // Clearer tab selector with better visual style
                 ui.horizontal(|ui| {
-                    ui.label("URL:");
-                    let mut url_buffer = file_loader.raw_data_url.clone().unwrap_or_default();
-                    let response = ui.text_edit_singleline(&mut url_buffer);
-
-                    if response.changed() {
-                        if !url_buffer.is_empty() {
-                            file_loader.set_raw_data_url(url_buffer);
-                        } else {
-                            file_loader.clear_raw_data();
-                        }
-                    }
+                    ui.label("Source:");
+                    ui.radio_value(
+                        &mut ui_state.raw_data_input_mode,
+                        RawDataInputMode::Local,
+                        "Local File",
+                    );
+                    ui.radio_value(
+                        &mut ui_state.raw_data_input_mode,
+                        RawDataInputMode::Cloud,
+                        "Cloud URL",
+                    );
                 });
 
-                // Show examples
-                ui.label(egui::RichText::new("Examples:").italics().weak().small());
-                ui.label(
-                    egui::RichText::new("s3://bucket/data.d or s3://bucket/data.idx")
-                        .small()
-                        .weak(),
-                );
-                ui.label(
-                    egui::RichText::new("gs://bucket/data.d or gs://bucket/data.idx")
-                        .small()
-                        .weak(),
-                );
-            }
-        }
+                ui.add_space(INTERNAL_SPACING);
 
-        // Show current location with clear button
-        if let Some(location) = file_loader.get_raw_data_location() {
-            ui.horizontal(|ui| {
-                let display_text = Self::truncate_middle(&location, 50);
-                ui.label(egui::RichText::new(display_text).weak())
-                    .on_hover_text(&location);
+                match ui_state.raw_data_input_mode {
+                    RawDataInputMode::Local => {
+                        // Existing folder picker button
+                        if ui.button("Browse for Raw Data...").clicked() {
+                            file_loader.open_raw_data_dialog();
+                        }
+                        ui.label(
+                            egui::RichText::new("Select a .d folder or .idx cache")
+                                .small()
+                                .weak(),
+                        );
+                    }
+                    RawDataInputMode::Cloud => {
+                        // URL input field
+                        ui.vertical(|ui| {
+                            ui.label("Enter cloud storage URL:");
+                            let mut url_buffer =
+                                file_loader.raw_data_url.clone().unwrap_or_default();
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut url_buffer)
+                                    .hint_text("s3://bucket/data.idx or gs://bucket/data.idx")
+                                    .desired_width(f32::INFINITY),
+                            );
 
-                if ui.small_button("✖").clicked() {
-                    file_loader.clear_raw_data();
+                            if response.changed() {
+                                if !url_buffer.is_empty() {
+                                    file_loader.set_raw_data_url(url_buffer);
+                                } else {
+                                    file_loader.clear_raw_data();
+                                }
+                            }
+
+                            ui.add_space(SMALL_SPACING);
+                            // Show examples in a collapsible section
+                            ui.collapsing("Examples", |ui| {
+                                ui.label(egui::RichText::new("S3:").strong().small());
+                                ui.label(
+                                    egui::RichText::new("  s3://bucket/experiment.d.idx")
+                                        .code()
+                                        .small(),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("Google Cloud:").strong().small());
+                                ui.label(
+                                    egui::RichText::new("  gs://bucket/experiment.d.idx")
+                                        .code()
+                                        .small(),
+                                );
+                            });
+                        });
+                    }
+                }
+
+                // Show current location with clear button
+                if let Some(location) = file_loader.get_raw_data_location() {
+                    ui.add_space(SMALL_SPACING_VERTICAL);
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(egui::CornerRadius::same(CORNER_RADIUS))
+                        .inner_margin(egui::Margin::symmetric(
+                            LOCATION_FRAME_PADDING_H,
+                            LOCATION_FRAME_PADDING_V,
+                        ))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let display_text =
+                                    Self::truncate_middle(&location, LOCATION_DISPLAY_MAX_LEN);
+                                ui.label(egui::RichText::new(display_text).small())
+                                    .on_hover_text(&location);
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Clear").clicked() {
+                                            file_loader.clear_raw_data();
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+
+                Self::load_raw_data_if_needed(ui, file_loader, data, computed);
+
+                if let IndexedDataState::Loaded { source, .. } = &data.indexed_data {
+                    ui.add_space(SMALL_SPACING);
+                    ui.label(
+                        egui::RichText::new("✓ Raw data indexed").color(egui::Color32::DARK_GREEN),
+                    );
+
+                    // Show data source with middle truncation for long paths
+                    let display_source = Self::truncate_middle(source, 60);
+
+                    ui.label(
+                        egui::RichText::new(format!("Source: {}", display_source))
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
                 }
             });
-        }
-
-        Self::load_raw_data_if_needed(ui, file_loader, data);
-
-        if matches!(data.indexed_data, IndexedDataState::Loaded { .. }) {
-            ui.label("✓ Raw data indexed");
-        }
     }
 
     /// Helper to truncate long paths/URLs for display
@@ -420,18 +744,29 @@ impl ViewerApp {
         file_loader: &mut FileLoader,
         data: &mut DataState,
     ) {
-        ui.label("Tolerance Settings:");
-        if ui.button("Load Tolerances...").clicked() {
-            file_loader.open_tolerance_dialog();
-        }
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(SECTION_MARGIN))
+            .show(ui, |ui| {
+                ui.heading("Tolerance Settings");
+                ui.add_space(INTERNAL_SPACING);
 
-        if let Some(path) = &file_loader.tolerance_path {
-            Self::display_filename(ui, path);
-        }
+                if ui.button("Load Tolerances...").clicked() {
+                    file_loader.open_tolerance_dialog();
+                }
 
-        Self::load_tolerance_if_needed(file_loader, data);
+                if let Some(path) = &file_loader.tolerance_path {
+                    ui.add_space(SMALL_SPACING);
+                    Self::display_filename(ui, path);
+                }
 
-        ui.label("Tolerance settings loaded");
+                Self::load_tolerance_if_needed(file_loader, data);
+
+                ui.add_space(SMALL_SPACING);
+                ui.label(
+                    egui::RichText::new("✓ Tolerance settings loaded")
+                        .color(egui::Color32::DARK_GREEN),
+                );
+            });
     }
 
     fn display_filename(ui: &mut egui::Ui, path: &std::path::Path) {
@@ -477,10 +812,22 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
+        computed: &mut ComputedState,
     ) {
         if let Some(location) = file_loader.get_raw_data_location() {
-            // Transition from None to Loading
-            if matches!(data.indexed_data, IndexedDataState::None) {
+            // Check if we need to load new data
+            let should_load = match &data.indexed_data {
+                IndexedDataState::None => true,
+                IndexedDataState::Loading(current_location) => current_location != &location,
+                IndexedDataState::Loaded { source, .. } => source != &location,
+                IndexedDataState::Failed(_, _) => true,
+            };
+
+            // Transition to Loading if new location
+            if should_load {
+                tracing::info!("Starting to load new raw data from: {}", location);
+                // Clear computed state to avoid showing stale chromatograms from old index
+                computed.clear();
                 data.indexed_data = IndexedDataState::Loading(location.clone());
                 ui.ctx().request_repaint();
             }
@@ -495,7 +842,10 @@ impl ViewerApp {
 
                 match file_loader.load_raw_data_from_location(location) {
                     Ok(index) => {
-                        data.indexed_data = IndexedDataState::Loaded { index };
+                        data.indexed_data = IndexedDataState::Loaded {
+                            index,
+                            source: location.to_string(),
+                        };
                         file_loader.clear_raw_data();
                         tracing::info!("Raw data indexing completed");
                     }
@@ -629,7 +979,15 @@ impl eframe::App for ViewerApp {
             ui.heading("TimsQuery Viewer");
             ui.separator();
         });
-        self.generate_chromatogram();
+
+        // Check if background computation completed
+        self.check_chromatogram_completion();
+
+        // Generate MS2 spectrum if RT was clicked
+        self.generate_ms2_spectrum_if_needed();
+
+        // Generate chromatogram if needed
+        self.generate_chromatogram(ctx);
 
         let mut tab_viewer = AppTabViewer {
             file_loader: &mut self.file_loader,
@@ -661,19 +1019,27 @@ struct AppTabViewer<'a> {
 
 impl<'a> AppTabViewer<'a> {
     fn render_left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Data Loading");
-        ui.separator();
+        // Data Loading Section
+        ui.label(egui::RichText::new("DATA LOADING").strong().size(13.0));
+        ui.add_space(INTERNAL_SPACING);
 
         ViewerApp::render_elution_groups_section_static(ui, self.file_loader, self.data);
-        ui.add_space(10.0);
+        ui.add_space(SECTION_SPACING);
 
-        ViewerApp::render_raw_data_section_static(ui, self.file_loader, self.data, self.ui);
-        ui.add_space(10.0);
+        ViewerApp::render_raw_data_section_static(
+            ui,
+            self.file_loader,
+            self.data,
+            self.ui,
+            self.computed,
+        );
+        ui.add_space(SECTION_SPACING);
 
         ViewerApp::render_tolerance_loading_section_static(ui, self.file_loader, self.data);
 
-        ui.add_space(20.0);
+        ui.add_space(SEPARATOR_SPACING);
         ui.separator();
+        ui.add_space(INTERNAL_SPACING);
 
         self.left_panel.render(
             ui,
@@ -734,7 +1100,13 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 );
             }
             Pane::PrecursorPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram_lines {
+                // Show loading indicator if computing
+                if self.computed.is_computing() {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
+                        ui.label("Computing chromatogram...");
+                    });
+                } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Fragments
                     let click_response = crate::plot_renderer::render_chromatogram_plot(
                         ui,
@@ -745,6 +1117,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         &mut self.computed.auto_zoom_frame_counter,
                         &mode,
                         &ref_lines,
+                        self.computed.apex_score.as_ref(),
                     );
                     if let Some(clicked_rt) = click_response {
                         self.computed.clicked_rt = Some(clicked_rt);
@@ -756,7 +1129,13 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 }
             }
             Pane::FragmentPlot => {
-                if let Some(chromatogram) = &self.computed.chromatogram_lines {
+                // Show loading indicator if computing
+                if self.computed.is_computing() {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
+                        ui.label("Computing chromatogram...");
+                    });
+                } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Precursors
                     let response = crate::plot_renderer::render_chromatogram_plot(
                         ui,
@@ -767,6 +1146,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         &mut self.computed.auto_zoom_frame_counter,
                         &mode,
                         &ref_lines,
+                        self.computed.apex_score.as_ref(),
                     );
                     if let Some(clicked_rt) = response {
                         self.computed.clicked_rt = Some(clicked_rt);
@@ -778,7 +1158,13 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 }
             }
             Pane::ScoresPlot => {
-                if let Some(score_lines) = &self.computed.score_lines {
+                // Show loading indicator if computing
+                if self.computed.is_computing() {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
+                        ui.label("Computing scores...");
+                    });
+                } else if let Some(score_lines) = &self.computed.score_lines {
                     let response = score_lines.render(
                         ui,
                         Some("precursor_fragment_x_axis"),

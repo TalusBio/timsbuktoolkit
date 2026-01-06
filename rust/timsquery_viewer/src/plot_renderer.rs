@@ -20,6 +20,7 @@ use timsseek::scoring::apex_finding::{
 
 use crate::chromatogram_processor::ChromatogramOutput;
 use tracing::{
+    debug,
     info,
     instrument,
 };
@@ -77,11 +78,11 @@ impl ScoreLines {
             .iter_scores()
             .map(|(name, trace)| {
                 let max_val = trace.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                info!("Max score for {}: {}", name, max_val);
+                debug!("Max score for {}: {}", name, max_val);
                 let norm_factor = max_val.max(1e-6);
                 let inv_norm_factor = (1.0 / norm_factor) as f64;
                 let inv_norm_factor = if name == "main_score" {
-                    info!("Main score trace length: {}", trace.len());
+                    debug!("Main score trace length: {}", trace.len());
                     1.0
                 } else {
                     inv_norm_factor
@@ -202,9 +203,7 @@ impl ScoreLines {
             }
             plot_reflines(label_lines, plot_ui, 0.0, 1.0);
             zoom_behavior(plot_ui, &scroll_delta);
-            if *auto_zoom_frame_counter <= 0 {
-                // Also ... we are letting all auto zoom modes apply on the
-                // companion plot.
+            if *auto_zoom_frame_counter == 0 {
                 // Since they are normalized the max will be 1.0
                 clamp_bounds(plot_ui, 1.0, self.rt_seconds_range);
             }
@@ -378,6 +377,36 @@ impl ChromatogramLines {
             .map(|line| line.intensity_max)
             .fold(f64::NEG_INFINITY, f64::max)
     }
+
+    /// Get the maximum intensity within a specific RT range for a given plot mode
+    fn get_intensity_max_in_range(&self, rt_min: f64, rt_max: f64, mode: PlotMode) -> f64 {
+        let mut max_intensity = 0.0_f64;
+
+        // Check precursor lines if applicable
+        if matches!(mode, PlotMode::All | PlotMode::PrecursorsOnly) {
+            for line in &self.precursor_lines {
+                for point in &line.data.points {
+                    if point.x >= rt_min && point.x <= rt_max {
+                        max_intensity = max_intensity.max(point.y);
+                    }
+                }
+            }
+        }
+
+        // Check fragment lines if applicable
+        if matches!(mode, PlotMode::All | PlotMode::FragmentsOnly) {
+            for line in &self.fragment_lines {
+                for point in &line.data.points {
+                    if point.x >= rt_min && point.x <= rt_max {
+                        max_intensity = max_intensity.max(point.y);
+                    }
+                }
+            }
+        }
+
+        // Return at least a small value to avoid zero bounds
+        max_intensity.max(1.0)
+    }
 }
 
 /// MS2 spectrum data at a specific retention time
@@ -405,6 +434,8 @@ pub fn render_chromatogram_plot(
     auto_zoom_mode: &AutoZoomMode,
     // Lines to add vertical markers for
     label_lines: &[(String, f64, Color32)],
+    // Apex score for PeakApex auto-zoom mode
+    apex_score: Option<&ApexScore>,
 ) -> Option<f64> {
     let mut clicked_rt = None;
 
@@ -494,7 +525,19 @@ pub fn render_chromatogram_plot(
                     plot_ui.set_plot_bounds_y(0.0..=max_polygon_height);
                 }
                 AutoZoomMode::PeakApex => {
-                    plot_ui.set_plot_bounds_y(0.0..=max_polygon_height);
+                    if let Some(apex) = apex_score {
+                        let apex_rt_seconds = apex.retention_time_ms as f64 / 1000.0;
+                        let rt_min = apex_rt_seconds - 30.0;
+                        let rt_max = apex_rt_seconds + 30.0;
+                        plot_ui.set_plot_bounds_x(rt_min..=rt_max);
+
+                        // Calculate max intensity in the zoomed region
+                        let zoomed_max_intensity =
+                            chromatogram.get_intensity_max_in_range(rt_min, rt_max, mode);
+                        plot_ui.set_plot_bounds_y(0.0..=zoomed_max_intensity);
+                    } else {
+                        plot_ui.set_plot_bounds_y(0.0..=max_polygon_height);
+                    }
                 }
                 AutoZoomMode::Disabled => {}
             }

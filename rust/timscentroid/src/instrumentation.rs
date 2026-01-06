@@ -9,15 +9,28 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    path::Path,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result,
+    GetOptions,
+    GetResult,
+    ListResult,
+    MultipartUpload,
+    ObjectMeta,
+    ObjectStore,
+    PutMultipartOptions,
+    PutOptions,
+    PutPayload,
+    PutResult,
+    Result,
 };
 use std::fmt::Display;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{
+    AtomicU64,
+    AtomicUsize,
+    Ordering,
+};
 
 /// Metrics collected during storage operations
 #[derive(Debug, Clone)]
@@ -111,18 +124,29 @@ impl MetricsSnapshot {
     pub fn print_report(&self, label: &str) {
         println!("\n=== Storage Metrics: {} ===", label);
         println!("Operations:");
-        println!("  GET:    {:>6} calls, {:>10.2} MB, {:>8.2} ms total, {:>6.2} ms/call",
+        println!(
+            "  GET:    {:>6} calls, {:>10.2} MB, {:>8.2} ms total, {:>6.2} ms/call",
             self.get_count,
             self.bytes_read as f64 / 1_024_000.0,
             self.get_time_us as f64 / 1_000.0,
-            if self.get_count > 0 { self.get_time_us as f64 / 1_000.0 / self.get_count as f64 } else { 0.0 }
+            if self.get_count > 0 {
+                self.get_time_us as f64 / 1_000.0 / self.get_count as f64
+            } else {
+                0.0
+            }
         );
-        println!("  HEAD:   {:>6} calls, {:>8.2} ms total, {:>6.2} ms/call",
+        println!(
+            "  HEAD:   {:>6} calls, {:>8.2} ms total, {:>6.2} ms/call",
             self.head_count,
             self.head_time_us as f64 / 1_000.0,
-            if self.head_count > 0 { self.head_time_us as f64 / 1_000.0 / self.head_count as f64 } else { 0.0 }
+            if self.head_count > 0 {
+                self.head_time_us as f64 / 1_000.0 / self.head_count as f64
+            } else {
+                0.0
+            }
         );
-        println!("  PUT:    {:>6} calls, {:>10.2} MB, {:>8.2} ms total",
+        println!(
+            "  PUT:    {:>6} calls, {:>10.2} MB, {:>8.2} ms total",
             self.put_count,
             self.bytes_written as f64 / 1_024_000.0,
             self.put_time_us as f64 / 1_000.0
@@ -130,10 +154,22 @@ impl MetricsSnapshot {
         println!("  DELETE: {:>6} calls", self.delete_count);
         println!("  LIST:   {:>6} calls", self.list_count);
         println!("\nTotals:");
-        println!("  Total operations: {}", self.get_count + self.put_count + self.head_count + self.delete_count + self.list_count);
-        println!("  Total bytes read: {:.2} MB", self.bytes_read as f64 / 1_024_000.0);
-        println!("  Total bytes written: {:.2} MB", self.bytes_written as f64 / 1_024_000.0);
-        println!("  Total I/O time: {:.2} ms", (self.get_time_us + self.put_time_us + self.head_time_us) as f64 / 1_000.0);
+        println!(
+            "  Total operations: {}",
+            self.get_count + self.put_count + self.head_count + self.delete_count + self.list_count
+        );
+        println!(
+            "  Total bytes read: {:.2} MB",
+            self.bytes_read as f64 / 1_024_000.0
+        );
+        println!(
+            "  Total bytes written: {:.2} MB",
+            self.bytes_written as f64 / 1_024_000.0
+        );
+        println!(
+            "  Total I/O time: {:.2} ms",
+            (self.get_time_us + self.put_time_us + self.head_time_us) as f64 / 1_000.0
+        );
     }
 }
 
@@ -145,7 +181,11 @@ pub struct InstrumentedStore {
 }
 
 impl InstrumentedStore {
-    pub fn new(inner: Arc<dyn ObjectStore>, metrics: Arc<StorageMetrics>, label: impl Into<String>) -> Self {
+    pub fn new(
+        inner: Arc<dyn ObjectStore>,
+        metrics: Arc<StorageMetrics>,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
             inner,
             metrics,
@@ -184,13 +224,22 @@ impl ObjectStore for InstrumentedStore {
 
         let elapsed = start.elapsed();
         self.metrics.put_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.bytes_written.fetch_add(bytes_len as u64, Ordering::SeqCst);
-        self.metrics.put_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .bytes_written
+            .fetch_add(bytes_len as u64, Ordering::SeqCst);
+        self.metrics
+            .put_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         result
     }
 
-    async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<PutResult> {
         let start = std::time::Instant::now();
         let bytes_len = payload.content_length();
 
@@ -198,8 +247,12 @@ impl ObjectStore for InstrumentedStore {
 
         let elapsed = start.elapsed();
         self.metrics.put_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.bytes_written.fetch_add(bytes_len as u64, Ordering::SeqCst);
-        self.metrics.put_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .bytes_written
+            .fetch_add(bytes_len as u64, Ordering::SeqCst);
+        self.metrics
+            .put_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         result
     }
@@ -210,12 +263,16 @@ impl ObjectStore for InstrumentedStore {
         let elapsed = start.elapsed();
 
         self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.get_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .get_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         // Track bytes read when the result is consumed
         if let Ok(get_result) = &result {
             let bytes_len = get_result.meta.size;
-            self.metrics.bytes_read.fetch_add(bytes_len as u64, Ordering::SeqCst);
+            self.metrics
+                .bytes_read
+                .fetch_add(bytes_len, Ordering::SeqCst);
         }
 
         result
@@ -227,11 +284,15 @@ impl ObjectStore for InstrumentedStore {
         let elapsed = start.elapsed();
 
         self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.get_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .get_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         if let Ok(get_result) = &result {
             let bytes_len = get_result.meta.size;
-            self.metrics.bytes_read.fetch_add(bytes_len as u64, Ordering::SeqCst);
+            self.metrics
+                .bytes_read
+                .fetch_add(bytes_len, Ordering::SeqCst);
         }
 
         result
@@ -243,10 +304,14 @@ impl ObjectStore for InstrumentedStore {
         let elapsed = start.elapsed();
 
         self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.get_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .get_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         if let Ok(bytes) = &result {
-            self.metrics.bytes_read.fetch_add(bytes.len() as u64, Ordering::SeqCst);
+            self.metrics
+                .bytes_read
+                .fetch_add(bytes.len() as u64, Ordering::SeqCst);
         }
 
         result
@@ -258,7 +323,9 @@ impl ObjectStore for InstrumentedStore {
         let elapsed = start.elapsed();
 
         self.metrics.head_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics.head_time_us.fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+        self.metrics
+            .head_time_us
+            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
         result
     }

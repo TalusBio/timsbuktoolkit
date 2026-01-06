@@ -138,6 +138,7 @@ use tracing::{
 /// This enum allows applications to work with either lazy-loaded or fully materialized
 /// index data. Lazy loading is faster to initialize and uses less memory, while eager
 /// loading provides faster queries and is required for some operations.
+#[derive(Debug, Clone)]
 pub enum IndexedPeaksHandle {
     /// Lazy loading - queries fetch data on-demand from parquet files
     Lazy(LazyIndexedTimstofPeaks),
@@ -230,6 +231,15 @@ impl IndexedPeaksHandle {
     /// Check if this handle is eager
     pub fn is_eager(&self) -> bool {
         matches!(self, Self::Eager(_))
+    }
+
+    pub fn ms1_cycle_mapping(
+        &self,
+    ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex> {
+        match self {
+            Self::Lazy(lazy) => &lazy.ms1_metadata().cycle_to_rt_ms,
+            Self::Eager(eager) => eager.ms1_cycle_mapping(),
+        }
     }
 }
 
@@ -621,7 +631,10 @@ impl Default for TimsIndexReader {
 /// Check if a location contains a cached index by looking for metadata.json
 ///
 /// This checks the actual directory contents rather than just the path extension.
-fn sniff_cached_index(location: &str) -> bool {
+///
+/// Returns Ok(true) if cached index exists, Ok(false) if not found,
+/// Err for permission/auth errors that should be propagated to the user.
+fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReadingError> {
     let is_cloud = location.contains("://");
 
     // Try to create storage location and check for metadata.json
@@ -631,38 +644,39 @@ fn sniff_cached_index(location: &str) -> bool {
         Ok(StorageLocation::from_path(location))
     };
 
-    let Ok(storage_location) = storage_result else {
-        return false;
+    let storage_location = match storage_result {
+        Ok(loc) => loc,
+        Err(e) => {
+            error!("Failed to parse storage location for sniffing: {:?}", e);
+            return Ok(false); // Treat parse errors as "not cached"
+        }
     };
 
     // Try to read metadata.json as a quick check
     match timscentroid::storage::StorageProvider::new(storage_location) {
         Ok(provider) => {
             // Just try to read a few bytes - if metadata.json exists, it's likely a cached index
-            matches!(provider.read_bytes("metadata.json"), Ok(_))
+            match provider.read_bytes("metadata.json") {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    // Check if it's a permission error - propagate it!
+                    if let timscentroid::serialization::SerializationError::Io(io_err) = &e
+                        && io_err.kind() == std::io::ErrorKind::PermissionDenied
+                    {
+                        error!("Permission denied while checking for cached index: {:?}", e);
+                        return Err(crate::errors::DataReadingError::SerializationError(e));
+                    }
+                    // For other errors (like NotFound), treat as not cached
+                    error!("metadata.json not found or unreadable: {:?}", e);
+                    Ok(false)
+                }
+            }
         }
-        Err(_) => false,
+        Err(e) => {
+            error!("Failed to access storage location for sniffing: {:?}", e);
+            Ok(false) // Treat provider creation errors as "not cached"
+        }
     }
-}
-
-/// Check if a location contains raw .d data by looking for analysis.tdf
-///
-/// This checks the actual directory contents rather than just the path extension.
-fn sniff_raw_tdf(location: &str) -> bool {
-    // For cloud URLs, we can't easily check directory contents without listing
-    // So fall back to path-based detection for now
-    if location.contains("://") {
-        return location.contains(".d") && !location.contains(".idx");
-    }
-
-    // For local paths, check if directory contains analysis.tdf
-    let path = Path::new(location);
-    if !path.is_dir() {
-        return false;
-    }
-
-    // Check for required Bruker timsTOF files
-    path.join("analysis.tdf").exists() && path.join("analysis.tdf_bin").exists()
 }
 
 /// Smart index loader - auto-detects input type and loads appropriately
@@ -725,7 +739,8 @@ pub fn load_index_auto(
 
     // Detect input type by actually checking directory contents
     // This is more robust than just looking at file extensions
-    let is_cached = sniff_cached_index(input);
+    // Propagate permission errors to the user
+    let is_cached = sniff_cached_index(input)?;
     let is_cloud = input.contains("://");
 
     info!(
@@ -735,7 +750,10 @@ pub fn load_index_auto(
 
     // Early validation: reject cloud raw .d files with helpful error
     if is_cloud && !is_cached {
-        error!("Attempted to load raw .d file from cloud storage: {}", input);
+        error!(
+            "Attempted to load raw .d file from cloud storage: {}",
+            input
+        );
         return Err(crate::errors::DataReadingError::UnsupportedDataError(
             crate::errors::UnsupportedDataError::CloudRawDataNotSupported {
                 url: input.to_string(),

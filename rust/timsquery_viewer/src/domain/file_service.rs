@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use timscentroid::IndexedTimstofPeaks;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::{
     IndexLoadConfig,
@@ -83,22 +82,6 @@ impl FileService {
     /// Supports both local paths and cloud URLs (s3://, gs://, az://).
     /// Automatically detects input type and loads appropriately.
     ///
-    /// Note: This operation may take 10-30 seconds for large datasets when
-    /// loading from raw .d files. Cached .idx files load much faster.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the .d directory, .idx cache, or cloud URL
-    ///
-    /// # Returns
-    /// Indexed peaks loaded into memory
-    pub fn load_raw_data(path: &Path) -> Result<Arc<IndexedPeaksHandle>, ViewerError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| ViewerError::General("Invalid path encoding".to_string()))?;
-
-        Self::load_raw_data_from_location(path_str)
-    }
-
     /// Load tolerance settings from a JSON file
     ///
     /// # Arguments
