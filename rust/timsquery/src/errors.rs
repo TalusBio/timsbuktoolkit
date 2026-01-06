@@ -1,9 +1,9 @@
 use std::fmt::Display;
+use timscentroid::serialization::SerializationError;
 use timsrust::{
     TimsRustError,
     TimsTofPathError,
 };
-use timscentroid::serialization::SerializationError;
 
 #[derive(Debug)]
 pub enum TimsqueryError {
@@ -44,10 +44,7 @@ impl From<UnsupportedDataError> for DataReadingError {
 #[derive(Debug)]
 pub enum UnsupportedDataError {
     NoMS2DataError,
-    CloudRawDataNotSupported {
-        url: String,
-        suggestion: String,
-    },
+    CloudRawDataNotSupported { url: String, suggestion: String },
 }
 
 impl Display for UnsupportedDataError {

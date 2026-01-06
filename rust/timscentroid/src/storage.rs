@@ -119,10 +119,10 @@ impl StorageLocation {
         let parsed = url::Url::parse(url.as_ref())?;
 
         // Handle file:// URLs as local paths
-        if parsed.scheme() == "file" {
-            if let Ok(path) = parsed.to_file_path() {
-                return Ok(Self::Local(path));
-            }
+        if parsed.scheme() == "file"
+            && let Ok(path) = parsed.to_file_path()
+        {
+            return Ok(Self::Local(path));
         }
 
         Ok(Self::Url(parsed))
@@ -227,7 +227,37 @@ impl StorageProvider {
         info!("Reading from full path: {}", full_path);
         let object_path = ObjectPath::from(full_path.as_str());
         info!("Object path: {:?}", object_path);
-        let result = self.store.get(&object_path).await?;
+        let result = match self.store.get(&object_path).await {
+            Ok(res) => res,
+            Err(e) => {
+                // Categorize the error properly based on what it actually is
+                let error_str = e.to_string();
+                info!("Error getting object: {:?}", e);
+
+                // Check if it's an authentication/permission error
+                let error_kind = if error_str.contains("ExpiredToken")
+                    || error_str.contains("The provided token has expired")
+                    || error_str.contains("Access Denied")
+                    || error_str.contains("InvalidAccessKeyId")
+                    || error_str.contains("SignatureDoesNotMatch")
+                    || error_str.contains("Forbidden")
+                    || error_str.contains("status: 401")
+                    || error_str.contains("status: 403")
+                {
+                    std::io::ErrorKind::PermissionDenied
+                } else if error_str.contains("status: 404") || error_str.contains("NotFound") {
+                    std::io::ErrorKind::NotFound
+                } else {
+                    // For other errors, use Other to indicate an unexpected issue
+                    std::io::ErrorKind::Other
+                };
+
+                return Err(SerializationError::Io(std::io::Error::new(
+                    error_kind,
+                    format!("Failed to read object at path {}: {}", full_path, e),
+                )));
+            }
+        };
         let bytes = result.bytes().await?;
         Ok(bytes.to_vec())
     }
@@ -420,7 +450,7 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
                     "Unsupported URL scheme: '{}'. Available schemes: {}",
                     scheme,
                     {
-                        let schemes = vec!["file"];
+                        let schemes = ["file"];
                         #[cfg(feature = "aws")]
                         let schemes = [schemes.as_slice(), &["s3"]].concat();
                         #[cfg(feature = "gcp")]

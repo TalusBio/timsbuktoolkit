@@ -3,6 +3,7 @@ name = "timsseek-workspace"
 version = "0.22.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "jupyter[python]>=1.1.1",
     "speclib_builder[ml]",
     "timsseek_rescore",
     "timsseek_rts_receiver",

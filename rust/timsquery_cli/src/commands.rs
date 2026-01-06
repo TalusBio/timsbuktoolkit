@@ -55,10 +55,10 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     info!("Loaded {} elution groups", elution_groups.len());
 
     let index = load_index_auto(
-        raw_file_path.to_str().ok_or_else(|| {
-            CliError::DataReading("Invalid path encoding".to_string())
-        })?,
-        None,  // Use default config
+        raw_file_path
+            .to_str()
+            .ok_or_else(|| CliError::DataReading("Invalid path encoding".to_string()))?,
+        None, // Use default config
     )
     .map_err(|e| CliError::DataReading(format!("{:?}", e)))?
     .into_eager()

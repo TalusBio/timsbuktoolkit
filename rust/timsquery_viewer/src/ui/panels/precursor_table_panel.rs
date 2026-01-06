@@ -100,12 +100,10 @@ impl TablePanel {
         // TODO: I think I can optimize search using the fact that when typing
         // letters are added, so I can filter from previous results.
         if self.last_search.as_ref() != Some(search_line) {
-            // Update filtered indices
             elution_groups.matching_indices_for_id_filter(
                 search_line,
                 self.filtered_indices.get_or_insert_with(Vec::new),
             );
-            Some(());
             self.last_search = Some(search_line.clone());
         }
         let filtered_indices = self.filtered_indices.as_ref().unwrap();

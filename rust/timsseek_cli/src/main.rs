@@ -123,7 +123,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
     #[cfg(feature = "instrumentation")]
     let reg = reg.with(tree_layer);
 
-    let _subscriber = reg.init();
+    reg.init();
 
     // Parse command line arguments
     let args = Cli::parse();
