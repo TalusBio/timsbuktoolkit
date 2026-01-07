@@ -11,17 +11,17 @@
 //! use timsquery::serde::load_index_auto;
 //!
 //! // Works with any input - auto-detects format and location
-//! let index = load_index_auto("data.d", None)?.into_eager()?;              // Local raw
-//! let index = load_index_auto("data.d.idx", None)?.into_eager()?;          // Local cached
-//! let index = load_index_auto("s3://bucket/exp.d", None)?.into_eager()?;   // Cloud raw
-//! let index = load_index_auto("s3://bucket/exp.idx", None)?.into_eager()?; // Cloud cached
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! let index = load_index_auto("data.d", None).unwrap().into_eager().unwrap();              // Local raw
+//! let index = load_index_auto("data.d.idx", None).unwrap().into_eager().unwrap();          // Local cached
+//! let index = load_index_auto("s3://bucket/exp.d", None).unwrap().into_eager().unwrap();   // Cloud raw
+//! let index = load_index_auto("s3://bucket/exp.idx", None).unwrap().into_eager().unwrap(); // Cloud cached
 //! ```
 //!
 //! ## Lazy Loading (For Large Datasets)
 //!
 //! ```no_run
-//! use timsquery::serde::{load_index_auto, IndexLoadConfig};
+//! use timsquery::serde::{load_index_auto, IndexLoadConfig, IndexedPeaksHandle};
+//! use timsquery::{TupleRange, OptionallyRestricted};
 //!
 //! // Prefer lazy loading when possible (faster initialization, less memory)
 //! let config = IndexLoadConfig {
@@ -29,13 +29,17 @@
 //!     ..Default::default()
 //! };
 //!
-//! let handle = load_index_auto("experiment.d.idx", Some(config))?;
+//! let handle = load_index_auto("experiment.d.idx", Some(config)).unwrap();
 //!
 //! // Query directly on lazy handle (loads data on-demand)
-//! if let Some(lazy) = handle.as_lazy() {
-//!     let peaks = lazy.query_peaks_ms1(mz_range, rt_range, im_range);
+//! if let IndexedPeaksHandle::Lazy(lazy) = handle {
+//!     let mz_range = TupleRange::try_new(400.0, 500.0).unwrap();
+//!     let peaks: Vec<_> = lazy.query_peaks_ms1(
+//!         mz_range,
+//!         OptionallyRestricted::Unrestricted,  // No cycle restriction
+//!         OptionallyRestricted::Unrestricted,  // No IM restriction
+//!     ).collect();
 //! }
-//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ## Custom Cache Configuration
@@ -49,8 +53,7 @@
 //! };
 //!
 //! // Process raw data and cache to S3
-//! let index = load_index_auto("data.d", Some(config))?.into_eager()?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! let index = load_index_auto("data.d", Some(config)).unwrap().into_eager().unwrap();
 //! ```
 //!
 //! # Cache Workflow
@@ -64,22 +67,17 @@
 //! use timsquery::serde::TimsIndexReader;
 //! use timsquery::CentroidingConfig;
 //! use timscentroid::serialization::SerializationConfig;
-//! use parquet::basic::{Compression, ZstdLevel};
 //!
 //! let index = TimsIndexReader::new()
-//!     .with_auto_cache()
+//!     .with_local_cache("/tmp/cache")
 //!     .with_centroiding_config(CentroidingConfig {
 //!         max_peaks: 50_000,
 //!         mz_ppm_tol: 10.0,
 //!         im_pct_tol: 5.0,
 //!         early_stop_iterations: 200,
 //!     })
-//!     .with_serialization_config(SerializationConfig {
-//!         row_group_size: 100_000,
-//!         compression: Compression::ZSTD(ZstdLevel::try_new(3)?),
-//!     })
-//!     .read_index("data.d")?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//!     .with_serialization_config(SerializationConfig::default())
+//!     .read_index("data.d").unwrap();
 //! ```
 //!
 //! # Use Cases
@@ -91,13 +89,12 @@
 //! // First team member: builds and caches to S3
 //! let index = TimsIndexReader::new()
 //!     .with_cloud_cache("s3://team-bucket/indexes/exp001/")
-//!     .read_index("/local/exp001.d")?;
+//!     .read_index("/local/exp001.d").unwrap();
 //!
 //! // Other team members: load from S3 cache (no raw data needed!)
 //! let index = TimsIndexReader::from_cache_url(
 //!     "s3://team-bucket/indexes/exp001/"
-//! )?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ).unwrap();
 //! ```
 //!
 //! **CI/CD pipelines:**
@@ -107,13 +104,12 @@
 //! // Build step: process raw data, cache result
 //! let index = TimsIndexReader::new()
 //!     .with_cloud_cache("s3://pipeline-artifacts/indexes/build-123/")
-//!     .read_index("raw_data.d")?;
+//!     .read_index("raw_data.d").unwrap();
 //!
 //! // Deploy step: load pre-built index
 //! let index = TimsIndexReader::from_cache_url(
 //!     "s3://pipeline-artifacts/indexes/build-123/"
-//! )?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ).unwrap();
 //! ```
 
 use crate::{
@@ -181,12 +177,11 @@ impl IndexedPeaksHandle {
     /// use timsquery::serde::{load_index_auto, CacheLocation};
     /// use timscentroid::serialization::SerializationConfig;
     ///
-    /// let handle = load_index_auto("data.d", None)?;
+    /// let handle = load_index_auto("data.d", None).unwrap();
     /// let lazy = handle.try_into_lazy(
     ///     CacheLocation::Local("/tmp/cache".into()),
     ///     SerializationConfig::default()
-    /// )?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ).unwrap();
     /// ```
     pub fn try_into_lazy(
         self,
@@ -460,13 +455,12 @@ impl TimsIndexReader {
     /// // Load from local cache
     /// let index = TimsIndexReader::from_cache(
     ///     StorageLocation::from_path("/path/to/experiment.d.idx")
-    /// )?;
+    /// ).unwrap();
     ///
     /// // Load from S3 cache
     /// let index = TimsIndexReader::from_cache(
-    ///     StorageLocation::from_url("s3://bucket/cache/experiment.idx")?
-    /// )?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    ///     StorageLocation::from_url("s3://bucket/cache/experiment.idx").unwrap()
+    /// ).unwrap();
     /// ```
     pub fn from_cache(
         location: StorageLocation,
@@ -717,16 +711,15 @@ fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReading
 /// use timsquery::serde::load_index_auto;
 ///
 /// // Simple usage - auto-detects everything
-/// let index = load_index_auto("data.d", None)?.into_eager()?;
+/// let index = load_index_auto("data.d", None).unwrap().into_eager().unwrap();
 ///
 /// // Load from cloud (works without .idx extension if metadata.json exists)
-/// let index = load_index_auto("s3://bucket/my_experiment", None)?.into_eager()?;
+/// let index = load_index_auto("s3://bucket/my_experiment", None).unwrap().into_eager().unwrap();
 ///
 /// // Prefer lazy loading
 /// use timsquery::serde::IndexLoadConfig;
 /// let config = IndexLoadConfig { prefer_lazy: true, ..Default::default() };
-/// let handle = load_index_auto("data.d.idx", Some(config))?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// let handle = load_index_auto("data.d.idx", Some(config)).unwrap();
 /// ```
 pub fn load_index_auto(
     path_or_url: impl AsRef<str>,

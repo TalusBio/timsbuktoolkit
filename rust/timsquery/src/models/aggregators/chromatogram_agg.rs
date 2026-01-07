@@ -169,7 +169,6 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use tinyvec::tiny_vec;
 
     #[test]
