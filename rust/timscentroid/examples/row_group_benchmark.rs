@@ -22,7 +22,7 @@ use OptionallyRestricted::{
     Unrestricted,
 };
 
-const NUM_QUERIES: usize = 500;
+const NUM_QUERIES: usize = 200;
 
 fn main() {
     const DATA_FILE: &str =
@@ -63,15 +63,38 @@ fn main() {
         build_queries(&mut rng, NUM_QUERIES)
     };
 
-    // Test each row group size
-    let mut results = Vec::new();
+    // Test each row group size (local/no latency)
+    println!("\n=== LOCAL PERFORMANCE (no latency) ===\n");
+    let mut results_local = Vec::new();
     for (label, row_group_size) in &row_group_sizes {
         println!("Testing {} ({} peaks/group)", label, row_group_size);
-        let result = test_row_group_size(&index, *row_group_size, label, &queries);
-        results.push((label.to_string(), *row_group_size, result));
+        let result = test_row_group_size(&index, *row_group_size, label, &queries, None);
+        results_local.push((label.to_string(), *row_group_size, result));
     }
 
-    print_results(&results);
+    println!("\n=== S3-SIMULATED PERFORMANCE (50ms latency per GET) ===\n");
+    let mut results_s3 = Vec::new();
+    for (label, row_group_size) in &row_group_sizes {
+        println!("Testing {} ({} peaks/group)", label, row_group_size);
+        let result = test_row_group_size(
+            &index,
+            *row_group_size,
+            label,
+            &queries,
+            Some(std::time::Duration::from_millis(50)),
+        );
+        results_s3.push((label.to_string(), *row_group_size, result));
+    }
+
+    println!("\n====================================");
+    println!("LOCAL PERFORMANCE RESULTS");
+    println!("====================================");
+    print_results(&results_local);
+
+    println!("\n====================================");
+    println!("S3-SIMULATED RESULTS (50ms/GET)");
+    println!("====================================");
+    print_results(&results_s3);
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +112,7 @@ fn test_row_group_size(
     row_group_size: usize,
     label: &str,
     queries: &[((f32, f32), (f32, f32), (f16, f16))],
+    fake_latency: Option<std::time::Duration>,
 ) -> BenchmarkResult {
     let output_dir = std::path::PathBuf::from(format!("./benchmark_rg_{}", label));
     if output_dir.exists() {
@@ -115,9 +139,15 @@ fn test_row_group_size(
 
     // Lazy load + queries
     let start = std::time::Instant::now();
-    let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location)
+    let mut lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location)
         .unwrap()
         .with_instrumentation(format!("RG_{}", label));
+
+    // Add fake latency if specified
+    if let Some(latency) = fake_latency {
+        lazy_index = lazy_index.with_fake_latency(latency);
+    }
+
     let lazy_init_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let query_start = std::time::Instant::now();
@@ -191,12 +221,6 @@ fn print_results(results: &[(String, usize, BenchmarkResult)]) {
         "Best query efficiency: {} ({:.0} bytes/peak, {} GETs)",
         best_query.0, best_query.2.bytes_per_peak, best_query.2.num_gets
     );
-
-    println!("\nS3 estimated (150ms/GET):");
-    for (label, _size, r) in results {
-        let s3_time = (r.num_gets as f64 * 150.0) + r.query_ms;
-        println!("  {:<8} -> ~{:.0} ms/query", label, s3_time);
-    }
 }
 
 fn build_queries(
