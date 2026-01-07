@@ -192,6 +192,42 @@ impl StorageProvider {
         }
     }
 
+    /// Add fake latency to simulate network delays
+    ///
+    /// This method must be called AFTER `with_instrumentation()`.
+    ///
+    /// Creates a new metrics tracker for the outer layer (with latency), while
+    /// the inner layer continues tracking without latency. This allows you to
+    /// measure latency overhead: outer_time - inner_time = latency.
+    ///
+    /// # Panics
+    /// Panics if called before `with_instrumentation()`.
+    pub fn with_fake_latency(self, latency: std::time::Duration) -> Self {
+        // Ensure instrumentation is enabled
+        self.metrics.as_ref().expect("with_fake_latency() must be called after with_instrumentation()");
+
+        // Create NEW metrics for the outer wrapper (with latency)
+        // The inner wrapper keeps its own metrics (without latency)
+        // This is a feature: outer_time - inner_time = latency overhead
+        let outer_metrics = Arc::new(StorageMetrics::new());
+
+        let new_instrumented = Arc::new(
+            InstrumentedStore::new(
+                self.store.clone(), // Inner instrumented store (has its own metrics)
+                outer_metrics.clone(),
+                "with_latency",
+            )
+            .with_fake_latency(latency)
+        );
+
+        Self {
+            store: new_instrumented,
+            is_local: self.is_local,
+            prefix: self.prefix,
+            metrics: Some(outer_metrics), // Return outer metrics (includes latency)
+        }
+    }
+
     /// Get metrics if instrumentation is enabled
     pub fn metrics(&self) -> Option<&StorageMetrics> {
         self.metrics.as_ref().map(|m| m.as_ref())

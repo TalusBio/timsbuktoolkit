@@ -5,6 +5,13 @@
 //! - Total bytes transferred
 //! - Time spent in each operation
 //! - Detailed operation logs
+//!
+//! # Note on Timing Metrics
+//!
+//! Individual operation times (get_time_us, etc.) represent cumulative time across all operations.
+//! When operations execute concurrently, these cumulative times will exceed wall-clock time.
+//! For wall-clock measurements, use external timers. Operation counts and bytes transferred
+//! remain accurate regardless of concurrency.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -175,9 +182,11 @@ impl MetricsSnapshot {
 
 /// ObjectStore wrapper that tracks metrics
 pub struct InstrumentedStore {
-    inner: Arc<dyn ObjectStore>,
+    pub(crate) inner: Arc<dyn ObjectStore>,
     metrics: Arc<StorageMetrics>,
     label: String,
+    /// Optional fake latency to simulate network delays (e.g., for testing S3 performance)
+    fake_latency: Option<std::time::Duration>,
 }
 
 impl InstrumentedStore {
@@ -190,7 +199,14 @@ impl InstrumentedStore {
             inner,
             metrics,
             label: label.into(),
+            fake_latency: None,
         }
+    }
+
+    /// Set fake latency to simulate network delays (useful for testing cloud storage performance)
+    pub fn with_fake_latency(mut self, latency: std::time::Duration) -> Self {
+        self.fake_latency = Some(latency);
+        self
     }
 
     pub fn metrics(&self) -> Arc<StorageMetrics> {
@@ -199,6 +215,13 @@ impl InstrumentedStore {
 
     pub fn print_metrics(&self) {
         self.metrics.snapshot().print_report(&self.label);
+    }
+
+    /// Simulate network latency if configured
+    async fn simulate_latency(&self) {
+        if let Some(latency) = self.fake_latency {
+            tokio::time::sleep(latency).await;
+        }
     }
 }
 
@@ -259,6 +282,10 @@ impl ObjectStore for InstrumentedStore {
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
         let start = std::time::Instant::now();
+
+        // Simulate latency first (included in timing)
+        self.simulate_latency().await;
+
         let result = self.inner.get(location).await;
         let elapsed = start.elapsed();
 
@@ -280,6 +307,10 @@ impl ObjectStore for InstrumentedStore {
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
         let start = std::time::Instant::now();
+
+        // Simulate latency first (included in timing)
+        self.simulate_latency().await;
+
         let result = self.inner.get_opts(location, options).await;
         let elapsed = start.elapsed();
 
@@ -300,6 +331,10 @@ impl ObjectStore for InstrumentedStore {
 
     async fn get_range(&self, location: &Path, range: Range<u64>) -> Result<Bytes> {
         let start = std::time::Instant::now();
+
+        // Simulate latency first (included in timing)
+        self.simulate_latency().await;
+
         let result = self.inner.get_range(location, range.clone()).await;
         let elapsed = start.elapsed();
 
@@ -319,6 +354,10 @@ impl ObjectStore for InstrumentedStore {
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
         let start = std::time::Instant::now();
+
+        // Simulate latency first (included in timing)
+        self.simulate_latency().await;
+
         let result = self.inner.head(location).await;
         let elapsed = start.elapsed();
 

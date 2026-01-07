@@ -413,6 +413,12 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                     Unrestricted => Unrestricted,
                 };
 
+                // TODO: The queries can happen in parallel since they are independent
+                // And the lazy index can handle concurrent requests safely.
+                // The eager implementation does not because it is usually used in already parallel contexts.
+                // (other 10 queries running in parallel..)
+                
+
                 // Query MS1 precursors
                 aggregator
                     .iter_mut_precursors()

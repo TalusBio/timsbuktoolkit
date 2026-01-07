@@ -133,6 +133,44 @@ impl LazyIndexedTimstofPeaks {
     pub fn metrics(&self) -> Option<&crate::instrumentation::StorageMetrics> {
         self.storage.metrics()
     }
+
+    /// Add fake latency to simulate network delays (for testing cloud storage performance)
+    ///
+    /// This must be called AFTER `with_instrumentation()`. It simulates network latency
+    /// by adding a sleep before each storage operation.
+    pub fn with_fake_latency(mut self, latency: std::time::Duration) -> Self {
+        // Wrap the storage with fake latency
+        self.storage = self.storage.with_fake_latency(latency);
+
+        // CRITICAL: Recreate all queriers with the latency-wrapped storage
+        // The old queriers hold references to the unwrapped storage and would bypass latency
+
+        // Recreate MS1 querier
+        self.ms1_querier = Arc::new(
+            ParquetQuerier::new(
+                self.storage.clone(),
+                self.ms1_metadata.relative_path.to_str().unwrap(),
+            )
+            .expect("Failed to recreate MS1 querier"),
+        );
+
+        // Recreate MS2 queriers
+        self.ms2_queriers = self
+            .ms2_metadata
+            .iter()
+            .map(|(_, meta)| {
+                Arc::new(
+                    ParquetQuerier::new(
+                        self.storage.clone(),
+                        meta.relative_path.to_str().unwrap(),
+                    )
+                    .expect("Failed to recreate MS2 querier"),
+                )
+            })
+            .collect();
+
+        self
+    }
 }
 
 impl LazyIndexedTimstofPeaks {
