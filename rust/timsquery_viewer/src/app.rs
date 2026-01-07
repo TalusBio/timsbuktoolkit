@@ -189,33 +189,6 @@ pub struct ViewerApp {
 }
 
 impl ViewerApp {
-    /// Create a new test instance without eframe context
-    #[cfg(test)]
-    pub fn new_test() -> Self {
-        let tabs = vec![
-            Pane::ConfigPanel,
-            Pane::TablePanel,
-            Pane::PrecursorPlot,
-            Pane::FragmentPlot,
-            Pane::MS2Spectrum,
-        ];
-
-        let dock_state = DockState::new(tabs);
-
-        Self {
-            file_loader: FileLoader::new(),
-            data: DataState::default(),
-            ui: UiState::default(),
-            computed: ComputedState::default(),
-            dock_state,
-            config_panel: ConfigPanel::new(),
-            table_panel: TablePanel::new(),
-            spectrum_panel: SpectrumPanel::new(),
-            chromatogram_receiver: None,
-            cancellation_token: None,
-        }
-    }
-
     pub fn new(cc: &eframe::CreationContext<'_>, args: &Cli) -> Self {
         // Try to load previous state
         if let Some(storage) = cc.storage {

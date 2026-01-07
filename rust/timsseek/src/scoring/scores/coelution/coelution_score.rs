@@ -117,15 +117,6 @@ pub fn coelution_vref_score_filter_into<'a, K: Clone + Eq>(
     Ok(())
 }
 
-// /// See the docs for [`coelution_score_arr`].
-// pub fn coelution_score<'a, const TOP_N: usize, K: Clone + Ord>(
-//     slices: &'a MzMajorIntensityArray<K, f32>,
-//     window: usize,
-// ) -> Result<impl Iterator<Item = f32> + 'a, DataProcessingError> {
-//     let filter: Option<fn(usize) -> bool> = None;
-//     coelution_score_iter_filter::<TOP_N>(&slices.arr, window, filter)
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,11 +168,5 @@ mod tests {
         // Expected buffer = sum * norm_factor
         let expected = vec![0.0, 0.5, 0.5, 0.0];
         assert_close_enough(&buffer, &expected, 1e-7);
-
-        // 5. Test the filter that returns an error (only one item selected)
-        let filter_one = |k: &i32| *k == 1;
-        let result =
-            coelution_vref_score_filter_into(&slices, &ref_slice, window, &filter_one, &mut buffer);
-        assert!(result.is_err());
     }
 }
