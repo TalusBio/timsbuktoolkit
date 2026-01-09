@@ -1,7 +1,9 @@
 pub use super::diann_io::DiannPrecursorExtras;
 use super::diann_io::{
-    read_library_file as read_diann,
+    read_library_file as read_diann_tsv,
+    read_parquet_library_file as read_diann_parquet,
     sniff_diann_library_file,
+    sniff_diann_parquet_library_file,
 };
 use super::elution_group_inputs::{
     ElutionGroupInput,
@@ -145,23 +147,44 @@ impl ElutionGroupCollection {
     }
 
     fn try_read_diann(path: &Path) -> Result<Self, LibraryReadingError> {
-        let is_diann = sniff_diann_library_file(path);
-        info!("Detected DIA-NN library file with label type",);
-        if is_diann {
-            let egs = match read_diann(path) {
+        // First check if it's a parquet file
+        let is_diann_parquet = sniff_diann_parquet_library_file(path);
+        if is_diann_parquet {
+            info!("Detected DIA-NN parquet library file (DiaNN 2.2+)");
+            let egs = match read_diann_parquet(path) {
                 Ok(egs) => egs,
                 Err(e) => {
-                    warn!("Failed to read DIA-NN library file: {:?}", e);
+                    warn!("Failed to read DIA-NN parquet library file: {:?}", e);
                     return Err(LibraryReadingError::UnableToParseElutionGroups);
                 }
             };
             let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-            info!("Successfully read DIA-NN library file");
+            info!("Successfully read DIA-NN parquet library file");
             return Ok(ElutionGroupCollection::MzpafLabels(
                 egs,
                 Some(FileReadingExtras::Diann(extras)),
             ));
         }
+
+        // Then check if it's a TSV file
+        let is_diann_tsv = sniff_diann_library_file(path);
+        if is_diann_tsv {
+            info!("Detected DIA-NN TSV library file");
+            let egs = match read_diann_tsv(path) {
+                Ok(egs) => egs,
+                Err(e) => {
+                    warn!("Failed to read DIA-NN TSV library file: {:?}", e);
+                    return Err(LibraryReadingError::UnableToParseElutionGroups);
+                }
+            };
+            let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+            info!("Successfully read DIA-NN TSV library file");
+            return Ok(ElutionGroupCollection::MzpafLabels(
+                egs,
+                Some(FileReadingExtras::Diann(extras)),
+            ));
+        }
+
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
 }

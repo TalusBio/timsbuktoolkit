@@ -160,11 +160,8 @@ impl LazyIndexedTimstofPeaks {
             .iter()
             .map(|(_, meta)| {
                 Arc::new(
-                    ParquetQuerier::new(
-                        self.storage.clone(),
-                        meta.relative_path.to_str().unwrap(),
-                    )
-                    .expect("Failed to recreate MS2 querier"),
+                    ParquetQuerier::new(self.storage.clone(), meta.relative_path.to_str().unwrap())
+                        .expect("Failed to recreate MS2 querier"),
                 )
             })
             .collect();

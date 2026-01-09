@@ -120,13 +120,41 @@ pub enum IndexedDataState {
     },
 }
 
+/// State of elution group library loading
+#[derive(Debug, Default)]
+pub enum ElutionGroupState {
+    /// No library loaded
+    #[default]
+    None,
+    /// Currently loading from path
+    Loading(PathBuf),
+    /// Loading failed with error message (path, error)
+    Failed(PathBuf, String),
+    /// Library successfully loaded
+    Loaded {
+        data: ElutionGroupData,
+        source: PathBuf,
+    },
+}
+
+impl ElutionGroupState {
+    pub fn as_ref(&self) -> Option<&ElutionGroupData> {
+        match self {
+            ElutionGroupState::Loaded { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, ElutionGroupState::None)
+    }
+}
+
 /// Domain/data state - represents loaded data and analysis parameters
 #[derive(Debug, Default)]
 pub struct DataState {
-    /// Loaded elution groups
-    pub elution_groups: Option<ElutionGroupData>,
-    /// Path from which the elution groups were loaded
-    pub elution_groups_source: Option<PathBuf>,
+    /// Elution group library with loading state
+    pub elution_groups: ElutionGroupState,
     /// Indexed timsTOF data with loading state
     pub indexed_data: IndexedDataState,
     /// Tolerance settings
@@ -340,7 +368,7 @@ impl ViewerApp {
             None => return,
         };
 
-        let Some(elution_groups) = &self.data.elution_groups else {
+        let Some(elution_groups) = self.data.elution_groups.as_ref() else {
             return;
         };
 
@@ -518,7 +546,7 @@ impl ViewerApp {
                     }
 
                     // Add library RT reference line
-                    if let Some(elution_groups) = &self.data.elution_groups
+                    if let Some(elution_groups) = self.data.elution_groups.as_ref()
                         && let Ok((elution_group, _)) =
                             elution_groups.get_elem(selected_idx as usize)
                     {
@@ -559,7 +587,7 @@ impl ViewerApp {
 
                 Self::load_elution_groups_if_needed(ui, file_loader, data);
 
-                if let Some(egs) = &data.elution_groups {
+                if let Some(egs) = data.elution_groups.as_ref() {
                     ui.add_space(SMALL_SPACING);
                     ui.label(
                         egui::RichText::new(format!("✓ {} groups loaded", egs.len()))
@@ -757,27 +785,58 @@ impl ViewerApp {
         data: &mut DataState,
     ) {
         if let Some(path) = &file_loader.elution_groups_path {
-            let should_load = match &data.elution_groups_source {
-                Some(current_path) => current_path != path,
-                None => true,
+            // Check if we need to load new library
+            let should_load = match &data.elution_groups {
+                ElutionGroupState::None => true,
+                ElutionGroupState::Loading(current_path) => current_path != path,
+                ElutionGroupState::Loaded { source, .. } => source != path,
+                ElutionGroupState::Failed(_, _) => true,
             };
 
+            // Transition to Loading if new path
             if should_load {
+                tracing::info!("Starting to load elution groups from: {}", path.display());
+                data.elution_groups = ElutionGroupState::Loading(path.clone());
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Handle loading state
+        match &data.elution_groups {
+            ElutionGroupState::Loading(path) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Loading elution groups...");
                 });
+
                 match file_loader.load_elution_groups(path) {
                     Ok(egs) => {
-                        tracing::info!("Loaded {} elution groups", egs.len());
-                        data.elution_groups = Some(egs);
-                        data.elution_groups_source = Some(path.clone());
+                        let count = egs.len();
+                        tracing::info!("Loaded {} elution groups", count);
+                        data.elution_groups = ElutionGroupState::Loaded {
+                            data: egs,
+                            source: path.clone(),
+                        };
                     }
                     Err(e) => {
-                        tracing::error!("Failed to load elution groups: {:?}", e);
+                        let error_msg = format!("{:?}", e);
+                        tracing::error!("Failed to load elution groups: {}", error_msg);
+                        data.elution_groups = ElutionGroupState::Failed(path.clone(), error_msg);
                     }
                 }
             }
+            ElutionGroupState::Failed(path, error) => {
+                ui.label(
+                    egui::RichText::new(format!("Failed to load library from {}:", path.display()))
+                        .color(egui::Color32::from_rgb(255, 100, 100)),
+                );
+                ui.label(egui::RichText::new(error).color(egui::Color32::RED).small());
+                if ui.button("Clear Error").clicked() {
+                    data.elution_groups = ElutionGroupState::None;
+                    file_loader.elution_groups_path = None;
+                }
+            }
+            _ => {}
         }
     }
 
