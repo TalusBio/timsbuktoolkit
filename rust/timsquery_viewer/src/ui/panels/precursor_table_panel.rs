@@ -78,7 +78,7 @@ impl TablePanel {
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
-        elution_groups: &Option<ElutionGroupData>,
+        elution_groups: &crate::app::ElutionGroupState,
         search_mode: bool,
         search_line: &mut String,
         selected_index: &mut Option<usize>,
@@ -87,15 +87,13 @@ impl TablePanel {
         ui.separator();
 
         // Check if we have data first
-        if elution_groups.is_none() {
+        let Some(elution_groups) = elution_groups.as_ref() else {
             ui.label("Load elution groups to see the table");
             return;
-        }
+        };
 
         self.render_search_ui(ui, search_line, search_mode);
         self.render_keybinding_ui(ui);
-
-        let elution_groups = elution_groups.as_ref().unwrap();
         // Invalidate cache if search line changed
         // TODO: I think I can optimize search using the fact that when typing
         // letters are added, so I can filter from previous results.

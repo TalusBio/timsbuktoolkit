@@ -204,7 +204,9 @@ impl StorageProvider {
     /// Panics if called before `with_instrumentation()`.
     pub fn with_fake_latency(self, latency: std::time::Duration) -> Self {
         // Ensure instrumentation is enabled
-        self.metrics.as_ref().expect("with_fake_latency() must be called after with_instrumentation()");
+        self.metrics
+            .as_ref()
+            .expect("with_fake_latency() must be called after with_instrumentation()");
 
         // Create NEW metrics for the outer wrapper (with latency)
         // The inner wrapper keeps its own metrics (without latency)
@@ -217,7 +219,7 @@ impl StorageProvider {
                 outer_metrics.clone(),
                 "with_latency",
             )
-            .with_fake_latency(latency)
+            .with_fake_latency(latency),
         );
 
         Self {
