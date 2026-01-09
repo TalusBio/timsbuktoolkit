@@ -13,6 +13,7 @@ pub struct TablePanel {
     last_search: Option<String>,
     last_displayed_mode: Modes,
     last_selected_index: Option<usize>,
+    last_library_size: Option<usize>,
 }
 
 impl TablePanel {
@@ -22,6 +23,7 @@ impl TablePanel {
             last_search: None,
             last_displayed_mode: Modes::Normal,
             last_selected_index: None,
+            last_library_size: None,
         }
     }
 
@@ -94,10 +96,25 @@ impl TablePanel {
 
         self.render_search_ui(ui, search_line, search_mode);
         self.render_keybinding_ui(ui);
-        // Invalidate cache if search line changed
-        // TODO: I think I can optimize search using the fact that when typing
-        // letters are added, so I can filter from previous results.
-        if self.last_search.as_ref() != Some(search_line) {
+
+        let current_library_size = elution_groups.len();
+
+        // Invalidate cache if library changed or search line changed
+        let library_changed = self.last_library_size != Some(current_library_size);
+        let search_changed = self.last_search.as_ref() != Some(search_line);
+
+        if library_changed || search_changed {
+            if library_changed {
+                tracing::info!(
+                    "Library size changed from {:?} to {}, invalidating filtered indices cache",
+                    self.last_library_size,
+                    current_library_size
+                );
+                self.last_library_size = Some(current_library_size);
+                // Also reset selected index when library changes
+                *selected_index = None;
+            }
+
             elution_groups.matching_indices_for_id_filter(
                 search_line,
                 self.filtered_indices.get_or_insert_with(Vec::new),

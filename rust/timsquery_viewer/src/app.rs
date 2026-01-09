@@ -569,6 +569,7 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
+        ui_state: &mut UiState,
     ) {
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::same(SECTION_MARGIN))
@@ -585,7 +586,7 @@ impl ViewerApp {
                     Self::display_filename(ui, path);
                 }
 
-                Self::load_elution_groups_if_needed(ui, file_loader, data);
+                Self::load_elution_groups_if_needed(ui, file_loader, data, ui_state);
 
                 if let Some(egs) = data.elution_groups.as_ref() {
                     ui.add_space(SMALL_SPACING);
@@ -783,6 +784,7 @@ impl ViewerApp {
         ui: &mut egui::Ui,
         file_loader: &mut FileLoader,
         data: &mut DataState,
+        ui_state: &mut UiState,
     ) {
         if let Some(path) = &file_loader.elution_groups_path {
             // Check if we need to load new library
@@ -797,6 +799,8 @@ impl ViewerApp {
             if should_load {
                 tracing::info!("Starting to load elution groups from: {}", path.display());
                 data.elution_groups = ElutionGroupState::Loading(path.clone());
+                // Reset selected index when loading a new library to avoid out-of-bounds errors
+                ui_state.selected_index = None;
                 ui.ctx().request_repaint();
             }
         }
@@ -817,6 +821,16 @@ impl ViewerApp {
                             data: egs,
                             source: path.clone(),
                         };
+                        // Validate selected_index is within bounds of new library
+                        if let Some(selected) = ui_state.selected_index {
+                            if selected >= count {
+                                tracing::warn!(
+                                    "Selected index {} is out of bounds for library with {} groups, resetting to None",
+                                    selected, count
+                                );
+                                ui_state.selected_index = None;
+                            }
+                        }
                     }
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
@@ -1055,7 +1069,7 @@ impl<'a> AppTabViewer<'a> {
         ui.label(egui::RichText::new("DATA LOADING").strong().size(13.0));
         ui.add_space(INTERNAL_SPACING);
 
-        ViewerApp::render_elution_groups_section_static(ui, self.file_loader, self.data);
+        ViewerApp::render_elution_groups_section_static(ui, self.file_loader, self.data, self.ui);
         ui.add_space(SECTION_SPACING);
 
         ViewerApp::render_raw_data_section_static(

@@ -68,7 +68,7 @@ impl FileLoader {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "Elution Groups File (json/diann txt/tsv)",
-                &["json", "txt", "tsv"],
+                &["json", "txt", "tsv", "parquet"],
             )
             .pick_file()
         {
