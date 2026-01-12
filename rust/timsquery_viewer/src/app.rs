@@ -826,7 +826,8 @@ impl ViewerApp {
                             if selected >= count {
                                 tracing::warn!(
                                     "Selected index {} is out of bounds for library with {} groups, resetting to None",
-                                    selected, count
+                                    selected,
+                                    count
                                 );
                                 ui_state.selected_index = None;
                             }
