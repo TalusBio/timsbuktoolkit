@@ -228,12 +228,11 @@ fn process_single_file(
 ) -> std::result::Result<(), errors::CliError> {
     info!("Processing file: {:?}", dotd_file);
 
-    let timstofpath = TimsTofPath::new(dotd_file.to_str().unwrap()).map_err(|e| {
-        errors::CliError::Io {
+    let timstofpath =
+        TimsTofPath::new(dotd_file.to_str().unwrap()).map_err(|e| errors::CliError::Io {
             source: format!("Failed to open raw file: {:?}", e),
             path: Some(dotd_file.to_string_lossy().to_string()),
-        }
-    })?;
+        })?;
 
     let index = load_index_auto(
         dotd_file.to_str().ok_or_else(|| errors::CliError::Io {
@@ -390,7 +389,9 @@ fn main() -> std::result::Result<(), errors::CliError> {
         config.analysis.dotd_files = Some(args.dotd_files.clone());
     }
     if let Some(ref speclib_file) = args.speclib_file {
-        config.input = Some(InputConfig::Speclib { path: speclib_file.clone() });
+        config.input = Some(InputConfig::Speclib {
+            path: speclib_file.clone(),
+        });
     }
     if config.input.is_none() {
         return Err(errors::CliError::Config {
@@ -417,11 +418,10 @@ fn main() -> std::result::Result<(), errors::CliError> {
         })?;
     }
 
-    let config_json = serde_json::to_string_pretty(&config).map_err(|e| {
-        errors::CliError::ParseError {
+    let config_json =
+        serde_json::to_string_pretty(&config).map_err(|e| errors::CliError::ParseError {
             msg: format!("Failed to serialize config: {}", e),
-        }
-    })?;
+        })?;
     std::fs::write(&config_output_path, config_json).map_err(|e| errors::CliError::Io {
         source: e.to_string(),
         path: Some(config_output_path.to_string_lossy().to_string()),
