@@ -822,8 +822,8 @@ impl ViewerApp {
                             source: path.clone(),
                         };
                         // Validate selected_index is within bounds of new library
-                        if let Some(selected) = ui_state.selected_index {
-                            if selected >= count {
+                        if let Some(selected) = ui_state.selected_index
+                            && selected >= count {
                                 tracing::warn!(
                                     "Selected index {} is out of bounds for library with {} groups, resetting to None",
                                     selected,
@@ -831,7 +831,6 @@ impl ViewerApp {
                                 );
                                 ui_state.selected_index = None;
                             }
-                        }
                     }
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
