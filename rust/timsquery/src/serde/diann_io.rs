@@ -3,6 +3,12 @@ use crate::ion::{
     IonAnnot,
     IonParsingError,
 };
+use arrow::array::{
+    Float32Array,
+    Int64Array,
+    LargeStringArray,
+    StringArray,
+};
 use serde::Deserialize;
 use std::path::Path;
 use tinyvec::tiny_vec;
@@ -12,7 +18,6 @@ use tracing::{
     info,
     warn,
 };
-use arrow::array::{Float32Array, Int64Array, LargeStringArray, StringArray};
 
 #[derive(Debug)]
 pub enum DiannReadingError {
@@ -28,7 +33,9 @@ impl std::fmt::Display for DiannReadingError {
         match self {
             DiannReadingError::IoError => write!(f, "IO error"),
             DiannReadingError::CsvError => write!(f, "CSV parsing error"),
-            DiannReadingError::DiannPrecursorParsingError => write!(f, "DIA-NN precursor parsing error"),
+            DiannReadingError::DiannPrecursorParsingError => {
+                write!(f, "DIA-NN precursor parsing error")
+            }
             DiannReadingError::ParquetError(msg) => write!(f, "Parquet error: {}", msg),
             DiannReadingError::ArrowError(msg) => write!(f, "Arrow error: {}", msg),
         }
@@ -156,7 +163,11 @@ pub fn sniff_diann_parquet_library_file<T: AsRef<Path>>(file: T) -> bool {
     };
 
     let schema = builder.schema();
-    let field_names: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
+    let field_names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
 
     // Required columns for DiaNN 2.2 parquet format
     let required_columns = vec![
@@ -176,7 +187,9 @@ pub fn sniff_diann_parquet_library_file<T: AsRef<Path>>(file: T) -> bool {
         "Decoy",
     ];
 
-    required_columns.iter().all(|col| field_names.contains(&col.to_string()))
+    required_columns
+        .iter()
+        .all(|col| field_names.contains(&col.to_string()))
 }
 
 pub fn sniff_diann_library_file<T: AsRef<Path>>(file: T) -> bool {
@@ -599,13 +612,18 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
 
     let file_handle = std::fs::File::open(file.as_ref())?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file_handle)
-        .map_err(|e| DiannReadingError::ParquetError(format!("Failed to create parquet reader: {}", e)))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file_handle).map_err(|e| {
+        DiannReadingError::ParquetError(format!("Failed to create parquet reader: {}", e))
+    })?;
 
-    let reader = builder.build()
-        .map_err(|e| DiannReadingError::ParquetError(format!("Failed to build parquet reader: {}", e)))?;
+    let reader = builder.build().map_err(|e| {
+        DiannReadingError::ParquetError(format!("Failed to build parquet reader: {}", e))
+    })?;
 
-    info!("Reading parquet file content from {}", file.as_ref().display());
+    info!(
+        "Reading parquet file content from {}",
+        file.as_ref().display()
+    );
 
     // Read all batches
     let mut all_batches: Vec<RecordBatch> = Vec::new();
@@ -620,50 +638,76 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     }
 
     // Helper function to extract columns from batches
-    fn get_string_column(batches: &[RecordBatch], column_name: &str) -> Result<Vec<String>, DiannReadingError> {
+    fn get_string_column(
+        batches: &[RecordBatch],
+        column_name: &str,
+    ) -> Result<Vec<String>, DiannReadingError> {
         let mut result = Vec::new();
         for batch in batches {
-            let column = batch
-                .column_by_name(column_name)
-                .ok_or_else(|| DiannReadingError::ArrowError(format!("Column {} not found", column_name)))?;
+            let column = batch.column_by_name(column_name).ok_or_else(|| {
+                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+            })?;
 
             // Try LargeStringArray first (common in parquet files)
             if let Some(large_string_array) = column.as_any().downcast_ref::<LargeStringArray>() {
-                result.extend(large_string_array.iter().map(|s| s.unwrap_or("").to_string()));
+                result.extend(
+                    large_string_array
+                        .iter()
+                        .map(|s| s.unwrap_or("").to_string()),
+                );
             } else if let Some(string_array) = column.as_any().downcast_ref::<StringArray>() {
                 result.extend(string_array.iter().map(|s| s.unwrap_or("").to_string()));
             } else {
-                return Err(DiannReadingError::ArrowError(format!("Column {} is not a string array", column_name)));
+                return Err(DiannReadingError::ArrowError(format!(
+                    "Column {} is not a string array",
+                    column_name
+                )));
             }
         }
         Ok(result)
     }
 
-    fn get_float_column(batches: &[RecordBatch], column_name: &str) -> Result<Vec<f32>, DiannReadingError> {
+    fn get_float_column(
+        batches: &[RecordBatch],
+        column_name: &str,
+    ) -> Result<Vec<f32>, DiannReadingError> {
         let mut result = Vec::new();
         for batch in batches {
-            let column = batch
-                .column_by_name(column_name)
-                .ok_or_else(|| DiannReadingError::ArrowError(format!("Column {} not found", column_name)))?;
+            let column = batch.column_by_name(column_name).ok_or_else(|| {
+                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+            })?;
             let float_array = column
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .ok_or_else(|| DiannReadingError::ArrowError(format!("Column {} is not a float array", column_name)))?;
+                .ok_or_else(|| {
+                    DiannReadingError::ArrowError(format!(
+                        "Column {} is not a float array",
+                        column_name
+                    ))
+                })?;
             result.extend(float_array.iter().map(|v| v.unwrap_or(0.0)));
         }
         Ok(result)
     }
 
-    fn get_int_column(batches: &[RecordBatch], column_name: &str) -> Result<Vec<i64>, DiannReadingError> {
+    fn get_int_column(
+        batches: &[RecordBatch],
+        column_name: &str,
+    ) -> Result<Vec<i64>, DiannReadingError> {
         let mut result = Vec::new();
         for batch in batches {
-            let column = batch
-                .column_by_name(column_name)
-                .ok_or_else(|| DiannReadingError::ArrowError(format!("Column {} not found", column_name)))?;
+            let column = batch.column_by_name(column_name).ok_or_else(|| {
+                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+            })?;
             let int_array = column
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| DiannReadingError::ArrowError(format!("Column {} is not an int array", column_name)))?;
+                .ok_or_else(|| {
+                    DiannReadingError::ArrowError(format!(
+                        "Column {} is not an int array",
+                        column_name
+                    ))
+                })?;
             result.extend(int_array.iter().map(|v| v.unwrap_or(0)));
         }
         Ok(result)
@@ -754,7 +798,10 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         elution_groups.push(eg);
     }
 
-    info!("Parsed {} elution groups from parquet file", elution_groups.len());
+    info!(
+        "Parsed {} elution groups from parquet file",
+        elution_groups.len()
+    );
     Ok(elution_groups)
 }
 
@@ -775,13 +822,12 @@ fn parse_precursor_group_from_parquet(
     // RT is in minutes in parquet format, convert to seconds
     let rt_seconds = columns.rts[first_idx] * 60.0;
     let precursor_mz = columns.precursor_mzs[first_idx] as f64;
-    let precursor_charge: u8 =
-        columns.precursor_charges[first_idx]
-            .try_into()
-            .map_err(|e: std::num::TryFromIntError| {
-                error!("Failed to convert PrecursorCharge to u8: {:?}", e);
-                DiannPrecursorParsingError::IonOverCapacity
-            })?;
+    let precursor_charge: u8 = columns.precursor_charges[first_idx].try_into().map_err(
+        |e: std::num::TryFromIntError| {
+            error!("Failed to convert PrecursorCharge to u8: {:?}", e);
+            DiannPrecursorParsingError::IonOverCapacity
+        },
+    )?;
 
     // Extract fragment information
     let mut fragment_mzs = Vec::with_capacity(indices.len());
@@ -801,7 +847,9 @@ fn parse_precursor_group_from_parquet(
         let rel_intensity = columns.relative_intensities[idx];
 
         // Check for loss type - warn if not "noloss" or "unknown"
-        if columns.fragment_loss_types[idx] != "noloss" && columns.fragment_loss_types[idx] != "unknown" {
+        if columns.fragment_loss_types[idx] != "noloss"
+            && columns.fragment_loss_types[idx] != "unknown"
+        {
             warn!(
                 "Unsupported fragment loss type '{}' at row {}; falling back to calling it an unknown ion",
                 columns.fragment_loss_types[idx], i

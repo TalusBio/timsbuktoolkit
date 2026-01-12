@@ -100,8 +100,11 @@ class TimsseekRunner:
                     output_path=results_path,
                     raw_file=self.raw_file_location,
                 )
-                self._rescore(results_dir=results_path, summary_dir=summary_dir)
-                self.log_results(wandb_experiment, output_loc)
+                # Results are now in a subdirectory named after the raw file
+                raw_file_stem = self.raw_file_location.stem
+                file_results_dir = results_path / raw_file_stem
+                self._rescore(results_dir=file_results_dir, summary_dir=summary_dir)
+                self.log_results(wandb_experiment, output_loc, raw_file_stem)
 
     @staticmethod
     def _run(config_path, speclib_path, output_path, raw_file):
@@ -126,7 +129,7 @@ class TimsseekRunner:
             str(speclib_path),
             "--output-dir",
             str(output_path),
-            "--dotd-file",
+            "--dotd-files",
             str(raw_file),
         ]
         logger.info(f"Running command: {' '.join(args)}")
@@ -180,8 +183,8 @@ class TimsseekRunner:
         logger.info(f"Rescoring completed with return code {res.returncode}")
         return res
 
-    def log_results(self, wandb_experiment, results_loc):
-        metrics = self.crunch_metrics(results_loc)
+    def log_results(self, wandb_experiment, results_loc, raw_file_stem):
+        metrics = self.crunch_metrics(results_loc, raw_file_stem)
         with open("latest_metrics.json", "w") as f:
             serializable_metrics = {
                 k: v
@@ -208,7 +211,7 @@ class TimsseekRunner:
         return config
 
     @staticmethod
-    def crunch_metrics(output_dir: Path) -> dict[str, Any]:
+    def crunch_metrics(output_dir: Path, raw_file_stem: str) -> dict[str, Any]:
         metrics = {}
         xgboost_images = [
             ("variable_importance_plot", "importances.png"),
@@ -231,7 +234,9 @@ class TimsseekRunner:
             report = tomllib.load(f)
         metrics.update(report["report"])
 
-        performance_report_path = output_dir / "res" / "performance_report.json"
+        performance_report_path = (
+            output_dir / "res" / raw_file_stem / "performance_report.json"
+        )
         if performance_report_path.exists():
             with open(performance_report_path, "r") as f:
                 performance_report = json.load(f)
@@ -267,35 +272,7 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
         run.finish()
 
 
-# FASTA_FILE = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-# SPECLIB_PATH = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
-#
-# DOTD_FILE = (
-#     Path.home() / "data/decompressed_timstof/250509_PRTC_Levaux_02_S1-A2_1_2513.d"
-# )
-#
-# RESULTS_DIR_BASE = Path("data_ignore")
-# SUMMARY_DIR_BASE = Path("data_ignore")
-#
-#
-# file_list = [
-#     "/Users/sebastianpaez/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
-#     "/Users/sebastianpaez/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
-# ]
-#
-# for file in file_list:
-#     # Get the file name without the path
-#     file_name = Path(file).stem
-#     # Create a new results directory for each file
-#     results_dir = RESULTS_DIR_BASE / file_name / "res"
-#     summary_dir = SUMMARY_DIR_BASE / file_name / "summ"
-#     # Call the main function with the current file
-#     main(FASTA_FILE, SPECLIB_PATH, file, results_dir, summary_dir)
-
-
 def main(wandb_kwargs: dict | None = None):
-    # fasta_file = Path.home() / "fasta/20231030_LINEARIZED_UP000005640_9606.fasta"
-    # speclib_path = Path("data_ignore/20231030_LINEARIZED_UP000005640_9606.msgpack.zst")
 
     fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
     speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
@@ -315,9 +292,6 @@ def main(wandb_kwargs: dict | None = None):
             raw_file_location=file,
         )
         runner.build_speclib()
-
-        # tmpdir = Path("myloc")
-        # runner.run(wandb_kwargs=wandb_kwargs, output_loc=tmpdir)
         runner.run(wandb_kwargs=wandb_kwargs)
 
 

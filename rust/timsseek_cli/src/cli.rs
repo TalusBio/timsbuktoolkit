@@ -4,13 +4,14 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Path to the JSON configuration file
+    /// Path to the JSON configuration file (optional, uses defaults if not provided)
     #[arg(short, long)]
-    pub config: PathBuf,
+    pub config: Option<PathBuf>,
 
-    /// Path to the .d file (will over-write the config file)
-    #[arg(short, long)]
-    pub dotd_file: Option<PathBuf>,
+    /// Path to the .d file(s) (will over-write the config file)
+    /// Can be specified multiple times for batch processing
+    #[arg(short, long, value_name = "FILE")]
+    pub dotd_files: Vec<PathBuf>,
 
     /// Path to the speclib file (will over-write the config file)
     #[arg(short, long)]
@@ -19,4 +20,8 @@ pub struct Cli {
     /// Path to the output directory
     #[arg(short, long)]
     pub output_dir: Option<PathBuf>,
+
+    /// Overwrite existing output directory if it exists
+    #[arg(short = 'O', long)]
+    pub overwrite: bool,
 }

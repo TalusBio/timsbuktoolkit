@@ -44,18 +44,6 @@ pub fn main_loop<I: ScorerQueriable>(
     let mut nwritten = 0;
     let start = Instant::now();
 
-    let out_path_pq = out_path.directory.join("results.parquet");
-    let mut pq_writer = ResultParquetWriter::new(out_path_pq.clone(), 20_000).map_err(|e| {
-        tracing::error!(
-            "Error creating parquet writer for path {:?}: {}",
-            out_path_pq,
-            e
-        );
-        TimsSeekError::Io {
-            path: out_path_pq.into(),
-            source: e,
-        }
-    })?;
     let mut all_timings = ScoreTimings::default();
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
@@ -79,9 +67,6 @@ pub fn main_loop<I: ScorerQueriable>(
             }
             results.extend(out.iter().cloned());
 
-            for x in out.into_iter() {
-                pq_writer.add(x);
-            }
             chunk_num += 1;
             let pct_done = (nqueried as f64 / total as f64) * 100.0;
             let estimated_total = start.elapsed().as_secs_f64() * (100.0 / pct_done);
@@ -93,16 +78,14 @@ pub fn main_loop<I: ScorerQueriable>(
             );
         });
 
-    pq_writer.close();
-    println!("Processed {} queries, wrote {} results", nqueried, nwritten);
-    println!(
+    info!("Processed {} queries, found {} results", nqueried, nwritten);
+    info!(
         "Finished processing {} chunks in {:?}",
         chunk_num,
         start.elapsed()
     );
 
-    // This is a really dirty deduplication step ... since some targets can be decoys as well
-    // we just sort by sequence and keep the best scoring one
+    // Deduplicate by sequence, keeping the best scoring target
     results.sort_unstable_by(|x, y| {
         let seq_ord = x.sequence.cmp(&y.sequence);
         if seq_ord == std::cmp::Ordering::Equal {
@@ -142,15 +125,15 @@ pub fn main_loop<I: ScorerQueriable>(
             n_targets, n_decoys, thresh, n_below_thresh
         );
     }
-    let out_path_pq = out_path.directory.join("results_rescored.parquet");
+    let out_path_pq = out_path.directory.join("results.parquet");
     let mut pq_writer = ResultParquetWriter::new(out_path_pq.clone(), 20_000).map_err(|e| {
         tracing::error!(
             "Error creating parquet writer for path {:?}: {}",
-            out_path_pq,
+            out_path_pq.clone(),
             e
         );
         TimsSeekError::Io {
-            path: out_path_pq.into(),
+            path: out_path_pq.clone().into(),
             source: e,
         }
     })?;
@@ -158,31 +141,24 @@ pub fn main_loop<I: ScorerQueriable>(
         pq_writer.add(res);
     }
     pq_writer.close();
+    info!("Wrote final results to {:?}", out_path_pq);
 
     Ok(all_timings)
 }
 
 fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResults> {
-    // Compete target-decoy pairs
-    // First keep the t/d id and then sort by score, bests go first
-    // competition happens at the precursor level
-    // so we can dedupe them
+    // Compete target-decoy pairs at precursor level
     results.sort_unstable_by(|x, y| {
         x.decoy_group_id
             .cmp(&y.decoy_group_id)
             .then_with(|| x.precursor_charge.cmp(&y.precursor_charge))
-            .then_with(|| {
-                // No score should be nan or infinite here ...
-                x.main_score.partial_cmp(&y.main_score).unwrap().reverse()
-            })
+            .then_with(|| x.main_score.partial_cmp(&y.main_score).unwrap().reverse())
     });
     info!(
         "Number of results before t/d competition: {}",
         results.len()
     );
 
-    // Assign the delta group scores
-    // this is the (td_id, charge, index, score)
     let mut last_id: Option<(u32, u8, usize, f32)> = None;
     let mut set = false;
     for i in 0..results.len() {
@@ -193,27 +169,17 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
                 if set {
                     continue;
                 }
-                // same group
-                // since we are going downhill, this score will alwayts be negative
                 let delta_score = res.main_score - last_score;
                 let delta_group_ratio = res.main_score / last_score;
 
-                // Since we are going to drop this ... we save some time not
-                // assigning this score RN...
-                // res.delta_group = delta_score;
-                // results[last_index].delta_group_ratio = 1 / delta_group_ratio;
-
-                // Also set the delta cn for the last one if its not already set
                 results[last_index].delta_group = -delta_score;
                 results[last_index].delta_group_ratio = delta_group_ratio;
                 set = true;
             } else {
-                // new group
                 last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
                 set = false;
             }
         } else {
-            // first entry
             last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
             set = false;
         }
