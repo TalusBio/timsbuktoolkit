@@ -1,4 +1,5 @@
 use crate::errors::LibraryReadingError;
+use crate::fragment_mass::elution_group_converter::isotope_dist_from_seq;
 use crate::models::{
     DecoyMarking,
     DigestSlice,
@@ -12,6 +13,7 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::collections::HashMap;
 use std::io::{
     BufRead,
     BufReader,
@@ -23,6 +25,12 @@ use std::path::{
 };
 use std::sync::Arc;
 use timsquery::models::elution_group::TimsElutionGroup;
+use timsquery::serde::{
+    DiannPrecursorExtras,
+    ElutionGroupCollection,
+    FileReadingExtras,
+    read_library_file as read_timsquery_library,
+};
 
 /// This is meant to the be the serializable version of the speclib element
 /// so ... in general should be backwards compatible and implement `Into<QueryItemToScore>`
@@ -256,6 +264,252 @@ pub struct ReferenceEG {
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
+}
+
+/// Convert a DIA-NN library entry to a QueryItemToScore
+///
+/// This handles conversion from TimsElutionGroup + DiannPrecursorExtras
+/// to the format expected by the timsseek scoring pipeline.
+fn convert_diann_to_query_item(
+    eg: TimsElutionGroup<IonAnnot>,
+    extra: DiannPrecursorExtras,
+    decoy_group_id: u32,
+) -> Result<QueryItemToScore, LibraryReadingError> {
+    let digest = DigestSlice::from_string(
+        extra.stripped_peptide.clone(),
+        extra.is_decoy,
+        decoy_group_id,
+    );
+
+    let fragment_intensities: HashMap<IonAnnot, f32> =
+        extra.relative_intensities.into_iter().collect();
+
+    let (rebuilt_eg, precursor_intensities) =
+        match isotope_dist_from_seq(&extra.stripped_peptide) {
+            Ok(isotope_ratios) => {
+                let fragment_labels: Vec<IonAnnot> = eg
+                    .iter_fragments()
+                    .map(|(label, _mz)| label.clone())
+                    .collect();
+                let fragment_mzs: Vec<f64> =
+                    eg.iter_fragments().map(|(_label, mz)| mz).collect();
+
+                let rebuilt = TimsElutionGroup::builder()
+                    .id(eg.id())
+                    .mobility_ook0(eg.mobility_ook0())
+                    .rt_seconds(eg.rt_seconds())
+                    .precursor(eg.precursor_mz(), eg.precursor_charge())
+                    .precursor_labels([0i8, 1i8, 2i8].as_slice().into())
+                    .fragment_labels(fragment_labels.as_slice().into())
+                    .fragment_mzs(fragment_mzs)
+                    .try_build()
+                    .map_err(|e| LibraryReadingError::UnsupportedFormat {
+                        message: format!("Failed to rebuild elution group: {:?}", e),
+                    })?;
+
+                let intensities: HashMap<i8, f32> = vec![
+                    (0i8, isotope_ratios[0]),
+                    (1i8, isotope_ratios[1]),
+                    (2i8, isotope_ratios[2]),
+                ]
+                .into_iter()
+                .collect();
+
+                (rebuilt, intensities)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to calculate isotope distribution for {}: {}. Using monoisotope only.",
+                    extra.stripped_peptide,
+                    e
+                );
+                (eg, HashMap::from_iter([(0i8, 1.0)]))
+            }
+        };
+
+    let expected_intensity = ExpectedIntensities {
+        fragment_intensities,
+        precursor_intensities,
+    };
+
+    Ok(QueryItemToScore {
+        digest,
+        query: rebuilt_eg,
+        expected_intensity,
+    })
+}
+
+/// Generate a mass-shifted decoy from a target QueryItemToScore
+///
+/// Creates a decoy by shifting the precursor m/z by a fixed mass difference.
+/// All other properties (RT, mobility, fragments, intensities) remain the same.
+fn create_mass_shifted_decoy(
+    target: &QueryItemToScore,
+    decoy_group_id: u32,
+    mass_shift_da: f64,
+) -> Result<QueryItemToScore, LibraryReadingError> {
+    let target_sequence: String = target.digest.clone().into();
+    let decoy_digest = DigestSlice::from_string(target_sequence, true, decoy_group_id);
+
+    let charge = target.query.precursor_charge();
+    let mz_shift = mass_shift_da / charge as f64;
+    let shifted_precursor_mz = target.query.precursor_mz() + mz_shift;
+
+    let fragment_labels: Vec<IonAnnot> = target
+        .query
+        .iter_fragments()
+        .map(|(label, _)| label.clone())
+        .collect();
+    let fragment_mzs: Vec<f64> = target
+        .query
+        .iter_fragments()
+        .map(|(_, mz)| mz)
+        .collect();
+
+    let precursor_labels: Vec<i8> = target
+        .query
+        .iter_precursors()
+        .map(|(label, _)| label)
+        .collect();
+
+    let shifted_eg = TimsElutionGroup::builder()
+        .id(target.query.id())
+        .mobility_ook0(target.query.mobility_ook0())
+        .rt_seconds(target.query.rt_seconds())
+        .precursor(shifted_precursor_mz, charge)
+        .precursor_labels(precursor_labels.as_slice().into())
+        .fragment_labels(fragment_labels.as_slice().into())
+        .fragment_mzs(fragment_mzs)
+        .try_build()
+        .map_err(|e| LibraryReadingError::UnsupportedFormat {
+            message: format!("Failed to build mass-shifted decoy elution group: {:?}", e),
+        })?;
+
+    Ok(QueryItemToScore {
+        digest: decoy_digest,
+        query: shifted_eg,
+        expected_intensity: target.expected_intensity.clone(),
+    })
+}
+
+/// Assign decoy group IDs to library entries
+///
+/// Strategy:
+/// - If no decoys present: Returns None (signals that decoys need to be generated)
+/// - If decoys present: Assign sequential IDs (no pairing logic, treat as independent)
+fn assign_decoy_groups(extras: &[DiannPrecursorExtras]) -> Option<Vec<u32>> {
+    let has_any_decoys = extras.iter().any(|e| e.is_decoy);
+
+    if !has_any_decoys {
+        tracing::warn!(
+            "Library contains NO decoys. Will generate synthetic mass-shift decoys:\n\
+             - Creating 2 decoys per target (±12.0 Da / C12 mass)\n\
+             - Total library size will be 3x original (1 target + 2 decoys)\n\
+             - Each target-decoy triplet will share a decoy_group for FDR estimation\n\
+             \n\
+             Note: Mass-shift decoys are a simple approach. For production use, consider:\n\
+             - Using a library with properly matched sequence-based decoys\n\
+             - Generating decoys with DIA-NN, Spectronaut, or similar tools"
+        );
+        None
+    } else {
+        tracing::info!(
+            "Library contains {} targets and {} decoys. Using existing decoys.",
+            extras.iter().filter(|e| !e.is_decoy).count(),
+            extras.iter().filter(|e| e.is_decoy).count()
+        );
+        Some((0..extras.len()).map(|i| i as u32).collect())
+    }
+}
+
+/// Convert an ElutionGroupCollection from timsquery to a Speclib
+fn convert_elution_group_collection(
+    collection: ElutionGroupCollection,
+) -> Result<Speclib, LibraryReadingError> {
+    match collection {
+        ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))) => {
+            if egs.len() != extras.len() {
+                return Err(LibraryReadingError::UnsupportedFormat {
+                    message: format!(
+                        "Mismatch between elution groups ({}) and extras ({})",
+                        egs.len(),
+                        extras.len()
+                    ),
+                });
+            }
+
+            tracing::info!(
+                "Converting {} DIA-NN library entries to Speclib format",
+                egs.len()
+            );
+
+            let decoy_groups_opt = assign_decoy_groups(&extras);
+
+            let elems = if let Some(decoy_groups) = decoy_groups_opt {
+                let result: Result<Vec<_>, _> = egs
+                    .into_iter()
+                    .zip(extras.into_iter())
+                    .enumerate()
+                    .map(|(idx, (eg, extra))| {
+                        let decoy_group = decoy_groups[idx];
+                        convert_diann_to_query_item(eg, extra, decoy_group)
+                    })
+                    .collect();
+                result?
+            } else {
+                const CARBON_MASS: f64 = 12.0;
+
+                tracing::info!("Generating mass-shift decoys for {} targets...", egs.len());
+
+                let targets: Result<Vec<_>, _> = egs
+                    .into_iter()
+                    .zip(extras.into_iter())
+                    .enumerate()
+                    .map(|(idx, (eg, extra))| {
+                        let decoy_group_id = idx as u32;
+                        convert_diann_to_query_item(eg, extra, decoy_group_id)
+                    })
+                    .collect();
+                let targets = targets?;
+
+                let mut all_entries = Vec::with_capacity(targets.len() * 3);
+
+                for target in targets {
+                    let decoy_group_id = target.digest.decoy_group;
+
+                    all_entries.push(target.clone());
+
+                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                    all_entries.push(plus_decoy);
+
+                    let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                    all_entries.push(minus_decoy);
+                }
+
+                tracing::info!(
+                    "Generated {} total entries ({} targets + {} decoys)",
+                    all_entries.len(),
+                    all_entries.len() / 3,
+                    all_entries.len() * 2 / 3
+                );
+
+                all_entries
+            };
+
+            Ok(Speclib { elems })
+        }
+        ElutionGroupCollection::MzpafLabels(_, None) => Err(LibraryReadingError::UnsupportedFormat {
+            message: "MzpafLabels variant without DiannPrecursorExtras is not supported"
+                .to_string(),
+        }),
+        _ => {
+            tracing::warn!("Unsupported ElutionGroupCollection variant for timsseek");
+            Err(LibraryReadingError::UnsupportedFormat {
+                message: "Only DIA-NN TSV/Parquet libraries are currently supported via timsquery"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -497,8 +751,31 @@ impl Speclib {
     }
 
     pub fn from_file(path: &Path) -> Result<Self, LibraryReadingError> {
-        let format = SpeclibFormat::detect_from_path(path)?;
-        Self::from_file_with_format(path, format)
+        // First try to detect if it's one of our native formats (msgpack/ndjson)
+        match SpeclibFormat::detect_from_path(path) {
+            Ok(format) => {
+                // Try to load with native format
+                match Self::from_file_with_format(path, format) {
+                    Ok(speclib) => return Ok(speclib),
+                    Err(e) => {
+                        tracing::debug!(
+                            "Failed to load as native format, trying timsquery fallback: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::debug!("Could not detect native format, trying timsquery fallback");
+            }
+        }
+
+        tracing::info!(
+            "Attempting to load library using timsquery format detection: {}",
+            path.display()
+        );
+        let collection = read_timsquery_library(path)?;
+        convert_elution_group_collection(collection)
     }
 
     pub fn from_file_with_format(
@@ -662,5 +939,373 @@ mod tests {
 
         assert_eq!(query_item.digest.len(), "PEPTIDEPINK".len());
         assert_eq!(query_item.query.fragment_count(), 3);
+    }
+
+    #[test]
+    fn test_load_diann_tsv_library() {
+        // Use the test file from timsquery tests
+        // Note: sample_lib.tsv is in Skyline format and won't load as DIA-NN
+        // So we test with sample_lib.txt which is in DIA-NN TSV format
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        assert!(
+            test_file.exists(),
+            "Test file should exist at {:?}",
+            test_file
+        );
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+
+        // The sample file has 2 unique precursors with no decoys
+        // Should generate 3x entries: 2 targets + 4 decoys
+        assert_eq!(speclib.len(), 6, "Expected 6 entries (2 targets + 4 decoys)");
+
+        // Verify first target entry structure (targets come first)
+        let first_target = speclib
+            .elems
+            .iter()
+            .find(|e| !e.digest.is_decoy())
+            .expect("Should have at least one target");
+        assert_eq!(
+            first_target.query.fragment_count(),
+            5,
+            "First entry should have 5 fragments"
+        );
+
+        // Verify isotope envelope was added (should have 3 isotopes: 0, 1, 2)
+        let precursor_count: usize = first_target.query.iter_precursors().count();
+        assert_eq!(precursor_count, 3, "Should have 3 isotopes in precursor envelope");
+
+        // Verify precursor intensities match isotope count
+        assert_eq!(
+            first_target.expected_intensity.precursor_intensities.len(),
+            3,
+            "Should have intensities for all 3 isotopes"
+        );
+
+        // Verify all intensities are present
+        assert!(
+            first_target
+                .expected_intensity
+                .precursor_intensities
+                .contains_key(&0),
+            "Should have intensity for isotope 0"
+        );
+        assert!(
+            first_target
+                .expected_intensity
+                .precursor_intensities
+                .contains_key(&1),
+            "Should have intensity for isotope 1"
+        );
+        assert!(
+            first_target
+                .expected_intensity
+                .precursor_intensities
+                .contains_key(&2),
+            "Should have intensity for isotope 2"
+        );
+    }
+
+    #[test]
+    fn test_load_diann_txt_library() {
+        // Use the test file from timsquery tests
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        assert!(
+            test_file.exists(),
+            "Test file should exist at {:?}",
+            test_file
+        );
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load TXT library");
+
+        // The sample file has 2 unique precursors with no decoys
+        // Should generate 3x entries: 2 targets + 4 decoys
+        assert_eq!(speclib.len(), 6, "Expected 6 entries (2 targets + 4 decoys)");
+
+        // Verify we have both targets and decoys
+        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
+
+        assert_eq!(n_targets, 2, "Should have 2 targets");
+        assert_eq!(n_decoys, 4, "Should have 4 decoys");
+    }
+
+    #[test]
+    fn test_load_diann_parquet_library() {
+        // Use the test file from timsquery tests
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_pq_speclib.parquet");
+
+        assert!(
+            test_file.exists(),
+            "Test file should exist at {:?}",
+            test_file
+        );
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load Parquet library");
+
+        // The sample parquet file has 3 unique precursors with no decoys
+        // Should generate 3x entries: 3 targets + 6 decoys
+        assert_eq!(
+            speclib.len(),
+            9,
+            "Expected 9 entries (3 targets + 6 decoys)"
+        );
+
+        // Verify we have both targets and decoys
+        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
+
+        assert_eq!(n_targets, 3, "Should have 3 targets");
+        assert_eq!(n_decoys, 6, "Should have 6 decoys");
+
+        // Verify isotope envelope for targets
+        for entry in speclib.elems.iter().filter(|e| !e.digest.is_decoy()) {
+            let precursor_count: usize = entry.query.iter_precursors().count();
+            assert_eq!(
+                precursor_count, 3,
+                "Each entry should have 3 isotopes in precursor envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn test_isotope_envelope_calculation() {
+        // Use the DIA-NN TSV test file
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+
+        // Check that isotope intensities are normalized (M0 should be 1.0)
+        for entry in &speclib.elems {
+            let m0_intensity = entry
+                .expected_intensity
+                .precursor_intensities
+                .get(&0)
+                .expect("Should have M0 intensity");
+
+            // M0 should be the highest intensity (normalized to 1.0)
+            assert!(
+                (*m0_intensity - 1.0).abs() < 0.01,
+                "M0 should be normalized to ~1.0, got {}",
+                m0_intensity
+            );
+
+            // M+1 and M+2 should be less than M0
+            let m1_intensity = entry.expected_intensity.precursor_intensities.get(&1);
+            let m2_intensity = entry.expected_intensity.precursor_intensities.get(&2);
+
+            if let Some(m1) = m1_intensity {
+                assert!(
+                    *m1 <= 1.0,
+                    "M+1 intensity should be <= 1.0, got {}",
+                    m1
+                );
+            }
+            if let Some(m2) = m2_intensity {
+                assert!(
+                    *m2 <= 1.0,
+                    "M+2 intensity should be <= 1.0, got {}",
+                    m2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_decoy_generation_for_library_without_decoys() {
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+
+        // Test file has 2 targets with no decoys
+        // Should generate 3x entries: 2 targets + 4 decoys (2 per target)
+        assert_eq!(
+            speclib.len(),
+            6,
+            "Should have 6 entries (2 targets + 4 decoys)"
+        );
+
+        // Count targets vs decoys
+        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
+
+        assert_eq!(n_targets, 2, "Should have 2 target entries");
+        assert_eq!(n_decoys, 4, "Should have 4 decoy entries (2 per target)");
+
+        // Each decoy_group should have exactly 3 entries (1 target + 2 decoys)
+        let mut groups: std::collections::HashMap<u32, Vec<&crate::QueryItemToScore>> =
+            std::collections::HashMap::new();
+        for entry in &speclib.elems {
+            groups
+                .entry(entry.digest.decoy_group)
+                .or_insert_with(Vec::new)
+                .push(entry);
+        }
+
+        assert_eq!(groups.len(), 2, "Should have 2 unique decoy groups");
+
+        for (group_id, entries) in groups {
+            assert_eq!(
+                entries.len(),
+                3,
+                "Decoy group {} should have exactly 3 entries",
+                group_id
+            );
+
+            // Verify 1 target + 2 decoys per group
+            let targets_in_group = entries.iter().filter(|e| !e.digest.is_decoy()).count();
+            let decoys_in_group = entries.iter().filter(|e| e.digest.is_decoy()).count();
+
+            assert_eq!(targets_in_group, 1, "Should have 1 target in group");
+            assert_eq!(decoys_in_group, 2, "Should have 2 decoys in group");
+        }
+    }
+
+    #[test]
+    fn test_mass_shift_decoys() {
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+
+        // Group by decoy_group_id
+        let mut groups: std::collections::HashMap<u32, Vec<&crate::QueryItemToScore>> =
+            std::collections::HashMap::new();
+        for entry in &speclib.elems {
+            groups
+                .entry(entry.digest.decoy_group)
+                .or_insert_with(Vec::new)
+                .push(entry);
+        }
+
+        const CARBON_MASS: f64 = 12.0;
+
+        for (_group_id, entries) in groups {
+            // Find target and decoys
+            let target = entries
+                .iter()
+                .find(|e| !e.digest.is_decoy())
+                .expect("Should have a target");
+            let decoys: Vec<_> = entries.iter().filter(|e| e.digest.is_decoy()).collect();
+
+            assert_eq!(decoys.len(), 2, "Should have 2 decoys");
+
+            let target_mz = target.query.precursor_mz();
+            let charge = target.query.precursor_charge();
+            let mz_shift = CARBON_MASS / charge as f64;
+
+            // Check that decoys have expected m/z shifts
+            let decoy_mzs: Vec<f64> = decoys.iter().map(|d| d.query.precursor_mz()).collect();
+
+            let expected_plus = target_mz + mz_shift;
+            let expected_minus = target_mz - mz_shift;
+
+            // One decoy should be +C12, one should be -C12
+            let has_plus = decoy_mzs
+                .iter()
+                .any(|mz| (mz - expected_plus).abs() < 0.001);
+            let has_minus = decoy_mzs
+                .iter()
+                .any(|mz| (mz - expected_minus).abs() < 0.001);
+
+            assert!(
+                has_plus,
+                "Should have a +C12 decoy at m/z {}, found {:?}",
+                expected_plus,
+                decoy_mzs
+            );
+            assert!(
+                has_minus,
+                "Should have a -C12 decoy at m/z {}, found {:?}",
+                expected_minus,
+                decoy_mzs
+            );
+
+            // Verify other properties are preserved
+            for decoy in &decoys {
+                assert_eq!(
+                    decoy.query.rt_seconds(),
+                    target.query.rt_seconds(),
+                    "RT should be preserved"
+                );
+                assert_eq!(
+                    decoy.query.mobility_ook0(),
+                    target.query.mobility_ook0(),
+                    "Mobility should be preserved"
+                );
+                assert_eq!(
+                    decoy.query.fragment_count(),
+                    target.query.fragment_count(),
+                    "Fragment count should be preserved"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_fragment_intensities_preserved() {
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+
+        for entry in &speclib.elems {
+            // Number of fragment intensities should match number of fragments
+            assert_eq!(
+                entry.expected_intensity.fragment_intensities.len(),
+                entry.query.fragment_count(),
+                "Fragment intensity count should match fragment count"
+            );
+
+            // All fragment intensities should be positive
+            for (_label, intensity) in &entry.expected_intensity.fragment_intensities {
+                assert!(
+                    *intensity > 0.0,
+                    "Fragment intensities should be positive"
+                );
+            }
+        }
     }
 }

@@ -45,6 +45,18 @@ pub enum LibraryReadingError {
         context: &'static str,
         path: PathBuf,
     },
+    TimsQueryLibraryError {
+        source: timsquery::serde::LibraryReadingError,
+    },
+    UnsupportedFormat {
+        message: String,
+    },
+}
+
+impl From<timsquery::serde::LibraryReadingError> for LibraryReadingError {
+    fn from(source: timsquery::serde::LibraryReadingError) -> Self {
+        Self::TimsQueryLibraryError { source }
+    }
 }
 
 impl From<TQDataProcessingError> for DataProcessingError {
