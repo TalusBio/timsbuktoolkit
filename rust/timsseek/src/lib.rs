@@ -18,6 +18,7 @@ extern crate parquet_derive;
 
 pub use data_sources::Speclib;
 pub use models::{
+    DecoyStrategy,
     DigestSlice,
     ExpectedIntensities,
     QueryItemToScore,

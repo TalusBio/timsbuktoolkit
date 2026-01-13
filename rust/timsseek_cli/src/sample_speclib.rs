@@ -33,7 +33,10 @@ enum SubCommands {
 
 fn parse_speclib(speclib_file: &str) -> Result<(), timsseek::errors::LibraryReadingError> {
     // This function parses a speclib file and prints the parsed content to stdout.
-    let speclib = Speclib::from_file(std::path::Path::new(speclib_file))?;
+    let speclib = Speclib::from_file(
+        std::path::Path::new(speclib_file),
+        timsseek::DecoyStrategy::default(),
+    )?;
     println!("{:#?}", speclib);
     Ok(())
 }

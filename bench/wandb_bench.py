@@ -123,6 +123,7 @@ class TimsseekRunner:
             "--bin",
             "timsseek",
             "--",
+            "--overwrite",
             "--config",
             str(config_path),
             "--speclib-file",

@@ -3,9 +3,10 @@ use indicatif::{
     ProgressIterator,
     ProgressStyle,
 };
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 use timsquery::IndexedTimstofPeaks;
+use timsseek::DecoyStrategy;
 use timsseek::ScorerQueriable;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
@@ -85,22 +86,6 @@ pub fn main_loop<I: ScorerQueriable>(
         start.elapsed()
     );
 
-    // Deduplicate by sequence, keeping the best scoring target
-    results.sort_unstable_by(|x, y| {
-        let seq_ord = x.sequence.cmp(&y.sequence);
-        if seq_ord == std::cmp::Ordering::Equal {
-            // Move to the first position the target
-            match (x.is_target, y.is_target) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
-        } else {
-            seq_ord
-        }
-    });
-    results.dedup_by(|x, y| x.sequence == y.sequence);
-
     let mut results = target_decoy_compete(results);
 
     // Sort in descending order of score
@@ -147,6 +132,57 @@ pub fn main_loop<I: ScorerQueriable>(
 }
 
 fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResults> {
+    // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
+    // a slice where we push rejected results to the end and keep the trailing slice as the "active")
+
+    // I KNOW this is an ugly place for a function...
+    fn glimpse_result_head(results: &[IonSearchResults]) -> Vec<String> {
+        results[..10.min(results.len())]
+            .iter()
+            .map(|x| {
+                format!(
+                    "{} {} {} {}",
+                    x.sequence, x.precursor_charge, x.precursor_mz, x.main_score
+                )
+            })
+            .collect::<Vec<_>>()
+    }
+    // Deduplicate by sequence, keeping the best scoring target
+    // This is meant to remove instances where reversing a target creates another target.
+    results.sort_unstable_by(|x, y| {
+        let seq_ord = x.sequence.cmp(&y.sequence);
+        // Then sort descending by main_score
+        // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
+        // to some of them to make a "decoy"
+        let score_ord = y.main_score.partial_cmp(&x.main_score).unwrap();
+        let ord = seq_ord.then(score_ord);
+
+        if ord == std::cmp::Ordering::Equal {
+            // Move to the first position the target
+            match (x.is_target, y.is_target) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            }
+        } else {
+            seq_ord
+        }
+    });
+    // As debug lets print the first and last results after deduplication
+    debug!(
+        "First 10 result before deduplication for seq+charge+mz: {:#?}",
+        glimpse_result_head(&results)
+    );
+    results.dedup_by(|x, y| {
+        (x.sequence == y.sequence)
+            && (x.precursor_charge == y.precursor_charge)
+            && (x.precursor_mz == y.precursor_mz)
+    });
+    debug!(
+        "First 10 result after deduplication for seq+charge+mz: {:#?}",
+        glimpse_result_head(&results)
+    );
+
     // Compete target-decoy pairs at precursor level
     results.sort_unstable_by(|x, y| {
         x.decoy_group_id
@@ -157,6 +193,10 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
     info!(
         "Number of results before t/d competition: {}",
         results.len()
+    );
+    debug!(
+        "First 10 result before target-decoy in decoy group id: {:#?}",
+        glimpse_result_head(&results)
     );
 
     let mut last_id: Option<(u32, u8, usize, f32)> = None;
@@ -188,21 +228,32 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
     results.dedup_by(|x, y| {
         (x.decoy_group_id == y.decoy_group_id) & (x.precursor_charge == y.precursor_charge)
     });
+    debug!(
+        "First 10 result after deduplication for decoy_group_id+charge: {:#?}",
+        glimpse_result_head(&results)
+    );
     info!("Number of results after t/d competition: {}", results.len());
+    debug!(
+        "First 10 result after target-decoy competition: {:#?}",
+        glimpse_result_head(&results)
+    );
     results
 }
 
 pub fn process_speclib(
-    path: PathBuf,
+    path: &Path,
     pipeline: &ScoringPipeline<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
+    decoy_strategy: DecoyStrategy,
 ) -> std::result::Result<(), TimsSeekError> {
     // TODO: I should probably "inline" this function with the main loop
     info!("Building database from speclib file {:?}", path);
+    info!("Decoy generation strategy: {}", decoy_strategy);
+
     let st = std::time::Instant::now();
     let performance_report_path = output.directory.join("performance_report.json");
-    let speclib = Speclib::from_file(&path)?;
+    let speclib = Speclib::from_file(path, decoy_strategy)?;
     let elap_time = st.elapsed();
     info!(
         "Loading speclib of length {} took: {:?} for {}",
