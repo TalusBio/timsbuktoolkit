@@ -6,8 +6,6 @@ use indicatif::{
 use std::path::Path;
 use std::time::Instant;
 use timsquery::IndexedTimstofPeaks;
-use timsseek::DecoyStrategy;
-use timsseek::ScorerQueriable;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
@@ -21,6 +19,10 @@ use timsseek::scoring::pipeline::ScoringPipeline;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
+};
+use timsseek::{
+    DecoyStrategy,
+    ScorerQueriable,
 };
 use tracing::{
     debug,
