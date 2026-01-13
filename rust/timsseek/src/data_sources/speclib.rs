@@ -284,48 +284,44 @@ fn convert_diann_to_query_item(
     let fragment_intensities: HashMap<IonAnnot, f32> =
         extra.relative_intensities.into_iter().collect();
 
-    let (rebuilt_eg, precursor_intensities) =
-        match isotope_dist_from_seq(&extra.stripped_peptide) {
-            Ok(isotope_ratios) => {
-                let fragment_labels: Vec<IonAnnot> = eg
-                    .iter_fragments()
-                    .map(|(label, _mz)| *label)
-                    .collect();
-                let fragment_mzs: Vec<f64> =
-                    eg.iter_fragments().map(|(_label, mz)| mz).collect();
+    let (rebuilt_eg, precursor_intensities) = match isotope_dist_from_seq(&extra.stripped_peptide) {
+        Ok(isotope_ratios) => {
+            let fragment_labels: Vec<IonAnnot> =
+                eg.iter_fragments().map(|(label, _mz)| *label).collect();
+            let fragment_mzs: Vec<f64> = eg.iter_fragments().map(|(_label, mz)| mz).collect();
 
-                let rebuilt = TimsElutionGroup::builder()
-                    .id(eg.id())
-                    .mobility_ook0(eg.mobility_ook0())
-                    .rt_seconds(eg.rt_seconds())
-                    .precursor(eg.precursor_mz(), eg.precursor_charge())
-                    .precursor_labels([0i8, 1i8, 2i8].as_slice().into())
-                    .fragment_labels(fragment_labels.as_slice().into())
-                    .fragment_mzs(fragment_mzs)
-                    .try_build()
-                    .map_err(|e| LibraryReadingError::UnsupportedFormat {
-                        message: format!("Failed to rebuild elution group: {:?}", e),
-                    })?;
+            let rebuilt = TimsElutionGroup::builder()
+                .id(eg.id())
+                .mobility_ook0(eg.mobility_ook0())
+                .rt_seconds(eg.rt_seconds())
+                .precursor(eg.precursor_mz(), eg.precursor_charge())
+                .precursor_labels([0i8, 1i8, 2i8].as_slice().into())
+                .fragment_labels(fragment_labels.as_slice().into())
+                .fragment_mzs(fragment_mzs)
+                .try_build()
+                .map_err(|e| LibraryReadingError::UnsupportedFormat {
+                    message: format!("Failed to rebuild elution group: {:?}", e),
+                })?;
 
-                let intensities: HashMap<i8, f32> = vec![
-                    (0i8, isotope_ratios[0]),
-                    (1i8, isotope_ratios[1]),
-                    (2i8, isotope_ratios[2]),
-                ]
-                .into_iter()
-                .collect();
+            let intensities: HashMap<i8, f32> = vec![
+                (0i8, isotope_ratios[0]),
+                (1i8, isotope_ratios[1]),
+                (2i8, isotope_ratios[2]),
+            ]
+            .into_iter()
+            .collect();
 
-                (rebuilt, intensities)
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Failed to calculate isotope distribution for {}: {}. Using monoisotope only.",
-                    extra.stripped_peptide,
-                    e
-                );
-                (eg, HashMap::from_iter([(0i8, 1.0)]))
-            }
-        };
+            (rebuilt, intensities)
+        }
+        Err(e) => {
+            tracing::debug!(
+                "Failed to calculate isotope distribution for {}: {}. Using monoisotope only.",
+                extra.stripped_peptide,
+                e
+            );
+            (eg, HashMap::from_iter([(0i8, 1.0)]))
+        }
+    };
 
     let expected_intensity = ExpectedIntensities {
         fragment_intensities,
@@ -426,10 +422,12 @@ fn convert_elution_group_collection(
 
             Ok(Speclib { elems })
         }
-        ElutionGroupCollection::MzpafLabels(_, None) => Err(LibraryReadingError::UnsupportedFormat {
-            message: "MzpafLabels variant without DiannPrecursorExtras is not supported"
-                .to_string(),
-        }),
+        ElutionGroupCollection::MzpafLabels(_, None) => {
+            Err(LibraryReadingError::UnsupportedFormat {
+                message: "MzpafLabels variant without DiannPrecursorExtras is not supported"
+                    .to_string(),
+            })
+        }
         _ => {
             tracing::warn!("Unsupported ElutionGroupCollection variant for timsseek");
             Err(LibraryReadingError::UnsupportedFormat {
@@ -717,7 +715,10 @@ impl Speclib {
         speclib: Speclib,
         strategy: crate::models::DecoyStrategy,
     ) -> Result<Speclib, LibraryReadingError> {
-        use crate::models::{DecoyMarking, DecoyStrategy};
+        use crate::models::{
+            DecoyMarking,
+            DecoyStrategy,
+        };
 
         // Separate targets from decoys
         let (targets, decoys): (Vec<_>, Vec<_>) = speclib
@@ -763,10 +764,12 @@ impl Speclib {
 
                     all_entries.push(target.clone());
 
-                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                    let plus_decoy =
+                        create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
                     all_entries.push(plus_decoy);
 
-                    let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                    let minus_decoy =
+                        create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
                     all_entries.push(minus_decoy);
                 }
 
@@ -810,10 +813,12 @@ impl Speclib {
 
                         all_entries.push(target.clone());
 
-                        let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                        let plus_decoy =
+                            create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
                         all_entries.push(plus_decoy);
 
-                        let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                        let minus_decoy =
+                            create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
                         all_entries.push(minus_decoy);
                     }
 
@@ -1016,11 +1021,16 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         // The sample file has 2 unique precursors with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys
-        assert_eq!(speclib.len(), 6, "Expected 6 entries (2 targets + 4 decoys)");
+        assert_eq!(
+            speclib.len(),
+            6,
+            "Expected 6 entries (2 targets + 4 decoys)"
+        );
 
         // Verify first target entry structure (targets come first)
         let first_target = speclib
@@ -1036,7 +1046,10 @@ mod tests {
 
         // Verify isotope envelope was added (should have 3 isotopes: 0, 1, 2)
         let precursor_count: usize = first_target.query.iter_precursors().count();
-        assert_eq!(precursor_count, 3, "Should have 3 isotopes in precursor envelope");
+        assert_eq!(
+            precursor_count, 3,
+            "Should have 3 isotopes in precursor envelope"
+        );
 
         // Verify precursor intensities match isotope count
         assert_eq!(
@@ -1086,14 +1099,23 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load TXT library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load TXT library");
 
         // The sample file has 2 unique precursors with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys
-        assert_eq!(speclib.len(), 6, "Expected 6 entries (2 targets + 4 decoys)");
+        assert_eq!(
+            speclib.len(),
+            6,
+            "Expected 6 entries (2 targets + 4 decoys)"
+        );
 
         // Verify we have both targets and decoys
-        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_targets = speclib
+            .elems
+            .iter()
+            .filter(|e| !e.digest.is_decoy())
+            .count();
         let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
 
         assert_eq!(n_targets, 2, "Should have 2 targets");
@@ -1117,7 +1139,8 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load Parquet library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load Parquet library");
 
         // The sample parquet file has 3 unique precursors with no decoys
         // Should generate 3x entries: 3 targets + 6 decoys
@@ -1128,7 +1151,11 @@ mod tests {
         );
 
         // Verify we have both targets and decoys
-        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_targets = speclib
+            .elems
+            .iter()
+            .filter(|e| !e.digest.is_decoy())
+            .count();
         let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
 
         assert_eq!(n_targets, 3, "Should have 3 targets");
@@ -1155,7 +1182,8 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         // Check that isotope intensities are normalized (M0 should be 1.0)
         for entry in &speclib.elems {
@@ -1177,18 +1205,10 @@ mod tests {
             let m2_intensity = entry.expected_intensity.precursor_intensities.get(&2);
 
             if let Some(m1) = m1_intensity {
-                assert!(
-                    *m1 <= 1.0,
-                    "M+1 intensity should be <= 1.0, got {}",
-                    m1
-                );
+                assert!(*m1 <= 1.0, "M+1 intensity should be <= 1.0, got {}", m1);
             }
             if let Some(m2) = m2_intensity {
-                assert!(
-                    *m2 <= 1.0,
-                    "M+2 intensity should be <= 1.0, got {}",
-                    m2
-                );
+                assert!(*m2 <= 1.0, "M+2 intensity should be <= 1.0, got {}", m2);
             }
         }
     }
@@ -1203,7 +1223,8 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         // Test file has 2 targets with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys (2 per target)
@@ -1214,7 +1235,11 @@ mod tests {
         );
 
         // Count targets vs decoys
-        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_targets = speclib
+            .elems
+            .iter()
+            .filter(|e| !e.digest.is_decoy())
+            .count();
         let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
 
         assert_eq!(n_targets, 2, "Should have 2 target entries");
@@ -1259,7 +1284,8 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         // Group by decoy_group_id
         let mut groups: std::collections::HashMap<u32, Vec<&crate::QueryItemToScore>> =
@@ -1304,14 +1330,12 @@ mod tests {
             assert!(
                 has_plus,
                 "Should have a +C12 decoy at m/z {}, found {:?}",
-                expected_plus,
-                decoy_mzs
+                expected_plus, decoy_mzs
             );
             assert!(
                 has_minus,
                 "Should have a -C12 decoy at m/z {}, found {:?}",
-                expected_minus,
-                decoy_mzs
+                expected_minus, decoy_mzs
             );
 
             // Verify other properties are preserved
@@ -1345,7 +1369,8 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         for entry in &speclib.elems {
             // Number of fragment intensities should match number of fragments
@@ -1357,10 +1382,7 @@ mod tests {
 
             // All fragment intensities should be positive
             for (_label, intensity) in &entry.expected_intensity.fragment_intensities {
-                assert!(
-                    *intensity > 0.0,
-                    "Fragment intensities should be positive"
-                );
+                assert!(*intensity > 0.0, "Fragment intensities should be positive");
             }
         }
     }
