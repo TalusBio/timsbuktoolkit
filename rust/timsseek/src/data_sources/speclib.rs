@@ -289,7 +289,7 @@ fn convert_diann_to_query_item(
             Ok(isotope_ratios) => {
                 let fragment_labels: Vec<IonAnnot> = eg
                     .iter_fragments()
-                    .map(|(label, _mz)| label.clone())
+                    .map(|(label, _mz)| *label)
                     .collect();
                 let fragment_mzs: Vec<f64> =
                     eg.iter_fragments().map(|(_label, mz)| mz).collect();
@@ -358,12 +358,12 @@ fn create_mass_shifted_decoy(
     let fragment_labels: Vec<IonAnnot> = target
         .query
         .iter_fragments()
-        .map(|(label, _)| label.clone())
+        .map(|(label, _)| *label)
         .collect();
     let fragment_mzs: Vec<f64> = target
         .query
         .iter_fragments()
-        .map(|(_, mz)| mz)
+        .map(|(_, mz)| mz + mz_shift)
         .collect();
 
     let precursor_labels: Vec<i8> = target
@@ -392,37 +392,7 @@ fn create_mass_shifted_decoy(
     })
 }
 
-/// Assign decoy group IDs to library entries
-///
-/// Strategy:
-/// - If no decoys present: Returns None (signals that decoys need to be generated)
-/// - If decoys present: Assign sequential IDs (no pairing logic, treat as independent)
-fn assign_decoy_groups(extras: &[DiannPrecursorExtras]) -> Option<Vec<u32>> {
-    let has_any_decoys = extras.iter().any(|e| e.is_decoy);
-
-    if !has_any_decoys {
-        tracing::warn!(
-            "Library contains NO decoys. Will generate synthetic mass-shift decoys:\n\
-             - Creating 2 decoys per target (±12.0 Da / C12 mass)\n\
-             - Total library size will be 3x original (1 target + 2 decoys)\n\
-             - Each target-decoy triplet will share a decoy_group for FDR estimation\n\
-             \n\
-             Note: Mass-shift decoys are a simple approach. For production use, consider:\n\
-             - Using a library with properly matched sequence-based decoys\n\
-             - Generating decoys with DIA-NN, Spectronaut, or similar tools"
-        );
-        None
-    } else {
-        tracing::info!(
-            "Library contains {} targets and {} decoys. Using existing decoys.",
-            extras.iter().filter(|e| !e.is_decoy).count(),
-            extras.iter().filter(|e| e.is_decoy).count()
-        );
-        Some((0..extras.len()).map(|i| i as u32).collect())
-    }
-}
-
-/// Convert an ElutionGroupCollection from timsquery to a Speclib
+/// Convert an ElutionGroupCollection from timsquery to a Speclib (without applying strategy)
 fn convert_elution_group_collection(
     collection: ElutionGroupCollection,
 ) -> Result<Speclib, LibraryReadingError> {
@@ -443,58 +413,16 @@ fn convert_elution_group_collection(
                 egs.len()
             );
 
-            let decoy_groups_opt = assign_decoy_groups(&extras);
-
-            let elems = if let Some(decoy_groups) = decoy_groups_opt {
-                let result: Result<Vec<_>, _> = egs
-                    .into_iter()
-                    .zip(extras.into_iter())
-                    .enumerate()
-                    .map(|(idx, (eg, extra))| {
-                        let decoy_group = decoy_groups[idx];
-                        convert_diann_to_query_item(eg, extra, decoy_group)
-                    })
-                    .collect();
-                result?
-            } else {
-                const CARBON_MASS: f64 = 12.0;
-
-                tracing::info!("Generating mass-shift decoys for {} targets...", egs.len());
-
-                let targets: Result<Vec<_>, _> = egs
-                    .into_iter()
-                    .zip(extras.into_iter())
-                    .enumerate()
-                    .map(|(idx, (eg, extra))| {
-                        let decoy_group_id = idx as u32;
-                        convert_diann_to_query_item(eg, extra, decoy_group_id)
-                    })
-                    .collect();
-                let targets = targets?;
-
-                let mut all_entries = Vec::with_capacity(targets.len() * 3);
-
-                for target in targets {
-                    let decoy_group_id = target.digest.decoy_group;
-
-                    all_entries.push(target.clone());
-
-                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
-                    all_entries.push(plus_decoy);
-
-                    let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
-                    all_entries.push(minus_decoy);
-                }
-
-                tracing::info!(
-                    "Generated {} total entries ({} targets + {} decoys)",
-                    all_entries.len(),
-                    all_entries.len() / 3,
-                    all_entries.len() * 2 / 3
-                );
-
-                all_entries
-            };
+            // Convert everything as-is, preserving existing decoy groups
+            let elems: Vec<_> = egs
+                .into_iter()
+                .zip(extras)
+                .enumerate()
+                .map(|(idx, (eg, extra))| {
+                    let decoy_group = idx as u32;
+                    convert_diann_to_query_item(eg, extra, decoy_group)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             Ok(Speclib { elems })
         }
@@ -750,12 +678,15 @@ impl Speclib {
         self.elems.len()
     }
 
-    pub fn from_file(path: &Path) -> Result<Self, LibraryReadingError> {
+    pub fn from_file(
+        path: &Path,
+        decoy_strategy: crate::models::DecoyStrategy,
+    ) -> Result<Self, LibraryReadingError> {
         // First try to detect if it's one of our native formats (msgpack/ndjson)
         match SpeclibFormat::detect_from_path(path) {
             Ok(format) => {
                 // Try to load with native format
-                match Self::from_file_with_format(path, format) {
+                match Self::from_file_with_format(path, format, decoy_strategy) {
                     Ok(speclib) => return Ok(speclib),
                     Err(e) => {
                         tracing::debug!(
@@ -775,12 +706,134 @@ impl Speclib {
             path.display()
         );
         let collection = read_timsquery_library(path)?;
-        convert_elution_group_collection(collection)
+        let speclib = convert_elution_group_collection(collection)?;
+
+        // Apply decoy strategy to the loaded speclib
+        Self::apply_decoy_strategy(speclib, decoy_strategy)
+    }
+
+    /// Apply decoy strategy to an already-loaded speclib (works for any format)
+    fn apply_decoy_strategy(
+        speclib: Speclib,
+        strategy: crate::models::DecoyStrategy,
+    ) -> Result<Speclib, LibraryReadingError> {
+        use crate::models::{DecoyMarking, DecoyStrategy};
+
+        // Separate targets from decoys
+        let (targets, decoys): (Vec<_>, Vec<_>) = speclib
+            .elems
+            .into_iter()
+            .partition(|item| item.digest.decoy == DecoyMarking::Target);
+
+        let has_decoys = !decoys.is_empty();
+
+        match strategy {
+            DecoyStrategy::Never => {
+                // Return as-is (targets + existing decoys)
+                tracing::info!(
+                    "Decoy strategy: Never - using library as-is ({} targets, {} decoys)",
+                    targets.len(),
+                    decoys.len()
+                );
+                Ok(Speclib {
+                    elems: targets.into_iter().chain(decoys).collect(),
+                })
+            }
+
+            DecoyStrategy::Force => {
+                // Drop existing decoys and generate new mass-shift decoys
+                if has_decoys {
+                    tracing::warn!(
+                        "Decoy strategy: Force - dropping {} existing decoys and regenerating mass-shift decoys",
+                        decoys.len()
+                    );
+                } else {
+                    tracing::info!("Decoy strategy: Force - generating mass-shift decoys");
+                }
+
+                const CARBON_MASS: f64 = 12.0;
+                let mut all_entries = Vec::with_capacity(targets.len() * 3);
+
+                for (idx, target) in targets.into_iter().enumerate() {
+                    let decoy_group_id = idx as u32;
+
+                    // Update target's decoy_group
+                    let mut target = target;
+                    target.digest.decoy_group = decoy_group_id;
+
+                    all_entries.push(target.clone());
+
+                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                    all_entries.push(plus_decoy);
+
+                    let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                    all_entries.push(minus_decoy);
+                }
+
+                tracing::info!(
+                    "Generated {} total entries ({} targets + {} decoys)",
+                    all_entries.len(),
+                    all_entries.len() / 3,
+                    all_entries.len() * 2 / 3
+                );
+
+                Ok(Speclib { elems: all_entries })
+            }
+
+            DecoyStrategy::IfMissing => {
+                if has_decoys {
+                    tracing::info!(
+                        "Library contains {} targets and {} decoys. Using existing decoys.",
+                        targets.len(),
+                        decoys.len()
+                    );
+                    Ok(Speclib {
+                        elems: targets.into_iter().chain(decoys).collect(),
+                    })
+                } else {
+                    tracing::warn!(
+                        "Library contains NO decoys. Will generate synthetic mass-shift decoys:\n\
+                         - Creating 2 decoys per target (±12.0 Da / C12 mass)\n\
+                         - Total library size will be 3x original (1 target + 2 decoys)\n\
+                         - Each target-decoy triplet will share a decoy_group for FDR estimation"
+                    );
+
+                    const CARBON_MASS: f64 = 12.0;
+                    let mut all_entries = Vec::with_capacity(targets.len() * 3);
+
+                    for (idx, target) in targets.into_iter().enumerate() {
+                        let decoy_group_id = idx as u32;
+
+                        // Update target's decoy_group
+                        let mut target = target;
+                        target.digest.decoy_group = decoy_group_id;
+
+                        all_entries.push(target.clone());
+
+                        let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                        all_entries.push(plus_decoy);
+
+                        let minus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                        all_entries.push(minus_decoy);
+                    }
+
+                    tracing::info!(
+                        "Generated {} total entries ({} targets + {} decoys)",
+                        all_entries.len(),
+                        all_entries.len() / 3,
+                        all_entries.len() * 2 / 3
+                    );
+
+                    Ok(Speclib { elems: all_entries })
+                }
+            }
+        }
     }
 
     pub fn from_file_with_format(
         path: &Path,
         format: SpeclibFormat,
+        decoy_strategy: crate::models::DecoyStrategy,
     ) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
@@ -793,7 +846,10 @@ impl Speclib {
         let elements: Result<Vec<_>, _> = reader.collect();
         let elems = elements?;
 
-        Ok(Self { elems })
+        let speclib = Self { elems };
+
+        // Apply decoy strategy to the loaded speclib
+        Self::apply_decoy_strategy(speclib, decoy_strategy)
     }
 
     // pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
@@ -960,7 +1016,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
 
         // The sample file has 2 unique precursors with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys
@@ -1030,7 +1086,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load TXT library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load TXT library");
 
         // The sample file has 2 unique precursors with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys
@@ -1061,7 +1117,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load Parquet library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load Parquet library");
 
         // The sample parquet file has 3 unique precursors with no decoys
         // Should generate 3x entries: 3 targets + 6 decoys
@@ -1099,7 +1155,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
 
         // Check that isotope intensities are normalized (M0 should be 1.0)
         for entry in &speclib.elems {
@@ -1147,7 +1203,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
 
         // Test file has 2 targets with no decoys
         // Should generate 3x entries: 2 targets + 4 decoys (2 per target)
@@ -1203,7 +1259,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
 
         // Group by decoy_group_id
         let mut groups: std::collections::HashMap<u32, Vec<&crate::QueryItemToScore>> =
@@ -1289,7 +1345,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file).expect("Failed to load DIA-NN TSV library");
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default()).expect("Failed to load DIA-NN TSV library");
 
         for entry in &speclib.elems {
             // Number of fragment intensities should match number of fragments

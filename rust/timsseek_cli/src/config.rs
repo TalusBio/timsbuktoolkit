@@ -10,6 +10,7 @@ use timsquery::models::tolerance::{
     QuadTolerance,
     RtTolerance,
 };
+use timsseek::DecoyStrategy;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -30,6 +31,9 @@ pub struct AnalysisConfig {
     pub dotd_files: Option<Vec<PathBuf>>,
     pub chunk_size: usize,
     pub tolerance: Tolerance,
+
+    #[serde(default)]
+    pub decoy_strategy: DecoyStrategy,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,6 +48,7 @@ impl Config {
     /// - Quad tolerance: 0.1 absolute
     /// - RT tolerance: unrestricted
     /// - Chunk size: 20000
+    /// - Decoy strategy: if-missing
     pub fn default_config() -> Self {
         Config {
             input: None,
@@ -56,6 +61,7 @@ impl Config {
                     quad: QuadTolerance::Absolute((0.1, 0.1)),
                     rt: RtTolerance::Unrestricted,
                 },
+                decoy_strategy: DecoyStrategy::default(),
             },
             output: None,
         }

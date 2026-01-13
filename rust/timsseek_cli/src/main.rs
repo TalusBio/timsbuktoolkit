@@ -220,10 +220,10 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 }
 
 fn process_single_file(
-    dotd_file: &std::path::PathBuf,
-    speclib_path: &std::path::PathBuf,
+    dotd_file: &std::path::Path,
+    speclib_path: &std::path::Path,
     config: &Config,
-    base_output_dir: &std::path::PathBuf,
+    base_output_dir: &std::path::Path,
     overwrite: bool,
 ) -> std::result::Result<(), errors::CliError> {
     info!("Processing file: {:?}", dotd_file);
@@ -297,10 +297,11 @@ fn process_single_file(
 
     // Process speclib
     processing::process_speclib(
-        speclib_path.clone(),
+        speclib_path,
         &pipeline,
         config.analysis.chunk_size,
         &file_output_config,
+        config.analysis.decoy_strategy,
     )
     .unwrap();
 
@@ -402,6 +403,11 @@ fn main() -> std::result::Result<(), errors::CliError> {
         config.output = Some(OutputConfig {
             directory: output_dir.clone(),
         });
+    }
+
+    // Override decoy strategy if provided
+    if let Some(strategy) = args.decoy_strategy {
+        config.analysis.decoy_strategy = strategy;
     }
 
     info!("Parsed configuration: {:#?}", config.clone());
