@@ -16,6 +16,7 @@ dev = [
   "pytest",
   "uv",
   "bumpver",
+  "plotnine>=0.15.2",
 ]
 interactive = [
   "pandas",

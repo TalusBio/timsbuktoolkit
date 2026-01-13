@@ -201,30 +201,37 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
         glimpse_result_head(&results)
     );
 
-    let mut last_id: Option<(u32, u8, usize, f32)> = None;
-    let mut set = false;
-    for i in 0..results.len() {
-        let res = &mut results[i];
-        let current_id = (res.decoy_group_id, res.precursor_charge);
-        if let Some((last_td_id, last_charge, last_index, last_score)) = last_id {
-            if (last_td_id, last_charge) == current_id {
-                if set {
-                    continue;
-                }
-                let delta_score = res.main_score - last_score;
-                let delta_group_ratio = res.main_score / last_score;
+    // Calculate delta scores between consecutive target/decoy pairs
+    // Results are sorted by (decoy_group_id, precursor_charge, score desc)
+    let mut previous: Option<(u32, u8, usize, f32)> = None;
 
-                results[last_index].delta_group = -delta_score;
-                results[last_index].delta_group_ratio = delta_group_ratio;
-                set = true;
-            } else {
-                last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
-                set = false;
+    for i in 0..results.len() {
+        let current = &results[i];
+        let current_key = (current.decoy_group_id, current.precursor_charge);
+
+        if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
+            let prev_key = (prev_group_id, prev_charge);
+
+            if current_key == prev_key {
+                // This is the second item in a target/decoy pair
+                let delta_score = current.main_score - prev_score;
+                let delta_ratio = current.main_score / prev_score;
+
+                results[prev_index].delta_group = -delta_score;
+                results[prev_index].delta_group_ratio = delta_ratio;
+
+                // Skip updating previous - we only compare first two items per group
+                continue;
             }
-        } else {
-            last_id = Some((res.decoy_group_id, res.precursor_charge, i, res.main_score));
-            set = false;
         }
+
+        // Start of a new group or first item overall
+        previous = Some((
+            current.decoy_group_id,
+            current.precursor_charge,
+            i,
+            current.main_score,
+        ));
     }
 
     results.dedup_by(|x, y| {

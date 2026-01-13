@@ -359,7 +359,16 @@ fn create_mass_shifted_decoy(
     let fragment_mzs: Vec<f64> = target
         .query
         .iter_fragments()
-        .map(|(_, mz)| mz + mz_shift)
+        .map(|(lab, mz)| {
+            if let Some(ord) = lab.try_get_ordinal() {
+                // Only shift masses if the ordinal is more than position
+                // 2
+                if ord <= 2 {
+                    return mz;
+                }
+            }
+            mz + (mass_shift_da / lab.get_charge() as f64)
+        })
         .collect();
 
     let precursor_labels: Vec<i8> = target
@@ -752,7 +761,9 @@ impl Speclib {
                     tracing::info!("Decoy strategy: Force - generating mass-shift decoys");
                 }
 
-                const CARBON_MASS: f64 = 12.0;
+                // const CARBON_MASS: f64 = 12.0;
+                // This seems to leak data.
+                const CH2_MASS: f64 = 14.0;
                 let mut all_entries = Vec::with_capacity(targets.len() * 3);
 
                 for (idx, target) in targets.into_iter().enumerate() {
@@ -764,12 +775,11 @@ impl Speclib {
 
                     all_entries.push(target.clone());
 
-                    let plus_decoy =
-                        create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CH2_MASS)?;
                     all_entries.push(plus_decoy);
 
                     let minus_decoy =
-                        create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                        create_mass_shifted_decoy(&target, decoy_group_id, -CH2_MASS)?;
                     all_entries.push(minus_decoy);
                 }
 
