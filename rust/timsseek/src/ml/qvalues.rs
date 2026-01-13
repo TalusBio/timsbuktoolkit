@@ -202,7 +202,7 @@ impl FeatureLike for IonSearchResults {
         } = *self;
 
         vec![
-            precursor_mz.round(),
+            (precursor_mz / 5.0).round(),
             precursor_charge as f64,
             precursor_mobility_query as f64,
             precursor_rt_query_seconds.round() as f64,

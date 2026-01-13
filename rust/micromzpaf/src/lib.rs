@@ -144,6 +144,10 @@ impl IonAnnot {
     pub fn get_charge(&self) -> i8 {
         self.charge
     }
+
+    pub fn try_get_ordinal(&self) -> Option<u8> {
+        self.series_ordinal.try_get_ordinal()
+    }
 }
 
 impl TryFrom<&str> for IonAnnot {
@@ -332,6 +336,24 @@ impl IonSeriesOrdinal {
             IonSeriesOrdinal::unknown { ordinal: _ } => IonSeriesTerminality::None,
             IonSeriesOrdinal::precursor => IonSeriesTerminality::None,
             IonSeriesOrdinal::None => panic!("IonSeriesOrdinal::None should not be used directly"),
+        }
+    }
+
+    pub fn try_get_ordinal(&self) -> Option<u8> {
+        match self {
+            IonSeriesOrdinal::a { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::b { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::c { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::d { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::v { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::w { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::x { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::y { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::z { ordinal } => Some(*ordinal),
+            IonSeriesOrdinal::unknown { .. } => None,
+            // ?1 does not mean its an ordinal, just a placeholder
+            IonSeriesOrdinal::precursor => None,
+            IonSeriesOrdinal::None => None,
         }
     }
 }
