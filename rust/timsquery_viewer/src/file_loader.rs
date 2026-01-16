@@ -353,13 +353,23 @@ impl ElutionGroupData {
                 matches!(extras, Some(FileReadingExtras::Diann(_)))
             }
         };
+        // Max column width ~40 chars at typical font size
+        const MAX_COL_WIDTH: f32 = 280.0;
         if has_diann_extras {
             for _ in DIANN_EXTRA_LABELS.iter() {
-                table = table.column(egui_extras::Column::auto().at_least(100.0));
+                table = table.column(
+                    egui_extras::Column::auto()
+                        .at_least(100.0)
+                        .at_most(MAX_COL_WIDTH),
+                );
             }
         }
         for _ in BASE_LABELS.iter() {
-            table = table.column(egui_extras::Column::auto().at_least(80.0));
+            table = table.column(
+                egui_extras::Column::auto()
+                    .at_least(80.0)
+                    .at_most(MAX_COL_WIDTH),
+            );
         }
         table
     }
@@ -408,14 +418,17 @@ impl ElutionGroupData {
             } else {
                 egui::RichText::new(text)
             };
-            let label = ui.selectable_label(is_selected, maybe_highlighted_text);
-            let label = if is_selected {
-                label.highlight()
+            // Use Label with truncate to show "..." when text overflows column width
+            let label = egui::Label::new(maybe_highlighted_text)
+                .truncate()
+                .sense(egui::Sense::click());
+            let response = ui.add(label);
+            let response = if is_selected {
+                response.highlight()
             } else {
-                label
+                response
             };
-
-            if label.clicked() {
+            if response.clicked() {
                 clicked = true;
             }
         };
