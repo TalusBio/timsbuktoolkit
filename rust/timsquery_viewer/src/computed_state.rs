@@ -223,8 +223,11 @@ impl ComputedState {
     #[instrument(skip(self), fields(eg_id = %self.cache_key.as_ref().map(|(id, _, _)| *id).unwrap_or(0)))]
     pub fn generate_spectrum_at_rt(&mut self, rt_seconds: f64) -> bool {
         // Skip if we already generated spectrum for this RT
+        // Use a tolerance of 1 microsecond (1e-6 seconds) instead of f64::EPSILON
+        // which is far too strict for RT values and can fail on different FPU implementations
+        const RT_TOLERANCE_SECONDS: f64 = 1e-6;
         if let Some(last_rt) = self.last_requested_rt
-            && (last_rt - rt_seconds).abs() < f64::EPSILON
+            && (last_rt - rt_seconds).abs() < RT_TOLERANCE_SECONDS
         {
             return false;
         }

@@ -179,6 +179,16 @@ impl From<url::ParseError> for SerializationError {
 
 const SCHEMA_VERSION: &str = "1.0";
 
+/// Normalize a path to always use forward slashes (for object_store compatibility)
+///
+/// object_store's ObjectPath expects forward slashes regardless of platform.
+/// This handles paths that may have been serialized on Windows with backslashes.
+pub(crate) fn normalize_storage_path(path: &Path) -> String {
+    path.to_str()
+        .map(|s| s.replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"))
+}
+
 /// Configuration for parquet serialization
 #[derive(Debug, Clone, Copy)]
 pub struct SerializationConfig {
@@ -416,6 +426,7 @@ impl IndexedTimstofPeaks {
                     .enumerate()
                     .map(|(i, (quad, group))| {
                         let filename = format!("group_{}.parquet", i);
+                        // Always use forward slashes for storage paths (object_store requirement)
                         let path = format!("ms2/{}", filename);
 
                         let bytes = write_peaks_to_parquet_bytes(&group.peaks, config)?;
@@ -425,7 +436,9 @@ impl IndexedTimstofPeaks {
                             id: i,
                             quadrupole_isolation: quad.clone(),
                             group_info: PeakGroupMetadata {
-                                relative_path: PathBuf::from("ms2").join(filename),
+                                // Use the same forward-slash path for metadata (not PathBuf::join
+                                // which uses OS-specific separators and breaks on Windows)
+                                relative_path: PathBuf::from(&path),
                                 cycle_to_rt_ms: group.cycle_to_rt_ms.clone(),
                                 bucket_size: group.bucket_size,
                             },
@@ -521,8 +534,9 @@ impl IndexedTimstofPeaks {
         ) = rayon::join(
             // Load MS1 in parallel thread
             || {
-                let ms1_peaks_vec =
-                    storage.read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
+                // Normalize path separators for cross-platform compatibility
+                let ms1_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
+                let ms1_peaks_vec = storage.read_parquet_peaks(&ms1_path)?;
 
                 let (ms1_peaks, _stats) = IndexedPeakGroup::new(
                     ms1_peaks_vec,
@@ -536,9 +550,9 @@ impl IndexedTimstofPeaks {
                 meta.ms2_window_groups
                     .par_iter()
                     .map(|group_meta| {
-                        let peaks_vec = storage.read_parquet_peaks(
-                            group_meta.group_info.relative_path.to_str().unwrap(),
-                        )?;
+                        // Normalize path separators for cross-platform compatibility
+                        let path = normalize_storage_path(&group_meta.group_info.relative_path);
+                        let peaks_vec = storage.read_parquet_peaks(&path)?;
 
                         let (group, _stats) = IndexedPeakGroup::new(
                             peaks_vec,
@@ -570,9 +584,9 @@ impl IndexedTimstofPeaks {
         storage: StorageProvider,
         meta: TimscentroidMetadata,
     ) -> Result<Self, SerializationError> {
-        // Load MS1 first
-        let ms1_peaks_vec =
-            storage.read_parquet_peaks(meta.ms1_peaks.relative_path.to_str().unwrap())?;
+        // Load MS1 first (normalize path for cross-platform compatibility)
+        let ms1_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
+        let ms1_peaks_vec = storage.read_parquet_peaks(&ms1_path)?;
         let (ms1_peaks, _stats) = IndexedPeakGroup::new(
             ms1_peaks_vec,
             meta.ms1_peaks.cycle_to_rt_ms.clone(),
@@ -584,8 +598,9 @@ impl IndexedTimstofPeaks {
             .ms2_window_groups
             .iter()
             .map(|group_meta| {
-                let peaks_vec = storage
-                    .read_parquet_peaks(group_meta.group_info.relative_path.to_str().unwrap())?;
+                // Normalize path separators for cross-platform compatibility
+                let path = normalize_storage_path(&group_meta.group_info.relative_path);
+                let peaks_vec = storage.read_parquet_peaks(&path)?;
 
                 let (group, _stats) = IndexedPeakGroup::new(
                     peaks_vec,
