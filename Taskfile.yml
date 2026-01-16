@@ -38,6 +38,8 @@ tasks:
     cmds:
       # --tag {alpha, beta, dev, rc, post, final}
       - uv run --dev  bumpver update --minor --allow-dirty --no-commit
+      - cargo b
+      - uv lock
 
   docker:
     cmds:

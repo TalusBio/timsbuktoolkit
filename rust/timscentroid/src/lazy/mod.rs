@@ -44,6 +44,7 @@ use crate::serialization::{
     PeakGroupMetadata,
     SerializationError,
     TimscentroidMetadata,
+    normalize_storage_path,
 };
 use crate::storage::{
     RUNTIME,
@@ -95,13 +96,13 @@ impl LazyIndexedTimstofPeaks {
         // CRITICAL: Recreate all queriers with the instrumented storage
         // The old queriers hold references to the unwrapped storage and would bypass instrumentation
 
-        // Recreate MS1 querier
-        let ms1_relative_path = self.ms1_metadata.relative_path.to_str().unwrap();
+        // Recreate MS1 querier (normalize path for cross-platform compatibility)
+        let ms1_relative_path = normalize_storage_path(&self.ms1_metadata.relative_path);
         self.ms1_querier = Arc::new(
             RUNTIME
                 .block_on(ParquetQuerier::new_async(
                     self.storage.clone(),
-                    ms1_relative_path,
+                    &ms1_relative_path,
                 ))
                 .expect("Failed to recreate MS1 querier with instrumentation"),
         );
@@ -109,12 +110,13 @@ impl LazyIndexedTimstofPeaks {
         // Recreate MS2 queriers
         self.ms2_queriers.clear();
         for (_, group_metadata) in &self.ms2_metadata {
-            let relative_path = group_metadata.relative_path.to_str().unwrap();
+            // Normalize path for cross-platform compatibility
+            let relative_path = normalize_storage_path(&group_metadata.relative_path);
             let querier = Arc::new(
                 RUNTIME
                     .block_on(ParquetQuerier::new_async(
                         self.storage.clone(),
-                        relative_path,
+                        &relative_path,
                     ))
                     .expect("Failed to recreate MS2 querier with instrumentation"),
             );
@@ -145,13 +147,11 @@ impl LazyIndexedTimstofPeaks {
         // CRITICAL: Recreate all queriers with the latency-wrapped storage
         // The old queriers hold references to the unwrapped storage and would bypass latency
 
-        // Recreate MS1 querier
+        // Recreate MS1 querier (normalize path for cross-platform compatibility)
+        let ms1_path = normalize_storage_path(&self.ms1_metadata.relative_path);
         self.ms1_querier = Arc::new(
-            ParquetQuerier::new(
-                self.storage.clone(),
-                self.ms1_metadata.relative_path.to_str().unwrap(),
-            )
-            .expect("Failed to recreate MS1 querier"),
+            ParquetQuerier::new(self.storage.clone(), &ms1_path)
+                .expect("Failed to recreate MS1 querier"),
         );
 
         // Recreate MS2 queriers
@@ -159,8 +159,10 @@ impl LazyIndexedTimstofPeaks {
             .ms2_metadata
             .iter()
             .map(|(_, meta)| {
+                // Normalize path for cross-platform compatibility
+                let path = normalize_storage_path(&meta.relative_path);
                 Arc::new(
-                    ParquetQuerier::new(self.storage.clone(), meta.relative_path.to_str().unwrap())
+                    ParquetQuerier::new(self.storage.clone(), &path)
                         .expect("Failed to recreate MS2 querier"),
                 )
             })
@@ -221,10 +223,10 @@ impl LazyIndexedTimstofPeaks {
         // OPTIMIZATION: Create queriers during initialization for reuse
         // This eliminates the need to create queriers (and fetch metadata) on every query
 
-        // Create MS1 querier
-        let ms1_relative_path = meta.ms1_peaks.relative_path.to_str().unwrap();
+        // Create MS1 querier (normalize path for cross-platform compatibility)
+        let ms1_relative_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
         let ms1_querier = Arc::new(
-            ParquetQuerier::new_async(storage.clone(), ms1_relative_path)
+            ParquetQuerier::new_async(storage.clone(), &ms1_relative_path)
                 .await
                 .map_err(|e| {
                     SerializationError::Io(std::io::Error::other(format!(
@@ -237,9 +239,10 @@ impl LazyIndexedTimstofPeaks {
         // Create MS2 queriers for each window group
         let mut ms2_queriers = Vec::with_capacity(ms2_metadata.len());
         for (_, group_metadata) in &ms2_metadata {
-            let relative_path = group_metadata.relative_path.to_str().unwrap();
+            // Normalize path for cross-platform compatibility
+            let relative_path = normalize_storage_path(&group_metadata.relative_path);
             let querier = Arc::new(
-                ParquetQuerier::new_async(storage.clone(), relative_path)
+                ParquetQuerier::new_async(storage.clone(), &relative_path)
                     .await
                     .map_err(|e| {
                         SerializationError::Io(std::io::Error::other(format!(
@@ -295,7 +298,8 @@ impl LazyIndexedTimstofPeaks {
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<Item = IndexedPeak<MS1CycleIndex>> {
-        let relative_path = self.ms1_metadata.relative_path.to_str().unwrap();
+        // Normalize path for cross-platform compatibility (pass owned String to avoid lifetime issues)
+        let relative_path = normalize_storage_path(&self.ms1_metadata.relative_path);
         self.query_peaks_file(relative_path, mz_range, cycle_range, im_range)
     }
 
@@ -395,13 +399,13 @@ impl LazyIndexedTimstofPeaks {
 
     fn query_peaks_file<T: RTIndex>(
         &self,
-        relative_path: &str,
+        relative_path: impl AsRef<str>,
         mz_range: TupleRange<f32>,
         cycle_range: OptionallyRestricted<TupleRange<u32>>,
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<Item = IndexedPeak<T>> {
         // Create querier with storage provider
-        let querier = match ParquetQuerier::new(self.storage.clone(), relative_path) {
+        let querier = match ParquetQuerier::new(self.storage.clone(), relative_path.as_ref()) {
             Ok(q) => q,
             Err(e) => {
                 eprintln!("Error initializing ParquetQuerier: {}", e);
