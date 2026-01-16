@@ -220,7 +220,7 @@ impl ComputedState {
 
     /// Generate MS2 spectrum at the given retention time.
     /// Returns true if a new spectrum was generated, false if skipped (already generated for this RT).
-    #[instrument(skip(self), fields(eg_id = %self.cache_key.as_ref().map(|(id, _, _)| *id).unwrap_or(0)))]
+    #[instrument(level = "trace", skip(self), fields(eg_id = %self.cache_key.as_ref().map(|(id, _, _)| *id).unwrap_or(0)))]
     pub fn generate_spectrum_at_rt(&mut self, rt_seconds: f64) -> bool {
         // Skip if we already generated spectrum for this RT
         // Use a tolerance of 1 microsecond (1e-6 seconds) instead of f64::EPSILON
@@ -232,6 +232,12 @@ impl ComputedState {
             return false;
         }
 
+        // Cache miss - generating new MS2 spectrum at this RT
+        tracing::debug!(
+            "MS2 spectrum cache MISS - generating spectrum at RT {:.2}s (previous: {:?})",
+            rt_seconds,
+            self.last_requested_rt
+        );
         self.last_requested_rt = Some(rt_seconds);
         if let Some(chrom_output) = &self.chromatogram_output {
             match chromatogram_processor::extract_ms2_spectrum_from_chromatogram(

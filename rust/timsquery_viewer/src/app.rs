@@ -376,6 +376,12 @@ impl ViewerApp {
             .computed
             .is_cache_valid(selected_idx, &self.data.tolerance, &self.data.smoothing)
         {
+            // Cache miss - chromatogram will be regenerated
+            tracing::debug!(
+                "Cache MISS for index {} - triggering chromatogram regeneration",
+                selected_idx
+            );
+
             let is_new_request = self
                 .computed
                 .computing_index()
