@@ -42,51 +42,6 @@ pub struct SerSpeclibElement {
 
 impl SerSpeclibElement {
     pub fn sample() -> Self {
-        // let eg = TimsElutionGroup::builder()
-        //     .id(42)
-        //     .mobility_ook0(0.75)
-        //     .rt_seconds(123.4)
-        //     .fragment_labels([
-        //         IonAnnot::try_from("y1").unwrap(),
-        //         IonAnnot::try_from("y2").unwrap(),
-        //         IonAnnot::try_from("y3").unwrap(),
-        //         IonAnnot::try_from("y4").unwrap(),
-        //         ].as_slice().into())
-        //     .fragment_mzs(
-        //         vec![450.0,
-        //             650.5,
-        //             751.0,
-        //             751.5,]
-        //     )
-        //     .precursor_labels(tiny_vec!(-1,0,1,2))
-        //     .precursor_mzs(vec![450.0, 450.5, 451.0, 451.5]).try_build().unwrap();
-
-        // let ei = ExpectedIntensities {
-        //     fragment_intensities: HashMap::from_iter(
-        //         [
-        //             (IonAnnot::try_from("y1").unwrap(), 1.0),
-        //             (IonAnnot::try_from("y2").unwrap(), 1.0),
-        //             (IonAnnot::try_from("y3").unwrap(), 1.0),
-        //             (IonAnnot::try_from("y4").unwrap(), 1.0),
-        //         ]
-        //         .iter()
-        //         .cloned(),
-        //     ),
-        //     precursor_intensities: HashMap::from_iter(
-        //         [(-1, 0.5), (0, 1.0), (1, 0.8), (2, 0.3)].iter().cloned(),
-        //     ),
-        // };
-        // let pepseq = "PEPTIDEPINKPEPTIDE".into();
-        // let digest = DigestSlice::from_string(pepseq, false, 1);
-        // let charge = 2;
-        // let query = eg;
-        // let expected_intensity = ei;
-        // QueryItemToScore {
-        //     digest,
-        //     charge,
-        //     query,
-        //     expected_intensity,
-        // }
         SerSpeclibElement {
             precursor: PrecursorEntry {
                 sequence: "PEPTIDESEK".into(),
@@ -193,63 +148,6 @@ impl From<SerSpeclibElement> for QueryItemToScore {
         }
     }
 }
-
-// impl From<QueryItemToScore> for SerSpeclibElement {
-//     fn from(x: QueryItemToScore) -> Self {
-//         let precursor = PrecursorEntry {
-//             sequence: x.digest.clone().into(),
-//             charge: x.charge,
-//             decoy: x.digest.is_decoy(),
-//             decoy_group: x.digest.decoy_group,
-//         };
-//         let mut precursor_mzs = Vec::with_capacity(x.query.precursors.len());
-//         let mut precursor_labels = Vec::with_capacity(x.query.precursors.len());
-//         for (label, mz) in x.query.precursors.iter() {
-//             precursor_labels.push(*label);
-//             precursor_mzs.push(*mz);
-//         }
-//         let mut fragment_mzs = Vec::with_capacity(x.query.fragments.len());
-//         let mut fragment_labels = Vec::with_capacity(x.query.fragments.len());
-//         for (label, mz) in x.query.fragments.iter() {
-//             fragment_labels.push(*label);
-//             fragment_mzs.push(*mz);
-//         }
-//         let precursor_intensities: Vec<f32> = precursor_labels
-//             .iter()
-//             .map(|l| {
-//                 *x.expected_intensity
-//                     .precursor_intensities
-//                     .get(l)
-//                     .expect("Correctly built reference eg should have all keys")
-//             })
-//             .collect();
-//         let fragment_intensities: Vec<f32> = fragment_labels
-//             .iter()
-//             .map(|l| {
-//                 *x.expected_intensity
-//                     .fragment_intensities
-//                     .get(l)
-//                     .expect("Correctly built reference eg should have all keys")
-//             })
-//             .collect();
-//         let elution_group = ReferenceEG {
-//             id: x.query.id() as u32,
-//             precursor_mzs,
-//             precursor_labels,
-//             fragment_mzs,
-//             fragment_labels,
-//             precursor_intensities,
-//             fragment_intensities,
-//             precursor_charge: x.charge,
-//             mobility_ook0: x.query.mobility_ook0(),
-//             rt_seconds: x.query.rt_seconds(),
-//         };
-//         SerSpeclibElement {
-//             precursor,
-//             elution_group,
-//         }
-//     }
-// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
@@ -474,17 +372,6 @@ impl Iterator for SpeclibIterator<'_> {
         (remaining, Some(remaining))
     }
 }
-
-// impl Serialize for Speclib {
-//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-//     where
-//         S: serde::Serializer,
-//     {
-//         let speclib_ser: Vec<SerSpeclibElement> =
-//             self.elems.iter().map(|x| x.clone().into()).collect();
-//         speclib_ser.serialize(serializer)
-//     }
-// }
 
 #[derive(Debug, Clone, Copy)]
 pub enum SpeclibFormat {
@@ -866,74 +753,6 @@ impl Speclib {
         // Apply decoy strategy to the loaded speclib
         Self::apply_decoy_strategy(speclib, decoy_strategy)
     }
-
-    // pub(crate) fn from_ndjson(json: &str) -> Result<Self, LibraryReadingError> {
-    //     // Split on newlines and parse each ...
-    //     // In the future I want to make this lazy but this will do for now
-    //     let lines: Vec<&str> = json.split('\n').collect();
-    //     Self::from_ndjson_elems(&lines)
-    // }
-
-    // fn from_ndjson_elems(lines: &[&str]) -> Result<Self, LibraryReadingError> {
-    //     let tmp = lines
-    //         .into_par_iter()
-    //         .filter(|line| !line.is_empty())
-    //         .map(|line| {
-    //             let elem: SerSpeclibElement = match serde_json::from_str(line) {
-    //                 Ok(x) => x,
-    //                 Err(e) => {
-    //                     return Err(LibraryReadingError::SpeclibParsingError {
-    //                         source: e,
-    //                         context: "Error parsing line in NDJSON",
-    //                     });
-    //                 }
-    //             };
-
-    //             Ok(elem.into())
-    //         })
-    //         .collect::<Result<Vec<_>, LibraryReadingError>>()?;
-
-    //     Ok(Self { elems: tmp, idx: 0 })
-    // }
-
-    // pub(crate) fn from_ndjson_file(path: &Path) -> Result<Self, LibraryReadingError> {
-    //     let file =
-    //         std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
-    //             source: e,
-    //             context: "Error opening NDJSON file",
-    //             path: PathBuf::from(path),
-    //         })?;
-
-    //     let mut reader = BufReader::new(file);
-    //     let mut current_chunk = String::new();
-    //     let mut curr_nlines = 0;
-    //     let mut results = Self {
-    //         elems: Vec::with_capacity(100_001),
-    //         idx: 0,
-    //     };
-
-    //     while let Ok(len) = reader.read_line(&mut current_chunk) {
-    //         curr_nlines += 1;
-    //         if len == 0 {
-    //             break;
-    //         }
-
-    //         if curr_nlines % 100_000 == 0 {
-    //             let chunk_result = Self::from_ndjson(&current_chunk)?;
-    //             results = results.fold(chunk_result);
-    //             current_chunk.clear();
-    //             curr_nlines = 0;
-    //         }
-    //     }
-
-    //     // Process remaining lines
-    //     if !current_chunk.is_empty() {
-    //         let chunk_result = Self::from_ndjson(&current_chunk)?;
-    //         results = results.fold(chunk_result);
-    //     }
-
-    //     Ok(results)
-    // }
 
     pub fn sample() -> Self {
         Self {
