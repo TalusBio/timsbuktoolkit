@@ -30,14 +30,39 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// Converts verbosity flags to a log level string.
+/// Returns the log level based on verbose/quiet counts.
+/// If RUST_LOG is set, it takes precedence.
+fn get_log_level(verbose: u8, quiet: u8) -> String {
+    // RUST_LOG environment variable takes precedence
+    if std::env::var("RUST_LOG").is_ok() {
+        return std::env::var("RUST_LOG").unwrap();
+    }
+
+    // Calculate effective verbosity: positive = more verbose, negative = more quiet
+    let effective = verbose as i8 - quiet as i8;
+
+    match effective {
+        2.. => "trace".to_string(),
+        1 => "debug".to_string(),
+        0 => "info".to_string(),
+        -1 => "warn".to_string(),
+        _ => "error".to_string(),
+    }
+}
+
 fn main() -> Result<(), CliError> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let args = Args::parse();
+
+    let log_level = get_log_level(args.verbose, args.quiet);
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(log_level.parse().unwrap())
+        .from_env_lossy();
     let subscriber = Registry::default()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE));
 
     set_global_default(subscriber).expect("Setting default subscriber failed");
-    let args = Args::parse();
 
     match args.command {
         Some(Commands::QueryIndex(args)) => main_query_index(args)?,

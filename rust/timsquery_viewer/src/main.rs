@@ -25,34 +25,55 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-fn setup_logger() {
-    let app_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    let env_filter = match EnvFilter::builder().parse(&app_level) {
+/// Converts verbosity flags to a log level string.
+/// Returns the log level based on verbose/quiet counts.
+/// If RUST_LOG is set, it takes precedence.
+fn get_log_level(verbose: u8, quiet: u8) -> String {
+    // RUST_LOG environment variable takes precedence
+    if std::env::var("RUST_LOG").is_ok() {
+        return std::env::var("RUST_LOG").unwrap();
+    }
+
+    // Calculate effective verbosity: positive = more verbose, negative = more quiet
+    let effective = verbose as i8 - quiet as i8;
+
+    match effective {
+        2.. => "trace".to_string(),
+        1 => "debug".to_string(),
+        0 => "info".to_string(),
+        -1 => "warn".to_string(),
+        _ => "error".to_string(),
+    }
+}
+
+fn setup_logger(verbose: u8, quiet: u8) {
+    let log_level = get_log_level(verbose, quiet);
+    let env_filter = match EnvFilter::builder().parse(&log_level) {
         Ok(filter) => filter,
         Err(_) => {
             let mut warning_msg = String::new();
             let _ = writeln!(
                 &mut warning_msg,
-                "Warning: Invalid RUST_LOG value: {}. Falling back to 'info'.",
-                app_level
+                "Warning: Invalid log level: {}. Falling back to 'info'.",
+                log_level
             );
             eprintln!("{}", warning_msg);
             EnvFilter::new("info")
         }
     };
 
-    // 5. Initialize Subscriber
+    // Initialize Subscriber
     let subscriber = Registry::default()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE));
 
-    subscriber.init(); // simpler than set_global_default + expect
+    subscriber.init();
 }
 
 fn main() -> eframe::Result {
     let args = cli::Cli::parse();
 
-    setup_logger();
+    setup_logger(args.verbose, args.quiet);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 800.0])

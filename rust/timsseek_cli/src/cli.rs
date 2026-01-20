@@ -5,6 +5,14 @@ use timsseek::DecoyStrategy;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    /// Increase logging verbosity (can be repeated: -v for debug, -vv for trace)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+
+    /// Decrease logging verbosity (can be repeated: -q for warn, -qq for error)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    pub quiet: u8,
+
     /// Path to the JSON configuration file (optional, uses defaults if not provided)
     #[arg(short, long)]
     pub config: Option<PathBuf>,
