@@ -309,10 +309,34 @@ fn process_single_file(
     Ok(())
 }
 
+/// Converts verbosity flags to a log level string.
+/// Returns the log level based on verbose/quiet counts.
+/// If RUST_LOG is set, it takes precedence.
+fn get_log_level(verbose: u8, quiet: u8) -> String {
+    // RUST_LOG environment variable takes precedence
+    if std::env::var("RUST_LOG").is_ok() {
+        return std::env::var("RUST_LOG").unwrap();
+    }
+
+    // Calculate effective verbosity: positive = more verbose, negative = more quiet
+    let effective = verbose as i8 - quiet as i8;
+
+    match effective {
+        2.. => "trace".to_string(),
+        1 => "debug".to_string(),
+        0 => "info".to_string(),
+        -1 => "warn".to_string(),
+        _ => "error".to_string(),
+    }
+}
+
 fn main() -> std::result::Result<(), errors::CliError> {
+    // Parse command line arguments first to get verbosity flags
+    let args = Cli::parse();
+
+    let log_level = get_log_level(args.verbose, args.quiet);
     let fmt_filter = EnvFilter::builder()
-        .with_default_directive("info".parse().unwrap())
-        .with_env_var("RUST_LOG")
+        .with_default_directive(log_level.parse().unwrap())
         .from_env_lossy();
 
     #[cfg(feature = "instrumentation")]
@@ -355,9 +379,6 @@ fn main() -> std::result::Result<(), errors::CliError> {
     let reg = reg.with(tree_layer);
 
     reg.init();
-
-    // Parse command line arguments
-    let args = Cli::parse();
 
     // Load and parse configuration, or use defaults
     let mut config = match args.config {
