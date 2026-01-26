@@ -1,6 +1,6 @@
 [project]
 name = "timsseek-workspace"
-version = "0.24.0"
+version = "0.25.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "jupyter[python]>=1.1.1",
@@ -55,7 +55,7 @@ packages = [
 ]
 
 [tool.bumpver]
-current_version = "0.24.0"
+current_version = "0.25.0"
 version_pattern = "MAJOR.MINOR.PATCH[-PYTAGNUM]"
 tag_message = "v{new_version}"
 commit_message = "chore: bump version to {new_version}"
