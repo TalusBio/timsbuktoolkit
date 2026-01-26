@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3.18", features = [
 timsrust = { git = "https://github.com/jspaezp/timsrust", branch = "experimental/recalib_iter" }
 rusqlite = "0.37.0"
 rayon = "1.5"
-clap = { version = "4.5.27", features = ["derive"] }
+clap = { version = "4.5.54", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
 
 # Parquet and arrow usually need to be kept in sync
