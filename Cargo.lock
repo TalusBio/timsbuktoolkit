@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "calibrt"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "insta",
  "rand 0.8.5",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "micromzpaf"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "rustyms",
  "serde",
@@ -5897,7 +5897,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5927,7 +5927,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "arrow",
  "bincode 1.3.3",
@@ -5949,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_cli"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "clap",
  "half",
@@ -5968,7 +5968,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_viewer"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "clap",
  "eframe",
@@ -6010,7 +6010,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "calibrt",
  "forust-ml",
@@ -6034,7 +6034,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "clap",
  "indicatif",
