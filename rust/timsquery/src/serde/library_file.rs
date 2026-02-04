@@ -1,4 +1,5 @@
 pub use super::diann_io::DiannPrecursorExtras;
+pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::diann_io::{
     read_library_file as read_diann_tsv,
     read_parquet_library_file as read_diann_parquet,
@@ -8,6 +9,10 @@ use super::diann_io::{
 use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
+};
+use super::spectronaut_io::{
+    read_library_file as read_spectronaut_tsv,
+    sniff_spectronaut_library_file,
 };
 use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
@@ -40,6 +45,7 @@ impl From<ElutionGroupInputError> for LibraryReadingError {
 #[derive(Debug)]
 pub enum FileReadingExtras {
     Diann(Vec<DiannPrecursorExtras>),
+    Spectronaut(Vec<SpectronautPrecursorExtras>),
 }
 
 #[derive(Debug)]
@@ -187,14 +193,45 @@ impl ElutionGroupCollection {
 
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
+
+    fn try_read_spectronaut(path: &Path) -> Result<Self, LibraryReadingError> {
+        let is_spectronaut = sniff_spectronaut_library_file(path);
+        if is_spectronaut {
+            info!("Detected Spectronaut TSV library file");
+            let egs = match read_spectronaut_tsv(path) {
+                Ok(egs) => egs,
+                Err(e) => {
+                    warn!("Failed to read Spectronaut TSV library file: {:?}", e);
+                    return Err(LibraryReadingError::UnableToParseElutionGroups);
+                }
+            };
+            let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+            info!("Successfully read Spectronaut TSV library file");
+            return Ok(ElutionGroupCollection::MzpafLabels(
+                egs,
+                Some(FileReadingExtras::Spectronaut(extras)),
+            ));
+        }
+
+        Err(LibraryReadingError::UnableToParseElutionGroups)
+    }
 }
 
 pub fn read_library_file<T: AsRef<Path>>(
     path: T,
 ) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    // Try DIA-NN first
     let diann_attempt = ElutionGroupCollection::try_read_diann(path.as_ref());
     if let Ok(egs) = diann_attempt {
         return Ok(egs);
     }
+
+    // Try Spectronaut next
+    let spectronaut_attempt = ElutionGroupCollection::try_read_spectronaut(path.as_ref());
+    if let Ok(egs) = spectronaut_attempt {
+        return Ok(egs);
+    }
+
+    // Fall back to JSON
     ElutionGroupCollection::try_read_json(path.as_ref())
 }
