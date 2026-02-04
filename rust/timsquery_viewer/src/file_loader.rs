@@ -12,11 +12,11 @@ use std::path::{
 use std::sync::Arc;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::{
-    DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
     IndexedPeaksHandle,
 };
+use timsquery::ion::IonAnnot;
 use timsquery::{
     KeyLike,
     TimsElutionGroup,
@@ -152,7 +152,15 @@ const BASE_LABELS: [&str; 6] = [
     "Fragments",
 ];
 
-const DIANN_EXTRA_LABELS: [&str; 3] = ["Modified Peptide", "Protein ID(s)", "Is Decoy"];
+/// Labels for library-specific extra columns (DIA-NN and Spectronaut share the same structure)
+const LIBRARY_EXTRA_LABELS: [&str; 3] = ["Modified Peptide", "Protein ID(s)", "Is Decoy"];
+
+/// Common view structure for library extras that both DIA-NN and Spectronaut can map to
+struct LibraryExtrasView {
+    modified_peptide: String,
+    protein_id: String,
+    is_decoy: bool,
+}
 
 impl ElutionGroupData {
     pub fn new(inner: ElutionGroupCollection) -> Self {
@@ -207,24 +215,92 @@ impl ElutionGroupData {
                 write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
             }
         }
-        let extras = match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
-                Some(FileReadingExtras::Diann(diann_extras)) => Some(&diann_extras[idx]),
-                _ => None,
-            },
-        };
-        if let Some(diann_extra) = extras {
+        let extras_view = self.get_library_extras_view(idx);
+        if let Some(extra) = extras_view {
             write!(
                 buffer,
                 "|{}|{}|{}",
-                diann_extra.modified_peptide, diann_extra.protein_id, diann_extra.is_decoy
+                extra.modified_peptide, extra.protein_id, extra.is_decoy
             )
             .map_err(|_| ())?;
         }
         Ok(())
+    }
+
+    /// Extracts a common view of library extras from either DIA-NN or Spectronaut format
+    fn get_library_extras_view(&self, idx: usize) -> Option<LibraryExtrasView> {
+        let extras = match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => extras.as_ref()?,
+        };
+        match extras {
+            FileReadingExtras::Diann(diann_extras) => {
+                let de = diann_extras.get(idx)?;
+                Some(LibraryExtrasView {
+                    modified_peptide: de.modified_peptide.clone(),
+                    protein_id: de.protein_id.clone(),
+                    is_decoy: de.is_decoy,
+                })
+            }
+            FileReadingExtras::Spectronaut(spectronaut_extras) => {
+                let se = spectronaut_extras.get(idx)?;
+                Some(LibraryExtrasView {
+                    modified_peptide: se.modified_peptide.clone(),
+                    protein_id: se.protein_id.clone(),
+                    is_decoy: se.is_decoy,
+                })
+            }
+        }
+    }
+
+    /// Checks if the collection has library extras (DIA-NN or Spectronaut)
+    fn has_library_extras(&self) -> bool {
+        match &self.inner {
+            ElutionGroupCollection::StringLabels(_, extras)
+            | ElutionGroupCollection::MzpafLabels(_, extras)
+            | ElutionGroupCollection::TinyIntLabels(_, extras)
+            | ElutionGroupCollection::IntLabels(_, extras) => extras.is_some(),
+        }
+    }
+
+    /// Builds ExpectedIntensities from library extras (shared by DIA-NN and Spectronaut)
+    fn build_expected_intensities(
+        stripped_peptide: &str,
+        relative_intensities: &[(IonAnnot, f32)],
+        eg: &mut TimsElutionGroup<String>,
+    ) -> ExpectedIntensities<String> {
+        let fragment_intensities = HashMap::from_iter(
+            relative_intensities
+                .iter()
+                .cloned()
+                .map(|(k, v)| (k.to_string(), v)),
+        );
+
+        let isotopes = match isotope_dist_from_seq(stripped_peptide) {
+            Ok(isotopes) => isotopes,
+            Err(e) => {
+                warn!(
+                    "Failed to calculate isotope distribution for sequence {}: {}",
+                    stripped_peptide, e
+                );
+                [1.0, 0.0, 0.0]
+            }
+        };
+
+        eg.set_precursor_labels([0, 1, 2].iter().cloned());
+        let precursor_intensities: HashMap<i8, f32> = isotopes
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, intensity)| (i as i8, intensity))
+            .collect();
+
+        ExpectedIntensities {
+            precursor_intensities,
+            fragment_intensities,
+        }
     }
 
     pub fn get_elem(
@@ -254,37 +330,22 @@ impl ElutionGroupData {
                     "Diann extras index {} out of bounds",
                     index
                 )))?;
-                let fragment_intensities = HashMap::from_iter(
-                    de.relative_intensities
-                        .iter()
-                        .cloned()
-                        .map(|(k, v)| (k.clone().to_string(), v)),
-                );
-
-                // TODO: Actually get expected intensities ... I could make
-                // The simple isotope calculation from number of carbons + sulphur.
-                let isotopes = match isotope_dist_from_seq(&de.stripped_peptide) {
-                    Ok(isotopes) => isotopes,
-                    Err(e) => {
-                        warn!(
-                            "Failed to calculate isotope distribution for sequence {}: {}",
-                            &de.stripped_peptide, e
-                        );
-                        [1.0, 0.0, 0.0]
-                    }
-                };
-                eg.set_precursor_labels([0, 1, 2].iter().cloned());
-                let precursor_intensities: HashMap<i8, f32> = isotopes
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, intensity)| (i as i8, intensity))
-                    .collect();
-
-                ExpectedIntensities {
-                    precursor_intensities,
-                    fragment_intensities,
-                }
+                Self::build_expected_intensities(
+                    &de.stripped_peptide,
+                    &de.relative_intensities,
+                    &mut eg,
+                )
+            }
+            Some(FileReadingExtras::Spectronaut(spectronaut_extras)) => {
+                let se = spectronaut_extras.get(index).ok_or(ViewerError::General(format!(
+                    "Spectronaut extras index {} out of bounds",
+                    index
+                )))?;
+                Self::build_expected_intensities(
+                    &se.stripped_peptide,
+                    &se.relative_intensities,
+                    &mut eg,
+                )
             }
             None => ExpectedIntensities {
                 precursor_intensities: eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect(),
@@ -345,18 +406,10 @@ impl ElutionGroupData {
     }
 
     fn add_columns<'a>(&self, mut table: TableBuilder<'a>) -> TableBuilder<'a> {
-        let has_diann_extras = match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => {
-                matches!(extras, Some(FileReadingExtras::Diann(_)))
-            }
-        };
         // Max column width ~40 chars at typical font size
         const MAX_COL_WIDTH: f32 = 280.0;
-        if has_diann_extras {
-            for _ in DIANN_EXTRA_LABELS.iter() {
+        if self.has_library_extras() {
+            for _ in LIBRARY_EXTRA_LABELS.iter() {
                 table = table.column(
                     egui_extras::Column::auto()
                         .at_least(100.0)
@@ -375,18 +428,9 @@ impl ElutionGroupData {
     }
 
     fn add_headers<'a>(&self, builder: TableBuilder<'a>) -> Table<'a> {
-        let has_diann_extras = match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => {
-                matches!(extras, Some(FileReadingExtras::Diann(_)))
-            }
-        };
-
         builder.header(20.0, |mut header| {
-            if has_diann_extras {
-                for label in DIANN_EXTRA_LABELS.iter() {
+            if self.has_library_extras() {
+                for label in LIBRARY_EXTRA_LABELS.iter() {
                     header.col(|ui| {
                         ui.strong(*label);
                     });
@@ -406,7 +450,7 @@ impl ElutionGroupData {
     /// Returns true if any of the content was clicked (for selection handling)
     fn add_row_content_inner<T: KeyLike>(
         eg: &TimsElutionGroup<T>,
-        extras: Option<DiannPrecursorExtras>,
+        extras: Option<LibraryExtrasView>,
         table_row: &mut egui_extras::TableRow,
         is_selected: bool,
     ) -> bool {
@@ -432,19 +476,16 @@ impl ElutionGroupData {
                 clicked = true;
             }
         };
-        match extras {
-            Some(diann_extra) => {
-                table_row.col(|ui| {
-                    add_col(ui, &diann_extra.modified_peptide);
-                });
-                table_row.col(|ui| {
-                    add_col(ui, &diann_extra.protein_id);
-                });
-                table_row.col(|ui| {
-                    add_col(ui, if diann_extra.is_decoy { "Yes" } else { "No" });
-                });
-            }
-            None => { /* No extra columns */ }
+        if let Some(extra) = extras {
+            table_row.col(|ui| {
+                add_col(ui, &extra.modified_peptide);
+            });
+            table_row.col(|ui| {
+                add_col(ui, &extra.protein_id);
+            });
+            table_row.col(|ui| {
+                add_col(ui, if extra.is_decoy { "Yes" } else { "No" });
+            });
         }
         table_row.col(|ui| {
             add_col(ui, &eg.id().to_string());
@@ -478,28 +519,20 @@ impl ElutionGroupData {
         selected_index: &mut Option<usize>,
         table_row: &mut egui_extras::TableRow,
     ) {
-        let diann_extra = match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => match extras {
-                Some(FileReadingExtras::Diann(diann_extras)) => Some(diann_extras[idx].clone()),
-                _ => None,
-            },
-        };
+        let library_extras = self.get_library_extras_view(idx);
         let is_selected = Some(idx) == *selected_index;
         let clicked = match &self.inner {
             ElutionGroupCollection::StringLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
             }
             ElutionGroupCollection::MzpafLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
             }
             ElutionGroupCollection::TinyIntLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
             }
             ElutionGroupCollection::IntLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], diann_extra, table_row, is_selected)
+                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
             }
         };
         if clicked {
