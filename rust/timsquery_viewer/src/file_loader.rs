@@ -10,13 +10,13 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
+use timsquery::ion::IonAnnot;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::{
     ElutionGroupCollection,
     FileReadingExtras,
     IndexedPeaksHandle,
 };
-use timsquery::ion::IonAnnot;
 use timsquery::{
     KeyLike,
     TimsElutionGroup,
@@ -189,9 +189,15 @@ impl ElutionGroupData {
             return;
         }
 
+        // Case-insensitive substring matching. to_lowercase() allocates per iteration,
+        // but eq_ignore_ascii_case only supports full equality, not substring search.
+        // Acceptable here since filtering runs only on search input changes, not per-frame.
+        let filter_lower = filter.to_lowercase();
         let mut str_buffer = String::new();
         for i in 0..self.len() {
-            if self.key_onto(i, &mut str_buffer).is_ok() && str_buffer.contains(filter) {
+            if self.key_onto(i, &mut str_buffer).is_ok()
+                && str_buffer.to_lowercase().contains(&filter_lower)
+            {
                 buffer.push(i);
             }
         }
@@ -337,10 +343,12 @@ impl ElutionGroupData {
                 )
             }
             Some(FileReadingExtras::Spectronaut(spectronaut_extras)) => {
-                let se = spectronaut_extras.get(index).ok_or(ViewerError::General(format!(
-                    "Spectronaut extras index {} out of bounds",
-                    index
-                )))?;
+                let se = spectronaut_extras
+                    .get(index)
+                    .ok_or(ViewerError::General(format!(
+                        "Spectronaut extras index {} out of bounds",
+                        index
+                    )))?;
                 Self::build_expected_intensities(
                     &se.stripped_peptide,
                     &se.relative_intensities,

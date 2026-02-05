@@ -15,3 +15,4 @@ pub use library_file::{
     SpectronautPrecursorExtras,
     read_library_file,
 };
+pub use spectronaut_io::LibrarySniffError;

@@ -7,7 +7,6 @@ use serde::Deserialize;
 use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
-    debug,
     error,
     info,
     warn,
@@ -18,6 +17,17 @@ pub enum SpectronautReadingError {
     IoError,
     CsvError,
     SpectronautPrecursorParsingError,
+}
+
+/// Error type for library format detection (sniffing)
+#[derive(Debug)]
+pub enum LibrarySniffError {
+    /// Failed to open or read the file
+    IoError(String),
+    /// Failed to parse CSV/TSV headers
+    InvalidFormat(String),
+    /// File is valid but missing required columns
+    MissingColumns(Vec<String>),
 }
 
 impl std::fmt::Display for SpectronautReadingError {
@@ -128,41 +138,31 @@ impl SpectronautLibraryRow {
     }
 }
 
-/// Check if a file is a Spectronaut library TSV by looking for Spectronaut-specific columns
-pub fn sniff_spectronaut_library_file<T: AsRef<Path>>(file: T) -> bool {
-    let file_result = std::fs::File::open(file.as_ref());
-    let file = match file_result {
-        Ok(f) => f,
-        Err(err) => {
-            debug!(
-                "Failed to open file {} for Spectronaut sniffing: {:?}",
-                file.as_ref().display(),
-                err
-            );
-            return false;
-        }
-    };
+/// Check if a file is a Spectronaut library TSV by looking for Spectronaut-specific columns.
+///
+/// Returns `Ok(())` if the file matches Spectronaut format, or `Err` with details about why not.
+pub fn sniff_spectronaut_library_file<T: AsRef<Path>>(file: T) -> Result<(), LibrarySniffError> {
+    let file_handle = std::fs::File::open(file.as_ref()).map_err(|e| {
+        LibrarySniffError::IoError(format!("Failed to open {}: {}", file.as_ref().display(), e))
+    })?;
 
-    let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(file);
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .from_reader(file_handle);
 
-    let headers = match rdr.headers() {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
+    let headers = rdr.headers().map_err(|e| {
+        LibrarySniffError::InvalidFormat(format!("Failed to parse TSV headers: {}", e))
+    })?;
 
     let columns: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
 
-    // Spectronaut-specific columns that distinguish it from DIA-NN
-    // iRT (instead of Tr_recalibrated) and ExcludeFromAssay are key identifiers
-    let spectronaut_specific = vec!["iRT", "ExcludeFromAssay"];
-
-    // Required columns for Spectronaut libraries
-    let required_columns = vec![
+    // Required columns for Spectronaut libraries (includes Spectronaut-specific markers)
+    let required_columns = [
         "ModifiedPeptide",
         "StrippedPeptide",
         "PrecursorMz",
         "PrecursorCharge",
-        "iRT",
+        "iRT", // Spectronaut-specific (DIA-NN uses Tr_recalibrated)
         "IonMobility",
         "ProteinGroups",
         "FragmentMz",
@@ -171,20 +171,21 @@ pub fn sniff_spectronaut_library_file<T: AsRef<Path>>(file: T) -> bool {
         "FragmentCharge",
         "FragmentLossType",
         "RelativeIntensity",
-        "ExcludeFromAssay",
+        "ExcludeFromAssay", // Spectronaut-specific
     ];
 
-    // Check that Spectronaut-specific columns are present
-    let has_spectronaut_markers = spectronaut_specific
+    // Find missing columns
+    let missing: Vec<String> = required_columns
         .iter()
-        .all(|col| columns.contains(&col.to_string()));
+        .filter(|col| !columns.contains(&col.to_string()))
+        .map(|s| s.to_string())
+        .collect();
 
-    // Check that all required columns are present
-    let has_required = required_columns
-        .iter()
-        .all(|col| columns.contains(&col.to_string()));
-
-    has_spectronaut_markers && has_required
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(LibrarySniffError::MissingColumns(missing))
+    }
 }
 
 struct ParsingBuffers {
@@ -193,7 +194,8 @@ struct ParsingBuffers {
 
 pub fn read_library_file<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautReadingError> {
+) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautReadingError>
+{
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -243,8 +245,10 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SpectronautLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<Option<(TimsElutionGroup<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautPrecursorParsingError>
-{
+) -> Result<
+    Option<(TimsElutionGroup<IonAnnot>, SpectronautPrecursorExtras)>,
+    SpectronautPrecursorParsingError,
+> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SpectronautPrecursorParsingError::Other);
@@ -372,13 +376,17 @@ mod tests {
             .join("sample_lib.tsv");
 
         let result = sniff_spectronaut_library_file(&file_path);
-        assert!(result, "File should be detected as Spectronaut library");
+        assert!(
+            result.is_ok(),
+            "File should be detected as Spectronaut library: {:?}",
+            result.err()
+        );
 
         // Cargo.toml should not be detected as Spectronaut library
         let file_path = PathBuf::from(manifest_dir).join("Cargo.toml");
         let result = sniff_spectronaut_library_file(file_path);
         assert!(
-            !result,
+            result.is_err(),
             "Cargo.toml should not be detected as Spectronaut library"
         );
     }
@@ -394,9 +402,16 @@ mod tests {
 
         let result = sniff_spectronaut_library_file(file_path);
         assert!(
-            !result,
+            result.is_err(),
             "DIA-NN library should not be detected as Spectronaut library"
         );
+        // Verify we get helpful error context
+        if let Err(LibrarySniffError::MissingColumns(cols)) = result {
+            assert!(
+                cols.contains(&"iRT".to_string()),
+                "Should report missing iRT column"
+            );
+        }
     }
 
     #[test]
@@ -474,7 +489,10 @@ mod tests {
 
         // Verify that the extras are populated correctly
         assert_eq!(extras.stripped_peptide, "KTVTAMDVVYALKR");
-        assert!(!extras.is_decoy, "Spectronaut libraries should be target-only");
+        assert!(
+            !extras.is_decoy,
+            "Spectronaut libraries should be target-only"
+        );
 
         // The sample file has 36 rows for this precursor, but many have ExcludeFromAssay=True
         // Only 6 rows have ExcludeFromAssay=False (looking at the sample: rows 2,4,5,6,7,8)

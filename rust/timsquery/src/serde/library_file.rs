@@ -1,5 +1,4 @@
 pub use super::diann_io::DiannPrecursorExtras;
-pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::diann_io::{
     read_library_file as read_diann_tsv,
     read_parquet_library_file as read_diann_parquet,
@@ -10,6 +9,7 @@ use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
 };
+pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::spectronaut_io::{
     read_library_file as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
@@ -195,25 +195,28 @@ impl ElutionGroupCollection {
     }
 
     fn try_read_spectronaut(path: &Path) -> Result<Self, LibraryReadingError> {
-        let is_spectronaut = sniff_spectronaut_library_file(path);
-        if is_spectronaut {
-            info!("Detected Spectronaut TSV library file");
-            let egs = match read_spectronaut_tsv(path) {
-                Ok(egs) => egs,
-                Err(e) => {
-                    warn!("Failed to read Spectronaut TSV library file: {:?}", e);
-                    return Err(LibraryReadingError::UnableToParseElutionGroups);
-                }
-            };
-            let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-            info!("Successfully read Spectronaut TSV library file");
-            return Ok(ElutionGroupCollection::MzpafLabels(
-                egs,
-                Some(FileReadingExtras::Spectronaut(extras)),
-            ));
+        match sniff_spectronaut_library_file(path) {
+            Ok(()) => {
+                info!("Detected Spectronaut TSV library file");
+                let egs = match read_spectronaut_tsv(path) {
+                    Ok(egs) => egs,
+                    Err(e) => {
+                        warn!("Failed to read Spectronaut TSV library file: {:?}", e);
+                        return Err(LibraryReadingError::UnableToParseElutionGroups);
+                    }
+                };
+                let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+                info!("Successfully read Spectronaut TSV library file");
+                Ok(ElutionGroupCollection::MzpafLabels(
+                    egs,
+                    Some(FileReadingExtras::Spectronaut(extras)),
+                ))
+            }
+            Err(e) => {
+                debug!("File is not Spectronaut format: {:?}", e);
+                Err(LibraryReadingError::UnableToParseElutionGroups)
+            }
         }
-
-        Err(LibraryReadingError::UnableToParseElutionGroups)
     }
 }
 
