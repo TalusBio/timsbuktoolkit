@@ -109,7 +109,9 @@ pub enum IndexedDataState {
     /// No data loaded
     #[default]
     None,
-    /// Currently loading data from location (path or URL)
+    /// Load requested but not yet started (triggers load on next frame)
+    LoadRequested(String),
+    /// Load in progress - shows spinner, does NOT re-trigger load
     Loading(String),
     /// Loading failed with error message
     Failed(String, String),
@@ -126,7 +128,9 @@ pub enum ElutionGroupState {
     /// No library loaded
     #[default]
     None,
-    /// Currently loading from path
+    /// Load requested but not yet started (triggers load on next frame)
+    LoadRequested(PathBuf),
+    /// Load in progress - shows spinner, does NOT re-trigger load
     Loading(PathBuf),
     /// Loading failed with error message (path, error)
     Failed(PathBuf, String),
@@ -793,39 +797,45 @@ impl ViewerApp {
         ui_state: &mut UiState,
     ) {
         if let Some(path) = &file_loader.elution_groups_path {
-            // Check if we need to load new library
-            let should_load = match &data.elution_groups {
+            // Check if we need to request a new load
+            let should_request_load = match &data.elution_groups {
                 ElutionGroupState::None => true,
+                ElutionGroupState::LoadRequested(current_path) => current_path != path,
                 ElutionGroupState::Loading(current_path) => current_path != path,
                 ElutionGroupState::Loaded { source, .. } => source != path,
                 ElutionGroupState::Failed(_, _) => true,
             };
 
-            // Transition to Loading if new path
-            if should_load {
-                tracing::info!("Starting to load elution groups from: {}", path.display());
-                data.elution_groups = ElutionGroupState::Loading(path.clone());
+            // Transition to LoadRequested if new path
+            if should_request_load {
+                tracing::info!("Requesting load of elution groups from: {}", path.display());
+                data.elution_groups = ElutionGroupState::LoadRequested(path.clone());
                 // Reset selected index when loading a new library to avoid out-of-bounds errors
                 ui_state.selected_index = None;
                 ui.ctx().request_repaint();
             }
         }
 
-        // Handle loading state
+        // Handle state machine transitions
         match &data.elution_groups {
-            ElutionGroupState::Loading(path) => {
+            ElutionGroupState::LoadRequested(path) => {
+                // Transition to Loading and perform the actual load
+                let path = path.clone();
+                tracing::info!("Starting to load elution groups from: {}", path.display());
+                data.elution_groups = ElutionGroupState::Loading(path.clone());
+
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Loading elution groups...");
                 });
 
-                match file_loader.load_elution_groups(path) {
+                match file_loader.load_elution_groups(&path) {
                     Ok(egs) => {
                         let count = egs.len();
                         tracing::info!("Loaded {} elution groups", count);
                         data.elution_groups = ElutionGroupState::Loaded {
                             data: egs,
-                            source: path.clone(),
+                            source: path,
                         };
                         // Validate selected_index is within bounds of new library
                         if let Some(selected) = ui_state.selected_index
@@ -842,9 +852,17 @@ impl ViewerApp {
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
                         tracing::error!("Failed to load elution groups: {}", error_msg);
-                        data.elution_groups = ElutionGroupState::Failed(path.clone(), error_msg);
+                        data.elution_groups = ElutionGroupState::Failed(path, error_msg);
                     }
                 }
+            }
+            ElutionGroupState::Loading(_) => {
+                // Load already in progress - just show spinner, don't re-trigger
+                // (This state is transient - we transition out of it in the same frame)
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading elution groups...");
+                });
             }
             ElutionGroupState::Failed(path, error) => {
                 ui.label(
@@ -868,36 +886,43 @@ impl ViewerApp {
         computed: &mut ComputedState,
     ) {
         if let Some(location) = file_loader.get_raw_data_location() {
-            // Check if we need to load new data
-            let should_load = match &data.indexed_data {
+            // Check if we need to request a new load
+            let should_request_load = match &data.indexed_data {
                 IndexedDataState::None => true,
+                IndexedDataState::LoadRequested(current_location) => current_location != &location,
                 IndexedDataState::Loading(current_location) => current_location != &location,
                 IndexedDataState::Loaded { source, .. } => source != &location,
                 IndexedDataState::Failed(_, _) => true,
             };
 
-            // Transition to Loading if new location
-            if should_load {
-                tracing::info!("Starting to load new raw data from: {}", location);
+            // Transition to LoadRequested if new location
+            if should_request_load {
+                tracing::info!("Requesting load of raw data from: {}", location);
                 // Clear computed state to avoid showing stale chromatograms from old index
                 computed.clear();
-                data.indexed_data = IndexedDataState::Loading(location.clone());
+                data.indexed_data = IndexedDataState::LoadRequested(location.clone());
                 ui.ctx().request_repaint();
             }
         }
 
+        // Handle state machine transitions
         match &data.indexed_data {
-            IndexedDataState::Loading(location) => {
+            IndexedDataState::LoadRequested(location) => {
+                // Transition to Loading and perform the actual load
+                let location = location.clone();
+                tracing::info!("Starting to load raw data from: {}", location);
+                data.indexed_data = IndexedDataState::Loading(location.clone());
+
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Indexing raw data... (this may take 10-30 seconds)");
                 });
 
-                match file_loader.load_raw_data_from_location(location) {
+                match file_loader.load_raw_data_from_location(&location) {
                     Ok(index) => {
                         data.indexed_data = IndexedDataState::Loaded {
                             index,
-                            source: location.to_string(),
+                            source: location,
                         };
                         file_loader.clear_raw_data();
                         tracing::info!("Raw data indexing completed");
@@ -905,10 +930,18 @@ impl ViewerApp {
                     Err(e) => {
                         let error_msg = format!("{:?}", e);
                         tracing::error!("Failed to load raw data: {}", error_msg);
-                        data.indexed_data = IndexedDataState::Failed(location.clone(), error_msg);
+                        data.indexed_data = IndexedDataState::Failed(location, error_msg);
                         file_loader.clear_raw_data();
                     }
                 }
+            }
+            IndexedDataState::Loading(_) => {
+                // Load already in progress - just show spinner, don't re-trigger
+                // (This state is transient - we transition out of it in the same frame)
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Indexing raw data... (this may take 10-30 seconds)");
+                });
             }
             IndexedDataState::Failed(location, error) => {
                 ui.label(
