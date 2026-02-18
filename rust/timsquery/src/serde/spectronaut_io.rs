@@ -231,10 +231,10 @@ pub fn read_library_file<T: AsRef<Path>>(
     }
 
     // Process the last group
-    if !current_group.is_empty() {
-        if let Some(eg) = parse_precursor_group(group_id, &current_group, &mut buffers)? {
-            elution_groups.push(eg);
-        }
+    if !current_group.is_empty()
+        && let Some(eg) = parse_precursor_group(group_id, &current_group, &mut buffers)?
+    {
+        elution_groups.push(eg);
     }
 
     info!("Parsed {} elution groups", elution_groups.len());

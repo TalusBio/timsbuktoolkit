@@ -45,21 +45,30 @@ fn coelution_vref_score_filter_onto(
 ) -> Result<(), DataProcessingError> {
     if slices.ncols() < window_size {
         trace!("Not enough data to calculate coelution score");
-        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+        return Err(DataProcessingError::ExpectedNonEmptyData {
+            context: Some(format!(
+                "Not enough columns in slices to apply the rolling window of size {}",
+                window_size
+            )),
+        });
     }
 
     let num_elems = (0..slices.nrows()).filter(|&i| filter(i)).count();
     if num_elems == 0 {
         trace!("No valid slices after filtering");
-        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+        return Err(DataProcessingError::ExpectedNonEmptyData {
+            context: Some("No valid slices after filtering, check your filter function".into()),
+        });
     }
     let norm_factor = 1f32 / num_elems as f32;
-    if num_elems > 50 {
+    if num_elems > 150 {
         trace!(
             "There are too many valid slices after filtering, probably an mz-major and an rt-major array got mixed up"
         );
         // TODO: make this a more specific error
-        return Err(DataProcessingError::ExpectedNonEmptyData { context: None });
+        return Err(DataProcessingError::ExpectedNonEmptyData { context: Some(
+            "Too many valid slices after filtering, probably an mz-major and an rt-major array got mixed up".into()
+        ) });
     }
     buffer.clear();
     buffer.resize(slices.ncols(), 0.0);

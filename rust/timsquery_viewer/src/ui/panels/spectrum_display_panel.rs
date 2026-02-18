@@ -38,12 +38,11 @@ impl SpectrumPanel {
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
-        ms2_spectrum: &Option<MS2Spectrum>,
-        expected_intensities: &Option<ExpectedIntensities<String>>,
+        ms2_spectrum: Option<&MS2Spectrum>,
+        expected_intensities: Option<&ExpectedIntensities<String>>,
     ) {
         if let Some(spec) = ms2_spectrum {
             let expected_intensities = expected_intensities
-                .as_ref()
                 .expect("If a spectrum is present we should also have expected intensities.");
             ui.label(format!("RT: {:.2} seconds", spec.rt_seconds));
             ui.separator();
@@ -58,7 +57,7 @@ impl SpectrumPanel {
                 .values()
                 .cloned()
                 .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap_or(1.0);
+                .unwrap_or(0.1);
 
             Plot::new("ms2_spectrum")
                 .height(ui.available_height())
