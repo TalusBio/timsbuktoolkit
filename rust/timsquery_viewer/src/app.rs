@@ -27,7 +27,6 @@ use crate::ui::panels::{
     SpectrumPanel,
     TablePanel,
 };
-use std::sync::Arc as StdArc;
 use std::sync::atomic::{
     AtomicBool,
     Ordering,
@@ -51,13 +50,13 @@ type ChromatogramComputeResult = Result<
 /// Handle to cancel a running background computation
 #[derive(Clone)]
 struct CancellationToken {
-    cancelled: StdArc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl CancellationToken {
     fn new() -> Self {
         Self {
-            cancelled: StdArc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -154,6 +153,20 @@ impl ElutionGroupState {
     }
 }
 
+/// State of tolerance file loading
+#[derive(Debug, Default)]
+pub enum ToleranceState {
+    /// No tolerance file loaded (using defaults or user-edited values)
+    #[default]
+    None,
+    /// Load requested but not yet started (triggers load on next frame)
+    LoadRequested(PathBuf),
+    /// Tolerance file successfully loaded (user can freely edit via UI)
+    Loaded { source: PathBuf },
+    /// Loading failed with error message (path, error)
+    Failed(PathBuf, String),
+}
+
 /// Domain/data state - represents loaded data and analysis parameters
 #[derive(Debug, Default)]
 pub struct DataState {
@@ -161,7 +174,9 @@ pub struct DataState {
     pub elution_groups: ElutionGroupState,
     /// Indexed timsTOF data with loading state
     pub indexed_data: IndexedDataState,
-    /// Tolerance settings
+    /// Tolerance file loading state
+    pub tolerance_state: ToleranceState,
+    /// Tolerance settings (live-editable values)
     pub tolerance: Tolerance,
     /// Smoothing method configuration
     pub smoothing: SmoothingMethod,
@@ -468,7 +483,13 @@ impl ViewerApp {
                 }
                 Err(e) => {
                     tracing::error!("Failed to spawn chromatogram thread: {}", e);
-                    self.computed.cancel_computing();
+                    let index = self.computed.computing_index().unwrap_or(0);
+                    self.computed.fail_computing(
+                        index,
+                        &self.data.tolerance,
+                        &self.data.smoothing,
+                        format!("Failed to spawn computation thread: {}", e),
+                    );
                     self.chromatogram_receiver = None;
                     self.cancellation_token = None;
                 }
@@ -569,7 +590,14 @@ impl ViewerApp {
                 }
                 Err(e) => {
                     tracing::error!("Chromatogram computation failed: {}", e);
-                    self.computed.cancel_computing();
+                    // Capture the computing index before clearing state
+                    let index = self.computed.computing_index().unwrap_or(0);
+                    self.computed.fail_computing(
+                        index,
+                        &self.data.tolerance,
+                        &self.data.smoothing,
+                        e,
+                    );
                 }
             }
         }
@@ -771,13 +799,35 @@ impl ViewerApp {
                     Self::display_filename(ui, path);
                 }
 
-                Self::load_tolerance_if_needed(file_loader, data);
+                Self::load_tolerance_if_needed(ui, file_loader, data);
 
-                ui.add_space(SMALL_SPACING);
-                ui.label(
-                    egui::RichText::new("✓ Tolerance settings loaded")
-                        .color(egui::Color32::DARK_GREEN),
-                );
+                match &data.tolerance_state {
+                    ToleranceState::Loaded { .. } => {
+                        ui.add_space(SMALL_SPACING);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("✓ Tolerance settings loaded")
+                                    .color(egui::Color32::DARK_GREEN),
+                            );
+                            if ui.button("Reset to file").clicked()
+                                && let Some(path) = &file_loader.tolerance_path
+                            {
+                                data.tolerance_state =
+                                    ToleranceState::LoadRequested(path.clone());
+                            }
+                        });
+                    }
+                    ToleranceState::None => {
+                        ui.add_space(SMALL_SPACING);
+                        ui.label(
+                            egui::RichText::new("Using current tolerance values").small().weak(),
+                        );
+                    }
+                    // Failed renders error UI inside load_tolerance_if_needed above.
+                    // LoadRequested always transitions out within the same frame, so it never
+                    // reaches this match.
+                    ToleranceState::Failed(_, _) | ToleranceState::LoadRequested(_) => {}
+                }
             });
     }
 
@@ -957,16 +1007,62 @@ impl ViewerApp {
         }
     }
 
-    fn load_tolerance_if_needed(file_loader: &mut FileLoader, data: &mut DataState) {
+    fn load_tolerance_if_needed(
+        ui: &mut egui::Ui,
+        file_loader: &mut FileLoader,
+        data: &mut DataState,
+    ) {
         if let Some(path) = &file_loader.tolerance_path {
-            match file_loader.load_tolerance(path) {
-                Ok(tol) => {
-                    data.tolerance = tol;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load tolerance: {:?}", e);
+            // Check if we need to request a new load
+            let should_request_load = match &data.tolerance_state {
+                ToleranceState::None => true,
+                ToleranceState::LoadRequested(current_path) => current_path != path,
+                ToleranceState::Loaded { source } => source != path,
+                // Only retry if the path changed; same-path failures require the user to clear the error
+                ToleranceState::Failed(failed_path, _) => failed_path != path,
+            };
+
+            if should_request_load {
+                tracing::info!("Requesting load of tolerance from: {}", path.display());
+                data.tolerance_state = ToleranceState::LoadRequested(path.clone());
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Handle state machine transitions
+        match &data.tolerance_state {
+            ToleranceState::LoadRequested(path) => {
+                let path = path.clone();
+                tracing::info!("Loading tolerance from: {}", path.display());
+
+                match file_loader.load_tolerance(&path) {
+                    Ok(tol) => {
+                        tracing::info!("Tolerance loaded successfully");
+                        data.tolerance = tol;
+                        data.tolerance_state = ToleranceState::Loaded { source: path };
+                    }
+                    Err(e) => {
+                        let error_msg = format!("{:?}", e);
+                        tracing::error!("Failed to load tolerance: {}", error_msg);
+                        data.tolerance_state = ToleranceState::Failed(path, error_msg);
+                    }
                 }
             }
+            ToleranceState::Failed(path, error) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Failed to load tolerance from {}:",
+                        path.display()
+                    ))
+                    .color(egui::Color32::from_rgb(255, 100, 100)),
+                );
+                ui.label(egui::RichText::new(error).color(egui::Color32::RED).small());
+                if ui.button("Clear Error").clicked() {
+                    data.tolerance_state = ToleranceState::None;
+                    file_loader.tolerance_path = None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1192,6 +1288,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         ui.spinner();
                         ui.label("Computing chromatogram...");
                     });
+                } else if let Some(error) = self.computed.failure_error() {
+                    ui.label(
+                        egui::RichText::new(format!("Chromatogram computation failed: {}", error))
+                            .color(egui::Color32::RED),
+                    );
                 } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Fragments
                     let click_response = crate::plot_renderer::render_chromatogram_plot(
@@ -1221,6 +1322,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         ui.spinner();
                         ui.label("Computing chromatogram...");
                     });
+                } else if let Some(error) = self.computed.failure_error() {
+                    ui.label(
+                        egui::RichText::new(format!("Chromatogram computation failed: {}", error))
+                            .color(egui::Color32::RED),
+                    );
                 } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
                     // Use shared link_id for synchronized X-axis with Precursors
                     let response = crate::plot_renderer::render_chromatogram_plot(
@@ -1250,6 +1356,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         ui.spinner();
                         ui.label("Computing scores...");
                     });
+                } else if let Some(error) = self.computed.failure_error() {
+                    ui.label(
+                        egui::RichText::new(format!("Score computation failed: {}", error))
+                            .color(egui::Color32::RED),
+                    );
                 } else if let Some(score_lines) = &self.computed.score_lines {
                     let response = score_lines.render(
                         ui,
