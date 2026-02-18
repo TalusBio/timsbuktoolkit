@@ -367,7 +367,7 @@ impl ViewerApp {
 
     /// Generate MS2 spectrum if user clicked on a new RT position
     fn generate_ms2_spectrum_if_needed(&mut self) {
-        let Some(requested_rt) = self.computed.clicked_rt else {
+        let Some(requested_rt) = self.computed.clicked_rt() else {
             return;
         };
 
@@ -812,15 +812,16 @@ impl ViewerApp {
                             if ui.button("Reset to file").clicked()
                                 && let Some(path) = &file_loader.tolerance_path
                             {
-                                data.tolerance_state =
-                                    ToleranceState::LoadRequested(path.clone());
+                                data.tolerance_state = ToleranceState::LoadRequested(path.clone());
                             }
                         });
                     }
                     ToleranceState::None => {
                         ui.add_space(SMALL_SPACING);
                         ui.label(
-                            egui::RichText::new("Using current tolerance values").small().weak(),
+                            egui::RichText::new("Using current tolerance values")
+                                .small()
+                                .weak(),
                         );
                     }
                     // Failed renders error UI inside load_tolerance_if_needed above.
@@ -1247,6 +1248,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        tracing::trace!("rendering pane: {:?}", tab);
         let mode = self.data.auto_zoom_mode;
 
         // TODO: figure out how to prevent this allocation per frame...
@@ -1277,12 +1279,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
             Pane::MS2Spectrum => {
                 self.spectrum_panel.render(
                     ui,
-                    &self.computed.ms2_spectrum,
-                    &self.computed.expected_intensities,
+                    self.computed.ms2_spectrum(),
+                    self.computed.expected_intensities(),
                 );
             }
             Pane::PrecursorPlot => {
-                // Show loading indicator if computing
                 if self.computed.is_computing() {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
@@ -1293,30 +1294,34 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         egui::RichText::new(format!("Chromatogram computation failed: {}", error))
                             .color(egui::Color32::RED),
                     );
-                } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
-                    // Use shared link_id for synchronized X-axis with Fragments
-                    let click_response = crate::plot_renderer::render_chromatogram_plot(
-                        ui,
-                        chromatogram,
-                        crate::plot_renderer::PlotMode::PrecursorsOnly,
-                        Some("precursor_fragment_x_axis"),
-                        true,
-                        &mut self.computed.auto_zoom_frame_counter,
-                        &mode,
-                        &ref_lines,
-                        self.computed.apex_score.as_ref(),
-                    );
-                    if let Some(clicked_rt) = click_response {
-                        self.computed.clicked_rt = Some(clicked_rt);
-                    }
-                } else if self.ui.selected_index.is_some() {
-                    ui.label("Generating chromatogram...");
                 } else {
-                    ui.label("Select a precursor from the table to view chromatogram");
+                    let click = if let Some((chromatogram, apex, counter)) =
+                        self.computed.chromatogram_render_context()
+                    {
+                        crate::plot_renderer::render_chromatogram_plot(
+                            ui,
+                            chromatogram,
+                            crate::plot_renderer::PlotMode::PrecursorsOnly,
+                            Some("precursor_fragment_x_axis"),
+                            true,
+                            counter,
+                            &mode,
+                            &ref_lines,
+                            apex,
+                        )
+                    } else if self.ui.selected_index.is_some() {
+                        ui.label("Generating chromatogram...");
+                        None
+                    } else {
+                        ui.label("Select a precursor from the table to view chromatogram");
+                        None
+                    };
+                    if let Some(rt) = click {
+                        self.computed.set_clicked_rt(rt);
+                    }
                 }
             }
             Pane::FragmentPlot => {
-                // Show loading indicator if computing
                 if self.computed.is_computing() {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
@@ -1327,30 +1332,34 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         egui::RichText::new(format!("Chromatogram computation failed: {}", error))
                             .color(egui::Color32::RED),
                     );
-                } else if let Some(chromatogram) = &self.computed.chromatogram_lines {
-                    // Use shared link_id for synchronized X-axis with Precursors
-                    let response = crate::plot_renderer::render_chromatogram_plot(
-                        ui,
-                        chromatogram,
-                        crate::plot_renderer::PlotMode::FragmentsOnly,
-                        Some("precursor_fragment_x_axis"),
-                        false,
-                        &mut self.computed.auto_zoom_frame_counter,
-                        &mode,
-                        &ref_lines,
-                        self.computed.apex_score.as_ref(),
-                    );
-                    if let Some(clicked_rt) = response {
-                        self.computed.clicked_rt = Some(clicked_rt);
-                    }
-                } else if self.ui.selected_index.is_some() {
-                    ui.label("Generating chromatogram...");
                 } else {
-                    ui.label("Select a precursor to view fragment traces");
+                    let click = if let Some((chromatogram, apex, counter)) =
+                        self.computed.chromatogram_render_context()
+                    {
+                        crate::plot_renderer::render_chromatogram_plot(
+                            ui,
+                            chromatogram,
+                            crate::plot_renderer::PlotMode::FragmentsOnly,
+                            Some("precursor_fragment_x_axis"),
+                            false,
+                            counter,
+                            &mode,
+                            &ref_lines,
+                            apex,
+                        )
+                    } else if self.ui.selected_index.is_some() {
+                        ui.label("Generating chromatogram...");
+                        None
+                    } else {
+                        ui.label("Select a precursor to view fragment traces");
+                        None
+                    };
+                    if let Some(rt) = click {
+                        self.computed.set_clicked_rt(rt);
+                    }
                 }
             }
             Pane::ScoresPlot => {
-                // Show loading indicator if computing
                 if self.computed.is_computing() {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
@@ -1361,21 +1370,27 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         egui::RichText::new(format!("Score computation failed: {}", error))
                             .color(egui::Color32::RED),
                     );
-                } else if let Some(score_lines) = &self.computed.score_lines {
-                    let response = score_lines.render(
-                        ui,
-                        Some("precursor_fragment_x_axis"),
-                        &mut self.computed.auto_zoom_frame_counter,
-                        &mode,
-                        &ref_lines,
-                    );
-                    if let Some(clicked_rt) = response {
-                        self.computed.clicked_rt = Some(clicked_rt);
-                    }
-                } else if self.ui.selected_index.is_some() {
-                    ui.label("Generating score plot...");
                 } else {
-                    ui.label("Select a precursor to view score traces");
+                    let click = if let Some((score_lines, counter)) =
+                        self.computed.score_render_context()
+                    {
+                        score_lines.render(
+                            ui,
+                            Some("precursor_fragment_x_axis"),
+                            counter,
+                            &mode,
+                            &ref_lines,
+                        )
+                    } else if self.ui.selected_index.is_some() {
+                        ui.label("Generating score plot...");
+                        None
+                    } else {
+                        ui.label("Select a precursor to view score traces");
+                        None
+                    };
+                    if let Some(rt) = click {
+                        self.computed.set_clicked_rt(rt);
+                    }
                 }
             }
         }

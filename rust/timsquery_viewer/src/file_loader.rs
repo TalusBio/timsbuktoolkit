@@ -359,7 +359,7 @@ impl ElutionGroupData {
                 precursor_intensities: eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect(),
                 fragment_intensities: eg
                     .iter_fragments()
-                    .map(|(label, _mz)| (label.to_string(), 1.0))
+                    .map(|(label, _mz)| (label.to_string(), 0.1))
                     .collect(),
             },
         };

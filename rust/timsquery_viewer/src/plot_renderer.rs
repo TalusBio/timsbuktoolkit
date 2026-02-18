@@ -110,7 +110,7 @@ impl ScoreLines {
             })
             .collect();
 
-        // Check that  all lines are the same length
+        // Check that all lines are the same length
         let first_line_len = lines.first().map(|line| line.points.len()).unwrap_or(0);
         for line in &lines {
             assert_eq!(
@@ -454,14 +454,25 @@ pub fn render_chromatogram_plot(
         PlotMode::PrecursorsOnly => "chromatogram_plot_precursors",
         PlotMode::FragmentsOnly => "chromatogram_plot_fragments",
     };
+    // Hide legend when there are too many traces to keep the plot readable
+    const MAX_LEGEND_TRACES: usize = 20;
+    let total_traces = match mode {
+        PlotMode::All => chromatogram.precursor_lines.len() + chromatogram.fragment_lines.len(),
+        PlotMode::PrecursorsOnly => chromatogram.precursor_lines.len(),
+        PlotMode::FragmentsOnly => chromatogram.fragment_lines.len(),
+    };
+
     let mut plot = Plot::new(plot_id)
-        .legend(Legend::default())
         .show_axes([true, true])
         .x_axis_label("Retention Time (s)")
         .y_axis_label("Intensity")
         .allow_zoom(false)
         .allow_drag(false)
         .allow_scroll(false);
+
+    if total_traces <= MAX_LEGEND_TRACES {
+        plot = plot.legend(Legend::default());
+    }
 
     if let Some(link_id) = link_group_id {
         const ONLY_X_AXIS: [bool; 2] = [true, false];
@@ -475,6 +486,16 @@ pub fn render_chromatogram_plot(
             PlotMode::PrecursorsOnly => chromatogram.get_precursor_intensity_max(),
             PlotMode::FragmentsOnly => chromatogram.get_fragment_intensity_max(),
         };
+
+        // Guard: skip rendering if max_polygon_height is non-finite or negative
+        if !max_polygon_height.is_finite() || max_polygon_height < 0.0 {
+            tracing::error!(
+                "Bad max_polygon_height={} for mode={:?}, skipping plot content",
+                max_polygon_height,
+                mode,
+            );
+            return;
+        }
 
         let reference_band = Polygon::new(
             "Reference RT",
@@ -498,7 +519,7 @@ pub fn render_chromatogram_plot(
 
         match mode {
             PlotMode::All | PlotMode::PrecursorsOnly => {
-                for line in chromatogram.precursor_lines.iter() {
+                for line in &chromatogram.precursor_lines {
                     plot_ui.line(line.data.to_plot_line());
                 }
             }
@@ -507,7 +528,7 @@ pub fn render_chromatogram_plot(
 
         match mode {
             PlotMode::All | PlotMode::FragmentsOnly => {
-                for line in chromatogram.fragment_lines.iter() {
+                for line in &chromatogram.fragment_lines {
                     plot_ui.line(line.data.to_plot_line());
                 }
             }
@@ -516,6 +537,7 @@ pub fn render_chromatogram_plot(
         plot_reflines(label_lines, plot_ui, 0.0, max_polygon_height);
 
         zoom_behavior(plot_ui, &scroll_delta);
+
         if *auto_zoom_frame_counter > 0 {
             match auto_zoom_mode {
                 AutoZoomMode::QueryRange => {
