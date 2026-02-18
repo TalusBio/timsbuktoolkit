@@ -1158,10 +1158,10 @@ impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_vim_keys(ctx);
 
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            ui.heading("TimsQuery Viewer");
-            ui.separator();
-        });
+        // egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+        //     ui.heading("TimsQuery Viewer");
+        //     ui.separator();
+        // });
 
         // Check if background computation completed
         self.check_chromatogram_completion();
