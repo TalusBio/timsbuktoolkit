@@ -42,6 +42,27 @@ pub(crate) struct ChromatogramComputationResult {
     pub expected_intensities: ExpectedIntensities<String>,
 }
 
+/// State machine for chromatogram computation lifecycle.
+///
+/// Follows the same pattern as `IndexedDataState` and `ElutionGroupState`:
+/// `None → Computing → Computed | Failed`
+#[derive(Debug, Default)]
+enum ChromatogramState {
+    #[default]
+    None,
+    /// Background computation in progress
+    Computing { index: u64 },
+    /// Computation completed successfully; cache key stored for invalidation checks
+    Computed {
+        cache_key: (u64, Tolerance, SmoothingMethod),
+    },
+    /// Computation failed for this combination — prevents infinite retry
+    Failed {
+        cache_key: (u64, Tolerance, SmoothingMethod),
+        error: String,
+    },
+}
+
 /// Computed/cached state - derived from data and UI state
 #[derive(Debug, Default)]
 pub struct ComputedState {
@@ -56,12 +77,10 @@ pub struct ComputedState {
     pub apex_score: Option<ApexScore>,
 
     // Internal state (private)
-    is_computing_chromatogram: bool,
-    computing_index: Option<u64>,
+    chromatogram_state: ChromatogramState,
     chromatogram_output: Option<ChromatogramOutput>,
     chromatogram_collector_buffer: Option<ChromatogramCollector<String, f32>>,
     apex_finder_buffer: Option<ApexFinder>,
-    cache_key: Option<(u64, Tolerance, SmoothingMethod)>,
     last_requested_rt: Option<f64>,
     reference_lines: HashMap<String, (f64, Color32)>,
 }
@@ -76,21 +95,49 @@ impl ComputedState {
     }
 
     pub fn is_computing(&self) -> bool {
-        self.is_computing_chromatogram
+        matches!(self.chromatogram_state, ChromatogramState::Computing { .. })
     }
 
     pub fn computing_index(&self) -> Option<u64> {
-        self.computing_index
+        match &self.chromatogram_state {
+            ChromatogramState::Computing { index } => Some(*index),
+            _ => None,
+        }
     }
 
     pub fn start_computing(&mut self, index: u64) {
-        self.is_computing_chromatogram = true;
-        self.computing_index = Some(index);
+        self.chromatogram_state = ChromatogramState::Computing { index };
     }
 
-    pub fn cancel_computing(&mut self) {
-        self.is_computing_chromatogram = false;
-        self.computing_index = None;
+    /// Record a failed computation so the same parameters won't be retried.
+    pub fn fail_computing(
+        &mut self,
+        index: u64,
+        tolerance: &Tolerance,
+        smoothing: &SmoothingMethod,
+        error: String,
+    ) {
+        self.chromatogram_state = ChromatogramState::Failed {
+            cache_key: (index, tolerance.clone(), *smoothing),
+            error,
+        };
+    }
+
+    /// Returns the error message if in `Failed` state.
+    pub fn failure_error(&self) -> Option<&str> {
+        match &self.chromatogram_state {
+            ChromatogramState::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Returns the cached elution group ID (for tracing instrumentation).
+    fn cached_eg_id(&self) -> u64 {
+        match &self.chromatogram_state {
+            ChromatogramState::Computed { cache_key } => cache_key.0,
+            ChromatogramState::Failed { cache_key, .. } => cache_key.0,
+            _ => 0,
+        }
     }
 
     pub fn is_cache_valid(
@@ -99,12 +146,14 @@ impl ComputedState {
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
     ) -> bool {
-        if let Some((cached_id, cached_tolerance, cached_smoothing)) = &self.cache_key {
-            return *cached_id == selected_idx as u64
-                && cached_tolerance == tolerance
-                && cached_smoothing == smoothing;
-        }
-        false
+        let cache_key = match &self.chromatogram_state {
+            ChromatogramState::Computed { cache_key } => cache_key,
+            ChromatogramState::Failed { cache_key, .. } => cache_key,
+            _ => return false,
+        };
+        cache_key.0 == selected_idx as u64
+            && &cache_key.1 == tolerance
+            && &cache_key.2 == smoothing
     }
 
     /// Resets computed state when data or UI changes significantly
@@ -115,14 +164,12 @@ impl ComputedState {
         self.ms2_spectrum = None;
         self.auto_zoom_frame_counter = 0;
         self.clicked_rt = None;
-        self.cache_key = None;
-        self.computing_index = None;
         self.last_requested_rt = None;
         self.apex_score = None;
         self.score_lines = None;
         self.expected_intensities = None;
         self.reference_lines.clear();
-        self.is_computing_chromatogram = false;
+        self.chromatogram_state = ChromatogramState::None;
     }
 
     pub(crate) fn build_collector(
@@ -166,7 +213,16 @@ impl ComputedState {
         // Convert to output format
         let mut output = ChromatogramOutput::try_new(collector, index.ms1_cycle_mapping())
             .map_err(|e| {
-                ViewerError::General(format!("Failed to generate chromatogram output: {:?}", e))
+                let msg = match e {
+                    timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
+                        "No data found with the current tolerances. \
+                         Try widening the mass or mobility tolerance, \
+                         or removing the retention time restriction."
+                            .to_string()
+                    }
+                    other => format!("Failed to generate chromatogram output: {:?}", other),
+                };
+                ViewerError::General(msg)
             })?;
 
         // Apply smoothing if configured
@@ -194,16 +250,20 @@ impl ComputedState {
                 .rt_milis_for_index(&MS1CycleIndex::new(idx as u32))
                 .unwrap()
         }).map_err(|x| {
-            match x {
+            let user_msg = match &x {
                 DataProcessingError::ExpectedNonEmptyData { context: err_context } => {
                     tracing::warn!(
-                        "{:#?}", context.query_values.eg, 
+                        "{:#?}", context.query_values.eg,
                     );
                     tracing::warn!(
                         "Apex finding failed for elution group {}: No valid data found in context {:?}",
                         context.query_values.eg.id(),
                         err_context
                     );
+                    "No data found with the current tolerances. \
+                     Try widening the mass or mobility tolerance, \
+                     or removing the retention time restriction."
+                        .to_string()
                 }
                 _ => {
                     tracing::error!(
@@ -211,16 +271,17 @@ impl ComputedState {
                         context.query_values.eg.id(),
                         x
                     );
+                    format!("Apex finding failed: {:?}", x)
                 }
             };
-            ViewerError::General("Apex finding error".into())
+            ViewerError::General(user_msg)
 
         })
     }
 
     /// Generate MS2 spectrum at the given retention time.
     /// Returns true if a new spectrum was generated, false if skipped (already generated for this RT).
-    #[instrument(level = "trace", skip(self), fields(eg_id = %self.cache_key.as_ref().map(|(id, _, _)| *id).unwrap_or(0)))]
+    #[instrument(level = "trace", skip(self), fields(eg_id = %self.cached_eg_id()))]
     pub fn generate_spectrum_at_rt(&mut self, rt_seconds: f64) -> bool {
         // Skip if we already generated spectrum for this RT
         // Use a tolerance of 1 microsecond (1e-6 seconds) instead of f64::EPSILON
@@ -281,8 +342,10 @@ impl ComputedState {
         self.chromatogram_output = Some(result.output.clone());
         self.auto_zoom_frame_counter = 5;
 
-        // Update cache key
-        self.cache_key = Some((result.selected_idx, tolerance.clone(), smoothing));
+        // Transition to Computed state with cache key
+        self.chromatogram_state = ChromatogramState::Computed {
+            cache_key: (result.selected_idx, tolerance.clone(), smoothing),
+        };
 
         // Store for scoring
         self.expected_intensities = Some(result.expected_intensities.clone());
@@ -295,10 +358,6 @@ impl ComputedState {
             &result.expected_intensities,
             &result.collector,
         );
-
-        // Clear computing state
-        self.is_computing_chromatogram = false;
-        self.computing_index = None;
     }
 
     /// Compute scores from buffers
@@ -312,12 +371,9 @@ impl ComputedState {
         let num_cycles = output.retention_time_results_seconds.len();
 
         // Prepare apex finder
-        let apex_finder = if self.apex_finder_buffer.is_none() {
-            self.apex_finder_buffer = Some(ApexFinder::new(num_cycles));
-            self.apex_finder_buffer.as_mut().unwrap()
-        } else {
-            self.apex_finder_buffer.as_mut().unwrap()
-        };
+        let apex_finder = self
+            .apex_finder_buffer
+            .get_or_insert_with(|| ApexFinder::new(num_cycles));
 
         // Build scoring context
         let scoring_ctx = ScoringContext {
