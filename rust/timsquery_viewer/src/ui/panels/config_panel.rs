@@ -1,4 +1,6 @@
 use eframe::egui;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::chromatogram_processor::SmoothingMethod;
 use crate::plot_renderer::AutoZoomMode;
@@ -9,6 +11,31 @@ use timsquery::Tolerance;
 const SECTION_MARGIN: i8 = 10;
 const SECTION_SPACING: f32 = 12.0;
 const INTERNAL_SPACING: f32 = 8.0;
+
+/// Screenshot capture lifecycle
+pub enum ScreenshotState {
+    /// Nothing happening
+    Idle,
+    /// Timer running, show remaining seconds overlay
+    Countdown { deadline: Instant },
+    /// Deadline reached, scale applied, screenshot command sent this frame
+    Capturing,
+    /// Screenshot received, saving to file
+    Saving(Arc<egui::ColorImage>),
+}
+
+impl Default for ScreenshotState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+/// Actions the export UI can request
+pub enum ScreenshotAction {
+    None,
+    Start,
+    Cancel,
+}
 
 /// Panel for configuration settings
 pub struct ConfigPanel;
@@ -166,6 +193,79 @@ impl ConfigPanel {
 
     pub fn title(&self) -> &str {
         "Settings"
+    }
+
+    /// Renders the Export/Screenshot section at the bottom of the config panel
+    pub fn render_export_section(
+        ui: &mut egui::Ui,
+        screenshot_delay_secs: &mut f32,
+        screenshot_state: &ScreenshotState,
+    ) -> ScreenshotAction {
+        let mut action = ScreenshotAction::None;
+
+        ui.label(egui::RichText::new("EXPORT").strong().size(13.0));
+        ui.add_space(INTERNAL_SPACING);
+
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(SECTION_MARGIN))
+            .show(ui, |ui| {
+                ui.heading("Screenshot");
+                ui.add_space(INTERNAL_SPACING);
+
+                let is_active = !matches!(screenshot_state, ScreenshotState::Idle);
+
+                // Delay selector
+                ui.horizontal(|ui| {
+                    ui.label("Delay:");
+                    ui.add_enabled_ui(!is_active, |ui| {
+                        egui::ComboBox::from_id_salt("screenshot_delay")
+                            .selected_text(if *screenshot_delay_secs == 0.0 {
+                                "None".to_string()
+                            } else {
+                                format!("{}s", *screenshot_delay_secs as u32)
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(screenshot_delay_secs, 0.0, "None");
+                                ui.selectable_value(screenshot_delay_secs, 3.0, "3s");
+                                ui.selectable_value(screenshot_delay_secs, 5.0, "5s");
+                                ui.selectable_value(screenshot_delay_secs, 10.0, "10s");
+                            });
+                    });
+                });
+
+                ui.add_space(INTERNAL_SPACING);
+
+                // Action buttons
+                match screenshot_state {
+                    ScreenshotState::Countdown { deadline } => {
+                        let remaining = deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_secs_f32()
+                            .ceil() as u32;
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(false, egui::Button::new(
+                                format!("Capturing in {}s...", remaining),
+                            ));
+                            if ui.button("Cancel").clicked() {
+                                action = ScreenshotAction::Cancel;
+                            }
+                        });
+                    }
+                    ScreenshotState::Capturing => {
+                        ui.add_enabled(false, egui::Button::new("Capturing..."));
+                    }
+                    ScreenshotState::Saving(_) => {
+                        ui.add_enabled(false, egui::Button::new("Saving..."));
+                    }
+                    ScreenshotState::Idle => {
+                        if ui.button("Save Screenshot").clicked() {
+                            action = ScreenshotAction::Start;
+                        }
+                    }
+                }
+            });
+
+        action
     }
 }
 

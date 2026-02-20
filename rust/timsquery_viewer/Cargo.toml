@@ -21,6 +21,7 @@ egui_plot = "0.34"
 egui_extras = { version = "0.33", features = ["serde"] }
 egui_dock = { version = "0.18", features = ["serde"] }
 rfd = "0.16" # File dialogs dependency
+image = { version = "0.25", default-features = false, features = ["png"] }
 ron = "0.12.0" # Yet another serialization format ...
 
 # Workspace-inherited deps

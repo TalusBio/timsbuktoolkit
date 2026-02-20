@@ -1,7 +1,4 @@
-use eframe::egui::{
-    self,
-    Color32,
-};
+use eframe::egui;
 use egui_plot::{
     Line,
     Plot,
@@ -25,15 +22,6 @@ impl SpectrumPanel {
         "MS2"
     }
 
-    /// Get color based on fragment label prefix
-    fn get_fragment_color(label: &str) -> Color32 {
-        match label.chars().next() {
-            Some('b') | Some('B') => Color32::from_rgb(100, 149, 237), // Blue (Cornflower)
-            Some('y') | Some('Y') => Color32::from_rgb(220, 20, 60),   // Red (Crimson)
-            Some('p') | Some('P') => Color32::from_rgb(255, 200, 0),   // Yellow
-            _ => Color32::from_rgb(50, 205, 50),                       // Green (Lime)
-        }
-    }
 
     pub fn render(
         &mut self,
@@ -73,7 +61,7 @@ impl SpectrumPanel {
                         spec.mz_values.iter().zip(&spec.intensities).enumerate()
                     {
                         let label_str = &spec.fragment_labels[idx];
-                        let color = Self::get_fragment_color(label_str);
+                        let color = super::ion_color(label_str);
                         let y_value = (intensity / norm_factor) as f64;
 
                         let points = PlotPoints::new(vec![[mz, 0.0], [mz, y_value]]);

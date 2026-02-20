@@ -8,6 +8,7 @@ use egui_dock::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
@@ -24,6 +25,9 @@ use crate::file_loader::{
 use crate::plot_renderer::AutoZoomMode;
 use crate::ui::panels::{
     ConfigPanel,
+    MobilityPanel,
+    ScreenshotAction,
+    ScreenshotState,
     SpectrumPanel,
     TablePanel,
 };
@@ -43,6 +47,7 @@ type ChromatogramComputeResult = Result<
         crate::chromatogram_processor::ChromatogramCollector<String, f32>,
         timsseek::ExpectedIntensities<String>,
         u64, // selected_idx as cache key
+        timsquery::models::elution_group::TimsElutionGroup<String>,
     ),
     String,
 >;
@@ -82,7 +87,7 @@ const LOCATION_FRAME_PADDING_H: i8 = 8;
 const LOCATION_FRAME_PADDING_V: i8 = 4;
 
 /// Pane types for the tile layout
-#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 enum Pane {
     ConfigPanel,
     TablePanel,
@@ -90,7 +95,20 @@ enum Pane {
     PrecursorPlot,
     FragmentPlot,
     ScoresPlot,
+    Mobility,
 }
+
+/// All pane variants that should exist in the dock.
+/// New variants added here will be auto-injected into saved layouts.
+const ALL_PANES: &[Pane] = &[
+    Pane::ConfigPanel,
+    Pane::TablePanel,
+    Pane::MS2Spectrum,
+    Pane::PrecursorPlot,
+    Pane::FragmentPlot,
+    Pane::ScoresPlot,
+    Pane::Mobility,
+];
 
 /// State to be persisted across restarts
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -228,11 +246,17 @@ pub struct ViewerApp {
     config_panel: ConfigPanel,
     table_panel: TablePanel,
     spectrum_panel: SpectrumPanel,
+    mobility_panel: MobilityPanel,
 
     /// Receiver for background chromatogram computation
     chromatogram_receiver: Option<Receiver<ChromatogramComputeResult>>,
     /// Token to cancel current background computation
     cancellation_token: Option<CancellationToken>,
+
+    /// Screenshot capture state machine
+    screenshot_state: ScreenshotState,
+    /// Countdown duration in seconds before capture
+    screenshot_delay_secs: f32,
 }
 
 impl ViewerApp {
@@ -266,6 +290,17 @@ impl ViewerApp {
                 };
 
                 if let Some(state) = state {
+                    let mut dock_state = state.dock_state;
+                    // Inject any pane variants added since the state was saved
+                    for &pane in ALL_PANES {
+                        if dock_state.find_tab(&pane).is_none() {
+                            tracing::info!("Adding missing pane {:?} to saved layout", pane);
+                            dock_state
+                                .main_surface_mut()
+                                .push_to_first_leaf(pane);
+                        }
+                    }
+
                     return Self {
                         file_loader: state
                             .file_loader
@@ -277,12 +312,15 @@ impl ViewerApp {
                         },
                         ui: state.ui_state,
                         computed: ComputedState::default(),
-                        dock_state: state.dock_state,
+                        dock_state,
                         config_panel: ConfigPanel::new(),
                         table_panel: TablePanel::new(),
                         spectrum_panel: SpectrumPanel::new(),
+                        mobility_panel: MobilityPanel::new(),
                         chromatogram_receiver: None,
                         cancellation_token: None,
+                        screenshot_state: ScreenshotState::default(),
+                        screenshot_delay_secs: 3.0,
                     };
                 }
             } else {
@@ -290,7 +328,7 @@ impl ViewerApp {
             }
         }
 
-        // Create initial tabs: Settings, Table, Precursors, Fragments, MS2
+        // Create initial tabs: Settings, Table, Precursors, Fragments, MS2, Scores, Mobilogram
         let tabs = vec![
             Pane::ConfigPanel,
             Pane::TablePanel,
@@ -298,6 +336,7 @@ impl ViewerApp {
             Pane::FragmentPlot,
             Pane::MS2Spectrum,
             Pane::ScoresPlot,
+            Pane::Mobility,
         ];
 
         let dock_state = DockState::new(tabs);
@@ -312,8 +351,11 @@ impl ViewerApp {
             config_panel: ConfigPanel::new(),
             table_panel: TablePanel::new(),
             spectrum_panel: SpectrumPanel::new(),
+            mobility_panel: MobilityPanel::new(),
             chromatogram_receiver: None,
             cancellation_token: None,
+            screenshot_state: ScreenshotState::default(),
+            screenshot_delay_secs: 3.0,
         }
     }
 
@@ -365,8 +407,8 @@ impl ViewerApp {
         });
     }
 
-    /// Generate MS2 spectrum if user clicked on a new RT position
-    fn generate_ms2_spectrum_if_needed(&mut self) {
+    /// Respond to a user RT click: generate MS2 spectrum and mobility data.
+    fn handle_rt_click(&mut self) {
         let Some(requested_rt) = self.computed.clicked_rt() else {
             return;
         };
@@ -374,6 +416,11 @@ impl ViewerApp {
         if self.computed.generate_spectrum_at_rt(requested_rt) {
             self.computed
                 .insert_reference_line("Clicked RT".into(), requested_rt, Color32::GREEN);
+        }
+
+        if let IndexedDataState::Loaded { index, .. } = &self.data.indexed_data {
+            self.computed
+                .generate_mobility_at_rt(requested_rt, index, &self.data.tolerance);
         }
     }
 
@@ -539,7 +586,7 @@ impl ViewerApp {
             return Err("Computation cancelled".to_string());
         }
 
-        Ok((output, collector, expected_intensities, selected_idx as u64))
+        Ok((output, collector, expected_intensities, selected_idx as u64, elution_group))
     }
 
     /// Check if background chromatogram computation completed
@@ -554,7 +601,7 @@ impl ViewerApp {
             self.cancellation_token = None;
 
             match result {
-                Ok((output, collector, expected_intensities, selected_idx)) => {
+                Ok((output, collector, expected_intensities, selected_idx, elution_group)) => {
                     tracing::debug!(
                         "Chromatogram computation result received for index {}",
                         selected_idx
@@ -566,6 +613,7 @@ impl ViewerApp {
                             output,
                             collector,
                             expected_intensities,
+                            elution_group,
                         };
 
                         self.computed.complete_chromatogram_computation(
@@ -1120,6 +1168,136 @@ impl ViewerApp {
     fn select_elution_group(cursor: &mut Option<usize>, idx: usize) {
         *cursor = Some(idx);
     }
+
+    /// Handle screenshot state machine transitions and capture
+    fn handle_screenshot(&mut self, ctx: &egui::Context) {
+        // Check for Escape to cancel countdown
+        if matches!(self.screenshot_state, ScreenshotState::Countdown { .. })
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            tracing::info!("Screenshot countdown cancelled by user");
+            self.screenshot_state = ScreenshotState::Idle;
+            return;
+        }
+
+        match &self.screenshot_state {
+            ScreenshotState::Idle => {}
+            ScreenshotState::Countdown { deadline } => {
+                let now = Instant::now();
+                if now >= *deadline {
+                    // Deadline reached — capture at native resolution
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                    self.screenshot_state = ScreenshotState::Capturing;
+                    tracing::info!("Screenshot capturing at native resolution");
+                } else {
+                    // Keep repainting during countdown
+                    ctx.request_repaint();
+                }
+            }
+            ScreenshotState::Capturing => {
+                // Waiting for the screenshot event
+            }
+            ScreenshotState::Saving(image) => {
+                let image = Arc::clone(image);
+
+                // Open save dialog and write PNG
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save Screenshot")
+                    .add_filter("PNG Image", &["png"])
+                    .set_file_name("screenshot.png")
+                    .save_file()
+                {
+                    if let Err(e) = save_color_image_as_png(&image, &path) {
+                        tracing::error!("Failed to save screenshot: {}", e);
+                    } else {
+                        tracing::info!("Screenshot saved to {}", path.display());
+                    }
+                }
+
+                self.screenshot_state = ScreenshotState::Idle;
+            }
+        }
+
+        // Check for screenshot events from egui
+        let screenshot_image = ctx.input(|i| {
+            for event in &i.raw.events {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    return Some(Arc::clone(image));
+                }
+            }
+            None
+        });
+
+        if let Some(image) = screenshot_image {
+            tracing::info!(
+                "Screenshot received: {}x{} pixels",
+                image.width(),
+                image.height()
+            );
+            self.screenshot_state = ScreenshotState::Saving(image);
+            // Request repaint so the Saving state is processed next frame
+            ctx.request_repaint();
+        }
+    }
+
+    /// Draw countdown overlay when screenshot timer is running
+    fn draw_screenshot_countdown_overlay(&self, ctx: &egui::Context) {
+        let ScreenshotState::Countdown { deadline } = &self.screenshot_state else {
+            return;
+        };
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let secs = remaining.as_secs_f32().ceil() as u32;
+
+        egui::Area::new(egui::Id::new("screenshot_countdown"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(180))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::symmetric(40, 24))
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(secs.to_string())
+                                    .size(72.0)
+                                    .color(egui::Color32::WHITE)
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new("Press Escape to cancel")
+                                    .size(14.0)
+                                    .color(egui::Color32::from_white_alpha(180)),
+                            );
+                        });
+                    });
+            });
+    }
+}
+
+/// Encode an egui ColorImage as PNG and write to disk
+fn save_color_image_as_png(
+    image: &egui::ColorImage,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let width = image.width() as u32;
+    let height = image.height() as u32;
+    let pixels: Vec<u8> = image
+        .pixels
+        .iter()
+        .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+        .collect();
+
+    let img_buf: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        image::ImageBuffer::from_raw(width, height, pixels)
+            .ok_or_else(|| "Failed to create image buffer from pixel data".to_string())?;
+
+    img_buf
+        .save(path)
+        .map_err(|e| format!("Failed to write PNG: {}", e))
 }
 
 impl eframe::App for ViewerApp {
@@ -1158,16 +1336,14 @@ impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_vim_keys(ctx);
 
-        // egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-        //     ui.heading("TimsQuery Viewer");
-        //     ui.separator();
-        // });
+        // Handle screenshot state machine
+        self.handle_screenshot(ctx);
 
         // Check if background computation completed
         self.check_chromatogram_completion();
 
-        // Generate MS2 spectrum if RT was clicked
-        self.generate_ms2_spectrum_if_needed();
+        // Generate MS2 spectrum and mobility data if RT was clicked
+        self.handle_rt_click();
 
         // Generate chromatogram if needed
         self.generate_chromatogram(ctx);
@@ -1180,6 +1356,9 @@ impl eframe::App for ViewerApp {
             left_panel: &mut self.config_panel,
             table_panel: &mut self.table_panel,
             spectrum_panel: &mut self.spectrum_panel,
+            mobility_panel: &mut self.mobility_panel,
+            screenshot_delay_secs: &mut self.screenshot_delay_secs,
+            screenshot_state: &mut self.screenshot_state,
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1187,6 +1366,9 @@ impl eframe::App for ViewerApp {
                 .style(Style::from_egui(ui.style().as_ref()))
                 .show_inside(ui, &mut tab_viewer);
         });
+
+        // Draw countdown overlay on top of everything
+        self.draw_screenshot_countdown_overlay(ctx);
     }
 }
 
@@ -1198,6 +1380,9 @@ struct AppTabViewer<'a> {
     left_panel: &'a mut ConfigPanel,
     table_panel: &'a mut TablePanel,
     spectrum_panel: &'a mut SpectrumPanel,
+    mobility_panel: &'a mut MobilityPanel,
+    screenshot_delay_secs: &'a mut f32,
+    screenshot_state: &'a mut ScreenshotState,
 }
 
 impl<'a> AppTabViewer<'a> {
@@ -1230,6 +1415,28 @@ impl<'a> AppTabViewer<'a> {
             &mut self.data.smoothing,
             &mut self.data.auto_zoom_mode,
         );
+
+        ui.add_space(SEPARATOR_SPACING);
+        ui.separator();
+        ui.add_space(INTERNAL_SPACING);
+
+        // Export section
+        let action = ConfigPanel::render_export_section(
+            ui,
+            self.screenshot_delay_secs,
+            &self.screenshot_state,
+        );
+        match action {
+            ScreenshotAction::None => {}
+            ScreenshotAction::Start => {
+                let deadline = Instant::now()
+                    + std::time::Duration::from_secs_f32(*self.screenshot_delay_secs);
+                *self.screenshot_state = ScreenshotState::Countdown { deadline };
+            }
+            ScreenshotAction::Cancel => {
+                *self.screenshot_state = ScreenshotState::Idle;
+            }
+        }
     }
 }
 
@@ -1244,6 +1451,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
             Pane::PrecursorPlot => "Precursors".into(),
             Pane::FragmentPlot => "Fragments".into(),
             Pane::ScoresPlot => "Scores".into(),
+            Pane::Mobility => self.mobility_panel.title().into(),
         }
     }
 
@@ -1392,6 +1600,10 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         self.computed.set_clicked_rt(rt);
                     }
                 }
+            }
+            Pane::Mobility => {
+                self.mobility_panel
+                    .render(ui, self.computed.mobility_data());
             }
         }
     }
