@@ -2608,7 +2608,7 @@ wheels = [
 
 [[package]]
 name = "speclib-builder"
-version = "0.25.0"
+version = "0.26.0"
 source = { editable = "python/speclib_builder" }
 dependencies = [
     { name = "loguru" },
@@ -2768,7 +2768,7 @@ wheels = [
 
 [[package]]
 name = "timsseek-rescore"
-version = "0.25.0"
+version = "0.26.0"
 source = { editable = "python/timsseek_rescore" }
 dependencies = [
     { name = "matplotlib" },
@@ -2797,7 +2797,7 @@ requires-dist = [
 
 [[package]]
 name = "timsseek-rts-receiver"
-version = "0.25.0"
+version = "0.26.0"
 source = { editable = "python/timsseek_rts_receiver" }
 dependencies = [
     { name = "matplotlib" },
@@ -2822,7 +2822,7 @@ requires-dist = [
 
 [[package]]
 name = "timsseek-workspace"
-version = "0.25.0"
+version = "0.26.0"
 source = { virtual = "." }
 dependencies = [
     { name = "jupyter" },
