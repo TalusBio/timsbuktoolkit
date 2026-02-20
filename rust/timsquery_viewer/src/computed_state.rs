@@ -1,9 +1,14 @@
 use egui::Color32;
 use std::collections::HashMap;
 use timsquery::models::elution_group::TimsElutionGroup;
-use timsquery::models::tolerance::Tolerance;
+use timsquery::models::tolerance::{
+    RtTolerance,
+    Tolerance,
+};
 use timsquery::{
+    MzMobilityStatsCollector,
     QueriableData,
+    SpectralCollector,
     TupleRange,
 };
 use timsseek::ExpectedIntensities;
@@ -27,6 +32,7 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
+use timscentroid::utils::OptionallyRestricted;
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
     ApexFinder,
@@ -40,6 +46,7 @@ pub(crate) struct ChromatogramComputationResult {
     pub output: ChromatogramOutput,
     pub collector: ChromatogramCollector<String, f32>,
     pub expected_intensities: ExpectedIntensities<String>,
+    pub elution_group: TimsElutionGroup<String>,
 }
 
 #[derive(Debug)]
@@ -57,6 +64,7 @@ struct ChromatogramResult {
     output: ChromatogramOutput,
     scoring: Option<ScoringResult>,
     expected_intensities: ExpectedIntensities<String>,
+    elution_group: TimsElutionGroup<String>,
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +72,38 @@ struct Ms2State {
     clicked_rt: Option<f64>,
     spectrum: Option<MS2Spectrum>,
     last_requested_rt: Option<f64>,
+}
+
+/// Per-ion aggregated stats for mobility visualization.
+#[derive(Debug, Clone)]
+pub struct IonMobilityStats {
+    pub label: String,
+    /// Intensity-weighted mean m/z
+    pub mean_mz: f64,
+    /// Intensity-weighted mean mobility (1/K0)
+    pub mean_mobility: f64,
+    /// Total intensity (sum of weights)
+    pub total_intensity: f64,
+}
+
+/// All data needed to render the mobility visualization.
+#[derive(Debug, Clone)]
+pub struct MobilityData {
+    pub ions: Vec<IonMobilityStats>,
+    pub ref_mobility: f64,
+    /// 1x tolerance window (for integration box overlay)
+    pub mobility_range: (f64, f64),
+    /// 2x tolerance window (the actual query range)
+    pub wide_mobility_range: (f64, f64),
+    /// Monotonically increasing counter — used to reset plot zoom on new data.
+    pub generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct MobilityState {
+    data: Option<MobilityData>,
+    last_requested_rt: Option<f64>,
+    generation: u64,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +141,7 @@ pub struct ComputedState {
     pub auto_zoom_frame_counter: u8,
     reference_lines: HashMap<String, (f64, Color32)>,
     ms2: Ms2State,
+    mobility: MobilityState,
     /// Reusable allocation — not reset between elution groups.
     scratch: ScratchBuffers,
 }
@@ -108,6 +149,10 @@ pub struct ComputedState {
 impl ComputedState {
     pub fn ms2_spectrum(&self) -> Option<&MS2Spectrum> {
         self.ms2.spectrum.as_ref()
+    }
+
+    pub fn mobility_data(&self) -> Option<&MobilityData> {
+        self.mobility.data.as_ref()
     }
 
     pub fn expected_intensities(&self) -> Option<&ExpectedIntensities<String>> {
@@ -216,6 +261,7 @@ impl ComputedState {
     pub fn clear(&mut self) {
         self.result = None;
         self.ms2 = Ms2State::default();
+        self.mobility = MobilityState::default();
         self.auto_zoom_frame_counter = 0;
         self.reference_lines.clear();
         self.chromatogram_state = ChromatogramState::None;
@@ -452,9 +498,11 @@ impl ComputedState {
             output: computation.output.clone(),
             scoring,
             expected_intensities: computation.expected_intensities.clone(),
+            elution_group: computation.elution_group,
         });
 
         self.ms2 = Ms2State::default();
+        self.mobility = MobilityState::default();
         self.reference_lines.clear();
         self.auto_zoom_frame_counter = 5;
         self.chromatogram_state = ChromatogramState::Computed {
@@ -471,5 +519,104 @@ impl ComputedState {
             "complete_chromatogram_computation finished for idx={}",
             computation.selected_idx
         );
+    }
+
+    /// Extract mobility peak data at a given RT.
+    /// Returns true if new data was generated.
+    #[instrument(level = "trace", skip(self, index), fields(eg_id = %self.cached_eg_id()))]
+    pub fn generate_mobility_at_rt(
+        &mut self,
+        rt_seconds: f64,
+        index: &IndexedPeaksHandle,
+        tolerance: &Tolerance,
+    ) -> bool {
+        const RT_TOLERANCE_SECONDS: f64 = 1e-6;
+        if let Some(last_rt) = self.mobility.last_requested_rt
+            && (last_rt - rt_seconds).abs() < RT_TOLERANCE_SECONDS
+        {
+            return false;
+        }
+        self.mobility.last_requested_rt = Some(rt_seconds);
+
+        let (eg, ref_mobility) = {
+            let Some(result) = &self.result else {
+                tracing::warn!("No chromatogram data available for mobility extraction");
+                return false;
+            };
+            (
+                result.elution_group.clone().with_rt_seconds(rt_seconds as f32),
+                result.output.mobility_ook0 as f64,
+            )
+        };
+
+        let ook0 = eg.mobility_ook0();
+
+        // Build a tolerance with 2x mobility and a narrow 5-second RT window
+        let wide_tolerance = tolerance
+            .clone()
+            .with_rt_tolerance(RtTolerance::Minutes((5.0 / 60.0, 5.0 / 60.0)))
+            .with_wider_mobility(2.0);
+
+        let mut collector: SpectralCollector<String, MzMobilityStatsCollector> =
+            SpectralCollector::new(eg);
+        index.add_query(&mut collector, &wide_tolerance);
+
+        // Compute 1x and 2x mobility ranges for overlays
+        let mob_1x = tolerance.mobility_range(ook0);
+        let mob_2x = wide_tolerance.mobility_range(ook0);
+
+        let to_range = |r: OptionallyRestricted<TupleRange<f32>>| -> (f64, f64) {
+            match r {
+                OptionallyRestricted::Restricted(tr) => {
+                    (tr.start() as f64, tr.end() as f64)
+                }
+                OptionallyRestricted::Unrestricted => (0.0, 2.0),
+            }
+        };
+
+        let mobility_range = to_range(mob_1x);
+        let wide_mobility_range = to_range(mob_2x);
+
+        // Collect per-ion aggregated stats
+        let mut ions = Vec::new();
+
+        for ((isotope_idx, _mz), stats) in collector.iter_precursors() {
+            if let (Ok(mean_mz), Ok(mean_mobility)) = (stats.mean_mz(), stats.mean_mobility()) {
+                ions.push(IonMobilityStats {
+                    label: format!("Prec[{:+}]", isotope_idx),
+                    mean_mz,
+                    mean_mobility,
+                    total_intensity: stats.weight(),
+                });
+            }
+        }
+
+        for ((label, _mz), stats) in collector.iter_fragments() {
+            if let (Ok(mean_mz), Ok(mean_mobility)) = (stats.mean_mz(), stats.mean_mobility()) {
+                ions.push(IonMobilityStats {
+                    label: label.clone(),
+                    mean_mz,
+                    mean_mobility,
+                    total_intensity: stats.weight(),
+                });
+            }
+        }
+
+        tracing::info!(
+            "Extracted mobility data at RT {:.2}s: {} ions with signal",
+            rt_seconds,
+            ions.len(),
+        );
+
+        self.mobility.generation += 1;
+        self.mobility.data = Some(MobilityData {
+            ions,
+            ref_mobility,
+            mobility_range,
+            wide_mobility_range,
+            generation: self.mobility.generation,
+        });
+
+        true
     }
 }

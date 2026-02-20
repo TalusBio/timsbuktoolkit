@@ -38,14 +38,10 @@ pub trait KeyLike: Clone + Eq + Serialize + Hash + Send + Sync + Debug + Default
 ///
 /// # Required Bounds
 ///
-/// - `Copy`: Values must be trivially copyable (typically numeric types)
-/// - `Clone`: Implied by `Copy`, but explicit for clarity
+/// - `Clone`: Values must be cloneable
 /// - `Serialize`: Values must be serializable for output and analysis
 /// - `Send + Sync`: Values must be thread-safe for parallel aggregation
 /// - `Debug`: Values must be debuggable for verification
-///
-/// Note: The `Copy` bound restricts values to small, stack-allocated types like
-/// numeric primitives (`f32`, `f64`, `u32`, etc.) and small aggregates.
 ///
 /// # Examples
 ///
@@ -61,7 +57,7 @@ pub trait KeyLike: Clone + Eq + Serialize + Hash + Send + Sync + Debug + Default
 /// use half::f16;
 /// let _value: f16 = f16::from_f32(123.4);
 /// ```
-pub trait ValueLike: Copy + Clone + Serialize + Send + Sync + Debug {}
+pub trait ValueLike: Clone + Serialize + Send + Sync + Debug {}
 
 impl<T: Clone + Eq + Serialize + Hash + Send + Sync + Debug + Default> KeyLike for T {}
-impl<T: Copy + Clone + Serialize + Send + Sync + Debug> ValueLike for T {}
+impl<T: Clone + Serialize + Send + Sync + Debug> ValueLike for T {}

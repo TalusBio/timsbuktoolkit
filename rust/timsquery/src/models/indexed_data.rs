@@ -65,6 +65,7 @@
 
 use crate::models::aggregators::{
     ChromatogramCollector,
+    MzMobilityStatsCollector,
     PointIntensityAggregator,
     SpectralCollector,
 };
@@ -446,6 +447,57 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                         for (_isolation_scheme, peaks) in results {
                             for peak in peaks {
                                 chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
+                            }
+                        }
+                    });
+            }
+        }
+    }
+}
+
+impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>> for IndexedPeaksHandle {
+    fn add_query(
+        &self,
+        aggregator: &mut SpectralCollector<FH, MzMobilityStatsCollector>,
+        tolerance: &Tolerance,
+    ) {
+        match self {
+            IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
+            IndexedPeaksHandle::Lazy(lazy) => {
+                let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
+                    lazy.rt_ms_to_cycle_index(rt)
+                });
+
+                let cycle_range_u32 = match ranges.ms1_cycle_range {
+                    Restricted(x) => Restricted(
+                        TupleRange::try_new(x.start().as_u32(), x.end().as_u32()).unwrap(),
+                    ),
+                    Unrestricted => Unrestricted,
+                };
+
+                aggregator
+                    .iter_mut_precursors()
+                    .for_each(|((_idx, mz), ion)| {
+                        let mz_range = tolerance.mz_range_f32(mz as f32);
+                        lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
+                            .for_each(|peak| {
+                                *ion += peak;
+                            });
+                    });
+
+                aggregator
+                    .iter_mut_fragments()
+                    .for_each(|((_idx, mz), ion)| {
+                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let results = lazy.query_peaks_ms2(
+                            ranges.quad_range,
+                            mz_range,
+                            cycle_range_u32,
+                            ranges.im_range,
+                        );
+                        for (_isolation_scheme, peaks) in results {
+                            for peak in peaks {
+                                *ion += peak;
                             }
                         }
                     });
