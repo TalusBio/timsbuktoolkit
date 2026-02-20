@@ -406,4 +406,21 @@ impl Tolerance {
             ..self
         }
     }
+
+    /// Scale the mobility tolerance by `factor` (e.g. 2.0 to double the window).
+    pub fn with_wider_mobility(self, factor: f32) -> Self {
+        let wider = match self.mobility {
+            MobilityTolerance::Absolute((low, high)) => {
+                MobilityTolerance::Absolute((low * factor, high * factor))
+            }
+            MobilityTolerance::Pct((low, high)) => {
+                MobilityTolerance::Pct((low * factor, high * factor))
+            }
+            MobilityTolerance::Unrestricted => MobilityTolerance::Unrestricted,
+        };
+        Self {
+            mobility: wider,
+            ..self
+        }
+    }
 }

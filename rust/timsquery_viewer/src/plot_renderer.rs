@@ -313,8 +313,7 @@ impl ChromatogramLines {
             .iter()
             .zip(chromatogram.fragment_intensities.iter())
             .zip(chromatogram.fragment_labels.iter())
-            .enumerate()
-            .map(|(i, ((mz, intensities), label))| {
+            .map(|((mz, intensities), label)| {
                 let points: Vec<PlotPoint> = chromatogram
                     .retention_time_results_seconds
                     .iter()
@@ -328,7 +327,7 @@ impl ChromatogramLines {
                     .fold(f32::NEG_INFINITY, f32::max) as f64;
                 global_max_intensity = global_max_intensity.max(intensity_max as f32);
 
-                let color = get_fragment_color(i);
+                let color = crate::ui::panels::ion_color(label);
                 ChromatogramLine {
                     data: LineData {
                         points,
@@ -731,19 +730,6 @@ fn get_precursor_color(index: usize) -> egui::Color32 {
     colors[index % colors.len()]
 }
 
-fn get_fragment_color(index: usize) -> egui::Color32 {
-    let colors = [
-        egui::Color32::from_rgb(230, 159, 0),   // Orange
-        egui::Color32::from_rgb(213, 94, 0),    // Vermillion
-        egui::Color32::from_rgb(204, 121, 167), // Reddish Purple
-        egui::Color32::from_rgb(240, 228, 66),  // Yellow
-        egui::Color32::from_rgb(255, 165, 0),   // Bright Orange
-        egui::Color32::from_rgb(220, 50, 47),   // Red
-        egui::Color32::from_rgb(255, 99, 71),   // Tomato
-        egui::Color32::from_rgb(255, 140, 0),   // Dark Orange
-    ];
-    colors[index % colors.len()]
-}
 
 fn get_palette1_colors(idx: usize) -> egui::Color32 {
     const COLORS: [&str; 5] = ["eac435", "345995", "03cea4", "fb4d3d", "ca1551"];
