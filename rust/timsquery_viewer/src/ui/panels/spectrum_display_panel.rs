@@ -22,7 +22,6 @@ impl SpectrumPanel {
         "MS2"
     }
 
-
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
@@ -61,7 +60,7 @@ impl SpectrumPanel {
                         spec.mz_values.iter().zip(&spec.intensities).enumerate()
                     {
                         let label_str = &spec.fragment_labels[idx];
-                        let color = super::ion_color(label_str);
+                        let color = super::ion_color(label_str, Some(255));
                         let y_value = (intensity / norm_factor) as f64;
 
                         let points = PlotPoints::new(vec![[mz, 0.0], [mz, y_value]]);

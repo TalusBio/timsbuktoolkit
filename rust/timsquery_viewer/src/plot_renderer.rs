@@ -327,7 +327,7 @@ impl ChromatogramLines {
                     .fold(f32::NEG_INFINITY, f32::max) as f64;
                 global_max_intensity = global_max_intensity.max(intensity_max as f32);
 
-                let color = crate::ui::panels::ion_color(label);
+                let color = crate::ui::panels::ion_color(label, Some(255));
                 ChromatogramLine {
                     data: LineData {
                         points,
@@ -729,7 +729,6 @@ fn get_precursor_color(index: usize) -> egui::Color32 {
     ];
     colors[index % colors.len()]
 }
-
 
 fn get_palette1_colors(idx: usize) -> egui::Color32 {
     const COLORS: [&str; 5] = ["eac435", "345995", "03cea4", "fb4d3d", "ca1551"];
