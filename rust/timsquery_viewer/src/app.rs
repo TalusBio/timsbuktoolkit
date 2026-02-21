@@ -120,6 +120,10 @@ struct PersistentState {
     dock_state: DockState<Pane>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// State of indexed raw data loading
 #[derive(Debug, Default)]
 pub enum IndexedDataState {
@@ -223,6 +227,9 @@ pub struct UiState {
     pub search_input: String,
     /// Raw data input mode (Local or Cloud)
     pub raw_data_input_mode: RawDataInputMode,
+    /// Dark mode preference (true = dark, false = light)
+    #[serde(default = "default_true")]
+    pub dark_mode: bool,
 }
 
 /// Main application state
@@ -257,6 +264,14 @@ pub struct ViewerApp {
     screenshot_state: ScreenshotState,
     /// Countdown duration in seconds before capture
     screenshot_delay_secs: f32,
+}
+
+fn apply_theme(ctx: &egui::Context, dark_mode: bool) {
+    ctx.set_visuals(if dark_mode {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    });
 }
 
 impl ViewerApp {
@@ -300,6 +315,8 @@ impl ViewerApp {
                                 .push_to_first_leaf(pane);
                         }
                     }
+
+                    apply_theme(&cc.egui_ctx, state.ui_state.dark_mode);
 
                     return Self {
                         file_loader: state
@@ -1316,6 +1333,7 @@ impl eframe::App for ViewerApp {
                 search_mode: self.ui.search_mode,
                 search_input: self.ui.search_input.clone(),
                 raw_data_input_mode: self.ui.raw_data_input_mode,
+                dark_mode: self.ui.dark_mode,
             },
             tolerance: self.data.tolerance.clone(),
             smoothing: self.data.smoothing,
@@ -1437,6 +1455,24 @@ impl<'a> AppTabViewer<'a> {
                 *self.screenshot_state = ScreenshotState::Idle;
             }
         }
+
+        ui.add_space(SEPARATOR_SPACING);
+        ui.separator();
+        ui.add_space(INTERNAL_SPACING);
+
+        // Theme toggle
+        ui.horizontal(|ui| {
+            ui.label("Theme:");
+            let label = if self.ui.dark_mode {
+                "Switch to Light"
+            } else {
+                "Switch to Dark"
+            };
+            if ui.button(label).clicked() {
+                self.ui.dark_mode = !self.ui.dark_mode;
+                apply_theme(ui.ctx(), self.ui.dark_mode);
+            }
+        });
     }
 }
 
