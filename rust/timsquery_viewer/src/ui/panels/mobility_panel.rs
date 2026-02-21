@@ -1,6 +1,11 @@
 use eframe::egui;
 use egui::Color32;
-use egui_plot::{HLine, Plot, PlotPoints, Points};
+use egui_plot::{
+    HLine,
+    Plot,
+    PlotPoints,
+    Points,
+};
 
 use super::ion_color;
 use crate::computed_state::MobilityData;
@@ -53,8 +58,10 @@ impl MobilityPanel {
         plot.show(ui, |plot_ui| {
             // 2x (wide query) range — solid lines
             let (wide_lo, wide_hi) = data.wide_mobility_range;
-            plot_ui.hline(HLine::new("2x range lo", wide_lo).color(Color32::from_rgb(120, 120, 120)));
-            plot_ui.hline(HLine::new("2x range hi", wide_hi).color(Color32::from_rgb(120, 120, 120)));
+            plot_ui
+                .hline(HLine::new("2x range lo", wide_lo).color(Color32::from_rgb(120, 120, 120)));
+            plot_ui
+                .hline(HLine::new("2x range hi", wide_hi).color(Color32::from_rgb(120, 120, 120)));
 
             // 1x (integration) range — dashed lines
             let (tol_lo, tol_hi) = data.mobility_range;
@@ -83,21 +90,22 @@ impl MobilityPanel {
                     0.0
                 };
                 let radius = MIN_RADIUS + frac.sqrt() * (MAX_RADIUS - MIN_RADIUS);
-                let color = ion_color(&ion.label);
+                let color_solid = ion_color(&ion.label, Some(255));
+                let color_transparent = ion_color(&ion.label, Some(200));
 
                 plot_ui.points(
-                    Points::new(&ion.label, PlotPoints::new(vec![[ion.mean_mz, ion.mean_mobility]]))
-                        .color(color)
-                        .radius(radius),
-                );
-                plot_ui.text(
-                    egui_plot::Text::new(
-                        format!("{}_label", ion.label),
-                        egui_plot::PlotPoint::new(ion.mean_mz, ion.mean_mobility),
+                    Points::new(
                         &ion.label,
+                        PlotPoints::new(vec![[ion.mean_mz, ion.mean_mobility]]),
                     )
-                    .color(color),
+                    .color(color_transparent)
+                    .radius(radius),
                 );
+                plot_ui.text(egui_plot::Text::new(
+                    format!("{}_label", ion.label),
+                    egui_plot::PlotPoint::new(ion.mean_mz, ion.mean_mobility),
+                    egui::RichText::new(&ion.label).strong().color(color_solid),
+                ));
             }
         });
     }
