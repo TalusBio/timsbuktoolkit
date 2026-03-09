@@ -455,7 +455,9 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
     }
 }
 
-impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>> for IndexedPeaksHandle {
+impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
+    for IndexedPeaksHandle
+{
     fn add_query(
         &self,
         aggregator: &mut SpectralCollector<FH, MzMobilityStatsCollector>,

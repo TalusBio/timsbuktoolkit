@@ -167,4 +167,3 @@ impl Add for MzMobilityStatsCollector {
         }
     }
 }
-

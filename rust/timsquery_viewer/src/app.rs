@@ -310,9 +310,7 @@ impl ViewerApp {
                     for &pane in ALL_PANES {
                         if dock_state.find_tab(&pane).is_none() {
                             tracing::info!("Adding missing pane {:?} to saved layout", pane);
-                            dock_state
-                                .main_surface_mut()
-                                .push_to_first_leaf(pane);
+                            dock_state.main_surface_mut().push_to_first_leaf(pane);
                         }
                     }
 
@@ -603,7 +601,13 @@ impl ViewerApp {
             return Err("Computation cancelled".to_string());
         }
 
-        Ok((output, collector, expected_intensities, selected_idx as u64, elution_group))
+        Ok((
+            output,
+            collector,
+            expected_intensities,
+            selected_idx as u64,
+            elution_group,
+        ))
     }
 
     /// Check if background chromatogram computation completed
@@ -1296,10 +1300,7 @@ impl ViewerApp {
 }
 
 /// Encode an egui ColorImage as PNG and write to disk
-fn save_color_image_as_png(
-    image: &egui::ColorImage,
-    path: &std::path::Path,
-) -> Result<(), String> {
+fn save_color_image_as_png(image: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
     let width = image.width() as u32;
     let height = image.height() as u32;
     let pixels: Vec<u8> = image
@@ -1442,7 +1443,7 @@ impl<'a> AppTabViewer<'a> {
         let action = ConfigPanel::render_export_section(
             ui,
             self.screenshot_delay_secs,
-            &self.screenshot_state,
+            self.screenshot_state,
         );
         match action {
             ScreenshotAction::None => {}
