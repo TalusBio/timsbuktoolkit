@@ -13,8 +13,10 @@ const SECTION_SPACING: f32 = 12.0;
 const INTERNAL_SPACING: f32 = 8.0;
 
 /// Screenshot capture lifecycle
+#[derive(Default)]
 pub enum ScreenshotState {
     /// Nothing happening
+    #[default]
     Idle,
     /// Timer running, show remaining seconds overlay
     Countdown { deadline: Instant },
@@ -22,12 +24,6 @@ pub enum ScreenshotState {
     Capturing,
     /// Screenshot received, saving to file
     Saving(Arc<egui::ColorImage>),
-}
-
-impl Default for ScreenshotState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Actions the export UI can request
@@ -243,9 +239,10 @@ impl ConfigPanel {
                             .as_secs_f32()
                             .ceil() as u32;
                         ui.horizontal(|ui| {
-                            ui.add_enabled(false, egui::Button::new(
-                                format!("Capturing in {}s...", remaining),
-                            ));
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(format!("Capturing in {}s...", remaining)),
+                            );
                             if ui.button("Cancel").clicked() {
                                 action = ScreenshotAction::Cancel;
                             }

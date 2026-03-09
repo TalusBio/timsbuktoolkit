@@ -14,7 +14,10 @@ use timsrust::{
     FramePeaks,
     Metadata,
 };
-use tracing::instrument;
+use tracing::{
+    instrument,
+    warn,
+};
 
 use crate::rt_mapping::{
     CycleToRTMapping,
@@ -669,14 +672,29 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     ) -> Vec<(usize, u32, u32)> {
         let mut out = Vec::new();
         let mut cycle_index = 0;
+        let mut last_pushed_cycle = None;
 
         for (i, meta) in frame_reader.frame_metas.iter().enumerate() {
             if matches!(meta.ms_level, timsrust::MSLevel::MS1) {
                 cycle_index += 1;
             }
             if filter(meta) {
+                if let Some(last_cycle) = last_pushed_cycle
+                    && last_cycle == cycle_index
+                {
+                    warn!(
+                        "Found multiple frames in the same cycle,
+                        skipping the non-first ones (cycle: {}, rt: {})
+                        this might point to an error when collecting the data
+                        (missing ms1 frame)
+                        ",
+                        last_cycle, meta.rt_in_seconds,
+                    );
+                    continue;
+                }
                 let rt_ms = (meta.rt_in_seconds * 1000.0).round() as u32;
                 out.push((i, cycle_index, rt_ms));
+                last_pushed_cycle = Some(cycle_index);
             }
         }
         // TODO: check that cycle indices are continuous AND without replicates
@@ -685,11 +703,21 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
             // Note: These are assertions instead of errors because
             // they are invariants I am checking, not recoverable errors, none of the logic
             // after this point would make sense if this is not true.
+            //
+            // This checks that whatever filter is used returns only a single frame within each
+            // cycle ...
             assert!(
                 w[0].1 < w[1].1,
-                "Cycle indices should be strictly increasing"
+                "Cycle indices should be strictly increasing, {:?} vs {:?}",
+                w[0],
+                w[1],
             );
-            assert!(w[0].2 <= w[1].2, "Retention times should be non-decreasing");
+            assert!(
+                w[0].2 <= w[1].2,
+                "Retention times should be non-decreasing, {:?} vs {:?}",
+                w[0],
+                w[1],
+            );
             assert!(
                 w[1].1 - w[0].1 == 1,
                 "Cycle indices should be continuous without gaps, found gap between {} and {}",

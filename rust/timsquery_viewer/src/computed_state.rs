@@ -544,7 +544,10 @@ impl ComputedState {
                 return false;
             };
             (
-                result.elution_group.clone().with_rt_seconds(rt_seconds as f32),
+                result
+                    .elution_group
+                    .clone()
+                    .with_rt_seconds(rt_seconds as f32),
                 result.output.mobility_ook0 as f64,
             )
         };
@@ -567,9 +570,7 @@ impl ComputedState {
 
         let to_range = |r: OptionallyRestricted<TupleRange<f32>>| -> (f64, f64) {
             match r {
-                OptionallyRestricted::Restricted(tr) => {
-                    (tr.start() as f64, tr.end() as f64)
-                }
+                OptionallyRestricted::Restricted(tr) => (tr.start() as f64, tr.end() as f64),
                 OptionallyRestricted::Unrestricted => (0.0, 2.0),
             }
         };

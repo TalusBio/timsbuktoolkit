@@ -20,7 +20,7 @@ pub struct MobilityPanel;
 
 impl MobilityPanel {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     pub fn title(&self) -> &str {
