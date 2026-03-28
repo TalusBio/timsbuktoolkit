@@ -281,6 +281,10 @@ impl<T: ArrayElement> Array2D<T> {
         Ok(())
     }
 
+    pub fn as_flat_slice(&self) -> &[T] {
+        &self.values
+    }
+
     pub fn nrows(&self) -> usize {
         self.n_row
     }

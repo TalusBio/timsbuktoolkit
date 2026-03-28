@@ -120,13 +120,16 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn add_query(&mut self, index: &IndexedTimstofPeaks, tolerance: &Tolerance) {
         match self {
             AggregatorContainer::Point(aggregators) => {
-                index.par_add_query_multi(aggregators, tolerance);
+                let n = aggregators.len();
+                index.par_add_query_multi(aggregators, rayon::iter::repeat_n(tolerance, n));
             }
             AggregatorContainer::Chromatogram(aggregators) => {
-                index.par_add_query_multi(aggregators, tolerance);
+                let n = aggregators.len();
+                index.par_add_query_multi(aggregators, rayon::iter::repeat_n(tolerance, n));
             }
             AggregatorContainer::Spectrum(aggregators) => {
-                index.par_add_query_multi(aggregators, tolerance);
+                let n = aggregators.len();
+                index.par_add_query_multi(aggregators, rayon::iter::repeat_n(tolerance, n));
             }
         }
     }

@@ -1,0 +1,17 @@
+[package]
+name = "timsquery_pyo3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "timsquery_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+timsquery = { path = "../../rust/timsquery" }
+timscentroid = { path = "../../rust/timscentroid" }
+
+rayon = { workspace = true }
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"
