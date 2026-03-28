@@ -79,22 +79,29 @@ where
 
     /// Execute multiple queries in parallel, one per aggregator.
     ///
-    /// This method processes a batch of aggregators using Rayon parallelism.
-    /// Each aggregator is queried independently against the same indexed data.
+    /// Zips aggregators with tolerances and processes each pair in parallel via
+    /// Rayon. Both parameters accept any `IntoParallelIterator`, so you can pass:
     ///
-    /// Useful for:
-    /// - Batch processing multiple elution groups
-    /// - Parallelizing across precursors
-    /// - Speeding up large-scale data extraction
+    /// - `&mut [QA]` for aggregators (the common case)
+    /// - `&[Tolerance]` or `&Vec<Tolerance>` for per-query tolerances
+    /// - `rayon::iter::repeatn(&tol, n)` for a single shared tolerance
     ///
     /// # Arguments
     ///
-    /// - `queriable_aggregators`: Slice of aggregators to process in parallel
-    /// - `tolerance`: Shared tolerance applied to all queries
-    fn par_add_query_multi(&self, queriable_aggregators: &mut [QA], tolerance: &Tolerance) {
+    /// - `queriable_aggregators`: Parallel iterator of mutable aggregator references
+    /// - `tolerances`: Parallel iterator of tolerance references (one per aggregator)
+    fn par_add_query_multi<'a, A, T>(&self, queriable_aggregators: A, tolerances: T)
+    where
+        QA: 'a,
+        A: IntoParallelIterator<Item = &'a mut QA>,
+        A::Iter: IndexedParallelIterator,
+        T: IntoParallelIterator<Item = &'a Tolerance>,
+        T::Iter: IndexedParallelIterator,
+    {
         queriable_aggregators
-            .par_iter_mut()
-            .for_each(|queriable_aggregator| self.add_query(queriable_aggregator, tolerance));
+            .into_par_iter()
+            .zip(tolerances)
+            .for_each(|(agg, tol)| self.add_query(agg, tol));
     }
 }
 

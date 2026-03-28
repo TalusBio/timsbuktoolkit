@@ -8,7 +8,8 @@ members = [
     "rust/timsseek_cli",
     "rust/timsquery",
     "rust/timsquery_cli",
-    "rust/timsquery_viewer"
+    "rust/timsquery_viewer",
+    "python/timsquery_pyo3"
 ]
 
 [workspace.package]
