@@ -9,8 +9,7 @@ use super::offsets::MzMobilityOffsets;
 use super::pipeline::SecondaryLazyScores;
 use crate::errors::DataProcessingError;
 
-pub const NUM_MS2_IONS: usize = 7;
-pub const NUM_MS1_IONS: usize = 3;
+use super::{NUM_MS2_IONS, NUM_MS1_IONS};
 
 /// Shared scoring fields produced by Phase 3. Every field is guaranteed populated.
 #[derive(Debug, Clone, Serialize)]

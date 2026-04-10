@@ -159,7 +159,7 @@ impl Default for GBMConfig {
             grow_policy: GrowPolicy::DepthWise,
             evaluation_metric: Some(Metric::LogLoss),
             // evaluation_metric: None,
-            early_stopping_rounds: None,
+            early_stopping_rounds: Some(100),
             initialize_base_score: true,
             terminate_missing_features: HashSet::new(),
             missing_node_treatment: MissingNodeTreatment::AssignToParent,
@@ -271,40 +271,28 @@ pub enum DataBufferError {
 }
 
 impl DataBuffer {
-    fn fill_buffer(
+    fn fill_buffer_precomputed(
         &mut self,
         assigned_fold: &[u8],
-        data: &[impl FeatureLike],
+        precomputed: &PrecomputedFeatures,
         fold: u8,
     ) -> Result<(), DataBufferError> {
         self.fold_buffer.clear();
         self.response_buffer.clear();
         self.nrows = assigned_fold.iter().filter(|&&x| x == fold).count();
+        self.ncols = precomputed.ncols;
 
-        let mut dumb_buffer = Vec::new();
-        dumb_buffer.extend(data.first().unwrap().as_feature());
-
-        self.ncols = dumb_buffer.len();
-
-        // now we resize to 0s, since the matrix is feature-major
-        // so we need to insert stuff in essentually the transposed order
+        // Feature-major layout: fold_buffer[feature_idx * nrows + sample_idx]
         self.fold_buffer.resize(self.ncols * self.nrows, 0.0);
 
         let mut sample_idx = 0;
-        for (elem_fold, elem) in assigned_fold.iter().zip(data.iter()) {
-            if fold == *elem_fold {
-                let mut local_added = 0;
-                for (feature_idx, val) in elem.as_feature().into_iter().enumerate() {
-                    let idx = feature_idx * self.nrows + sample_idx;
-                    assert!(self.fold_buffer[idx] == 0.0);
-                    self.fold_buffer[idx] = val;
-                    local_added += 1;
+        for (elem_idx, &elem_fold) in assigned_fold.iter().enumerate() {
+            if fold == elem_fold {
+                let row = precomputed.row(elem_idx);
+                for (feature_idx, &val) in row.iter().enumerate() {
+                    self.fold_buffer[feature_idx * self.nrows + sample_idx] = val;
                 }
-
-                if local_added != self.ncols {
-                    return Err(DataBufferError::UnequalLengths(local_added, self.ncols));
-                }
-                self.response_buffer.push(elem.get_y());
+                self.response_buffer.push(precomputed.responses[elem_idx]);
                 sample_idx += 1;
             }
         }
@@ -333,15 +321,40 @@ impl DataBuffer {
 /// So the score for any point in the data is the average of
 /// the results for all classifiers that didint use it
 /// for either training or early_stopping_rounds.
+/// Row-major precomputed feature matrix: features[sample_idx * ncols + feature_idx]
+struct PrecomputedFeatures {
+    features: Vec<f64>,
+    responses: Vec<f64>,
+    ncols: usize,
+}
+
+impl PrecomputedFeatures {
+    fn from_data(data: &[impl FeatureLike]) -> Self {
+        let ncols = data.first().map_or(0, |d| {
+            d.as_feature().into_iter().count()
+        });
+        let mut features = Vec::with_capacity(data.len() * ncols);
+        let mut responses = Vec::with_capacity(data.len());
+        for elem in data {
+            features.extend(elem.as_feature());
+            responses.push(elem.get_y());
+        }
+        Self { features, responses, ncols }
+    }
+
+    fn row(&self, idx: usize) -> &[f64] {
+        &self.features[idx * self.ncols..(idx + 1) * self.ncols]
+    }
+}
+
 pub struct CrossValidatedScorer<T: FeatureLike> {
     n_folds: u8,
     data: Vec<T>,
     weights: Vec<f64>,
     assigned_fold: Vec<u8>,
     fold_classifiers: Vec<Option<GradientBooster>>,
-    // I tried this but makes no difference ...
-    // fold_classifiers: Vec<Option<SelfSupervisedBooster>>,
     config: GBMConfig,
+    precomputed: PrecomputedFeatures,
 }
 
 impl<T: FeatureLike> CrossValidatedScorer<T> {
@@ -354,12 +367,12 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         let assigned_fold: Vec<u8> = (0..data.len())
             .map(|x| (x % n_folds as usize).try_into().unwrap())
             .collect();
-        // let weights = vec![1.0; data.len()];
-        // default to a weight of 0.5 to all targets and 1.0 for decoys
         let weights: Vec<f64> = data
             .iter()
             .map(|x| if x.get_y() > 0.5 { 0.5 } else { 1.0 })
             .collect();
+
+        let precomputed = PrecomputedFeatures::from_data(&data);
 
         Self {
             n_folds,
@@ -368,6 +381,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             fold_classifiers: Vec::new(),
             weights,
             config,
+            precomputed,
         }
     }
 
@@ -473,7 +487,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         buffer: &'a mut DataBuffer,
     ) -> (Matrix<'a, f64>, &'a [f64]) {
         buffer
-            .fill_buffer(self.assigned_fold.as_slice(), self.data.as_slice(), fold)
+            .fill_buffer_precomputed(self.assigned_fold.as_slice(), &self.precomputed, fold)
             .unwrap();
         buffer.as_matrix()
     }

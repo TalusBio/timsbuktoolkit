@@ -230,12 +230,13 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 
 fn process_single_file(
     dotd_file: &std::path::Path,
-    speclib_path: &std::path::Path,
-    calib_lib_path: Option<&std::path::Path>,
+    speclib: &timsseek::data_sources::speclib::Speclib,
+    calib_lib: Option<&timsseek::data_sources::speclib::Speclib>,
     config: &Config,
     base_output_dir: &std::path::Path,
     overwrite: bool,
-) -> std::result::Result<(), errors::CliError> {
+    max_qvalue: f32,
+) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
     info!("Processing file: {:?}", dotd_file);
 
     let timstofpath =
@@ -244,6 +245,7 @@ fn process_single_file(
             path: Some(dotd_file.to_string_lossy().to_string()),
         })?;
 
+    let index_start = std::time::Instant::now();
     let index = load_index_auto(
         dotd_file.to_str().ok_or_else(|| errors::CliError::Io {
             source: "Invalid path encoding".to_string(),
@@ -252,6 +254,8 @@ fn process_single_file(
         None,
     )?
     .into_eager()?;
+    let load_index_ms = index_start.elapsed().as_millis() as u64;
+    println!("Loading index ........... {:.1}s", load_index_ms as f64 / 1000.0);
 
     let fragmented_range = get_frag_range(&timstofpath);
 
@@ -298,19 +302,19 @@ fn process_single_file(
         directory: file_output_dir,
     };
 
-    // Process speclib
-    processing::run_pipeline(
-        speclib_path,
-        calib_lib_path,
+    let report = processing::run_pipeline(
+        speclib,
+        calib_lib,
         &pipeline,
         config.analysis.chunk_size,
         &file_output_config,
-        config.analysis.decoy_strategy,
+        max_qvalue,
+        load_index_ms,
     )
     .unwrap();
 
     info!("Successfully processed {:?}", dotd_file);
-    Ok(())
+    Ok(report)
 }
 
 fn main() -> std::result::Result<(), errors::CliError> {
@@ -487,8 +491,41 @@ fn main() -> std::result::Result<(), errors::CliError> {
     })?;
     info!("Wrote final configuration to {:?}", config_output_path);
 
+    let mut run_report = timsseek::scoring::RunReport::default();
     let mut failed_files: Vec<(std::path::PathBuf, errors::CliError)> = Vec::new();
     let mut successful_files: Vec<std::path::PathBuf> = Vec::new();
+
+    // Load speclib once (shared across all files)
+    let speclib_start = std::time::Instant::now();
+    info!("Building database from speclib file {:?}", validated.speclib_path);
+    info!("Decoy generation strategy: {}", config.analysis.decoy_strategy);
+    let speclib = timsseek::data_sources::speclib::Speclib::from_file(
+        &validated.speclib_path,
+        config.analysis.decoy_strategy,
+    ).map_err(|e| errors::CliError::Config { source: format!("Failed to load speclib: {:?}", e) })?;
+    let load_speclib_ms = speclib_start.elapsed().as_millis() as u64;
+    println!("Loading speclib ......... {:.1}s ({} entries)", load_speclib_ms as f64 / 1000.0, speclib.len());
+
+    // Load calibration library once (if provided)
+    let calib_start = std::time::Instant::now();
+    let calib_lib = match &validated.calib_lib_path {
+        Some(p) => {
+            info!("Loading calibration library from {:?}", p);
+            let lib = timsseek::data_sources::speclib::Speclib::from_file(
+                p,
+                config.analysis.decoy_strategy,
+            ).map_err(|e| errors::CliError::Config { source: format!("Failed to load calib lib: {:?}", e) })?;
+            println!("Loading calib lib ....... {:.1}s ({} entries)", calib_start.elapsed().as_secs_f64(), lib.len());
+            Some(lib)
+        }
+        None => None,
+    };
+    let load_calib_lib_ms = calib_start.elapsed().as_millis() as u64;
+
+    run_report.load_speclib_ms = load_speclib_ms;
+    run_report.load_calib_lib_ms = load_calib_lib_ms;
+    run_report.speclib_entries = speclib.len();
+    run_report.calib_lib_entries = calib_lib.as_ref().map_or(0, |l| l.len());
 
     let total_files = validated.dotd_files.len();
     info!("Processing {} raw file(s)", total_files);
@@ -503,20 +540,32 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
         match process_single_file(
             dotd_file,
-            &validated.speclib_path,
-            validated.calib_lib_path.as_deref(),
+            &speclib,
+            calib_lib.as_ref(),
             &config,
             &validated.output_directory,
             validated.overwrite,
+            args.max_qvalue,
         ) {
-            Ok(_) => {
+            Ok(report) => {
                 successful_files.push(dotd_file.clone());
+                run_report.files.push(timsseek::scoring::FileReport {
+                    file_name: dotd_file.to_string_lossy().to_string(),
+                    pipeline: report,
+                });
             }
             Err(e) => {
                 error!("Failed to process {:?}: {}", dotd_file, e);
                 failed_files.push((dotd_file.clone(), e));
             }
         }
+    }
+
+    // Write run-level report
+    let run_report_path = validated.output_directory.join("run_report.json");
+    if let Ok(json) = serde_json::to_string_pretty(&run_report) {
+        let _ = std::fs::write(&run_report_path, json);
+        info!("Wrote run report to {:?}", run_report_path);
     }
 
     info!("Successfully processed {} file(s)", successful_files.len());
