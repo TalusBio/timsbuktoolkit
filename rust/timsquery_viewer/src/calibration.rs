@@ -858,36 +858,46 @@ impl ViewerCalibrationState {
                             );
                         }
 
-                        // Ridge envelope: semi-transparent band showing tolerance width
+                        // Ridge envelope: upper and lower boundary lines showing tolerance width
                         let ridge = cs.measure_ridge_width(0.1);
                         if ridge.len() >= 2 {
-                            // Build a closed polygon: upper edge left-to-right, then lower edge right-to-left
-                            let mut envelope: Vec<[f64; 2]> = Vec::with_capacity(ridge.len() * 2);
+                            let ridge_color = egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
 
-                            // Upper edge (left to right)
-                            for m in &ridge {
-                                let y = match curve.predict(m.x) {
-                                    Ok(y) => y,
-                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
-                                    Err(_) => continue,
-                                };
-                                envelope.push([m.x, y + m.half_width]);
-                            }
-                            // Lower edge (right to left)
-                            for m in ridge.iter().rev() {
-                                let y = match curve.predict(m.x) {
-                                    Ok(y) => y,
-                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
-                                    Err(_) => continue,
-                                };
-                                envelope.push([m.x, y - m.half_width]);
-                            }
+                            let upper: Vec<[f64; 2]> = ridge.iter()
+                                .filter_map(|m| {
+                                    let y = match curve.predict(m.x) {
+                                        Ok(y) => y,
+                                        Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                        Err(_) => return None,
+                                    };
+                                    Some([m.x, y + m.half_width])
+                                })
+                                .collect();
+                            let lower: Vec<[f64; 2]> = ridge.iter()
+                                .filter_map(|m| {
+                                    let y = match curve.predict(m.x) {
+                                        Ok(y) => y,
+                                        Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                        Err(_) => return None,
+                                    };
+                                    Some([m.x, y - m.half_width])
+                                })
+                                .collect();
 
-                            if envelope.len() >= 3 {
-                                plot_ui.polygon(
-                                    Polygon::new("ridge", PlotPoints::new(envelope))
-                                        .fill_color(egui::Color32::from_rgba_unmultiplied(0, 220, 220, 30))
-                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 220, 220, 80)))
+                            if upper.len() >= 2 {
+                                plot_ui.line(
+                                    Line::new("ridge upper", PlotPoints::new(upper))
+                                        .color(ridge_color)
+                                        .width(1.5)
+                                        .style(egui_plot::LineStyle::dashed_dense()),
+                                );
+                            }
+                            if lower.len() >= 2 {
+                                plot_ui.line(
+                                    Line::new("ridge lower", PlotPoints::new(lower))
+                                        .color(ridge_color)
+                                        .width(1.5)
+                                        .style(egui_plot::LineStyle::dashed_dense()),
                                 );
                             }
                         }
