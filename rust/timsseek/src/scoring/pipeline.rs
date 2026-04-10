@@ -50,7 +50,7 @@ use super::apex_finding::{
     PeptideMetadata,
     RelativeIntensities,
 };
-use super::full_results::FullQueryResult;
+use super::full_results::ViewerResult;
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
 use super::results::{
@@ -510,15 +510,15 @@ impl<I: ScorerQueriable> Scorer<I> {
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
-    pub fn process_query_full(
+    pub fn score_for_viewer(
         &self,
         item: QueryItemToScore,
         calibration: &CalibrationResult,
-    ) -> Result<FullQueryResult, DataProcessingError> {
+    ) -> Result<ViewerResult, DataProcessingError> {
         let mut buffer = ApexFinder::new(self.num_cycles());
 
         // Re-implementing logic here because process_query consumes `item` and returns `Option`.
-        // We want intermediate results for `FullQueryResult`.
+        // We want intermediate results for `ViewerResult`.
 
         let (metadata, scoring_ctx) = self.build_broad_extraction(&item).map_err(|_| {
             DataProcessingError::ExpectedNonEmptyData {
@@ -533,7 +533,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             self.execute_secondary_query(&item, &apex_score, &spectral_tol, &isotope_tol);
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
-        let search_results = self.finalize_results(
+        let scored = self.finalize_results(
             &metadata,
             nqueries,
             &apex_score,
@@ -542,13 +542,13 @@ impl<I: ScorerQueriable> Scorer<I> {
         )?;
 
         // Extract chromatograms before it's consumed
-        let extractions = scoring_ctx.chromatograms;
+        let chromatograms = scoring_ctx.chromatograms;
 
-        Ok(FullQueryResult {
-            main_score_elements: buffer.traces.clone(),
-            longitudinal_main_score: buffer.traces.apex_profile.clone(),
-            extractions,
-            search_results,
+        Ok(ViewerResult {
+            traces: buffer.traces.clone(),
+            longitudinal_apex_profile: buffer.traces.apex_profile.clone(),
+            chromatograms,
+            scored,
         })
     }
 
