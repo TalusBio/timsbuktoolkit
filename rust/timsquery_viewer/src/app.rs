@@ -670,16 +670,41 @@ impl ViewerApp {
                         );
                     }
 
-                    // Add library RT reference line
+                    // Add RT reference lines
                     if let Some(elution_groups) = self.data.elution_groups.as_ref()
                         && let Ok((elution_group, _)) =
                             elution_groups.get_elem(selected_idx as usize)
                     {
-                        self.computed.insert_reference_line(
-                            "Library RT".into(),
-                            elution_group.rt_seconds() as f64,
-                            Color32::BLUE,
-                        );
+                        let lib_rt = elution_group.rt_seconds() as f64;
+
+                        // Check if calibration projects to a different RT
+                        let calibrated_rt = self.calibration.calibration_state.as_ref()
+                            .and_then(|cs| cs.curve())
+                            .and_then(|curve| match curve.predict(lib_rt) {
+                                Ok(y) => Some(y),
+                                Err(calibrt::CalibRtError::OutOfBounds(y)) => Some(y),
+                                Err(_) => None,
+                            });
+
+                        if let Some(cal_rt) = calibrated_rt {
+                            // Show both: dashed library RT + solid calibrated RT
+                            self.computed.insert_reference_line(
+                                "Library RT".into(),
+                                lib_rt,
+                                Color32::from_rgba_unmultiplied(100, 100, 255, 120), // dim blue
+                            );
+                            self.computed.insert_reference_line(
+                                "Calibrated RT".into(),
+                                cal_rt,
+                                Color32::from_rgb(255, 165, 0), // orange
+                            );
+                        } else {
+                            self.computed.insert_reference_line(
+                                "Library RT".into(),
+                                lib_rt,
+                                Color32::BLUE,
+                            );
+                        }
                     }
                 }
                 Err(e) => {
