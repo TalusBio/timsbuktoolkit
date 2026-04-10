@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use array2d::Array2DError;
 use timscentroid::serialization::SerializationError;
 use timsrust::{
     TimsRustError,
@@ -77,6 +78,16 @@ pub enum DataProcessingError {
 impl From<DataProcessingError> for TimsqueryError {
     fn from(e: DataProcessingError) -> Self {
         TimsqueryError::DataProcessingError(e)
+    }
+}
+
+impl From<Array2DError> for DataProcessingError {
+    fn from(e: Array2DError) -> Self {
+        match e {
+            Array2DError::EmptyData => DataProcessingError::ExpectedNonEmptyData,
+            Array2DError::DimensionMismatch => DataProcessingError::ExpectedVectorSameLength,
+            Array2DError::IndexOutOfBounds(n) => DataProcessingError::IndexOutOfBoundsError(n),
+        }
     }
 }
 
