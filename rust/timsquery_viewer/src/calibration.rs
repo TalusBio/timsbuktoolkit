@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 use calibrt::CalibrationState;
 use timscentroid::rt_mapping::{MS1CycleIndex, RTIndex};
@@ -68,6 +69,28 @@ pub enum CalibrationPhase {
 #[derive(Debug, Clone)]
 pub struct DerivedTolerances {
     pub rt_tolerance_minutes: f32,
+    pub wrmse: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Serde types for save/load
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct SavedCalibration {
+    version: String,
+    rt_range_seconds: [f64; 2],
+    calibrant_points: Vec<[f64; 3]>, // [lib_rt, measured_rt, weight]
+    tolerances: SavedTolerances,
+    wrmse: f64,
+    n_calibrants: usize,
+    n_scored: usize,
+    grid_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedTolerances {
+    rt_minutes: f32,
 }
 
 /// Messages sent from the background thread to the UI.
@@ -427,6 +450,108 @@ impl ViewerCalibrationState {
     }
 
     // -----------------------------------------------------------------------
+    // Save / Load
+    // -----------------------------------------------------------------------
+
+    /// Serialize the current calibration state to a JSON v1 file.
+    pub fn save_to_file(
+        &self,
+        path: &std::path::Path,
+        rt_range_seconds: [f64; 2],
+    ) -> Result<(), String> {
+        let tol = self.derived_tolerances.as_ref();
+        let saved = SavedCalibration {
+            version: "v1".to_string(),
+            rt_range_seconds,
+            calibrant_points: self
+                .snapshot_points
+                .iter()
+                .map(|(x, y, w)| [*x, *y, *w])
+                .collect(),
+            tolerances: SavedTolerances {
+                rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
+            },
+            wrmse: tol.map_or(0.0, |t| t.wrmse),
+            n_calibrants: self.n_calibrants,
+            n_scored: self.n_scored,
+            grid_size: DEFAULT_GRID_SIZE,
+        };
+        let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Deserialize calibration state from a JSON v1 file.
+    ///
+    /// Returns an optional warning string (e.g. RT range mismatch).
+    pub fn load_from_file(
+        &mut self,
+        path: &std::path::Path,
+        raw_rt_range: Option<[f64; 2]>,
+    ) -> Result<Option<String>, String> {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let saved: SavedCalibration =
+            serde_json::from_str(&json).map_err(|e| e.to_string())?;
+
+        if saved.version != "v1" {
+            return Err(format!("Unsupported version: {}", saved.version));
+        }
+
+        // RT range compatibility check.
+        let mut warning = None;
+        if let Some(raw_range) = raw_rt_range {
+            let overlap_lo = saved.rt_range_seconds[0].max(raw_range[0]);
+            let overlap_hi = saved.rt_range_seconds[1].min(raw_range[1]);
+            let overlap = (overlap_hi - overlap_lo).max(0.0);
+            let saved_span = saved.rt_range_seconds[1] - saved.rt_range_seconds[0];
+            if saved_span > 0.0 && overlap / saved_span < 0.5 {
+                warning = Some(
+                    "RT range mismatch — calibration may not be valid for this file".to_string(),
+                );
+            }
+        } else {
+            warning = Some(
+                "No raw file loaded — cannot verify RT range compatibility".to_string(),
+            );
+        }
+
+        // Rebuild calibration state from saved points.
+        let points: Vec<(f64, f64, f64)> = saved
+            .calibrant_points
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect();
+
+        if !points.is_empty() {
+            let x_min = points.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let x_max = points.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+            let y_min = points.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let y_max = points.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+
+            if let Ok(mut cal) = calibrt::CalibrationState::new(
+                saved.grid_size,
+                (x_min, x_max),
+                (y_min, y_max),
+                DEFAULT_LOOKBACK,
+            ) {
+                cal.update(points.iter().copied());
+                cal.fit();
+                self.calibration_state = Some(cal);
+            }
+        }
+
+        self.snapshot_points = points;
+        self.n_calibrants = saved.n_calibrants;
+        self.n_scored = saved.n_scored;
+        self.derived_tolerances = Some(DerivedTolerances {
+            rt_tolerance_minutes: saved.tolerances.rt_minutes,
+            wrmse: saved.wrmse,
+        });
+        self.phase = CalibrationPhase::Done;
+
+        Ok(warning)
+    }
+
+    // -----------------------------------------------------------------------
     // UI rendering
     // -----------------------------------------------------------------------
 
@@ -466,6 +591,33 @@ impl ViewerCalibrationState {
                             self.start(Arc::clone(index), Arc::clone(data));
                         }
                     }
+                    if ui.button("Load").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .pick_file()
+                        {
+                            let raw_rt_range = if let crate::app::IndexedDataState::Loaded {
+                                index, ..
+                            } = indexed_data
+                            {
+                                let cycle_mapping = index.ms1_cycle_mapping();
+                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                                Some([
+                                    rt_min_ms as f64 / 1000.0,
+                                    rt_max_ms as f64 / 1000.0,
+                                ])
+                            } else {
+                                None
+                            };
+                            match self.load_from_file(&path, raw_rt_range) {
+                                Ok(Some(warning)) => tracing::warn!("{}", warning),
+                                Ok(None) => {
+                                    tracing::info!("Calibration loaded from {:?}", path)
+                                }
+                                Err(e) => tracing::error!("Failed to load calibration: {}", e),
+                            }
+                        }
+                    }
                 }
                 CalibrationPhase::Running => {
                     if ui.button("\u{23F8} Pause").clicked() {
@@ -482,10 +634,52 @@ impl ViewerCalibrationState {
                     if ui.button("\u{23F9} Stop").clicked() {
                         self.stop();
                     }
+                    if ui.button("Save").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("calibration.json")
+                            .add_filter("JSON", &["json"])
+                            .save_file()
+                        {
+                            let rt_range = if let crate::app::IndexedDataState::Loaded {
+                                index, ..
+                            } = indexed_data
+                            {
+                                let cycle_mapping = index.ms1_cycle_mapping();
+                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                                [rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0]
+                            } else {
+                                [0.0, 0.0]
+                            };
+                            if let Err(e) = self.save_to_file(&path, rt_range) {
+                                tracing::error!("Failed to save calibration: {}", e);
+                            }
+                        }
+                    }
                 }
                 CalibrationPhase::Done => {
                     if ui.button("\u{21BA} Reset").clicked() {
                         self.reset();
+                    }
+                    if ui.button("Save").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("calibration.json")
+                            .add_filter("JSON", &["json"])
+                            .save_file()
+                        {
+                            let rt_range = if let crate::app::IndexedDataState::Loaded {
+                                index, ..
+                            } = indexed_data
+                            {
+                                let cycle_mapping = index.ms1_cycle_mapping();
+                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                                [rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0]
+                            } else {
+                                [0.0, 0.0]
+                            };
+                            if let Err(e) = self.save_to_file(&path, rt_range) {
+                                tracing::error!("Failed to save calibration: {}", e);
+                            }
+                        }
                     }
                 }
             }
@@ -681,9 +875,10 @@ impl ViewerCalibrationState {
         // Derive a suggested RT tolerance: 3x WRMSE in minutes.
         let suggested_rt_min = wrmse.map(|w| (w / 60.0) * 3.0);
 
-        if let Some(derived) = &suggested_rt_min {
+        if let (Some(rt_min), Some(w)) = (suggested_rt_min, wrmse) {
             self.derived_tolerances = Some(DerivedTolerances {
-                rt_tolerance_minutes: *derived as f32,
+                rt_tolerance_minutes: rt_min as f32,
+                wrmse: w,
             });
         }
 
