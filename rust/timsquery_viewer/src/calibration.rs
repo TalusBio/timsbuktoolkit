@@ -142,6 +142,61 @@ impl Default for ViewerCalibrationState {
 }
 
 impl ViewerCalibrationState {
+    /// Reconstruct from a persisted snapshot (app state restore).
+    pub fn from_snapshot(snapshot: Option<calibrt::CalibrationSnapshot>) -> Self {
+        let Some(snapshot) = snapshot else {
+            return Self::default();
+        };
+        if snapshot.points.is_empty() {
+            return Self::default();
+        }
+
+        let snapshot_points: Vec<(f64, f64, f64)> = snapshot
+            .points
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect();
+        let n_calibrants = snapshot_points.len();
+
+        let calibration_state = calibrt::CalibrationState::from_snapshot(&snapshot).ok();
+
+        Self {
+            phase: if calibration_state.is_some() {
+                CalibrationPhase::Done
+            } else {
+                CalibrationPhase::Idle
+            },
+            calibration_state,
+            generation: 0,
+            n_scored: n_calibrants,
+            n_calibrants,
+            heap_capacity: DEFAULT_HEAP_CAPACITY,
+            elution_group_count: 0,
+            derived_tolerances: None,
+            thread_handle: None,
+            thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
+            receiver: None,
+            snapshot_points,
+        }
+    }
+
+    /// Extract snapshot for persistence (returns None if no calibration data).
+    pub fn snapshot_for_persistence(&self) -> Option<calibrt::CalibrationSnapshot> {
+        if self.snapshot_points.is_empty() {
+            return None;
+        }
+        // Use CalibrationState's save_snapshot if available, otherwise build from raw points
+        if let Some(cs) = &self.calibration_state {
+            Some(cs.save_snapshot(&self.snapshot_points))
+        } else {
+            Some(calibrt::CalibrationSnapshot {
+                points: self.snapshot_points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+                grid_size: DEFAULT_GRID_SIZE,
+                lookback: DEFAULT_LOOKBACK,
+            })
+        }
+    }
+
     /// Start the calibration background thread.
     ///
     /// Requires both raw data and elution groups to be loaded.
