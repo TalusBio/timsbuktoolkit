@@ -12,7 +12,12 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Nodes are sorted by (x, y) to ensure topological order
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
-pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node], lookback: usize) -> Vec<crate::Point> {
+pub(crate) fn find_optimal_path(
+    nodes: &mut [crate::grid::Node],
+    lookback: usize,
+    max_weights: &mut Vec<f64>,
+    prev_node_indices: &mut Vec<Option<usize>>,
+) -> Vec<crate::Point> {
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -29,8 +34,10 @@ pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node], lookback: usize
     });
 
     let n = nodes.len();
-    let mut max_weights = vec![0.0; n];
-    let mut prev_node_indices = vec![None; n];
+    max_weights.clear();
+    max_weights.resize(n, 0.0);
+    prev_node_indices.clear();
+    prev_node_indices.resize(n, None);
 
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
@@ -64,7 +71,7 @@ pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node], lookback: usize
     let mut max_path_weight = 0.0;
     let mut end_of_path_idx = 0;
 
-    for (i, max_w) in max_weights.into_iter().enumerate() {
+    for (i, &max_w) in max_weights.iter().enumerate() {
         if max_w > max_path_weight {
             max_path_weight = max_w;
             end_of_path_idx = i;
