@@ -27,10 +27,10 @@ pub(crate) fn find_optimal_path(
     // predecessors (with smaller x,y) have already been processed.
     nodes.sort_by(|a, b| {
         a.center
-            .x
-            .partial_cmp(&b.center.x)
+            .library
+            .partial_cmp(&b.center.library)
             .unwrap()
-            .then_with(|| a.center.y.partial_cmp(&b.center.y).unwrap())
+            .then_with(|| a.center.observed.partial_cmp(&b.center.observed).unwrap())
     });
 
     let n = nodes.len();
@@ -45,9 +45,9 @@ pub(crate) fn find_optimal_path(
         let start = if i > lookback { i - lookback } else { 0 };
         for j in start..i {
             // Only create edges where both dimensions increase (monotonic constraint)
-            if nodes[i].center.x > nodes[j].center.x && nodes[i].center.y > nodes[j].center.y {
-                let dx = nodes[i].center.x - nodes[j].center.x;
-                let dy = nodes[i].center.y - nodes[j].center.y;
+            if nodes[i].center.library > nodes[j].center.library && nodes[i].center.observed > nodes[j].center.observed {
+                let dx = nodes[i].center.library - nodes[j].center.library;
+                let dy = nodes[i].center.observed - nodes[j].center.observed;
                 let dist = (dx * dx + dy * dy).sqrt();
 
                 if dist > DISTANCE_THRESHOLD {

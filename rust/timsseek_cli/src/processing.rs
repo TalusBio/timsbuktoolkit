@@ -471,8 +471,8 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             };
 
             Some(Point {
-                x: irt_for_curve as f64,
-                y: c.apex_rt_seconds as f64,
+                library: irt_for_curve as f64,
+                observed: c.apex_rt_seconds as f64,
                 weight: 1.0,
             })
         })
@@ -494,14 +494,14 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             f64::INFINITY,
             f64::NEG_INFINITY,
         ),
-        |(mnx, mxx, mny, mxy), p| (mnx.min(p.x), mxx.max(p.x), mny.min(p.y), mxy.max(p.y)),
+        |(mnx, mxx, mny, mxy), p| (mnx.min(p.library), mxx.max(p.library), mny.min(p.observed), mxy.max(p.observed)),
     );
 
     // Use CalibrationState for fitting + ridge width measurement
     let mut cal_state = CalibratedGrid::new(
         config.grid_size, (min_x, max_x), (min_y, max_y), config.dp_lookback,
     )?;
-    cal_state.update(points.iter().map(|p| (p.x, p.y, p.weight)));
+    cal_state.update(points.iter().map(|p| (p.library, p.observed, p.weight)));
     cal_state.fit();
     let cal_curve = cal_state.curve()
         .ok_or(CalibRtError::NoPoints)?
@@ -565,8 +565,8 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         let mut abs_residuals: Vec<f64> = points
             .iter()
             .map(|p| {
-                let predicted = cal_curve.predict(p.x).unwrap_or(p.y);
-                (p.y - predicted).abs()
+                let predicted = cal_curve.predict(p.library).unwrap_or(p.observed);
+                (p.observed - predicted).abs()
             })
             .collect();
         abs_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());

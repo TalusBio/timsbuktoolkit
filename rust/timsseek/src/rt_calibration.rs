@@ -55,7 +55,7 @@ impl CalibrationResult {
     }
 
     pub fn with_ridge_widths(mut self, mut widths: Vec<RidgeMeasurement>) -> Self {
-        widths.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        widths.sort_by(|a, b| a.library.partial_cmp(&b.library).unwrap_or(std::cmp::Ordering::Equal));
         self.ridge_widths = widths;
         self
     }
@@ -69,15 +69,15 @@ impl CalibrationResult {
         let widths = &self.ridge_widths;
 
         // Clamp to endpoints
-        if library_rt_seconds <= widths[0].x {
+        if library_rt_seconds <= widths[0].library {
             return Some(widths[0].half_width);
         }
-        if library_rt_seconds >= widths[widths.len() - 1].x {
+        if library_rt_seconds >= widths[widths.len() - 1].library {
             return Some(widths[widths.len() - 1].half_width);
         }
 
         // Binary search for the bracketing pair
-        let pos = widths.partition_point(|m| m.x < library_rt_seconds);
+        let pos = widths.partition_point(|m| m.library < library_rt_seconds);
         if pos == 0 {
             return Some(widths[0].half_width);
         }
@@ -85,7 +85,7 @@ impl CalibrationResult {
         let right = &widths[pos];
 
         // Linear interpolation
-        let t = (library_rt_seconds - left.x) / (right.x - left.x).max(1e-9);
+        let t = (library_rt_seconds - left.library) / (right.library - left.library).max(1e-9);
         Some(left.half_width + t * (right.half_width - left.half_width))
     }
 
@@ -236,13 +236,13 @@ impl CalibrationResult {
         let end = range.1 as f64 / 1000.0;
         let points = vec![
             Point {
-                x: start,
-                y: start,
+                library: start,
+                observed: start,
                 weight: 1.0,
             },
             Point {
-                x: end,
-                y: end,
+                library: end,
+                observed: end,
                 weight: 1.0,
             },
         ];
