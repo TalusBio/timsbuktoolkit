@@ -12,10 +12,6 @@ pub mod traits;
 pub mod utils;
 pub use micromzpaf;
 
-extern crate parquet;
-#[macro_use]
-extern crate parquet_derive;
-
 pub use data_sources::Speclib;
 pub use models::{
     DecoyStrategy,
@@ -24,8 +20,11 @@ pub use models::{
     QueryItemToScore,
 };
 pub use scoring::{
-    IonSearchResults,
     Scorer,
+    ScoredCandidate,
+    CompetedCandidate,
+    FinalResult,
+    ScoringFields,
 };
 pub use timsquery::ion::{
     IonAnnot,

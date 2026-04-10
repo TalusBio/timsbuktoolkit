@@ -27,7 +27,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 rayon = { workspace = true }
-parquet_derive = {  workspace = true }
 parquet = { workspace = true }
 arrow = { workspace = true }
 
