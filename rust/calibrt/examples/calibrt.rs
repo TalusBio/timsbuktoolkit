@@ -1,5 +1,6 @@
 use calibrt::{
     Point,
+    LibraryRT,
     calibrate,
 };
 use rand::Rng;
@@ -52,10 +53,10 @@ fn main() {
             println!("\n--- Predictions ---");
             for &x in &test_x_vals {
                 let real_expect = real_x_to_y(x);
-                match calibration_curve.predict(x) {
+                match calibration_curve.predict(LibraryRT(x)) {
                     Ok(predicted_y) => println!(
                         "- For library RT {:.2}, predicted measured RT is {:.2}; expect {}",
-                        x, predicted_y, real_expect
+                        x, predicted_y.0, real_expect
                     ),
                     Err(e) => eprintln!(
                         "- For library RT {:.2}, prediction failed: {:?} expected: {}",
