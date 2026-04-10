@@ -3,7 +3,7 @@
 //! This module provides efficient collection of scoring results from parallel iterators.
 //! It aggregates both successful search results and timing measurements across threads.
 
-use super::search_results::IonSearchResults;
+use super::results::ScoredCandidate;
 use super::timings::ScoreTimings;
 use rayon::iter::{
     FromParallelIterator,
@@ -26,7 +26,7 @@ use rayon::iter::{
 /// This minimizes contention and allows efficient parallel collection of results.
 #[derive(Default)]
 pub(super) struct IonSearchAccumulator {
-    pub(super) res: Vec<IonSearchResults>,
+    pub(super) res: Vec<ScoredCandidate>,
     pub(super) timings: ScoreTimings,
 }
 
@@ -44,7 +44,7 @@ impl IonSearchAccumulator {
     ///
     /// Used in the fold phase of parallel collection. Successful results are collected,
     /// while `None` results (failed scoring) are discarded.
-    pub(super) fn fold(mut self, item: (Option<IonSearchResults>, ScoreTimings)) -> Self {
+    pub(super) fn fold(mut self, item: (Option<ScoredCandidate>, ScoreTimings)) -> Self {
         if let Some(elem) = item.0 {
             self.res.push(elem);
         }
@@ -53,20 +53,20 @@ impl IonSearchAccumulator {
     }
 }
 
-impl FromIterator<(Option<IonSearchResults>, ScoreTimings)> for IonSearchAccumulator {
+impl FromIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumulator {
     fn from_iter<I>(iter: I) -> Self
     where
-        I: IntoIterator<Item = (Option<IonSearchResults>, ScoreTimings)>,
+        I: IntoIterator<Item = (Option<ScoredCandidate>, ScoreTimings)>,
     {
         iter.into_iter()
             .fold(IonSearchAccumulator::default(), IonSearchAccumulator::fold)
     }
 }
 
-impl FromParallelIterator<(Option<IonSearchResults>, ScoreTimings)> for IonSearchAccumulator {
+impl FromParallelIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumulator {
     fn from_par_iter<I>(par_iter: I) -> Self
     where
-        I: IntoParallelIterator<Item = (Option<IonSearchResults>, ScoreTimings)>,
+        I: IntoParallelIterator<Item = (Option<ScoredCandidate>, ScoreTimings)>,
     {
         par_iter
             .into_par_iter()
