@@ -5,7 +5,9 @@
 pub mod grid;
 mod pathfinding;
 pub mod plotting;
+pub mod types;
 pub use grid::Grid;
+pub use types::{LibraryRT, ObservedRTSeconds};
 use tracing::{
     info,
     warn,
