@@ -68,6 +68,7 @@ pub struct CalibrantCandidate {
     pub score: f32,
     pub apex_rt_seconds: f32,
     pub speclib_index: usize,
+    pub library_rt_seconds: f32,
 }
 
 impl PartialEq for CalibrantCandidate {
@@ -132,6 +133,11 @@ impl CalibrantHeap {
 
     pub fn len(&self) -> usize {
         self.heap.len()
+    }
+
+    /// Iterate over heap contents. Order is arbitrary (not sorted by score).
+    pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> {
+        self.heap.iter().map(|r| &r.0)
     }
 }
 
@@ -811,6 +817,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt_seconds: loc.retention_time_ms as f32 / 1000.0,
                             speclib_index: speclib_offset + chunk_idx,
+                            library_rt_seconds: item.query.rt_seconds(),
                         });
                     }
                     (scorer, heap)
@@ -833,6 +840,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         score: loc.score,
                         apex_rt_seconds: loc.retention_time_ms as f32 / 1000.0,
                         speclib_index: speclib_offset + chunk_idx,
+                        library_rt_seconds: item.query.rt_seconds(),
                     });
                 }
             }
