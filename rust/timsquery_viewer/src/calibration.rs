@@ -248,6 +248,11 @@ impl ViewerCalibrationState {
 
     /// Drain the channel and update internal state.
     ///
+    /// Whether the background thread is still active (Running or Paused).
+    pub fn is_active(&self) -> bool {
+        matches!(self.phase, CalibrationPhase::Running | CalibrationPhase::Paused)
+    }
+
     /// Returns `true` if any new data was received (caller should
     /// `request_repaint`).
     pub fn poll(&mut self) -> bool {
@@ -278,6 +283,15 @@ impl ViewerCalibrationState {
                                 .map(|&(lib_rt, apex_rt, _weight)| (lib_rt, apex_rt, 1.0)),
                         );
                         cs.fit();
+                        let has_curve = cs.curve().is_some();
+                        let n_path = cs.path_indices().len();
+                        let n_retained = cs.grid_cells().iter()
+                            .filter(|n| !n.suppressed && n.center.weight > 0.0)
+                            .count();
+                        tracing::info!(
+                            "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={}",
+                            n_scored, heap_len, n_retained, n_path, has_curve,
+                        );
                     }
                     changed = true;
                 }
@@ -337,7 +351,6 @@ impl ViewerCalibrationState {
         let mut heap = CalibrantHeap::new(heap_capacity);
 
         let mut n_scored: usize = 0;
-        let mut last_snapshot_heap_len: usize = 0;
 
         for &eg_idx in &indices {
             // Check control flag.
@@ -403,9 +416,10 @@ impl ViewerCalibrationState {
             heap.push(candidate);
             n_scored += 1;
 
-            // Periodic snapshot.
-            if n_scored % SNAPSHOT_INTERVAL == 0 && heap.len() != last_snapshot_heap_len {
-                last_snapshot_heap_len = heap.len();
+            // Periodic snapshot — always send at interval.
+            // Heap content changes even when len() stays at capacity
+            // (better candidates evict worse ones).
+            if n_scored % SNAPSHOT_INTERVAL == 0 {
                 let points: Vec<(f64, f64, f64)> = heap
                     .iter()
                     .map(|c| {
@@ -511,6 +525,7 @@ impl ViewerCalibrationState {
         indexed_data: &crate::app::IndexedDataState,
         elution_groups: &crate::app::ElutionGroupState,
         tolerance: &mut Tolerance,
+        selected_library_rt: Option<f64>,
     ) {
         // -- Control buttons --------------------------------------------------
         ui.horizontal(|ui| {
@@ -655,24 +670,23 @@ impl ViewerCalibrationState {
         ui.separator();
         ui.add_space(4.0);
 
-        // -- Grid + curve plot ------------------------------------------------
-        self.render_calibration_plot(ui);
+        // -- Tolerance suggestion (pinned to bottom, reserves its natural height) --
+        egui::TopBottomPanel::bottom("calibration_footer")
+            .show_inside(ui, |ui| {
+                self.render_tolerance_suggestion(ui, tolerance);
+            });
 
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        // -- Tolerance suggestion ---------------------------------------------
-        self.render_tolerance_suggestion(ui, tolerance);
+        // -- Grid + curve plot (fills remaining space) -------------------------
+        self.render_calibration_plot(ui, selected_library_rt);
     }
 
     /// Render the scatter + curve calibration plot.
-    fn render_calibration_plot(&self, ui: &mut egui::Ui) {
-        use egui_plot::{Line, Plot, PlotPoints, Points, Polygon};
+    fn render_calibration_plot(&self, ui: &mut egui::Ui, selected_library_rt: Option<f64>) {
+        use egui_plot::{Line, Plot, PlotPoints, Points, Polygon, VLine, HLine};
 
         let plot_id = format!("calibration_plot_{}", self.generation);
         let plot = Plot::new(plot_id)
-            .height(ui.available_height().min(400.0))
+            .height(ui.available_height().max(100.0))
             .x_axis_label("Library RT (s)")
             .y_axis_label("Measured RT (s)")
             .allow_zoom(true)
@@ -789,6 +803,43 @@ impl ViewerCalibrationState {
                         }
                     }
                 }
+
+                // Selected peptide overlay: vertical line at library RT,
+                // horizontal line at predicted measured RT, tolerance band
+                if let Some(lib_rt) = selected_library_rt {
+                    // Vertical line: library RT (x-axis)
+                    plot_ui.vline(
+                        VLine::new("library RT", lib_rt)
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 100, 100, 160))
+                            .width(1.5),
+                    );
+
+                    // If curve is fitted, show predicted RT + tolerance band
+                    if let Some(curve) = cs.curve() {
+                        let predicted_rt = match curve.predict(lib_rt) {
+                            Ok(y) => y,
+                            Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                            Err(_) => lib_rt,
+                        };
+
+                        // Horizontal line: predicted measured RT
+                        plot_ui.hline(
+                            HLine::new("predicted RT", predicted_rt)
+                                .color(egui::Color32::from_rgba_unmultiplied(255, 100, 100, 160))
+                                .width(1.5),
+                        );
+
+                        // Crosshair point at (lib_rt, predicted_rt)
+                        plot_ui.points(
+                            Points::new(
+                                "query",
+                                PlotPoints::new(vec![[lib_rt, predicted_rt]]),
+                            )
+                            .color(egui::Color32::from_rgb(255, 80, 80))
+                            .radius(6.0),
+                        );
+                    }
+                }
             } else if !self.snapshot_points.is_empty() {
                 // Fallback: show raw calibrant points if CalibrationState
                 // hasn't been built yet.
@@ -812,39 +863,60 @@ impl ViewerCalibrationState {
 
     /// Render tolerance suggestion and Apply button.
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
-        // Compute WRMSE if we have a curve and snapshot points.
-        let wrmse = self
+        // Compute tolerance from NON-SUPPRESSED GRID CELL centroids.
+        // These ~90 cells survived NMS — they represent the grid's consensus evidence.
+        // Not all 2000 raw calibrants (many false positives with huge residuals).
+        // Not the ~20 path points (near-zero residuals by construction).
+        let stats = self
             .calibration_state
             .as_ref()
             .and_then(|cs| {
                 let curve = cs.curve()?;
-                let points: Vec<calibrt::Point> = self
-                    .snapshot_points
+                let cells = cs.grid_cells();
+
+                // Absolute residuals from non-suppressed cell centroids
+                let mut abs_residuals: Vec<f64> = cells
                     .iter()
-                    .map(|&(lib_rt, apex_rt, score)| calibrt::Point {
-                        x: lib_rt,
-                        y: apex_rt,
-                        weight: score,
+                    .filter(|n| !n.suppressed && n.center.weight > 0.0)
+                    .filter_map(|n| {
+                        let pred = match curve.predict(n.center.x) {
+                            Ok(y) => y,
+                            Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                            Err(_) => return None,
+                        };
+                        Some((pred - n.center.y).abs())
                     })
                     .collect();
-                let val = curve.wrmse(points.iter());
-                if val.is_finite() { Some(val) } else { None }
+
+                if abs_residuals.len() < 4 {
+                    return None;
+                }
+
+                abs_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = abs_residuals.len();
+                let mad_seconds = abs_residuals[n / 2];
+                let q75_seconds = abs_residuals[3 * n / 4];
+
+                Some((mad_seconds, q75_seconds, n))
             });
 
-        // Derive a suggested RT tolerance: 3x WRMSE in minutes.
-        let suggested_rt_min = wrmse.map(|w| (w / 60.0) * 3.0);
+        // Suggested RT tolerance: 3x MAD of retained cell residuals, floored at 0.5 min.
+        let suggested = stats.map(|(mad_s, q75_s, n_cells)| {
+            let rt_min = (mad_s / 60.0 * 3.0).max(0.5);
+            (rt_min, mad_s, q75_s, n_cells)
+        });
 
-        if let Some(rt_min) = suggested_rt_min {
+        if let Some((rt_min, _, _, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
                 rt_tolerance_minutes: rt_min as f32,
             });
         }
 
         ui.horizontal(|ui| {
-            if let (Some(rt_min), Some(w)) = (suggested_rt_min, wrmse) {
+            if let Some((rt_min, mad_s, q75_s, n_cells)) = suggested {
                 ui.label(format!(
-                    "Suggested RT: \u{00B1}{:.2} min   WRMSE: {:.2} s",
-                    rt_min, w
+                    "Suggested RT: \u{00B1}{:.2} min   MAD: {:.1} s   Q75: {:.1} s   ({} cells)",
+                    rt_min, mad_s, q75_s, n_cells,
                 ));
                 if ui.button("Apply").clicked() {
                     let rt_tol = rt_min as f32;

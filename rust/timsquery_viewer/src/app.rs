@@ -517,7 +517,23 @@ impl ViewerApp {
             self.chromatogram_receiver = Some(rx);
 
             let index_owned = index.clone();
-            let elution_group_owned = elution_group.clone();
+            // If calibration is available, project the library RT to measured RT
+            let mut elution_group_owned = elution_group.clone();
+            if let Some(cs) = &self.calibration.calibration_state {
+                if let Some(curve) = cs.curve() {
+                    let lib_rt = elution_group_owned.rt_seconds();
+                    let calibrated_rt = match curve.predict(lib_rt as f64) {
+                        Ok(y) => y as f32,
+                        Err(calibrt::CalibRtError::OutOfBounds(y)) => y as f32,
+                        Err(_) => lib_rt,
+                    };
+                    tracing::debug!(
+                        "RT calibration: {:.1}s (library) → {:.1}s (projected)",
+                        lib_rt, calibrated_rt,
+                    );
+                    elution_group_owned.set_rt_seconds(calibrated_rt);
+                }
+            }
             let expected_intensities_owned = expected_intensities.clone();
             let tolerance_owned = self.data.tolerance.clone();
             let smoothing_owned = self.data.smoothing;
@@ -1374,6 +1390,10 @@ impl eframe::App for ViewerApp {
         if self.calibration.poll() {
             ctx.request_repaint();
         }
+        // Keep polling while calibration is running (egui won't repaint without input otherwise)
+        if self.calibration.is_active() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
 
         // Generate MS2 spectrum and mobility data if RT was clicked
         self.handle_rt_click();
@@ -1660,11 +1680,18 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                     .render(ui, self.computed.mobility_data());
             }
             Pane::Calibration => {
+                // Get selected peptide's library RT for overlay on heatmap
+                let selected_library_rt = self.ui.selected_index.and_then(|idx| {
+                    let eg_data = self.data.elution_groups.as_ref()?;
+                    let (eg, _) = eg_data.get_elem(idx).ok()?;
+                    Some(eg.rt_seconds() as f64)
+                });
                 self.calibration.render_panel(
                     ui,
                     &self.data.indexed_data,
                     &self.data.elution_groups,
                     &mut self.data.tolerance,
+                    selected_library_rt,
                 );
             }
         }
