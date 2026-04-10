@@ -62,27 +62,6 @@ use super::timings::ScoreTimings;
 use crate::rt_calibration::CalibrationResult;
 use tracing::warn;
 
-/// Hierarchical tolerance configuration for the scoring pipeline.
-///
-/// Progressive refinement: prescore (broad RT) -> secondary (narrow RT) -> tertiary (tight mobility).
-#[derive(Debug, Clone)]
-pub struct ToleranceHierarchy {
-    /// Broad search for prescore phase (full RT range, e.g., +/- 5 min).
-    pub prescore: Tolerance,
-
-    /// Refined search at detected apex (narrow RT window, e.g., +/- 30-60s).
-    pub secondary: Tolerance,
-}
-
-impl ToleranceHierarchy {
-    /// Creates tertiary tolerance with 3% mobility constraints for isotope matching.
-    pub fn tertiary_tolerance(&self) -> Tolerance {
-        self.secondary
-            .clone()
-            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
-    }
-}
-
 /// Lightweight calibrant candidate — just enough to re-query in Phase 2.
 /// Implements Ord by score (ascending) for use in BinaryHeap<Reverse<_>>.
 #[derive(Debug, Clone)]
@@ -322,12 +301,15 @@ fn compute_secondary_lazyscores(
 ///
 /// Pipeline stages: build context → find apex → refine → finalize.
 /// Uses progressive tolerance refinement, metadata separation, and buffer reuse for high throughput.
-pub struct ScoringPipeline<I: ScorerQueriable> {
+pub struct Scorer<I: ScorerQueriable> {
     /// Indexed peak data that implements the required query aggregators.
     pub index: I,
 
-    /// Hierarchical tolerance configuration for progressive refinement.
-    pub tolerances: ToleranceHierarchy,
+    /// Broad tolerance used during the prescore phase.
+    pub broad_tolerance: Tolerance,
+
+    /// Refined tolerance used at detected apex for secondary queries.
+    pub secondary_tolerance: Tolerance,
 
     /// m/z range where peptides were fragmented.
     /// Queries with precursors outside this range are filtered out.
@@ -339,7 +321,7 @@ enum SkippingReason {
     RetentionTimeOutOfBounds,
 }
 
-impl<I: ScorerQueriable> ScoringPipeline<I> {
+impl<I: ScorerQueriable> Scorer<I> {
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
@@ -358,8 +340,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let max_range = TupleRange::try_new(max_range.0, max_range.1)
             .expect("Reference RTs should be sorted and valid");
         let rt_range = match self
-            .tolerances
-            .prescore
+            .broad_tolerance
             .rt_range_as_milis(item.query.rt_seconds())
         {
             OptionallyRestricted::Unrestricted => max_range,
@@ -380,7 +361,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
             ) {
                 Ok(collector) => collector,
                 Err(e) => {
-                    let tol_range = self.tolerances.prescore.rt_range_as_milis(item.query.rt_seconds());
+                    let tol_range = self.broad_tolerance.rt_range_as_milis(item.query.rt_seconds());
                     panic!(
                         "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
                         item.query, e, tol_range,
@@ -391,7 +372,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
 
         tracing::span!(tracing::Level::TRACE, "build_candidate_context::add_query").in_scope(
             || {
-                self.index.add_query(&mut agg, &self.tolerances.prescore);
+                self.index.add_query(&mut agg, &self.broad_tolerance);
             },
         );
 
@@ -479,7 +460,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let new_query = item.query.clone().with_rt_seconds(new_rt_seconds);
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
-        self.index.add_query(&mut agg, &self.tolerances.secondary);
+        self.index.add_query(&mut agg, &self.secondary_tolerance);
 
         // Calculate weighted mean mobility from observed data
         let mobility = Self::get_mobility(&agg);
@@ -499,7 +480,10 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
 
-        let tol_use = self.tolerances.tertiary_tolerance();
+        let tol_use = self
+            .secondary_tolerance
+            .clone()
+            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)));
 
         self.index.add_query(&mut agg, &tol_use);
         self.index.add_query(&mut isotope_agg, &tol_use);
@@ -536,7 +520,7 @@ impl<I: ScorerQueriable> ScoringPipeline<I> {
     }
 }
 
-impl<I: ScorerQueriable> ScoringPipeline<I> {
+impl<I: ScorerQueriable> Scorer<I> {
     pub fn process_query_full(
         &self,
         item: QueryItemToScore,

@@ -32,7 +32,7 @@ use timsseek::scoring::{
     PipelineTimings,
     ScoreTimings,
 };
-use timsseek::scoring::pipeline::ScoringPipeline;
+use timsseek::scoring::pipeline::Scorer;
 use timsseek::scoring::search_results::{
     IonSearchResults,
     ResultParquetWriter,
@@ -111,7 +111,7 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
 pub fn main_loop<I: ScorerQueriable>(
     speclib: Speclib,
     calib_lib: Option<Speclib>,
-    pipeline: &ScoringPipeline<I>,
+    pipeline: &Scorer<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
 ) -> std::result::Result<PipelineTimings, TimsSeekError> {
@@ -252,7 +252,7 @@ pub fn main_loop<I: ScorerQueriable>(
 )]
 fn phase1_prescore<I: ScorerQueriable>(
     speclib: &Speclib,
-    pipeline: &ScoringPipeline<I>,
+    pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
 ) -> Vec<CalibrantCandidate> {
@@ -303,7 +303,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &Speclib,
     main_lookup: Option<&std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>>,
-    pipeline: &ScoringPipeline<I>,
+    pipeline: &Scorer<I>,
     config: &CalibrationConfig,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
@@ -467,7 +467,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
 )]
 fn phase3_score<I: ScorerQueriable>(
     speclib: &Speclib,
-    pipeline: &ScoringPipeline<I>,
+    pipeline: &Scorer<I>,
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
@@ -645,7 +645,7 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
 pub fn process_speclib(
     path: &Path,
     calib_lib_path: Option<&Path>,
-    pipeline: &ScoringPipeline<IndexedTimstofPeaks>,
+    pipeline: &Scorer<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
     decoy_strategy: DecoyStrategy,
