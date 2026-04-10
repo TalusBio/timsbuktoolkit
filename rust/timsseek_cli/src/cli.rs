@@ -5,13 +5,15 @@ use timsseek::DecoyStrategy;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Increase logging verbosity (can be repeated: -v for debug, -vv for trace)
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
-    pub verbose: u8,
+    /// Path to the log file.
+    /// Defaults to {output_dir}/timsseek.log.
+    /// Use "-" to send logs to stderr instead of a file.
+    #[arg(long, value_name = "PATH")]
+    pub log_path: Option<PathBuf>,
 
-    /// Decrease logging verbosity (can be repeated: -q for warn, -qq for error)
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
-    pub quiet: u8,
+    /// Log level for the log file (default: info)
+    #[arg(long, value_name = "LEVEL", default_value = "info")]
+    pub log_level: String,
 
     /// Path to the JSON configuration file (optional, uses defaults if not provided)
     #[arg(short, long)]

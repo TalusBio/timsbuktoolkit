@@ -1,8 +1,10 @@
 use super::config::OutputConfig;
 use indicatif::{
+    ProgressBar,
     ProgressIterator,
     ProgressStyle,
 };
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Instant;
 use timsquery::IndexedTimstofPeaks;
@@ -45,6 +47,20 @@ use tracing::{
     info,
     warn,
 };
+
+/// Create a progress bar that writes to stderr when it is a TTY, or a hidden
+/// (no-op) bar when stderr is not a terminal (e.g. piped / redirected).
+fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let style = ProgressStyle::with_template(&format!(
+        "{{spinner:.green}} {} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({{eta}})",
+        label
+    ))
+    .unwrap();
+    ProgressBar::new(len).with_style(style)
+}
 
 /// Check that two speclibs are on a compatible RT scale.
 /// Warns loudly if the RT ranges don't overlap, which would produce a useless calibration.
@@ -135,6 +151,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         calibrants.len(),
         phase1_ms
     );
+    println!(
+        "Phase 1: Prescore ........ {:.1}s ({} calibrants)",
+        phase1_ms as f64 / 1000.0,
+        calibrants.len()
+    );
 
     // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
     // Build lookup from main speclib when using a separate calib lib.
@@ -186,6 +207,10 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         }
     };
     let phase2_ms = phase2_start.elapsed().as_millis() as u64;
+    println!(
+        "Phase 2: Calibrate ....... {:.1}s",
+        phase2_ms as f64 / 1000.0
+    );
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
@@ -198,10 +223,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         chunk_size,
         &mut phase3_timings,
     );
+    let phase3_ms = phase3_start.elapsed().as_millis() as u64;
     info!(
         "Phase 3 complete: {} scored peptides in {:?}",
         results.len(),
         phase3_start.elapsed()
+    );
+    println!(
+        "Phase 3: Score ........... {:.1}s ({} peptides)",
+        phase3_ms as f64 / 1000.0,
+        results.len()
     );
 
     let total_scored = results.len();
@@ -214,21 +245,30 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     });
     let phase4_ms = phase4_start.elapsed().as_millis() as u64;
     let total_after_competition = competed.len();
+    println!(
+        "Phase 4: Compete ......... {:.1}s ({} candidates)",
+        phase4_ms as f64 / 1000.0,
+        total_after_competition
+    );
 
     // === PHASE 5: Rescore (GBM cross-validated discriminant) ===
     let phase5_start = Instant::now();
     let data = rescore(competed);
     let phase5_ms = phase5_start.elapsed().as_millis() as u64;
+    println!(
+        "Phase 5: Rescore ......... {:.1}s",
+        phase5_ms as f64 / 1000.0
+    );
 
-    // Collect q-value threshold counts and print summary
+    // Collect q-value threshold counts — full report to log, key result to stdout
     let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
     let mut targets_at_1pct_qval = 0usize;
     let mut targets_at_5pct_qval = 0usize;
     let mut targets_at_10pct_qval = 0usize;
     for &(thresh, n_below_thresh, n_targets, n_decoys) in &qval_report {
-        println!(
-            "Found {} targets and {} decoys at q-value threshold {:.2} ({} total)",
-            n_targets, n_decoys, thresh, n_below_thresh
+        info!(
+            "q-value threshold {:.2}: {} targets, {} decoys ({} total)",
+            thresh, n_targets, n_decoys, n_below_thresh
         );
         if (thresh - 0.01).abs() < 1e-6 {
             targets_at_1pct_qval = n_targets;
@@ -256,6 +296,15 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     pq_writer.close();
     let phase6_ms = phase6_start.elapsed().as_millis() as u64;
     info!("Wrote final results to {:?}", out_path_pq);
+    println!(
+        "Phase 6: Write output .... {:.1}s",
+        phase6_ms as f64 / 1000.0
+    );
+
+    // Key result to stdout
+    println!();
+    println!("{} targets at 1% FDR", targets_at_1pct_qval);
+    println!("Output: {}", out_path_pq.display());
 
     Ok(PipelineReport {
         phase1_prescore_ms: phase1_ms,
@@ -285,15 +334,13 @@ fn phase1_prescore<I: ScorerQueriable>(
     chunk_size: usize,
     config: &CalibrationConfig,
 ) -> Vec<CalibrantCandidate> {
-    let style = ProgressStyle::with_template(
-        "{spinner:.green} Phase 1 [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
-    )
-    .unwrap();
+    let n_chunks = (speclib.as_slice().len() + chunk_size - 1) / chunk_size;
+    let pb = make_progress_bar(n_chunks as u64, "Phase 1");
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
     let mut offset = 0usize;
 
-    for chunk in speclib.as_slice().chunks(chunk_size).progress_with_style(style) {
+    for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
         let chunk_heap = pipeline.prescore_batch(chunk, offset, config);
         global_heap = global_heap.merge(chunk_heap);
         offset += chunk.len();
@@ -501,18 +548,16 @@ fn phase3_score<I: ScorerQueriable>(
     chunk_size: usize,
     timings: &mut ScoreTimings,
 ) -> Vec<ScoredCandidate> {
-    let style = ProgressStyle::with_template(
-        "{spinner:.green} Phase 3 [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
-    )
-    .unwrap();
-
     let total_peptides = speclib.as_slice().len();
+    let n_chunks = (total_peptides + chunk_size - 1) / chunk_size;
+    let pb = make_progress_bar(n_chunks as u64, "Phase 3");
+
     let mut results = Vec::new();
 
     for chunk in speclib
         .as_slice()
         .chunks(chunk_size)
-        .progress_with_style(style)
+        .progress_with(pb)
     {
         let (batch_results, batch_timings) =
             pipeline.score_calibrated_batch(chunk, calibration);
@@ -588,7 +633,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
                 _ => std::cmp::Ordering::Equal,
             }
         } else {
-            seq_ord
+            ord
         }
     });
     // As debug lets print the first and last results after deduplication
