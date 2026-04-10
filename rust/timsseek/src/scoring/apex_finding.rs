@@ -28,7 +28,6 @@
 use std::fmt::Display;
 
 use super::{
-    COELUTION_WINDOW_WIDTH,
     NUM_MS1_IONS,
     NUM_MS2_IONS,
 };
@@ -38,8 +37,15 @@ use crate::models::{
     DigestSlice,
     ExpectedIntensities,
 };
-use crate::scoring::scores::coelution::coelution_score::coelution_vref_score_filter_into;
-use crate::scoring::scores::corr_v_ref;
+use crate::scoring::scores::apex_features::{
+    ApexFeatures,
+    SplitProductScore,
+    compute_apex_features,
+    compute_split_product,
+    compute_weighted_score,
+    find_joint_apex,
+};
+use crate::scoring::scores::scribe::SCRIBE_FLOOR;
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
 use timsquery::models::aggregators::ChromatogramCollector;
@@ -106,35 +112,48 @@ pub struct ScoringContext<T: KeyLike> {
     pub query_values: ChromatogramCollector<T, f32>,
 }
 
-/// The result of the apex finding process.
+/// Lightweight result from Phase 1 apex finding.
+/// Contains only the apex location and a basic score for calibrant ranking.
 #[derive(Debug, Clone, Copy)]
-pub struct ApexScore {
-    /// The main composite score (higher is better).
+pub struct ApexLocation {
+    /// Basic score (apex profile peak value) for ranking.
     pub score: f32,
-    /// Difference to the next best peak.
-    pub delta_next: f32,
-    /// Difference to the third best peak.
-    pub delta_second_next: f32,
     /// Retention time at the apex (ms).
     pub retention_time_ms: u32,
+    /// Local cycle index of the apex within the extraction.
+    pub apex_cycle: usize,
+    /// Peak shape metrics for baseline computation.
+    pub raising_cycles: u8,
+    pub falling_cycles: u8,
+}
 
-    // --- MS2 Features ---
-    pub ms2_cosine_ref_sim: f32,
-    pub ms2_coelution_score: f32,
-    pub ms2_summed_intensity: f32,
-    pub npeaks: u8,
+/// The result of the full scoring process (Phase 3).
+#[derive(Debug, Clone, Copy)]
+pub struct ApexScore {
+    /// The final weighted product score (higher is better).
+    pub score: f32,
+    /// Retention time at the apex (ms).
+    pub retention_time_ms: u32,
+    /// Local cycle index of the joint apex.
+    pub joint_apex_cycle: usize,
+
+    // --- Split product components ---
+    pub split_product: SplitProductScore,
+
+    // --- 11 features at joint apex ---
+    pub features: ApexFeatures,
+
+    // --- Peak discrimination ---
+    pub delta_next: f32,
+    pub delta_second_next: f32,
+
+    // --- Retained from current (used downstream) ---
     pub lazyscore: f32,
     pub lazyscore_vs_baseline: f32,
     pub lazyscore_z: f32,
-    pub ms2_corr_v_gauss: f32,
-
-    // --- MS1 Features ---
-    pub ms1_corr_v_gauss: f32,
-    pub ms1_cosine_ref_sim: f32,
-    pub ms1_coelution_score: f32,
+    pub npeaks: u8,
+    pub ms2_summed_intensity: f32,
     pub ms1_summed_intensity: f32,
-
-    // --- Shape Features ---
     pub raising_cycles: u8,
     pub falling_cycles: u8,
 }
@@ -142,64 +161,58 @@ pub struct ApexScore {
 /// Stores time-resolved scores for every cycle in the chromatogram.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoreTraces {
-    pub ms1_cosine_ref_sim: Vec<f32>,
-    pub ms1_coelution_score: Vec<f32>,
-    pub ms1_corr_v_gauss: Vec<f32>,
+    /// Per-cycle cosine similarity (sqrt-transformed expected).
     pub ms2_cosine_ref_sim: Vec<f32>,
-    pub ms2_coelution_score: Vec<f32>,
+    /// Per-cycle lazyscore (kept for baseline lambda computation).
     pub ms2_lazyscore: Vec<f32>,
-    pub ms2_corr_v_gauss: Vec<f32>,
+    /// Per-cycle Scribe score.
+    pub ms2_scribe: Vec<f32>,
+    /// Per-cycle log1p(sum(fragment_intensities)).
+    pub ms2_log_intensity: Vec<f32>,
+    /// Per-cycle summed precursor intensity (keys >= 0 only).
+    pub ms1_precursor_trace: Vec<f32>,
+    /// Composite apex profile for peak picking.
     pub main_score: Vec<f32>,
 }
 
 impl ScoreTraces {
     pub fn new_with_capacity(capacity: usize) -> Self {
         Self {
-            ms1_cosine_ref_sim: Vec::with_capacity(capacity),
-            ms1_coelution_score: Vec::with_capacity(capacity),
-            ms1_corr_v_gauss: Vec::with_capacity(capacity),
             ms2_cosine_ref_sim: Vec::with_capacity(capacity),
-            ms2_coelution_score: Vec::with_capacity(capacity),
             ms2_lazyscore: Vec::with_capacity(capacity),
-            ms2_corr_v_gauss: Vec::with_capacity(capacity),
+            ms2_scribe: Vec::with_capacity(capacity),
+            ms2_log_intensity: Vec::with_capacity(capacity),
+            ms1_precursor_trace: Vec::with_capacity(capacity),
             main_score: Vec::with_capacity(capacity),
         }
     }
 
     pub fn clear(&mut self) {
-        self.ms1_cosine_ref_sim.clear();
-        self.ms1_coelution_score.clear();
-        self.ms1_corr_v_gauss.clear();
         self.ms2_cosine_ref_sim.clear();
-        self.ms2_coelution_score.clear();
         self.ms2_lazyscore.clear();
-        self.ms2_corr_v_gauss.clear();
+        self.ms2_scribe.clear();
+        self.ms2_log_intensity.clear();
+        self.ms1_precursor_trace.clear();
         self.main_score.clear();
     }
 
     /// Resize all buffers to the specified length (filling with 0.0).
     pub fn resize(&mut self, len: usize) {
-        self.ms1_cosine_ref_sim.resize(len, 0.0);
-        self.ms1_coelution_score.resize(len, 0.0);
-        self.ms1_corr_v_gauss.resize(len, 0.0);
         self.ms2_cosine_ref_sim.resize(len, 0.0);
-        self.ms2_coelution_score.resize(len, 0.0);
         self.ms2_lazyscore.resize(len, 0.0);
-        self.ms2_corr_v_gauss.resize(len, 0.0);
-        // main_score is computed later, so we just reserve/clear usually,
-        // but for safety we can resize it too.
+        self.ms2_scribe.resize(len, 0.0);
+        self.ms2_log_intensity.resize(len, 0.0);
+        self.ms1_precursor_trace.resize(len, 0.0);
         self.main_score.resize(len, 0.0);
     }
 
     pub fn iter_scores(&self) -> impl Iterator<Item = (&'static str, &[f32])> + '_ {
         vec![
-            ("ms1_cosine_ref_sim", &self.ms1_cosine_ref_sim[..]),
-            ("ms1_coelution_score", &self.ms1_coelution_score[..]),
-            ("ms1_corr_v_gauss", &self.ms1_corr_v_gauss[..]),
             ("ms2_cosine_ref_sim", &self.ms2_cosine_ref_sim[..]),
-            ("ms2_coelution_score", &self.ms2_coelution_score[..]),
             ("ms2_lazyscore", &self.ms2_lazyscore[..]),
-            ("ms2_corr_v_gauss", &self.ms2_corr_v_gauss[..]),
+            ("ms2_scribe", &self.ms2_scribe[..]),
+            ("ms2_log_intensity", &self.ms2_log_intensity[..]),
+            ("ms1_precursor_trace", &self.ms1_precursor_trace[..]),
             ("main_score", &self.main_score[..]),
         ]
         .into_iter()
@@ -215,10 +228,14 @@ pub struct ApexFinder {
 
 #[derive(Debug)]
 struct ApexFinderBuffers {
+    /// Cosine numerator: sum(obs * sqrt(exp)) per cycle.
     temp_ms2_dot_prod: Vec<f32>,
+    /// Cosine denominator: sum(obs^2) per cycle.
     temp_ms2_norm_sq_obs: Vec<f32>,
-    temp_ms1_dot_prod: Vec<f32>,
-    temp_ms1_norm_sq_obs: Vec<f32>,
+    /// Scribe: sum(sqrt(obs)) per cycle.
+    temp_sqrt_sum: Vec<f32>,
+    /// Log-intensity: sum(obs) per cycle (finalized as log1p).
+    temp_raw_intensity_sum: Vec<f32>,
 }
 
 impl ApexFinderBuffers {
@@ -226,27 +243,23 @@ impl ApexFinderBuffers {
         Self {
             temp_ms2_dot_prod: vec![0.0f32; size],
             temp_ms2_norm_sq_obs: vec![0.0f32; size],
-            temp_ms1_dot_prod: vec![0.0f32; size],
-            temp_ms1_norm_sq_obs: vec![0.0f32; size],
+            temp_sqrt_sum: vec![0.0f32; size],
+            temp_raw_intensity_sum: vec![0.0f32; size],
         }
     }
 
     fn clear(&mut self) {
-        // I can maybe cut some corners by not zeroing the whole vec,
-        // but just resizing later.
-        // Since every value is over-written anyway.
-        // ... This feels safer though.
         self.temp_ms2_dot_prod.fill(0.0);
         self.temp_ms2_norm_sq_obs.fill(0.0);
-        self.temp_ms1_dot_prod.fill(0.0);
-        self.temp_ms1_norm_sq_obs.fill(0.0);
+        self.temp_sqrt_sum.fill(0.0);
+        self.temp_raw_intensity_sum.fill(0.0);
     }
 
     fn resize(&mut self, len: usize) {
         self.temp_ms2_dot_prod.resize(len, 0.0);
         self.temp_ms2_norm_sq_obs.resize(len, 0.0);
-        self.temp_ms1_dot_prod.resize(len, 0.0);
-        self.temp_ms1_norm_sq_obs.resize(len, 0.0);
+        self.temp_sqrt_sum.resize(len, 0.0);
+        self.temp_raw_intensity_sum.resize(len, 0.0);
     }
 }
 
@@ -258,7 +271,87 @@ impl ApexFinder {
         }
     }
 
-    /// Find the peptide apex within the provided scoring context.
+    /// Build cosine and scribe profiles from traces.
+    /// cosine_profile[i] = cos^3 * intensity, scribe_profile[i] = scribe * intensity.
+    fn build_profiles(&self) -> (Vec<f32>, Vec<f32>) {
+        let n = self.traces.ms2_cosine_ref_sim.len();
+        let mut cosine_profile = Vec::with_capacity(n);
+        let mut scribe_profile = Vec::with_capacity(n);
+        for i in 0..n {
+            let cos = self.traces.ms2_cosine_ref_sim[i];
+            let intensity = self.traces.ms2_log_intensity[i];
+            cosine_profile.push(cos * cos * cos * intensity);
+            scribe_profile.push(self.traces.ms2_scribe[i] * intensity);
+        }
+        (cosine_profile, scribe_profile)
+    }
+
+    /// Phase 1: Find apex location using broad extraction.
+    ///
+    /// Returns a lightweight `ApexLocation` with just the peak location and
+    /// a basic score (apex profile value). Sufficient for calibrant ranking.
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
+    )]
+    pub fn find_apex_location<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &ScoringContext<T>,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<ApexLocation, DataProcessingError> {
+        let collector = &scoring_ctx.query_values;
+        let n_cycles = collector.num_cycles();
+
+        self.traces.clear();
+        self.traces.resize(n_cycles);
+        self.buffers.clear();
+        self.buffers.resize(n_cycles);
+
+        self.compute_pass_1(scoring_ctx)?;
+        self.compute_main_score_trace();
+
+        // Peak-pick on apex profile
+        let peak_picker = PeakPicker::new(&self.traces.main_score);
+        let (max_val, max_loc) = match peak_picker.next_peak() {
+            Some(p) => p,
+            None => {
+                return Err(DataProcessingError::ExpectedNonEmptyData {
+                    context: Some("No main score found".into()),
+                });
+            }
+        };
+        if max_val == 0.0 {
+            return Err(DataProcessingError::ExpectedNonEmptyData {
+                context: Some("No non-0 main score".into()),
+            });
+        }
+
+        let (raising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
+        let cycle_offset = scoring_ctx.query_values.cycle_offset();
+        let retention_time_ms = rt_mapper(max_loc + cycle_offset);
+
+        // Compute split product score for calibrant ranking
+        let (cosine_profile, scribe_profile) = self.build_profiles();
+
+        let split_product = compute_split_product(
+            &cosine_profile,
+            &scribe_profile,
+            &scoring_ctx.query_values.fragments,
+            &scoring_ctx.expected_intensities.fragment_intensities,
+        );
+
+        Ok(ApexLocation {
+            score: split_product.base_score,
+            retention_time_ms,
+            apex_cycle: max_loc,
+            raising_cycles,
+            falling_cycles,
+        })
+    }
+
+    /// Phase 3: Full scoring on a (narrow) extraction.
+    ///
+    /// Computes traces, apex profile, split product, 11 features, and weighted score.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -277,26 +370,18 @@ impl ApexFinder {
         self.buffers.clear();
         self.buffers.resize(n_cycles);
 
-        // 2. Compute scores (Two-Pass approach)
+        // 2. Compute per-cycle scores (single pass)
         self.compute_pass_1(scoring_ctx)?;
-        self.compute_pass_2(scoring_ctx)?;
 
-        // 3. Smooth scores
-        self.smooth_scores();
-
-        // 4. Compute Main Score (Composite)
+        // 3. Compute apex profile (cos^3 * I combined with scribe * I)
         self.compute_main_score_trace();
 
-        // 5. Find Apex and Extract Features
+        // 4. Find apex and extract features
         self.extract_apex_score(scoring_ctx, &rt_mapper)
     }
 
-    /// Pass 1: Scores that depend only on individual ion traces.
-    /// - Lazyscore (Hyperscore approximation)
-    /// - Cosine Similarity vs Expected Intensities
-    /// - Gaussian Shape Correlation
-    ///
-    /// Can be an error if no valid ions are found for scoring.
+    /// Single-pass scoring: cosine (sqrt-transformed), scribe, lazyscore,
+    /// log-intensity, and precursor trace.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
@@ -308,15 +393,18 @@ impl ApexFinder {
         let collector = &scoring_ctx.query_values;
 
         // --- MS2 (Fragments) ---
-        // We use accumulators to compute cosine similarity and lazyscore in one go.
-        // Lazyscore ~ Sum(ln(1 + intensity))
-        // Cosine ~ DotProduct(obs, exp) / (Norm(obs) * Norm(exp))
-
         let ms2_dot_prod = &mut self.buffers.temp_ms2_dot_prod;
         let ms2_norm_sq_obs = &mut self.buffers.temp_ms2_norm_sq_obs;
-        let mut ms2_norm_sq_exp = 0.0f32; // Scalar, since expected is a single vector
+        let sqrt_sum = &mut self.buffers.temp_sqrt_sum;
+        let raw_sum = &mut self.buffers.temp_raw_intensity_sum;
+        // Sum of sqrt(expected) for cosine norm: ||sqrt(exp)||^2 = sum(exp)
+        let mut ms2_sum_exp = 0.0f32;
 
-        for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
+        // Pre-compute pred_norm for scribe
+        let mut pred_norms: Vec<(usize, f32)> = Vec::new();
+        let mut pred_sqrt_sum = 0.0f32;
+
+        for (row_idx, ((key, _mz), chrom)) in collector.fragments.iter_mzs().enumerate() {
             let expected = scoring_ctx
                 .expected_intensities
                 .fragment_intensities
@@ -327,178 +415,145 @@ impl ApexFinder {
             if expected <= 0.0 {
                 continue;
             }
-            ms2_norm_sq_exp += expected * expected;
+
+            let sqrt_exp = expected.sqrt();
+            ms2_sum_exp += expected; // sqrt_exp * sqrt_exp = expected
+            pred_norms.push((row_idx, expected.sqrt()));
+            pred_sqrt_sum += sqrt_exp;
 
             for (i, &intensity) in chrom.iter().enumerate() {
                 if intensity > 0.0 {
-                    // Lazyscore: lnfact of sum of logs... simplified here to sum of logs
-                    // Actual implementation in `hyperscore.rs` uses `lnfact_f32(sum(ln(x)))`.
-                    // We'll accumulate the log sums here.
-                    let ln_val = intensity.max(1.0).ln();
-                    self.traces.ms2_lazyscore[i] += ln_val;
-
-                    // Cosine parts
-                    ms2_dot_prod[i] += intensity * expected;
+                    // Lazyscore accumulation
+                    self.traces.ms2_lazyscore[i] += intensity.max(1.0).ln();
+                    // Cosine: dot(obs, sqrt(exp))
+                    ms2_dot_prod[i] += intensity * sqrt_exp;
+                    // Cosine: obs norm
                     ms2_norm_sq_obs[i] += intensity * intensity;
+                    // Scribe: sqrt(obs) sum
+                    sqrt_sum[i] += intensity.sqrt();
                 }
+                // Raw intensity sum (for log-intensity, includes zeros)
+                raw_sum[i] += intensity.max(0.0);
             }
         }
 
-        // Finalize MS2 Cosine & Lazyscore
-        let ms2_norm_exp = ms2_norm_sq_exp.sqrt();
-        for i in 0..self.traces.ms2_cosine_ref_sim.len() {
-            // Finalize Lazyscore
+        // Finalize cosine, lazyscore, log-intensity
+        let norm_sqrt_exp = ms2_sum_exp.sqrt(); // ||sqrt(exp)|| = sqrt(sum(exp))
+        let n = self.traces.ms2_cosine_ref_sim.len();
+        for i in 0..n {
+            // Lazyscore
             self.traces.ms2_lazyscore[i] =
                 crate::utils::math::lnfact_f32(self.traces.ms2_lazyscore[i]);
 
-            // Finalize Cosine
+            // Cosine (sqrt-transformed expected)
             let obs_norm = ms2_norm_sq_obs[i].sqrt();
-            if obs_norm > 0.0 && ms2_norm_exp > 0.0 {
-                self.traces.ms2_cosine_ref_sim[i] = ms2_dot_prod[i] / (obs_norm * ms2_norm_exp);
-                // Clip to valid range and min value
+            if obs_norm > 0.0 && norm_sqrt_exp > 0.0 {
                 self.traces.ms2_cosine_ref_sim[i] =
-                    self.traces.ms2_cosine_ref_sim[i].max(1e-3).min(1.0);
+                    (ms2_dot_prod[i] / (obs_norm * norm_sqrt_exp)).clamp(1e-3, 1.0);
             } else {
                 self.traces.ms2_cosine_ref_sim[i] = 1e-3;
             }
+
+            // Log-intensity
+            self.traces.ms2_log_intensity[i] = raw_sum[i].ln_1p();
         }
 
-        // --- MS2 Gaussian Correlation ---
-        // We can reuse the existing function from `corr_v_ref` as it takes `MzMajorIntensityArray`.
-        // It iterates ions internally.
-        corr_v_ref::calculate_cosine_with_ref_gaussian_into(
-            &collector.fragments,
-            |_| true, // Filter: take all
-            &mut self.traces.ms2_corr_v_gauss,
-        )?;
-
-        // --- MS1 (Precursors) ---
-        // Similar logic for MS1
-        let ms1_dot_prod = &mut self.buffers.temp_ms1_dot_prod;
-        let ms1_norm_sq_obs = &mut self.buffers.temp_ms1_norm_sq_obs;
-        let mut ms1_norm_sq_exp = 0.0f32;
-
-        for ((key, _mz), chrom) in collector.precursors.iter_mzs() {
-            let expected = scoring_ctx
-                .expected_intensities
-                .precursor_intensities
-                .get(key)
-                .copied()
-                .unwrap_or(0.0);
-            if expected <= 0.0 {
-                continue;
+        // Finalize scribe (inline, reusing sqrt_sum buffer from accumulation above)
+        if pred_sqrt_sum > 0.0 && !pred_norms.is_empty() {
+            // Normalize pred_norms in-place
+            for entry in pred_norms.iter_mut() {
+                entry.1 /= pred_sqrt_sum;
             }
-            ms1_norm_sq_exp += expected * expected;
 
+            // Pass B: accumulate SSE
+            for &(row_idx, pred_norm_i) in &pred_norms {
+                let row = collector
+                    .fragments
+                    .get_row_idx(row_idx)
+                    .expect("row_idx from enumeration must be valid");
+                for (t, &intensity) in row.iter().enumerate() {
+                    if sqrt_sum[t] == 0.0 {
+                        continue;
+                    }
+                    let obs_norm_i = if intensity > 0.0 {
+                        intensity.sqrt() / sqrt_sum[t]
+                    } else {
+                        0.0
+                    };
+                    let diff = obs_norm_i - pred_norm_i;
+                    self.traces.ms2_scribe[t] += diff * diff;
+                }
+            }
+
+            // Finalize scribe: -log(sse)
+            for t in 0..n {
+                if sqrt_sum[t] == 0.0 {
+                    self.traces.ms2_scribe[t] = SCRIBE_FLOOR;
+                } else {
+                    let sse = self.traces.ms2_scribe[t].max(f32::EPSILON);
+                    self.traces.ms2_scribe[t] = -sse.ln();
+                }
+            }
+        } else {
+            self.traces.ms2_scribe.fill(SCRIBE_FLOOR);
+        }
+
+        // --- MS1 Precursor trace ---
+        for ((key, _mz), chrom) in collector.precursors.iter_mzs() {
+            if *key < 0 {
+                continue; // Skip decoy isotope keys
+            }
             for (i, &intensity) in chrom.iter().enumerate() {
                 if intensity > 0.0 {
-                    ms1_dot_prod[i] += intensity * expected;
-                    ms1_norm_sq_obs[i] += intensity * intensity;
+                    self.traces.ms1_precursor_trace[i] += intensity;
                 }
             }
         }
 
-        let ms1_norm_exp = ms1_norm_sq_exp.sqrt();
-        for i in 0..self.traces.ms1_cosine_ref_sim.len() {
-            let obs_norm = ms1_norm_sq_obs[i].sqrt();
-            if obs_norm > 0.0 && ms1_norm_exp > 0.0 {
-                self.traces.ms1_cosine_ref_sim[i] = ms1_dot_prod[i] / (obs_norm * ms1_norm_exp);
-                self.traces.ms1_cosine_ref_sim[i] =
-                    self.traces.ms1_cosine_ref_sim[i].max(1e-3).min(1.0);
-            } else {
-                self.traces.ms1_cosine_ref_sim[i] = 1e-3;
-            }
-        }
-
-        corr_v_ref::calculate_cosine_with_ref_gaussian_into(
-            &collector.precursors,
-            |&k| k >= 0, // Filter: Ignore negative keys (decoys/invalid)
-            &mut self.traces.ms1_corr_v_gauss,
-        )?;
-
         Ok(())
     }
 
-    /// Pass 2: Scores that depend on the results of Pass 1.
-    /// - Coelution Score (compares individual ion traces vs the aggregated Lazyscore trace)
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip_all, level = "trace")
-    )]
-    fn compute_pass_2<T: KeyLike>(
-        &mut self,
-        scoring_ctx: &ScoringContext<T>,
-    ) -> Result<(), DataProcessingError> {
-        let collector = &scoring_ctx.query_values;
-
-        // Apply smoothing to Lazyscore BEFORE using it as a reference for Coelution
-        // Note: The original code smoothed EVERYTHING at the end.
-        // But Coelution uses `ms2_lazyscore` as the reference shape.
-        // Does it use the smoothed or raw?
-        // Checking `calculate_scores.rs`: `smooth_scores()` happens AFTER `calculate_coelution_scores`.
-        // So it uses the RAW lazyscore. Okay, we proceed with raw.
-
-        // MS2 Coelution
-        coelution_vref_score_filter_into(
-            &collector.fragments,
-            &self.traces.ms2_lazyscore,
-            COELUTION_WINDOW_WIDTH,
-            &|_| true,
-            &mut self.traces.ms2_coelution_score,
-        )?;
-
-        // MS1 Coelution (vs MS2 Lazyscore reference)
-        coelution_vref_score_filter_into(
-            &collector.precursors,
-            &self.traces.ms2_lazyscore,
-            COELUTION_WINDOW_WIDTH,
-            &|x: &i8| *x >= 0i8,
-            &mut self.traces.ms1_coelution_score,
-        )?;
-
-        Ok(())
-    }
-
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip_all, level = "trace")
-    )]
-    fn smooth_scores(&mut self) {
-        gaussblur_in_place(&mut self.traces.ms2_lazyscore);
-        gaussblur_in_place(&mut self.traces.ms1_coelution_score);
-        gaussblur_in_place(&mut self.traces.ms2_coelution_score);
-        gaussblur_in_place(&mut self.traces.ms2_cosine_ref_sim);
-        gaussblur_in_place(&mut self.traces.ms1_cosine_ref_sim);
-        gaussblur_in_place(&mut self.traces.ms2_corr_v_gauss);
-        gaussblur_in_place(&mut self.traces.ms1_corr_v_gauss);
-    }
-
+    /// Compute the apex profile from cosine and scribe traces.
+    ///
+    /// apex_profile(t) = C(t) * (0.5 + S_norm(t))
+    /// where C(t) = cosine(t)^3 * I(t)
+    ///       S(t) = scribe(t) * I(t)
+    ///       S_norm = (S - min(S)) / (max(S) - min(S))
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
     fn compute_main_score_trace(&mut self) {
-        let len = self.traces.ms1_corr_v_gauss.len();
+        let len = self.traces.ms2_cosine_ref_sim.len();
         self.traces.main_score.clear();
         self.traces.main_score.reserve(len);
 
-        const MS1_SCALING: f32 = 0.75;
-        const MS1_OFFSET: f32 = 0.25;
+        // Compute S(t) = scribe(t) * I(t), find min/max for normalization
+        let mut s_min = f32::INFINITY;
+        let mut s_max = f32::NEG_INFINITY;
+
+        // Temp: compute S values inline
+        for i in 0..len {
+            let s = self.traces.ms2_scribe[i] * self.traces.ms2_log_intensity[i];
+            s_min = s_min.min(s);
+            s_max = s_max.max(s);
+        }
+
+        let s_range = s_max - s_min;
 
         for i in 0..len {
-            let ms1_cos_score =
-                MS1_SCALING + (MS1_OFFSET * self.traces.ms1_coelution_score[i].max(1e-3).powi(2));
-            let ms1_gauss_score =
-                MS1_SCALING + (MS1_OFFSET * self.traces.ms1_corr_v_gauss[i].max(1e-3).powi(2));
+            let cos = self.traces.ms2_cosine_ref_sim[i];
+            let intensity = self.traces.ms2_log_intensity[i];
+            let c = cos * cos * cos * intensity; // cos^3 * I
 
-            let mut loc_score = 1.0;
-            loc_score *= ms1_cos_score;
-            loc_score *= ms1_gauss_score;
-            loc_score *= self.traces.ms2_cosine_ref_sim[i].max(1e-3).powi(2);
-            loc_score *= self.traces.ms2_coelution_score[i].max(1e-3).powi(2);
-            loc_score *= self.traces.ms2_corr_v_gauss[i].max(1e-3).powi(2);
+            let s = self.traces.ms2_scribe[i] * intensity;
+            let s_norm = if s_range > 0.0 {
+                (s - s_min) / s_range
+            } else {
+                0.5 // Degrade to cosine-only when scribe is constant
+            };
 
-            self.traces.main_score.push(loc_score);
+            self.traces.main_score.push(c * (0.5 + s_norm));
         }
     }
 
@@ -525,39 +580,64 @@ impl ApexFinder {
             });
         }
 
-        // Calculate Peak Shape (Raising/Falling) to determine width
+        // Peak shape (rise/fall) for delta computation
         let (raising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
 
-        // Mask the current peak
+        // Mask and find next peaks for delta scores
         peak_picker.mask_peak(max_loc, raising_cycles as usize, falling_cycles as usize, 2);
-
-        // Find next peaks
         let (next_val, next_loc) = peak_picker.next_peak().unwrap_or((0.0, max_loc));
-
-        // For second next, we need to mask the 'next' peak properly.
         let (next_raise, next_fall) = self.calculate_rise_and_fall_cycles(next_loc);
         peak_picker.mask_peak(next_loc, next_raise as usize, next_fall as usize, 1);
-
         let (second_next_val, _) = peak_picker.next_peak().unwrap_or((0.0, max_loc));
 
         let delta_next = max_val - next_val;
         let delta_second_next = max_val - second_next_val;
 
-        // Extract features at max_loc
+        // Build intermediate profiles for split product and features
+        let (cosine_profile, scribe_profile) = self.build_profiles();
+
+        // Split product score (independent cosine/scribe apexes)
+        let split_product = compute_split_product(
+            &cosine_profile,
+            &scribe_profile,
+            &scoring_ctx.query_values.fragments,
+            &scoring_ctx.expected_intensities.fragment_intensities,
+        );
+
+        // Joint precursor-fragment apex
+        let joint_apex = find_joint_apex(&cosine_profile, &self.traces.ms1_precursor_trace);
+
+        // 11 features at joint apex
+        let n_cycles = cosine_profile.len();
+        let features = compute_apex_features(
+            &scoring_ctx.query_values.fragments,
+            &scoring_ctx.query_values.precursors,
+            &scoring_ctx.expected_intensities,
+            &cosine_profile,
+            &self.traces.ms1_precursor_trace,
+            joint_apex,
+            n_cycles,
+        );
+
+        // Weighted final score
+        let score = compute_weighted_score(split_product.base_score, &features);
+
+        // RT at joint apex
         let cycle_offset = scoring_ctx.query_values.cycle_offset();
-        let global_loc = max_loc + cycle_offset;
+        let global_loc = joint_apex + cycle_offset;
         let retention_time_ms = rt_mapper(global_loc);
 
-        let (ms1_summed_intensity, _ms1_npeaks) =
-            self.sum_intensities_at(&scoring_ctx.query_values.precursors, max_loc);
+        // Intensity counts at joint apex
+        let (ms1_summed_intensity, _) =
+            self.sum_intensities_at(&scoring_ctx.query_values.precursors, joint_apex);
         let (ms2_summed_intensity, ms2_npeaks) =
-            self.sum_intensities_at(&scoring_ctx.query_values.fragments, max_loc);
+            self.sum_intensities_at(&scoring_ctx.query_values.fragments, joint_apex);
 
-        // Calculate Lambda (Baseline noise level)
+        // Lazyscore baseline stats
         let lambda = self.calculate_baseline_lambda(max_loc, raising_cycles, falling_cycles);
-        let k = self.traces.ms2_lazyscore[max_loc] as f64;
+        let k = self.traces.ms2_lazyscore[joint_apex] as f64;
         let norm_lazy_std = lambda.sqrt().max(1.0) as f32;
-        let lazyscore_z = self.traces.ms2_lazyscore[max_loc] / norm_lazy_std;
+        let lazyscore_z = self.traces.ms2_lazyscore[joint_apex] / norm_lazy_std;
 
         if lazyscore_z.is_nan() {
             return Err(DataProcessingError::ExpectedFiniteNonNanData {
@@ -566,21 +646,18 @@ impl ApexFinder {
         }
 
         Ok(ApexScore {
-            score: max_val,
+            score,
+            retention_time_ms,
+            joint_apex_cycle: joint_apex,
+            split_product,
+            features,
             delta_next,
             delta_second_next,
-            retention_time_ms,
-            ms2_cosine_ref_sim: self.traces.ms2_cosine_ref_sim[max_loc],
-            ms2_coelution_score: self.traces.ms2_coelution_score[max_loc],
-            ms2_summed_intensity,
-            npeaks: ms2_npeaks as u8,
-            lazyscore: self.traces.ms2_lazyscore[max_loc],
+            lazyscore: self.traces.ms2_lazyscore[joint_apex],
             lazyscore_vs_baseline: (k / lambda) as f32,
             lazyscore_z,
-            ms2_corr_v_gauss: self.traces.ms2_corr_v_gauss[max_loc],
-            ms1_corr_v_gauss: self.traces.ms1_corr_v_gauss[max_loc],
-            ms1_cosine_ref_sim: self.traces.ms1_cosine_ref_sim[max_loc],
-            ms1_coelution_score: self.traces.ms1_coelution_score[max_loc],
+            npeaks: ms2_npeaks as u8,
+            ms2_summed_intensity,
             ms1_summed_intensity,
             raising_cycles,
             falling_cycles,

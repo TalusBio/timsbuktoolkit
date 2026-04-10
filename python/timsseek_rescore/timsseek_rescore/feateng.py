@@ -165,7 +165,9 @@ def to_mokapot_df(
         "delta_next",
         "delta_second_next",
         "apex_lazyerscore",
-        "apex_lazyerscore_vs_baseline",
+        "split_product_score",
+        "cosine_au_score",
+        "scribe_au_score",
         "ms2_isotope_lazyerscore",
         "ms2_lazyerscore",
         "ms2_isotope_lazyerscore_ratio",
@@ -174,6 +176,8 @@ def to_mokapot_df(
         # TODO: consider clamping instead of logging here.
         "sq_delta_theo_rt",
         "calibrated_sq_delta_theo_rt",
+        "delta_group",
+        "delta_group_ratio",
     )
     imputable_cols = (
         # Abs impute
@@ -229,13 +233,26 @@ def to_mokapot_df(
             "precursor_mz",
             "precursor_mobility_query",
             "obs_mobility",
-            "ms2_cosine_ref_similarity",
-            "ms2_coelution_score",
-            "ms1_cosine_ref_similarity",
-            "ms1_coelution_score",
-            "ms1_corr_v_gauss",
-            "ms2_corr_v_gauss",
+            "peak_shape",
+            "ratio_cv",
+            "centered_apex",
+            "precursor_coelution",
+            "fragment_coverage",
+            "precursor_apex_match",
+            "xic_quality",
+            "fragment_apex_agreement",
+            "isotope_correlation",
+            "gaussian_correlation",
+            "per_frag_gaussian_corr",
+            "coelution_gradient_cosine",
+            "coelution_gradient_scribe",
+            "cosine_weighted_coelution",
+            "cosine_gradient_consistency",
+            "scribe_weighted_coelution",
+            "scribe_gradient_consistency",
             "nqueries",
+            "lazyscore_z",
+            "lazyscore_vs_baseline",
             # Intensity ratios
             "ms1_inten_ratio_2",
             "ms2_inten_ratio_4",
@@ -250,10 +267,7 @@ def to_mokapot_df(
             # Cycle counts
             "raising_cycles",
             "falling_cycles",
-            "apex_norm_lazyerscore_vs_baseline",
-            # ...
-            "delta_group_ratio",
-            "delta_group",
+            # delta_group and delta_group_ratio are in loggable_cols
         )
         + loggable_cols
         + imputable_cols

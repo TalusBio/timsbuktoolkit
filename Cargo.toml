@@ -11,6 +11,16 @@ members = [
     "rust/timsquery_viewer",
     "python/timsquery_pyo3"
 ]
+default-members = [
+    "rust/calibrt",
+    "rust/micromzpaf",
+    "rust/timscentroid",
+    "rust/timsseek",
+    "rust/timsseek_cli",
+    "rust/timsquery",
+    "rust/timsquery_cli",
+    "rust/timsquery_viewer"
+]
 
 [workspace.package]
 version = "0.26.0"

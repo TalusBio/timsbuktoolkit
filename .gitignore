@@ -37,3 +37,10 @@ results.json
 *search_results*/*
 
 wandb/*
+docs/superpowers/*
+.plans/*
+.claude/*
+.prompts/*
+sh*/
+*plan*.md
+

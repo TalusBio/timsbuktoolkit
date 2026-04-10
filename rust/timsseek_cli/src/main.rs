@@ -51,6 +51,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct ValidatedInputs {
     dotd_files: Vec<std::path::PathBuf>,
     speclib_path: std::path::PathBuf,
+    calib_lib_path: Option<std::path::PathBuf>,
     output_directory: std::path::PathBuf,
     overwrite: bool,
 }
@@ -101,6 +102,18 @@ fn validate_inputs(
         });
     }
     info!("✓ Speclib file exists: {:?}", speclib_path);
+
+    // Validate calib lib if provided
+    let calib_lib_path = args.calib_lib.clone();
+    if let Some(ref path) = calib_lib_path {
+        if !path.exists() {
+            return Err(errors::CliError::Io {
+                source: "Calibration library file does not exist".to_string(),
+                path: Some(path.to_string_lossy().to_string()),
+            });
+        }
+        info!("✓ Calibration library exists: {:?}", path);
+    }
 
     // Validate all raw files exist
     for dotd_file in &dotd_files {
@@ -183,6 +196,7 @@ fn validate_inputs(
     Ok(ValidatedInputs {
         dotd_files,
         speclib_path,
+        calib_lib_path,
         output_directory,
         overwrite: args.overwrite,
     })
@@ -222,6 +236,7 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
 fn process_single_file(
     dotd_file: &std::path::Path,
     speclib_path: &std::path::Path,
+    calib_lib_path: Option<&std::path::Path>,
     config: &Config,
     base_output_dir: &std::path::Path,
     overwrite: bool,
@@ -298,6 +313,7 @@ fn process_single_file(
     // Process speclib
     processing::process_speclib(
         speclib_path,
+        calib_lib_path,
         &pipeline,
         config.analysis.chunk_size,
         &file_output_config,
@@ -472,6 +488,7 @@ fn main() -> std::result::Result<(), errors::CliError> {
         match process_single_file(
             dotd_file,
             &validated.speclib_path,
+            validated.calib_lib_path.as_deref(),
             &config,
             &validated.output_directory,
             validated.overwrite,

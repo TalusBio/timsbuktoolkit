@@ -58,3 +58,21 @@ impl std::ops::AddAssign for ScoreTimings {
         self.finalization += rhs.finalization;
     }
 }
+
+/// Phase-level + stage-level timing for the two-pass pipeline.
+/// All durations are in milliseconds.
+#[derive(Debug, Default, Serialize)]
+pub struct PipelineTimings {
+    /// Wall time for Phase 1 (broad prescore, all peptides).
+    pub phase1_prescore_ms: u64,
+    /// Wall time for Phase 2 (calibration: RT fit + error measurement).
+    pub phase2_calibration_ms: u64,
+    /// Time spent building calibrated chromatograms in Phase 3.
+    pub phase3_prescore_ms: u64,
+    /// Time spent finding peak apex in Phase 3 (typically the bottleneck).
+    pub phase3_localize_ms: u64,
+    /// Time spent on secondary spectral query in Phase 3.
+    pub phase3_secondary_query_ms: u64,
+    /// Time spent assembling final results in Phase 3.
+    pub phase3_finalization_ms: u64,
+}

@@ -6,15 +6,32 @@ use indicatif::{
 use std::path::Path;
 use std::time::Instant;
 use timsquery::IndexedTimstofPeaks;
+use timsquery::MzMobilityStatsCollector;
+use timsquery::SpectralCollector;
+use timsquery::Tolerance;
+use timsquery::models::tolerance::{
+    MobilityTolerance,
+    MzTolerance,
+    QuadTolerance,
+    RtTolerance,
+};
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::rescore;
 use timsseek::rt_calibration::{
-    recalibrate_results,
-    recalibrate_speclib,
+    CalibRtError,
+    CalibrationResult,
+    Point,
+    calibrate_with_ranges,
 };
-use timsseek::scoring::ScoreTimings;
+use timsseek::scoring::{
+    CalibrantCandidate,
+    CalibrantHeap,
+    CalibrationConfig,
+    PipelineTimings,
+    ScoreTimings,
+};
 use timsseek::scoring::pipeline::ScoringPipeline;
 use timsseek::scoring::search_results::{
     IonSearchResults,
@@ -22,87 +39,176 @@ use timsseek::scoring::search_results::{
 };
 use timsseek::{
     DecoyStrategy,
+    IonAnnot,
     ScorerQueriable,
 };
 use tracing::{
     debug,
     info,
+    warn,
 };
+
+/// Check that two speclibs are on a compatible RT scale.
+/// Warns loudly if the RT ranges don't overlap, which would produce a useless calibration.
+fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
+    fn rt_range(lib: &Speclib) -> (f32, f32) {
+        let mut min_rt = f32::INFINITY;
+        let mut max_rt = f32::NEG_INFINITY;
+        for item in lib.as_slice() {
+            let rt = item.query.rt_seconds();
+            min_rt = min_rt.min(rt);
+            max_rt = max_rt.max(rt);
+        }
+        (min_rt, max_rt)
+    }
+
+    let (main_min, main_max) = rt_range(main_lib);
+    let (calib_min, calib_max) = rt_range(calib_lib);
+
+    info!(
+        "RT ranges — main speclib: [{:.1}, {:.1}]s, calib lib: [{:.1}, {:.1}]s",
+        main_min, main_max, calib_min, calib_max
+    );
+
+    // Check overlap
+    let overlap_start = main_min.max(calib_min);
+    let overlap_end = main_max.min(calib_max);
+
+    if overlap_start >= overlap_end {
+        warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        warn!("!! RT SCALE MISMATCH: main speclib and calibration library  !!");
+        warn!("!! have NO overlapping RT range. The calibration will be    !!");
+        warn!("!! meaningless. Ensure both libraries use the same iRT      !!");
+        warn!("!! scale (e.g., both from the same prediction model).       !!");
+        warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        return;
+    }
+
+    let main_span = main_max - main_min;
+    let overlap_span = overlap_end - overlap_start;
+    let overlap_pct = overlap_span / main_span * 100.0;
+
+    if overlap_pct < 50.0 {
+        warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        warn!(
+            "!! RT SCALE WARNING: only {:.0}% overlap between main speclib !!", overlap_pct
+        );
+        warn!("!! and calibration library. Calibration may be unreliable.  !!");
+        warn!("!! Ensure both libraries use the same iRT scale.            !!");
+        warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    } else if overlap_pct < 80.0 {
+        warn!(
+            "RT overlap between main speclib and calib lib is {:.0}% — may affect calibration at the extremes",
+            overlap_pct
+        );
+    }
+}
 
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
 pub fn main_loop<I: ScorerQueriable>(
-    // query_iterator: impl ExactSizeIterator<Item = QueryItemToScore>,
-    // # I would like this to be streaming
-    mut query_iterator: Speclib,
+    speclib: Speclib,
+    calib_lib: Option<Speclib>,
     pipeline: &ScoringPipeline<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
-) -> std::result::Result<ScoreTimings, TimsSeekError> {
-    let total = query_iterator.len();
-    let mut chunk_num = 0;
-    let mut nqueried = 0;
-    let mut nwritten = 0;
-    let start = Instant::now();
+) -> std::result::Result<PipelineTimings, TimsSeekError> {
+    let calib_config = CalibrationConfig::default();
 
-    let mut all_timings = ScoreTimings::default();
-    let style = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
-    )
-    .unwrap();
-    let mut results: Vec<IonSearchResults> = Vec::new();
-    query_iterator
-        .as_slice()
-        .chunks(chunk_size)
-        .progress_with_style(style)
-        .for_each(|chunk| {
-            nqueried += chunk.len();
-            // Parallelism happens here within the process_batch function
-            let (mut out, timings): (Vec<IonSearchResults>, ScoreTimings) = pipeline.process_batch(chunk);
-            all_timings += timings;
-            nwritten += out.len();
-            out.sort_unstable_by(|x, y| x.main_score.partial_cmp(&y.main_score).unwrap());
-            debug!("Worst score in chunk: {:#?}", out[0]);
-            if let Some(last) = out.last() {
-                debug!("Best Score in chunk: {:#?}", last);
-            }
-            results.extend(out.iter().cloned());
-
-            chunk_num += 1;
-            let pct_done = (nqueried as f64 / total as f64) * 100.0;
-            let estimated_total = start.elapsed().as_secs_f64() * (100.0 / pct_done);
-            let eta = (estimated_total - start.elapsed().as_secs_f64()).max(0.0);
-            let eta_duration = std::time::Duration::from_secs_f64(eta);
-            info!(
-                "Processed chunk {}, total queries {}, total written {}, elapsed {:?}, {:.2}% done, ETA {:?}",
-                chunk_num, nqueried, nwritten, start.elapsed(), pct_done, eta_duration
-            );
-        });
-
-    info!("Processed {} queries, found {} results", nqueried, nwritten);
+    // === PHASE 1: Broad prescore -> collect top calibrants ===
+    // Use calibration library if provided, otherwise fall back to main speclib
+    let phase1_lib = calib_lib.as_ref().unwrap_or(&speclib);
+    if let Some(ref clib) = calib_lib {
+        info!(
+            "Phase 1: Broad prescore using calibration library ({} entries)...",
+            clib.len()
+        );
+        check_rt_scale_compatibility(&speclib, clib);
+    } else {
+        info!("Phase 1: Broad prescore (unrestricted RT)...");
+    }
+    let phase1_start = Instant::now();
+    let calibrants = phase1_prescore(phase1_lib, pipeline, chunk_size, &calib_config);
+    let phase1_ms = phase1_start.elapsed().as_millis() as u64;
     info!(
-        "Finished processing {} chunks in {:?}",
-        chunk_num,
-        start.elapsed()
+        "Phase 1 complete: {} calibrant candidates in {}ms",
+        calibrants.len(),
+        phase1_ms
     );
 
-    let mut results = target_decoy_compete(results);
+    // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
+    // Build lookup from main speclib when using a separate calib lib.
+    // Maps (quantized_precursor_mz, charge) -> Vec<(rt, sorted_fragment_mzs)>.
+    // Matching requires same precursor (0.01 Da) + charge + at least 5 shared fragment masses.
+    let main_lookup: Option<
+        std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>,
+    > = if calib_lib.is_some() {
+        let mut map: std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>> =
+            std::collections::HashMap::new();
+        for item in speclib.as_slice() {
+            let mz_key = (item.query.mono_precursor_mz() * 100.0).round() as i64;
+            let charge = item.query.precursor_charge();
+            let mut frag_mzs: Vec<i64> = item
+                .query
+                .iter_fragments()
+                .map(|(_, mz)| (mz * 100.0).round() as i64)
+                .collect();
+            frag_mzs.sort_unstable();
+            map.entry((mz_key, charge))
+                .or_default()
+                .push((item.query.rt_seconds(), frag_mzs));
+        }
+        info!(
+            "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
+            map.len()
+        );
+        Some(map)
+    } else {
+        None
+    };
 
-    // Sort in descending order of score
-    results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
-    assert!(results.first().unwrap().main_score >= results.last().unwrap().main_score);
-
-    match recalibrate_speclib(&mut query_iterator, &results) {
+    info!("Phase 2: Calibration...");
+    let phase2_start = Instant::now();
+    let calibration = match calibrate_from_phase1(
+        calibrants,
+        phase1_lib,
+        main_lookup.as_ref(),
+        pipeline,
+        &calib_config,
+    ) {
         Ok(calib) => {
-            info!("Recalibrated speclib retention times based on search results");
-            recalibrate_results(&calib, results.as_mut_slice());
+            info!("Calibration succeeded");
+            calib
         }
         Err(e) => {
-            tracing::error!("Error recalibrating speclib retention times: {:?}", e);
+            tracing::error!("Calibration failed: {:?}. Using fallback.", e);
+            CalibrationResult::fallback(pipeline)
         }
     };
+    let phase2_ms = phase2_start.elapsed().as_millis() as u64;
+
+    // === PHASE 3: Narrow scoring with calibrated tolerances ===
+    info!("Phase 3: Scoring with calibrated extraction...");
+    let phase3_start = Instant::now();
+    let mut phase3_timings = ScoreTimings::default();
+    let results = phase3_score(
+        &speclib,
+        pipeline,
+        &calibration,
+        chunk_size,
+        &mut phase3_timings,
+    );
+    info!(
+        "Phase 3 complete: {} scored peptides in {:?}",
+        results.len(),
+        phase3_start.elapsed()
+    );
+
+    // === Post-processing ===
+    let mut results = target_decoy_compete(results);
+    results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
 
     let data = rescore(results);
     for val in report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]) {
@@ -130,9 +236,296 @@ pub fn main_loop<I: ScorerQueriable>(
     pq_writer.close();
     info!("Wrote final results to {:?}", out_path_pq);
 
-    Ok(all_timings)
+    Ok(PipelineTimings {
+        phase1_prescore_ms: phase1_ms,
+        phase2_calibration_ms: phase2_ms,
+        phase3_prescore_ms: phase3_timings.prescore.as_millis() as u64,
+        phase3_localize_ms: phase3_timings.localize.as_millis() as u64,
+        phase3_secondary_query_ms: phase3_timings.secondary_query.as_millis() as u64,
+        phase3_finalization_ms: phase3_timings.finalization.as_millis() as u64,
+    })
 }
 
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+fn phase1_prescore<I: ScorerQueriable>(
+    speclib: &Speclib,
+    pipeline: &ScoringPipeline<I>,
+    chunk_size: usize,
+    config: &CalibrationConfig,
+) -> Vec<CalibrantCandidate> {
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} Phase 1 [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+    )
+    .unwrap();
+
+    let mut global_heap = CalibrantHeap::new(config.n_calibrants);
+    let mut offset = 0usize;
+
+    for chunk in speclib.as_slice().chunks(chunk_size).progress_with_style(style) {
+        let chunk_heap = pipeline.prescore_batch(chunk, offset, config);
+        global_heap = global_heap.merge(chunk_heap);
+        offset += chunk.len();
+    }
+
+    global_heap.into_vec()
+}
+
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+/// Count shared fragment m/z values between two sorted lists (within 0.01 Da = 1 unit of quantized m/z).
+fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
+    let mut i = 0;
+    let mut j = 0;
+    let mut count = 0;
+    while i < a.len() && j < b.len() {
+        let diff = a[i] - b[j];
+        if diff.abs() <= 1 {
+            count += 1;
+            i += 1;
+            j += 1;
+        } else if diff < 0 {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    count
+}
+
+const MIN_SHARED_FRAGMENTS: usize = 5;
+
+fn calibrate_from_phase1<I: ScorerQueriable>(
+    candidates: Vec<CalibrantCandidate>,
+    phase1_lib: &Speclib,
+    main_lookup: Option<&std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>>,
+    pipeline: &ScoringPipeline<I>,
+    config: &CalibrationConfig,
+) -> Result<CalibrationResult, CalibRtError> {
+    // === Step A: Fit iRT -> RT curve ===
+    // When a separate calib lib is used, we need the main speclib's iRT as x.
+    // The calibration curve must map main_speclib_irt -> observed_rt.
+    let points: Vec<Point> = candidates
+        .iter()
+        .filter_map(|c| {
+            let calib_item = &phase1_lib.as_slice()[c.speclib_index];
+
+            let irt_for_curve = match main_lookup {
+                Some(lookup) => {
+                    let mz_key =
+                        (calib_item.query.mono_precursor_mz() * 100.0).round() as i64;
+                    let charge = calib_item.query.precursor_charge();
+                    let bucket = lookup.get(&(mz_key, charge))?;
+
+                    // Build sorted fragment m/z list for the calib entry
+                    let mut calib_frags: Vec<i64> = calib_item
+                        .query
+                        .iter_fragments()
+                        .map(|(_, mz)| (mz * 100.0).round() as i64)
+                        .collect();
+                    calib_frags.sort_unstable();
+
+                    // Find best match: most shared fragments, break ties by closest RT
+                    let calib_rt = calib_item.query.rt_seconds();
+                    bucket
+                        .iter()
+                        .filter_map(|(main_rt, main_frags)| {
+                            let shared = count_shared_fragments(&calib_frags, main_frags);
+                            if shared >= MIN_SHARED_FRAGMENTS {
+                                Some((shared, (main_rt - calib_rt).abs(), *main_rt))
+                            } else {
+                                None
+                            }
+                        })
+                        // Best = most shared fragments, then closest RT
+                        .min_by(|a, b| b.0.cmp(&a.0).then(a.1.partial_cmp(&b.1).unwrap()))
+                        .map(|(_, _, rt)| rt)?
+                }
+                None => calib_item.query.rt_seconds(),
+            };
+
+            Some(Point {
+                x: irt_for_curve as f64,
+                y: c.apex_rt_seconds as f64,
+                weight: 1.0,
+            })
+        })
+        .collect();
+
+    if main_lookup.is_some() {
+        info!(
+            "Calibration: {} of {} calibrants matched in main speclib (>={} shared fragments)",
+            points.len(),
+            candidates.len(),
+            MIN_SHARED_FRAGMENTS,
+        );
+    }
+
+    let (min_x, max_x, min_y, max_y) = points.iter().fold(
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(mnx, mxx, mny, mxy), p| (mnx.min(p.x), mxx.max(p.x), mny.min(p.y), mxy.max(p.y)),
+    );
+
+    let cal_curve =
+        calibrate_with_ranges(&points, (min_x, max_x), (min_y, max_y), config.grid_size)?;
+
+    // === Step B: Measure m/z and mobility errors at calibrant apexes ===
+    let query_tolerance = Tolerance {
+        ms: MzTolerance::Ppm((10.0, 10.0)),
+        rt: RtTolerance::Minutes((
+            config.calibration_query_rt_window_minutes,
+            config.calibration_query_rt_window_minutes,
+        )),
+        mobility: MobilityTolerance::Pct((5.0, 5.0)),
+        quad: QuadTolerance::Absolute((0.1, 0.1)),
+    };
+
+    let mut mz_errors_ppm: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
+
+    for candidate in &candidates {
+        let item = &phase1_lib.as_slice()[candidate.speclib_index];
+        let query_at_apex = item
+            .query
+            .clone()
+            .with_rt_seconds(candidate.apex_rt_seconds);
+        let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
+            SpectralCollector::new(query_at_apex);
+        pipeline.index.add_query(&mut agg, &query_tolerance);
+
+        for ((_key, expected_mz), stats) in agg.iter_precursors() {
+            if let (Ok(obs_mz), Ok(obs_mob)) = (stats.mean_mz(), stats.mean_mobility()) {
+                let mz_err = (obs_mz - expected_mz) / expected_mz * 1e6;
+                mz_errors_ppm.push(mz_err as f32);
+
+                let expected_mob = item.query.mobility_ook0() as f64;
+                let mob_err = (obs_mob - expected_mob) / expected_mob * 100.0;
+                mobility_errors_pct.push(mob_err as f32);
+                break;
+            }
+        }
+    }
+
+    // === Step C: Derive tolerances from error distributions ===
+    let rt_tolerance_minutes = {
+        let mut abs_residuals: Vec<f64> = points
+            .iter()
+            .map(|p| {
+                let predicted = cal_curve.predict(p.x).unwrap_or(p.y);
+                (p.y - predicted).abs()
+            })
+            .collect();
+        abs_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mad_seconds = abs_residuals
+            .get(abs_residuals.len() / 2)
+            .copied()
+            .unwrap_or(0.0);
+        info!(
+            "RT residuals: MAD={:.1}s, n={}",
+            mad_seconds, abs_residuals.len()
+        );
+        (config.rt_sigma_factor * mad_seconds as f32 / 60.0).max(config.min_rt_tolerance_minutes)
+    };
+
+    let mz_tolerance_ppm = {
+        let (l, r) = asymmetric_tolerance(&mz_errors_ppm, config.mz_sigma, 0.1);
+        (l as f64, r as f64)
+    };
+
+    let mobility_tolerance_pct =
+        asymmetric_tolerance(&mobility_errors_pct, config.mobility_sigma, 0.1);
+
+    info!(
+        "Calibration: RT tol={:.2} min, m/z tol=({:.1}, {:.1}) ppm, mob tol=({:.1}, {:.1}) %",
+        rt_tolerance_minutes,
+        mz_tolerance_ppm.0,
+        mz_tolerance_ppm.1,
+        mobility_tolerance_pct.0,
+        mobility_tolerance_pct.1,
+    );
+
+    Ok(CalibrationResult::new(
+        cal_curve,
+        rt_tolerance_minutes,
+        mz_tolerance_ppm,
+        mobility_tolerance_pct,
+    ))
+}
+
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+fn phase3_score<I: ScorerQueriable>(
+    speclib: &Speclib,
+    pipeline: &ScoringPipeline<I>,
+    calibration: &CalibrationResult,
+    chunk_size: usize,
+    timings: &mut ScoreTimings,
+) -> Vec<IonSearchResults> {
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} Phase 3 [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+    )
+    .unwrap();
+
+    let total_peptides = speclib.as_slice().len();
+    let mut results = Vec::new();
+
+    for chunk in speclib
+        .as_slice()
+        .chunks(chunk_size)
+        .progress_with_style(style)
+    {
+        let (batch_results, batch_timings) =
+            pipeline.score_calibrated_batch(chunk, calibration);
+        *timings += batch_timings;
+        results.extend(batch_results);
+    }
+
+    let skipped = total_peptides - results.len();
+    if skipped > total_peptides / 20 {
+        warn!(
+            "{}/{} peptides produced no Phase 3 result (>{:.0}%). \
+             If this is unexpected, check calibration quality.",
+            skipped,
+            total_peptides,
+            (skipped as f64 / total_peptides as f64) * 100.0
+        );
+    }
+
+    results
+}
+
+/// Derive asymmetric tolerance from error distribution.
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+fn asymmetric_tolerance(errors: &[f32], n_sigma: f32, min_val: f32) -> (f32, f32) {
+    if errors.is_empty() {
+        return (min_val, min_val);
+    }
+    let mean = errors.iter().sum::<f32>() / errors.len() as f32;
+    let variance = errors.iter().map(|e| (e - mean).powi(2)).sum::<f32>() / errors.len() as f32;
+    let std = variance.sqrt();
+    let left = (-(mean - n_sigma * std)).max(min_val);
+    let right = (mean + n_sigma * std).max(min_val);
+    (left, right)
+}
+
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
 fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResults> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -251,12 +644,12 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
 
 pub fn process_speclib(
     path: &Path,
+    calib_lib_path: Option<&Path>,
     pipeline: &ScoringPipeline<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
     decoy_strategy: DecoyStrategy,
 ) -> std::result::Result<(), TimsSeekError> {
-    // TODO: I should probably "inline" this function with the main loop
     info!("Building database from speclib file {:?}", path);
     info!("Decoy generation strategy: {}", decoy_strategy);
 
@@ -270,7 +663,23 @@ pub fn process_speclib(
         elap_time,
         path.display()
     );
-    let timings = main_loop(speclib, pipeline, chunk_size, output)?;
+
+    let calib_lib = match calib_lib_path {
+        Some(p) => {
+            info!("Loading calibration library from {:?}", p);
+            let st = std::time::Instant::now();
+            let lib = Speclib::from_file(p, decoy_strategy)?;
+            info!(
+                "Loaded calibration library of length {} in {:?}",
+                lib.len(),
+                st.elapsed()
+            );
+            Some(lib)
+        }
+        None => None,
+    };
+
+    let timings = main_loop(speclib, calib_lib, pipeline, chunk_size, output)?;
     let perf_report =
         serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
             msg: format!("Error serializing performance report to JSON: {}", e),

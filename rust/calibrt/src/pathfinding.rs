@@ -35,7 +35,9 @@ pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node]) -> Vec<crate::P
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
 
-        for j in 0..i {
+        let lookback = 30;
+        let start = if i > lookback { i - lookback } else { 0 };
+        for j in start..i {
             // Only create edges where both dimensions increase (monotonic constraint)
             if nodes[i].center.x > nodes[j].center.x && nodes[i].center.y > nodes[j].center.y {
                 let dx = nodes[i].center.x - nodes[j].center.x;

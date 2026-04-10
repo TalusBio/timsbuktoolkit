@@ -47,26 +47,42 @@ pub struct SearchResultBuilder<'q> {
     // ms1_ms2_correlation: SetField<f32>,
     npeaks: SetField<u8>,
     apex_lazyerscore: SetField<f32>,
-    apex_lazyerscore_vs_baseline: SetField<f32>,
-    apex_norm_lazyerscore_vs_baseline: SetField<f32>,
-    ms2_cosine_ref_similarity: SetField<f32>,
-    ms2_coelution_score: SetField<f32>,
     ms2_summed_transition_intensity: SetField<f32>,
-    ms2_corr_v_gauss: SetField<f32>,
     ms2_lazyerscore: SetField<f32>,
     ms2_isotope_lazyerscore: SetField<f32>,
     ms2_isotope_lazyerscore_ratio: SetField<f32>,
+    lazyscore_z: SetField<f32>,
+    lazyscore_vs_baseline: SetField<f32>,
 
     ms2_mz_errors: SetField<[f32; NUM_MS2_IONS]>,
     ms2_mobility_errors: SetField<[f32; NUM_MS2_IONS]>,
 
-    ms1_cosine_ref_similarity: SetField<f32>,
-    ms1_coelution_score: SetField<f32>,
     ms1_summed_precursor_intensity: SetField<f32>,
-    ms1_corr_v_gauss: SetField<f32>,
 
     ms1_mz_errors: SetField<[f32; NUM_MS1_IONS]>,
     ms1_mobility_errors: SetField<[f32; NUM_MS1_IONS]>,
+
+    // Split product & apex features
+    split_product_score: SetField<f32>,
+    cosine_au_score: SetField<f32>,
+    scribe_au_score: SetField<f32>,
+    coelution_gradient_cosine: SetField<f32>,
+    coelution_gradient_scribe: SetField<f32>,
+    cosine_weighted_coelution: SetField<f32>,
+    cosine_gradient_consistency: SetField<f32>,
+    scribe_weighted_coelution: SetField<f32>,
+    scribe_gradient_consistency: SetField<f32>,
+    peak_shape: SetField<f32>,
+    ratio_cv: SetField<f32>,
+    centered_apex: SetField<f32>,
+    precursor_coelution: SetField<f32>,
+    fragment_coverage: SetField<f32>,
+    precursor_apex_match: SetField<f32>,
+    xic_quality: SetField<f32>,
+    fragment_apex_agreement: SetField<f32>,
+    isotope_correlation: SetField<f32>,
+    gaussian_correlation: SetField<f32>,
+    per_frag_gaussian_corr: SetField<f32>,
 
     relative_intensities: SetField<RelativeIntensities>,
     raising_cycles: SetField<u8>,
@@ -168,21 +184,18 @@ impl<'q> SearchResultBuilder<'q> {
     pub fn with_apex_score(mut self, main_score: &ApexScore) -> Self {
         let ApexScore {
             score,
+            retention_time_ms,
+            joint_apex_cycle: _,
+            split_product,
+            features,
             delta_next,
             delta_second_next,
-            ms2_cosine_ref_sim,
-            ms2_coelution_score,
-            ms1_coelution_score,
-            ms1_cosine_ref_sim,
             lazyscore,
             lazyscore_vs_baseline,
             lazyscore_z,
-            ms2_corr_v_gauss,
-            ms1_corr_v_gauss,
             npeaks,
-            ms1_summed_intensity,
             ms2_summed_intensity,
-            retention_time_ms,
+            ms1_summed_intensity,
             raising_cycles,
             falling_cycles,
         } = *main_score;
@@ -190,20 +203,36 @@ impl<'q> SearchResultBuilder<'q> {
             self.main_score = SetField::Some(score);
             self.delta_next = SetField::Some(delta_next);
             self.delta_second_next = SetField::Some(delta_second_next);
-
             self.rt_seconds = SetField::Some(retention_time_ms as f32 / 1000.0);
-            self.ms2_cosine_ref_similarity = SetField::Some(ms2_cosine_ref_sim);
-            self.ms2_coelution_score = SetField::Some(ms2_coelution_score);
-            self.ms1_coelution_score = SetField::Some(ms1_coelution_score);
-            self.ms1_cosine_ref_similarity = SetField::Some(ms1_cosine_ref_sim);
+
+            self.split_product_score = SetField::Some(split_product.base_score);
+            self.cosine_au_score = SetField::Some(split_product.cosine_au);
+            self.scribe_au_score = SetField::Some(split_product.scribe_au);
+            self.coelution_gradient_cosine = SetField::Some(split_product.cosine_cg);
+            self.coelution_gradient_scribe = SetField::Some(split_product.scribe_cg);
+            self.cosine_weighted_coelution = SetField::Some(split_product.cosine_weighted_coelution);
+            self.cosine_gradient_consistency = SetField::Some(split_product.cosine_gradient_consistency);
+            self.scribe_weighted_coelution = SetField::Some(split_product.scribe_weighted_coelution);
+            self.scribe_gradient_consistency = SetField::Some(split_product.scribe_gradient_consistency);
+
+            self.peak_shape = SetField::Some(features.peak_shape);
+            self.ratio_cv = SetField::Some(features.ratio_cv);
+            self.centered_apex = SetField::Some(features.centered_apex);
+            self.precursor_coelution = SetField::Some(features.precursor_coelution);
+            self.fragment_coverage = SetField::Some(features.fragment_coverage);
+            self.precursor_apex_match = SetField::Some(features.precursor_apex_match);
+            self.xic_quality = SetField::Some(features.xic_quality);
+            self.fragment_apex_agreement = SetField::Some(features.fragment_apex_agreement);
+            self.isotope_correlation = SetField::Some(features.isotope_correlation);
+            self.gaussian_correlation = SetField::Some(features.gaussian_correlation);
+            self.per_frag_gaussian_corr = SetField::Some(features.per_frag_gaussian_corr);
+
             self.apex_lazyerscore = SetField::Some(lazyscore);
-            self.apex_lazyerscore_vs_baseline = SetField::Some(lazyscore_vs_baseline);
-            self.apex_norm_lazyerscore_vs_baseline = SetField::Some(lazyscore_z);
+            self.lazyscore_z = SetField::Some(lazyscore_z);
+            self.lazyscore_vs_baseline = SetField::Some(lazyscore_vs_baseline);
             self.npeaks = SetField::Some(npeaks);
             self.ms1_summed_precursor_intensity = SetField::Some(ms1_summed_intensity);
             self.ms2_summed_transition_intensity = SetField::Some(ms2_summed_intensity);
-            self.ms2_corr_v_gauss = SetField::Some(ms2_corr_v_gauss);
-            self.ms1_corr_v_gauss = SetField::Some(ms1_corr_v_gauss);
             self.raising_cycles = SetField::Some(raising_cycles);
             self.falling_cycles = SetField::Some(falling_cycles);
         }
@@ -297,17 +326,33 @@ impl<'q> SearchResultBuilder<'q> {
             falling_cycles: expect_some!(falling_cycles),
 
             apex_lazyerscore: expect_some!(apex_lazyerscore),
-            apex_lazyerscore_vs_baseline: expect_some!(apex_lazyerscore_vs_baseline),
-            // ms1_ms2_correlation: self
-            //     .ms1_ms2_correlation
-            //     .expect_some("ms1_ms2_correlation", "ms1_ms2_correlation")?,
-            apex_norm_lazyerscore_vs_baseline: expect_some!(apex_norm_lazyerscore_vs_baseline),
-            ms2_cosine_ref_similarity: expect_some!(ms2_cosine_ref_similarity),
-            ms2_corr_v_gauss: expect_some!(ms2_corr_v_gauss),
             ms2_summed_transition_intensity: expect_some!(ms2_summed_transition_intensity),
             ms2_lazyerscore: expect_some!(ms2_lazyerscore),
             ms2_isotope_lazyerscore: expect_some!(ms2_isotope_lazyerscore),
             ms2_isotope_lazyerscore_ratio: expect_some!(ms2_isotope_lazyerscore_ratio),
+            lazyscore_z: expect_some!(lazyscore_z),
+            lazyscore_vs_baseline: expect_some!(lazyscore_vs_baseline),
+
+            split_product_score: expect_some!(split_product_score),
+            cosine_au_score: expect_some!(cosine_au_score),
+            scribe_au_score: expect_some!(scribe_au_score),
+            coelution_gradient_cosine: expect_some!(coelution_gradient_cosine),
+            coelution_gradient_scribe: expect_some!(coelution_gradient_scribe),
+            cosine_weighted_coelution: expect_some!(cosine_weighted_coelution),
+            cosine_gradient_consistency: expect_some!(cosine_gradient_consistency),
+            scribe_weighted_coelution: expect_some!(scribe_weighted_coelution),
+            scribe_gradient_consistency: expect_some!(scribe_gradient_consistency),
+            peak_shape: expect_some!(peak_shape),
+            ratio_cv: expect_some!(ratio_cv),
+            centered_apex: expect_some!(centered_apex),
+            precursor_coelution: expect_some!(precursor_coelution),
+            fragment_coverage: expect_some!(fragment_coverage),
+            precursor_apex_match: expect_some!(precursor_apex_match),
+            xic_quality: expect_some!(xic_quality),
+            fragment_apex_agreement: expect_some!(fragment_apex_agreement),
+            isotope_correlation: expect_some!(isotope_correlation),
+            gaussian_correlation: expect_some!(gaussian_correlation),
+            per_frag_gaussian_corr: expect_some!(per_frag_gaussian_corr),
 
             ms2_mz_error_0: mz2_e0,
             ms2_mz_error_1: mz2_e1,
@@ -324,14 +369,7 @@ impl<'q> SearchResultBuilder<'q> {
             ms2_mobility_error_5: mob2_e5,
             ms2_mobility_error_6: mob2_e6,
 
-            ms2_coelution_score: expect_some!(ms2_coelution_score),
-            ms1_cosine_ref_similarity: expect_some!(ms1_cosine_ref_similarity),
             ms1_summed_precursor_intensity: expect_some!(ms1_summed_precursor_intensity),
-            ms1_corr_v_gauss: expect_some!(ms1_corr_v_gauss),
-            ms1_coelution_score: expect_some!(ms1_coelution_score),
-            // ms1_coelution_score: self
-            //     .ms1_coelution_score
-            //     .expect_some("ms1_coelution_score", "ms1_coelution_score")?,
             ms1_mz_error_0: mz1_e0,
             ms1_mz_error_1: mz1_e1,
             ms1_mz_error_2: mz1_e2,
@@ -356,8 +394,8 @@ impl<'q> SearchResultBuilder<'q> {
             qvalue: f32::NAN,
             delta_group: f32::NAN,
             delta_group_ratio: f32::NAN,
-            recalibrated_query_rt: f32::NAN,
-            calibrated_sq_delta_theo_rt: f32::NAN,
+            recalibrated_query_rt: ref_rt,
+            calibrated_sq_delta_theo_rt: sq_delta_theo_rt,
         };
 
         Ok(results)
@@ -403,22 +441,36 @@ pub struct IonSearchResults {
     // MS2
     pub npeaks: u8,
     pub apex_lazyerscore: f32,
-    pub apex_lazyerscore_vs_baseline: f32,
-    pub apex_norm_lazyerscore_vs_baseline: f32,
-    pub ms2_cosine_ref_similarity: f32,
-    pub ms2_coelution_score: f32,
-    pub ms2_corr_v_gauss: f32,
     pub ms2_summed_transition_intensity: f32,
     pub ms2_lazyerscore: f32,
     pub ms2_isotope_lazyerscore: f32,
     pub ms2_isotope_lazyerscore_ratio: f32,
+    pub lazyscore_z: f32,
+    pub lazyscore_vs_baseline: f32,
+
+    // Split product & apex features
+    pub split_product_score: f32,
+    pub cosine_au_score: f32,
+    pub scribe_au_score: f32,
+    pub coelution_gradient_cosine: f32,
+    pub coelution_gradient_scribe: f32,
+    pub cosine_weighted_coelution: f32,
+    pub cosine_gradient_consistency: f32,
+    pub scribe_weighted_coelution: f32,
+    pub scribe_gradient_consistency: f32,
+    pub peak_shape: f32,
+    pub ratio_cv: f32,
+    pub centered_apex: f32,
+    pub precursor_coelution: f32,
+    pub fragment_coverage: f32,
+    pub precursor_apex_match: f32,
+    pub xic_quality: f32,
+    pub fragment_apex_agreement: f32,
+    pub isotope_correlation: f32,
+    pub gaussian_correlation: f32,
+    pub per_frag_gaussian_corr: f32,
 
     // MS2 - Split
-    // Flattening manually bc serde(flatten)
-    // is not supported by csv ...
-    // https://github.com/BurntSushi/rust-csv/pull/223
-    // Q: Is it supported by parquet?
-    // A: As of 2025-May-20, it is not.
     pub ms2_mz_error_0: f32,
     pub ms2_mz_error_1: f32,
     pub ms2_mz_error_2: f32,
@@ -435,10 +487,7 @@ pub struct IonSearchResults {
     pub ms2_mobility_error_6: f32,
 
     // MS1
-    pub ms1_cosine_ref_similarity: f32,
-    pub ms1_coelution_score: f32,
     pub ms1_summed_precursor_intensity: f32,
-    pub ms1_corr_v_gauss: f32,
 
     // MS1 Split
     pub ms1_mz_error_0: f32,
