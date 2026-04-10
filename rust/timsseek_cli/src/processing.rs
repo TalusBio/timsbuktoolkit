@@ -23,8 +23,8 @@ use timsseek::ml::rescore;
 use timsseek::rt_calibration::{
     CalibRtError,
     CalibrationResult,
+    CalibratedGrid,
     Point,
-    calibrate_with_ranges,
 };
 use timsseek::scoring::{
     CalibrantCandidate,
@@ -482,8 +482,31 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         |(mnx, mxx, mny, mxy), p| (mnx.min(p.x), mxx.max(p.x), mny.min(p.y), mxy.max(p.y)),
     );
 
-    let cal_curve =
-        calibrate_with_ranges(&points, (min_x, max_x), (min_y, max_y), config.grid_size, config.dp_lookback)?;
+    // Use CalibrationState for fitting + ridge width measurement
+    let mut cal_state = CalibratedGrid::new(
+        config.grid_size, (min_x, max_x), (min_y, max_y), config.dp_lookback,
+    )?;
+    cal_state.update(points.iter().map(|p| (p.x, p.y, p.weight)));
+    cal_state.fit();
+    let cal_curve = cal_state.curve()
+        .ok_or(CalibRtError::NoPoints)?
+        .clone();
+
+    // Measure ridge width for position-dependent RT tolerance
+    let ridge_widths = cal_state.measure_ridge_width(0.1);
+    if !ridge_widths.is_empty() {
+        let total_weight: f64 = ridge_widths.iter().map(|m| m.total_weight).sum();
+        let weighted_hw: f64 = ridge_widths.iter()
+            .map(|m| m.half_width * m.total_weight)
+            .sum::<f64>() / total_weight.max(1.0);
+        info!(
+            "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",
+            weighted_hw,
+            ridge_widths.len(),
+            ridge_widths.iter().map(|m| m.half_width).fold(f64::MAX, f64::min),
+            ridge_widths.iter().map(|m| m.half_width).fold(0.0f64, f64::max),
+        );
+    }
 
     // === Step B: Measure m/z and mobility errors at calibrant apexes ===
     let query_tolerance = Tolerance {
@@ -565,7 +588,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         rt_tolerance_minutes,
         mz_tolerance_ppm,
         mobility_tolerance_pct,
-    ))
+    ).with_ridge_widths(ridge_widths))
 }
 
 #[cfg_attr(
