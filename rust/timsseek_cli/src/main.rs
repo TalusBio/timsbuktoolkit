@@ -5,7 +5,6 @@ mod processing;
 
 use clap::Parser;
 use timsquery::TimsTofPath;
-use timsquery::models::tolerance::RtTolerance;
 use timsquery::serde::load_index_auto;
 use timsquery::utils::TupleRange;
 use timsseek::scoring::Scorer;
@@ -260,11 +259,6 @@ fn process_single_file(
     let pipeline = Scorer {
         index,
         broad_tolerance: config.analysis.tolerance.clone(),
-        secondary_tolerance: config
-            .analysis
-            .tolerance
-            .clone()
-            .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
         fragmented_range,
     };
 

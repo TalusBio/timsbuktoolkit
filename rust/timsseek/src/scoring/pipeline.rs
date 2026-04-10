@@ -32,7 +32,6 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
-use timsquery::models::tolerance::MobilityTolerance;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
@@ -308,9 +307,6 @@ pub struct Scorer<I: ScorerQueriable> {
     /// Broad tolerance used during the prescore phase.
     pub broad_tolerance: Tolerance,
 
-    /// Refined tolerance used at detected apex for secondary queries.
-    pub secondary_tolerance: Tolerance,
-
     /// m/z range where peptides were fragmented.
     /// Queries with precursors outside this range are filtered out.
     pub fragmented_range: TupleRange<f64>,
@@ -444,12 +440,14 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Performs refined secondary query at detected apex with two-pass strategy.
     #[cfg_attr(
         feature = "instrumentation",
-        tracing::instrument(skip(self, item, main_score), level = "trace")
+        tracing::instrument(skip(self, item, main_score, spectral_tol, isotope_tol), level = "trace")
     )]
     fn execute_secondary_query(
         &self,
         item: &QueryItemToScore,
         main_score: &ApexScore,
+        spectral_tol: &Tolerance,
+        isotope_tol: &Tolerance,
     ) -> (
         SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
         SpectralCollector<IonAnnot, f32>,
@@ -460,7 +458,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let new_query = item.query.clone().with_rt_seconds(new_rt_seconds);
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
-        self.index.add_query(&mut agg, &self.secondary_tolerance);
+        self.index.add_query(&mut agg, spectral_tol);
 
         // Calculate weighted mean mobility from observed data
         let mobility = Self::get_mobility(&agg);
@@ -480,13 +478,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
             SpectralCollector::new(new_query);
 
-        let tol_use = self
-            .secondary_tolerance
-            .clone()
-            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)));
-
-        self.index.add_query(&mut agg, &tol_use);
-        self.index.add_query(&mut isotope_agg, &tol_use);
+        self.index.add_query(&mut agg, isotope_tol);
+        self.index.add_query(&mut isotope_agg, isotope_tol);
 
         (agg, isotope_agg)
     }
@@ -522,6 +515,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn process_query_full(
         &self,
         item: QueryItemToScore,
+        calibration: &CalibrationResult,
     ) -> Result<FullQueryResult, DataProcessingError> {
         let mut buffer = ApexFinder::new(self.num_cycles());
 
@@ -535,7 +529,10 @@ impl<I: ScorerQueriable> Scorer<I> {
         })?;
 
         let apex_score = buffer.find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
-        let (inner_collector, isotope_collector) = self.execute_secondary_query(&item, &apex_score);
+        let spectral_tol = calibration.get_spectral_tolerance();
+        let isotope_tol = calibration.get_isotope_tolerance();
+        let (inner_collector, isotope_collector) =
+            self.execute_secondary_query(&item, &apex_score, &spectral_tol, &isotope_tol);
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let search_results = self.finalize_results(
@@ -669,9 +666,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings.localize += st.elapsed();
 
         let st = Instant::now();
+        let spectral_tol = calibration.get_spectral_tolerance();
+        let isotope_tol = calibration.get_isotope_tolerance();
         let (inner_collector, isotope_collector) =
             tracing::span!(tracing::Level::TRACE, "score_calibrated::secondary_query")
-                .in_scope(|| self.execute_secondary_query(item, &apex_score));
+                .in_scope(|| self.execute_secondary_query(item, &apex_score, &spectral_tol, &isotope_tol));
         timings.secondary_query += st.elapsed();
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;

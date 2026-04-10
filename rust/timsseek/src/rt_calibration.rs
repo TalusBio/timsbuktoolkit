@@ -57,6 +57,22 @@ impl CalibrationResult {
         }
     }
 
+    /// Tolerance for the secondary spectral query at a detected apex.
+    pub fn get_spectral_tolerance(&self) -> Tolerance {
+        Tolerance {
+            ms: MzTolerance::Ppm(self.mz_tolerance_ppm),
+            rt: RtTolerance::Minutes((0.5 / 60.0, 0.5 / 60.0)), // ~0.5 seconds
+            mobility: MobilityTolerance::Pct(self.mobility_tolerance_pct),
+            quad: QuadTolerance::Absolute((0.1, 0.1)),
+        }
+    }
+
+    /// Tight mobility tolerance for isotope pattern matching.
+    pub fn get_isotope_tolerance(&self) -> Tolerance {
+        self.get_spectral_tolerance()
+            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
+    }
+
     /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
     pub fn fallback<I: ScorerQueriable>(pipeline: &Scorer<I>) -> Self {
         let range = pipeline.index.ms1_cycle_mapping().range_milis();
