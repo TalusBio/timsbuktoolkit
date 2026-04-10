@@ -89,7 +89,7 @@ pub fn rescore<T: LabelledScore + FeatureLike + Send + Sync + std::fmt::Debug>(
 
     data.shuffle(&mut rand::rng());
 
-    let mut scorer = CrossValidatedScorer::new_from_shuffled(5, data, config);
+    let mut scorer = CrossValidatedScorer::new_from_shuffled(3, data, config);
     scorer
         .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
         .unwrap();
@@ -104,6 +104,12 @@ pub fn rescore<T: LabelledScore + FeatureLike + Send + Sync + std::fmt::Debug>(
 }
 
 use crate::IonSearchResults;
+
+fn mean_abs_error(errs: &[f32]) -> f64 {
+    let (sum, n) = errs.iter().filter(|e| e.is_finite() && **e != 0.0)
+        .fold((0.0f64, 0u32), |(s, n), &e| (s + (e as f64).abs(), n + 1));
+    if n > 0 { sum / n as f64 } else { f64::NAN }
+}
 
 impl FeatureLike for IonSearchResults {
     fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
@@ -129,7 +135,6 @@ impl FeatureLike for IonSearchResults {
             sq_delta_theo_rt,
             calibrated_sq_delta_theo_rt,
             delta_ms1_ms2_mobility,
-            // ms1_ms2_correlation,
             sq_delta_ms1_ms2_mobility,
             raising_cycles,
             falling_cycles,
@@ -137,22 +142,36 @@ impl FeatureLike for IonSearchResults {
             // MS2
             npeaks,
             apex_lazyerscore,
-            apex_lazyerscore_vs_baseline,
-            apex_norm_lazyerscore_vs_baseline,
-            ms2_cosine_ref_similarity,
-            ms2_coelution_score,
-            ms2_corr_v_gauss,
             ms2_summed_transition_intensity,
             ms2_lazyerscore,
             ms2_isotope_lazyerscore,
             ms2_isotope_lazyerscore_ratio,
+            lazyscore_z,
+            lazyscore_vs_baseline,
+
+            // Split product & apex features
+            split_product_score,
+            cosine_au_score,
+            scribe_au_score,
+            coelution_gradient_cosine,
+            coelution_gradient_scribe,
+            cosine_weighted_coelution,
+            cosine_gradient_consistency,
+            scribe_weighted_coelution,
+            scribe_gradient_consistency,
+            peak_shape,
+            ratio_cv,
+            centered_apex,
+            precursor_coelution,
+            fragment_coverage,
+            precursor_apex_match,
+            xic_quality,
+            fragment_apex_agreement,
+            isotope_correlation,
+            gaussian_correlation,
+            per_frag_gaussian_corr,
 
             // MS2 - Split
-            // Flattening manually bc serde(flatten)
-            // is not supported by csv ...
-            // https,
-            // Q,
-            // A,
             ms2_mz_error_0,
             ms2_mz_error_1,
             ms2_mz_error_2,
@@ -169,10 +188,7 @@ impl FeatureLike for IonSearchResults {
             ms2_mobility_error_6,
 
             // MS1
-            ms1_cosine_ref_similarity,
-            ms1_coelution_score,
             ms1_summed_precursor_intensity,
-            ms1_corr_v_gauss,
 
             // MS1 Split
             ms1_mz_error_0,
@@ -223,15 +239,33 @@ impl FeatureLike for IonSearchResults {
             // MS2
             npeaks as f64,
             apex_lazyerscore as f64,
-            apex_lazyerscore_vs_baseline as f64,
-            apex_norm_lazyerscore_vs_baseline as f64,
-            ms2_cosine_ref_similarity as f64,
-            ms2_coelution_score as f64,
-            ms2_corr_v_gauss as f64,
             (ms2_summed_transition_intensity as f64).ln_1p(),
             ms2_lazyerscore as f64,
             ms2_isotope_lazyerscore as f64,
             ms2_isotope_lazyerscore_ratio as f64,
+            lazyscore_z as f64,
+            lazyscore_vs_baseline as f64,
+            // Split product & apex features
+            (split_product_score as f64).ln_1p(),
+            (cosine_au_score as f64).ln_1p(),
+            (scribe_au_score as f64).ln_1p(),
+            coelution_gradient_cosine as f64,
+            coelution_gradient_scribe as f64,
+            cosine_weighted_coelution as f64,
+            cosine_gradient_consistency as f64,
+            scribe_weighted_coelution as f64,
+            scribe_gradient_consistency as f64,
+            peak_shape as f64,
+            ratio_cv as f64,
+            centered_apex as f64,
+            precursor_coelution as f64,
+            fragment_coverage as f64,
+            precursor_apex_match as f64,
+            xic_quality as f64,
+            fragment_apex_agreement as f64,
+            isotope_correlation as f64,
+            gaussian_correlation as f64,
+            per_frag_gaussian_corr as f64,
             // MS2 - Split
             ms2_mz_error_0 as f64,
             ms2_mz_error_1 as f64,
@@ -247,12 +281,9 @@ impl FeatureLike for IonSearchResults {
             ms2_mobility_error_4 as f64,
             ms2_mobility_error_5 as f64,
             ms2_mobility_error_6 as f64,
-            // MS as f641
-            ms1_cosine_ref_similarity as f64,
-            ms1_coelution_score as f64,
+            // MS1
             (ms1_summed_precursor_intensity as f64).ln_1p(),
-            ms1_corr_v_gauss as f64,
-            // MS1 Spli as f64t
+            // MS1 Split
             ms1_mz_error_0 as f64,
             ms1_mz_error_1 as f64,
             ms1_mz_error_2 as f64,
@@ -274,6 +305,23 @@ impl FeatureLike for IonSearchResults {
             delta_group_ratio as f64,
             recalibrated_query_rt as f64,
             calibrated_sq_delta_theo_rt as f64,
+            // Derived intensity features
+            {
+                // Max fragment intensity ratio (dominance of strongest fragment)
+                let ratios = [ms2_inten_ratio_0, ms2_inten_ratio_1, ms2_inten_ratio_2,
+                    ms2_inten_ratio_3, ms2_inten_ratio_4, ms2_inten_ratio_5, ms2_inten_ratio_6];
+                ratios.iter().filter(|r| r.is_finite()).fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64
+            },
+            // Interaction features
+            (main_score * delta_next) as f64,         // score × peak separation
+            (split_product_score * fragment_coverage) as f64, // base score × coverage
+            // Summary error features
+            mean_abs_error(&[ms2_mz_error_0, ms2_mz_error_1, ms2_mz_error_2,
+                ms2_mz_error_3, ms2_mz_error_4, ms2_mz_error_5, ms2_mz_error_6]),
+            mean_abs_error(&[ms2_mobility_error_0, ms2_mobility_error_1, ms2_mobility_error_2,
+                ms2_mobility_error_3, ms2_mobility_error_4, ms2_mobility_error_5, ms2_mobility_error_6]),
+            mean_abs_error(&[ms1_mz_error_0, ms1_mz_error_1, ms1_mz_error_2]),
+            mean_abs_error(&[ms1_mobility_error_0, ms1_mobility_error_1, ms1_mobility_error_2]),
         ]
     }
 

@@ -114,6 +114,8 @@ impl CalibrationCurve {
 
         // Find the partition point; first element >= x_val.
         let i = self.points.partition_point(|p| p.x < x_val);
+        // Clamp to [1, slopes.len()] — partition_point can return 0 when x_val == first_x
+        let i = i.max(1).min(self.slopes.len());
         Ok(self.predict_with_index(x_val, i))
     }
 

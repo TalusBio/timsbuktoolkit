@@ -26,6 +26,13 @@ pub struct Cli {
     #[arg(short, long)]
     pub speclib_file: Option<PathBuf>,
 
+    /// Path to a calibration library (optional).
+    /// If provided, Phase 1 prescore uses this library for calibrant selection,
+    /// while Phase 3 scoring uses the main speclib.
+    /// If not provided, the main speclib is used for both phases.
+    #[arg(long)]
+    pub calib_lib: Option<PathBuf>,
+
     /// Path to the output directory
     #[arg(short, long)]
     pub output_dir: Option<PathBuf>,

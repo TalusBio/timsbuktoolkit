@@ -44,6 +44,9 @@ impl Grid {
                         weight: 0.0,
                     },
                     suppressed: false,
+                    sum_wx: 0.0,
+                    sum_wy: 0.0,
+                    sum_w: 0.0,
                 });
             }
         }
@@ -83,6 +86,9 @@ impl Grid {
         let index = gy * self.bins + gx;
         if let Some(node) = self.nodes.get_mut(index) {
             node.center.weight += weight;
+            node.sum_wx += x * weight;
+            node.sum_wy += y * weight;
+            node.sum_w += weight;
         }
 
         Ok(())
@@ -142,6 +148,18 @@ impl Grid {
         if non_suppressed_sum == 0.0 {
             return Err(CalibRtError::NoPoints);
         }
+
+        // Replace bin centers with weighted centroids for non-suppressed nodes.
+        // Clamp to grid range to avoid interpolation boundary issues.
+        for node in self.nodes.iter_mut() {
+            if !node.suppressed && node.sum_w > 0.0 {
+                let cx = (node.sum_wx / node.sum_w).clamp(self.x_range.0, self.x_range.1);
+                let cy = (node.sum_wy / node.sum_w).clamp(self.y_range.0, self.y_range.1);
+                node.center.x = cx;
+                node.center.y = cy;
+            }
+        }
+
         Ok(())
     }
 }
@@ -151,6 +169,10 @@ impl Grid {
 pub(crate) struct Node {
     pub(crate) center: Point,
     pub(crate) suppressed: bool,
+    // Weighted centroid accumulators
+    sum_wx: f64,
+    sum_wy: f64,
+    sum_w: f64,
 }
 
 #[cfg(test)]
@@ -239,15 +261,8 @@ mod tests {
             non_suppressed.len()
         );
 
-        // Verify the specific nodes
-        assert!(
-            non_suppressed.contains(&(0, 2, 9.0)),
-            "Node at (0,2) with weight 9.0 should be non-suppressed"
-        );
-        assert!(
-            non_suppressed.contains(&(2, 1, 8.0)),
-            "Node at (2,1) with weight 8.0 should be non-suppressed"
-        );
+        assert!(non_suppressed.contains(&(0, 2, 9.0)));
+        assert!(non_suppressed.contains(&(2, 1, 8.0)));
     }
 
     #[test]
@@ -281,17 +296,15 @@ mod tests {
         let non_suppressed = print_grid_state(&grid);
 
         // Only the center cell (1,1) with weight 9 should be non-suppressed
+        // It is the max in both its row (row 1: 4,9,6) and column (col 1: 2,9,8)
         assert_eq!(
             non_suppressed.len(),
             1,
-            "Expected 1 non-suppressed node (the global max), found {}",
+            "Expected 1 non-suppressed node, found {}",
             non_suppressed.len()
         );
 
-        assert!(
-            non_suppressed.contains(&(1, 1, 9.0)),
-            "Node at (1,1) with weight 9.0 should be non-suppressed"
-        );
+        assert!(non_suppressed.contains(&(1, 1, 9.0)));
     }
 
     #[test]
