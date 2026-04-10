@@ -58,7 +58,6 @@ use super::results::{
     ScoredCandidate,
     ScoredCandidateBuilder,
 };
-use super::search_results::IonSearchResults;
 use super::timings::ScoreTimings;
 use crate::rt_calibration::CalibrationResult;
 use tracing::warn;
@@ -639,7 +638,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         calibration: &CalibrationResult,
         buffer: &mut ApexFinder,
         timings: &mut ScoreTimings,
-    ) -> Option<IonSearchResults> {
+    ) -> Option<ScoredCandidate> {
         let st = Instant::now();
         let (metadata, scoring_ctx) =
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(
@@ -708,7 +707,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         items_to_score: &[QueryItemToScore],
         calibration: &CalibrationResult,
-    ) -> (Vec<IonSearchResults>, ScoreTimings) {
+    ) -> (Vec<ScoredCandidate>, ScoreTimings) {
         let init_fn = || ApexFinder::new(self.num_cycles());
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
