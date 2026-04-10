@@ -47,6 +47,11 @@ impl CalibrationResult {
         }
     }
 
+    /// Derived RT tolerance in minutes.
+    pub fn rt_tolerance_minutes(&self) -> f32 {
+        self.rt_tolerance_minutes
+    }
+
     /// Get per-query tolerance. Initially uniform; future: position-dependent.
     pub fn get_tolerance(&self, _mz: f64, _mobility: f32, _rt: f32) -> Tolerance {
         Tolerance {

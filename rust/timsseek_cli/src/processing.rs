@@ -187,6 +187,12 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         None
     };
 
+    // Snapshot calibrant points before calibration consumes them (for saving)
+    let calibrant_points: Vec<[f64; 3]> = calibrants
+        .iter()
+        .map(|c| [c.library_rt_seconds as f64, c.apex_rt_seconds as f64, 1.0])
+        .collect();
+
     info!("Phase 2: Calibration...");
     let phase2_start = Instant::now();
     let calibration = match calibrate_from_phase1(
@@ -210,6 +216,29 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         "Phase 2: Calibrate ....... {:.1}s",
         phase2_ms as f64 / 1000.0
     );
+
+    // Save calibration as JSON v1 (compatible with viewer load)
+    if !calibrant_points.is_empty() {
+        let rt_lo = calibrant_points.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+        let rt_hi = calibrant_points.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        let cal_save = serde_json::json!({
+            "version": "v1",
+            "rt_range_seconds": [rt_lo, rt_hi],
+            "calibrant_points": calibrant_points,
+            "tolerances": {
+                "rt_minutes": calibration.rt_tolerance_minutes(),
+            },
+            "wrmse": 0.0,
+            "n_calibrants": calibrant_points.len(),
+            "n_scored": calibrant_points.len(),
+            "grid_size": calib_config.grid_size,
+        });
+        let cal_json_path = out_path.directory.join("calibration.json");
+        if let Ok(json) = serde_json::to_string_pretty(&cal_save) {
+            let _ = std::fs::write(&cal_json_path, json);
+            info!("Saved calibration to {:?}", cal_json_path);
+        }
+    }
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
