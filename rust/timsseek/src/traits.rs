@@ -40,14 +40,12 @@ use timsquery::{
 ///
 /// # let peaks: IndexedTimstofPeaks = unimplemented!();
 /// # let broad_tol = Tolerance::default();
-/// # let secondary_tol = Tolerance::default();
 /// # let fragmented_range = (400.0, 1200.0).try_into().unwrap();
 ///
 /// // IndexedTimstofPeaks implements ScorerQueriable
 /// let scorer = Scorer {
 ///     index: peaks,
 ///     broad_tolerance: broad_tol,
-///     secondary_tolerance: secondary_tol,
 ///     fragmented_range,
 /// };
 ///
