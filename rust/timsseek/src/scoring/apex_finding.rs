@@ -219,9 +219,6 @@ impl ElutionTraces {
     }
 }
 
-/// Backward compatibility alias. Migrate callers to `TraceScorer`.
-pub type ApexFinder = TraceScorer;
-
 /// The core engine for finding peptide apexes.
 #[derive(Debug)]
 pub struct TraceScorer {
