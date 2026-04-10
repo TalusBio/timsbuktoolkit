@@ -536,7 +536,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let tolerance = calibration.get_tolerance(
             item.query.mono_precursor_mz(),
             item.query.mobility_ook0(),
-            calibrated_rt,
+            original_irt, // library RT — ridge widths are indexed by library RT
         );
 
         let calibrated_query = item.query.clone().with_rt_seconds(calibrated_rt);
