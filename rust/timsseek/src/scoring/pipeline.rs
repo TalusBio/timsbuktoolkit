@@ -176,7 +176,7 @@ const TOP_N_FRAGMENTS: usize = 8;
 ///
 /// Removes lower-ranked fragments from the chromatogram collector (fragments array + eg)
 /// and from expected intensities, maintaining the invariant that all three agree on count.
-fn select_top_n_fragments<T: KeyLike>(
+pub(crate) fn select_top_n_fragments<T: KeyLike>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
     n: usize,
@@ -239,7 +239,7 @@ fn select_top_n_fragments<T: KeyLike>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-fn filter_zero_intensity_ions<T: KeyLike>(
+pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
 ) {
@@ -316,7 +316,7 @@ pub struct Scorer<I: ScorerQueriable> {
     pub fragmented_range: TupleRange<f64>,
 }
 
-enum SkippingReason {
+pub enum SkippingReason {
     // TODO: Implement more options and a counter ...
     RetentionTimeOutOfBounds,
 }
@@ -336,68 +336,24 @@ impl<I: ScorerQueriable> Scorer<I> {
         ),
         SkippingReason,
     > {
-        let max_range = self.index.ms1_cycle_mapping().range_milis();
-        let max_range = TupleRange::try_new(max_range.0, max_range.1)
-            .expect("Reference RTs should be sorted and valid");
-        let rt_range = match self
-            .broad_tolerance
-            .rt_range_as_milis(item.query.rt_seconds())
-        {
-            OptionallyRestricted::Unrestricted => max_range,
-            OptionallyRestricted::Restricted(r) => r,
-        };
-
-        if !max_range.intersects(rt_range) {
-            return Err(SkippingReason::RetentionTimeOutOfBounds);
-        }
-        let mut agg = tracing::span!(
-            tracing::Level::TRACE,
-            "build_broad_extraction::new_collector"
-        ).in_scope(|| {
-            match ChromatogramCollector::new(
-                item.query.clone(),
-                rt_range,
-                self.index.ms1_cycle_mapping(),
-            ) {
-                Ok(collector) => collector,
-                Err(e) => {
-                    let tol_range = self.broad_tolerance.rt_range_as_milis(item.query.rt_seconds());
-                    panic!(
-                        "Failed to create ChromatogramCollector for query id {:#?}: {:?} with RT tolerance {:#?}",
-                        item.query, e, tol_range,
-                    )
-                }
-            }
-        });
-
-        tracing::span!(tracing::Level::TRACE, "build_broad_extraction::add_query").in_scope(
-            || {
-                self.index.add_query(&mut agg, &self.broad_tolerance);
-            },
-        );
-
-        // Filter out zero-intensity ions and update expected intensities in one pass
-        let mut expected_intensities = item.expected_intensity.clone();
-        filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
-
-        // Retain only top-N fragments by predicted intensity for scoring
-        select_top_n_fragments(&mut agg, &mut expected_intensities, TOP_N_FRAGMENTS);
+        let extraction = super::extraction::build_extraction(
+            &item.query,
+            item.expected_intensity.clone(),
+            &self.index,
+            &self.broad_tolerance,
+            Some(TOP_N_FRAGMENTS),
+        )?;
 
         let metadata = super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
-            library_id: agg.eg.id() as u32,
+            library_id: extraction.chromatograms.eg.id() as u32,
             query_rt_seconds: item.query.rt_seconds(),
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };
 
-        let scoring_ctx = super::apex_finding::Extraction {
-            expected_intensities,
-            chromatograms: agg,
-        };
-
-        Ok((metadata, scoring_ctx))
+        Ok((metadata, extraction))
     }
 
     /// Calculates the weighted mean ion mobility across fragments and precursors.

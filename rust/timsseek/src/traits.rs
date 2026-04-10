@@ -86,3 +86,11 @@ impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
         self.ms1_cycle_mapping()
     }
 }
+
+impl MappableRTCycles for timsquery::serde::IndexedPeaksHandle {
+    fn ms1_cycle_mapping(
+        &self,
+    ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex> {
+        self.ms1_cycle_mapping()
+    }
+}
