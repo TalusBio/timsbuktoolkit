@@ -29,14 +29,12 @@ use timsseek::scoring::{
     CalibrantCandidate,
     CalibrantHeap,
     CalibrationConfig,
+    CompetedCandidate,
     PipelineTimings,
+    ScoredCandidate,
     ScoreTimings,
 };
 use timsseek::scoring::pipeline::Scorer;
-use timsseek::scoring::search_results::{
-    IonSearchResults,
-    ResultParquetWriter,
-};
 use timsseek::{
     DecoyStrategy,
     IonAnnot,
@@ -113,7 +111,7 @@ pub fn main_loop<I: ScorerQueriable>(
     calib_lib: Option<Speclib>,
     pipeline: &Scorer<I>,
     chunk_size: usize,
-    out_path: &OutputConfig,
+    _out_path: &OutputConfig,
 ) -> std::result::Result<PipelineTimings, TimsSeekError> {
     let calib_config = CalibrationConfig::default();
 
@@ -207,10 +205,12 @@ pub fn main_loop<I: ScorerQueriable>(
     );
 
     // === Post-processing ===
-    let mut results = target_decoy_compete(results);
-    results.sort_unstable_by(|x, y| y.main_score.partial_cmp(&x.main_score).unwrap());
+    let mut competed = target_decoy_compete(results);
+    competed.sort_unstable_by(|x, y| {
+        y.scoring.main_score.partial_cmp(&x.scoring.main_score).unwrap()
+    });
 
-    let data = rescore(results);
+    let data = rescore(competed);
     for val in report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]) {
         let (thresh, n_below_thresh, n_targets, n_decoys) = val;
         println!(
@@ -218,23 +218,9 @@ pub fn main_loop<I: ScorerQueriable>(
             n_targets, n_decoys, thresh, n_below_thresh
         );
     }
-    let out_path_pq = out_path.directory.join("results.parquet");
-    let mut pq_writer = ResultParquetWriter::new(out_path_pq.clone(), 20_000).map_err(|e| {
-        tracing::error!(
-            "Error creating parquet writer for path {:?}: {}",
-            out_path_pq.clone(),
-            e
-        );
-        TimsSeekError::Io {
-            path: out_path_pq.clone().into(),
-            source: e,
-        }
-    })?;
-    for res in data.into_iter() {
-        pq_writer.add(res);
-    }
-    pq_writer.close();
-    info!("Wrote final results to {:?}", out_path_pq);
+
+    // TODO: Task 7 — manual Parquet writer for FinalResult
+    let _ = &data;
 
     Ok(PipelineTimings {
         phase1_prescore_ms: phase1_ms,
@@ -471,7 +457,7 @@ fn phase3_score<I: ScorerQueriable>(
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
-) -> Vec<IonSearchResults> {
+) -> Vec<ScoredCandidate> {
     let style = ProgressStyle::with_template(
         "{spinner:.green} Phase 3 [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
     )
@@ -526,18 +512,17 @@ fn asymmetric_tolerance(errors: &[f32], n_sigma: f32, min_val: f32) -> (f32, f32
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResults> {
+fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
 
-    // I KNOW this is an ugly place for a function...
-    fn glimpse_result_head(results: &[IonSearchResults]) -> Vec<String> {
+    fn glimpse_result_head(results: &[ScoredCandidate]) -> Vec<String> {
         results[..10.min(results.len())]
             .iter()
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.sequence, x.precursor_charge, x.precursor_mz, x.main_score
+                    x.scoring.sequence, x.scoring.precursor_charge, x.scoring.precursor_mz, x.scoring.main_score
                 )
             })
             .collect::<Vec<_>>()
@@ -545,16 +530,16 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
     // Deduplicate by sequence, keeping the best scoring target
     // This is meant to remove instances where reversing a target creates another target.
     results.sort_unstable_by(|x, y| {
-        let seq_ord = x.sequence.cmp(&y.sequence);
+        let seq_ord = x.scoring.sequence.cmp(&y.scoring.sequence);
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
-        let score_ord = y.main_score.partial_cmp(&x.main_score).unwrap();
+        let score_ord = y.scoring.main_score.partial_cmp(&x.scoring.main_score).unwrap();
         let ord = seq_ord.then(score_ord);
 
         if ord == std::cmp::Ordering::Equal {
             // Move to the first position the target
-            match (x.is_target, y.is_target) {
+            match (x.scoring.is_target, y.scoring.is_target) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Equal,
@@ -569,9 +554,9 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
         glimpse_result_head(&results)
     );
     results.dedup_by(|x, y| {
-        (x.sequence == y.sequence)
-            && (x.precursor_charge == y.precursor_charge)
-            && (x.precursor_mz == y.precursor_mz)
+        (x.scoring.sequence == y.scoring.sequence)
+            && (x.scoring.precursor_charge == y.scoring.precursor_charge)
+            && (x.scoring.precursor_mz == y.scoring.precursor_mz)
     });
     debug!(
         "First 10 result after deduplication for seq+charge+mz: {:#?}",
@@ -580,38 +565,35 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
 
     // Compete target-decoy pairs at precursor level
     results.sort_unstable_by(|x, y| {
-        x.decoy_group_id
-            .cmp(&y.decoy_group_id)
-            .then_with(|| x.precursor_charge.cmp(&y.precursor_charge))
-            .then_with(|| x.main_score.partial_cmp(&y.main_score).unwrap().reverse())
+        x.scoring.decoy_group_id
+            .cmp(&y.scoring.decoy_group_id)
+            .then_with(|| x.scoring.precursor_charge.cmp(&y.scoring.precursor_charge))
+            .then_with(|| x.scoring.main_score.partial_cmp(&y.scoring.main_score).unwrap().reverse())
     });
     info!(
         "Number of results before t/d competition: {}",
         results.len()
     );
-    debug!(
-        "First 10 result before target-decoy in decoy group id: {:#?}",
-        glimpse_result_head(&results)
-    );
 
     // Calculate delta scores between consecutive target/decoy pairs
     // Results are sorted by (decoy_group_id, precursor_charge, score desc)
+    // We store (group_id, charge, index, main_score) and the computed deltas per index.
+    let mut delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
     let mut previous: Option<(u32, u8, usize, f32)> = None;
 
     for i in 0..results.len() {
         let current = &results[i];
-        let current_key = (current.decoy_group_id, current.precursor_charge);
+        let current_key = (current.scoring.decoy_group_id, current.scoring.precursor_charge);
 
         if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
             let prev_key = (prev_group_id, prev_charge);
 
             if current_key == prev_key {
                 // This is the second item in a target/decoy pair
-                let delta_score = current.main_score - prev_score;
-                let delta_ratio = current.main_score / prev_score;
+                let delta_score = current.scoring.main_score - prev_score;
+                let delta_ratio = current.scoring.main_score / prev_score;
 
-                results[prev_index].delta_group = -delta_score;
-                results[prev_index].delta_group_ratio = delta_ratio;
+                delta_map[prev_index] = (-delta_score, delta_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -620,26 +602,46 @@ fn target_decoy_compete(mut results: Vec<IonSearchResults>) -> Vec<IonSearchResu
 
         // Start of a new group or first item overall
         previous = Some((
-            current.decoy_group_id,
-            current.precursor_charge,
+            current.scoring.decoy_group_id,
+            current.scoring.precursor_charge,
             i,
-            current.main_score,
+            current.scoring.main_score,
         ));
     }
 
-    results.dedup_by(|x, y| {
-        (x.decoy_group_id == y.decoy_group_id) & (x.precursor_charge == y.precursor_charge)
-    });
-    debug!(
-        "First 10 result after deduplication for decoy_group_id+charge: {:#?}",
-        glimpse_result_head(&results)
-    );
-    info!("Number of results after t/d competition: {}", results.len());
-    debug!(
-        "First 10 result after target-decoy competition: {:#?}",
-        glimpse_result_head(&results)
-    );
-    results
+    // Dedup by (decoy_group_id, charge) — keep the first (best scoring)
+    // We need indices to grab the right deltas, so collect the deduped indices first.
+    let mut kept_indices: Vec<usize> = Vec::with_capacity(results.len());
+    {
+        let mut last_key: Option<(u32, u8)> = None;
+        for i in 0..results.len() {
+            let key = (results[i].scoring.decoy_group_id, results[i].scoring.precursor_charge);
+            if last_key == Some(key) {
+                continue; // duplicate in same group
+            }
+            last_key = Some(key);
+            kept_indices.push(i);
+        }
+    }
+
+    info!("Number of results after t/d competition: {}", kept_indices.len());
+
+    // Build CompetedCandidate vec from the kept indices.
+    // We need to pull elements out of `results` by index, but they are non-Copy.
+    // Convert the whole Vec into an indexed form we can drain.
+    let mut results_opt: Vec<Option<ScoredCandidate>> = results.into_iter().map(Some).collect();
+    let competed: Vec<CompetedCandidate> = kept_indices
+        .into_iter()
+        .map(|i| {
+            let (dg, dgr) = delta_map[i];
+            results_opt[i]
+                .take()
+                .expect("index should be unique")
+                .into_competed(dg, dgr)
+        })
+        .collect();
+
+    competed
 }
 
 pub fn process_speclib(

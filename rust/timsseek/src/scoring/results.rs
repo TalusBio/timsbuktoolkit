@@ -126,6 +126,39 @@ pub struct FinalResult {
 }
 
 // ---------------------------------------------------------------------------
+// Stage conversions
+// ---------------------------------------------------------------------------
+
+impl ScoredCandidate {
+    /// Convert into a `CompetedCandidate` with the given delta-group values.
+    ///
+    /// Items that are alone in their group (no competitor) should pass
+    /// `f32::NAN` for both deltas.
+    pub fn into_competed(self, delta_group: f32, delta_group_ratio: f32) -> CompetedCandidate {
+        CompetedCandidate {
+            scoring: self.scoring,
+            delta_group,
+            delta_group_ratio,
+            discriminant_score: f32::NAN,
+            qvalue: f32::NAN,
+        }
+    }
+}
+
+impl CompetedCandidate {
+    /// Promote to a `FinalResult` (all fields frozen).
+    pub fn into_final(self) -> FinalResult {
+        FinalResult {
+            scoring: self.scoring,
+            delta_group: self.delta_group,
+            delta_group_ratio: self.delta_group_ratio,
+            discriminant_score: self.discriminant_score,
+            qvalue: self.qvalue,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
 

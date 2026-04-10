@@ -82,28 +82,28 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn rescore<T: LabelledScore + FeatureLike + Send + Sync + std::fmt::Debug>(
-    mut data: Vec<T>,
-) -> Vec<T> {
+pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
     let config = GBMConfig::default();
 
     data.shuffle(&mut rand::rng());
 
-    let mut scorer = CrossValidatedScorer::new_from_shuffled(3, data, config);
+    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled(3, data, config);
     scorer
         .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
         .unwrap();
 
-    let mut out = scorer.score();
+    let mut scored = scorer.score();
     // Sort by score descending
-    out.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    assign_qval(&mut out, |x| T::get_score(x) as f32);
-    debug!("Best:\n{:#?}", out.first());
-    debug!("Worst:\n{:#?}", out.last());
-    out
+    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
+    debug!("Best:\n{:#?}", scored.first());
+    debug!("Worst:\n{:#?}", scored.last());
+
+    scored.into_iter().map(|c| c.into_final()).collect()
 }
 
 use crate::IonSearchResults;
+use crate::scoring::results::{CompetedCandidate, FinalResult};
 
 fn mean_abs_error(errs: &[f32]) -> f64 {
     let (sum, n) = errs.iter().filter(|e| e.is_finite() && **e != 0.0)
@@ -354,6 +354,147 @@ impl LabelledScore for IonSearchResults {
     fn get_qval(&self) -> f32 {
         self.qvalue
     }
+}
+
+// ---------------------------------------------------------------------------
+// CompetedCandidate: FeatureLike + LabelledScore
+// ---------------------------------------------------------------------------
+
+impl FeatureLike for CompetedCandidate {
+    fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
+        let s = &self.scoring;
+
+        vec![
+            (s.precursor_mz / 5.0).round(),
+            s.precursor_charge as f64,
+            s.precursor_mobility as f64,
+            s.query_rt_seconds.round() as f64,
+            s.n_scored_fragments as f64,
+            // Combined
+            s.main_score as f64,
+            (s.main_score / s.delta_next) as f64,
+            s.delta_next as f64,
+            s.delta_second_next as f64,
+            s.obs_rt_seconds as f64,
+            s.obs_mobility as f64,
+            s.delta_rt as f64,
+            s.sq_delta_rt as f64,
+            s.delta_ms1_ms2_mobility as f64,
+            s.sq_delta_ms1_ms2_mobility as f64,
+            s.rising_cycles as f64,
+            s.falling_cycles as f64,
+            // MS2
+            s.npeaks as f64,
+            s.apex_lazyscore as f64,
+            (s.ms2_summed_intensity as f64).ln_1p(),
+            s.ms2_lazyscore as f64,
+            s.ms2_isotope_lazyscore as f64,
+            s.ms2_isotope_lazyscore_ratio as f64,
+            s.lazyscore_z as f64,
+            s.lazyscore_vs_baseline as f64,
+            // Split product & apex features
+            (s.split_product_score as f64).ln_1p(),
+            (s.cosine_au as f64).ln_1p(),
+            (s.scribe_au as f64).ln_1p(),
+            s.cosine_cg as f64,
+            s.scribe_cg as f64,
+            s.cosine_weighted_coelution as f64,
+            s.cosine_gradient_consistency as f64,
+            s.scribe_weighted_coelution as f64,
+            s.scribe_gradient_consistency as f64,
+            s.peak_shape as f64,
+            s.ratio_cv as f64,
+            s.centered_apex as f64,
+            s.precursor_coelution as f64,
+            s.fragment_coverage as f64,
+            s.precursor_apex_match as f64,
+            s.xic_quality as f64,
+            s.fragment_apex_agreement as f64,
+            s.isotope_correlation as f64,
+            s.gaussian_correlation as f64,
+            s.per_frag_gaussian_corr as f64,
+            // MS2 per-ion errors
+            s.ms2_mz_errors[0] as f64,
+            s.ms2_mz_errors[1] as f64,
+            s.ms2_mz_errors[2] as f64,
+            s.ms2_mz_errors[3] as f64,
+            s.ms2_mz_errors[4] as f64,
+            s.ms2_mz_errors[5] as f64,
+            s.ms2_mz_errors[6] as f64,
+            s.ms2_mobility_errors[0] as f64,
+            s.ms2_mobility_errors[1] as f64,
+            s.ms2_mobility_errors[2] as f64,
+            s.ms2_mobility_errors[3] as f64,
+            s.ms2_mobility_errors[4] as f64,
+            s.ms2_mobility_errors[5] as f64,
+            s.ms2_mobility_errors[6] as f64,
+            // MS1
+            (s.ms1_summed_intensity as f64).ln_1p(),
+            // MS1 per-ion errors
+            s.ms1_mz_errors[0] as f64,
+            s.ms1_mz_errors[1] as f64,
+            s.ms1_mz_errors[2] as f64,
+            s.ms1_mobility_errors[0] as f64,
+            s.ms1_mobility_errors[1] as f64,
+            s.ms1_mobility_errors[2] as f64,
+            // Relative intensities
+            s.ms1_intensity_ratios[0] as f64,
+            s.ms1_intensity_ratios[1] as f64,
+            s.ms1_intensity_ratios[2] as f64,
+            s.ms2_intensity_ratios[0] as f64,
+            s.ms2_intensity_ratios[1] as f64,
+            s.ms2_intensity_ratios[2] as f64,
+            s.ms2_intensity_ratios[3] as f64,
+            s.ms2_intensity_ratios[4] as f64,
+            s.ms2_intensity_ratios[5] as f64,
+            s.ms2_intensity_ratios[6] as f64,
+            self.delta_group as f64,
+            self.delta_group_ratio as f64,
+            s.recalibrated_rt as f64,
+            s.calibrated_sq_delta_rt as f64,
+            // Derived intensity features
+            {
+                let ratios = &s.ms2_intensity_ratios;
+                ratios.iter().filter(|r| r.is_finite()).fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64
+            },
+            // Interaction features
+            (s.main_score * s.delta_next) as f64,
+            (s.split_product_score * s.fragment_coverage) as f64,
+            // Summary error features
+            mean_abs_error(&s.ms2_mz_errors),
+            mean_abs_error(&s.ms2_mobility_errors),
+            mean_abs_error(&s.ms1_mz_errors),
+            mean_abs_error(&s.ms1_mobility_errors),
+        ]
+    }
+
+    fn get_y(&self) -> f64 {
+        if self.scoring.is_target { 1.0 } else { 0.0 }
+    }
+
+    fn assign_score(&mut self, score: f64) {
+        self.discriminant_score = score as f32;
+    }
+
+    fn get_score(&self) -> f64 {
+        self.discriminant_score as f64
+    }
+}
+
+impl LabelledScore for CompetedCandidate {
+    fn get_label(&self) -> TargetDecoy {
+        if self.scoring.is_target { TargetDecoy::Target } else { TargetDecoy::Decoy }
+    }
+    fn assign_qval(&mut self, q: f32) { self.qvalue = q; }
+    fn get_qval(&self) -> f32 { self.qvalue }
+}
+
+impl LabelledScore for FinalResult {
+    fn get_label(&self) -> TargetDecoy {
+        if self.scoring.is_target { TargetDecoy::Target } else { TargetDecoy::Decoy }
+    }
+    fn assign_qval(&mut self, q: f32) { self.qvalue = q; }
+    fn get_qval(&self) -> f32 { self.qvalue }
 }
 
 #[cfg(test)]
