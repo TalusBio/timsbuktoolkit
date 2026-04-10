@@ -219,23 +219,23 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // Save calibration as JSON v1 (compatible with viewer load)
     if !calibrant_points.is_empty() {
+        let cal_points_tuples: Vec<(f64, f64, f64)> = calibrant_points
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect();
         let rt_lo = calibrant_points.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
         let rt_hi = calibrant_points.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
-        let cal_save = serde_json::json!({
-            "version": "v1",
-            "rt_range_seconds": [rt_lo, rt_hi],
-            "calibrant_points": calibrant_points,
-            "tolerances": {
-                "rt_minutes": calibration.rt_tolerance_minutes(),
-            },
-            "wrmse": 0.0,
-            "n_calibrants": calibrant_points.len(),
-            "n_scored": calibrant_points.len(),
-            "grid_size": calib_config.grid_size,
-        });
         let cal_json_path = out_path.directory.join("calibration.json");
-        if let Ok(json) = serde_json::to_string_pretty(&cal_save) {
-            let _ = std::fs::write(&cal_json_path, json);
+        if let Err(e) = calibration.save_json(
+            &cal_points_tuples,
+            [rt_lo, rt_hi],
+            calib_config.grid_size,
+            calib_config.dp_lookback,
+            calibrant_points.len(),
+            &cal_json_path,
+        ) {
+            tracing::warn!("Failed to save calibration: {}", e);
+        } else {
             info!("Saved calibration to {:?}", cal_json_path);
         }
     }

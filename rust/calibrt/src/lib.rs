@@ -150,6 +150,15 @@ impl CalibrationCurve {
     }
 }
 
+/// Serializable snapshot of calibration data — points + config.
+/// Used for save/load. Does not include the fitted curve (reconstructed on load).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CalibrationSnapshot {
+    pub points: Vec<[f64; 3]>,  // [x, y, weight]
+    pub grid_size: usize,
+    pub lookback: usize,
+}
+
 /// Reusable calibration state for incremental fitting. Owns all allocations.
 pub struct CalibrationState {
     grid: grid::Grid,
@@ -240,6 +249,29 @@ impl CalibrationState {
 
     pub fn curve(&self) -> Option<&CalibrationCurve> {
         self.curve.as_ref()
+    }
+
+    /// Bundle current config into a snapshot (caller provides the points).
+    pub fn save_snapshot(&self, points: &[(f64, f64, f64)]) -> CalibrationSnapshot {
+        CalibrationSnapshot {
+            points: points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+            grid_size: self.grid.bins,
+            lookback: self.lookback,
+        }
+    }
+
+    /// Reconstruct a CalibrationState from a snapshot.
+    pub fn from_snapshot(snapshot: &CalibrationSnapshot) -> Result<Self, CalibRtError> {
+        if snapshot.points.is_empty() {
+            return Err(CalibRtError::NoPoints);
+        }
+        let x_range = compute_range(snapshot.points.iter().map(|p| p[0]))?;
+        let y_range = compute_range(snapshot.points.iter().map(|p| p[1]))?;
+
+        let mut state = Self::new(snapshot.grid_size, x_range, y_range, snapshot.lookback)?;
+        state.update(snapshot.points.iter().map(|p| (p[0], p[1], p[2])));
+        state.fit();
+        Ok(state)
     }
 
     pub fn is_stale(&self) -> bool {

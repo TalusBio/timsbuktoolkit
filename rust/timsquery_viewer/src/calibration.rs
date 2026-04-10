@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eframe::egui;
-use serde::{Deserialize, Serialize};
 
 use calibrt::CalibrationState;
 use timscentroid::rt_mapping::{MS1CycleIndex, RTIndex};
@@ -72,26 +71,8 @@ pub struct DerivedTolerances {
     pub wrmse: f64,
 }
 
-// ---------------------------------------------------------------------------
-// Serde types for save/load
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize)]
-struct SavedCalibration {
-    version: String,
-    rt_range_seconds: [f64; 2],
-    calibrant_points: Vec<[f64; 3]>, // [lib_rt, measured_rt, weight]
-    tolerances: SavedTolerances,
-    wrmse: f64,
-    n_calibrants: usize,
-    n_scored: usize,
-    grid_size: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedTolerances {
-    rt_minutes: f32,
-}
+// Save/load uses shared types from timsseek::rt_calibration:
+// SavedCalibration, SavedTolerances, LoadedCalibration, CalibrationSnapshot
 
 /// Messages sent from the background thread to the UI.
 #[derive(Debug)]
@@ -454,101 +435,65 @@ impl ViewerCalibrationState {
     // -----------------------------------------------------------------------
 
     /// Serialize the current calibration state to a JSON v1 file.
+    /// Delegates to `CalibrationResult::save_json` format via shared serde types.
     pub fn save_to_file(
         &self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
+        use timsseek::rt_calibration::{SavedCalibration, SavedTolerances};
+        use calibrt::CalibrationSnapshot;
+
         let tol = self.derived_tolerances.as_ref();
         let saved = SavedCalibration {
             version: "v1".to_string(),
             rt_range_seconds,
-            calibrant_points: self
-                .snapshot_points
-                .iter()
-                .map(|(x, y, w)| [*x, *y, *w])
-                .collect(),
+            calibration: CalibrationSnapshot {
+                points: self.snapshot_points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+                grid_size: DEFAULT_GRID_SIZE,
+                lookback: DEFAULT_LOOKBACK,
+            },
             tolerances: SavedTolerances {
                 rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
+                mz_ppm: [0.0, 0.0],
+                mobility_pct: [0.0, 0.0],
             },
-            wrmse: tol.map_or(0.0, |t| t.wrmse),
             n_calibrants: self.n_calibrants,
             n_scored: self.n_scored,
-            grid_size: DEFAULT_GRID_SIZE,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
     /// Deserialize calibration state from a JSON v1 file.
-    ///
-    /// Returns an optional warning string (e.g. RT range mismatch).
+    /// Delegates to `CalibrationResult::load_json` + `CalibrationState::from_snapshot`.
     pub fn load_from_file(
         &mut self,
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
     ) -> Result<Option<String>, String> {
-        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let saved: SavedCalibration =
-            serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        use timsseek::rt_calibration::CalibrationResult;
 
-        if saved.version != "v1" {
-            return Err(format!("Unsupported version: {}", saved.version));
+        let loaded = CalibrationResult::load_json(path, raw_rt_range)?;
+
+        // Reconstruct CalibrationState from the snapshot
+        if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&loaded.snapshot) {
+            self.snapshot_points = loaded.snapshot.points
+                .iter()
+                .map(|p| (p[0], p[1], p[2]))
+                .collect();
+            self.calibration_state = Some(cal);
         }
 
-        // RT range compatibility check.
-        let mut warning = None;
-        if let Some(raw_range) = raw_rt_range {
-            let overlap_lo = saved.rt_range_seconds[0].max(raw_range[0]);
-            let overlap_hi = saved.rt_range_seconds[1].min(raw_range[1]);
-            let overlap = (overlap_hi - overlap_lo).max(0.0);
-            let saved_span = saved.rt_range_seconds[1] - saved.rt_range_seconds[0];
-            if saved_span > 0.0 && overlap / saved_span < 0.5 {
-                warning = Some(
-                    "RT range mismatch — calibration may not be valid for this file".to_string(),
-                );
-            }
-        } else {
-            warning = Some(
-                "No raw file loaded — cannot verify RT range compatibility".to_string(),
-            );
-        }
-
-        // Rebuild calibration state from saved points.
-        let points: Vec<(f64, f64, f64)> = saved
-            .calibrant_points
-            .iter()
-            .map(|p| (p[0], p[1], p[2]))
-            .collect();
-
-        if !points.is_empty() {
-            let x_min = points.iter().map(|p| p.0).fold(f64::MAX, f64::min);
-            let x_max = points.iter().map(|p| p.0).fold(f64::MIN, f64::max);
-            let y_min = points.iter().map(|p| p.1).fold(f64::MAX, f64::min);
-            let y_max = points.iter().map(|p| p.1).fold(f64::MIN, f64::max);
-
-            if let Ok(mut cal) = calibrt::CalibrationState::new(
-                saved.grid_size,
-                (x_min, x_max),
-                (y_min, y_max),
-                DEFAULT_LOOKBACK,
-            ) {
-                cal.update(points.iter().copied());
-                cal.fit();
-                self.calibration_state = Some(cal);
-            }
-        }
-
-        self.snapshot_points = points;
-        self.n_calibrants = saved.n_calibrants;
-        self.n_scored = saved.n_scored;
+        self.n_calibrants = loaded.n_calibrants;
+        self.n_scored = loaded.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
-            rt_tolerance_minutes: saved.tolerances.rt_minutes,
-            wrmse: saved.wrmse,
+            rt_tolerance_minutes: loaded.tolerances.rt_minutes,
+            wrmse: 0.0, // WRMSE will be recomputed from snapshot on next render
         });
         self.phase = CalibrationPhase::Done;
 
-        Ok(warning)
+        Ok(loaded.warning)
     }
 
     // -----------------------------------------------------------------------
