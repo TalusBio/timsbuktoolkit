@@ -1,4 +1,5 @@
 mod app;
+mod calibration;
 mod chromatogram_processor;
 mod cli;
 mod computed_state;

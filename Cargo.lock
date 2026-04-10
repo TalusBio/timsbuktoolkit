@@ -6062,6 +6062,7 @@ dependencies = [
 name = "timsquery_viewer"
 version = "0.26.0"
 dependencies = [
+ "calibrt",
  "clap",
  "eframe",
  "egui",

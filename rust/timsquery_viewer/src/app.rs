@@ -12,6 +12,7 @@ use std::time::Instant;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
+use crate::calibration::ViewerCalibrationState;
 use crate::chromatogram_processor::SmoothingMethod;
 use crate::cli::Cli;
 use crate::computed_state::{
@@ -96,6 +97,7 @@ enum Pane {
     FragmentPlot,
     ScoresPlot,
     Mobility,
+    Calibration,
 }
 
 /// All pane variants that should exist in the dock.
@@ -108,6 +110,7 @@ const ALL_PANES: &[Pane] = &[
     Pane::FragmentPlot,
     Pane::ScoresPlot,
     Pane::Mobility,
+    Pane::Calibration,
 ];
 
 /// State to be persisted across restarts
@@ -157,7 +160,7 @@ pub enum ElutionGroupState {
     Failed(PathBuf, String),
     /// Library successfully loaded
     Loaded {
-        data: ElutionGroupData,
+        data: Arc<ElutionGroupData>,
         source: PathBuf,
     },
 }
@@ -166,6 +169,14 @@ impl ElutionGroupState {
     pub fn as_ref(&self) -> Option<&ElutionGroupData> {
         match self {
             ElutionGroupState::Loaded { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Get a cloned Arc handle to the loaded data (for sharing with background threads).
+    pub fn arc_clone(&self) -> Option<Arc<ElutionGroupData>> {
+        match self {
+            ElutionGroupState::Loaded { data, .. } => Some(Arc::clone(data)),
             _ => None,
         }
     }
@@ -264,6 +275,9 @@ pub struct ViewerApp {
     screenshot_state: ScreenshotState,
     /// Countdown duration in seconds before capture
     screenshot_delay_secs: f32,
+
+    /// Calibration state machine (background scoring + calibrt)
+    calibration: ViewerCalibrationState,
 }
 
 fn apply_theme(ctx: &egui::Context, dark_mode: bool) {
@@ -336,6 +350,7 @@ impl ViewerApp {
                         cancellation_token: None,
                         screenshot_state: ScreenshotState::default(),
                         screenshot_delay_secs: 3.0,
+                        calibration: ViewerCalibrationState::default(),
                     };
                 }
             } else {
@@ -352,6 +367,7 @@ impl ViewerApp {
             Pane::MS2Spectrum,
             Pane::ScoresPlot,
             Pane::Mobility,
+            Pane::Calibration,
         ];
 
         let dock_state = DockState::new(tabs);
@@ -371,6 +387,7 @@ impl ViewerApp {
             cancellation_token: None,
             screenshot_state: ScreenshotState::default(),
             screenshot_delay_secs: 3.0,
+            calibration: ViewerCalibrationState::default(),
         }
     }
 
@@ -954,7 +971,7 @@ impl ViewerApp {
                         let count = egs.len();
                         tracing::info!("Loaded {} elution groups", count);
                         data.elution_groups = ElutionGroupState::Loaded {
-                            data: egs,
+                            data: Arc::new(egs),
                             source: path,
                         };
                         // Validate selected_index is within bounds of new library
@@ -1361,6 +1378,11 @@ impl eframe::App for ViewerApp {
         // Check if background computation completed
         self.check_chromatogram_completion();
 
+        // Poll calibration background thread
+        if self.calibration.poll() {
+            ctx.request_repaint();
+        }
+
         // Generate MS2 spectrum and mobility data if RT was clicked
         self.handle_rt_click();
 
@@ -1489,6 +1511,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
             Pane::FragmentPlot => "Fragments".into(),
             Pane::ScoresPlot => "Scores".into(),
             Pane::Mobility => self.mobility_panel.title().into(),
+            Pane::Calibration => "Calibration".into(),
         }
     }
 
@@ -1641,6 +1664,10 @@ impl<'a> TabViewer for AppTabViewer<'a> {
             Pane::Mobility => {
                 self.mobility_panel
                     .render(ui, self.computed.mobility_data());
+            }
+            Pane::Calibration => {
+                // Placeholder: Task 11 will render the full calibration panel UI.
+                ui.label("Calibration panel (UI wired in Task 11)");
             }
         }
     }
