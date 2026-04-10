@@ -173,14 +173,6 @@ impl ElutionGroupState {
         }
     }
 
-    /// Get a cloned Arc handle to the loaded data (for sharing with background threads).
-    pub fn arc_clone(&self) -> Option<Arc<ElutionGroupData>> {
-        match self {
-            ElutionGroupState::Loaded { data, .. } => Some(Arc::clone(data)),
-            _ => None,
-        }
-    }
-
     pub fn is_none(&self) -> bool {
         matches!(self, ElutionGroupState::None)
     }

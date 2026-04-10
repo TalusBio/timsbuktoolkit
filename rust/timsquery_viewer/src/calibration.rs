@@ -68,7 +68,6 @@ pub enum CalibrationPhase {
 #[derive(Debug, Clone)]
 pub struct DerivedTolerances {
     pub rt_tolerance_minutes: f32,
-    pub wrmse: f64,
 }
 
 // Save/load uses shared types from timsseek::rt_calibration:
@@ -489,7 +488,6 @@ impl ViewerCalibrationState {
         self.n_scored = loaded.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
             rt_tolerance_minutes: loaded.tolerances.rt_minutes,
-            wrmse: 0.0, // WRMSE will be recomputed from snapshot on next render
         });
         self.phase = CalibrationPhase::Done;
 
@@ -820,10 +818,9 @@ impl ViewerCalibrationState {
         // Derive a suggested RT tolerance: 3x WRMSE in minutes.
         let suggested_rt_min = wrmse.map(|w| (w / 60.0) * 3.0);
 
-        if let (Some(rt_min), Some(w)) = (suggested_rt_min, wrmse) {
+        if let Some(rt_min) = suggested_rt_min {
             self.derived_tolerances = Some(DerivedTolerances {
                 rt_tolerance_minutes: rt_min as f32,
-                wrmse: w,
             });
         }
 
