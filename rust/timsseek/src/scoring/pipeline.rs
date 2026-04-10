@@ -6,11 +6,11 @@
 //! throughput, it's critical to minimize allocations in the hot path.
 //!
 //! Each scoring operation requires several buffers:
-//! - `ApexFinder` holds time-series feature buffers (size varies with query)
+//! - `TraceScorer` holds time-series feature buffers (size varies with query)
 //! - Chromatogram collectors (size varies with query complexity)
 //!
 //! `prescore_batch` and `score_calibrated_batch` use Rayon's `map_init()` / `fold` to create
-//! one `ApexFinder` buffer per thread, which is reused across thousands of queries.
+//! one `TraceScorer` buffer per thread, which is reused across thousands of queries.
 //!
 //! ## Scoring Pipeline
 //!
@@ -44,7 +44,7 @@ use timsquery::{
 
 use super::accumulator::IonSearchAccumulator;
 use super::apex_finding::{
-    ApexFinder,
+    TraceScorer,
     ApexLocation,
     ApexScore,
     PeptideMetadata,
@@ -477,7 +477,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         item: QueryItemToScore,
         calibration: &CalibrationResult,
     ) -> Result<ViewerResult, DataProcessingError> {
-        let mut buffer = ApexFinder::new(self.num_cycles());
+        let mut buffer = TraceScorer::new(self.num_cycles());
 
         // Re-implementing logic here because process_query consumes `item` and returns `Option`.
         // We want intermediate results for `ViewerResult`.
@@ -593,7 +593,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: &QueryItemToScore,
         calibration: &CalibrationResult,
-        buffer: &mut ApexFinder,
+        buffer: &mut TraceScorer,
         timings: &mut ScoreTimings,
     ) -> Option<ScoredCandidate> {
         let st = Instant::now();
@@ -667,7 +667,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         items_to_score: &[QueryItemToScore],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings) {
-        let init_fn = || ApexFinder::new(self.num_cycles());
+        let init_fn = || TraceScorer::new(self.num_cycles());
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
@@ -715,7 +715,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn prescore(
         &self,
         item: &QueryItemToScore,
-        buffer: &mut ApexFinder,
+        buffer: &mut TraceScorer,
     ) -> Option<(ApexLocation, PeptideMetadata)> {
         let (metadata, scoring_ctx) = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
             .in_scope(|| match self.build_broad_extraction(item) {
@@ -761,7 +761,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         #[cfg(not(feature = "serial_scoring"))]
         let heap: CalibrantHeap = {
             let init_fn =
-                || (ApexFinder::new(self.num_cycles()), CalibrantHeap::new(config.n_calibrants));
+                || (TraceScorer::new(self.num_cycles()), CalibrantHeap::new(config.n_calibrants));
 
             items_to_score
                 .par_iter()
@@ -787,7 +787,7 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         #[cfg(feature = "serial_scoring")]
         let heap: CalibrantHeap = {
-            let mut scorer = ApexFinder::new(self.num_cycles());
+            let mut scorer = TraceScorer::new(self.num_cycles());
             let mut heap = CalibrantHeap::new(config.n_calibrants);
             for (chunk_idx, item) in items_to_score.iter().enumerate().filter(|(_, x)| filter_fn(x))
             {
