@@ -387,6 +387,8 @@ impl ViewerCalibrationState {
         control: Arc<AtomicU8>,
         heap_capacity: usize,
     ) {
+        use rayon::prelude::*;
+
         let n_elution_groups = elution_groups.len();
         if n_elution_groups == 0 {
             let _ = tx.send(CalibrationMessage::Done { n_scored: 0 });
@@ -399,104 +401,103 @@ impl ViewerCalibrationState {
 
         let tolerance = broad_calibration_tolerance();
         let cycle_mapping = index.ms1_cycle_mapping();
-
-        // Thread-local scorer.
         let n_cycles = cycle_mapping.len();
-        let mut scorer = TraceScorer::new(n_cycles);
-        let mut heap = CalibrantHeap::new(heap_capacity);
 
+        let mut heap = CalibrantHeap::new(heap_capacity);
         let mut n_scored: usize = 0;
 
-        for &eg_idx in &indices {
-            // Check control flag.
+        // Process in chunks — each chunk is parallelized via Rayon.
+        // Between chunks: merge heaps, send snapshot, check pause/stop.
+        for chunk in indices.chunks(SNAPSHOT_INTERVAL) {
+            // Check control flag between chunks.
             loop {
                 let flag = control.load(Ordering::Acquire);
                 match flag {
                     CONTROL_RUNNING => break,
                     CONTROL_PAUSED => {
                         std::thread::park();
-                        // Re-check after unpark.
                         continue;
                     }
                     _ => {
-                        // STOP_REQUESTED or unknown.
                         let _ = tx.send(CalibrationMessage::Done { n_scored });
                         return;
                     }
                 }
             }
 
-            // Get elution group data. Skip on error.
-            let Ok((elution_group, expected_intensities)) = elution_groups.get_elem(eg_idx) else {
-                continue;
-            };
+            // Score chunk in parallel — per-thread TraceScorer + CalibrantHeap.
+            let chunk_heap: CalibrantHeap = chunk
+                .par_iter()
+                .fold(
+                    || (TraceScorer::new(n_cycles), CalibrantHeap::new(heap_capacity)),
+                    |(mut scorer, mut local_heap), &eg_idx| {
+                        let Ok((elution_group, expected_intensities)) =
+                            elution_groups.get_elem(eg_idx)
+                        else {
+                            return (scorer, local_heap);
+                        };
 
-            // Build extraction.
-            let extraction = match build_extraction(
-                &elution_group,
-                expected_intensities,
-                index.as_ref(),
-                &tolerance,
-                Some(CALIBRATION_TOP_N_FRAGMENTS),
-            ) {
-                Ok(ext) => ext,
-                Err(_) => continue,
-            };
+                        let extraction = match build_extraction(
+                            &elution_group,
+                            expected_intensities,
+                            index.as_ref(),
+                            &tolerance,
+                            Some(CALIBRATION_TOP_N_FRAGMENTS),
+                        ) {
+                            Ok(ext) => ext,
+                            Err(_) => return (scorer, local_heap),
+                        };
 
-            // Compute traces.
-            if scorer.compute_traces(&extraction).is_err() {
-                continue;
-            }
+                        if scorer.compute_traces(&extraction).is_err() {
+                            return (scorer, local_heap);
+                        }
 
-            // Build RT mapper closure.
-            let cycle_offset = extraction.chromatograms.cycle_offset();
-            let rt_mapper = |idx: usize| -> u32 {
-                cycle_mapping
-                    .rt_milis_for_index(&MS1CycleIndex::new((idx + cycle_offset) as u32))
-                    .unwrap_or(0)
-            };
+                        let cycle_offset = extraction.chromatograms.cycle_offset();
+                        let rt_mapper = |idx: usize| -> u32 {
+                            cycle_mapping
+                                .rt_milis_for_index(&MS1CycleIndex::new(
+                                    (idx + cycle_offset) as u32,
+                                ))
+                                .unwrap_or(0)
+                        };
 
-            // Suggest apex.
-            let apex = match scorer.suggest_apex(&rt_mapper, 0) {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
+                        if let Ok(apex) = scorer.suggest_apex(&rt_mapper, 0) {
+                            local_heap.push(CalibrantCandidate {
+                                score: apex.score,
+                                apex_rt_seconds: apex.retention_time_ms as f32 / 1000.0,
+                                speclib_index: eg_idx,
+                                library_rt_seconds: elution_group.rt_seconds(),
+                            });
+                        }
+                        (scorer, local_heap)
+                    },
+                )
+                .map(|(_, local_heap)| local_heap)
+                .reduce(|| CalibrantHeap::new(heap_capacity), CalibrantHeap::merge);
 
-            let candidate = CalibrantCandidate {
-                score: apex.score,
-                apex_rt_seconds: apex.retention_time_ms as f32 / 1000.0,
-                speclib_index: eg_idx,
-                library_rt_seconds: elution_group.rt_seconds(),
-            };
-            heap.push(candidate);
-            n_scored += 1;
+            // Merge chunk results into main heap.
+            heap = heap.merge(chunk_heap);
+            n_scored += chunk.len();
 
-            // Periodic snapshot — always send at interval.
-            // Heap content changes even when len() stays at capacity
-            // (better candidates evict worse ones).
-            if n_scored % SNAPSHOT_INTERVAL == 0 {
-                let points: Vec<(f64, f64, f64)> = heap
-                    .iter()
-                    .map(|c| {
-                        (
-                            c.library_rt_seconds as f64,
-                            c.apex_rt_seconds as f64,
-                            c.score as f64,
-                        )
-                    })
-                    .collect();
+            // Send snapshot.
+            let points: Vec<(f64, f64, f64)> = heap
+                .iter()
+                .map(|c| {
+                    (
+                        c.library_rt_seconds as f64,
+                        c.apex_rt_seconds as f64,
+                        c.score as f64,
+                    )
+                })
+                .collect();
 
-                let msg = CalibrationMessage::Snapshot {
-                    n_scored,
-                    heap_len: heap.len(),
-                    points,
-                };
-                // Use try_send: if the channel is full, skip this snapshot.
-                let _ = tx.try_send(msg);
-            }
+            let _ = tx.try_send(CalibrationMessage::Snapshot {
+                n_scored,
+                heap_len: heap.len(),
+                points,
+            });
         }
 
-        // Final snapshot with Done marker.
         let _ = tx.send(CalibrationMessage::Done { n_scored });
     }
 
