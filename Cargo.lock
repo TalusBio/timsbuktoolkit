@@ -4437,18 +4437,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parquet_derive"
-version = "57.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "777a89bd0515e7948516ce6d3f41c16b3a32de71f7eb99c5fdb55456b695b227"
-dependencies = [
- "parquet",
- "proc-macro2",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6122,7 +6110,6 @@ dependencies = [
  "forust-ml",
  "micromzpaf",
  "parquet",
- "parquet_derive",
  "rand 0.9.2",
  "rayon",
  "regex",
