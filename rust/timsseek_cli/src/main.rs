@@ -306,7 +306,7 @@ fn process_single_file(
     };
 
     // Process speclib
-    processing::process_speclib(
+    processing::run_pipeline(
         speclib_path,
         calib_lib_path,
         &pipeline,

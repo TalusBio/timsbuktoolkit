@@ -203,7 +203,7 @@ pub struct ScoredCandidateBuilder {
     is_target: SetField<bool>,
 
     // --- Reference RT / mobility (used to compute deltas) ---
-    ref_rt_seconds: SetField<f32>,
+    query_rt_seconds: SetField<f32>,
 
     // --- Observed RT / mobility ---
     obs_rt_seconds: SetField<f32>,
@@ -279,7 +279,7 @@ impl ScoredCandidateBuilder {
         self.precursor_charge = SetField::Some(metadata.charge);
         self.precursor_mz = SetField::Some(metadata.ref_precursor_mz);
         self.precursor_mobility = SetField::Some(metadata.ref_mobility_ook0);
-        self.ref_rt_seconds = SetField::Some(metadata.ref_rt_seconds);
+        self.query_rt_seconds = SetField::Some(metadata.query_rt_seconds);
         self
     }
 
@@ -339,7 +339,7 @@ impl ScoredCandidateBuilder {
             npeaks,
             ms2_summed_intensity,
             ms1_summed_intensity,
-            raising_cycles,
+            rising_cycles,
             falling_cycles,
         } = *main_score;
 
@@ -380,7 +380,7 @@ impl ScoredCandidateBuilder {
         self.npeaks = SetField::Some(npeaks);
         self.ms1_summed_intensity = SetField::Some(ms1_summed_intensity);
         self.ms2_summed_intensity = SetField::Some(ms2_summed_intensity);
-        self.rising_cycles = SetField::Some(raising_cycles);
+        self.rising_cycles = SetField::Some(rising_cycles);
         self.falling_cycles = SetField::Some(falling_cycles);
 
         self
@@ -395,7 +395,7 @@ impl ScoredCandidateBuilder {
         }
 
         let obs_rt_seconds = expect_some!(obs_rt_seconds);
-        let ref_rt = expect_some!(ref_rt_seconds);
+        let ref_rt = expect_some!(query_rt_seconds);
         let delta_rt = obs_rt_seconds - ref_rt;
         let sq_delta_rt = delta_rt * delta_rt;
 

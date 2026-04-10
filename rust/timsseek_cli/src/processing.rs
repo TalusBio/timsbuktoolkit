@@ -106,7 +106,7 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn main_loop<I: ScorerQueriable>(
+pub fn execute_pipeline<I: ScorerQueriable>(
     speclib: Speclib,
     calib_lib: Option<Speclib>,
     pipeline: &Scorer<I>,
@@ -657,7 +657,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     competed
 }
 
-pub fn process_speclib(
+pub fn run_pipeline(
     path: &Path,
     calib_lib_path: Option<&Path>,
     pipeline: &Scorer<IndexedTimstofPeaks>,
@@ -694,7 +694,7 @@ pub fn process_speclib(
         None => None,
     };
 
-    let timings = main_loop(speclib, calib_lib, pipeline, chunk_size, output)?;
+    let timings = execute_pipeline(speclib, calib_lib, pipeline, chunk_size, output)?;
     let perf_report =
         serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
             msg: format!("Error serializing performance report to JSON: {}", e),

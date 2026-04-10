@@ -15,7 +15,7 @@ use timscentroid::rt_mapping::{
 };
 use timsseek::scoring::apex_finding::{
     ApexScore,
-    ScoreTraces,
+    ElutionTraces,
 };
 
 use crate::chromatogram_processor::ChromatogramOutput;
@@ -70,7 +70,7 @@ impl ScoreLines {
     #[instrument(skip_all)]
     pub(crate) fn from_scores(
         apex: ApexScore,
-        scores: &ScoreTraces,
+        scores: &ElutionTraces,
         mapper: &CycleToRTMapping<MS1CycleIndex>,
         cycle_offset: usize,
     ) -> Self {
@@ -81,7 +81,7 @@ impl ScoreLines {
                 debug!("Max score for {}: {}", name, max_val);
                 let norm_factor = max_val.max(1e-6);
                 let inv_norm_factor = (1.0 / norm_factor) as f64;
-                let inv_norm_factor = if name == "main_score" {
+                let inv_norm_factor = if name == "apex_profile" {
                     debug!("Main score trace length: {}", trace.len());
                     1.0
                 } else {
@@ -121,8 +121,8 @@ impl ScoreLines {
         }
 
         let main_score_line = lines
-            .pop_if(|x| x.name == "main_score")
-            .expect("There should be a main_score line");
+            .pop_if(|x| x.name == "apex_profile")
+            .expect("There should be an apex_profile line");
 
         let rt_seconds_range = (
             lines

@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
 
+/// Floor value for Scribe score when no signal is observed.
+pub const SCRIBE_FLOOR: f32 = -100.0;
+
 // ---------------------------------------------------------------------------
 // Structs
 // ---------------------------------------------------------------------------

@@ -37,7 +37,7 @@ use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
     ApexFinder,
     ApexScore,
-    ScoringContext,
+    Extraction,
 };
 
 /// Result bundle from background chromatogram computation
@@ -318,10 +318,10 @@ impl ComputedState {
         Ok(output)
     }
 
-    #[instrument(skip_all, fields(eg_id = %context.query_values.eg.id()))]
+    #[instrument(skip_all, fields(eg_id = %context.chromatograms.eg.id()))]
     fn find_apex(
         apex_finder: &mut ApexFinder,
-        context: &ScoringContext<String>,
+        context: &Extraction<String>,
         index: &IndexedPeaksHandle,
     ) -> Result<ApexScore, ViewerError> {
         apex_finder.find_apex(context, &|idx| {
@@ -333,11 +333,11 @@ impl ComputedState {
             let user_msg = match &x {
                 DataProcessingError::ExpectedNonEmptyData { context: err_context } => {
                     tracing::warn!(
-                        "{:#?}", context.query_values.eg,
+                        "{:#?}", context.chromatograms.eg,
                     );
                     tracing::warn!(
                         "Apex finding failed for elution group {}: No valid data found in context {:?}",
-                        context.query_values.eg.id(),
+                        context.chromatograms.eg.id(),
                         err_context
                     );
                     "No data found with the current tolerances. \
@@ -348,7 +348,7 @@ impl ComputedState {
                 _ => {
                     tracing::error!(
                         "Apex finding failed for elution group {}: {:?}",
-                        context.query_values.eg.id(),
+                        context.chromatograms.eg.id(),
                         x
                     );
                     format!("Apex finding failed: {:?}", x)
@@ -421,9 +421,9 @@ impl ComputedState {
             .apex_finder
             .get_or_insert_with(|| ApexFinder::new(num_cycles));
 
-        let scoring_ctx = ScoringContext {
+        let scoring_ctx = Extraction {
             expected_intensities: expected_intensities.clone(),
-            query_values: collector.clone(),
+            chromatograms: collector.clone(),
         };
 
         let apex_score = match Self::find_apex(apex_finder, &scoring_ctx, index) {

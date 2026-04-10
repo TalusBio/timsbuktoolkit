@@ -326,13 +326,13 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn build_candidate_context(
+    fn build_broad_extraction(
         &self,
         item: &QueryItemToScore,
     ) -> Result<
         (
             super::apex_finding::PeptideMetadata,
-            super::apex_finding::ScoringContext<IonAnnot>,
+            super::apex_finding::Extraction<IonAnnot>,
         ),
         SkippingReason,
     > {
@@ -352,7 +352,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         }
         let mut agg = tracing::span!(
             tracing::Level::TRACE,
-            "build_candidate_context::new_collector"
+            "build_broad_extraction::new_collector"
         ).in_scope(|| {
             match ChromatogramCollector::new(
                 item.query.clone(),
@@ -370,7 +370,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             }
         });
 
-        tracing::span!(tracing::Level::TRACE, "build_candidate_context::add_query").in_scope(
+        tracing::span!(tracing::Level::TRACE, "build_broad_extraction::add_query").in_scope(
             || {
                 self.index.add_query(&mut agg, &self.broad_tolerance);
             },
@@ -387,14 +387,14 @@ impl<I: ScorerQueriable> Scorer<I> {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: agg.eg.id() as u32,
-            ref_rt_seconds: item.query.rt_seconds(),
+            query_rt_seconds: item.query.rt_seconds(),
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };
 
-        let scoring_ctx = super::apex_finding::ScoringContext {
+        let scoring_ctx = super::apex_finding::Extraction {
             expected_intensities,
-            query_values: agg,
+            chromatograms: agg,
         };
 
         Ok((metadata, scoring_ctx))
@@ -528,7 +528,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         // Re-implementing logic here because process_query consumes `item` and returns `Option`.
         // We want intermediate results for `FullQueryResult`.
 
-        let (metadata, scoring_ctx) = self.build_candidate_context(&item).map_err(|_| {
+        let (metadata, scoring_ctx) = self.build_broad_extraction(&item).map_err(|_| {
             DataProcessingError::ExpectedNonEmptyData {
                 context: Some("RT out of bounds".into()),
             }
@@ -537,7 +537,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let apex_score = buffer.find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
         let (inner_collector, isotope_collector) = self.execute_secondary_query(&item, &apex_score);
 
-        let nqueries = scoring_ctx.query_values.fragments.num_ions() as u8;
+        let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let search_results = self.finalize_results(
             &metadata,
             nqueries,
@@ -546,12 +546,12 @@ impl<I: ScorerQueriable> Scorer<I> {
             &isotope_collector,
         )?;
 
-        // Extract query_values before it's consumed
-        let extractions = scoring_ctx.query_values;
+        // Extract chromatograms before it's consumed
+        let extractions = scoring_ctx.chromatograms;
 
         Ok(FullQueryResult {
             main_score_elements: buffer.traces.clone(),
-            longitudinal_main_score: buffer.traces.main_score.clone(),
+            longitudinal_main_score: buffer.traces.apex_profile.clone(),
             extractions,
             search_results,
         })
@@ -563,14 +563,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn build_calibrated_context(
+    fn build_calibrated_extraction(
         &self,
         item: &QueryItemToScore,
         calibration: &CalibrationResult,
     ) -> Result<
         (
             super::apex_finding::PeptideMetadata,
-            super::apex_finding::ScoringContext<IonAnnot>,
+            super::apex_finding::Extraction<IonAnnot>,
         ),
         SkippingReason,
     > {
@@ -613,14 +613,14 @@ impl<I: ScorerQueriable> Scorer<I> {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: agg.eg.id() as u32,
-            ref_rt_seconds: calibrated_rt,
+            query_rt_seconds: calibrated_rt,
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };
 
-        let scoring_ctx = super::apex_finding::ScoringContext {
+        let scoring_ctx = super::apex_finding::Extraction {
             expected_intensities,
-            query_values: agg,
+            chromatograms: agg,
         };
 
         Ok((metadata, scoring_ctx))
@@ -642,7 +642,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let st = Instant::now();
         let (metadata, scoring_ctx) =
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(
-                || match self.build_calibrated_context(item, calibration) {
+                || match self.build_calibrated_extraction(item, calibration) {
                     Ok(result) => Some(result),
                     Err(_) => None,
                 },
@@ -674,7 +674,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .in_scope(|| self.execute_secondary_query(item, &apex_score));
         timings.secondary_query += st.elapsed();
 
-        let nqueries = scoring_ctx.query_values.fragments.num_ions() as u8;
+        let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let st = Instant::now();
         let out = tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(
             || {
@@ -759,7 +759,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         buffer: &mut ApexFinder,
     ) -> Option<(ApexLocation, PeptideMetadata)> {
         let (metadata, scoring_ctx) = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
-            .in_scope(|| match self.build_candidate_context(item) {
+            .in_scope(|| match self.build_broad_extraction(item) {
                 Ok(result) => Some(result),
                 Err(SkippingReason::RetentionTimeOutOfBounds) => None,
             })?;
