@@ -644,7 +644,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     Err(_) => None,
                 },
             )?;
-        timings.prescore += st.elapsed();
+        timings.extraction += st.elapsed();
 
         if scoring_ctx
             .expected_intensities
@@ -663,7 +663,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         .ok()
                 },
             )?;
-        timings.localize += st.elapsed();
+        timings.scoring += st.elapsed();
 
         let st = Instant::now();
         let spectral_tol = calibration.get_spectral_tolerance();
@@ -671,7 +671,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let (inner_collector, isotope_collector) =
             tracing::span!(tracing::Level::TRACE, "score_calibrated::secondary_query")
                 .in_scope(|| self.execute_secondary_query(item, &apex_score, &spectral_tol, &isotope_tol));
-        timings.secondary_query += st.elapsed();
+        timings.spectral_query += st.elapsed();
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let st = Instant::now();
@@ -686,7 +686,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 )
             },
         );
-        timings.finalization += st.elapsed();
+        timings.assembly += st.elapsed();
 
         match out {
             Ok(res) => Some(res),

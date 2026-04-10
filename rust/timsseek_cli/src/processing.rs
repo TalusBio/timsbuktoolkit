@@ -30,7 +30,7 @@ use timsseek::scoring::{
     CalibrantHeap,
     CalibrationConfig,
     CompetedCandidate,
-    PipelineTimings,
+    PipelineReport,
     ScoredCandidate,
     ScoreTimings,
 };
@@ -112,7 +112,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     pipeline: &Scorer<I>,
     chunk_size: usize,
     _out_path: &OutputConfig,
-) -> std::result::Result<PipelineTimings, TimsSeekError> {
+) -> std::result::Result<PipelineReport, TimsSeekError> {
     let calib_config = CalibrationConfig::default();
 
     // === PHASE 1: Broad prescore -> collect top calibrants ===
@@ -204,22 +204,43 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         phase3_start.elapsed()
     );
 
-    // === Post-processing ===
+    let total_scored = results.len();
+
+    // === PHASE 4: Target-decoy competition ===
+    let phase4_start = Instant::now();
     let mut competed = target_decoy_compete(results);
     competed.sort_unstable_by(|x, y| {
         y.scoring.main_score.partial_cmp(&x.scoring.main_score).unwrap()
     });
+    let phase4_ms = phase4_start.elapsed().as_millis() as u64;
+    let total_after_competition = competed.len();
 
+    // === PHASE 5: Rescore (GBM cross-validated discriminant) ===
+    let phase5_start = Instant::now();
     let data = rescore(competed);
-    for val in report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]) {
-        let (thresh, n_below_thresh, n_targets, n_decoys) = val;
+    let phase5_ms = phase5_start.elapsed().as_millis() as u64;
+
+    // Collect q-value threshold counts and print summary
+    let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
+    let mut targets_at_1pct_qval = 0usize;
+    let mut targets_at_5pct_qval = 0usize;
+    let mut targets_at_10pct_qval = 0usize;
+    for &(thresh, n_below_thresh, n_targets, n_decoys) in &qval_report {
         println!(
             "Found {} targets and {} decoys at q-value threshold {:.2} ({} total)",
             n_targets, n_decoys, thresh, n_below_thresh
         );
+        if (thresh - 0.01).abs() < 1e-6 {
+            targets_at_1pct_qval = n_targets;
+        } else if (thresh - 0.05).abs() < 1e-6 {
+            targets_at_5pct_qval = n_targets;
+        } else if (thresh - 0.10).abs() < 1e-6 {
+            targets_at_10pct_qval = n_targets;
+        }
     }
 
-    // Write final results to Parquet
+    // === PHASE 6: Write Parquet output ===
+    let phase6_start = Instant::now();
     let out_path_pq = _out_path.directory.join("results.parquet");
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
@@ -233,15 +254,24 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         pq_writer.add(res);
     }
     pq_writer.close();
+    let phase6_ms = phase6_start.elapsed().as_millis() as u64;
     info!("Wrote final results to {:?}", out_path_pq);
 
-    Ok(PipelineTimings {
+    Ok(PipelineReport {
         phase1_prescore_ms: phase1_ms,
         phase2_calibration_ms: phase2_ms,
-        phase3_prescore_ms: phase3_timings.prescore.as_millis() as u64,
-        phase3_localize_ms: phase3_timings.localize.as_millis() as u64,
-        phase3_secondary_query_ms: phase3_timings.secondary_query.as_millis() as u64,
-        phase3_finalization_ms: phase3_timings.finalization.as_millis() as u64,
+        phase3_extraction_ms: phase3_timings.extraction.as_millis() as u64,
+        phase3_scoring_ms: phase3_timings.scoring.as_millis() as u64,
+        phase3_spectral_query_ms: phase3_timings.spectral_query.as_millis() as u64,
+        phase3_assembly_ms: phase3_timings.assembly.as_millis() as u64,
+        phase4_competition_ms: phase4_ms,
+        phase5_rescore_ms: phase5_ms,
+        phase6_output_ms: phase6_ms,
+        total_scored,
+        total_after_competition,
+        targets_at_1pct_qval,
+        targets_at_5pct_qval,
+        targets_at_10pct_qval,
     })
 }
 

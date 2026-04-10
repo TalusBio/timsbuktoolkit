@@ -16,23 +16,23 @@ use std::time::Duration;
 ///
 /// ```ignore
 /// let (results, timings) = scorer.score_iter(&queries);
-/// println!("Prescore: {}ms", timings.prescore.as_millis());
-/// println!("Localize: {}ms", timings.localize.as_millis());
+/// println!("Extraction: {}ms", timings.extraction.as_millis());
+/// println!("Scoring: {}ms", timings.scoring.as_millis());
 /// ```
 #[derive(Debug, Default)]
 pub struct ScoreTimings {
-    /// Time spent collecting chromatographic data (Stage 1: Prescore).
-    pub prescore: Duration,
+    /// Time spent collecting chromatographic data (Stage 1: Extraction).
+    pub extraction: Duration,
 
-    /// Time spent finding peak apex (Stage 2: Localization).
+    /// Time spent finding peak apex (Stage 2: Scoring).
     /// This is typically the bottleneck (~62% of total time).
-    pub localize: Duration,
+    pub scoring: Duration,
 
-    /// Time spent refining search at detected apex (Stage 3: Secondary Query).
-    pub secondary_query: Duration,
+    /// Time spent refining search at detected apex (Stage 3: Spectral Query).
+    pub spectral_query: Duration,
 
-    /// Time spent assembling final results (Stage 4: Finalization).
-    pub finalization: Duration,
+    /// Time spent assembling final results (Stage 4: Assembly).
+    pub assembly: Duration,
 }
 
 impl Serialize for ScoreTimings {
@@ -42,37 +42,42 @@ impl Serialize for ScoreTimings {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("ScoreTimings", 4)?;
-        state.serialize_field("prescore_ms", &self.prescore.as_millis())?;
-        state.serialize_field("localize_ms", &self.localize.as_millis())?;
-        state.serialize_field("secondary_query_ms", &self.secondary_query.as_millis())?;
-        state.serialize_field("finalization_ms", &self.finalization.as_millis())?;
+        state.serialize_field("extraction_ms", &self.extraction.as_millis())?;
+        state.serialize_field("scoring_ms", &self.scoring.as_millis())?;
+        state.serialize_field("spectral_query_ms", &self.spectral_query.as_millis())?;
+        state.serialize_field("assembly_ms", &self.assembly.as_millis())?;
         state.end()
     }
 }
 
 impl std::ops::AddAssign for ScoreTimings {
     fn add_assign(&mut self, rhs: Self) {
-        self.prescore += rhs.prescore;
-        self.localize += rhs.localize;
-        self.secondary_query += rhs.secondary_query;
-        self.finalization += rhs.finalization;
+        self.extraction += rhs.extraction;
+        self.scoring += rhs.scoring;
+        self.spectral_query += rhs.spectral_query;
+        self.assembly += rhs.assembly;
     }
 }
 
-/// Phase-level + stage-level timing for the two-pass pipeline.
-/// All durations are in milliseconds.
+/// Full pipeline report: per-phase timings and result-quality metrics.
+/// All timing fields are in milliseconds.
 #[derive(Debug, Default, Serialize)]
-pub struct PipelineTimings {
-    /// Wall time for Phase 1 (broad prescore, all peptides).
+pub struct PipelineReport {
+    // Timings (all in ms)
     pub phase1_prescore_ms: u64,
-    /// Wall time for Phase 2 (calibration: RT fit + error measurement).
     pub phase2_calibration_ms: u64,
-    /// Time spent building calibrated chromatograms in Phase 3.
-    pub phase3_prescore_ms: u64,
-    /// Time spent finding peak apex in Phase 3 (typically the bottleneck).
-    pub phase3_localize_ms: u64,
-    /// Time spent on secondary spectral query in Phase 3.
-    pub phase3_secondary_query_ms: u64,
-    /// Time spent assembling final results in Phase 3.
-    pub phase3_finalization_ms: u64,
+    pub phase3_extraction_ms: u64,
+    pub phase3_scoring_ms: u64,
+    pub phase3_spectral_query_ms: u64,
+    pub phase3_assembly_ms: u64,
+    pub phase4_competition_ms: u64,
+    pub phase5_rescore_ms: u64,
+    pub phase6_output_ms: u64,
+
+    // Result quality
+    pub total_scored: usize,
+    pub total_after_competition: usize,
+    pub targets_at_1pct_qval: usize,
+    pub targets_at_5pct_qval: usize,
+    pub targets_at_10pct_qval: usize,
 }
