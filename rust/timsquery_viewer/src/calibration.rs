@@ -10,6 +10,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use eframe::egui;
+
 use calibrt::CalibrationState;
 use timscentroid::rt_mapping::{MS1CycleIndex, RTIndex};
 use timsquery::models::tolerance::{
@@ -422,6 +424,286 @@ impl ViewerCalibrationState {
 
         // Final snapshot with Done marker.
         let _ = tx.send(CalibrationMessage::Done { n_scored });
+    }
+
+    // -----------------------------------------------------------------------
+    // UI rendering
+    // -----------------------------------------------------------------------
+
+    /// Render the calibration panel inside an egui `Ui`.
+    ///
+    /// `indexed_data` and `elution_groups` are needed to enable the Start
+    /// button (we need both loaded). `tolerance` is written when the user
+    /// clicks [Apply].
+    pub fn render_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        indexed_data: &crate::app::IndexedDataState,
+        elution_groups: &crate::app::ElutionGroupState,
+        tolerance: &mut Tolerance,
+    ) {
+        // -- Control buttons --------------------------------------------------
+        ui.horizontal(|ui| {
+            match self.phase {
+                CalibrationPhase::Idle => {
+                    let both_loaded = matches!(
+                        indexed_data,
+                        crate::app::IndexedDataState::Loaded { .. }
+                    ) && matches!(
+                        elution_groups,
+                        crate::app::ElutionGroupState::Loaded { .. }
+                    );
+                    if ui
+                        .add_enabled(both_loaded, egui::Button::new("\u{25B6} Start"))
+                        .clicked()
+                    {
+                        // Extract Arc handles from the loaded states.
+                        if let (
+                            crate::app::IndexedDataState::Loaded { index, .. },
+                            crate::app::ElutionGroupState::Loaded { data, .. },
+                        ) = (indexed_data, elution_groups)
+                        {
+                            self.start(Arc::clone(index), Arc::clone(data));
+                        }
+                    }
+                }
+                CalibrationPhase::Running => {
+                    if ui.button("\u{23F8} Pause").clicked() {
+                        self.pause();
+                    }
+                    if ui.button("\u{23F9} Stop").clicked() {
+                        self.stop();
+                    }
+                }
+                CalibrationPhase::Paused => {
+                    if ui.button("\u{25B6} Resume").clicked() {
+                        self.resume();
+                    }
+                    if ui.button("\u{23F9} Stop").clicked() {
+                        self.stop();
+                    }
+                }
+                CalibrationPhase::Done => {
+                    if ui.button("\u{21BA} Reset").clicked() {
+                        self.reset();
+                    }
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // -- Progress counters ------------------------------------------------
+        ui.horizontal(|ui| {
+            let total = if self.elution_group_count > 0 {
+                self.elution_group_count
+            } else {
+                // Fallback: show "?" until we know the total
+                0
+            };
+            ui.label(format!(
+                "Scored: {} / {}",
+                self.n_scored, total
+            ));
+            ui.separator();
+            ui.label(format!(
+                "Calibrants: {} / {}",
+                self.n_calibrants, self.heap_capacity
+            ));
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // -- Grid + curve plot ------------------------------------------------
+        self.render_calibration_plot(ui);
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // -- Tolerance suggestion ---------------------------------------------
+        self.render_tolerance_suggestion(ui, tolerance);
+    }
+
+    /// Render the scatter + curve calibration plot.
+    fn render_calibration_plot(&self, ui: &mut egui::Ui) {
+        use egui_plot::{Line, Plot, PlotPoints, Points};
+
+        let plot_id = format!("calibration_plot_{}", self.generation);
+        let plot = Plot::new(plot_id)
+            .height(ui.available_height().min(400.0))
+            .x_axis_label("Library RT (s)")
+            .y_axis_label("Measured RT (s)")
+            .allow_zoom(true)
+            .allow_drag(true);
+
+        let cal_state = self.calibration_state.as_ref();
+
+        plot.show(ui, |plot_ui| {
+            // Grid cells from CalibrationState (if available).
+            if let Some(cs) = cal_state {
+                let cells = cs.grid_cells();
+                let path_indices = cs.path_indices();
+
+                // Suppressed cells with any weight: small gray dots
+                let suppressed_pts: Vec<[f64; 2]> = cells
+                    .iter()
+                    .filter(|n| n.suppressed && n.center.weight > 0.0)
+                    .map(|n| [n.center.x, n.center.y])
+                    .collect();
+
+                if !suppressed_pts.is_empty() {
+                    plot_ui.points(
+                        Points::new(
+                            "suppressed",
+                            PlotPoints::new(suppressed_pts),
+                        )
+                        .color(egui::Color32::from_rgb(140, 140, 140))
+                        .radius(2.0),
+                    );
+                }
+
+                // Retained (non-suppressed) cells with weight: larger blue dots
+                let retained_pts: Vec<[f64; 2]> = cells
+                    .iter()
+                    .filter(|n| !n.suppressed && n.center.weight > 0.0)
+                    .map(|n| [n.center.x, n.center.y])
+                    .collect();
+
+                if !retained_pts.is_empty() {
+                    plot_ui.points(
+                        Points::new(
+                            "retained",
+                            PlotPoints::new(retained_pts),
+                        )
+                        .color(egui::Color32::from_rgb(70, 130, 230))
+                        .radius(4.0),
+                    );
+                }
+
+                // Path nodes: green dots
+                let path_pts: Vec<[f64; 2]> = path_indices
+                    .iter()
+                    .filter_map(|&idx| cells.get(idx))
+                    .map(|n| [n.center.x, n.center.y])
+                    .collect();
+
+                if !path_pts.is_empty() {
+                    plot_ui.points(
+                        Points::new(
+                            "path",
+                            PlotPoints::new(path_pts),
+                        )
+                        .color(egui::Color32::from_rgb(50, 205, 50))
+                        .radius(5.0),
+                    );
+                }
+
+                // Fitted curve: cyan line sampled at 200 points
+                if let Some(curve) = cs.curve() {
+                    let curve_points = curve.points();
+                    if curve_points.len() >= 2 {
+                        let x_min = curve_points.first().unwrap().x;
+                        let x_max = curve_points.last().unwrap().x;
+                        let n_samples = 200;
+                        let step = (x_max - x_min) / n_samples as f64;
+
+                        let line_pts: Vec<[f64; 2]> = (0..=n_samples)
+                            .filter_map(|i| {
+                                let x = x_min + i as f64 * step;
+                                // predict returns Err for out-of-bounds but we stay in range
+                                let y = match curve.predict(x) {
+                                    Ok(y) => y,
+                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                    Err(_) => return None,
+                                };
+                                Some([x, y])
+                            })
+                            .collect();
+
+                        if !line_pts.is_empty() {
+                            plot_ui.line(
+                                Line::new(
+                                    "fitted curve",
+                                    PlotPoints::new(line_pts),
+                                )
+                                .color(egui::Color32::from_rgb(0, 220, 220))
+                                .width(2.0),
+                            );
+                        }
+                    }
+                }
+            } else if !self.snapshot_points.is_empty() {
+                // Fallback: show raw calibrant points if CalibrationState
+                // hasn't been built yet (shouldn't normally happen, but
+                // keeps the plot populated).
+                let raw_pts: Vec<[f64; 2]> = self
+                    .snapshot_points
+                    .iter()
+                    .map(|&(lib_rt, apex_rt, _)| [lib_rt, apex_rt])
+                    .collect();
+
+                plot_ui.points(
+                    Points::new(
+                        "calibrants",
+                        PlotPoints::new(raw_pts),
+                    )
+                    .color(egui::Color32::from_rgb(70, 130, 230))
+                    .radius(3.0),
+                );
+            }
+        });
+    }
+
+    /// Render tolerance suggestion and Apply button.
+    fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
+        // Compute WRMSE if we have a curve and snapshot points.
+        let wrmse = self
+            .calibration_state
+            .as_ref()
+            .and_then(|cs| {
+                let curve = cs.curve()?;
+                let points: Vec<calibrt::Point> = self
+                    .snapshot_points
+                    .iter()
+                    .map(|&(lib_rt, apex_rt, score)| calibrt::Point {
+                        x: lib_rt,
+                        y: apex_rt,
+                        weight: score,
+                    })
+                    .collect();
+                let val = curve.wrmse(points.iter());
+                if val.is_finite() { Some(val) } else { None }
+            });
+
+        // Derive a suggested RT tolerance: 3x WRMSE in minutes.
+        let suggested_rt_min = wrmse.map(|w| (w / 60.0) * 3.0);
+
+        if let Some(derived) = &suggested_rt_min {
+            self.derived_tolerances = Some(DerivedTolerances {
+                rt_tolerance_minutes: *derived as f32,
+            });
+        }
+
+        ui.horizontal(|ui| {
+            if let (Some(rt_min), Some(w)) = (suggested_rt_min, wrmse) {
+                ui.label(format!(
+                    "Suggested RT: \u{00B1}{:.2} min   WRMSE: {:.2} s",
+                    rt_min, w
+                ));
+                if ui.button("Apply").clicked() {
+                    let rt_tol = rt_min as f32;
+                    tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
+                }
+            } else if self.phase == CalibrationPhase::Idle {
+                ui.label("Start calibration to compute RT tolerance suggestion.");
+            } else {
+                ui.label("Collecting data...");
+                ui.spinner();
+            }
+        });
     }
 }
 

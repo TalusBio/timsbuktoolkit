@@ -1400,6 +1400,7 @@ impl eframe::App for ViewerApp {
             mobility_panel: &mut self.mobility_panel,
             screenshot_delay_secs: &mut self.screenshot_delay_secs,
             screenshot_state: &mut self.screenshot_state,
+            calibration: &mut self.calibration,
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1424,6 +1425,7 @@ struct AppTabViewer<'a> {
     mobility_panel: &'a mut MobilityPanel,
     screenshot_delay_secs: &'a mut f32,
     screenshot_state: &'a mut ScreenshotState,
+    calibration: &'a mut ViewerCalibrationState,
 }
 
 impl<'a> AppTabViewer<'a> {
@@ -1666,8 +1668,12 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                     .render(ui, self.computed.mobility_data());
             }
             Pane::Calibration => {
-                // Placeholder: Task 11 will render the full calibration panel UI.
-                ui.label("Calibration panel (UI wired in Task 11)");
+                self.calibration.render_panel(
+                    ui,
+                    &self.data.indexed_data,
+                    &self.data.elution_groups,
+                    &mut self.data.tolerance,
+                );
             }
         }
     }

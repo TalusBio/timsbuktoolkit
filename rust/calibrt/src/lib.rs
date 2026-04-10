@@ -73,6 +73,11 @@ impl CalibrationCurve {
         Ok(Self { points, slopes })
     }
 
+    /// Read access to the sorted calibration points.
+    pub fn points(&self) -> &[Point] {
+        &self.points
+    }
+
     pub fn wrmse<'a>(&self, test_points: impl Iterator<Item = &'a Point> + 'a) -> f64 {
         let mut total_error = 0.0;
         let mut weight: f64 = 0.0;
