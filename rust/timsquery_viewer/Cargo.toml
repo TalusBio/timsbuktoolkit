@@ -13,6 +13,7 @@ path = "src/main.rs"
 timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 timsseek = { path = "../timsseek" }
+calibrt = { path = "../calibrt" }
 
 # GUI dependencies
 egui = {version = "0.33", features = ["persistence", "rayon"]}

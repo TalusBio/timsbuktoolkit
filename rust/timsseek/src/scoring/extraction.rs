@@ -22,7 +22,7 @@ use super::pipeline::SkippingReason;
 /// top_n_fragments:
 ///   Some(n) -> filter_zero_intensity_ions + select_top_n_fragments(n)
 ///   None    -> no filtering, all ions kept
-pub(crate) fn build_extraction<T, I>(
+pub fn build_extraction<T, I>(
     elution_group: &timsquery::TimsElutionGroup<T>,
     mut expected_intensities: ExpectedIntensities<T>,
     index: &I,
