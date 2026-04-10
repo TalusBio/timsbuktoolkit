@@ -5,6 +5,8 @@ pub use calibrt::{
     CalibrationCurve as RTCalibration,
     CalibrationSnapshot,
     CalibrationState as CalibratedGrid,
+    LibraryRT,
+    ObservedRTSeconds,
     Point,
     RidgeMeasurement,
     calibrate_with_ranges,
@@ -55,29 +57,30 @@ impl CalibrationResult {
     }
 
     pub fn with_ridge_widths(mut self, mut widths: Vec<RidgeMeasurement>) -> Self {
-        widths.sort_by(|a, b| a.library.partial_cmp(&b.library).unwrap_or(std::cmp::Ordering::Equal));
+        widths.sort_by(|a, b| a.library.0.partial_cmp(&b.library.0).unwrap_or(std::cmp::Ordering::Equal));
         self.ridge_widths = widths;
         self
     }
 
     /// Interpolate ridge half-width at a given library RT (seconds).
     /// Returns the half-width in seconds, or None if no ridge data.
-    fn ridge_half_width_at(&self, library_rt_seconds: f64) -> Option<f64> {
+    fn ridge_half_width_at(&self, library_rt: LibraryRT<f64>) -> Option<f64> {
         if self.ridge_widths.is_empty() {
             return None;
         }
         let widths = &self.ridge_widths;
+        let rt = library_rt.0;
 
         // Clamp to endpoints
-        if library_rt_seconds <= widths[0].library {
+        if rt <= widths[0].library.0 {
             return Some(widths[0].half_width);
         }
-        if library_rt_seconds >= widths[widths.len() - 1].library {
+        if rt >= widths[widths.len() - 1].library.0 {
             return Some(widths[widths.len() - 1].half_width);
         }
 
         // Binary search for the bracketing pair
-        let pos = widths.partition_point(|m| m.library < library_rt_seconds);
+        let pos = widths.partition_point(|m| m.library.0 < rt);
         if pos == 0 {
             return Some(widths[0].half_width);
         }
@@ -85,16 +88,16 @@ impl CalibrationResult {
         let right = &widths[pos];
 
         // Linear interpolation
-        let t = (library_rt_seconds - left.library) / (right.library - left.library).max(1e-9);
+        let t = (rt - left.library.0) / (right.library.0 - left.library.0).max(1e-9);
         Some(left.half_width + t * (right.half_width - left.half_width))
     }
 
     /// Convert indexed RT to calibrated absolute RT (seconds).
-    pub fn convert_irt(&self, irt_seconds: f32) -> f32 {
-        match self.cal_curve.predict(irt_seconds as f64) {
-            Ok(rt) => rt as f32,
-            Err(CalibRtError::OutOfBounds(rt)) => rt as f32,
-            Err(_) => irt_seconds,
+    pub fn convert_irt(&self, irt: LibraryRT<f32>) -> ObservedRTSeconds<f32> {
+        match self.cal_curve.predict(LibraryRT(irt.0 as f64)) {
+            Ok(rt) => ObservedRTSeconds(rt.0 as f32),
+            Err(CalibRtError::OutOfBounds(rt)) => ObservedRTSeconds(rt as f32),
+            Err(_) => ObservedRTSeconds(irt.0),
         }
     }
 
@@ -106,9 +109,9 @@ impl CalibrationResult {
     /// Get per-query tolerance. Uses position-dependent ridge width when available,
     /// falls back to uniform `rt_tolerance_minutes` otherwise.
     /// `rt` is the library RT in seconds (pre-calibration).
-    pub fn get_tolerance(&self, _mz: f64, _mobility: f32, rt: f32) -> Tolerance {
+    pub fn get_tolerance(&self, _mz: f64, _mobility: f32, rt: LibraryRT<f32>) -> Tolerance {
         let rt_tol_minutes = self
-            .ridge_half_width_at(rt as f64)
+            .ridge_half_width_at(LibraryRT(rt.0 as f64))
             .map(|hw| (hw * RIDGE_WIDTH_MULTIPLIER / 60.0) as f32)
             .unwrap_or(self.rt_tolerance_minutes)
             .max(MIN_RT_TOLERANCE_MINUTES);
