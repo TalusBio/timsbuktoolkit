@@ -121,6 +121,8 @@ struct PersistentState {
     tolerance: Tolerance,
     smoothing: SmoothingMethod,
     dock_state: DockState<Pane>,
+    #[serde(default)]
+    calibration_snapshot: Option<calibrt::CalibrationSnapshot>,
 }
 
 fn default_true() -> bool {
@@ -342,7 +344,9 @@ impl ViewerApp {
                         cancellation_token: None,
                         screenshot_state: ScreenshotState::default(),
                         screenshot_delay_secs: 3.0,
-                        calibration: ViewerCalibrationState::default(),
+                        calibration: ViewerCalibrationState::from_snapshot(
+                            state.calibration_snapshot,
+                        ),
                     };
                 }
             } else {
@@ -1389,6 +1393,7 @@ impl eframe::App for ViewerApp {
             tolerance: self.data.tolerance.clone(),
             smoothing: self.data.smoothing,
             dock_state: self.dock_state.clone(),
+            calibration_snapshot: self.calibration.snapshot_for_persistence(),
         };
 
         if let Ok(value) = ron::to_string(&state) {
