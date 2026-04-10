@@ -39,7 +39,7 @@ fn test_calibrate_zero_x_range() {
         y: 60.0,
         weight: 1.0,
     }];
-    let result = calibrate_with_ranges(&points, (50.0, 50.0), (0.0, 100.0), 50);
+    let result = calibrate_with_ranges(&points, (50.0, 50.0), (0.0, 100.0), 50, 30);
     assert!(result.is_err());
 }
 
@@ -51,7 +51,7 @@ fn test_calibrate_zero_y_range() {
         y: 60.0,
         weight: 1.0,
     }];
-    let result = calibrate_with_ranges(&points, (0.0, 100.0), (60.0, 60.0), 50);
+    let result = calibrate_with_ranges(&points, (0.0, 100.0), (60.0, 60.0), 50, 30);
     assert!(result.is_err());
 }
 

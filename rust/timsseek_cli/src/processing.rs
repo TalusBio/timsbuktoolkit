@@ -405,7 +405,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     );
 
     let cal_curve =
-        calibrate_with_ranges(&points, (min_x, max_x), (min_y, max_y), config.grid_size)?;
+        calibrate_with_ranges(&points, (min_x, max_x), (min_y, max_y), config.grid_size, config.dp_lookback)?;
 
     // === Step B: Measure m/z and mobility errors at calibrant apexes ===
     let query_tolerance = Tolerance {

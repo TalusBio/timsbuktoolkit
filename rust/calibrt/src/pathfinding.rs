@@ -12,7 +12,7 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Nodes are sorted by (x, y) to ensure topological order
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
-pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node]) -> Vec<crate::Point> {
+pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node], lookback: usize) -> Vec<crate::Point> {
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -35,7 +35,6 @@ pub(crate) fn find_optimal_path(nodes: &mut [crate::grid::Node]) -> Vec<crate::P
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
 
-        let lookback = 30;
         let start = if i > lookback { i - lookback } else { 0 };
         for j in start..i {
             // Only create edges where both dimensions increase (monotonic constraint)
