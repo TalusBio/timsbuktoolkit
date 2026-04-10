@@ -282,21 +282,6 @@ impl TraceScorer {
         &self.traces
     }
 
-    /// Build cosine and scribe profiles from traces.
-    /// cosine_profile[i] = cos^3 * intensity, scribe_profile[i] = scribe * intensity.
-    fn build_profiles(&self) -> (Vec<f32>, Vec<f32>) {
-        let n = self.traces.cosine_trace.len();
-        let mut cosine_profile = Vec::with_capacity(n);
-        let mut scribe_profile = Vec::with_capacity(n);
-        for i in 0..n {
-            let cos = self.traces.cosine_trace[i];
-            let intensity = self.traces.ms2_log_intensity[i];
-            cosine_profile.push(cos * cos * cos * intensity);
-            scribe_profile.push(self.traces.ms2_scribe[i] * intensity);
-        }
-        (cosine_profile, scribe_profile)
-    }
-
     /// Build cosine and scribe profiles into cached fields, avoiding allocation.
     fn build_profiles_cached(&mut self) {
         let n = self.traces.cosine_trace.len();
@@ -333,31 +318,14 @@ impl TraceScorer {
         Ok(())
     }
 
-    /// Phase 1: Find apex location using broad extraction.
-    ///
-    /// Returns a lightweight `ApexLocation` with just the peak location and
-    /// a basic score (apex profile value). Sufficient for calibrant ranking.
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
-    )]
-    pub fn find_apex_location<T: KeyLike>(
-        &mut self,
-        scoring_ctx: &Extraction<T>,
+    /// Stage B: Suggest best apex from precomputed traces.
+    /// Pure peak-pick on apex_profile — O(cycles). Truly cheap.
+    /// Returns apex_profile[max_loc] as the ranking score.
+    pub fn suggest_apex(
+        &self,
         rt_mapper: &dyn Fn(usize) -> u32,
+        cycle_offset: usize,
     ) -> Result<ApexLocation, DataProcessingError> {
-        let collector = &scoring_ctx.chromatograms;
-        let n_cycles = collector.num_cycles();
-
-        self.traces.clear();
-        self.traces.resize(n_cycles);
-        self.buffers.clear();
-        self.buffers.resize(n_cycles);
-
-        self.compute_pass_1(scoring_ctx)?;
-        self.compute_main_score_trace();
-
-        // Peak-pick on apex profile
         let peak_picker = PeakPicker::new(&self.traces.apex_profile);
         let (max_val, max_loc) = match peak_picker.next_peak() {
             Some(p) => p,
@@ -374,21 +342,10 @@ impl TraceScorer {
         }
 
         let (rising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
-        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let retention_time_ms = rt_mapper(max_loc + cycle_offset);
 
-        // Compute split product score for calibrant ranking
-        let (cosine_profile, scribe_profile) = self.build_profiles();
-
-        let split_product = compute_split_product(
-            &cosine_profile,
-            &scribe_profile,
-            &scoring_ctx.chromatograms.fragments,
-            &scoring_ctx.expected_intensities.fragment_intensities,
-        );
-
         Ok(ApexLocation {
-            score: split_product.base_score,
+            score: max_val, // apex_profile peak value, NOT split_product
             retention_time_ms,
             apex_cycle: max_loc,
             rising_cycles,
@@ -396,9 +353,125 @@ impl TraceScorer {
         })
     }
 
-    /// Phase 3: Full scoring on a (narrow) extraction.
-    ///
-    /// Computes traces, apex profile, split product, 11 features, and weighted score.
+    /// Stage C: Compute full score at a given cycle index.
+    /// Uses precomputed traces and cached profiles.
+    /// `suggested` provides peak context for delta/baseline calculations.
+    pub fn score_at<T: KeyLike>(
+        &mut self, // needs &mut for PeakPicker on traces
+        scoring_ctx: &Extraction<T>,
+        cycle: usize,
+        suggested: &ApexLocation,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<ApexScore, DataProcessingError> {
+        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
+
+        // Split product using cached profiles
+        let split_product = compute_split_product(
+            &self.cosine_profile,
+            &self.scribe_profile,
+            &scoring_ctx.chromatograms.fragments,
+            &scoring_ctx.expected_intensities.fragment_intensities,
+        );
+
+        // Delta scores: compare apex_profile[cycle] against global 2nd/3rd peaks
+        let mut peak_picker = PeakPicker::new(&self.traces.apex_profile);
+        let cycle_val = self.traces.apex_profile[cycle];
+
+        // Mask the suggested apex region (stable reference for deltas)
+        peak_picker.mask_peak(
+            suggested.apex_cycle,
+            suggested.rising_cycles as usize,
+            suggested.falling_cycles as usize,
+            2,
+        );
+        let (next_val, next_loc) = peak_picker.next_peak().unwrap_or((0.0, cycle));
+        let (next_raise, next_fall) = self.calculate_rise_and_fall_cycles(next_loc);
+        peak_picker.mask_peak(next_loc, next_raise as usize, next_fall as usize, 1);
+        let (second_next_val, _) = peak_picker.next_peak().unwrap_or((0.0, cycle));
+
+        let delta_next = cycle_val - next_val;
+        let delta_second_next = cycle_val - second_next_val;
+
+        // Joint apex: find precursor-fragment agreement, but use clicked cycle if far from it
+        let joint_apex = find_joint_apex(&self.cosine_profile, &self.traces.ms1_precursor_trace);
+        let effective_apex = if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize <= 3 {
+            joint_apex
+        } else {
+            cycle
+        };
+
+        // 11 features at effective apex
+        let n_cycles = self.cosine_profile.len();
+        let features = compute_apex_features(
+            &scoring_ctx.chromatograms.fragments,
+            &scoring_ctx.chromatograms.precursors,
+            &scoring_ctx.expected_intensities,
+            &self.cosine_profile,
+            &self.traces.ms1_precursor_trace,
+            effective_apex,
+            n_cycles,
+        );
+
+        let score = compute_weighted_score(split_product.base_score, &features);
+        let retention_time_ms = rt_mapper(effective_apex + cycle_offset);
+
+        // Intensity sums at effective apex
+        let (ms1_summed_intensity, _) =
+            self.sum_intensities_at(&scoring_ctx.chromatograms.precursors, effective_apex);
+        let (ms2_summed_intensity, ms2_npeaks) =
+            self.sum_intensities_at(&scoring_ctx.chromatograms.fragments, effective_apex);
+
+        // Baseline lambda uses suggested apex's rise/fall (stable window)
+        let lambda = self.calculate_baseline_lambda(
+            suggested.apex_cycle,
+            suggested.rising_cycles,
+            suggested.falling_cycles,
+        );
+        let norm_lazy_std = lambda.sqrt().max(1.0) as f32;
+        let lazyscore_at = self.traces.ms2_lazyscore[effective_apex];
+        let lazyscore_z = lazyscore_at / norm_lazy_std;
+
+        if lazyscore_z.is_nan() {
+            return Err(DataProcessingError::ExpectedFiniteNonNanData {
+                context: format!("Lazy score is NaN {} and {}", lazyscore_at, norm_lazy_std),
+            });
+        }
+
+        Ok(ApexScore {
+            score,
+            retention_time_ms,
+            joint_apex_cycle: effective_apex,
+            split_product,
+            features,
+            delta_next,
+            delta_second_next,
+            lazyscore: lazyscore_at,
+            lazyscore_vs_baseline: (lazyscore_at as f64 / lambda) as f32,
+            lazyscore_z,
+            npeaks: ms2_npeaks as u8,
+            ms2_summed_intensity,
+            ms1_summed_intensity,
+            rising_cycles: suggested.rising_cycles,
+            falling_cycles: suggested.falling_cycles,
+        })
+    }
+
+    /// Convenience: compute_traces + suggest_apex. Migration aid.
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
+    )]
+    pub fn find_apex_location<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &Extraction<T>,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<ApexLocation, DataProcessingError> {
+        self.compute_traces(scoring_ctx)?;
+        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
+        self.suggest_apex(rt_mapper, cycle_offset)
+    }
+
+    /// Convenience: compute_traces + suggest_apex + score_at. Migration aid.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -408,23 +481,10 @@ impl TraceScorer {
         scoring_ctx: &Extraction<T>,
         rt_mapper: &dyn Fn(usize) -> u32,
     ) -> Result<ApexScore, DataProcessingError> {
-        let collector = &scoring_ctx.chromatograms;
-        let n_cycles = collector.num_cycles();
-
-        // 1. Reset buffers
-        self.traces.clear();
-        self.traces.resize(n_cycles);
-        self.buffers.clear();
-        self.buffers.resize(n_cycles);
-
-        // 2. Compute per-cycle scores (single pass)
-        self.compute_pass_1(scoring_ctx)?;
-
-        // 3. Compute apex profile (cos^3 * I combined with scribe * I)
-        self.compute_main_score_trace();
-
-        // 4. Find apex and extract features
-        self.extract_apex_score(scoring_ctx, &rt_mapper)
+        self.compute_traces(scoring_ctx)?;
+        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
+        let loc = self.suggest_apex(rt_mapper, cycle_offset)?;
+        self.score_at(scoring_ctx, loc.apex_cycle, &loc, rt_mapper)
     }
 
     /// Single-pass scoring: cosine (sqrt-transformed), scribe, lazyscore,
@@ -602,113 +662,6 @@ impl TraceScorer {
 
             self.traces.apex_profile.push(c * (0.5 + s_norm));
         }
-    }
-
-    fn extract_apex_score<T: KeyLike>(
-        &self,
-        scoring_ctx: &Extraction<T>,
-        rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexScore, DataProcessingError> {
-        let mut peak_picker = PeakPicker::new(&self.traces.apex_profile);
-
-        // Find best peak
-        let (max_val, max_loc) = match peak_picker.next_peak() {
-            Some(p) => p,
-            None => {
-                return Err(DataProcessingError::ExpectedNonEmptyData {
-                    context: Some("No main score found".into()),
-                });
-            }
-        };
-
-        if max_val == 0.0 {
-            return Err(DataProcessingError::ExpectedNonEmptyData {
-                context: Some("No non-0 main score".into()),
-            });
-        }
-
-        // Peak shape (rise/fall) for delta computation
-        let (rising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
-
-        // Mask and find next peaks for delta scores
-        peak_picker.mask_peak(max_loc, rising_cycles as usize, falling_cycles as usize, 2);
-        let (next_val, next_loc) = peak_picker.next_peak().unwrap_or((0.0, max_loc));
-        let (next_raise, next_fall) = self.calculate_rise_and_fall_cycles(next_loc);
-        peak_picker.mask_peak(next_loc, next_raise as usize, next_fall as usize, 1);
-        let (second_next_val, _) = peak_picker.next_peak().unwrap_or((0.0, max_loc));
-
-        let delta_next = max_val - next_val;
-        let delta_second_next = max_val - second_next_val;
-
-        // Build intermediate profiles for split product and features
-        let (cosine_profile, scribe_profile) = self.build_profiles();
-
-        // Split product score (independent cosine/scribe apexes)
-        let split_product = compute_split_product(
-            &cosine_profile,
-            &scribe_profile,
-            &scoring_ctx.chromatograms.fragments,
-            &scoring_ctx.expected_intensities.fragment_intensities,
-        );
-
-        // Joint precursor-fragment apex
-        let joint_apex = find_joint_apex(&cosine_profile, &self.traces.ms1_precursor_trace);
-
-        // 11 features at joint apex
-        let n_cycles = cosine_profile.len();
-        let features = compute_apex_features(
-            &scoring_ctx.chromatograms.fragments,
-            &scoring_ctx.chromatograms.precursors,
-            &scoring_ctx.expected_intensities,
-            &cosine_profile,
-            &self.traces.ms1_precursor_trace,
-            joint_apex,
-            n_cycles,
-        );
-
-        // Weighted final score
-        let score = compute_weighted_score(split_product.base_score, &features);
-
-        // RT at joint apex
-        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
-        let global_loc = joint_apex + cycle_offset;
-        let retention_time_ms = rt_mapper(global_loc);
-
-        // Intensity counts at joint apex
-        let (ms1_summed_intensity, _) =
-            self.sum_intensities_at(&scoring_ctx.chromatograms.precursors, joint_apex);
-        let (ms2_summed_intensity, ms2_npeaks) =
-            self.sum_intensities_at(&scoring_ctx.chromatograms.fragments, joint_apex);
-
-        // Lazyscore baseline stats
-        let lambda = self.calculate_baseline_lambda(max_loc, rising_cycles, falling_cycles);
-        let k = self.traces.ms2_lazyscore[joint_apex] as f64;
-        let norm_lazy_std = lambda.sqrt().max(1.0) as f32;
-        let lazyscore_z = self.traces.ms2_lazyscore[joint_apex] / norm_lazy_std;
-
-        if lazyscore_z.is_nan() {
-            return Err(DataProcessingError::ExpectedFiniteNonNanData {
-                context: format!("Lazy score is NaN {} and {}", k, norm_lazy_std),
-            });
-        }
-
-        Ok(ApexScore {
-            score,
-            retention_time_ms,
-            joint_apex_cycle: joint_apex,
-            split_product,
-            features,
-            delta_next,
-            delta_second_next,
-            lazyscore: self.traces.ms2_lazyscore[joint_apex],
-            lazyscore_vs_baseline: (k / lambda) as f32,
-            lazyscore_z,
-            npeaks: ms2_npeaks as u8,
-            ms2_summed_intensity,
-            ms1_summed_intensity,
-            rising_cycles,
-            falling_cycles,
-        })
     }
 
     fn calculate_rise_and_fall_cycles(&self, max_loc: usize) -> (u8, u8) {
