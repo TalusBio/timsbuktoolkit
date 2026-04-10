@@ -144,7 +144,6 @@ pub struct CalibrationConfig {
     pub mobility_sigma: f32,
     pub rt_sigma_factor: f32,
     pub min_rt_tolerance_minutes: f32,
-    pub lowess_frac: f32,
     pub calibration_query_rt_window_minutes: f32,
     pub dp_lookback: usize,
 }
@@ -158,7 +157,6 @@ impl Default for CalibrationConfig {
             mobility_sigma: 3.0,
             rt_sigma_factor: 3.0,
             min_rt_tolerance_minutes: 0.5,
-            lowess_frac: 0.5,
             calibration_query_rt_window_minutes: 0.5,
             dp_lookback: 30,
         }

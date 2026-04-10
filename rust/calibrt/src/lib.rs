@@ -188,6 +188,7 @@ pub fn calibrate_with_ranges(
     x_range: (f64, f64),
     y_range: (f64, f64),
     grid_size: usize,
+    lookback: usize,
 ) -> Result<CalibrationCurve, CalibRtError> {
     // Module 1: Grid data and apply nonmaximal suppression
     let mut grid = Grid::new(grid_size, x_range, y_range)?;
@@ -203,7 +204,7 @@ pub fn calibrate_with_ranges(
         .collect();
 
     // Module 2: Find the optimal ascending path
-    let optimal_path_points = pathfinding::find_optimal_path(&mut filtered_nodes);
+    let optimal_path_points = pathfinding::find_optimal_path(&mut filtered_nodes, lookback);
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
     match &calcurve {
@@ -262,5 +263,5 @@ pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve,
     let x_range = compute_range(points.iter().map(|p| p.x))?;
     let y_range = compute_range(points.iter().map(|p| p.y))?;
 
-    calibrate_with_ranges(points, x_range, y_range, grid_size)
+    calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
 }

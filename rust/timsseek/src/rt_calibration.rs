@@ -90,7 +90,7 @@ impl CalibrationResult {
                 weight: 1.0,
             },
         ];
-        let cal_curve = calibrate_with_ranges(&points, (start, end), (start, end), 10)
+        let cal_curve = calibrate_with_ranges(&points, (start, end), (start, end), 10, 10)
             .expect("Identity calibration should not fail");
 
         Self {
