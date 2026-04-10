@@ -55,7 +55,7 @@ pub struct CalibrationCurve {
 impl CalibrationCurve {
     /// Creates a new CalibrationCurve from a slice of points.
     /// Precomputes slopes for faster prediction.
-    fn new(mut points: Vec<Point>) -> Result<Self, CalibRtError> {
+    pub(crate) fn new(mut points: Vec<Point>) -> Result<Self, CalibRtError> {
         if points.is_empty() {
             return Err(CalibRtError::NoPoints);
         }
@@ -142,6 +142,164 @@ impl CalibrationCurve {
         let p1 = self.points[i - 1];
         let slope = self.slopes[i - 1];
         p1.y + (x_val - p1.x) * slope
+    }
+}
+
+/// Reusable calibration state for incremental fitting. Owns all allocations.
+pub struct CalibrationState {
+    grid: grid::Grid,
+    path_indices: Vec<usize>,
+    dp_max_weights: Vec<f64>,
+    dp_prev_indices: Vec<Option<usize>>,
+    curve: Option<CalibrationCurve>,
+    stale: bool,
+    lookback: usize,
+}
+
+impl CalibrationState {
+    pub fn new(
+        grid_size: usize,
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+        lookback: usize,
+    ) -> Result<Self, CalibRtError> {
+        Ok(Self {
+            grid: grid::Grid::new(grid_size, x_range, y_range)?,
+            path_indices: Vec::new(),
+            dp_max_weights: Vec::new(),
+            dp_prev_indices: Vec::new(),
+            curve: None,
+            stale: false,
+            lookback,
+        })
+    }
+
+    pub fn update(&mut self, points: impl Iterator<Item = (f64, f64, f64)>) {
+        for (x, y, w) in points {
+            let _ = self.grid.add_point(&Point { x, y, weight: w });
+        }
+        self.stale = true;
+    }
+
+    pub fn fit(&mut self) {
+        if self.grid.suppress_nonmax().is_err() {
+            self.curve = None;
+            self.path_indices.clear();
+            self.stale = false;
+            return;
+        }
+
+        // Collect non-suppressed nodes for pathfinding
+        let mut filtered: Vec<grid::Node> = self.grid.grid_cells()
+            .iter()
+            .filter(|n| !n.suppressed && n.center.weight > 0.0)
+            .copied()
+            .collect();
+
+        // Pathfinding with reused buffers
+        let path_points = pathfinding::find_optimal_path(
+            &mut filtered,
+            self.lookback,
+            &mut self.dp_max_weights,
+            &mut self.dp_prev_indices,
+        );
+
+        // Store path indices by matching path points back to grid cells
+        self.path_indices.clear();
+        for pp in &path_points {
+            if let Some(idx) = self.grid.grid_cells().iter().position(|n| {
+                (n.center.x - pp.x).abs() < 1e-9 && (n.center.y - pp.y).abs() < 1e-9
+            }) {
+                self.path_indices.push(idx);
+            }
+        }
+
+        self.curve = CalibrationCurve::new(path_points).ok();
+        self.stale = false;
+    }
+
+    pub fn reset(&mut self) {
+        self.grid.reset();
+        self.curve = None;
+        self.path_indices.clear();
+        self.stale = false;
+    }
+
+    pub fn grid_cells(&self) -> &[grid::Node] {
+        self.grid.grid_cells()
+    }
+
+    pub fn path_indices(&self) -> &[usize] {
+        &self.path_indices
+    }
+
+    pub fn curve(&self) -> Option<&CalibrationCurve> {
+        self.curve.as_ref()
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+}
+
+#[cfg(test)]
+mod calibration_state_tests {
+    use super::*;
+
+    #[test]
+    fn test_update_fit_cycle() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+        let points: Vec<(f64, f64, f64)> = (0..10)
+            .map(|i| {
+                let v = (i as f64) * 10.0 + 5.0;
+                (v, v, 1.0)
+            })
+            .collect();
+
+        state.update(points.into_iter());
+        assert!(state.is_stale());
+
+        state.fit();
+        assert!(!state.is_stale());
+        assert!(state.curve().is_some());
+
+        let curve = state.curve().unwrap();
+        let pred = curve.predict(50.0).unwrap();
+        assert!((pred - 50.0).abs() < 5.0, "predicted {} expected ~50.0", pred);
+    }
+
+    #[test]
+    fn test_reset_clears_state() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+        let points = vec![(25.0, 25.0, 1.0), (75.0, 75.0, 1.0)];
+        state.update(points.into_iter());
+        state.fit();
+        assert!(state.curve().is_some());
+
+        state.reset();
+        assert!(state.curve().is_none());
+        assert!(state.path_indices().is_empty());
+        assert!(!state.is_stale());
+    }
+
+    #[test]
+    fn test_refit_after_reset_update() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+
+        // First fit: y = x
+        let points1: Vec<_> = (0..10).map(|i| ((i as f64) * 10.0 + 5.0, (i as f64) * 10.0 + 5.0, 1.0)).collect();
+        state.update(points1.into_iter());
+        state.fit();
+        let curve1_pred = state.curve().unwrap().predict(50.0).unwrap();
+
+        // Reset and refit: y = 2x
+        state.reset();
+        let points2: Vec<_> = (0..10).map(|i| ((i as f64) * 10.0 + 5.0, (i as f64) * 20.0 + 5.0, 1.0)).collect();
+        state.update(points2.into_iter());
+        state.fit();
+        let curve2_pred = state.curve().unwrap().predict(50.0).unwrap();
+
+        assert!((curve2_pred - curve1_pred).abs() > 10.0);
     }
 }
 
