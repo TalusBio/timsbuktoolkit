@@ -94,9 +94,6 @@ cargo run --release --bin timsseek -- \
     --speclib-file $SPECLIB_NAME \
     --output-dir $RESULTS_DIR \
     --dotd-file $DOTD_FILE $EXTRAS
-
-# Run rescoring with summary plotting and target-decoy competitions
-uv run python -m timsseek_rescore --results_dir $RESULTS_DIR --output_dir $SUMMARY_DIR
 ```
 
 #### On-Demand Search
@@ -121,9 +118,6 @@ cargo run --bin timsseek_rts --release -- \
     --dotd-file $RAW_FILE &
 SERVER_PID=$!
 
-# To start the receiver, this sample app allows typing a peptide
-# and visualizing the scores
-uv run python -m streamlit run python/timsseek_rts_receiver/app.py
 kill $SERVER_PID
 wait
 

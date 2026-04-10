@@ -10,7 +10,6 @@ import argparse
 import json
 import subprocess
 import tempfile
-import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,8 +101,6 @@ class TimsseekRunner:
                 )
                 # Results are now in a subdirectory named after the raw file
                 raw_file_stem = self.raw_file_location.stem
-                file_results_dir = results_path / raw_file_stem
-                self._rescore(results_dir=file_results_dir, summary_dir=summary_dir)
                 self.log_results(wandb_experiment, output_loc, raw_file_stem)
 
     @staticmethod
@@ -152,38 +149,6 @@ class TimsseekRunner:
         logger.info(f"Timsseek completed with return code {res.returncode}")
         return res
 
-    @staticmethod
-    def _rescore(results_dir: Path, summary_dir: Path):
-        args = [
-            "uv",
-            "run",
-            "python",
-            "-m",
-            "timsseek_rescore",
-            "--results_dir",
-            str(results_dir),
-            "--output_dir",
-            str(summary_dir),
-        ]
-        stdout_file = summary_dir / "timsseek_stdout.log"
-        stderr_file = summary_dir / "timsseek_stderr.log"
-
-        logger.info(f"Starting rescoring, logging to {stdout_file} and {stderr_file}")
-        try:
-            res = subprocess.run(
-                args,
-                stdout=open(stdout_file, "w"),
-                stderr=open(stderr_file, "w"),
-                check=True,
-            )
-        finally:
-            # Log stdout and stderr
-            logger.info(stdout_file.read_text())
-            logger.error(stderr_file.read_text())
-
-        logger.info(f"Rescoring completed with return code {res.returncode}")
-        return res
-
     def log_results(self, wandb_experiment, results_loc, raw_file_stem):
         metrics = self.crunch_metrics(results_loc, raw_file_stem)
         with open("latest_metrics.json", "w") as f:
@@ -214,38 +179,14 @@ class TimsseekRunner:
     @staticmethod
     def crunch_metrics(output_dir: Path, raw_file_stem: str) -> dict[str, Any]:
         metrics = {}
-        xgboost_images = [
-            ("variable_importance_plot", "importances.png"),
-            ("mass_error_plot", "mass_error_rt_1pct.png"),
-            ("mobility_error_plot", "mobility_error_rt_1pct.png"),
-            ("mz_mobility_plot", "mz_mobility_1pct.png"),
-            ("predicted_rt_obs_plot", "predicted_rt_obs_rt_1pct.png"),
-            ("mass_error_mz_1pct_plot", "mass_error_mz_1pct.png"),
-        ]
-
-        for metric_name, file_name in xgboost_images:
-            img_path = output_dir / "summ" / "xgboost" / file_name
-            if img_path.exists():
-                metrics[metric_name] = wandb.Image(img_path)
-            else:
-                logger.warning(f"Image {img_path} does not exist, skipping")
-
-        report_toml = output_dir / "summ" / "xgboost" / "report.toml"
-        with open(report_toml, "rb") as f:
-            report = tomllib.load(f)
-        metrics.update(report["report"])
-
         performance_report_path = (
             output_dir / "res" / raw_file_stem / "performance_report.json"
         )
         if performance_report_path.exists():
             with open(performance_report_path, "r") as f:
-                performance_report = json.load(f)
-            metrics.update(performance_report)
+                metrics.update(json.load(f))
         else:
-            logger.warning(
-                f"Performance report {performance_report_path} does not exist"
-            )
+            logger.warning(f"Performance report {performance_report_path} does not exist")
         return metrics
 
 

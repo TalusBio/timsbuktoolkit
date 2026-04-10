@@ -77,6 +77,3 @@ cargo run --release --bin timsseek -- \
     --speclib-file $SPECLIB_NAME \
     --output-dir $RESULTS_DIR \
     --dotd-file $DOTD_FILE
-
-# Technically does T/D competition
-uv run python -m timsseek_rescore --results_dir $RESULTS_DIR --output_dir $SUMMARY_DIR
