@@ -5,8 +5,6 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "jupyter[python]>=1.1.1",
     "speclib_builder[ml]",
-    "timsseek_rescore",
-    "timsseek_rts_receiver",
 ]
 
 [dependency-groups]
@@ -28,14 +26,10 @@ interactive = [
 
 [tool.uv.sources]
 speclib_builder = { workspace = true }
-timsseek_rescore = { workspace = true }
-timsseek_rts_receiver = { workspace = true }
 
 [tool.uv.workspace]
 members = [
   "python/speclib_builder",
-  "python/timsseek_rescore",
-  "python/timsseek_rts_receiver",
 ]
 
 [tool.ruff]
@@ -51,7 +45,6 @@ select = ["E", "F", "T20", "I"]
 [tool.hatch.build.targets.wheel]
 packages = [
   "python/speclib_builder",
-  "python/timsseek_rescore",
 ]
 
 [tool.bumpver]
