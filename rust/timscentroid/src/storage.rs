@@ -63,8 +63,9 @@ use crate::instrumentation::{
 };
 use crate::serialization::SerializationError;
 use tracing::{
-    info,
+    debug,
     instrument,
+    trace,
 };
 
 /// Global tokio runtime for all async operations (created lazily)
@@ -262,15 +263,15 @@ impl StorageProvider {
     #[instrument(skip(self), fields(path = %path))]
     pub async fn read_bytes_async(&self, path: &str) -> Result<Vec<u8>, SerializationError> {
         let full_path = self.build_path(path);
-        info!("Reading from full path: {}", full_path);
+        trace!("Reading from full path: {}", full_path);
         let object_path = ObjectPath::from(full_path.as_str());
-        info!("Object path: {:?}", object_path);
+        trace!("Object path: {:?}", object_path);
         let result = match self.store.get(&object_path).await {
             Ok(res) => res,
             Err(e) => {
                 // Categorize the error properly based on what it actually is
                 let error_str = e.to_string();
-                info!("Error getting object: {:?}", e);
+                debug!("Error getting object: {:?}", e);
 
                 // Check if it's an authentication/permission error
                 let error_kind = if error_str.contains("ExpiredToken")
@@ -406,7 +407,7 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
                     "Missing bucket in S3 URL",
                 ))
             })?;
-            info!("Creating S3 ObjectStore for bucket: {}", bucket);
+            debug!("Creating S3 ObjectStore for bucket: {}", bucket);
 
             // 1. Load the AWS configuration from the environment (handles Profile, MFA, SSO, etc.)
             let sdk_config = aws_config::load_defaults(BehaviorVersion::latest()).await;

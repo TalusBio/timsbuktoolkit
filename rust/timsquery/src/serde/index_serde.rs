@@ -125,6 +125,7 @@ use timscentroid::StorageLocation;
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
 use timscentroid::serialization::SerializationConfig;
 use tracing::{
+    debug,
     error,
     info,
 };
@@ -522,7 +523,7 @@ impl TimsIndexReader {
             other => match other.to_storage_location() {
                 Some(Ok(loc)) => Some(loc),
                 Some(Err(e)) => {
-                    error!("Invalid cache location: {}", e);
+                    debug!("Invalid cache location: {}", e);
                     None
                 }
                 None => None,
@@ -568,10 +569,7 @@ impl TimsIndexReader {
                 Some(idx)
             }
             Err(e) => {
-                error!(
-                    "Failed to load index from cache at {}: {:?}",
-                    location_desc, e
-                );
+                debug!("Cache miss at {}: {:?}", location_desc, e);
                 None
             }
         }
@@ -631,44 +629,42 @@ impl Default for TimsIndexReader {
 fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReadingError> {
     let is_cloud = location.contains("://");
 
-    // Try to create storage location and check for metadata.json
-    let storage_result = if is_cloud {
-        StorageLocation::from_url(location)
-    } else {
-        Ok(StorageLocation::from_path(location))
-    };
+    if !is_cloud {
+        // Local: check filesystem directly — no StorageProvider, no logging noise
+        let metadata_path = std::path::Path::new(location).join("metadata.json");
+        let is_cached = metadata_path.exists();
+        debug!("Local index sniff: {} -> cached={}", location, is_cached);
+        return Ok(is_cached);
+    }
 
-    let storage_location = match storage_result {
+    // Cloud: must probe via StorageProvider (can't stat files on S3)
+    let storage_location = match StorageLocation::from_url(location) {
         Ok(loc) => loc,
         Err(e) => {
-            error!("Failed to parse storage location for sniffing: {:?}", e);
-            return Ok(false); // Treat parse errors as "not cached"
+            debug!("Failed to parse cloud URL for sniffing: {:?}", e);
+            return Ok(false);
         }
     };
 
-    // Try to read metadata.json as a quick check
     match timscentroid::storage::StorageProvider::new(storage_location) {
         Ok(provider) => {
-            // Just try to read a few bytes - if metadata.json exists, it's likely a cached index
             match provider.read_bytes("metadata.json") {
                 Ok(_) => Ok(true),
                 Err(e) => {
-                    // Check if it's a permission error - propagate it!
-                    if let timscentroid::serialization::SerializationError::Io(io_err) = &e
-                        && io_err.kind() == std::io::ErrorKind::PermissionDenied
-                    {
-                        error!("Permission denied while checking for cached index: {:?}", e);
-                        return Err(crate::errors::DataReadingError::SerializationError(e));
+                    if let timscentroid::serialization::SerializationError::Io(io_err) = &e {
+                        if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                            error!("Permission denied checking for cached index at {}: {:?}", location, e);
+                            return Err(crate::errors::DataReadingError::SerializationError(e));
+                        }
                     }
-                    // For other errors (like NotFound), treat as not cached
-                    error!("metadata.json not found or unreadable: {:?}", e);
+                    debug!("Cloud index sniff: {} -> not cached ({:?})", location, e);
                     Ok(false)
                 }
             }
         }
         Err(e) => {
-            error!("Failed to access storage location for sniffing: {:?}", e);
-            Ok(false) // Treat provider creation errors as "not cached"
+            debug!("Cloud index sniff: {} -> provider error ({:?})", location, e);
+            Ok(false)
         }
     }
 }
@@ -736,10 +732,12 @@ pub fn load_index_auto(
     let is_cached = sniff_cached_index(input)?;
     let is_cloud = input.contains("://");
 
-    info!(
-        "Detected: cached={}, cloud={}, prefer_lazy={}",
-        is_cached, is_cloud, config.prefer_lazy
-    );
+    info!("Index type: {}", match (is_cached, is_cloud) {
+        (true, true) => "cloud cached index",
+        (true, false) => "local cached index",
+        (false, true) => "cloud raw (unsupported)",
+        (false, false) => "local raw .d file",
+    });
 
     // Early validation: reject cloud raw .d files with helpful error
     if is_cloud && !is_cached {
