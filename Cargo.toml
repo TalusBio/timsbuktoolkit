@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "rust/array2d",
     "rust/calibrt",
     "rust/micromzpaf",
     "rust/timscentroid",
@@ -12,6 +13,7 @@ members = [
     "python/timsquery_pyo3"
 ]
 default-members = [
+    "rust/array2d",
     "rust/calibrt",
     "rust/micromzpaf",
     "rust/timscentroid",

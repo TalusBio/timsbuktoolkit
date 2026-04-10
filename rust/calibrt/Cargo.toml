@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+array2d = { path = "../array2d" }
 rand = "0.8.5" # Used for generating sample data in the example
 serde = { workspace = true }
 tracing = { workspace = true }

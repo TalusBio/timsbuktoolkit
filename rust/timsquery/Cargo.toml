@@ -11,6 +11,7 @@ zstd = "0.13"
 
 
 # Workspace member deps
+array2d = { path = "../array2d" }
 timscentroid = { path = "../timscentroid" }
 micromzpaf = { path = "../micromzpaf" }
 
