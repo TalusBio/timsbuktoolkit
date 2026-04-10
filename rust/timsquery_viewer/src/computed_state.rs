@@ -35,7 +35,7 @@ use timscentroid::rt_mapping::{
 use timscentroid::utils::OptionallyRestricted;
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
-    ApexFinder,
+    TraceScorer,
     ApexScore,
     Extraction,
 };
@@ -108,7 +108,7 @@ struct MobilityState {
 
 #[derive(Debug, Default)]
 struct ScratchBuffers {
-    apex_finder: Option<ApexFinder>,
+    trace_scorer: Option<TraceScorer>,
 }
 
 /// State machine for chromatogram computation lifecycle.
@@ -320,11 +320,11 @@ impl ComputedState {
 
     #[instrument(skip_all, fields(eg_id = %context.chromatograms.eg.id()))]
     fn find_apex(
-        apex_finder: &mut ApexFinder,
+        trace_scorer: &mut TraceScorer,
         context: &Extraction<String>,
         index: &IndexedPeaksHandle,
     ) -> Result<ApexScore, ViewerError> {
-        apex_finder.find_apex(context, &|idx| {
+        trace_scorer.find_apex(context, &|idx| {
             index
                 .ms1_cycle_mapping()
                 .rt_milis_for_index(&MS1CycleIndex::new(idx as u32))
@@ -417,16 +417,16 @@ impl ComputedState {
             collector.fragments.mz_order.len(),
         );
 
-        let apex_finder = scratch
-            .apex_finder
-            .get_or_insert_with(|| ApexFinder::new(num_cycles));
+        let trace_scorer = scratch
+            .trace_scorer
+            .get_or_insert_with(|| TraceScorer::new(num_cycles));
 
         let scoring_ctx = Extraction {
             expected_intensities: expected_intensities.clone(),
             chromatograms: collector.clone(),
         };
 
-        let apex_score = match Self::find_apex(apex_finder, &scoring_ctx, index) {
+        let apex_score = match Self::find_apex(trace_scorer, &scoring_ctx, index) {
             Ok(score) => {
                 tracing::info!("Apex found at RT={:.2}ms", score.retention_time_ms);
                 score
@@ -444,7 +444,7 @@ impl ComputedState {
 
         let score_lines = ScoreLines::from_scores(
             apex_score,
-            &apex_finder.traces,
+            &trace_scorer.traces,
             index.ms1_cycle_mapping(),
             collector.cycle_offset(),
         );
