@@ -919,60 +919,54 @@ impl ViewerCalibrationState {
 
     /// Render tolerance suggestion and Apply button.
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
-        // Compute tolerance from NON-SUPPRESSED GRID CELL centroids.
-        // These ~90 cells survived NMS — they represent the grid's consensus evidence.
-        // Not all 2000 raw calibrants (many false positives with huge residuals).
-        // Not the ~20 path points (near-zero residuals by construction).
-        let stats = self
+        // Measure ridge width: expand from path cells into adjacent cells
+        // with weight above 10% of the path cell's weight. Weight-averaged
+        // half-width gives the global tolerance — heavy columns count more.
+        let ridge_stats = self
             .calibration_state
             .as_ref()
             .and_then(|cs| {
-                let curve = cs.curve()?;
-                let cells = cs.grid_cells();
-
-                // Absolute residuals from non-suppressed cell centroids
-                let mut abs_residuals: Vec<f64> = cells
-                    .iter()
-                    .filter(|n| !n.suppressed && n.center.weight > 0.0)
-                    .filter_map(|n| {
-                        let pred = match curve.predict(n.center.x) {
-                            Ok(y) => y,
-                            Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
-                            Err(_) => return None,
-                        };
-                        Some((pred - n.center.y).abs())
-                    })
-                    .collect();
-
-                if abs_residuals.len() < 4 {
+                cs.curve()?; // ensure curve is fitted
+                let measurements = cs.measure_ridge_width(0.1);
+                if measurements.is_empty() {
                     return None;
                 }
 
-                abs_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = abs_residuals.len();
-                let mad_seconds = abs_residuals[n / 2];
-                let q75_seconds = abs_residuals[3 * n / 4];
+                // Weighted average half-width (seconds)
+                let total_weight: f64 = measurements.iter().map(|m| m.total_weight).sum();
+                if total_weight <= 0.0 {
+                    return None;
+                }
+                let weighted_hw: f64 = measurements
+                    .iter()
+                    .map(|m| m.half_width * m.total_weight)
+                    .sum::<f64>()
+                    / total_weight;
 
-                Some((mad_seconds, q75_seconds, n))
+                // Also report min/max for context
+                let min_hw = measurements.iter().map(|m| m.half_width).fold(f64::MAX, f64::min);
+                let max_hw = measurements.iter().map(|m| m.half_width).fold(0.0f64, f64::max);
+
+                Some((weighted_hw, min_hw, max_hw, measurements.len()))
             });
 
-        // Suggested RT tolerance: 3x MAD of retained cell residuals, floored at 0.5 min.
-        let suggested = stats.map(|(mad_s, q75_s, n_cells)| {
-            let rt_min = (mad_s / 60.0 * 3.0).max(0.5);
-            (rt_min, mad_s, q75_s, n_cells)
+        // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
+        let suggested = ridge_stats.map(|(hw_s, min_s, max_s, n_cols)| {
+            let rt_min = (hw_s / 60.0).max(0.5);
+            (rt_min, hw_s, min_s, max_s, n_cols)
         });
 
-        if let Some((rt_min, _, _, _)) = suggested {
+        if let Some((rt_min, _, _, _, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
                 rt_tolerance_minutes: rt_min as f32,
             });
         }
 
         ui.horizontal(|ui| {
-            if let Some((rt_min, mad_s, q75_s, n_cells)) = suggested {
+            if let Some((rt_min, hw_s, min_s, max_s, n_cols)) = suggested {
                 ui.label(format!(
-                    "Suggested RT: \u{00B1}{:.2} min   MAD: {:.1} s   Q75: {:.1} s   ({} cells)",
-                    rt_min, mad_s, q75_s, n_cells,
+                    "Suggested RT: \u{00B1}{:.2} min   Ridge: {:.0} s (min {:.0}, max {:.0})   ({} cols)",
+                    rt_min, hw_s, min_s, max_s, n_cols,
                 ));
                 if ui.button("Apply").clicked() {
                     let rt_tol = rt_min as f32;

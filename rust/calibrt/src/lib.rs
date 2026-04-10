@@ -150,6 +150,17 @@ impl CalibrationCurve {
     }
 }
 
+/// Measurement of the evidence ridge width at one grid column.
+#[derive(Debug, Clone)]
+pub struct RidgeMeasurement {
+    /// Center x position (library RT, seconds).
+    pub x: f64,
+    /// Half-width of the ridge in y-units (seconds).
+    pub half_width: f64,
+    /// Total accumulated weight in the expanded range — more weight = more trustworthy.
+    pub total_weight: f64,
+}
+
 /// Serializable snapshot of calibration data — points + config.
 /// Used for save/load. Does not include the fitted curve (reconstructed on load).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -261,6 +272,77 @@ impl CalibrationState {
 
     pub fn curve(&self) -> Option<&CalibrationCurve> {
         self.curve.as_ref()
+    }
+
+    /// Measure the width of the evidence "mountain" around the fitted path.
+    ///
+    /// For each grid column that contains a path cell, expands up and down
+    /// from the path cell until cell weight drops below `fraction` of the
+    /// path cell's weight. Returns `(column_center_x, half_width_y, total_weight)`.
+    ///
+    /// `fraction`: weight threshold as a fraction of the path cell's weight
+    /// (e.g., 0.1 = expand until weight < 10% of path cell).
+    /// `total_weight`: sum of all cell weights in the expanded range — heavier
+    /// columns should carry more authority in tolerance estimation.
+    pub fn measure_ridge_width(&self, fraction: f64) -> Vec<RidgeMeasurement> {
+        let bins = self.grid.bins;
+        let cells = self.grid.grid_cells();
+        let y_span = self.grid.y_range.1 - self.grid.y_range.0;
+        let cell_h = y_span / bins as f64;
+
+        let mut widths = Vec::new();
+
+        for &path_idx in &self.path_indices {
+            let path_node = &cells[path_idx];
+            if path_node.center.weight <= 0.0 {
+                continue;
+            }
+
+            let gx = path_idx % bins;
+            let gy = path_idx / bins;
+            let threshold = path_node.center.weight * fraction;
+
+            // Expand upward (increasing gy) from path cell
+            let mut upper_gy = gy;
+            let mut total_weight = path_node.center.weight;
+            for dy in 1..bins {
+                let check_gy = gy + dy;
+                if check_gy >= bins {
+                    break;
+                }
+                let idx = check_gy * bins + gx;
+                if cells[idx].center.weight < threshold {
+                    break;
+                }
+                total_weight += cells[idx].center.weight;
+                upper_gy = check_gy;
+            }
+
+            // Expand downward (decreasing gy) from path cell
+            let mut lower_gy = gy;
+            for dy in 1..bins {
+                if dy > gy {
+                    break;
+                }
+                let check_gy = gy - dy;
+                let idx = check_gy * bins + gx;
+                if cells[idx].center.weight < threshold {
+                    break;
+                }
+                total_weight += cells[idx].center.weight;
+                lower_gy = check_gy;
+            }
+
+            let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
+
+            widths.push(RidgeMeasurement {
+                x: path_node.center.x,
+                half_width,
+                total_weight,
+            });
+        }
+
+        widths
     }
 
     /// Bundle current config into a snapshot (caller provides the points).
