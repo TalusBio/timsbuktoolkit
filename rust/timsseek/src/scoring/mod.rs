@@ -17,7 +17,7 @@ pub use pipeline::{
     Scorer,
 };
 pub use results::{ScoredCandidate, CompetedCandidate, FinalResult, ScoringFields};
-pub use timings::{PipelineReport, ScoreTimings};
+pub use timings::{FileReport, PipelineReport, RunReport, ScoreTimings};
 
 pub const NUM_MS2_IONS: usize = 7;
 pub const NUM_MS1_IONS: usize = 3;

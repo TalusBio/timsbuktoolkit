@@ -5,7 +5,6 @@ use indicatif::{
     ProgressStyle,
 };
 use std::io::IsTerminal;
-use std::path::Path;
 use std::time::Instant;
 use timsquery::IndexedTimstofPeaks;
 use timsquery::MzMobilityStatsCollector;
@@ -38,7 +37,6 @@ use timsseek::scoring::{
 };
 use timsseek::scoring::pipeline::Scorer;
 use timsseek::{
-    DecoyStrategy,
     IonAnnot,
     ScorerQueriable,
 };
@@ -123,17 +121,18 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     tracing::instrument(skip_all, level = "trace")
 )]
 pub fn execute_pipeline<I: ScorerQueriable>(
-    speclib: Speclib,
-    calib_lib: Option<Speclib>,
+    speclib: &Speclib,
+    calib_lib: Option<&Speclib>,
     pipeline: &Scorer<I>,
     chunk_size: usize,
-    _out_path: &OutputConfig,
+    out_path: &OutputConfig,
+    max_qvalue: f32,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     let calib_config = CalibrationConfig::default();
 
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
-    let phase1_lib = calib_lib.as_ref().unwrap_or(&speclib);
+    let phase1_lib = calib_lib.unwrap_or(speclib);
     if let Some(ref clib) = calib_lib {
         info!(
             "Phase 1: Broad prescore using calibration library ({} entries)...",
@@ -251,7 +250,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         total_after_competition
     );
 
-    // === PHASE 5: Rescore (GBM cross-validated discriminant) ===
+    // === PHASE 5: Rescore ===
     let phase5_start = Instant::now();
     let data = rescore(competed);
     let phase5_ms = phase5_start.elapsed().as_millis() as u64;
@@ -281,7 +280,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let phase6_start = Instant::now();
-    let out_path_pq = _out_path.directory.join("results.parquet");
+    let out_path_pq = out_path.directory.join("results.parquet");
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
         20_000,
@@ -291,7 +290,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         source: e,
     })?;
     for res in data.into_iter() {
-        pq_writer.add(res);
+        if res.qvalue <= max_qvalue {
+            pq_writer.add(res);
+        }
     }
     pq_writer.close();
     let phase6_ms = phase6_start.elapsed().as_millis() as u64;
@@ -307,6 +308,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     println!("Output: {}", out_path_pq.display());
 
     Ok(PipelineReport {
+        load_index_ms: 0, // set by caller after return
         phase1_prescore_ms: phase1_ms,
         phase2_calibration_ms: phase2_ms,
         phase3_extraction_ms: phase3_timings.extraction.as_millis() as u64,
@@ -733,43 +735,19 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 }
 
 pub fn run_pipeline(
-    path: &Path,
-    calib_lib_path: Option<&Path>,
+    speclib: &Speclib,
+    calib_lib: Option<&Speclib>,
     pipeline: &Scorer<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
-    decoy_strategy: DecoyStrategy,
-) -> std::result::Result<(), TimsSeekError> {
-    info!("Building database from speclib file {:?}", path);
-    info!("Decoy generation strategy: {}", decoy_strategy);
-
-    let st = std::time::Instant::now();
+    max_qvalue: f32,
+    load_index_ms: u64,
+) -> std::result::Result<PipelineReport, TimsSeekError> {
     let performance_report_path = output.directory.join("performance_report.json");
-    let speclib = Speclib::from_file(path, decoy_strategy)?;
-    let elap_time = st.elapsed();
-    info!(
-        "Loading speclib of length {} took: {:?} for {}",
-        speclib.len(),
-        elap_time,
-        path.display()
-    );
 
-    let calib_lib = match calib_lib_path {
-        Some(p) => {
-            info!("Loading calibration library from {:?}", p);
-            let st = std::time::Instant::now();
-            let lib = Speclib::from_file(p, decoy_strategy)?;
-            info!(
-                "Loaded calibration library of length {} in {:?}",
-                lib.len(),
-                st.elapsed()
-            );
-            Some(lib)
-        }
-        None => None,
-    };
-
-    let timings = execute_pipeline(speclib, calib_lib, pipeline, chunk_size, output)?;
+    let mut timings = execute_pipeline(speclib, calib_lib, pipeline, chunk_size, output, max_qvalue)?;
+    timings.load_index_ms = load_index_ms;
+    // Write per-file report
     let perf_report =
         serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
             msg: format!("Error serializing performance report to JSON: {}", e),
@@ -778,5 +756,5 @@ pub fn run_pipeline(
         path: performance_report_path.into(),
         source: e,
     })?;
-    Ok(())
+    Ok(timings)
 }

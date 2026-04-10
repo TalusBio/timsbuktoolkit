@@ -2386,9 +2386,9 @@ dependencies = [
 
 [[package]]
 name = "forust-ml"
-version = "0.4.8"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e2b0aa48a6ad52ae5ed92f6f41b46bb9b8e80922fb6c23067bab7022f1b114"
+checksum = "51128a6700cc6e8561877f999a69b48ec9536e8fd3c1db3e570d2805d69f92a5"
 dependencies = [
  "log",
  "rand 0.8.5",

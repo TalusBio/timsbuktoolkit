@@ -63,7 +63,10 @@ impl std::ops::AddAssign for ScoreTimings {
 /// All timing fields are in milliseconds.
 #[derive(Debug, Default, Serialize)]
 pub struct PipelineReport {
-    // Timings (all in ms)
+    // Per-file: index loading (ms)
+    pub load_index_ms: u64,
+
+    // Phase timings (all in ms)
     pub phase1_prescore_ms: u64,
     pub phase2_calibration_ms: u64,
     pub phase3_extraction_ms: u64,
@@ -80,4 +83,22 @@ pub struct PipelineReport {
     pub targets_at_1pct_qval: usize,
     pub targets_at_5pct_qval: usize,
     pub targets_at_10pct_qval: usize,
+}
+
+/// Top-level report for an entire CLI invocation.
+/// Contains shared loading costs and per-file pipeline reports.
+#[derive(Debug, Default, Serialize)]
+pub struct RunReport {
+    pub load_speclib_ms: u64,
+    pub load_calib_lib_ms: u64,
+    pub speclib_entries: usize,
+    pub calib_lib_entries: usize,
+    pub files: Vec<FileReport>,
+}
+
+/// Per-file report: file name + pipeline report.
+#[derive(Debug, Serialize)]
+pub struct FileReport {
+    pub file_name: String,
+    pub pipeline: PipelineReport,
 }
