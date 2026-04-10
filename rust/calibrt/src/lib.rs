@@ -287,37 +287,40 @@ impl CalibrationState {
     /// (e.g., 0.1 = expand until weight < 10% of path cell).
     /// `total_weight`: sum of all cell weights in the expanded range — heavier
     /// columns should carry more authority in tolerance estimation.
-    pub fn measure_ridge_width(&self, fraction: f64) -> Vec<RidgeMeasurement> {
+    pub fn measure_ridge_width(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
-        let cells = self.grid.grid_cells();
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
+
+        // Sync node weights into buffer A, then blur into buffer B
+        self.grid.sync_weights();
+        self.grid.blur_weights();
 
         let mut widths = Vec::new();
 
         for &path_idx in &self.path_indices {
-            let path_node = &cells[path_idx];
-            if path_node.center.weight <= 0.0 {
+            let gx = path_idx % bins;
+            let gy = path_idx / bins;
+            let path_weight = self.grid.blurred_weight(gy, gx);
+            if path_weight <= 0.0 {
                 continue;
             }
 
-            let gx = path_idx % bins;
-            let gy = path_idx / bins;
-            let threshold = path_node.center.weight * fraction;
+            let threshold = path_weight * fraction;
 
             // Expand upward (increasing gy) from path cell
             let mut upper_gy = gy;
-            let mut total_weight = path_node.center.weight;
+            let mut total_weight = path_weight;
             for dy in 1..bins {
                 let check_gy = gy + dy;
                 if check_gy >= bins {
                     break;
                 }
-                let idx = check_gy * bins + gx;
-                if cells[idx].center.weight < threshold {
+                let w = self.grid.blurred_weight(check_gy, gx);
+                if w < threshold {
                     break;
                 }
-                total_weight += cells[idx].center.weight;
+                total_weight += w;
                 upper_gy = check_gy;
             }
 
@@ -328,18 +331,18 @@ impl CalibrationState {
                     break;
                 }
                 let check_gy = gy - dy;
-                let idx = check_gy * bins + gx;
-                if cells[idx].center.weight < threshold {
+                let w = self.grid.blurred_weight(check_gy, gx);
+                if w < threshold {
                     break;
                 }
-                total_weight += cells[idx].center.weight;
+                total_weight += w;
                 lower_gy = check_gy;
             }
 
             let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
 
             widths.push(RidgeMeasurement {
-                library: LibraryRT(path_node.center.library),
+                library: LibraryRT(self.grid.grid_cells()[path_idx].center.library),
                 half_width,
                 total_weight,
             });

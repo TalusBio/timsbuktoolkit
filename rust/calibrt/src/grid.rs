@@ -1,3 +1,4 @@
+use array2d::Array2D;
 use crate::{
     CalibRtError,
     Point,
@@ -11,6 +12,9 @@ pub struct Grid {
     x_span: f64,
     y_span: f64,
     pub(crate) bins: usize,
+    /// Ping-pong weight buffers. A = raw weights, B = blurred output.
+    weights_a: Array2D<f64>,
+    weights_b: Array2D<f64>,
 }
 
 impl Grid {
@@ -51,6 +55,11 @@ impl Grid {
             }
         }
 
+        let weights_a = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
+            .expect("Grid dimensions are valid");
+        let weights_b = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
+            .expect("Grid dimensions are valid");
+
         Ok(Self {
             nodes,
             x_range,
@@ -58,6 +67,8 @@ impl Grid {
             x_span,
             y_span,
             bins,
+            weights_a,
+            weights_b,
         })
     }
 
@@ -172,11 +183,37 @@ impl Grid {
             node.sum_wy = 0.0;
             node.sum_w = 0.0;
         }
+        self.weights_a.reset_with_value(self.bins, self.bins, 0.0);
+        self.weights_b.reset_with_value(self.bins, self.bins, 0.0);
     }
 
     /// Read access to all grid cells.
     pub fn grid_cells(&self) -> &[Node] {
         &self.nodes
+    }
+
+    /// Copy node weights into buffer A for blur processing.
+    pub(crate) fn sync_weights(&mut self) {
+        for (i, node) in self.nodes.iter().enumerate() {
+            let r = i / self.bins;
+            let c = i % self.bins;
+            self.weights_a.insert(r, c, node.center.weight);
+        }
+    }
+
+    /// Apply 3x3 approximate gaussian blur: A -> B.
+    pub(crate) fn blur_weights(&mut self) {
+        const KERNEL: [f64; 9] = [
+            1.0/10.0, 1.0/10.0, 1.0/10.0,
+            1.0/10.0, 2.0/10.0, 1.0/10.0,
+            1.0/10.0, 1.0/10.0, 1.0/10.0,
+        ];
+        self.weights_a.convolve_2d_into(&KERNEL, &mut self.weights_b);
+    }
+
+    /// Read access to blurred weight at grid position (row, col).
+    pub(crate) fn blurred_weight(&self, row: usize, col: usize) -> f64 {
+        self.weights_b.as_flat_slice()[row * self.bins + col]
     }
 }
 
