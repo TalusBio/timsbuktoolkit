@@ -377,6 +377,32 @@ impl<T: ArrayElement + std::ops::Mul<T, Output = T>> Array2D<T> {
         Array2D::from_flat_vector(result, self.nrows(), self.ncols()).unwrap()
     }
 
+    /// Apply a 3x3 kernel to the 2D array, writing results into `output`.
+    /// Both arrays must have the same dimensions.
+    /// Boundary cells use clamped indexing (repeat edge values).
+    /// Kernel layout: [top-left, top-center, top-right, mid-left, mid-center, mid-right, bot-left, bot-center, bot-right]
+    pub fn convolve_2d_into(&self, kernel: &[T; 9], output: &mut Array2D<T>) {
+        assert_eq!(self.n_row, output.n_row);
+        assert_eq!(self.n_col, output.n_col);
+
+        let nrows = self.n_row;
+        let ncols = self.n_col;
+
+        for r in 0..nrows {
+            for c in 0..ncols {
+                let mut acc = T::default();
+                for (ki, &kval) in kernel.iter().enumerate() {
+                    let dr = (ki / 3) as isize - 1;
+                    let dc = (ki % 3) as isize - 1;
+                    let sr = (r as isize + dr).clamp(0, (nrows - 1) as isize) as usize;
+                    let sc = (c as isize + dc).clamp(0, (ncols - 1) as isize) as usize;
+                    acc += self.values[sr * ncols + sc] * kval;
+                }
+                output.values[r * ncols + c] = acc;
+            }
+        }
+    }
+
     pub fn convolve_fold(
         &self,
         kernel: &[T],
@@ -679,5 +705,31 @@ mod tests {
 
         // get_row should return None for index 0
         assert_eq!(array.get_row(0), None);
+    }
+
+    #[test]
+    fn test_convolve_2d_identity() {
+        let array = Array2D::from_flat_vector(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 3, 3).unwrap();
+        let kernel = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let mut output = Array2D::from_flat_vector(vec![0.0; 9], 3, 3).unwrap();
+        array.convolve_2d_into(&kernel, &mut output);
+        assert_eq!(output.as_flat_slice(), array.as_flat_slice());
+    }
+
+    #[test]
+    fn test_convolve_2d_blur() {
+        let array = Array2D::from_flat_vector(vec![0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0], 3, 3).unwrap();
+        let kernel: [f64; 9] = [
+            1.0/10.0, 1.0/10.0, 1.0/10.0,
+            1.0/10.0, 2.0/10.0, 1.0/10.0,
+            1.0/10.0, 1.0/10.0, 1.0/10.0,
+        ];
+        let mut output = Array2D::from_flat_vector(vec![0.0; 9], 3, 3).unwrap();
+        array.convolve_2d_into(&kernel, &mut output);
+        // Center should get 10 * 2/10 = 2.0
+        assert!((output.as_flat_slice()[4] - 2.0).abs() < 1e-9);
+        // Each neighbor should get 10 * 1/10 = 1.0
+        assert!((output.as_flat_slice()[0] - 1.0).abs() < 1e-9);
+        assert!((output.as_flat_slice()[1] - 1.0).abs() < 1e-9);
     }
 }
