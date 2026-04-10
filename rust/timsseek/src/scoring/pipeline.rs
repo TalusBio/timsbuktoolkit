@@ -54,10 +54,11 @@ use super::apex_finding::{
 use super::full_results::FullQueryResult;
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
-use super::search_results::{
-    IonSearchResults,
-    SearchResultBuilder,
+use super::results::{
+    ScoredCandidate,
+    ScoredCandidateBuilder,
 };
+use super::search_results::IonSearchResults;
 use super::timings::ScoreTimings;
 use crate::rt_calibration::CalibrationResult;
 use tracing::warn;
@@ -502,14 +503,12 @@ impl<I: ScorerQueriable> Scorer<I> {
         main_score: &ApexScore,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
         isotope_collector: &SpectralCollector<IonAnnot, f32>,
-    ) -> Result<IonSearchResults, DataProcessingError> {
+    ) -> Result<ScoredCandidate, DataProcessingError> {
         let offsets = MzMobilityOffsets::new(inner_collector, metadata.ref_mobility_ook0 as f64);
         let rel_inten = RelativeIntensities::new(inner_collector);
         let lazyscores = compute_secondary_lazyscores(inner_collector, isotope_collector);
 
-        let builder = SearchResultBuilder::default();
-
-        builder
+        ScoredCandidateBuilder::default()
             .with_metadata(metadata)
             .with_nqueries(nqueries)
             .with_sorted_offsets(&offsets)
