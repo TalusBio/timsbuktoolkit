@@ -269,11 +269,13 @@ impl ViewerCalibrationState {
                     self.snapshot_points = points;
 
                     // Feed points into CalibrationState for curve fitting.
+                    // Reset first — each snapshot is the full heap, not a delta.
                     if let Some(cs) = &mut self.calibration_state {
+                        cs.reset();
                         cs.update(
                             self.snapshot_points
                                 .iter()
-                                .map(|&(lib_rt, apex_rt, score)| (lib_rt, apex_rt, score)),
+                                .map(|&(lib_rt, apex_rt, _weight)| (lib_rt, apex_rt, 1.0)),
                         );
                         cs.fit();
                     }
@@ -666,7 +668,7 @@ impl ViewerCalibrationState {
 
     /// Render the scatter + curve calibration plot.
     fn render_calibration_plot(&self, ui: &mut egui::Ui) {
-        use egui_plot::{Line, Plot, PlotPoints, Points};
+        use egui_plot::{Line, Plot, PlotPoints, Points, Polygon};
 
         let plot_id = format!("calibration_plot_{}", self.generation);
         let plot = Plot::new(plot_id)
@@ -679,48 +681,64 @@ impl ViewerCalibrationState {
         let cal_state = self.calibration_state.as_ref();
 
         plot.show(ui, |plot_ui| {
-            // Grid cells from CalibrationState (if available).
+            // Grid heatmap from CalibrationState (if available).
             if let Some(cs) = cal_state {
                 let cells = cs.grid_cells();
                 let path_indices = cs.path_indices();
+                let bins = cs.grid_bins();
+                let (x_lo, x_hi) = cs.grid_x_range();
+                let (y_lo, y_hi) = cs.grid_y_range();
+                let cell_w = (x_hi - x_lo) / bins as f64;
+                let cell_h = (y_hi - y_lo) / bins as f64;
 
-                // Suppressed cells with any weight: small gray dots
-                let suppressed_pts: Vec<[f64; 2]> = cells
-                    .iter()
-                    .filter(|n| n.suppressed && n.center.weight > 0.0)
-                    .map(|n| [n.center.x, n.center.y])
-                    .collect();
+                // Find max weight for color normalization (log scale)
+                let max_weight = cells.iter()
+                    .map(|n| n.center.weight)
+                    .fold(0.0f64, f64::max)
+                    .max(1.0);
+                let log_max = max_weight.ln_1p();
 
-                if !suppressed_pts.is_empty() {
-                    plot_ui.points(
-                        Points::new(
-                            "suppressed",
-                            PlotPoints::new(suppressed_pts),
-                        )
-                        .color(egui::Color32::from_rgb(140, 140, 140))
-                        .radius(2.0),
+                // Draw each non-zero cell as a colored rectangle
+                for (i, node) in cells.iter().enumerate() {
+                    if node.center.weight <= 0.0 {
+                        continue;
+                    }
+
+                    let gx = i % bins;
+                    let gy = i / bins;
+                    let cx = x_lo + (gx as f64 + 0.5) * cell_w;
+                    let cy = y_lo + (gy as f64 + 0.5) * cell_h;
+                    let hw = cell_w * 0.5;
+                    let hh = cell_h * 0.5;
+
+                    // Log-scale color: dark blue → bright yellow
+                    let t = (node.center.weight.ln_1p() / log_max) as f32;
+                    let color = if node.suppressed {
+                        // Suppressed: gray tones
+                        let v = (40.0 + t * 80.0) as u8;
+                        egui::Color32::from_rgba_unmultiplied(v, v, v, 180)
+                    } else {
+                        // Retained: blue → cyan → yellow heat
+                        let r = (t * 255.0) as u8;
+                        let g = (t * 200.0 + 55.0) as u8;
+                        let b = ((1.0 - t) * 200.0) as u8;
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, 200)
+                    };
+
+                    let rect = vec![
+                        [cx - hw, cy - hh],
+                        [cx + hw, cy - hh],
+                        [cx + hw, cy + hh],
+                        [cx - hw, cy + hh],
+                    ];
+                    plot_ui.polygon(
+                        Polygon::new(format!("cell_{i}"), PlotPoints::new(rect))
+                            .fill_color(color)
+                            .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT))
                     );
                 }
 
-                // Retained (non-suppressed) cells with weight: larger blue dots
-                let retained_pts: Vec<[f64; 2]> = cells
-                    .iter()
-                    .filter(|n| !n.suppressed && n.center.weight > 0.0)
-                    .map(|n| [n.center.x, n.center.y])
-                    .collect();
-
-                if !retained_pts.is_empty() {
-                    plot_ui.points(
-                        Points::new(
-                            "retained",
-                            PlotPoints::new(retained_pts),
-                        )
-                        .color(egui::Color32::from_rgb(70, 130, 230))
-                        .radius(4.0),
-                    );
-                }
-
-                // Path nodes: green dots
+                // Path nodes: bright green dots on top of heatmap
                 let path_pts: Vec<[f64; 2]> = path_indices
                     .iter()
                     .filter_map(|&idx| cells.get(idx))
@@ -733,7 +751,7 @@ impl ViewerCalibrationState {
                             "path",
                             PlotPoints::new(path_pts),
                         )
-                        .color(egui::Color32::from_rgb(50, 205, 50))
+                        .color(egui::Color32::from_rgb(50, 255, 50))
                         .radius(5.0),
                     );
                 }
@@ -750,7 +768,6 @@ impl ViewerCalibrationState {
                         let line_pts: Vec<[f64; 2]> = (0..=n_samples)
                             .filter_map(|i| {
                                 let x = x_min + i as f64 * step;
-                                // predict returns Err for out-of-bounds but we stay in range
                                 let y = match curve.predict(x) {
                                     Ok(y) => y,
                                     Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
@@ -774,8 +791,7 @@ impl ViewerCalibrationState {
                 }
             } else if !self.snapshot_points.is_empty() {
                 // Fallback: show raw calibrant points if CalibrationState
-                // hasn't been built yet (shouldn't normally happen, but
-                // keeps the plot populated).
+                // hasn't been built yet.
                 let raw_pts: Vec<[f64; 2]> = self
                     .snapshot_points
                     .iter()

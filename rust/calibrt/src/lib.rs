@@ -243,6 +243,18 @@ impl CalibrationState {
         self.grid.grid_cells()
     }
 
+    pub fn grid_bins(&self) -> usize {
+        self.grid.bins
+    }
+
+    pub fn grid_x_range(&self) -> (f64, f64) {
+        self.grid.x_range
+    }
+
+    pub fn grid_y_range(&self) -> (f64, f64) {
+        self.grid.y_range
+    }
+
     pub fn path_indices(&self) -> &[usize] {
         &self.path_indices
     }
