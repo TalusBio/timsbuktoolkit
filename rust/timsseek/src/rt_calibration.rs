@@ -121,6 +121,33 @@ impl CalibrationResult {
         }
     }
 
+    pub fn mz_tolerance(&self) -> (f64, f64) {
+        self.mz_tolerance_ppm
+    }
+
+    pub fn mobility_tolerance(&self) -> (f32, f32) {
+        self.mobility_tolerance_pct
+    }
+
+    /// Summary of ridge width measurements for reporting.
+    pub fn ridge_width_summary(&self) -> Option<RidgeWidthSummary> {
+        if self.ridge_widths.is_empty() {
+            return None;
+        }
+        let total_weight: f64 = self.ridge_widths.iter().map(|m| m.total_weight).sum();
+        let weighted_avg = self.ridge_widths.iter()
+            .map(|m| m.half_width * m.total_weight)
+            .sum::<f64>() / total_weight.max(1.0);
+        let min = self.ridge_widths.iter().map(|m| m.half_width).fold(f64::MAX, f64::min);
+        let max = self.ridge_widths.iter().map(|m| m.half_width).fold(0.0f64, f64::max);
+        Some(RidgeWidthSummary {
+            weighted_avg,
+            min,
+            max,
+            n_columns: self.ridge_widths.len(),
+        })
+    }
+
     /// Tolerance for the secondary spectral query at a detected apex.
     pub fn get_spectral_tolerance(&self) -> Tolerance {
         Tolerance {
@@ -230,6 +257,14 @@ impl CalibrationResult {
             ridge_widths: Vec::new(),
         }
     }
+}
+
+/// Summary of ridge width measurements for reporting.
+pub struct RidgeWidthSummary {
+    pub weighted_avg: f64,
+    pub min: f64,
+    pub max: f64,
+    pub n_columns: usize,
 }
 
 /// JSON v1 calibration file format — shared between CLI and viewer.

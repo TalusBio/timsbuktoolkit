@@ -213,8 +213,23 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     };
     let phase2_ms = phase2_start.elapsed().as_millis() as u64;
     println!(
-        "Phase 2: Calibrate ....... {:.1}s",
-        phase2_ms as f64 / 1000.0
+        "Phase 2: Calibrate ....... {:.1}s ({} calibrants → {} path nodes)",
+        phase2_ms as f64 / 1000.0,
+        calibrant_points.len(),
+        // Path nodes info from the calibration log (already printed by calibrt)
+        calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
+    );
+    // Print tolerance summary
+    if let Some(summary) = calibration.ridge_width_summary() {
+        println!(
+            "  RT tolerance (ridge): avg {:.0}s, min {:.0}s, max {:.0}s ({} cols)",
+            summary.weighted_avg, summary.min, summary.max, summary.n_columns,
+        );
+    }
+    println!(
+        "  m/z: ({:.1}, {:.1}) ppm   mobility: ({:.1}, {:.1}) %",
+        calibration.mz_tolerance().0, calibration.mz_tolerance().1,
+        calibration.mobility_tolerance().0, calibration.mobility_tolerance().1,
     );
 
     // Save calibration as JSON v1 (compatible with viewer load)
