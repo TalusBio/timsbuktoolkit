@@ -826,7 +826,7 @@ impl ViewerCalibrationState {
                     );
                 }
 
-                // Fitted curve: cyan line sampled at 200 points
+                // Fitted curve + ridge envelope
                 if let Some(curve) = cs.curve() {
                     let curve_points = curve.points();
                     if curve_points.len() >= 2 {
@@ -856,6 +856,40 @@ impl ViewerCalibrationState {
                                 .color(egui::Color32::from_rgb(0, 220, 220))
                                 .width(2.0),
                             );
+                        }
+
+                        // Ridge envelope: semi-transparent band showing tolerance width
+                        let ridge = cs.measure_ridge_width(0.1);
+                        if ridge.len() >= 2 {
+                            // Build a closed polygon: upper edge left-to-right, then lower edge right-to-left
+                            let mut envelope: Vec<[f64; 2]> = Vec::with_capacity(ridge.len() * 2);
+
+                            // Upper edge (left to right)
+                            for m in &ridge {
+                                let y = match curve.predict(m.x) {
+                                    Ok(y) => y,
+                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                    Err(_) => continue,
+                                };
+                                envelope.push([m.x, y + m.half_width]);
+                            }
+                            // Lower edge (right to left)
+                            for m in ridge.iter().rev() {
+                                let y = match curve.predict(m.x) {
+                                    Ok(y) => y,
+                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                    Err(_) => continue,
+                                };
+                                envelope.push([m.x, y - m.half_width]);
+                            }
+
+                            if envelope.len() >= 3 {
+                                plot_ui.polygon(
+                                    Polygon::new("ridge", PlotPoints::new(envelope))
+                                        .fill_color(egui::Color32::from_rgba_unmultiplied(0, 220, 220, 30))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 220, 220, 80)))
+                                );
+                            }
                         }
                     }
                 }
