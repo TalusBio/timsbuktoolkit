@@ -162,22 +162,54 @@ impl Grid {
 
         Ok(())
     }
+
+    /// Zero all node weights and suppression flags. Keeps allocation.
+    pub fn reset(&mut self) {
+        for node in &mut self.nodes {
+            node.center = Point::default();
+            node.suppressed = false;
+            node.sum_wx = 0.0;
+            node.sum_wy = 0.0;
+            node.sum_w = 0.0;
+        }
+    }
+
+    /// Read access to all grid cells.
+    pub fn grid_cells(&self) -> &[Node] {
+        &self.nodes
+    }
 }
 
 /// Represents a node (cell) in the grid.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Node {
-    pub(crate) center: Point,
-    pub(crate) suppressed: bool,
-    // Weighted centroid accumulators
-    sum_wx: f64,
-    sum_wy: f64,
-    sum_w: f64,
+pub struct Node {
+    pub center: Point,
+    pub suppressed: bool,
+    // Internal accumulators — not exposed beyond crate
+    pub(crate) sum_wx: f64,
+    pub(crate) sum_wy: f64,
+    pub(crate) sum_w: f64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Point;
+
+    #[test]
+    fn test_grid_reset_preserves_allocation() {
+        let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        grid.add_point(&Point { x: 50.0, y: 50.0, weight: 1.0 }).unwrap();
+
+        let capacity_before = grid.nodes.capacity();
+        assert!(grid.grid_cells().iter().any(|n| n.sum_w > 0.0));
+
+        grid.reset();
+
+        assert_eq!(grid.nodes.capacity(), capacity_before);
+        assert!(grid.grid_cells().iter().all(|n| n.sum_w == 0.0));
+        assert!(grid.grid_cells().iter().all(|n| !n.suppressed));
+    }
 
     /// Helper function to print grid state and return non-suppressed nodes
     fn print_grid_state(grid: &Grid) -> Vec<(usize, usize, f64)> {
