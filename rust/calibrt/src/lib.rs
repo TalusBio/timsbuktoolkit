@@ -40,8 +40,8 @@ pub enum CalibRtError {
 /// Represents a single data point on the library-measured-RT plane.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Point {
-    pub x: f64,
-    pub y: f64,
+    pub library: f64,
+    pub observed: f64,
     pub weight: f64,
 }
 
@@ -65,11 +65,11 @@ impl CalibrationCurve {
             return Err(CalibRtError::InsufficientPoints);
         }
 
-        points.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        points.sort_by(|a, b| a.library.partial_cmp(&b.library).unwrap());
 
         let slopes = points
             .windows(2)
-            .map(|p| (p[1].y - p[0].y) / (p[1].x - p[0].x).max(MIN_SLOPE_DENOMINATOR))
+            .map(|p| (p[1].observed - p[0].observed) / (p[1].library - p[0].library).max(MIN_SLOPE_DENOMINATOR))
             .collect();
 
         Ok(Self { points, slopes })
@@ -85,9 +85,9 @@ impl CalibrationCurve {
         let mut weight: f64 = 0.0;
 
         for p in test_points {
-            match self.predict(p.x) {
+            match self.predict(p.library) {
                 Ok(predicted_y) => {
-                    let error = predicted_y - p.y;
+                    let error = predicted_y - p.observed;
                     total_error += (error * error) * p.weight;
                     weight += p.weight;
                 }
@@ -107,8 +107,8 @@ impl CalibrationCurve {
     /// Predicts a calibrated measured RT (Y) for a given library RT (X).
     /// Returns an error if the value is outside the bounds of the calibration curve.
     pub fn predict(&self, x_val: f64) -> Result<f64, CalibRtError> {
-        let first_x = self.points.first().unwrap().x;
-        let last_x = self.points.last().unwrap().x;
+        let first_x = self.points.first().unwrap().library;
+        let last_x = self.points.last().unwrap().library;
         if x_val < first_x {
             return Err(CalibRtError::OutOfBounds(self.predict_with_index(x_val, 1)));
         }
@@ -120,7 +120,7 @@ impl CalibrationCurve {
         }
 
         // Find the partition point; first element >= x_val.
-        let i = self.points.partition_point(|p| p.x < x_val);
+        let i = self.points.partition_point(|p| p.library < x_val);
         // Clamp to [1, slopes.len()] — partition_point can return 0 when x_val == first_x
         let i = i.max(1).min(self.slopes.len());
         Ok(self.predict_with_index(x_val, i))
@@ -148,15 +148,15 @@ impl CalibrationCurve {
         );
         let p1 = self.points[i - 1];
         let slope = self.slopes[i - 1];
-        p1.y + (x_val - p1.x) * slope
+        p1.observed + (x_val - p1.library) * slope
     }
 }
 
 /// Measurement of the evidence ridge width at one grid column.
 #[derive(Debug, Clone)]
 pub struct RidgeMeasurement {
-    /// Center x position (library RT, seconds).
-    pub x: f64,
+    /// Center library RT position (seconds).
+    pub library: f64,
     /// Half-width of the ridge in y-units (seconds).
     pub half_width: f64,
     /// Total accumulated weight in the expanded range — more weight = more trustworthy.
@@ -167,7 +167,7 @@ pub struct RidgeMeasurement {
 /// Used for save/load. Does not include the fitted curve (reconstructed on load).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CalibrationSnapshot {
-    pub points: Vec<[f64; 3]>,  // [x, y, weight]
+    pub points: Vec<[f64; 3]>,  // [library, observed, weight]
     pub grid_size: usize,
     pub lookback: usize,
 }
@@ -203,7 +203,7 @@ impl CalibrationState {
 
     pub fn update(&mut self, points: impl Iterator<Item = (f64, f64, f64)>) {
         for (x, y, w) in points {
-            let _ = self.grid.add_point(&Point { x, y, weight: w });
+            let _ = self.grid.add_point(&Point { library: x, observed: y, weight: w });
         }
         self.stale = true;
     }
@@ -235,7 +235,7 @@ impl CalibrationState {
         self.path_indices.clear();
         for pp in &path_points {
             if let Some(idx) = self.grid.grid_cells().iter().position(|n| {
-                (n.center.x - pp.x).abs() < 1e-9 && (n.center.y - pp.y).abs() < 1e-9
+                (n.center.library - pp.library).abs() < 1e-9 && (n.center.observed - pp.observed).abs() < 1e-9
             }) {
                 self.path_indices.push(idx);
             }
@@ -338,7 +338,7 @@ impl CalibrationState {
             let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
 
             widths.push(RidgeMeasurement {
-                x: path_node.center.x,
+                library: path_node.center.library,
                 half_width,
                 total_weight,
             });
@@ -543,9 +543,9 @@ pub fn calibrate_with_ranges(
 /// use calibrt::{Point, calibrate};
 ///
 /// let points = vec![
-///     Point { x: 1.0, y: 1.5, weight: 1.0 },
-///     Point { x: 2.0, y: 2.5, weight: 1.0 },
-///     Point { x: 3.0, y: 3.5, weight: 1.0 },
+///     Point { library: 1.0, observed: 1.5, weight: 1.0 },
+///     Point { library: 2.0, observed: 2.5, weight: 1.0 },
+///     Point { library: 3.0, observed: 3.5, weight: 1.0 },
 /// ];
 ///
 /// let curve = calibrate(&points, 100).expect("Calibration failed");
@@ -555,8 +555,8 @@ pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve,
         return Err(CalibRtError::NoPoints);
     }
 
-    let x_range = compute_range(points.iter().map(|p| p.x))?;
-    let y_range = compute_range(points.iter().map(|p| p.y))?;
+    let x_range = compute_range(points.iter().map(|p| p.library))?;
+    let y_range = compute_range(points.iter().map(|p| p.observed))?;
 
     calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
 }

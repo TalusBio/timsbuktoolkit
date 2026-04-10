@@ -25,14 +25,14 @@ fn main() {
     for i in 0..500 {
         let x = i as f64;
         let y = real_x_to_y(x);
-        points.push(Point { x, y, weight: 1.0 });
+        points.push(Point { library: x, observed: y, weight: 1.0 });
     }
     // Add some random noise points
     let mut rng = rand::thread_rng();
     for _ in 0..50 {
         points.push(Point {
-            x: rng.gen_range(0.0..100.0),
-            y: rng.gen_range(0.0..150.0),
+            library: rng.gen_range(0.0..100.0),
+            observed: rng.gen_range(0.0..150.0),
             weight: 1.0,
         });
     }

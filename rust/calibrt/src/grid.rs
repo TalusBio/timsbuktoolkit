@@ -39,8 +39,8 @@ impl Grid {
                 let center_y = y_range.0 + (r as f64 + 0.5) * (y_span / bins as f64);
                 nodes.push(Node {
                     center: Point {
-                        x: center_x,
-                        y: center_y,
+                        library: center_x,
+                        observed: center_y,
                         weight: 0.0,
                     },
                     suppressed: false,
@@ -70,15 +70,15 @@ impl Grid {
 
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
     pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
-        let Point { x, y, weight } = point;
+        let Point { library, observed, weight } = point;
 
         // If the weight is infinite or NaN, we yell ...
         if weight.is_infinite() || weight.is_nan() {
             return Err(CalibRtError::UnsupportedWeight(*weight));
         }
 
-        let gx = (((x - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
-        let gy = (((y - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
+        let gx = (((library - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
+        let gy = (((observed - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
 
         let gx = gx.min(self.bins - 1);
         let gy = gy.min(self.bins - 1);
@@ -86,8 +86,8 @@ impl Grid {
         let index = gy * self.bins + gx;
         if let Some(node) = self.nodes.get_mut(index) {
             node.center.weight += weight;
-            node.sum_wx += x * weight;
-            node.sum_wy += y * weight;
+            node.sum_wx += library * weight;
+            node.sum_wy += observed * weight;
             node.sum_w += weight;
         }
 
@@ -155,8 +155,8 @@ impl Grid {
             if !node.suppressed && node.sum_w > 0.0 {
                 let cx = (node.sum_wx / node.sum_w).clamp(self.x_range.0, self.x_range.1);
                 let cy = (node.sum_wy / node.sum_w).clamp(self.y_range.0, self.y_range.1);
-                node.center.x = cx;
-                node.center.y = cy;
+                node.center.library = cx;
+                node.center.observed = cy;
             }
         }
 
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn test_grid_reset_preserves_allocation() {
         let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        grid.add_point(&Point { x: 50.0, y: 50.0, weight: 1.0 }).unwrap();
+        grid.add_point(&Point { library: 50.0, observed: 50.0, weight: 1.0 }).unwrap();
 
         let capacity_before = grid.nodes.capacity();
         assert!(grid.grid_cells().iter().any(|n| n.sum_w > 0.0));
@@ -271,8 +271,8 @@ mod tests {
 
         for (x, y, weight) in test_data.iter() {
             grid.add_point(&Point {
-                x: *x,
-                y: *y,
+                library: *x,
+                observed: *y,
                 weight: *weight,
             })
             .unwrap();
@@ -316,8 +316,8 @@ mod tests {
 
         for (x, y, weight) in test_data.iter() {
             grid.add_point(&Point {
-                x: *x,
-                y: *y,
+                library: *x,
+                observed: *y,
                 weight: *weight,
             })
             .unwrap();
@@ -358,8 +358,8 @@ mod tests {
 
         for (x, y, weight) in test_data.iter() {
             grid.add_point(&Point {
-                x: *x,
-                y: *y,
+                library: *x,
+                observed: *y,
                 weight: *weight,
             })
             .unwrap();

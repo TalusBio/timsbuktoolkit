@@ -812,7 +812,7 @@ impl ViewerCalibrationState {
                 let path_pts: Vec<[f64; 2]> = path_indices
                     .iter()
                     .filter_map(|&idx| cells.get(idx))
-                    .map(|n| [n.center.x, n.center.y])
+                    .map(|n| [n.center.library, n.center.observed])
                     .collect();
 
                 if !path_pts.is_empty() {
@@ -830,8 +830,8 @@ impl ViewerCalibrationState {
                 if let Some(curve) = cs.curve() {
                     let curve_points = curve.points();
                     if curve_points.len() >= 2 {
-                        let x_min = curve_points.first().unwrap().x;
-                        let x_max = curve_points.last().unwrap().x;
+                        let x_min = curve_points.first().unwrap().library;
+                        let x_max = curve_points.last().unwrap().library;
                         let n_samples = 200;
                         let step = (x_max - x_min) / n_samples as f64;
 
@@ -865,22 +865,22 @@ impl ViewerCalibrationState {
 
                             let upper: Vec<[f64; 2]> = ridge.iter()
                                 .filter_map(|m| {
-                                    let y = match curve.predict(m.x) {
+                                    let y = match curve.predict(m.library) {
                                         Ok(y) => y,
                                         Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                                         Err(_) => return None,
                                     };
-                                    Some([m.x, y + m.half_width])
+                                    Some([m.library, y + m.half_width])
                                 })
                                 .collect();
                             let lower: Vec<[f64; 2]> = ridge.iter()
                                 .filter_map(|m| {
-                                    let y = match curve.predict(m.x) {
+                                    let y = match curve.predict(m.library) {
                                         Ok(y) => y,
                                         Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                                         Err(_) => return None,
                                     };
-                                    Some([m.x, y - m.half_width])
+                                    Some([m.library, y - m.half_width])
                                 })
                                 .collect();
 
