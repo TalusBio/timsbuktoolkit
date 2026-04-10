@@ -2,6 +2,7 @@ mod accumulator;
 pub mod apex_finding;
 pub mod full_results;
 mod offsets;
+pub mod parquet_writer;
 pub mod pipeline;
 pub mod results;
 mod scores;

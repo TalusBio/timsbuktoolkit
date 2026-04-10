@@ -219,8 +219,21 @@ pub fn main_loop<I: ScorerQueriable>(
         );
     }
 
-    // TODO: Task 7 — manual Parquet writer for FinalResult
-    let _ = &data;
+    // Write final results to Parquet
+    let out_path_pq = _out_path.directory.join("results.parquet");
+    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
+        &out_path_pq,
+        20_000,
+    )
+    .map_err(|e| TimsSeekError::Io {
+        path: out_path_pq.clone().into(),
+        source: e,
+    })?;
+    for res in data.into_iter() {
+        pq_writer.add(res);
+    }
+    pq_writer.close();
+    info!("Wrote final results to {:?}", out_path_pq);
 
     Ok(PipelineTimings {
         phase1_prescore_ms: phase1_ms,
