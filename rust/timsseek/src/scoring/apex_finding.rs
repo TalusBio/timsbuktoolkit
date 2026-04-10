@@ -7,10 +7,10 @@
 //! # Usage
 //!
 //! ```ignore
-//! use timsseek::scoring::apex_finding::{ApexFinder, CandidateContext};
+//! use timsseek::scoring::apex_finding::{TraceScorer, CandidateContext};
 //!
-//! // 1. Create a reusable finder (one per thread)
-//! let mut finder = ApexFinder::new(chromatogram_collector.num_cycles());
+//! // 1. Create a reusable scorer (one per thread)
+//! let mut scorer = TraceScorer::new(chromatogram_collector.num_cycles());
 //!
 //! // 2. Create the context for a specific query
 //! let context = CandidateContext {
@@ -20,8 +20,8 @@
 //!     chromatograms: chromatogram_collector,
 //! };
 //!
-//! // 3. Score (reusing the finder's internal buffers)
-//! let score = finder.find_apex(&context, rt_mapping_fn).unwrap();
+//! // 3. Score (reusing the scorer's internal buffers)
+//! let score = scorer.find_apex(&context, rt_mapping_fn).unwrap();
 //! println!("Found apex at RT: {} ms with score {}", score.retention_time_ms, score.score);
 //! ```
 
@@ -219,15 +219,20 @@ impl ElutionTraces {
     }
 }
 
+/// Backward compatibility alias. Migrate callers to `TraceScorer`.
+pub type ApexFinder = TraceScorer;
+
 /// The core engine for finding peptide apexes.
 #[derive(Debug)]
-pub struct ApexFinder {
+pub struct TraceScorer {
     pub traces: ElutionTraces,
-    buffers: ApexFinderBuffers,
+    buffers: TraceScorerBuffers,
+    cosine_profile: Vec<f32>,
+    scribe_profile: Vec<f32>,
 }
 
 #[derive(Debug)]
-struct ApexFinderBuffers {
+struct TraceScorerBuffers {
     /// Cosine numerator: sum(obs * sqrt(exp)) per cycle.
     temp_ms2_dot_prod: Vec<f32>,
     /// Cosine denominator: sum(obs^2) per cycle.
@@ -238,7 +243,7 @@ struct ApexFinderBuffers {
     temp_raw_intensity_sum: Vec<f32>,
 }
 
-impl ApexFinderBuffers {
+impl TraceScorerBuffers {
     fn new(size: usize) -> Self {
         Self {
             temp_ms2_dot_prod: vec![0.0f32; size],
@@ -263,12 +268,18 @@ impl ApexFinderBuffers {
     }
 }
 
-impl ApexFinder {
+impl TraceScorer {
     pub fn new(capacity: usize) -> Self {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
-            buffers: ApexFinderBuffers::new(capacity),
+            buffers: TraceScorerBuffers::new(capacity),
+            cosine_profile: Vec::with_capacity(capacity),
+            scribe_profile: Vec::with_capacity(capacity),
         }
+    }
+
+    pub fn traces(&self) -> &ElutionTraces {
+        &self.traces
     }
 
     /// Build cosine and scribe profiles from traces.
@@ -284,6 +295,42 @@ impl ApexFinder {
             scribe_profile.push(self.traces.ms2_scribe[i] * intensity);
         }
         (cosine_profile, scribe_profile)
+    }
+
+    /// Build cosine and scribe profiles into cached fields, avoiding allocation.
+    fn build_profiles_cached(&mut self) {
+        let n = self.traces.cosine_trace.len();
+        self.cosine_profile.clear();
+        self.cosine_profile.reserve(n);
+        self.scribe_profile.clear();
+        self.scribe_profile.reserve(n);
+
+        for i in 0..n {
+            let cos = self.traces.cosine_trace[i];
+            let intensity = self.traces.ms2_log_intensity[i];
+            self.cosine_profile.push(cos * cos * cos * intensity);
+            self.scribe_profile.push(self.traces.ms2_scribe[i] * intensity);
+        }
+    }
+
+    /// Stage A: Compute all per-cycle traces and cached profiles.
+    /// O(fragments x cycles). Call once per extraction.
+    pub fn compute_traces<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &Extraction<T>,
+    ) -> Result<(), DataProcessingError> {
+        let n_cycles = scoring_ctx.chromatograms.num_cycles();
+
+        self.traces.clear();
+        self.traces.resize(n_cycles);
+        self.buffers.clear();
+        self.buffers.resize(n_cycles);
+
+        self.compute_pass_1(scoring_ctx)?;
+        self.compute_main_score_trace();
+        self.build_profiles_cached();
+
+        Ok(())
     }
 
     /// Phase 1: Find apex location using broad extraction.
