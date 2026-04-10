@@ -13,8 +13,7 @@ pub use pipeline::{
     CalibrantCandidate,
     CalibrantHeap,
     CalibrationConfig,
-    ScoringPipeline,
-    ToleranceHierarchy,
+    Scorer,
 };
 pub use search_results::IonSearchResults;
 pub use timings::{PipelineTimings, ScoreTimings};

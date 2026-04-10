@@ -8,10 +8,7 @@ use timsquery::TimsTofPath;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::serde::load_index_auto;
 use timsquery::utils::TupleRange;
-use timsseek::scoring::{
-    ScoringPipeline,
-    ToleranceHierarchy,
-};
+use timsseek::scoring::Scorer;
 use tracing::{
     error,
     info,
@@ -260,16 +257,14 @@ fn process_single_file(
 
     let fragmented_range = get_frag_range(&timstofpath);
 
-    let pipeline = ScoringPipeline {
+    let pipeline = Scorer {
         index,
-        tolerances: ToleranceHierarchy {
-            prescore: config.analysis.tolerance.clone(),
-            secondary: config
-                .analysis
-                .tolerance
-                .clone()
-                .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
-        },
+        broad_tolerance: config.analysis.tolerance.clone(),
+        secondary_tolerance: config
+            .analysis
+            .tolerance
+            .clone()
+            .with_rt_tolerance(RtTolerance::Minutes((0.2, 0.2))),
         fragmented_range,
     };
 

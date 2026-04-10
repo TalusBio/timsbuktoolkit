@@ -1,5 +1,5 @@
 use crate::ScorerQueriable;
-use crate::scoring::pipeline::ScoringPipeline;
+use crate::scoring::pipeline::Scorer;
 pub use calibrt::{
     CalibRtError,
     CalibrationCurve as RTCalibration,
@@ -58,7 +58,7 @@ impl CalibrationResult {
     }
 
     /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
-    pub fn fallback<I: ScorerQueriable>(pipeline: &ScoringPipeline<I>) -> Self {
+    pub fn fallback<I: ScorerQueriable>(pipeline: &Scorer<I>) -> Self {
         let range = pipeline.index.ms1_cycle_mapping().range_milis();
         let start = range.0 as f64 / 1000.0;
         let end = range.1 as f64 / 1000.0;
