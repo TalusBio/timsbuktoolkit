@@ -80,16 +80,16 @@ impl CalibrationCurve {
         &self.points
     }
 
-    pub fn wrmse<'a>(&self, test_points: impl Iterator<Item = &'a Point> + 'a) -> f64 {
+    pub fn wrmse(&self, test_points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) -> f64 {
         let mut total_error = 0.0;
         let mut weight: f64 = 0.0;
 
-        for p in test_points {
-            match self.predict(p.library) {
+        for (lib_rt, obs_rt, w) in test_points {
+            match self.predict(lib_rt) {
                 Ok(predicted_y) => {
-                    let error = predicted_y - p.observed;
-                    total_error += (error * error) * p.weight;
-                    weight += p.weight;
+                    let error = predicted_y.0 - obs_rt.0;
+                    total_error += (error * error) * w;
+                    weight += w;
                 }
                 Err(_) => {
                     // Ignore out-of-bounds points for MSE calculation
@@ -106,7 +106,8 @@ impl CalibrationCurve {
 
     /// Predicts a calibrated measured RT (Y) for a given library RT (X).
     /// Returns an error if the value is outside the bounds of the calibration curve.
-    pub fn predict(&self, x_val: f64) -> Result<f64, CalibRtError> {
+    pub fn predict(&self, lib_rt: LibraryRT<f64>) -> Result<ObservedRTSeconds<f64>, CalibRtError> {
+        let x_val = lib_rt.0;
         let first_x = self.points.first().unwrap().library;
         let last_x = self.points.last().unwrap().library;
         if x_val < first_x {
@@ -123,7 +124,7 @@ impl CalibrationCurve {
         let i = self.points.partition_point(|p| p.library < x_val);
         // Clamp to [1, slopes.len()] — partition_point can return 0 when x_val == first_x
         let i = i.max(1).min(self.slopes.len());
-        Ok(self.predict_with_index(x_val, i))
+        Ok(ObservedRTSeconds(self.predict_with_index(x_val, i)))
     }
 
     /// Internal prediction function that performs linear interpolation using a precomputed slope.
@@ -155,8 +156,8 @@ impl CalibrationCurve {
 /// Measurement of the evidence ridge width at one grid column.
 #[derive(Debug, Clone)]
 pub struct RidgeMeasurement {
-    /// Center library RT position (seconds).
-    pub library: f64,
+    /// Center library RT position.
+    pub library: LibraryRT<f64>,
     /// Half-width of the ridge in y-units (seconds).
     pub half_width: f64,
     /// Total accumulated weight in the expanded range — more weight = more trustworthy.
@@ -201,9 +202,9 @@ impl CalibrationState {
         })
     }
 
-    pub fn update(&mut self, points: impl Iterator<Item = (f64, f64, f64)>) {
-        for (x, y, w) in points {
-            let _ = self.grid.add_point(&Point { library: x, observed: y, weight: w });
+    pub fn update(&mut self, points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) {
+        for (lib_rt, obs_rt, w) in points {
+            let _ = self.grid.add_point(&Point { library: lib_rt.0, observed: obs_rt.0, weight: w });
         }
         self.stale = true;
     }
@@ -338,7 +339,7 @@ impl CalibrationState {
             let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
 
             widths.push(RidgeMeasurement {
-                library: path_node.center.library,
+                library: LibraryRT(path_node.center.library),
                 half_width,
                 total_weight,
             });
@@ -348,9 +349,9 @@ impl CalibrationState {
     }
 
     /// Bundle current config into a snapshot (caller provides the points).
-    pub fn save_snapshot(&self, points: &[(f64, f64, f64)]) -> CalibrationSnapshot {
+    pub fn save_snapshot(&self, points: &[(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)]) -> CalibrationSnapshot {
         CalibrationSnapshot {
-            points: points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+            points: points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
             grid_size: self.grid.bins,
             lookback: self.lookback,
         }
@@ -365,7 +366,7 @@ impl CalibrationState {
         let y_range = compute_range(snapshot.points.iter().map(|p| p[1]))?;
 
         let mut state = Self::new(snapshot.grid_size, x_range, y_range, snapshot.lookback)?;
-        state.update(snapshot.points.iter().map(|p| (p[0], p[1], p[2])));
+        state.update(snapshot.points.iter().map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2])));
         state.fit();
         Ok(state)
     }
@@ -382,10 +383,10 @@ mod calibration_state_tests {
     #[test]
     fn test_update_fit_cycle() {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-        let points: Vec<(f64, f64, f64)> = (0..10)
+        let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = (0..10)
             .map(|i| {
                 let v = (i as f64) * 10.0 + 5.0;
-                (v, v, 1.0)
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0)
             })
             .collect();
 
@@ -397,14 +398,14 @@ mod calibration_state_tests {
         assert!(state.curve().is_some());
 
         let curve = state.curve().unwrap();
-        let pred = curve.predict(50.0).unwrap();
-        assert!((pred - 50.0).abs() < 5.0, "predicted {} expected ~50.0", pred);
+        let pred = curve.predict(LibraryRT(50.0)).unwrap();
+        assert!((pred.0 - 50.0).abs() < 5.0, "predicted {} expected ~50.0", pred.0);
     }
 
     #[test]
     fn test_reset_clears_state() {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-        let points = vec![(25.0, 25.0, 1.0), (75.0, 75.0, 1.0)];
+        let points = vec![(LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0), (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0)];
         state.update(points.into_iter());
         state.fit();
         assert!(state.curve().is_some());
@@ -420,19 +421,19 @@ mod calibration_state_tests {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
 
         // First fit: y = x
-        let points1: Vec<_> = (0..10).map(|i| ((i as f64) * 10.0 + 5.0, (i as f64) * 10.0 + 5.0, 1.0)).collect();
+        let points1: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 10.0 + 5.0), 1.0)).collect();
         state.update(points1.into_iter());
         state.fit();
-        let curve1_pred = state.curve().unwrap().predict(50.0).unwrap();
+        let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
         // Reset and refit: y = 2x
         state.reset();
-        let points2: Vec<_> = (0..10).map(|i| ((i as f64) * 10.0 + 5.0, (i as f64) * 20.0 + 5.0, 1.0)).collect();
+        let points2: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 20.0 + 5.0), 1.0)).collect();
         state.update(points2.into_iter());
         state.fit();
-        let curve2_pred = state.curve().unwrap().predict(50.0).unwrap();
+        let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
-        assert!((curve2_pred - curve1_pred).abs() > 10.0);
+        assert!((curve2_pred.0 - curve1_pred.0).abs() > 10.0);
     }
 }
 
@@ -504,11 +505,11 @@ pub fn calibrate_with_ranges(
     let calcurve = CalibrationCurve::new(optimal_path_points);
     match &calcurve {
         Ok(c) => {
-            let wrmse = c.wrmse(points.iter());
+            let wrmse = c.wrmse(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)));
             info!("Calibration successful, WRMSE: {}", wrmse);
             plotting::plot_function(
                 |x| {
-                    c.predict(x).map_err(|e| match e {
+                    c.predict(LibraryRT(x)).map(|obs| obs.0).map_err(|e| match e {
                         CalibRtError::OutOfBounds(y) => y,
                         _ => panic!("Unexpected error during plotting"),
                     })

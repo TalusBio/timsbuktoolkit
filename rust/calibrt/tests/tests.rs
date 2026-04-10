@@ -1,5 +1,6 @@
 use calibrt::{
     Point,
+    LibraryRT,
     calibrate,
     calibrate_with_ranges,
 };
@@ -19,8 +20,8 @@ fn test_calibrate_with_linear_data() {
     assert!(result.is_ok());
 
     let curve = result.unwrap();
-    let predicted = curve.predict(50.0).unwrap();
-    assert!((predicted - 60.0).abs() < 5.0); // Allow small error
+    let predicted = curve.predict(LibraryRT(50.0)).unwrap();
+    assert!((predicted.0 - 60.0).abs() < 5.0); // Allow small error
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn test_predict_within_range() {
         .collect();
 
     let curve = calibrate(&points, 30).unwrap();
-    let result = curve.predict(25.0);
+    let result = curve.predict(LibraryRT(25.0));
     assert!(result.is_ok());
 }
 
@@ -83,7 +84,7 @@ fn test_predict_outside_range() {
         .collect();
 
     let curve = calibrate(&points, 30).unwrap();
-    let result = curve.predict(100.0);
+    let result = curve.predict(LibraryRT(100.0));
     assert!(result.is_err());
 }
 
