@@ -204,7 +204,11 @@ pub fn calibrate_with_ranges(
         .collect();
 
     // Module 2: Find the optimal ascending path
-    let optimal_path_points = pathfinding::find_optimal_path(&mut filtered_nodes, lookback);
+    let mut max_weights = Vec::new();
+    let mut prev_indices = Vec::new();
+    let optimal_path_points = pathfinding::find_optimal_path(
+        &mut filtered_nodes, lookback, &mut max_weights, &mut prev_indices,
+    );
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
     match &calcurve {
