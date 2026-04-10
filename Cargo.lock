@@ -6117,6 +6117,7 @@ dependencies = [
 name = "timsseek"
 version = "0.26.0"
 dependencies = [
+ "arrow",
  "calibrt",
  "forust-ml",
  "micromzpaf",
