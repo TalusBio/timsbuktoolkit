@@ -1,5 +1,6 @@
 mod accumulator;
 pub mod apex_finding;
+pub mod extraction;
 pub mod full_results;
 mod offsets;
 pub mod parquet_writer;
