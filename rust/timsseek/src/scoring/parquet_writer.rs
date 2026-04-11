@@ -20,7 +20,7 @@ macro_rules! columns {
         let mut fields: Vec<Field> = Vec::new();
         let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
         $(
-            fields.push(Field::new($name, $dtype, true));
+            fields.push(Field::new($name, $dtype, false));
             arrays.push(Arc::new(<$array_type>::from_iter(
                 $results.iter().map($accessor)
             )));
