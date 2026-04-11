@@ -24,6 +24,8 @@ use timsseek::rt_calibration::{
     CalibRtError,
     CalibrationResult,
     CalibratedGrid,
+    LibraryRT,
+    ObservedRTSeconds,
     Point,
 };
 use timsseek::scoring::{
@@ -190,7 +192,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Snapshot calibrant points before calibration consumes them (for saving)
     let calibrant_points: Vec<[f64; 3]> = calibrants
         .iter()
-        .map(|c| [c.library_rt_seconds as f64, c.apex_rt_seconds as f64, 1.0])
+        .map(|c| [c.library_rt.0 as f64, c.apex_rt.0 as f64, 1.0])
         .collect();
 
     info!("Phase 2: Calibration...");
@@ -472,7 +474,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
 
             Some(Point {
                 library: irt_for_curve as f64,
-                observed: c.apex_rt_seconds as f64,
+                observed: c.apex_rt.0 as f64,
                 weight: 1.0,
             })
         })
@@ -501,7 +503,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     let mut cal_state = CalibratedGrid::new(
         config.grid_size, (min_x, max_x), (min_y, max_y), config.dp_lookback,
     )?;
-    cal_state.update(points.iter().map(|p| (p.library, p.observed, p.weight)));
+    cal_state.update(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)));
     cal_state.fit();
     let cal_curve = cal_state.curve()
         .ok_or(CalibRtError::NoPoints)?
@@ -542,7 +544,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         let query_at_apex = item
             .query
             .clone()
-            .with_rt_seconds(candidate.apex_rt_seconds);
+            .with_rt_seconds(candidate.apex_rt.0);
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
             SpectralCollector::new(query_at_apex);
         pipeline.index.add_query(&mut agg, &query_tolerance);
@@ -565,7 +567,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         let mut abs_residuals: Vec<f64> = points
             .iter()
             .map(|p| {
-                let predicted = cal_curve.predict(p.library).unwrap_or(p.observed);
+                let predicted = cal_curve.predict(LibraryRT(p.library)).map(|v| v.0).unwrap_or(p.observed);
                 (p.observed - predicted).abs()
             })
             .collect();
