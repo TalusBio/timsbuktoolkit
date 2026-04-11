@@ -79,12 +79,10 @@ pub fn build_record_batch(results: &[FinalResult]) -> RecordBatch {
                     precursor_charge: _,
                     precursor_mobility: _,
                     is_target: _,
-                    query_rt_seconds: _,
+                    library_rt: _,
+                    calibrated_rt_seconds: _,
                     obs_rt_seconds: _,
-                    delta_rt: _,
-                    sq_delta_rt: _,
                     calibrated_sq_delta_rt: _,
-                    recalibrated_rt: _,
                     obs_mobility: _,
                     delta_ms1_ms2_mobility: _,
                     sq_delta_ms1_ms2_mobility: _,
@@ -151,12 +149,10 @@ pub fn build_record_batch(results: &[FinalResult]) -> RecordBatch {
         "is_target"        => DataType::Boolean, BooleanArray(|r: &FinalResult| Some(r.scoring.is_target));
 
         // RT
-        "query_rt_seconds"       => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.query_rt_seconds));
+        "library_rt"             => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.library_rt));
+        "calibrated_rt_seconds"  => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.calibrated_rt_seconds));
         "obs_rt_seconds"         => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.obs_rt_seconds));
-        "delta_rt"               => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.delta_rt));
-        "sq_delta_rt"            => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.sq_delta_rt));
         "calibrated_sq_delta_rt" => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.calibrated_sq_delta_rt));
-        "recalibrated_rt"        => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.recalibrated_rt));
 
         // Mobility
         "obs_mobility"              => DataType::Float32, Float32Array(|r: &FinalResult| Some(r.scoring.obs_mobility));

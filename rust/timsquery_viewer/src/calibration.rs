@@ -285,12 +285,12 @@ impl ViewerCalibrationState {
     /// Stop and reset all state. Returns to Idle.
     pub fn reset(&mut self) {
         self.stop();
-        // Wait for the thread to finish (non-blocking check; if it takes
-        // too long the Drop impl will also try).
+        // Drop the receiver BEFORE joining — if the background thread is
+        // blocked on tx.send(Done), dropping the receiver unblocks it.
+        self.receiver = None;
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
-        self.receiver = None;
         self.phase = CalibrationPhase::Idle;
         self.n_scored = 0;
         self.n_calibrants = 0;
@@ -419,7 +419,9 @@ impl ViewerCalibrationState {
                         continue;
                     }
                     _ => {
-                        let _ = tx.send(CalibrationMessage::Done { n_scored });
+                        if let Err(e) = tx.try_send(CalibrationMessage::Done { n_scored }) {
+                            tracing::warn!("Calibration thread: failed to send Done on stop: {e}");
+                        }
                         return;
                     }
                 }
@@ -498,7 +500,9 @@ impl ViewerCalibrationState {
             });
         }
 
-        let _ = tx.send(CalibrationMessage::Done { n_scored });
+        if let Err(e) = tx.try_send(CalibrationMessage::Done { n_scored }) {
+            tracing::warn!("Calibration thread: failed to send Done on completion: {e}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1079,6 +1083,9 @@ impl ViewerCalibrationState {
 impl Drop for ViewerCalibrationState {
     fn drop(&mut self) {
         self.stop();
+        // Drop the receiver BEFORE joining — unblocks any tx.send(Done)
+        // in the background thread that would otherwise deadlock.
+        self.receiver = None;
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }

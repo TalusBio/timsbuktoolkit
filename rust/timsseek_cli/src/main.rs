@@ -311,7 +311,9 @@ fn process_single_file(
         max_qvalue,
         load_index_ms,
     )
-    .unwrap();
+    .map_err(|e| errors::CliError::DataReading {
+        source: format!("{}", e),
+    })?;
 
     info!("Successfully processed {:?}", dotd_file);
     Ok(report)
@@ -556,6 +558,13 @@ fn main() -> std::result::Result<(), errors::CliError> {
             }
             Err(e) => {
                 error!("Failed to process {:?}: {}", dotd_file, e);
+                // I/O errors are likely systemic (disk full, permissions) —
+                // abort the batch instead of failing every remaining file.
+                if matches!(e, errors::CliError::Io { .. }) {
+                    failed_files.push((dotd_file.clone(), e));
+                    error!("Aborting batch due to I/O error");
+                    break;
+                }
                 failed_files.push((dotd_file.clone(), e));
             }
         }
