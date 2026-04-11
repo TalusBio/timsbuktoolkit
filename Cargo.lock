@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "array2d"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "serde",
 ]
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "calibrt"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "array2d",
  "insta",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "micromzpaf"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "rustyms",
  "serde",
@@ -6047,7 +6047,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -6077,7 +6077,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "array2d",
  "arrow",
@@ -6100,7 +6100,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_cli"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "half",
@@ -6119,7 +6119,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_pyo3"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "numpy",
  "pyo3",
@@ -6130,7 +6130,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_viewer"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "calibrt",
  "clap",
@@ -6174,7 +6174,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "arrow",
  "calibrt",
@@ -6198,7 +6198,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "clap",
  "indicatif",
