@@ -657,25 +657,7 @@ impl ViewerCalibrationState {
                         self.stop();
                     }
                     if ui.button("Save").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("calibration.json")
-                            .add_filter("JSON", &["json"])
-                            .save_file()
-                        {
-                            let rt_range = if let crate::app::IndexedDataState::Loaded {
-                                index, ..
-                            } = indexed_data
-                            {
-                                let cycle_mapping = index.ms1_cycle_mapping();
-                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-                                [rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0]
-                            } else {
-                                [0.0, 0.0]
-                            };
-                            if let Err(e) = self.save_to_file(&path, rt_range) {
-                                tracing::error!("Failed to save calibration: {}", e);
-                            }
-                        }
+                        save_calibration_dialog(self, indexed_data);
                     }
                 }
                 CalibrationPhase::Done => {
@@ -683,25 +665,7 @@ impl ViewerCalibrationState {
                         self.reset();
                     }
                     if ui.button("Save").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("calibration.json")
-                            .add_filter("JSON", &["json"])
-                            .save_file()
-                        {
-                            let rt_range = if let crate::app::IndexedDataState::Loaded {
-                                index, ..
-                            } = indexed_data
-                            {
-                                let cycle_mapping = index.ms1_cycle_mapping();
-                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-                                [rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0]
-                            } else {
-                                [0.0, 0.0]
-                            };
-                            if let Err(e) = self.save_to_file(&path, rt_range) {
-                                tracing::error!("Failed to save calibration: {}", e);
-                            }
-                        }
+                        save_calibration_dialog(self, indexed_data);
                     }
                 }
             }
@@ -1097,6 +1061,28 @@ impl Drop for ViewerCalibrationState {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Show a file-save dialog and write the current calibration to JSON.
+fn save_calibration_dialog(
+    state: &mut ViewerCalibrationState,
+    indexed_data: &crate::app::IndexedDataState,
+) {
+    if let Some(path) = rfd::FileDialog::new()
+        .set_file_name("calibration.json")
+        .add_filter("JSON", &["json"])
+        .save_file()
+    {
+        let rt_range = if let crate::app::IndexedDataState::Loaded { index, .. } = indexed_data {
+            let (rt_min_ms, rt_max_ms) = index.ms1_cycle_mapping().range_milis();
+            [rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0]
+        } else {
+            [0.0, 0.0]
+        };
+        if let Err(e) = state.save_to_file(&path, rt_range) {
+            tracing::error!("Failed to save calibration: {}", e);
+        }
+    }
+}
 
 /// Simple deterministic shuffle using a linear congruential generator.
 /// Avoids pulling in the `rand` crate just for this.

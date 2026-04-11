@@ -525,8 +525,8 @@ impl TraceScorer {
             }
 
             let sqrt_exp = expected.sqrt();
-            ms2_sum_exp += expected; // sqrt_exp * sqrt_exp = expected
-            pred_norms.push((row_idx, expected.sqrt()));
+            ms2_sum_exp += expected;
+            pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
             for (i, &intensity) in chrom.iter().enumerate() {
