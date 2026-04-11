@@ -224,8 +224,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Print tolerance summary
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
-            "  RT tolerance (ridge): avg {:.0}s, min {:.0}s, max {:.0}s ({} cols)",
+            "  RT tolerance (ridge): avg {:.0}s, min {:.0}s, max {:.0}s ({} cols, {:.0}% in-ridge)",
             summary.weighted_avg, summary.min, summary.max, summary.n_columns,
+            summary.in_ridge_ratio * 100.0,
         );
     }
     println!(
@@ -512,9 +513,9 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     // Measure ridge width for position-dependent RT tolerance
     let ridge_widths = cal_state.measure_ridge_width(0.1);
     if !ridge_widths.is_empty() {
-        let total_weight: f64 = ridge_widths.iter().map(|m| m.total_weight).sum();
+        let total_weight: f64 = ridge_widths.iter().map(|m| m.ridge_weight).sum();
         let weighted_hw: f64 = ridge_widths.iter()
-            .map(|m| m.half_width * m.total_weight)
+            .map(|m| m.half_width * m.ridge_weight)
             .sum::<f64>() / total_weight.max(1.0);
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",

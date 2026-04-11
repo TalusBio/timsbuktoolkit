@@ -160,8 +160,10 @@ pub struct RidgeMeasurement {
     pub library: LibraryRT<f64>,
     /// Half-width of the ridge in y-units (seconds).
     pub half_width: f64,
-    /// Total accumulated weight in the expanded range — more weight = more trustworthy.
-    pub total_weight: f64,
+    /// Weight inside the ridge bounds.
+    pub ridge_weight: f64,
+    /// Total weight in the full column (all rows at this x).
+    pub column_weight: f64,
 }
 
 /// Serializable snapshot of calibration data — points + config.
@@ -339,12 +341,18 @@ impl CalibrationState {
                 lower_gy = check_gy;
             }
 
+            // Sum all weights in this column for the in-ridge ratio
+            let column_weight: f64 = (0..bins)
+                .map(|row| self.grid.blurred_weight(row, gx))
+                .sum();
+
             let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
 
             widths.push(RidgeMeasurement {
                 library: LibraryRT(self.grid.grid_cells()[path_idx].center.library),
                 half_width,
-                total_weight,
+                ridge_weight: total_weight,
+                column_weight,
             });
         }
 
