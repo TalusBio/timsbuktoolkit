@@ -61,7 +61,7 @@ fn expand_f32_array_columns<const N: usize>(
 /// **COMPILE-TIME SAFETY:** The exhaustive destructure at the top ensures that
 /// adding a field to `ScoringFields` or `FinalResult` without updating this
 /// function causes a compile error.
-pub fn build_record_batch(results: &[FinalResult]) -> RecordBatch {
+pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatch> {
     // -----------------------------------------------------------------------
     // Exhaustive destructure for compile-time completeness check.
     // Every field must be listed -- no `..` allowed.
@@ -229,7 +229,8 @@ pub fn build_record_batch(results: &[FinalResult]) -> RecordBatch {
     // Build the RecordBatch
     // -----------------------------------------------------------------------
     let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, arrays).expect("schema/array mismatch in build_record_batch")
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +258,7 @@ impl ResultParquetWriter {
         };
 
         // Build schema from a zero-row batch
-        let empty_batch = build_record_batch(&[]);
+        let empty_batch = build_record_batch(&[])?;
         let schema = empty_batch.schema();
 
         let props = WriterProperties::builder()
@@ -274,25 +275,30 @@ impl ResultParquetWriter {
         })
     }
 
-    pub fn add(&mut self, result: FinalResult) {
+    pub fn add(&mut self, result: FinalResult) -> std::io::Result<()> {
         self.buffer.push(result);
         if self.buffer.len() >= self.row_group_size {
-            self.flush();
+            self.flush()?;
         }
+        Ok(())
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() {
-            return;
+            return Ok(());
         }
         debug!("Flushing {} results to parquet", self.buffer.len());
-        let batch = build_record_batch(&self.buffer);
-        self.writer.write(&batch).expect("parquet write failed");
+        let batch = build_record_batch(&self.buffer)?;
+        self.writer.write(&batch)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         self.buffer.clear();
+        Ok(())
     }
 
-    pub fn close(mut self) {
-        self.flush();
-        self.writer.close().expect("parquet close failed");
+    pub fn close(mut self) -> std::io::Result<()> {
+        self.flush()?;
+        self.writer.close()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        Ok(())
     }
 }

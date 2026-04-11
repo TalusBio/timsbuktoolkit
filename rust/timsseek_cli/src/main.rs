@@ -197,12 +197,18 @@ fn validate_inputs(
     })
 }
 
-fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
-    let reader = file.load_frame_reader().unwrap();
-    let upper_mz = reader
+fn get_frag_range(file: &TimsTofPath) -> Result<TupleRange<f64>, errors::CliError> {
+    let reader = file.load_frame_reader().map_err(|e| errors::CliError::DataReading {
+        source: format!("Failed to load frame reader: {:?}", e),
+    })?;
+    let dia_windows = reader
         .dia_windows
         .as_ref()
-        .expect("DIA windows should be present for a dia run")
+        .ok_or_else(|| errors::CliError::DataReading {
+            source: "File does not contain DIA windows — is this a DIA run?".to_string(),
+        })?;
+
+    let upper_mz = dia_windows
         .iter()
         .map(|w| {
             w.isolation_mz
@@ -213,9 +219,7 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
         })
         .fold(0.0, f64::max);
 
-    let lower_mz = reader
-        .dia_windows
-        .expect("DIA windows should be present for a dia run")
+    let lower_mz = dia_windows
         .iter()
         .map(|w| {
             w.isolation_mz
@@ -225,7 +229,10 @@ fn get_frag_range(file: &TimsTofPath) -> TupleRange<f64> {
                 .fold(f64::MAX, f64::min)
         })
         .fold(f64::MAX, f64::min);
-    TupleRange::try_new(lower_mz, upper_mz).unwrap()
+
+    TupleRange::try_new(lower_mz, upper_mz).map_err(|e| errors::CliError::DataReading {
+        source: format!("Invalid DIA m/z range: {:?}", e),
+    })
 }
 
 fn process_single_file(
@@ -257,7 +264,7 @@ fn process_single_file(
     let load_index_ms = index_start.elapsed().as_millis() as u64;
     println!("Loading index ........... {:.1}s", load_index_ms as f64 / 1000.0);
 
-    let fragmented_range = get_frag_range(&timstofpath);
+    let fragmented_range = get_frag_range(&timstofpath)?;
 
     let pipeline = Scorer {
         index,

@@ -241,15 +241,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             .iter()
             .map(|p| (p[0], p[1], p[2]))
             .collect();
-        let rt_lo = calibrant_points.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
-        let rt_hi = calibrant_points.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
+        let rt_lo = rt_lo_ms as f64 / 1000.0;
+        let rt_hi = rt_hi_ms as f64 / 1000.0;
         let cal_json_path = out_path.directory.join("calibration.json");
         if let Err(e) = calibration.save_json(
             &cal_points_tuples,
             [rt_lo, rt_hi],
             calib_config.grid_size,
             calib_config.dp_lookback,
-            calibrant_points.len(),
+            phase1_lib.len(),
             &cal_json_path,
         ) {
             tracing::warn!("Failed to save calibration: {}", e);
@@ -339,10 +340,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     })?;
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
-            pq_writer.add(res);
+            pq_writer.add(res).map_err(|e| TimsSeekError::Io {
+                path: out_path_pq.clone().into(),
+                source: e,
+            })?;
         }
     }
-    pq_writer.close();
+    pq_writer.close().map_err(|e| TimsSeekError::Io {
+        path: out_path_pq.clone().into(),
+        source: e,
+    })?;
     let phase6_ms = phase6_start.elapsed().as_millis() as u64;
     info!("Wrote final results to {:?}", out_path_pq);
     println!(

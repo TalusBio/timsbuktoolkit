@@ -87,7 +87,7 @@ impl PartialOrd for CalibrantCandidate {
 
 impl Ord for CalibrantCandidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.score.total_cmp(&other.score)
     }
 }
 

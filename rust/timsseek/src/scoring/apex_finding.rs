@@ -816,6 +816,8 @@ impl<'a> PeakPicker<'a> {
     }
 }
 
+/// Count non-increasing steps from `start` in direction `step`.
+/// Returns at least 1 (the apex itself counts), capped at MAX_WIDTH.
 fn count_falling_steps(start: usize, step: i32, slc: &[f32]) -> u8 {
     const MAX_WIDTH: u8 = 10;
     let mut count = 0;
