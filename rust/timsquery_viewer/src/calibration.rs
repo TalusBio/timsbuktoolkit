@@ -1020,13 +1020,13 @@ impl ViewerCalibrationState {
                 }
 
                 // Weighted average half-width (seconds)
-                let total_weight: f64 = measurements.iter().map(|m| m.total_weight).sum();
+                let total_weight: f64 = measurements.iter().map(|m| m.ridge_weight).sum();
                 if total_weight <= 0.0 {
                     return None;
                 }
                 let weighted_hw: f64 = measurements
                     .iter()
-                    .map(|m| m.half_width * m.total_weight)
+                    .map(|m| m.half_width * m.ridge_weight)
                     .sum::<f64>()
                     / total_weight;
 
@@ -1034,26 +1034,33 @@ impl ViewerCalibrationState {
                 let min_hw = measurements.iter().map(|m| m.half_width).fold(f64::MAX, f64::min);
                 let max_hw = measurements.iter().map(|m| m.half_width).fold(0.0f64, f64::max);
 
-                Some((weighted_hw, min_hw, max_hw, measurements.len()))
+                let total_column_weight: f64 = measurements.iter().map(|m| m.column_weight).sum();
+                let in_ridge_pct = if total_column_weight > 0.0 {
+                    total_weight / total_column_weight * 100.0
+                } else {
+                    0.0
+                };
+
+                Some((weighted_hw, min_hw, max_hw, measurements.len(), in_ridge_pct))
             });
 
         // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
-        let suggested = ridge_stats.map(|(hw_s, min_s, max_s, n_cols)| {
+        let suggested = ridge_stats.map(|(hw_s, min_s, max_s, n_cols, in_ridge_pct)| {
             let rt_min = (hw_s / 60.0).max(0.5);
-            (rt_min, hw_s, min_s, max_s, n_cols)
+            (rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct)
         });
 
-        if let Some((rt_min, _, _, _, _)) = suggested {
+        if let Some((rt_min, _, _, _, _, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
                 rt_tolerance_minutes: rt_min as f32,
             });
         }
 
         ui.horizontal(|ui| {
-            if let Some((rt_min, hw_s, min_s, max_s, n_cols)) = suggested {
+            if let Some((rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct)) = suggested {
                 ui.label(format!(
-                    "Suggested RT: \u{00B1}{:.2} min   Ridge: {:.0} s (min {:.0}, max {:.0})   ({} cols)",
-                    rt_min, hw_s, min_s, max_s, n_cols,
+                    "Suggested RT: \u{00B1}{:.2} min   Ridge: {:.0} s (min {:.0}, max {:.0})   ({} cols)   {:.0}% in-ridge",
+                    rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct,
                 ));
                 if ui.button("Apply").clicked() {
                     let rt_tol = rt_min as f32;

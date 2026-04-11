@@ -137,17 +137,24 @@ impl CalibrationResult {
         if self.ridge_widths.is_empty() {
             return None;
         }
-        let total_weight: f64 = self.ridge_widths.iter().map(|m| m.total_weight).sum();
+        let total_weight: f64 = self.ridge_widths.iter().map(|m| m.ridge_weight).sum();
         let weighted_avg = self.ridge_widths.iter()
-            .map(|m| m.half_width * m.total_weight)
+            .map(|m| m.half_width * m.ridge_weight)
             .sum::<f64>() / total_weight.max(1.0);
         let min = self.ridge_widths.iter().map(|m| m.half_width).fold(f64::MAX, f64::min);
         let max = self.ridge_widths.iter().map(|m| m.half_width).fold(0.0f64, f64::max);
+        let total_column_weight: f64 = self.ridge_widths.iter().map(|m| m.column_weight).sum();
+        let in_ridge_ratio = if total_column_weight > 0.0 {
+            total_weight / total_column_weight
+        } else {
+            0.0
+        };
         Some(RidgeWidthSummary {
             weighted_avg,
             min,
             max,
             n_columns: self.ridge_widths.len(),
+            in_ridge_ratio,
         })
     }
 
@@ -268,6 +275,9 @@ pub struct RidgeWidthSummary {
     pub min: f64,
     pub max: f64,
     pub n_columns: usize,
+    /// Fraction of total column weight that falls inside the ridge bounds (0.0–1.0).
+    /// Higher = better fit between spectral library and raw file.
+    pub in_ridge_ratio: f64,
 }
 
 /// JSON v1 calibration file format — shared between CLI and viewer.
