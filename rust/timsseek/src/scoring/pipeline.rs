@@ -58,7 +58,7 @@ use super::results::{
     ScoredCandidateBuilder,
 };
 use super::timings::ScoreTimings;
-use crate::rt_calibration::CalibrationResult;
+use crate::rt_calibration::{CalibrationResult, LibraryRT, ObservedRTSeconds};
 use tracing::warn;
 
 /// Lightweight calibrant candidate — just enough to re-query in Phase 2.
@@ -66,9 +66,9 @@ use tracing::warn;
 #[derive(Debug, Clone)]
 pub struct CalibrantCandidate {
     pub score: f32,
-    pub apex_rt_seconds: f32,
+    pub apex_rt: ObservedRTSeconds<f32>,
     pub speclib_index: usize,
-    pub library_rt_seconds: f32,
+    pub library_rt: LibraryRT<f32>,
 }
 
 impl PartialEq for CalibrantCandidate {
@@ -531,7 +531,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         ),
         SkippingReason,
     > {
-        let original_irt = item.query.rt_seconds();
+        let original_irt = LibraryRT(item.query.rt_seconds());
         let calibrated_rt = calibration.convert_irt(original_irt);
         let tolerance = calibration.get_tolerance(
             item.query.mono_precursor_mz(),
@@ -539,12 +539,12 @@ impl<I: ScorerQueriable> Scorer<I> {
             original_irt, // library RT — ridge widths are indexed by library RT
         );
 
-        let calibrated_query = item.query.clone().with_rt_seconds(calibrated_rt);
+        let calibrated_query = item.query.clone().with_rt_seconds(calibrated_rt.0);
 
         let max_range = self.index.ms1_cycle_mapping().range_milis();
         let max_range = TupleRange::try_new(max_range.0, max_range.1)
             .expect("Reference RTs should be sorted and valid");
-        let rt_range = match tolerance.rt_range_as_milis(calibrated_rt) {
+        let rt_range = match tolerance.rt_range_as_milis(calibrated_rt.0) {
             OptionallyRestricted::Unrestricted => max_range,
             OptionallyRestricted::Restricted(r) => r,
         };
@@ -570,7 +570,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: agg.eg.id() as u32,
-            query_rt_seconds: calibrated_rt,
+            query_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };
@@ -771,9 +771,9 @@ impl<I: ScorerQueriable> Scorer<I> {
                     if let Some((loc, _meta)) = self.prescore(item, &mut scorer) {
                         heap.push(CalibrantCandidate {
                             score: loc.score,
-                            apex_rt_seconds: loc.retention_time_ms as f32 / 1000.0,
+                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: speclib_offset + chunk_idx,
-                            library_rt_seconds: item.query.rt_seconds(),
+                            library_rt: LibraryRT(item.query.rt_seconds()),
                         });
                     }
                     (scorer, heap)
@@ -794,9 +794,9 @@ impl<I: ScorerQueriable> Scorer<I> {
                 if let Some((loc, _meta)) = self.prescore(item, &mut scorer) {
                     heap.push(CalibrantCandidate {
                         score: loc.score,
-                        apex_rt_seconds: loc.retention_time_ms as f32 / 1000.0,
+                        apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                         speclib_index: speclib_offset + chunk_idx,
-                        library_rt_seconds: item.query.rt_seconds(),
+                        library_rt: LibraryRT(item.query.rt_seconds()),
                     });
                 }
             }

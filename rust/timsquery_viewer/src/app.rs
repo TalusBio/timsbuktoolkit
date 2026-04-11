@@ -9,6 +9,7 @@ use egui_dock::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use calibrt::LibraryRT;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
@@ -526,8 +527,8 @@ impl ViewerApp {
             if let Some(cs) = &self.calibration.calibration_state {
                 if let Some(curve) = cs.curve() {
                     let lib_rt = elution_group_owned.rt_seconds();
-                    let calibrated_rt = match curve.predict(lib_rt as f64) {
-                        Ok(y) => y as f32,
+                    let calibrated_rt = match curve.predict(LibraryRT(lib_rt as f64)) {
+                        Ok(y) => y.0 as f32,
                         Err(calibrt::CalibRtError::OutOfBounds(y)) => y as f32,
                         Err(_) => lib_rt,
                     };
@@ -684,8 +685,8 @@ impl ViewerApp {
                         // Check if calibration projects to a different RT
                         let calibrated_rt = self.calibration.calibration_state.as_ref()
                             .and_then(|cs| cs.curve())
-                            .and_then(|curve| match curve.predict(lib_rt) {
-                                Ok(y) => Some(y),
+                            .and_then(|curve| match curve.predict(LibraryRT(lib_rt)) {
+                                Ok(y) => Some(y.0),
                                 Err(calibrt::CalibRtError::OutOfBounds(y)) => Some(y),
                                 Err(_) => None,
                             });

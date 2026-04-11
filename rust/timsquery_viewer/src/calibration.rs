@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use calibrt::CalibrationState;
+use calibrt::{CalibrationState, LibraryRT, ObservedRTSeconds};
 use timscentroid::rt_mapping::{MS1CycleIndex, RTIndex};
 use timsquery::models::tolerance::{
     MobilityTolerance, MzTolerance, QuadTolerance, RtTolerance, Tolerance,
@@ -80,8 +80,8 @@ pub enum CalibrationMessage {
     Snapshot {
         n_scored: usize,
         heap_len: usize,
-        /// (library_rt_seconds, apex_rt_seconds, score)
-        points: Vec<(f64, f64, f64)>,
+        /// (library_rt, apex_rt, score)
+        points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
     },
     /// Thread completed (all elution groups scored or stopped).
     Done { n_scored: usize },
@@ -119,7 +119,7 @@ pub struct ViewerCalibrationState {
     receiver: Option<Receiver<CalibrationMessage>>,
 
     /// Latest calibrant points: (library_rt, apex_rt, score).
-    pub snapshot_points: Vec<(f64, f64, f64)>,
+    pub snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
 }
 
 impl Default for ViewerCalibrationState {
@@ -151,10 +151,10 @@ impl ViewerCalibrationState {
             return Self::default();
         }
 
-        let snapshot_points: Vec<(f64, f64, f64)> = snapshot
+        let snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = snapshot
             .points
             .iter()
-            .map(|p| (p[0], p[1], p[2]))
+            .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2]))
             .collect();
         let n_calibrants = snapshot_points.len();
 
@@ -190,7 +190,7 @@ impl ViewerCalibrationState {
             Some(cs.save_snapshot(&self.snapshot_points))
         } else {
             Some(calibrt::CalibrationSnapshot {
-                points: self.snapshot_points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+                points: self.snapshot_points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
                 grid_size: DEFAULT_GRID_SIZE,
                 lookback: DEFAULT_LOOKBACK,
             })
@@ -336,7 +336,7 @@ impl ViewerCalibrationState {
                             self.snapshot_points
                                 .iter()
                                 .map(|&(lib_rt, apex_rt, _weight)| (lib_rt, apex_rt, 1.0)),
-                        );
+                        );  // snapshot_points already typed
                         cs.fit();
                         let has_curve = cs.curve().is_some();
                         let n_path = cs.path_indices().len();
@@ -464,9 +464,9 @@ impl ViewerCalibrationState {
                         if let Ok(apex) = scorer.suggest_apex(&rt_mapper, 0) {
                             local_heap.push(CalibrantCandidate {
                                 score: apex.score,
-                                apex_rt_seconds: apex.retention_time_ms as f32 / 1000.0,
+                                apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: eg_idx,
-                                library_rt_seconds: elution_group.rt_seconds(),
+                                library_rt: LibraryRT(elution_group.rt_seconds()),
                             });
                         }
                         (scorer, local_heap)
@@ -480,12 +480,12 @@ impl ViewerCalibrationState {
             n_scored += chunk.len();
 
             // Send snapshot.
-            let points: Vec<(f64, f64, f64)> = heap
+            let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = heap
                 .iter()
                 .map(|c| {
                     (
-                        c.library_rt_seconds as f64,
-                        c.apex_rt_seconds as f64,
+                        LibraryRT(c.library_rt.0 as f64),
+                        ObservedRTSeconds(c.apex_rt.0 as f64),
                         c.score as f64,
                     )
                 })
@@ -520,7 +520,7 @@ impl ViewerCalibrationState {
             version: "v1".to_string(),
             rt_range_seconds,
             calibration: CalibrationSnapshot {
-                points: self.snapshot_points.iter().map(|&(x, y, w)| [x, y, w]).collect(),
+                points: self.snapshot_points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
                 grid_size: DEFAULT_GRID_SIZE,
                 lookback: DEFAULT_LOOKBACK,
             },
@@ -551,7 +551,7 @@ impl ViewerCalibrationState {
         if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&loaded.snapshot) {
             self.snapshot_points = loaded.snapshot.points
                 .iter()
-                .map(|p| (p[0], p[1], p[2]))
+                .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2]))
                 .collect();
             self.calibration_state = Some(cal);
         }
@@ -737,7 +737,7 @@ impl ViewerCalibrationState {
     }
 
     /// Render the scatter + curve calibration plot.
-    fn render_calibration_plot(&self, ui: &mut egui::Ui, selected_library_rt: Option<f64>) {
+    fn render_calibration_plot(&mut self, ui: &mut egui::Ui, selected_library_rt: Option<f64>) {
         use egui_plot::{Line, Plot, PlotPoints, Points, Polygon, VLine, HLine};
 
         let plot_id = format!("calibration_plot_{}", self.generation);
@@ -748,7 +748,7 @@ impl ViewerCalibrationState {
             .allow_zoom(true)
             .allow_drag(true);
 
-        let cal_state = self.calibration_state.as_ref();
+        let cal_state = self.calibration_state.as_mut();
 
         plot.show(ui, |plot_ui| {
             // Grid heatmap from CalibrationState (if available).
@@ -827,7 +827,7 @@ impl ViewerCalibrationState {
                 }
 
                 // Fitted curve + ridge envelope
-                if let Some(curve) = cs.curve() {
+                if let Some(curve) = cs.curve().cloned() {
                     let curve_points = curve.points();
                     if curve_points.len() >= 2 {
                         let x_min = curve_points.first().unwrap().library;
@@ -838,8 +838,8 @@ impl ViewerCalibrationState {
                         let line_pts: Vec<[f64; 2]> = (0..=n_samples)
                             .filter_map(|i| {
                                 let x = x_min + i as f64 * step;
-                                let y = match curve.predict(x) {
-                                    Ok(y) => y,
+                                let y = match curve.predict(LibraryRT(x)) {
+                                    Ok(y) => y.0,
                                     Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                                     Err(_) => return None,
                                 };
@@ -866,21 +866,21 @@ impl ViewerCalibrationState {
                             let upper: Vec<[f64; 2]> = ridge.iter()
                                 .filter_map(|m| {
                                     let y = match curve.predict(m.library) {
-                                        Ok(y) => y,
+                                        Ok(y) => y.0,
                                         Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                                         Err(_) => return None,
                                     };
-                                    Some([m.library, y + m.half_width])
+                                    Some([m.library.0, y + m.half_width])
                                 })
                                 .collect();
                             let lower: Vec<[f64; 2]> = ridge.iter()
                                 .filter_map(|m| {
                                     let y = match curve.predict(m.library) {
-                                        Ok(y) => y,
+                                        Ok(y) => y.0,
                                         Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                                         Err(_) => return None,
                                     };
-                                    Some([m.library, y - m.half_width])
+                                    Some([m.library.0, y - m.half_width])
                                 })
                                 .collect();
 
@@ -916,8 +916,8 @@ impl ViewerCalibrationState {
 
                     // If curve is fitted, show predicted RT + tolerance band
                     if let Some(curve) = cs.curve() {
-                        let predicted_rt = match curve.predict(lib_rt) {
-                            Ok(y) => y,
+                        let predicted_rt = match curve.predict(LibraryRT(lib_rt)) {
+                            Ok(y) => y.0,
                             Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
                             Err(_) => lib_rt,
                         };
@@ -946,7 +946,7 @@ impl ViewerCalibrationState {
                 let raw_pts: Vec<[f64; 2]> = self
                     .snapshot_points
                     .iter()
-                    .map(|&(lib_rt, apex_rt, _)| [lib_rt, apex_rt])
+                    .map(|&(lib_rt, apex_rt, _)| [lib_rt.0, apex_rt.0])
                     .collect();
 
                 plot_ui.points(
@@ -968,7 +968,7 @@ impl ViewerCalibrationState {
         // half-width gives the global tolerance — heavy columns count more.
         let ridge_stats = self
             .calibration_state
-            .as_ref()
+            .as_mut()
             .and_then(|cs| {
                 cs.curve()?; // ensure curve is fitted
                 let measurements = cs.measure_ridge_width(0.1);
