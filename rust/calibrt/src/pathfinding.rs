@@ -51,11 +51,11 @@ pub(crate) fn find_optimal_path(
                 let dist = (dx * dx + dy * dy).sqrt();
 
                 if dist > DISTANCE_THRESHOLD {
-                    // Edge weight formula: (weight_i * weight_j) / distance
-                    // - Product of weights: Prioritizes paths through high-confidence nodes
+                    // Edge weight formula: sqrt(weight_i) * sqrt(weight_j) / distance
+                    // - Geometric mean of weights: Prefers high-confidence nodes but doesn't
+                    //   annihilate edges to sparse-but-real cells (sqrt compresses the scale)
                     // - Division by distance: Penalizes long jumps, encouraging smooth curves
-                    // This balances data fidelity (high weights) with geometric smoothness (short edges)
-                    let edge_weight = (nodes[i].center.weight * nodes[j].center.weight) / dist;
+                    let edge_weight = (nodes[i].center.weight.sqrt() * nodes[j].center.weight.sqrt()) / dist;
                     let new_weight = max_weights[j] + edge_weight;
 
                     if new_weight > max_weights[i] {
@@ -78,7 +78,7 @@ pub(crate) fn find_optimal_path(
         }
     }
 
-    // Reconstruct the path
+    // Reconstruct the DP path
     let mut path = Vec::new();
     let mut current_idx_opt = Some(end_of_path_idx);
     while let Some(current_idx) = current_idx_opt {
@@ -87,5 +87,64 @@ pub(crate) fn find_optimal_path(
     }
     path.reverse();
 
-    path
+    if path.is_empty() {
+        return path;
+    }
+
+    // Pass 2: Greedily extend the path beyond the DP endpoints.
+    // The DP optimizes total weight and may skip sparse-but-valid regions at
+    // the edges. We extend by walking through remaining non-suppressed nodes
+    // that satisfy monotonicity, picking the nearest one at each step.
+
+    // Extend backward: find nodes before the path start that satisfy monotonicity.
+    // Nodes are sorted by (library, observed), so candidates are before the path's
+    // first node in the sorted order.
+    let first = path[0];
+    let mut prefix = Vec::new();
+    // Walk backward through sorted nodes, greedily picking the nearest monotonic predecessor
+    let first_sorted_idx = nodes.iter().position(|n| {
+        (n.center.library - first.library).abs() < 1e-9
+            && (n.center.observed - first.observed).abs() < 1e-9
+    });
+    if let Some(start_idx) = first_sorted_idx {
+        let mut cursor = first;
+        for j in (0..start_idx).rev() {
+            let candidate = nodes[j].center;
+            if candidate.weight > 0.0
+                && candidate.library < cursor.library
+                && candidate.observed < cursor.observed
+            {
+                prefix.push(candidate);
+                cursor = candidate;
+            }
+        }
+        prefix.reverse();
+    }
+
+    // Extend forward: find nodes after the path end that satisfy monotonicity.
+    let last = *path.last().unwrap();
+    let last_sorted_idx = nodes.iter().rposition(|n| {
+        (n.center.library - last.library).abs() < 1e-9
+            && (n.center.observed - last.observed).abs() < 1e-9
+    });
+    let mut suffix = Vec::new();
+    if let Some(end_idx) = last_sorted_idx {
+        let mut cursor = last;
+        for j in (end_idx + 1)..n {
+            let candidate = nodes[j].center;
+            if candidate.weight > 0.0
+                && candidate.library > cursor.library
+                && candidate.observed > cursor.observed
+            {
+                suffix.push(candidate);
+                cursor = candidate;
+            }
+        }
+    }
+
+    // Assemble: prefix + DP path + suffix
+    let mut full_path = prefix;
+    full_path.append(&mut path);
+    full_path.append(&mut suffix);
+    full_path
 }
