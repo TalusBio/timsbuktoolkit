@@ -404,10 +404,9 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         self.fold_classifiers.clear();
         (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
         for fold in 0..self.n_folds {
-            eprint!("  Training fold {}/{} ...", fold + 1, self.n_folds);
             let start = std::time::Instant::now();
             self.fit_fold(fold, train_buffer, val_buffer)?;
-            eprintln!(" {:?}", start.elapsed());
+            eprintln!("  Training fold {}/{} ... {:?}", fold + 1, self.n_folds, start.elapsed());
         }
 
         Ok(())
@@ -417,7 +416,6 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         let mut scores = vec![0.0; self.data.len()];
         let mut buffer = DataBuffer::default();
 
-        eprint!("  Scoring folds ...");
         let score_start = std::time::Instant::now();
         for train_i in 0..self.n_folds {
             let early_stop_i = self.next_fold(train_i);
@@ -443,7 +441,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                 }
             }
         }
-        eprintln!(" {:?}", score_start.elapsed());
+        eprintln!("  Scoring folds ... {:?}", score_start.elapsed());
 
         let div_factor = (self.n_folds - 2) as f64;
         scores.iter_mut().for_each(|x| {
