@@ -826,35 +826,78 @@ impl ViewerCalibrationState {
                     );
                 }
 
-                // Fitted curve + ridge envelope
+                // Fitted curve + extrapolation over full grid range
                 if let Some(curve) = cs.curve().cloned() {
                     let curve_points = curve.points();
                     if curve_points.len() >= 2 {
-                        let x_min = curve_points.first().unwrap().library;
-                        let x_max = curve_points.last().unwrap().library;
+                        let curve_x_min = curve_points.first().unwrap().library;
+                        let curve_x_max = curve_points.last().unwrap().library;
+                        let (grid_x_min, grid_x_max) = cs.grid_x_range();
                         let n_samples = 200;
-                        let step = (x_max - x_min) / n_samples as f64;
 
-                        let line_pts: Vec<[f64; 2]> = (0..=n_samples)
+                        // Interpolated region (solid cyan) — within curve bounds
+                        let interp_step = (curve_x_max - curve_x_min) / n_samples as f64;
+                        let interp_pts: Vec<[f64; 2]> = (0..=n_samples)
                             .filter_map(|i| {
-                                let x = x_min + i as f64 * step;
-                                let y = match curve.predict(LibraryRT(x)) {
-                                    Ok(y) => y.0,
-                                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
-                                    Err(_) => return None,
-                                };
+                                let x = curve_x_min + i as f64 * interp_step;
+                                let y = curve.predict(LibraryRT(x)).ok()?.0;
                                 Some([x, y])
                             })
                             .collect();
 
-                        if !line_pts.is_empty() {
+                        if !interp_pts.is_empty() {
                             plot_ui.line(
                                 Line::new(
                                     "fitted curve",
-                                    PlotPoints::new(line_pts),
+                                    PlotPoints::new(interp_pts),
                                 )
                                 .color(egui::Color32::from_rgb(0, 220, 220))
                                 .width(2.0),
+                            );
+                        }
+
+                        // Extrapolated regions (dashed red) — beyond curve bounds
+                        // Clamp Y to grid range so extrapolation doesn't fly off
+                        let (grid_y_min, grid_y_max) = cs.grid_y_range();
+                        let extrap_color = egui::Color32::from_rgb(255, 100, 100);
+                        let extrap_predict = |x: f64| -> f64 {
+                            let y = match curve.predict(LibraryRT(x)) {
+                                Ok(y) => y.0,
+                                Err(calibrt::CalibRtError::OutOfBounds(y)) => y,
+                                Err(_) => 0.0,
+                            };
+                            y.clamp(grid_y_min, grid_y_max)
+                        };
+                        // Left extrapolation
+                        if grid_x_min < curve_x_min {
+                            let left_step = (curve_x_min - grid_x_min) / 50.0_f64;
+                            let left_pts: Vec<[f64; 2]> = (0..=50)
+                                .map(|i| {
+                                    let x = grid_x_min + i as f64 * left_step;
+                                    [x, extrap_predict(x)]
+                                })
+                                .collect();
+                            plot_ui.line(
+                                Line::new("extrapolation (left)", PlotPoints::new(left_pts))
+                                    .color(extrap_color)
+                                    .width(1.5)
+                                    .style(egui_plot::LineStyle::dashed_dense()),
+                            );
+                        }
+                        // Right extrapolation
+                        if grid_x_max > curve_x_max {
+                            let right_step = (grid_x_max - curve_x_max) / 50.0_f64;
+                            let right_pts: Vec<[f64; 2]> = (0..=50)
+                                .map(|i| {
+                                    let x = curve_x_max + i as f64 * right_step;
+                                    [x, extrap_predict(x)]
+                                })
+                                .collect();
+                            plot_ui.line(
+                                Line::new("extrapolation (right)", PlotPoints::new(right_pts))
+                                    .color(extrap_color)
+                                    .width(1.5)
+                                    .style(egui_plot::LineStyle::dashed_dense()),
                             );
                         }
 
