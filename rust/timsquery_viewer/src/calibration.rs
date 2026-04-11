@@ -332,11 +332,13 @@ impl ViewerCalibrationState {
                     // Reset first — each snapshot is the full heap, not a delta.
                     if let Some(cs) = &mut self.calibration_state {
                         cs.reset();
-                        cs.update(
+                        if let Err(e) = cs.update(
                             self.snapshot_points
                                 .iter()
                                 .map(|&(lib_rt, apex_rt, _weight)| (lib_rt, apex_rt, 1.0)),
-                        );  // snapshot_points already typed
+                        ) {
+                            tracing::warn!("Calibration update rejected points: {:?}", e);
+                        }
                         cs.fit();
                         let has_curve = cs.curve().is_some();
                         let n_path = cs.path_indices().len();

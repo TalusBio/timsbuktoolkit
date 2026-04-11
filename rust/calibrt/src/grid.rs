@@ -83,8 +83,7 @@ impl Grid {
     pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
         let Point { library, observed, weight } = point;
 
-        // If the weight is infinite or NaN, we yell ...
-        if weight.is_infinite() || weight.is_nan() {
+        if !weight.is_finite() || !library.is_finite() || !observed.is_finite() {
             return Err(CalibRtError::UnsupportedWeight(*weight));
         }
 
@@ -174,10 +173,17 @@ impl Grid {
         Ok(())
     }
 
-    /// Zero all node weights and suppression flags. Keeps allocation.
+    /// Zero all node weights and suppression flags, preserving bin geometry.
+    /// Restores each node center to the midpoint of its bin.
     pub fn reset(&mut self) {
-        for node in &mut self.nodes {
-            node.center = Point::default();
+        for (i, node) in self.nodes.iter_mut().enumerate() {
+            let r = i / self.bins;
+            let c = i % self.bins;
+            node.center = Point {
+                library: self.x_range.0 + (c as f64 + 0.5) * (self.x_span / self.bins as f64),
+                observed: self.y_range.0 + (r as f64 + 0.5) * (self.y_span / self.bins as f64),
+                weight: 0.0,
+            };
             node.suppressed = false;
             node.sum_wx = 0.0;
             node.sum_wy = 0.0;
@@ -185,6 +191,18 @@ impl Grid {
         }
         self.weights_a.reset_with_value(self.bins, self.bins, 0.0);
         self.weights_b.reset_with_value(self.bins, self.bins, 0.0);
+    }
+
+    /// Reset the grid with new dimensions and ranges. Reallocates if the
+    /// bin count changes.
+    pub fn reconfigure(
+        &mut self,
+        bins: usize,
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+    ) -> Result<(), CalibRtError> {
+        *self = Self::new(bins, x_range, y_range)?;
+        Ok(())
     }
 
     /// Read access to all grid cells.

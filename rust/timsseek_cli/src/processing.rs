@@ -287,7 +287,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase4_start = Instant::now();
     let mut competed = target_decoy_compete(results);
     competed.sort_unstable_by(|x, y| {
-        y.scoring.main_score.partial_cmp(&x.scoring.main_score).unwrap()
+        y.scoring.main_score.partial_cmp(&x.scoring.main_score)
+            .expect("NaN main_score should have been filtered during Phase 3 scoring")
     });
     let phase4_ms = phase4_start.elapsed().as_millis() as u64;
     let total_after_competition = competed.len();
@@ -467,7 +468,8 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
                             }
                         })
                         // Best = most shared fragments, then closest RT
-                        .min_by(|a, b| b.0.cmp(&a.0).then(a.1.partial_cmp(&b.1).unwrap()))
+                        .min_by(|a, b| b.0.cmp(&a.0).then(a.1.partial_cmp(&b.1)
+                            .expect("NaN RT residual in calibrant matching")))
                         .map(|(_, _, rt)| rt)?
                 }
                 None => calib_item.query.rt_seconds(),
@@ -504,7 +506,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     let mut cal_state = CalibratedGrid::new(
         config.grid_size, (min_x, max_x), (min_y, max_y), config.dp_lookback,
     )?;
-    cal_state.update(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)));
+    cal_state.update(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)))?;
     cal_state.fit();
     let cal_curve = cal_state.curve()
         .ok_or(CalibRtError::NoPoints)?
@@ -572,7 +574,8 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
                 (p.observed - predicted).abs()
             })
             .collect();
-        abs_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        abs_residuals.sort_by(|a, b| a.partial_cmp(b)
+            .expect("NaN calibration residual in tolerance estimation"));
         let mad_seconds = abs_residuals
             .get(abs_residuals.len() / 2)
             .copied()
@@ -694,7 +697,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
-        let score_ord = y.scoring.main_score.partial_cmp(&x.scoring.main_score).unwrap();
+        let score_ord = y.scoring.main_score.partial_cmp(&x.scoring.main_score)
+            .expect("NaN main_score should have been filtered during Phase 3 scoring");
         let ord = seq_ord.then(score_ord);
 
         if ord == std::cmp::Ordering::Equal {
@@ -728,7 +732,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         x.scoring.decoy_group_id
             .cmp(&y.scoring.decoy_group_id)
             .then_with(|| x.scoring.precursor_charge.cmp(&y.scoring.precursor_charge))
-            .then_with(|| x.scoring.main_score.partial_cmp(&y.scoring.main_score).unwrap().reverse())
+            .then_with(|| x.scoring.main_score.partial_cmp(&y.scoring.main_score)
+                .expect("NaN main_score should have been filtered during Phase 3 scoring").reverse())
     });
     info!(
         "Number of results before t/d competition: {}",

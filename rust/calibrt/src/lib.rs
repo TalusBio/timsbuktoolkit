@@ -204,11 +204,14 @@ impl CalibrationState {
         })
     }
 
-    pub fn update(&mut self, points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) {
+    /// Feed points into the grid. Returns an error if any point has
+    /// non-finite coordinates or weight (NaN/Inf), indicating a bug upstream.
+    pub fn update(&mut self, points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) -> Result<(), CalibRtError> {
         for (lib_rt, obs_rt, w) in points {
-            let _ = self.grid.add_point(&Point { library: lib_rt.0, observed: obs_rt.0, weight: w });
+            self.grid.add_point(&Point { library: lib_rt.0, observed: obs_rt.0, weight: w })?;
         }
         self.stale = true;
+        Ok(())
     }
 
     pub fn fit(&mut self) {
@@ -377,7 +380,7 @@ impl CalibrationState {
         let y_range = compute_range(snapshot.points.iter().map(|p| p[1]))?;
 
         let mut state = Self::new(snapshot.grid_size, x_range, y_range, snapshot.lookback)?;
-        state.update(snapshot.points.iter().map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2])));
+        state.update(snapshot.points.iter().map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2])))?;
         state.fit();
         Ok(state)
     }
@@ -401,7 +404,7 @@ mod calibration_state_tests {
             })
             .collect();
 
-        state.update(points.into_iter());
+        state.update(points.into_iter()).unwrap();
         assert!(state.is_stale());
 
         state.fit();
@@ -417,7 +420,7 @@ mod calibration_state_tests {
     fn test_reset_clears_state() {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
         let points = vec![(LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0), (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0)];
-        state.update(points.into_iter());
+        state.update(points.into_iter()).unwrap();
         state.fit();
         assert!(state.curve().is_some());
 
@@ -433,14 +436,14 @@ mod calibration_state_tests {
 
         // First fit: y = x
         let points1: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 10.0 + 5.0), 1.0)).collect();
-        state.update(points1.into_iter());
+        state.update(points1.into_iter()).unwrap();
         state.fit();
         let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
         // Reset and refit: y = 2x
         state.reset();
         let points2: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 20.0 + 5.0), 1.0)).collect();
-        state.update(points2.into_iter());
+        state.update(points2.into_iter()).unwrap();
         state.fit();
         let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
