@@ -344,11 +344,13 @@ impl<I: ScorerQueriable> Scorer<I> {
             Some(TOP_N_FRAGMENTS),
         )?;
 
+        let library_rt = item.query.rt_seconds();
         let metadata = super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: extraction.chromatograms.eg.id() as u32,
-            query_rt_seconds: item.query.rt_seconds(),
+            library_rt,
+            calibrated_rt_seconds: library_rt, // no calibration in broad path
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };
@@ -570,7 +572,8 @@ impl<I: ScorerQueriable> Scorer<I> {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: agg.eg.id() as u32,
-            query_rt_seconds: calibrated_rt.0,
+            library_rt: original_irt.0 as f32,
+            calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
         };

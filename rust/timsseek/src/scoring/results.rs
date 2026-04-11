@@ -24,12 +24,10 @@ pub struct ScoringFields {
     pub is_target: bool,
 
     // RT
-    pub query_rt_seconds: f32,
+    pub library_rt: f32,
+    pub calibrated_rt_seconds: f32,
     pub obs_rt_seconds: f32,
-    pub delta_rt: f32,
-    pub sq_delta_rt: f32,
     pub calibrated_sq_delta_rt: f32,
-    pub recalibrated_rt: f32,
 
     // Mobility
     pub obs_mobility: f32,
@@ -201,8 +199,9 @@ pub struct ScoredCandidateBuilder {
     precursor_mobility: SetField<f32>,
     is_target: SetField<bool>,
 
-    // --- Reference RT / mobility (used to compute deltas) ---
-    query_rt_seconds: SetField<f32>,
+    // --- RT ---
+    library_rt: SetField<f32>,
+    calibrated_rt_seconds: SetField<f32>,
 
     // --- Observed RT / mobility ---
     obs_rt_seconds: SetField<f32>,
@@ -278,7 +277,8 @@ impl ScoredCandidateBuilder {
         self.precursor_charge = SetField::Some(metadata.charge);
         self.precursor_mz = SetField::Some(metadata.ref_precursor_mz);
         self.precursor_mobility = SetField::Some(metadata.ref_mobility_ook0);
-        self.query_rt_seconds = SetField::Some(metadata.query_rt_seconds);
+        self.library_rt = SetField::Some(metadata.library_rt);
+        self.calibrated_rt_seconds = SetField::Some(metadata.calibrated_rt_seconds);
         self
     }
 
@@ -394,9 +394,10 @@ impl ScoredCandidateBuilder {
         }
 
         let obs_rt_seconds = expect_some!(obs_rt_seconds);
-        let ref_rt = expect_some!(query_rt_seconds);
-        let delta_rt = obs_rt_seconds - ref_rt;
-        let sq_delta_rt = delta_rt * delta_rt;
+        let library_rt = expect_some!(library_rt);
+        let calibrated_rt_seconds = expect_some!(calibrated_rt_seconds);
+        let calibrated_delta_rt = obs_rt_seconds - calibrated_rt_seconds;
+        let calibrated_sq_delta_rt = calibrated_delta_rt * calibrated_delta_rt;
 
         let delta_ms1_ms2_mobility = expect_some!(delta_ms1_ms2_mobility);
         let sq_delta_ms1_ms2_mobility = delta_ms1_ms2_mobility * delta_ms1_ms2_mobility;
@@ -416,12 +417,10 @@ impl ScoredCandidateBuilder {
             is_target: expect_some!(is_target),
 
             // RT
-            query_rt_seconds: ref_rt,
+            library_rt,
+            calibrated_rt_seconds,
             obs_rt_seconds,
-            delta_rt,
-            sq_delta_rt,
-            calibrated_sq_delta_rt: sq_delta_rt,
-            recalibrated_rt: ref_rt,
+            calibrated_sq_delta_rt,
 
             // Mobility
             obs_mobility: expect_some!(obs_mobility),

@@ -122,7 +122,7 @@ impl FeatureLike for CompetedCandidate {
             (s.precursor_mz / 5.0).round(),
             s.precursor_charge as f64,
             s.precursor_mobility as f64,
-            s.query_rt_seconds.round() as f64,
+            s.calibrated_rt_seconds.round() as f64,
             s.n_scored_fragments as f64,
             // Combined
             s.main_score as f64,
@@ -131,8 +131,8 @@ impl FeatureLike for CompetedCandidate {
             s.delta_second_next as f64,
             s.obs_rt_seconds as f64,
             s.obs_mobility as f64,
-            s.delta_rt as f64,
-            s.sq_delta_rt as f64,
+            (s.obs_rt_seconds - s.calibrated_rt_seconds) as f64,
+            s.calibrated_sq_delta_rt as f64,
             s.delta_ms1_ms2_mobility as f64,
             s.sq_delta_ms1_ms2_mobility as f64,
             s.rising_cycles as f64,
@@ -204,7 +204,7 @@ impl FeatureLike for CompetedCandidate {
             s.ms2_intensity_ratios[6] as f64,
             self.delta_group as f64,
             self.delta_group_ratio as f64,
-            s.recalibrated_rt as f64,
+            s.calibrated_rt_seconds as f64,
             s.calibrated_sq_delta_rt as f64,
             // Derived intensity features
             {

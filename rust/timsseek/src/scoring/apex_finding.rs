@@ -89,8 +89,12 @@ pub struct PeptideMetadata {
     /// Library identifier for this peptide.
     pub library_id: u32,
 
-    /// Reference retention time (seconds) from library.
-    pub query_rt_seconds: f32,
+    /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).
+    pub library_rt: f32,
+
+    /// Calibrated retention time in seconds (predicted observed RT for this run).
+    /// Equals library_rt when no calibration has been applied.
+    pub calibrated_rt_seconds: f32,
 
     /// Reference ion mobility (ook0) from library.
     pub ref_mobility_ook0: f32,
