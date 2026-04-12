@@ -145,12 +145,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         info!("Phase 1: Broad prescore (unrestricted RT)...");
     }
     let phase1_start = Instant::now();
-    let calibrants = phase1_prescore(phase1_lib, pipeline, chunk_size, &calib_config);
+    let (calibrants, phase1_timings) = phase1_prescore(phase1_lib, pipeline, chunk_size, &calib_config);
     let phase1_ms = phase1_start.elapsed().as_millis() as u64;
     info!(
-        "Phase 1 complete: {} calibrant candidates in {}ms",
+        "Phase 1 complete: {} calibrant candidates in {}ms (extraction: {}ms, scoring: {}ms, {} passed filter, {} scored)",
         calibrants.len(),
-        phase1_ms
+        phase1_ms,
+        phase1_timings.extraction.as_millis(),
+        phase1_timings.scoring.as_millis(),
+        phase1_timings.n_passed_filter,
+        phase1_timings.n_scored,
     );
     println!(
         "Phase 1: Prescore ........ {:.1}s ({} calibrants)",
@@ -365,11 +369,12 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     Ok(PipelineReport {
         load_index_ms: 0, // set by caller after return
         phase1_prescore_ms: phase1_ms,
+        phase1_detail: phase1_timings,
         phase2_calibration_ms: phase2_ms,
-        phase3_extraction_ms: phase3_timings.extraction.as_millis() as u64,
-        phase3_scoring_ms: phase3_timings.scoring.as_millis() as u64,
-        phase3_spectral_query_ms: phase3_timings.spectral_query.as_millis() as u64,
-        phase3_assembly_ms: phase3_timings.assembly.as_millis() as u64,
+        phase3_extraction_thread_ms: phase3_timings.extraction.as_millis() as u64,
+        phase3_scoring_thread_ms: phase3_timings.scoring.as_millis() as u64,
+        phase3_spectral_query_thread_ms: phase3_timings.spectral_query.as_millis() as u64,
+        phase3_assembly_thread_ms: phase3_timings.assembly.as_millis() as u64,
         phase4_competition_ms: phase4_ms,
         phase5_rescore_ms: phase5_ms,
         phase6_output_ms: phase6_ms,
@@ -390,20 +395,21 @@ fn phase1_prescore<I: ScorerQueriable>(
     pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
-) -> Vec<CalibrantCandidate> {
+) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
     let n_chunks = (speclib.as_slice().len() + chunk_size - 1) / chunk_size;
     let pb = make_progress_bar(n_chunks as u64, "Phase 1");
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
+    let mut timings = timsseek::scoring::PrescoreTimings::default();
     let mut offset = 0usize;
 
     for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
-        let chunk_heap = pipeline.prescore_batch(chunk, offset, config);
+        let chunk_heap = pipeline.prescore_batch(chunk, offset, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
         offset += chunk.len();
     }
 
-    global_heap.into_vec()
+    (global_heap.into_vec(), timings)
 }
 
 #[cfg_attr(
