@@ -8,6 +8,7 @@ use timsquery::TimsTofPath;
 use timsquery::serde::load_index_auto;
 use timsquery::utils::TupleRange;
 use timsseek::scoring::Scorer;
+use timsseek::scoring::timings::TimedStep;
 use tracing::{
     error,
     info,
@@ -252,7 +253,7 @@ fn process_single_file(
             path: Some(dotd_file.to_string_lossy().to_string()),
         })?;
 
-    let index_start = std::time::Instant::now();
+    let step = TimedStep::begin("Loading index");
     let index = load_index_auto(
         dotd_file.to_str().ok_or_else(|| errors::CliError::Io {
             source: "Invalid path encoding".to_string(),
@@ -261,8 +262,7 @@ fn process_single_file(
         None,
     )?
     .into_eager()?;
-    let load_index_ms = index_start.elapsed().as_millis() as u64;
-    println!("Loading index ........... {:.1}s", load_index_ms as f64 / 1000.0);
+    let load_index_ms = step.finish().as_millis() as u64;
 
     let fragmented_range = get_frag_range(&timstofpath)?;
 
@@ -505,31 +505,29 @@ fn main() -> std::result::Result<(), errors::CliError> {
     let mut successful_files: Vec<std::path::PathBuf> = Vec::new();
 
     // Load speclib once (shared across all files)
-    let speclib_start = std::time::Instant::now();
+    let step = TimedStep::begin("Loading speclib");
     info!("Building database from speclib file {:?}", validated.speclib_path);
     info!("Decoy generation strategy: {}", config.analysis.decoy_strategy);
     let speclib = timsseek::data_sources::speclib::Speclib::from_file(
         &validated.speclib_path,
         config.analysis.decoy_strategy,
     ).map_err(|e| errors::CliError::Config { source: format!("Failed to load speclib: {:?}", e) })?;
-    let load_speclib_ms = speclib_start.elapsed().as_millis() as u64;
-    println!("Loading speclib ......... {:.1}s ({} entries)", load_speclib_ms as f64 / 1000.0, speclib.len());
+    let load_speclib_ms = step.finish_with(format_args!("{} entries", speclib.len())).as_millis() as u64;
 
     // Load calibration library once (if provided)
-    let calib_start = std::time::Instant::now();
-    let calib_lib = match &validated.calib_lib_path {
+    let (calib_lib, load_calib_lib_ms) = match &validated.calib_lib_path {
         Some(p) => {
+            let step = TimedStep::begin("Loading calib lib");
             info!("Loading calibration library from {:?}", p);
             let lib = timsseek::data_sources::speclib::Speclib::from_file(
                 p,
                 config.analysis.decoy_strategy,
             ).map_err(|e| errors::CliError::Config { source: format!("Failed to load calib lib: {:?}", e) })?;
-            println!("Loading calib lib ....... {:.1}s ({} entries)", calib_start.elapsed().as_secs_f64(), lib.len());
-            Some(lib)
+            let ms = step.finish_with(format_args!("{} entries", lib.len())).as_millis() as u64;
+            (Some(lib), ms)
         }
-        None => None,
+        None => (None, 0),
     };
-    let load_calib_lib_ms = calib_start.elapsed().as_millis() as u64;
 
     run_report.load_speclib_ms = load_speclib_ms;
     run_report.load_calib_lib_ms = load_calib_lib_ms;

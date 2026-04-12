@@ -28,7 +28,7 @@ use crate::{
 };
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-use std::time::Instant;
+use crate::timed;
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -599,15 +599,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         buffer: &mut TraceScorer,
         timings: &mut ScoreTimings,
     ) -> Option<ScoredCandidate> {
-        let st = Instant::now();
-        let (metadata, scoring_ctx) =
+        let (metadata, scoring_ctx) = timed!(timings.extraction,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(
                 || match self.build_calibrated_extraction(item, calibration) {
                     Ok(result) => Some(result),
                     Err(_) => None,
                 },
-            )?;
-        timings.extraction += st.elapsed();
+            )
+        )?;
 
         if scoring_ctx
             .expected_intensities
@@ -617,39 +616,37 @@ impl<I: ScorerQueriable> Scorer<I> {
             return None;
         }
 
-        let st = Instant::now();
-        let apex_score =
+        let apex_score = timed!(timings.scoring,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::apex_scoring").in_scope(
                 || {
                     buffer
                         .find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
                         .ok()
                 },
-            )?;
-        timings.scoring += st.elapsed();
+            )
+        )?;
 
-        let st = Instant::now();
-        let spectral_tol = calibration.get_spectral_tolerance();
-        let isotope_tol = calibration.get_isotope_tolerance();
-        let (inner_collector, isotope_collector) =
+        let (inner_collector, isotope_collector) = timed!(timings.spectral_query, {
+            let spectral_tol = calibration.get_spectral_tolerance();
+            let isotope_tol = calibration.get_isotope_tolerance();
             tracing::span!(tracing::Level::TRACE, "score_calibrated::secondary_query")
-                .in_scope(|| self.execute_secondary_query(item, &apex_score, &spectral_tol, &isotope_tol));
-        timings.spectral_query += st.elapsed();
+                .in_scope(|| self.execute_secondary_query(item, &apex_score, &spectral_tol, &isotope_tol))
+        });
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
-        let st = Instant::now();
-        let out = tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(
-            || {
-                self.finalize_results(
-                    &metadata,
-                    nqueries,
-                    &apex_score,
-                    &inner_collector,
-                    &isotope_collector,
-                )
-            },
+        let out = timed!(timings.assembly,
+            tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(
+                || {
+                    self.finalize_results(
+                        &metadata,
+                        nqueries,
+                        &apex_score,
+                        &inner_collector,
+                        &isotope_collector,
+                    )
+                },
+            )
         );
-        timings.assembly += st.elapsed();
 
         match out {
             Ok(res) => Some(res),
@@ -722,21 +719,20 @@ impl<I: ScorerQueriable> Scorer<I> {
         buffer: &mut TraceScorer,
         timings: &mut super::timings::PrescoreTimings,
     ) -> Option<ApexLocation> {
-        let st = Instant::now();
-        let scoring_ctx = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
-            .in_scope(|| {
-                super::extraction::build_extraction(
-                    &item.query,
-                    item.expected_intensity.clone(),
-                    &self.index,
-                    &self.broad_tolerance,
-                    Some(TOP_N_FRAGMENTS),
-                )
-                .ok()
-            });
-        timings.extraction += st.elapsed();
+        let scoring_ctx = timed!(timings.extraction,
+            tracing::span!(tracing::Level::TRACE, "prescore::extraction")
+                .in_scope(|| {
+                    super::extraction::build_extraction(
+                        &item.query,
+                        item.expected_intensity.clone(),
+                        &self.index,
+                        &self.broad_tolerance,
+                        Some(TOP_N_FRAGMENTS),
+                    )
+                    .ok()
+                })
+        )?;
 
-        let scoring_ctx = scoring_ctx?;
         if scoring_ctx
             .expected_intensities
             .fragment_intensities
@@ -745,13 +741,13 @@ impl<I: ScorerQueriable> Scorer<I> {
             return None;
         }
 
-        let st = Instant::now();
-        let result = tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
-            buffer
-                .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                .ok()
-        });
-        timings.scoring += st.elapsed();
+        let result = timed!(timings.scoring,
+            tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
+                buffer
+                    .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
+                    .ok()
+            })
+        );
 
         if result.is_some() {
             timings.n_scored += 1;
