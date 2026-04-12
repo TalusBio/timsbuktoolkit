@@ -5,6 +5,7 @@
 
 use super::results::ScoredCandidate;
 use super::timings::ScoreTimings;
+#[cfg(feature = "rayon")]
 use rayon::iter::{
     FromParallelIterator,
     IntoParallelIterator,
@@ -63,6 +64,7 @@ impl FromIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumula
     }
 }
 
+#[cfg(feature = "rayon")]
 impl FromParallelIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumulator {
     fn from_par_iter<I>(par_iter: I) -> Self
     where

@@ -26,12 +26,12 @@ rusqlite = {workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-rayon = { workspace = true }
+rayon = { workspace = true, optional = true }
 parquet = { workspace = true }
 arrow = { workspace = true }
 
 [features]
+default = ["rayon"]
 instrumentation = []
-serial_scoring = []
 
 [lib]

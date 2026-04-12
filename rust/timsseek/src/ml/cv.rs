@@ -18,7 +18,6 @@ pub use forust_ml::{
     GradientBooster,
     Matrix,
 };
-pub use rayon::prelude::*;
 pub use std::collections::HashSet;
 
 pub struct GBMConfig {

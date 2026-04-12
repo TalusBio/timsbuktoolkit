@@ -59,6 +59,43 @@ impl std::ops::AddAssign for ScoreTimings {
     }
 }
 
+/// Timing breakdown for Phase 1 prescore.
+#[derive(Debug, Default)]
+pub struct PrescoreTimings {
+    /// Time spent building extractions (chromatogram collection).
+    pub extraction: Duration,
+    /// Time spent in apex scoring (find_apex_location).
+    pub scoring: Duration,
+    /// Number of items that passed the fragmented_range filter.
+    pub n_passed_filter: usize,
+    /// Number of items where prescore returned Some (successful apex).
+    pub n_scored: usize,
+}
+
+impl Serialize for PrescoreTimings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PrescoreTimings", 4)?;
+        state.serialize_field("extraction_thread_ms", &self.extraction.as_millis())?;
+        state.serialize_field("scoring_thread_ms", &self.scoring.as_millis())?;
+        state.serialize_field("n_passed_filter", &self.n_passed_filter)?;
+        state.serialize_field("n_scored", &self.n_scored)?;
+        state.end()
+    }
+}
+
+impl std::ops::AddAssign for PrescoreTimings {
+    fn add_assign(&mut self, rhs: Self) {
+        self.extraction += rhs.extraction;
+        self.scoring += rhs.scoring;
+        self.n_passed_filter += rhs.n_passed_filter;
+        self.n_scored += rhs.n_scored;
+    }
+}
+
 /// Full pipeline report: per-phase timings and result-quality metrics.
 /// All timing fields are in milliseconds.
 #[derive(Debug, Default, Serialize)]
@@ -68,11 +105,12 @@ pub struct PipelineReport {
 
     // Phase timings (all in ms)
     pub phase1_prescore_ms: u64,
+    pub phase1_detail: PrescoreTimings,
     pub phase2_calibration_ms: u64,
-    pub phase3_extraction_ms: u64,
-    pub phase3_scoring_ms: u64,
-    pub phase3_spectral_query_ms: u64,
-    pub phase3_assembly_ms: u64,
+    pub phase3_extraction_thread_ms: u64,
+    pub phase3_scoring_thread_ms: u64,
+    pub phase3_spectral_query_thread_ms: u64,
+    pub phase3_assembly_thread_ms: u64,
     pub phase4_competition_ms: u64,
     pub phase5_rescore_ms: u64,
     pub phase6_output_ms: u64,

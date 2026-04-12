@@ -9,6 +9,7 @@ use super::{
     TargetDecoy,
 };
 use rand::prelude::*;
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -94,7 +95,10 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
 
     let mut scored = scorer.score();
     // Sort by score descending
+    #[cfg(feature = "rayon")]
     scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    #[cfg(not(feature = "rayon"))]
+    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
     assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
     debug!("Best:\n{:#?}", scored.first());
     debug!("Worst:\n{:#?}", scored.last());

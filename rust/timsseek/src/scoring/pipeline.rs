@@ -26,6 +26,7 @@ use crate::{
     QueryItemToScore,
     ScorerQueriable,
 };
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 use std::time::Instant;
 use timscentroid::rt_mapping::{
@@ -676,7 +677,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             self.fragmented_range.intersects(lims)
         };
 
-        #[cfg(not(feature = "serial_scoring"))]
+        #[cfg(feature = "rayon")]
         let results: IonSearchAccumulator = {
             items_to_score
                 .par_iter()
@@ -690,13 +691,14 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .collect()
         };
 
-        #[cfg(feature = "serial_scoring")]
+        #[cfg(not(feature = "rayon"))]
         let results: IonSearchAccumulator = {
             let mut scorer = init_fn();
             items_to_score
                 .iter()
                 .filter(filter_fn)
                 .map(|item| {
+                    let _span = tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     let result =
                         self.score_calibrated_extraction(item, calibration, &mut scorer, &mut t);
@@ -718,7 +720,9 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: &QueryItemToScore,
         buffer: &mut TraceScorer,
+        timings: &mut super::timings::PrescoreTimings,
     ) -> Option<ApexLocation> {
+        let st = Instant::now();
         let scoring_ctx = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
             .in_scope(|| {
                 super::extraction::build_extraction(
@@ -729,8 +733,10 @@ impl<I: ScorerQueriable> Scorer<I> {
                     Some(TOP_N_FRAGMENTS),
                 )
                 .ok()
-            })?;
+            });
+        timings.extraction += st.elapsed();
 
+        let scoring_ctx = scoring_ctx?;
         if scoring_ctx
             .expected_intensities
             .fragment_intensities
@@ -739,11 +745,18 @@ impl<I: ScorerQueriable> Scorer<I> {
             return None;
         }
 
-        tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
+        let st = Instant::now();
+        let result = tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
             buffer
                 .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
                 .ok()
-        })
+        });
+        timings.scoring += st.elapsed();
+
+        if result.is_some() {
+            timings.n_scored += 1;
+        }
+        result
     }
 
     /// Phase 1 batch: Prescore all peptides, collecting top-N calibrant candidates via bounded heaps.
@@ -756,6 +769,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         items_to_score: &[QueryItemToScore],
         speclib_offset: usize,
         config: &CalibrationConfig,
+        timings: &mut super::timings::PrescoreTimings,
     ) -> CalibrantHeap {
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
@@ -763,17 +777,22 @@ impl<I: ScorerQueriable> Scorer<I> {
             self.fragmented_range.intersects(lims)
         };
 
-        #[cfg(not(feature = "serial_scoring"))]
-        let heap: CalibrantHeap = {
-            let init_fn =
-                || (TraceScorer::new(self.num_cycles()), CalibrantHeap::new(config.n_calibrants));
+        #[cfg(feature = "rayon")]
+        let (heap, par_timings): (CalibrantHeap, super::timings::PrescoreTimings) = {
+            use super::timings::PrescoreTimings;
+            let init_fn = || (
+                TraceScorer::new(self.num_cycles()),
+                CalibrantHeap::new(config.n_calibrants),
+                PrescoreTimings::default(),
+            );
 
             items_to_score
                 .par_iter()
                 .enumerate()
                 .filter(|(_, x)| filter_fn(x))
-                .fold(init_fn, |(mut scorer, mut heap), (chunk_idx, item)| {
-                    if let Some(loc) = self.prescore(item, &mut scorer) {
+                .fold(init_fn, |(mut scorer, mut heap, mut t), (chunk_idx, item)| {
+                    t.n_passed_filter += 1;
+                    if let Some(loc) = self.prescore(item, &mut scorer, &mut t) {
                         heap.push(CalibrantCandidate {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
@@ -781,22 +800,27 @@ impl<I: ScorerQueriable> Scorer<I> {
                             library_rt: LibraryRT(item.query.rt_seconds()),
                         });
                     }
-                    (scorer, heap)
+                    (scorer, heap, t)
                 })
-                .map(|(_, heap)| heap)
+                .map(|(_, heap, t)| (heap, t))
                 .reduce(
-                    || CalibrantHeap::new(config.n_calibrants),
-                    |a, b| a.merge(b),
+                    || (CalibrantHeap::new(config.n_calibrants), PrescoreTimings::default()),
+                    |(a_heap, mut a_t), (b_heap, b_t)| { a_t += b_t; (a_heap.merge(b_heap), a_t) },
                 )
         };
+        #[cfg(feature = "rayon")]
+        { *timings += par_timings; }
 
-        #[cfg(feature = "serial_scoring")]
+        #[cfg(not(feature = "rayon"))]
         let heap: CalibrantHeap = {
             let mut scorer = TraceScorer::new(self.num_cycles());
             let mut heap = CalibrantHeap::new(config.n_calibrants);
-            for (chunk_idx, item) in items_to_score.iter().enumerate().filter(|(_, x)| filter_fn(x))
-            {
-                if let Some(loc) = self.prescore(item, &mut scorer) {
+            for (chunk_idx, item) in items_to_score.iter().enumerate() {
+                if !filter_fn(&item) {
+                    continue;
+                }
+                timings.n_passed_filter += 1;
+                if let Some(loc) = self.prescore(item, &mut scorer, timings) {
                     heap.push(CalibrantCandidate {
                         score: loc.score,
                         apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
