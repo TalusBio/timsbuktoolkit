@@ -5,7 +5,7 @@ use indicatif::{
     ProgressStyle,
 };
 use std::io::IsTerminal;
-use std::time::Instant;
+use timsseek::scoring::timings::TimedStep;
 use timsquery::IndexedTimstofPeaks;
 use timsquery::MzMobilityStatsCollector;
 use timsquery::SpectralCollector;
@@ -144,22 +144,15 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     } else {
         info!("Phase 1: Broad prescore (unrestricted RT)...");
     }
-    let phase1_start = Instant::now();
+    let step = TimedStep::begin("Phase 1: Prescore");
     let (calibrants, phase1_timings) = phase1_prescore(phase1_lib, pipeline, chunk_size, &calib_config);
-    let phase1_ms = phase1_start.elapsed().as_millis() as u64;
+    let phase1_ms = step.finish_with(format_args!("{} calibrants", calibrants.len())).as_millis() as u64;
     info!(
-        "Phase 1 complete: {} calibrant candidates in {}ms (extraction: {}ms, scoring: {}ms, {} passed filter, {} scored)",
-        calibrants.len(),
-        phase1_ms,
-        phase1_timings.extraction.as_millis(),
-        phase1_timings.scoring.as_millis(),
+        "Phase 1 detail: extraction {:?}, scoring {:?}, {} passed filter, {} scored",
+        phase1_timings.extraction,
+        phase1_timings.scoring,
         phase1_timings.n_passed_filter,
         phase1_timings.n_scored,
-    );
-    println!(
-        "Phase 1: Prescore ........ {:.1}s ({} calibrants)",
-        phase1_ms as f64 / 1000.0,
-        calibrants.len()
     );
 
     // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
@@ -200,7 +193,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         .collect();
 
     info!("Phase 2: Calibration...");
-    let phase2_start = Instant::now();
+    let step = TimedStep::begin("Phase 2: Calibrate");
     let calibration = match calibrate_from_phase1(
         calibrants,
         phase1_lib,
@@ -217,14 +210,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             CalibrationResult::fallback(pipeline)
         }
     };
-    let phase2_ms = phase2_start.elapsed().as_millis() as u64;
-    println!(
-        "Phase 2: Calibrate ....... {:.1}s ({} calibrants → {} path nodes)",
-        phase2_ms as f64 / 1000.0,
+    let phase2_ms = step.finish_with(format_args!(
+        "{} calibrants → {} path nodes",
         calibrant_points.len(),
-        // Path nodes info from the calibration log (already printed by calibrt)
         calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
-    );
+    )).as_millis() as u64;
     // Print tolerance summary
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
@@ -265,7 +255,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
-    let phase3_start = Instant::now();
+    let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
     let results = phase3_score(
         &speclib,
@@ -274,43 +264,24 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         chunk_size,
         &mut phase3_timings,
     );
-    let phase3_ms = phase3_start.elapsed().as_millis() as u64;
-    info!(
-        "Phase 3 complete: {} scored peptides in {:?}",
-        results.len(),
-        phase3_start.elapsed()
-    );
-    println!(
-        "Phase 3: Score ........... {:.1}s ({} peptides)",
-        phase3_ms as f64 / 1000.0,
-        results.len()
-    );
+    step.finish_with(format_args!("{} peptides", results.len()));
 
     let total_scored = results.len();
 
     // === PHASE 4: Target-decoy competition ===
-    let phase4_start = Instant::now();
+    let step = TimedStep::begin("Phase 4: Compete");
     let mut competed = target_decoy_compete(results);
     competed.sort_unstable_by(|x, y| {
         y.scoring.main_score.partial_cmp(&x.scoring.main_score)
             .expect("NaN main_score should have been filtered during Phase 3 scoring")
     });
-    let phase4_ms = phase4_start.elapsed().as_millis() as u64;
     let total_after_competition = competed.len();
-    println!(
-        "Phase 4: Compete ......... {:.1}s ({} candidates)",
-        phase4_ms as f64 / 1000.0,
-        total_after_competition
-    );
+    let phase4_ms = step.finish_with(format_args!("{} candidates", total_after_competition)).as_millis() as u64;
 
     // === PHASE 5: Rescore ===
-    let phase5_start = Instant::now();
+    let step = TimedStep::begin("Phase 5: Rescore");
     let data = rescore(competed);
-    let phase5_ms = phase5_start.elapsed().as_millis() as u64;
-    println!(
-        "Phase 5: Rescore ......... {:.1}s",
-        phase5_ms as f64 / 1000.0
-    );
+    let phase5_ms = step.finish().as_millis() as u64;
 
     // Collect q-value threshold counts — full report to log, key result to stdout
     let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
@@ -332,7 +303,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     }
 
     // === PHASE 6: Write Parquet output ===
-    let phase6_start = Instant::now();
+    let step = TimedStep::begin("Phase 6: Write output");
     let out_path_pq = out_path.directory.join("results.parquet");
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
@@ -354,12 +325,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         path: out_path_pq.clone().into(),
         source: e,
     })?;
-    let phase6_ms = phase6_start.elapsed().as_millis() as u64;
+    let phase6_ms = step.finish().as_millis() as u64;
     info!("Wrote final results to {:?}", out_path_pq);
-    println!(
-        "Phase 6: Write output .... {:.1}s",
-        phase6_ms as f64 / 1000.0
-    );
 
     // Key result to stdout
     println!();
