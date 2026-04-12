@@ -47,7 +47,6 @@ use super::apex_finding::{
     TraceScorer,
     ApexLocation,
     ApexScore,
-    PeptideMetadata,
     RelativeIntensities,
 };
 use super::full_results::ViewerResult;
@@ -719,11 +718,17 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: &QueryItemToScore,
         buffer: &mut TraceScorer,
-    ) -> Option<(ApexLocation, PeptideMetadata)> {
-        let (metadata, scoring_ctx) = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
-            .in_scope(|| match self.build_broad_extraction(item) {
-                Ok(result) => Some(result),
-                Err(SkippingReason::RetentionTimeOutOfBounds) => None,
+    ) -> Option<ApexLocation> {
+        let scoring_ctx = tracing::span!(tracing::Level::TRACE, "prescore::extraction")
+            .in_scope(|| {
+                super::extraction::build_extraction(
+                    &item.query,
+                    item.expected_intensity.clone(),
+                    &self.index,
+                    &self.broad_tolerance,
+                    Some(TOP_N_FRAGMENTS),
+                )
+                .ok()
             })?;
 
         if scoring_ctx
@@ -734,14 +739,11 @@ impl<I: ScorerQueriable> Scorer<I> {
             return None;
         }
 
-        let apex_location =
-            tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
-                buffer
-                    .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                    .ok()
-            })?;
-
-        Some((apex_location, metadata))
+        tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
+            buffer
+                .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
+                .ok()
+        })
     }
 
     /// Phase 1 batch: Prescore all peptides, collecting top-N calibrant candidates via bounded heaps.
@@ -771,7 +773,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .enumerate()
                 .filter(|(_, x)| filter_fn(x))
                 .fold(init_fn, |(mut scorer, mut heap), (chunk_idx, item)| {
-                    if let Some((loc, _meta)) = self.prescore(item, &mut scorer) {
+                    if let Some(loc) = self.prescore(item, &mut scorer) {
                         heap.push(CalibrantCandidate {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
@@ -794,7 +796,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             let mut heap = CalibrantHeap::new(config.n_calibrants);
             for (chunk_idx, item) in items_to_score.iter().enumerate().filter(|(_, x)| filter_fn(x))
             {
-                if let Some((loc, _meta)) = self.prescore(item, &mut scorer) {
+                if let Some(loc) = self.prescore(item, &mut scorer) {
                     heap.push(CalibrantCandidate {
                         score: loc.score,
                         apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
