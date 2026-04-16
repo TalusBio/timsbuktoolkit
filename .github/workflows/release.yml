@@ -11,7 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer
+  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer speclib_build
 
 jobs:
   build-and-release:
