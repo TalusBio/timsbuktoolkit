@@ -10,6 +10,7 @@ members = [
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
+    "rust/speclib_build_cli",
     "python/timsquery_pyo3"
 ]
 default-members = [
@@ -21,7 +22,8 @@ default-members = [
     "rust/timsseek_cli",
     "rust/timsquery",
     "rust/timsquery_cli",
-    "rust/timsquery_viewer"
+    "rust/timsquery_viewer",
+    "rust/speclib_build_cli"
 ]
 
 [workspace.package]
