@@ -4,7 +4,6 @@ version = "0.27.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "jupyter[python]>=1.1.1",
-    "speclib_builder[ml]",
 ]
 
 [dependency-groups]
@@ -24,14 +23,6 @@ interactive = [
   "vizta",
 ]
 
-[tool.uv.sources]
-speclib_builder = { workspace = true }
-
-[tool.uv.workspace]
-members = [
-  "python/speclib_builder",
-]
-
 [tool.ruff]
 target-version = "py312"
 
@@ -41,11 +32,6 @@ preview = true
 
 [tool.ruff.lint]
 select = ["E", "F", "T20", "I"]
-
-[tool.hatch.build.targets.wheel]
-packages = [
-  "python/speclib_builder",
-]
 
 [tool.bumpver]
 current_version = "0.27.0"
