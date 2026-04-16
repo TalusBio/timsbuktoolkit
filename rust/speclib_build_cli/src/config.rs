@@ -150,6 +150,8 @@ pub struct PredictionConfig {
     pub batch_size: usize,
     /// Normalised collision energy sent to the Koina model (0.0–1.0).
     pub nce: f32,
+    /// Delay in milliseconds between Koina request batches (0 = no delay).
+    pub request_delay_ms: u64,
 }
 
 impl Default for PredictionConfig {
@@ -160,6 +162,7 @@ impl Default for PredictionConfig {
             koina_url: default_koina_url(),
             batch_size: default_batch_size(),
             nce: default_nce(),
+            request_delay_ms: 0,
         }
     }
 }
@@ -299,6 +302,9 @@ impl SpeclibBuildConfig {
         }
         if let Some(v) = cli.nce {
             cfg.prediction.nce = v;
+        }
+        if let Some(v) = cli.request_delay_ms {
+            cfg.prediction.request_delay_ms = v;
         }
 
         // ── Filters ──

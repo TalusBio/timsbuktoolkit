@@ -61,6 +61,10 @@ batch_size = 1000
 # Normalised collision energy forwarded to the fragment model (0.0 – 1.0).
 nce = 0.3
 
+# Delay in milliseconds between Koina request batches (0 = no delay).
+# Useful to avoid rate-limiting on the public Koina server.
+request_delay_ms = 0
+
 # ── Filters ───────────────────────────────────────────────────────────────────
 [filters]
 # Maximum number of fragment ions retained per precursor (highest intensity first).

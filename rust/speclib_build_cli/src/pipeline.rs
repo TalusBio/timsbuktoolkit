@@ -172,6 +172,11 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
     let nce = config.prediction.nce;
     let batch_size = config.prediction.batch_size;
+    let request_delay = if config.prediction.request_delay_ms > 0 {
+        Some(std::time::Duration::from_millis(config.prediction.request_delay_ms))
+    } else {
+        None
+    };
     let charges: Vec<u8> = (config.charges.min..=config.charges.max).collect();
     let max_var_mods = config.modifications.max_variable;
 
@@ -246,6 +251,9 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                         &progress,
                     )
                     .await?;
+                    if let Some(delay) = request_delay {
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
         }

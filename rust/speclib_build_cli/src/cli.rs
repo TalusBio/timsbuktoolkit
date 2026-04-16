@@ -85,6 +85,10 @@ pub struct Cli {
     #[arg(long)]
     pub nce: Option<f32>,
 
+    /// Delay in milliseconds between Koina request batches (rate-limit friendly).
+    #[arg(long)]
+    pub request_delay_ms: Option<u64>,
+
     // ── Fragment filters ───────────────────────────────────────────────────
     /// Maximum number of fragment ions retained per precursor.
     #[arg(long)]
