@@ -4,24 +4,30 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FragmentModel {
+    Prosit2023IntensityTimstof,
     Prosit2020IntensityHcd,
+    Prosit2020IntensityCid,
     AlphaPeptDeepMs2Generic,
 }
 
 impl FragmentModel {
     pub fn from_name(name: &str) -> Result<Self, String> {
         match name {
+            "Prosit_2023_intensity_timsTOF" => Ok(Self::Prosit2023IntensityTimstof),
             "Prosit_2020_intensity_HCD" => Ok(Self::Prosit2020IntensityHcd),
+            "Prosit_2020_intensity_CID" => Ok(Self::Prosit2020IntensityCid),
             "AlphaPeptDeep_ms2_generic" => Ok(Self::AlphaPeptDeepMs2Generic),
             other => Err(format!(
-                "unknown fragment model {other:?}; valid: Prosit_2020_intensity_HCD, AlphaPeptDeep_ms2_generic"
+                "unknown fragment model {other:?}; valid: Prosit_2023_intensity_timsTOF, Prosit_2020_intensity_HCD, Prosit_2020_intensity_CID, AlphaPeptDeep_ms2_generic"
             )),
         }
     }
 
     pub fn model_name(&self) -> &str {
         match self {
+            Self::Prosit2023IntensityTimstof => "Prosit_2023_intensity_timsTOF",
             Self::Prosit2020IntensityHcd => "Prosit_2020_intensity_HCD",
+            Self::Prosit2020IntensityCid => "Prosit_2020_intensity_CID",
             Self::AlphaPeptDeepMs2Generic => "AlphaPeptDeep_ms2_generic",
         }
     }

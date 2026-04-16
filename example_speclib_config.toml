@@ -49,7 +49,7 @@ strategy = "none"
 # ── Prediction ────────────────────────────────────────────────────────────────
 [prediction]
 # Koina model names for fragment intensities and retention time.
-fragment_model = "Prosit_2020_intensity_HCD"
+fragment_model = "Prosit_2023_intensity_timsTOF"
 rt_model = "Prosit_2019_irt"
 
 # Base URL for the Koina inference service (no trailing slash).
