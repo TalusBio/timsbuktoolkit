@@ -9,6 +9,11 @@ use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
 };
+pub use super::skyline_io::SkylinePrecursorExtras;
+use super::skyline_io::{
+    read_library_file as read_skyline_csv,
+    sniff_skyline_library_file,
+};
 pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::spectronaut_io::{
     read_library_file as read_spectronaut_tsv,
@@ -46,6 +51,7 @@ impl From<ElutionGroupInputError> for LibraryReadingError {
 pub enum FileReadingExtras {
     Diann(Vec<DiannPrecursorExtras>),
     Spectronaut(Vec<SpectronautPrecursorExtras>),
+    Skyline(Vec<SkylinePrecursorExtras>),
 }
 
 #[derive(Debug)]
@@ -194,6 +200,31 @@ impl ElutionGroupCollection {
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
 
+    fn try_read_skyline(path: &Path) -> Result<Self, LibraryReadingError> {
+        match sniff_skyline_library_file(path) {
+            Ok(()) => {
+                info!("Detected Skyline transition list CSV");
+                let egs = match read_skyline_csv(path) {
+                    Ok(egs) => egs,
+                    Err(e) => {
+                        warn!("Failed to read Skyline transition list: {:?}", e);
+                        return Err(LibraryReadingError::UnableToParseElutionGroups);
+                    }
+                };
+                let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+                info!("Successfully read Skyline transition list");
+                Ok(ElutionGroupCollection::MzpafLabels(
+                    egs,
+                    Some(FileReadingExtras::Skyline(extras)),
+                ))
+            }
+            Err(e) => {
+                debug!("File is not Skyline format: {:?}", e);
+                Err(LibraryReadingError::UnableToParseElutionGroups)
+            }
+        }
+    }
+
     fn try_read_spectronaut(path: &Path) -> Result<Self, LibraryReadingError> {
         match sniff_spectronaut_library_file(path) {
             Ok(()) => {
@@ -232,6 +263,12 @@ pub fn read_library_file<T: AsRef<Path>>(
     // Try Spectronaut next
     let spectronaut_attempt = ElutionGroupCollection::try_read_spectronaut(path.as_ref());
     if let Ok(egs) = spectronaut_attempt {
+        return Ok(egs);
+    }
+
+    // Try Skyline transition list (CSV)
+    let skyline_attempt = ElutionGroupCollection::try_read_skyline(path.as_ref());
+    if let Ok(egs) = skyline_attempt {
         return Ok(egs);
     }
 

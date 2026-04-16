@@ -29,6 +29,7 @@ use timsquery::serde::{
     DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
+    SkylinePrecursorExtras,
     read_library_file as read_timsquery_library,
 };
 
@@ -339,6 +340,19 @@ fn create_mass_shifted_decoy(
     })
 }
 
+/// `SkylinePrecursorExtras` is structurally identical to `DiannPrecursorExtras`
+/// (peptide + protein + decoy flag + fragment intensity pairs), so we adapt it
+/// into the DIA-NN shape and reuse `convert_diann_to_query_item`.
+fn skyline_to_diann_extras(sky: SkylinePrecursorExtras) -> DiannPrecursorExtras {
+    DiannPrecursorExtras {
+        modified_peptide: sky.modified_peptide,
+        stripped_peptide: sky.stripped_peptide,
+        protein_id: sky.protein_id,
+        is_decoy: sky.is_decoy,
+        relative_intensities: sky.relative_intensities,
+    }
+}
+
 /// Convert an ElutionGroupCollection from timsquery to a Speclib (without applying strategy)
 fn convert_elution_group_collection(
     collection: ElutionGroupCollection,
@@ -373,6 +387,35 @@ fn convert_elution_group_collection(
 
             Ok(Speclib { elems })
         }
+        ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Skyline(extras))) => {
+            if egs.len() != extras.len() {
+                return Err(LibraryReadingError::UnsupportedFormat {
+                    message: format!(
+                        "Mismatch between Skyline elution groups ({}) and extras ({})",
+                        egs.len(),
+                        extras.len()
+                    ),
+                });
+            }
+
+            tracing::info!(
+                "Converting {} Skyline transition-list entries to Speclib format",
+                egs.len()
+            );
+
+            let elems: Vec<_> = egs
+                .into_iter()
+                .zip(extras)
+                .enumerate()
+                .map(|(idx, (eg, sky_extra))| {
+                    let decoy_group = idx as u32;
+                    let diann_extra = skyline_to_diann_extras(sky_extra);
+                    convert_diann_to_query_item(eg, diann_extra, decoy_group)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(Speclib { elems })
+        }
         ElutionGroupCollection::MzpafLabels(_, None) => {
             Err(LibraryReadingError::UnsupportedFormat {
                 message: "MzpafLabels variant without DiannPrecursorExtras is not supported"
@@ -382,7 +425,7 @@ fn convert_elution_group_collection(
         _ => {
             tracing::warn!("Unsupported ElutionGroupCollection variant for timsseek");
             Err(LibraryReadingError::UnsupportedFormat {
-                message: "Only DIA-NN TSV/Parquet libraries are currently supported via timsquery"
+                message: "Only DIA-NN TSV/Parquet and Skyline CSV libraries are currently supported via timsquery"
                     .to_string(),
             })
         }
@@ -993,6 +1036,47 @@ mod tests {
                 .contains_key(&2),
             "Should have intensity for isotope 2"
         );
+    }
+
+    #[test]
+    fn test_load_skyline_csv_library() {
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("skyline_io_files")
+            .join("sample_transition_list.csv");
+
+        assert!(
+            test_file.exists(),
+            "Test file should exist at {:?}",
+            test_file
+        );
+
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load Skyline CSV library");
+
+        // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
+        assert_eq!(speclib.len(), 42, "Expected 42 entries (14 targets + 28 decoys)");
+
+        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
+        assert_eq!(n_targets, 14, "Should have 14 targets");
+        assert_eq!(n_decoys, 28, "Should have 28 decoys");
+
+        // Isotope envelope should have been attached (3 isotopes) for every target
+        for entry in speclib.elems.iter().filter(|e| !e.digest.is_decoy()) {
+            assert_eq!(
+                entry.query.iter_precursors().count(),
+                3,
+                "Each target should have 3 isotopes in precursor envelope"
+            );
+            assert!(
+                entry.query.fragment_count() > 0,
+                "Each target should have at least one fragment"
+            );
+        }
     }
 
     #[test]
