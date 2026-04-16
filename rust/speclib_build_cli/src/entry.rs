@@ -39,10 +39,19 @@ pub fn strip_mods(seq: &str) -> String {
     out
 }
 
+/// Convert our short mod notation to ProForma for rustyms.
+/// `C[U:4]` → `C[UNIMOD:4]`, mass-shift mods like `[+57.02]` pass through.
+/// Note: rustyms parses `[U:N]` as element Uranium, not UNIMOD — must expand.
+fn to_proforma(seq: &str) -> String {
+    seq.replace("[U:", "[UNIMOD:")
+}
+
 /// Compute the monoisotopic precursor m/z using rustyms.
-fn compute_precursor_mz(stripped_seq: &str, charge: u8) -> Option<f64> {
+/// Input should be the modified sequence (mods included in mass).
+fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
     use rustyms::prelude::*;
-    let peptide = Peptidoform::pro_forma(stripped_seq, None).ok()?;
+    let proforma = to_proforma(modified_seq);
+    let peptide = Peptidoform::pro_forma(&proforma, None).ok()?;
     let linear = peptide.as_linear()?;
     let formulas = linear.formulas();
     if formulas.is_empty() {
@@ -51,6 +60,12 @@ fn compute_precursor_mz(stripped_seq: &str, charge: u8) -> Option<f64> {
     let mass = formulas[0].monoisotopic_mass().value;
     let proton_mass = 1.007_276_f64;
     Some((mass + proton_mass * charge as f64) / charge as f64)
+}
+
+/// Count carbon and sulphur from modified sequence (mods affect formula).
+fn count_cs_modified(modified_seq: &str) -> Option<(u16, u16)> {
+    let proforma = to_proforma(modified_seq);
+    count_carbon_sulphur_in_sequence(&proforma).ok()
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -71,15 +86,12 @@ pub fn build_entry(
     rt: &RtPrediction,
     filters: &EntryFilters,
 ) -> Option<SerSpeclibElement> {
-    // 1. Strip modifications for formula-based computations.
-    let stripped = strip_mods(sequence);
-
-    // 2. Carbon / sulphur count → isotope distribution.
-    let (ncarbon, nsulphur) = count_carbon_sulphur_in_sequence(&stripped).ok()?;
+    // 1. Carbon / sulphur count from modified sequence (includes mod contributions).
+    let (ncarbon, nsulphur) = count_cs_modified(sequence)?;
     let iso = peptide_isotopes(ncarbon, nsulphur);
 
-    // 3. Precursor m/z.
-    let precursor_mz = compute_precursor_mz(&stripped, charge)?;
+    // 2. Precursor m/z from modified sequence (includes mod masses).
+    let precursor_mz = compute_precursor_mz(sequence, charge)?;
 
     // 4. Filter by precursor m/z range.
     if precursor_mz < filters.min_mz as f64 || precursor_mz > filters.max_mz as f64 {
@@ -199,6 +211,20 @@ mod tests {
         let mz = compute_precursor_mz("PEPTIDEK", 2).unwrap();
         assert!(mz > 400.0 && mz < 600.0, "Expected reasonable m/z, got {mz}");
     }
+
+    #[test]
+    fn test_precursor_mz_includes_mod_mass() {
+        // to_proforma converts [U:4] → [UNIMOD:4] before rustyms
+        let mz_unmod = compute_precursor_mz("PEPTCIDEK", 2).unwrap();
+        let mz_mod = compute_precursor_mz("PEPTC[U:4]IDEK", 2).unwrap();
+        let diff = mz_mod - mz_unmod;
+        // Cys carbamidomethyl = +57.02 Da, at charge 2 = +28.51 m/z
+        assert!(
+            (diff - 28.51).abs() < 0.1,
+            "Mod should add ~28.51 m/z at z=2, got diff={diff}"
+        );
+    }
+
 
     #[test]
     fn test_build_entry_basic() {
