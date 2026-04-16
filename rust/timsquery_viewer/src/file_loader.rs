@@ -258,6 +258,14 @@ impl ElutionGroupData {
                     is_decoy: se.is_decoy,
                 })
             }
+            FileReadingExtras::Skyline(skyline_extras) => {
+                let sky = skyline_extras.get(idx)?;
+                Some(LibraryExtrasView {
+                    modified_peptide: sky.modified_peptide.clone(),
+                    protein_id: sky.protein_id.clone(),
+                    is_decoy: sky.is_decoy,
+                })
+            }
         }
     }
 
@@ -352,6 +360,19 @@ impl ElutionGroupData {
                 Self::build_expected_intensities(
                     &se.stripped_peptide,
                     &se.relative_intensities,
+                    &mut eg,
+                )
+            }
+            Some(FileReadingExtras::Skyline(skyline_extras)) => {
+                let sky = skyline_extras
+                    .get(index)
+                    .ok_or(ViewerError::General(format!(
+                        "Skyline extras index {} out of bounds",
+                        index
+                    )))?;
+                Self::build_expected_intensities(
+                    &sky.stripped_peptide,
+                    &sky.relative_intensities,
                     &mut eg,
                 )
             }

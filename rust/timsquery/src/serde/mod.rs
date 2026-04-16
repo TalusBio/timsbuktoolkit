@@ -3,6 +3,7 @@ mod diann_io;
 mod elution_group_inputs;
 pub mod index_serde;
 mod library_file;
+mod skyline_io;
 mod spectronaut_io;
 
 pub use chromatogram_output::*;
@@ -12,6 +13,7 @@ pub use library_file::{
     ElutionGroupCollection,
     FileReadingExtras,
     LibraryReadingError,
+    SkylinePrecursorExtras,
     SpectronautPrecursorExtras,
     read_library_file,
 };
