@@ -82,7 +82,7 @@ impl Default for Tolerance {
     fn default() -> Self {
         Tolerance {
             ms: MzTolerance::Ppm((20.0, 20.0)),
-            rt: RtTolerance::Minutes((5.0, 5.0)),
+            rt: RtTolerance::Unrestricted,
             mobility: MobilityTolerance::Pct((3.0, 3.0)),
             quad: QuadTolerance::Absolute((0.1, 0.1)),
         }
