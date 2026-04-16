@@ -1,15 +1,6 @@
-mod cli;
-mod config;
-mod dedup;
-mod decoys;
-mod entry;
-mod koina;
-mod mods;
-mod pipeline;
-
 use clap::Parser;
-use cli::Cli;
-use config::SpeclibBuildConfig;
+use speclib_build_cli::cli::Cli;
+use speclib_build_cli::config::SpeclibBuildConfig;
 
 fn main() {
     let cli = Cli::parse();
@@ -35,7 +26,7 @@ fn main() {
     }
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    if let Err(e) = rt.block_on(pipeline::run(&config)) {
+    if let Err(e) = rt.block_on(speclib_build_cli::pipeline::run(&config)) {
         eprintln!("Pipeline error: {e}");
         std::process::exit(1);
     }

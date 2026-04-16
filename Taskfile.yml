@@ -48,3 +48,25 @@ tasks:
       - cross build --release --target x86_64-unknown-linux-gnu --bin timsseek
       - docker build --platform linux/amd64 -t timsseek:local .
 
+  speclib:build:
+    desc: Build spectral library from FASTA
+    cmds:
+      - cargo run --release -p speclib_build_cli -- {{.CLI_ARGS}}
+
+  speclib:local-koina:
+    desc: Start local Koina server (CPU, Docker)
+    cmds:
+      - |
+        docker run --rm -d \
+          --name koina-local \
+          --shm-size 8G \
+          -p 8500:8500 -p 8501:8501 -p 8502:8502 \
+          ghcr.io/wilhelm-lab/koina:latest
+      - echo "Koina running at http://localhost:8501/v2/models"
+      - echo "Use --koina-url http://localhost:8501/v2/models"
+
+  speclib:stop-koina:
+    desc: Stop local Koina server
+    cmds:
+      - docker stop koina-local
+
