@@ -1,0 +1,78 @@
+# example_speclib_config.toml
+#
+# Reference configuration for speclib_build.
+# CLI flags override any value set here.
+# All fields are optional — omit a section or key to use the compiled-in default.
+
+# ── Output ────────────────────────────────────────────────────────────────────
+# Path for the output spectral library (msgpack + zstd).
+output = "library.msgpack.zst"
+
+# ── Digestion ─────────────────────────────────────────────────────────────────
+[digestion]
+# Proteolytic enzyme. Currently only "trypsin" is supported.
+enzyme = "trypsin"
+
+# Peptide length range (number of amino acids, inclusive).
+min_length = 7
+max_length = 25
+
+# Maximum number of missed cleavage sites allowed per peptide.
+missed_cleavages = 1
+
+# ── Modifications ─────────────────────────────────────────────────────────────
+[modifications]
+# Fixed modifications applied to every matching residue.
+# Format: "ModName@Residue"  (ProForma-style notation)
+fixed = ["Carbamidomethyl@C"]
+
+# Variable modifications; combinations up to max_variable are generated.
+variable = ["Oxidation@M"]
+
+# Maximum number of variable modifications per peptide sequence.
+max_variable = 2
+
+# ── Charges ───────────────────────────────────────────────────────────────────
+[charges]
+# Precursor charge range (inclusive).
+min = 2
+max = 4
+
+# ── Decoys ────────────────────────────────────────────────────────────────────
+[decoys]
+# Decoy generation strategy.
+#   none         — no decoys (target-only library)
+#   reverse      — reverse the amino-acid sequence
+#   edge_mutate  — mutate N- and C-terminal residues
+strategy = "none"
+
+# ── Prediction ────────────────────────────────────────────────────────────────
+[prediction]
+# Koina model names for fragment intensities and retention time.
+fragment_model = "Prosit_2020_intensity_HCD"
+rt_model = "Prosit_2019_irt"
+
+# Base URL for the Koina inference service (no trailing slash).
+koina_url = "https://koina.wilhelmlab.org/v2/models"
+
+# Number of peptides sent to Koina per HTTP request.
+batch_size = 1000
+
+# Normalised collision energy forwarded to the fragment model (0.0 – 1.0).
+nce = 0.3
+
+# ── Filters ───────────────────────────────────────────────────────────────────
+[filters]
+# Maximum number of fragment ions retained per precursor (highest intensity first).
+max_ions = 10
+
+# Precursor m/z window.
+min_mz = 400.0
+max_mz = 2000.0
+
+# Fragment ion m/z window; ions outside this range are discarded.
+min_ion_mz = 250.0
+max_ion_mz = 2000.0
+
+# Precursors with fewer surviving fragment ions than this are dropped.
+min_ions = 3
