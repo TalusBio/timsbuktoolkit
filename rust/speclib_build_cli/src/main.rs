@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod dedup;
 mod decoys;
+mod entry;
 mod koina;
 mod mods;
 
