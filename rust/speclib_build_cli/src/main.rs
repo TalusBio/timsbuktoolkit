@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod dedup;
 mod decoys;
+mod koina;
 mod mods;
 
 use clap::Parser;
