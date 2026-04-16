@@ -30,7 +30,7 @@ fn default_decoy_strategy() -> String {
     "none".to_string()
 }
 fn default_fragment_model() -> String {
-    "Prosit_2020_intensity_HCD".to_string()
+    "Prosit_2023_intensity_timsTOF".to_string()
 }
 fn default_rt_model() -> String {
     "Prosit_2019_irt".to_string()
