@@ -37,19 +37,20 @@ class TimsseekRunner:
 
         logger.info("Building speclib")
         args = [
-            "uv",
+            "cargo",
             "run",
-            "speclib_build_fasta",
-            "--fasta_file",
+            "--release",
+            "-p",
+            "speclib_build_cli",
+            "--",
+            "--fasta",
             str(self.fasta_file_location),
-            "--decoy_strategy",
-            "REVERSE",
-            "--max_ions",
+            "--fixed-mod",
+            "C[U:4]",
+            "--max-ions",
             "10",
-            "--outfile",
+            "-o",
             str(self.speclib_location),
-            "--model",
-            "onnx",
         ]
         res = subprocess.run(args, check=True)
         return res

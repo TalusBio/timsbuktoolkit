@@ -78,15 +78,13 @@ cat << EOF > config_use.json
 }
 EOF
 
-# Build the spectral lib
-# Rn the models for RT+mobility are pretty rudimentary and
-# hard-coded for a 22 min gradient, we can improve them in the future.
-uv run speclib_build_fasta \
-    --fasta_file $FASTA_FILE \
-    --decoy_strategy REVERSE \
-    --max_ions 10 \
-    --outfile $SPECLIB_NAME \
-    --model onnx
+# Build the spectral lib using Koina (Prosit) for fragment/RT prediction.
+# Requires network access to https://koina.wilhelmlab.org or a local Koina server.
+cargo run --release -p speclib_build_cli -- \
+    --fasta $FASTA_FILE \
+    --fixed-mod "C[U:4]" \
+    --max-ions 10 \
+    -o $SPECLIB_NAME
 
 # Run timsseek using the generated speclib + config
 cargo run --release --bin timsseek -- \

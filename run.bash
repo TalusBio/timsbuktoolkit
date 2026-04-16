@@ -64,12 +64,11 @@ if [ -f "$SPECLIB_NAME" ]; then
 else
     echo "Building speclib"
     sleep 2
-    uv run speclib_build_fasta \
-        --fasta_file $FASTA_FILE \
-        --decoy_strategy REVERSE \
-        --max_ions 10 \
-        --outfile $SPECLIB_NAME \
-        --model onnx
+    cargo run --release -p speclib_build_cli -- \
+        --fasta $FASTA_FILE \
+        --fixed-mod "C[U:4]" \
+        --max-ions 10 \
+        -o $SPECLIB_NAME
 fi
 
 cargo run --release --bin timsseek -- \
