@@ -96,6 +96,16 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
             max_missed_cleavages: config.digestion.missed_cleavages,
         };
 
+        // Warn about proteins containing non-standard amino acids
+        for prot in &collection.sequences {
+            if prot.sequence.chars().any(|c| matches!(c, 'U' | 'B' | 'J' | 'Z' | 'X')) {
+                tracing::warn!(
+                    "Protein {} contains non-standard amino acids (U/B/J/Z/X) — affected peptides will be skipped",
+                    prot.description,
+                );
+            }
+        }
+
         let protein_seqs: Vec<std::sync::Arc<str>> = collection
             .sequences
             .iter()
@@ -106,6 +116,10 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
         let estimated = PeptideDedup::estimate_from_proteins(total_aa, config.digestion.missed_cleavages);
         let deduped = PeptideDedup::dedup(raw, estimated);
+        let (deduped, skipped) = filter_nonstandard_aa(deduped);
+        if skipped > 0 {
+            tracing::warn!("Skipped {skipped} peptides containing non-standard amino acids");
+        }
         tracing::info!("Deduplicated to {} unique peptides", deduped.len());
         deduped
     } else if let Some(list_path) = &config.peptide_list {
@@ -125,6 +139,10 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
         let estimated = slices.len();
         let deduped = PeptideDedup::dedup(slices, estimated);
+        let (deduped, skipped) = filter_nonstandard_aa(deduped);
+        if skipped > 0 {
+            tracing::warn!("Skipped {skipped} peptides containing non-standard amino acids");
+        }
         tracing::info!("Deduplicated to {} unique peptides", deduped.len());
         deduped
     } else {
@@ -283,4 +301,18 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     );
 
     Ok(())
+}
+
+const NONSTANDARD_AA: &[char] = &['U', 'B', 'J', 'Z', 'X'];
+
+/// Filter out peptides containing non-standard amino acids (U, B, J, Z, X).
+/// Returns (kept, skipped_count).
+fn filter_nonstandard_aa(peptides: Vec<DigestSlice>) -> (Vec<DigestSlice>, usize) {
+    let before = peptides.len();
+    let kept: Vec<DigestSlice> = peptides
+        .into_iter()
+        .filter(|p| !p.as_str().chars().any(|c| NONSTANDARD_AA.contains(&c)))
+        .collect();
+    let skipped = before - kept.len();
+    (kept, skipped)
 }
