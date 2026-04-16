@@ -70,7 +70,7 @@ tasks:
         fi
       - echo "Koina running at http://localhost:8501/v2/models"
       - echo "Use --koina-url http://localhost:8501/v2/models"
-      - echo "Check readiness: curl -s http://localhost:8501/v2/health/ready"
+      - 'echo "Check readiness: curl -s http://localhost:8501/v2/health/ready"'
 
   speclib:stop-koina:
     desc: Stop local Koina server
