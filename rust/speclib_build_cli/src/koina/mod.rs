@@ -91,10 +91,16 @@ impl KoinaClient {
             }
 
             if status.is_success() {
-                return resp
-                    .json::<KoinaResponse>()
-                    .await
-                    .map_err(|e| format!("failed to deserialise Koina response: {e}"));
+                let body = resp.text().await.map_err(|e| {
+                    format!("failed to read Koina response body: {e}")
+                })?;
+                return serde_json::from_str::<KoinaResponse>(&body).map_err(|e| {
+                    // Show first 500 chars of body for debugging
+                    let preview: String = body.chars().take(500).collect();
+                    format!(
+                        "failed to deserialise Koina response: {e}\nbody preview: {preview}"
+                    )
+                });
             }
 
             // 5xx or other non-success — record and retry.
