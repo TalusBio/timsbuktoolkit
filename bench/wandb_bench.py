@@ -55,6 +55,9 @@ class TimsseekRunner:
         ]
         if self.koina_url:
             args.extend(["--koina-url", self.koina_url])
+        else:
+            # Public Koina: use delay to avoid rate limiting
+            args.extend(["--request-delay-ms", "500"])
         res = subprocess.run(args, check=True)
         return res
 
