@@ -78,6 +78,14 @@ impl DigestSlice {
         self.range.is_empty()
     }
 
+    /// Returns the peptide sequence as a string slice without allocation.
+    /// For Target and ReversedDecoy, returns the raw slice.
+    /// For NonReversedDecoy, this returns the ORIGINAL (non-reversed) sequence —
+    /// use `Into::<String>` if you need the decoy form.
+    pub fn as_str(&self) -> &str {
+        &self.ref_seq[self.range.start as usize..self.range.end as usize]
+    }
+
     pub fn is_decoy(&self) -> bool {
         matches!(
             self.decoy,
@@ -156,6 +164,14 @@ mod tests {
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].len(), seq.as_ref().len());
         assert_eq!(deduped[1].len(), seq2.as_ref().len());
+    }
+
+    #[test]
+    fn test_as_str() {
+        let seq: Arc<str> = "PEPTIDEPINKTOMATO".into();
+        let slice = DigestSlice::new(seq.clone(), 0..7, DecoyMarking::Target, 0);
+        assert_eq!(slice.as_str(), "PEPTIDE");
+        assert_eq!(slice.as_str().as_bytes(), b"PEPTIDE");
     }
 
     #[test]
