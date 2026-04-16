@@ -78,10 +78,15 @@ pub fn parse_fragment_response(
     // Each tensor has shape [batch_size, num_ions]; flatten then chunk.
     let ions_per_peptide = total_len(annotations_tensor) / batch_size;
 
+    // Koina returns annotations like "y1+1" (plus for charge), but
+    // IonAnnot expects "y1^1" (caret). Convert.
     let annotations_flat: Vec<String> = annotations_tensor
         .data
         .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
+        .map(|v| {
+            let s = v.as_str().unwrap_or("");
+            koina_annotation_to_mzpaf(s)
+        })
         .collect();
     let mzs_flat: Vec<f64> = mz_tensor
         .data
@@ -164,6 +169,21 @@ fn find_output<'a>(
 
 fn total_len(tensor: &crate::koina::models::KoinaOutputTensor) -> usize {
     tensor.data.len()
+}
+
+/// Convert Koina annotation format to mzPAF format.
+///
+/// Koina: "y1+1" (series, ordinal, '+', charge)
+/// mzPAF: "y1^1" (series, ordinal, '^', charge)
+fn koina_annotation_to_mzpaf(s: &str) -> String {
+    // Find the last '+' that separates ordinal from charge
+    // Annotations look like: y1+1, y1+2, y1+3, b12+2
+    if let Some(pos) = s.rfind('+') {
+        let (prefix, charge) = s.split_at(pos);
+        format!("{prefix}^{}", &charge[1..])
+    } else {
+        s.to_string()
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

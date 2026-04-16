@@ -9,7 +9,7 @@ use timsseek::protein::fasta::ProteinSequenceCollection;
 use crate::config::SpeclibBuildConfig;
 use crate::decoys::{DecoyMode, generate_decoy};
 use crate::dedup::PeptideDedup;
-use crate::entry::{EntryFilters, build_entry};
+use crate::entry::{EntryFilters, build_entry, strip_mods};
 use crate::koina::KoinaClient;
 use crate::koina::models::{FragmentModel, PredictionInput, RtModel};
 use crate::mods::{Modification, apply_fixed_mods, expand_variable_mods};
@@ -38,10 +38,11 @@ async fn flush_batch(
         return Ok(());
     }
 
+    // Koina (Prosit) expects bare AA sequences — strip bracket mods
     let inputs: Vec<PredictionInput> = batch
         .iter()
         .map(|item| PredictionInput {
-            sequence: item.sequence.clone(),
+            sequence: strip_mods(&item.sequence),
             charge: item.charge,
             nce,
         })
