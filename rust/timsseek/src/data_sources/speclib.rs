@@ -41,6 +41,13 @@ pub struct SerSpeclibElement {
 }
 
 impl SerSpeclibElement {
+    pub fn new(precursor: PrecursorEntry, elution_group: ReferenceEG) -> Self {
+        Self {
+            precursor,
+            elution_group,
+        }
+    }
+
     pub fn sample() -> Self {
         SerSpeclibElement {
             precursor: PrecursorEntry {
@@ -91,11 +98,22 @@ impl SerSpeclibElement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PrecursorEntry {
+pub struct PrecursorEntry {
     sequence: String,
     charge: u8,
     decoy: bool,
     decoy_group: u32,
+}
+
+impl PrecursorEntry {
+    pub fn new(sequence: String, charge: u8, decoy: bool, decoy_group: u32) -> Self {
+        Self {
+            sequence,
+            charge,
+            decoy,
+            decoy_group,
+        }
+    }
 }
 
 impl From<PrecursorEntry> for DigestSlice {
@@ -162,6 +180,32 @@ pub struct ReferenceEG {
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
+}
+
+impl ReferenceEG {
+    pub fn new(
+        id: u32,
+        precursor_mz: f64,
+        precursor_labels: Vec<i8>,
+        fragment_mzs: Vec<f64>,
+        fragment_labels: Vec<IonAnnot>,
+        precursor_intensities: Vec<f32>,
+        fragment_intensities: Vec<f32>,
+        mobility_ook0: f32,
+        rt_seconds: f32,
+    ) -> Self {
+        Self {
+            id,
+            precursor_mz,
+            precursor_labels,
+            fragment_mzs,
+            fragment_labels,
+            precursor_intensities,
+            fragment_intensities,
+            mobility_ook0,
+            rt_seconds,
+        }
+    }
 }
 
 /// Convert a DIA-NN library entry to a QueryItemToScore
@@ -765,6 +809,46 @@ impl Speclib {
     }
 }
 
+pub struct SpeclibWriter<W: std::io::Write> {
+    inner: SpeclibWriterInner<W>,
+}
+
+enum SpeclibWriterInner<W: std::io::Write> {
+    MsgpackZstd(zstd::Encoder<'static, W>),
+}
+
+impl<W: std::io::Write> SpeclibWriter<W> {
+    pub fn new_msgpack_zstd(writer: W) -> Result<Self, std::io::Error> {
+        let encoder = zstd::Encoder::new(writer, 3)?;
+        Ok(Self {
+            inner: SpeclibWriterInner::MsgpackZstd(encoder),
+        })
+    }
+
+    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), LibraryReadingError> {
+        match &mut self.inner {
+            SpeclibWriterInner::MsgpackZstd(encoder) => {
+                rmp_serde::encode::write(encoder, elem).map_err(|e| {
+                    LibraryReadingError::SpeclibParsingError {
+                        source: serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            e,
+                        )),
+                        context: "Error writing MessagePack",
+                    }
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<W, std::io::Error> {
+        match self.inner {
+            SpeclibWriterInner::MsgpackZstd(encoder) => encoder.finish(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1214,5 +1298,48 @@ mod tests {
                 assert!(*intensity > 0.0, "Fragment intensities should be positive");
             }
         }
+    }
+
+    #[test]
+    fn test_ser_speclib_element_roundtrip() {
+        let elem = SerSpeclibElement::new(
+            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
+            ReferenceEG::new(
+                0,
+                500.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.8, 0.3],
+                0.75,
+                120.0,
+            ),
+        );
+        let bytes = rmp_serde::to_vec(&elem).unwrap();
+        let decoded: SerSpeclibElement = rmp_serde::from_slice(&bytes).unwrap();
+        let qi: QueryItemToScore = decoded.into();
+        assert_eq!(qi.digest.len(), "PEPTIDEK".len());
+        assert_eq!(qi.query.fragment_count(), 2);
+    }
+
+    #[test]
+    fn test_speclib_writer_roundtrip() {
+        let elem = SerSpeclibElement::sample();
+        let mut buf = Vec::new();
+        {
+            let mut writer = SpeclibWriter::new_msgpack_zstd(&mut buf).unwrap();
+            writer.append(&elem).unwrap();
+            writer.append(&elem).unwrap();
+            writer.finish().unwrap();
+        }
+        let reader =
+            SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd)
+                .unwrap();
+        let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(items.len(), 2);
     }
 }
