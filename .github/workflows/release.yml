@@ -11,7 +11,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer speclib_build
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build-and-release:
@@ -50,6 +53,9 @@ jobs:
           target: ${{ matrix.target }}
           cache: true
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -57,9 +63,15 @@ jobs:
       - name: Build Binaries
         shell: bash
         run: |
+          bins=()
           for binary in $RELEASE_BINARIES; do
-            cargo build --release --bin $binary --target ${{ matrix.target }}
+            bins+=(--bin "$binary")
           done
+          cargo build --release --target ${{ matrix.target }} "${bins[@]}"
+
+      - name: sccache stats
+        shell: bash
+        run: sccache --show-stats
 
       - name: Package Artifacts
         shell: bash
