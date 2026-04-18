@@ -382,7 +382,10 @@ impl TraceScorer {
             &self.cosine_profile,
             &self.scribe_profile,
             &scoring_ctx.chromatograms.fragments,
-            &scoring_ctx.expected_intensities.fragment_intensities,
+            scoring_ctx
+                .expected_intensities
+                .fragment_intensities
+                .as_slice(),
             &mut self.coel_scratch,
         );
 
@@ -527,9 +530,7 @@ impl TraceScorer {
         for (row_idx, ((key, _mz), chrom)) in collector.fragments.iter_mzs().enumerate() {
             let expected = scoring_ctx
                 .expected_intensities
-                .fragment_intensities
-                .get(key)
-                .copied()
+                .get_fragment(key)
                 .unwrap_or(0.0);
 
             if expected <= 0.0 {

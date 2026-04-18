@@ -4,7 +4,6 @@ use egui_extras::{
     Table,
     TableBuilder,
 };
-use std::collections::HashMap;
 use std::path::{
     Path,
     PathBuf,
@@ -285,12 +284,11 @@ impl ElutionGroupData {
         relative_intensities: &[(IonAnnot, f32)],
         eg: &mut TimsElutionGroup<String>,
     ) -> ExpectedIntensities<String> {
-        let fragment_intensities = HashMap::from_iter(
-            relative_intensities
-                .iter()
-                .cloned()
-                .map(|(k, v)| (k.to_string(), v)),
-        );
+        let fragment_intensities = relative_intensities
+            .iter()
+            .cloned()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
 
         let isotopes = match isotope_dist_from_seq(stripped_peptide) {
             Ok(isotopes) => isotopes,
@@ -304,7 +302,7 @@ impl ElutionGroupData {
         };
 
         eg.set_precursor_labels([0, 1, 2].iter().cloned());
-        let precursor_intensities: HashMap<i8, f32> = isotopes
+        let precursor_intensities = isotopes
             .iter()
             .cloned()
             .enumerate()

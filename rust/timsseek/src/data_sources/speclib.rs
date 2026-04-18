@@ -13,7 +13,6 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
 use std::io::{
     BufRead,
     BufReader,
@@ -224,7 +223,7 @@ fn convert_diann_to_query_item(
         decoy_group_id,
     );
 
-    let fragment_intensities: HashMap<IonAnnot, f32> =
+    let fragment_intensities: crate::models::query_item::FragmentIntensityVec<IonAnnot> =
         extra.relative_intensities.into_iter().collect();
 
     let (rebuilt_eg, precursor_intensities) = match isotope_dist_from_seq(&extra.stripped_peptide) {
@@ -246,7 +245,7 @@ fn convert_diann_to_query_item(
                     message: format!("Failed to rebuild elution group: {:?}", e),
                 })?;
 
-            let intensities: HashMap<i8, f32> = vec![
+            let intensities: crate::models::query_item::PrecursorIntensityVec = vec![
                 (0i8, isotope_ratios[0]),
                 (1i8, isotope_ratios[1]),
                 (2i8, isotope_ratios[2]),
@@ -262,7 +261,10 @@ fn convert_diann_to_query_item(
                 extra.stripped_peptide,
                 e
             );
-            (eg, HashMap::from_iter([(0i8, 1.0)]))
+            (
+                eg,
+                crate::models::query_item::PrecursorIntensityVec::from_iter([(0i8, 1.0)]),
+            )
         }
     };
 
@@ -690,7 +692,9 @@ impl Speclib {
         let speclib = convert_elution_group_collection(collection)?;
 
         // Apply decoy strategy to the loaded speclib
-        Self::apply_decoy_strategy(speclib, decoy_strategy)
+        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        speclib.log_entry_stats();
+        Ok(speclib)
     }
 
     /// Apply decoy strategy to an already-loaded speclib (works for any format)
@@ -838,7 +842,9 @@ impl Speclib {
         let speclib = Self { elems };
 
         // Apply decoy strategy to the loaded speclib
-        Self::apply_decoy_strategy(speclib, decoy_strategy)
+        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        speclib.log_entry_stats();
+        Ok(speclib)
     }
 
     pub fn sample() -> Self {
@@ -849,6 +855,69 @@ impl Speclib {
 
     pub fn as_slice(&self) -> &[QueryItemToScore] {
         &self.elems
+    }
+
+    /// Log a summary of per-entry fragment and precursor counts.
+    ///
+    /// Entries whose fragment count exceeds [`INLINE_FRAG_CAPACITY`] spill out
+    /// of the inline storage for `ExpectedIntensities` and incur a heap
+    /// allocation per clone, so the spillover count is worth surfacing.
+    pub fn log_entry_stats(&self) {
+        use crate::models::query_item::{
+            INLINE_FRAG_CAPACITY,
+            INLINE_PREC_CAPACITY,
+        };
+
+        let n = self.elems.len();
+        if n == 0 {
+            tracing::info!("Speclib stats: empty library");
+            return;
+        }
+
+        let mut frag_max = 0usize;
+        let mut prec_max = 0usize;
+        let mut frag_sum = 0usize;
+        let mut frag_spill = 0usize;
+        let mut prec_spill = 0usize;
+
+        for item in &self.elems {
+            let nf = item.expected_intensity.fragment_len();
+            let np = item.expected_intensity.precursor_len();
+            frag_sum += nf;
+            frag_max = frag_max.max(nf);
+            prec_max = prec_max.max(np);
+            if nf > INLINE_FRAG_CAPACITY {
+                frag_spill += 1;
+            }
+            if np > INLINE_PREC_CAPACITY {
+                prec_spill += 1;
+            }
+        }
+
+        let frag_mean = frag_sum as f64 / n as f64;
+
+        tracing::info!(
+            "Speclib stats: {} entries; fragments per entry: mean={:.1} max={} (inline cap={}, spillover entries={}); precursors per entry: max={} (inline cap={}, spillover entries={})",
+            n,
+            frag_mean,
+            frag_max,
+            INLINE_FRAG_CAPACITY,
+            frag_spill,
+            prec_max,
+            INLINE_PREC_CAPACITY,
+            prec_spill,
+        );
+
+        if frag_spill > 0 {
+            let pct = (frag_spill as f64 / n as f64) * 100.0;
+            tracing::warn!(
+                "{}/{} speclib entries ({:.2}%) exceed INLINE_FRAG_CAPACITY={} — those entries will heap-allocate on every clone. Consider raising the inline cap in `models::query_item` if this is a large fraction.",
+                frag_spill,
+                n,
+                pct,
+                INLINE_FRAG_CAPACITY,
+            );
+        }
     }
 }
 
@@ -1016,24 +1085,15 @@ mod tests {
 
         // Verify all intensities are present
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&0),
+            first_target.expected_intensity.get_precursor(0).is_some(),
             "Should have intensity for isotope 0"
         );
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&1),
+            first_target.expected_intensity.get_precursor(1).is_some(),
             "Should have intensity for isotope 1"
         );
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&2),
+            first_target.expected_intensity.get_precursor(2).is_some(),
             "Should have intensity for isotope 2"
         );
     }
@@ -1194,26 +1254,25 @@ mod tests {
         for entry in &speclib.elems {
             let m0_intensity = entry
                 .expected_intensity
-                .precursor_intensities
-                .get(&0)
+                .get_precursor(0)
                 .expect("Should have M0 intensity");
 
             // M0 should be the highest intensity (normalized to 1.0)
             assert!(
-                (*m0_intensity - 1.0).abs() < 0.01,
+                (m0_intensity - 1.0).abs() < 0.01,
                 "M0 should be normalized to ~1.0, got {}",
                 m0_intensity
             );
 
             // M+1 and M+2 should be less than M0
-            let m1_intensity = entry.expected_intensity.precursor_intensities.get(&1);
-            let m2_intensity = entry.expected_intensity.precursor_intensities.get(&2);
+            let m1_intensity = entry.expected_intensity.get_precursor(1);
+            let m2_intensity = entry.expected_intensity.get_precursor(2);
 
             if let Some(m1) = m1_intensity {
-                assert!(*m1 <= 1.0, "M+1 intensity should be <= 1.0, got {}", m1);
+                assert!(m1 <= 1.0, "M+1 intensity should be <= 1.0, got {}", m1);
             }
             if let Some(m2) = m2_intensity {
-                assert!(*m2 <= 1.0, "M+2 intensity should be <= 1.0, got {}", m2);
+                assert!(m2 <= 1.0, "M+2 intensity should be <= 1.0, got {}", m2);
             }
         }
     }

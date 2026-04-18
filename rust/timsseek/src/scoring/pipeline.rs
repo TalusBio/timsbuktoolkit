@@ -207,7 +207,7 @@ const TOP_N_FRAGMENTS: usize = 8;
 ///
 /// Removes lower-ranked fragments from the chromatogram collector (fragments array + eg)
 /// and from expected intensities, maintaining the invariant that all three agree on count.
-pub(crate) fn select_top_n_fragments<T: KeyLike>(
+pub(crate) fn select_top_n_fragments<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
     n: usize,
@@ -223,11 +223,7 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
         .iter_mzs()
         .enumerate()
         .map(|(idx, ((key, _mz), _chrom))| {
-            let intensity = expected
-                .fragment_intensities
-                .get(key)
-                .copied()
-                .unwrap_or(0.0);
+            let intensity = expected.get_fragment(key).unwrap_or(0.0);
             (idx, key.clone(), intensity)
         })
         .collect();
@@ -252,14 +248,11 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
         agg.eg
             .try_drop_fragment(&key)
             .expect("key should exist in eg");
-        expected.fragment_intensities.remove(&key);
+        expected.remove_fragment(&key);
     }
 
     debug_assert_eq!(agg.fragments.num_ions(), agg.eg.fragment_count());
-    debug_assert_eq!(
-        agg.fragments.num_ions(),
-        expected.fragment_intensities.len()
-    );
+    debug_assert_eq!(agg.fragments.num_ions(), expected.fragment_len());
 }
 
 /// Filter out zero-intensity ions and update expected intensities in one pass.
@@ -270,7 +263,7 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
+pub(crate) fn filter_zero_intensity_ions<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
 ) {
@@ -279,12 +272,12 @@ pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
 
     // Filter precursors
     for (k, _mz) in agg.drain_nonmatching_precursors(predicate) {
-        expected.precursor_intensities.remove(&k);
+        expected.remove_precursor(k);
     }
 
     // Filter fragments
     for (k, _mz) in agg.drain_nonmatching_fragments(predicate) {
-        expected.fragment_intensities.remove(&k);
+        expected.remove_fragment(&k);
     }
 
     // Assert all lengths match
@@ -295,7 +288,7 @@ pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
     );
     assert_eq!(
         agg.precursors.num_ions(),
-        expected.precursor_intensities.len(),
+        expected.precursor_len(),
         "Precursor expected intensities count mismatch after filtering"
     );
     assert_eq!(
