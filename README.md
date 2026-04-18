@@ -21,6 +21,7 @@ mass spectrometry data. The project consists of several components:
     - It also includes an example receiver server in streamlit (python) to show how to interface with it.
 - `timscentroid`: Internal library for indexing and centroiding timsTOF data.
 - `calibrt`: Internal library for retention time calibration.
+- `alloc_track`: Dev-only tracking global allocator. Opt-in via `--features track-alloc` on `timsseek_cli`; emits per-phase allocation deltas on stderr.
 
 ## Installation
 

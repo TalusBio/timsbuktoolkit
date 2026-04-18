@@ -134,10 +134,13 @@ rt = "Unrestricted"
     /// PartialEq on every nested type.
     #[test]
     fn default_template_matches_default_config() {
-        let from_template: Config = toml::from_str(DEFAULT_CONFIG_TOML)
-            .expect("default template must parse");
+        let from_template: Config =
+            toml::from_str(DEFAULT_CONFIG_TOML).expect("default template must parse");
         let a = serde_json::to_string(&from_template).unwrap();
         let b = serde_json::to_string(&Config::default_config()).unwrap();
-        assert_eq!(a, b, "default_config.toml drifted from Config::default_config()");
+        assert_eq!(
+            a, b,
+            "default_config.toml drifted from Config::default_config()"
+        );
     }
 }

@@ -36,12 +36,16 @@ use config::{
 };
 // use tracing_profile::PerfettoLayer;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
 use mimalloc::MiMalloc;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[cfg(feature = "track-alloc")]
+#[global_allocator]
+static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::new();
 
 /// Validated inputs ready for processing
 struct ValidatedInputs {
@@ -265,6 +269,7 @@ fn process_single_file(
     )?
     .into_eager()?;
     let load_index_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Loading index");
 
     let fragmented_range = get_frag_range(&timstofpath)?;
 
@@ -507,6 +512,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     info!("Parsed configuration: {:#?}", config.clone());
+    alloc_track::snap!("start");
 
     let validated = validate_inputs(&config, &args)?;
 
@@ -554,6 +560,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     let load_speclib_ms = step
         .finish_with(format_args!("{} entries", speclib.len()))
         .as_millis() as u64;
+    alloc_track::snap!("Loading speclib");
 
     // Load calibration library once (if provided)
     let (calib_lib, load_calib_lib_ms) = match &validated.calib_lib_path {
@@ -570,6 +577,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
             let ms = step
                 .finish_with(format_args!("{} entries", lib.len()))
                 .as_millis() as u64;
+            alloc_track::snap!("Loading calib lib");
             (Some(lib), ms)
         }
         None => (None, 0),
