@@ -464,7 +464,9 @@ impl ViewerCalibrationState {
                 .fold(
                     || {
                         (
-                            TraceScorer::new(n_cycles),
+                            // Viewer is interactive, not a hot path — a conservative
+                            // default capacity is fine; realloc on outliers is free.
+                            TraceScorer::new(n_cycles, 16),
                             CalibrantHeap::new(heap_capacity),
                         )
                     },

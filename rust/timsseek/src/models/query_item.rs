@@ -31,6 +31,24 @@ pub fn linear_get<K: PartialEq, V: Copy>(entries: &[(K, V)], key: &K) -> Option<
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
 }
 
+/// Rejection returned by [`ExpectedIntensities::try_from_pairs`] when the
+/// input contains a repeated fragment or precursor key. Keys are expected
+/// to be unique — `linear_get`/`remove_*` return only the first match and
+/// silently masking a duplicate corrupts downstream scoring.
+#[derive(Debug, Clone)]
+pub struct DuplicateKeyError {
+    pub which: &'static str,
+    pub key: String,
+}
+
+impl std::fmt::Display for DuplicateKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "duplicate {} key: {}", self.which, self.key)
+    }
+}
+
+impl std::error::Error for DuplicateKeyError {}
+
 /// Expected (theoretical / predicted) precursor and fragment intensities for
 /// a peptide query.
 ///
@@ -39,6 +57,15 @@ pub fn linear_get<K: PartialEq, V: Copy>(entries: &[(K, V)], key: &K) -> Option<
 /// peptides (<=13 fragments / <=13 precursors) the backing storage is inline,
 /// so `clone()` is a stack memcpy and mutation is in-place swap-remove —
 /// zero heap allocations on the hot path.
+///
+/// # Invariants
+///
+/// Keys within each field must be unique. [`linear_get`] and
+/// [`ExpectedIntensities::remove_fragment`]/[`remove_precursor`] return only
+/// the first match; a duplicate silently hides data. All construction paths
+/// go through [`ExpectedIntensities::try_from_pairs`] which enforces this.
+/// Direct struct-literal construction bypasses the check — avoid it outside
+/// tests where uniqueness is obvious.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities<T: KeyLike + Default> {
     pub fragment_intensities: FragmentIntensityVec<T>,
@@ -51,6 +78,38 @@ impl<T: KeyLike + Default> Default for ExpectedIntensities<T> {
             fragment_intensities: TinyVec::new(),
             precursor_intensities: TinyVec::new(),
         }
+    }
+}
+
+impl<T: KeyLike + Default + std::fmt::Debug> ExpectedIntensities<T> {
+    /// Construct from fragment and precursor pair iterators, erroring on any
+    /// repeated key in either input. Preferred entry point for all library
+    /// load paths (speclib ndjson/msgpack, DIA-NN/Spectronaut/Skyline TSV).
+    pub fn try_from_pairs<FI, PI>(frags: FI, precs: PI) -> Result<Self, DuplicateKeyError>
+    where
+        FI: IntoIterator<Item = (T, f32)>,
+        PI: IntoIterator<Item = (i8, f32)>,
+    {
+        let mut out = Self::default();
+        for (k, v) in frags {
+            if out.get_fragment(&k).is_some() {
+                return Err(DuplicateKeyError {
+                    which: "fragment",
+                    key: format!("{:?}", k),
+                });
+            }
+            out.fragment_intensities.push((k, v));
+        }
+        for (k, v) in precs {
+            if out.get_precursor(k).is_some() {
+                return Err(DuplicateKeyError {
+                    which: "precursor",
+                    key: k.to_string(),
+                });
+            }
+            out.precursor_intensities.push((k, v));
+        }
+        Ok(out)
     }
 }
 
@@ -144,5 +203,64 @@ impl QueryItemToScore {
             query,
             expected_intensity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn yi(s: &str) -> IonAnnot {
+        IonAnnot::try_from(s).unwrap()
+    }
+
+    #[test]
+    fn try_from_pairs_empty_is_ok() {
+        let out: ExpectedIntensities<IonAnnot> =
+            ExpectedIntensities::try_from_pairs(std::iter::empty(), std::iter::empty()).unwrap();
+        assert_eq!(out.fragment_len(), 0);
+        assert_eq!(out.precursor_len(), 0);
+    }
+
+    #[test]
+    fn try_from_pairs_unique_ok() {
+        let out: ExpectedIntensities<IonAnnot> = ExpectedIntensities::try_from_pairs(
+            [(yi("y1"), 0.5), (yi("y2"), 0.7)],
+            [(0i8, 1.0), (1i8, 0.3)],
+        )
+        .unwrap();
+        assert_eq!(out.get_fragment(&yi("y1")), Some(0.5));
+        assert_eq!(out.get_precursor(1), Some(0.3));
+    }
+
+    #[test]
+    fn try_from_pairs_duplicate_fragment_errs() {
+        let err = ExpectedIntensities::<IonAnnot>::try_from_pairs(
+            [(yi("y1"), 0.5), (yi("y1"), 0.9)],
+            std::iter::empty::<(i8, f32)>(),
+        )
+        .expect_err("duplicate fragment must error");
+        assert_eq!(err.which, "fragment");
+    }
+
+    #[test]
+    fn try_from_pairs_duplicate_precursor_errs() {
+        let err = ExpectedIntensities::<IonAnnot>::try_from_pairs(
+            std::iter::empty::<(IonAnnot, f32)>(),
+            [(0i8, 1.0), (0i8, 2.0)],
+        )
+        .expect_err("duplicate precursor must error");
+        assert_eq!(err.which, "precursor");
+    }
+
+    #[test]
+    fn try_from_pairs_checks_fragments_before_precursors() {
+        // Fragment dup should surface even when precursor block also has a dup.
+        let err = ExpectedIntensities::<IonAnnot>::try_from_pairs(
+            [(yi("y1"), 0.5), (yi("y1"), 0.5)],
+            [(0i8, 1.0), (0i8, 2.0)],
+        )
+        .expect_err("should fail on fragment dup first");
+        assert_eq!(err.which, "fragment");
     }
 }

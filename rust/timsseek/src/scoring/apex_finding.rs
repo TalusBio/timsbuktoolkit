@@ -249,16 +249,13 @@ struct TraceScorerBuffers {
 }
 
 impl TraceScorerBuffers {
-    /// Typical peptide has up to ~16 fragments.
-    const TYP_FRAGS: usize = 16;
-
-    fn new(size: usize) -> Self {
+    fn new(size: usize, max_frags: usize) -> Self {
         Self {
             temp_ms2_dot_prod: vec![0.0f32; size],
             temp_ms2_norm_sq_obs: vec![0.0f32; size],
             temp_sqrt_sum: vec![0.0f32; size],
             temp_raw_intensity_sum: vec![0.0f32; size],
-            pred_norms: Vec::with_capacity(Self::TYP_FRAGS),
+            pred_norms: Vec::with_capacity(max_frags),
         }
     }
 
@@ -279,11 +276,14 @@ impl TraceScorerBuffers {
 }
 
 impl TraceScorer {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, max_frags: usize) -> Self {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
-            buffers: TraceScorerBuffers::new(capacity),
-            coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch::new(),
+            buffers: TraceScorerBuffers::new(capacity, max_frags),
+            coel_scratch:
+                crate::scoring::scores::apex_features::CoelutionScratch::with_frag_capacity(
+                    max_frags,
+                ),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
         }

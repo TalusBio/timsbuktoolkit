@@ -419,7 +419,9 @@ impl ComputedState {
 
         let trace_scorer = scratch
             .trace_scorer
-            .get_or_insert_with(|| TraceScorer::new(num_cycles));
+            // Viewer is interactive, not a hot path — a conservative
+            // default capacity is fine; realloc on outliers is free.
+            .get_or_insert_with(|| TraceScorer::new(num_cycles, 16));
 
         let scoring_ctx = Extraction {
             expected_intensities: expected_intensities.clone(),
