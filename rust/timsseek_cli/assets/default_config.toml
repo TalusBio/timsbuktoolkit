@@ -1,0 +1,74 @@
+# timsseek default configuration.
+#
+# Every section is optional unless explicitly noted — omitted sections fall back
+# to the values shown here. Unknown fields are rejected to catch typos early.
+#
+# Dump this file at any time with:
+#     timsseek --write-default-config <path>
+# or:
+#     timsseek --print-default-config
+#
+# The CLI also accepts JSON configs; TOML is preferred for hand-authored ones.
+
+## Input spectral library (optional — `--speclib-file` overrides this).
+# [input]
+# type = "speclib"
+# path = "path/to/library.msgpack.zst"
+
+
+[analysis]
+## Number of peptides scored per chunk. Bigger = more parallelism, more RAM.
+chunk_size = 20000
+
+## Decoy generation strategy.
+## "if_missing"  — generate ±12 Da mass-shift decoys when the library has none
+## "always"      — always generate decoys (replace any existing ones)
+## "never"       — trust the library's decoy labels
+decoy_strategy = "if_missing"
+
+
+## Extraction tolerances for the broad first-pass scoring (pre-calibration).
+## Each field is an externally-tagged enum:
+##   ms       : { Ppm = [left, right] } | { Absolute = [left, right] }
+##   mobility : { Pct = [left, right] } | { Absolute = [left, right] }
+##   quad     : { Absolute = [left, right] }
+##   rt       : "Unrestricted" | { Minutes = [before, after] }
+[analysis.tolerance]
+ms       = { Ppm = [15.0, 15.0] }
+mobility = { Pct = [5.0, 5.0] }
+quad     = { Absolute = [0.1, 0.1] }
+rt       = "Unrestricted"
+
+
+[calibration]
+## Number of top-scoring calibrants retained from Phase 1 (used to fit the RT
+## curve and measure mass/mobility offsets).
+n_calibrants = 2000
+
+## Grid resolution for the RT calibration pathfinding.
+grid_size = 100
+
+## DP lookback width during pathfinding (larger = smoother curve, slower fit).
+dp_lookback = 30
+
+## Tolerance-derivation sigma multipliers. Bounds are set to
+## `median ± sigma * 1.4826 * MAD` per dimension (robust-to-tails estimator
+## that matches mean ± stdev for Gaussian data). 1.5 on m/z is the observed
+## FDR-optimal trade between missing real peaks and admitting decoys.
+mz_sigma                 = 1.5
+mobility_sigma           = 3.0
+rt_sigma_factor          = 3.0
+
+## Floor for the derived RT tolerance. Prevents pathologically tight windows
+## on well-calibrated runs.
+min_rt_tolerance_minutes = 0.5
+
+## Per-calibrant RT aggregation window used when measuring mass/mobility
+## offsets at the Phase-1 apex. Narrow (a handful of cycles) isolates the
+## peak from neighbors; wider admits contamination into the stats.
+calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
+
+
+## Output directory (optional — `--output-dir` overrides this).
+# [output]
+# directory = "./results"

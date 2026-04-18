@@ -22,16 +22,14 @@ type Result<T> = std::result::Result<T, StreamingAggregatorError>;
 /// ```
 /// use timsquery::utils::streaming_calculators::RunningStatsCalculator;
 ///
-/// // Create a new calculator with a weight of 10 and a mean of 0.0
+/// // `new` seeds the stream with (weight=1.0, value=0.0).
 /// let mut calc = RunningStatsCalculator::new(1.0, 0.0);
 /// calc.add(1.0, 10.0);
 /// calc.add(1.0, 0.0);
 /// calc.add(1.0, 10.0);
 /// calc.add(1.0, 0.0);
 /// calc.add(1.0, 10.0);
-/// calc.add(1.0, 0.0);
-/// // So overall this should be the equivalent of the mean for
-/// // [0.0, 10.0, 0.0, 10.0, 0.0, 10.0]
+/// // Stream is [0.0, 10.0, 0.0, 10.0, 0.0, 10.0] -> mean 5.0
 /// assert_eq!(calc.mean().unwrap(), 5.0, "{calc:#?}");
 /// // assert!((4.5..5.5).contains(&calc.standard_deviation().unwrap()), "{calc:#?}");
 /// ```
@@ -71,28 +69,14 @@ impl RunningStatsCalculator {
 
     /// Add a new value to the running stats calculator.
     pub fn add(&mut self, weight: f64, value: f64) {
-        if weight == 0. {
-            panic!("Weight must be > 0, adding");
-        }
-        let f64_weight = weight;
-        // Update the mean
-        let weight_ratio = f64_weight / self.weight;
+        debug_assert!(weight > 0., "Weight must be > 0");
+        self.weight += weight;
+        let weight_ratio = weight / self.weight;
         let delta = value - self.mean_n;
         self.mean_n += delta * weight_ratio;
 
-        // Update the weight
-        self.weight += weight;
-
-        // That should be the end of it but I seem to be getting consistently some
-        // values outside of the min and max observed values. Which might be a
-        // float issue ... TODO investigate.
-
-        // In the meantime I will just squeeze the mean to the min/max observed values.
-        // TODO:Make this conditional compilation
         self.min = self.min.min(value);
         self.max = self.max.max(value);
-
-        self.mean_n = self.mean_n.min(self.max).max(self.min);
     }
 
     pub fn mean(&self) -> Result<f64> {

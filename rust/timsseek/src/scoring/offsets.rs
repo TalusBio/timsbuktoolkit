@@ -113,6 +113,27 @@ impl MzMobilityOffsets {
         }
     }
 
+    /// Intensity-weighted mean of precursor mz / mobility errors across the
+    /// top-N (label >= 0) channels. Returns None when no channel has signal.
+    /// Used by Phase-2 calibration to estimate population-level offsets;
+    /// rescoring uses the per-ion arrays directly.
+    pub fn weighted_ms1(&self) -> Option<(f32, f32)> {
+        let (mut w, mut mz, mut mob) = (0.0f64, 0.0f64, 0.0f64);
+        for v in self.ms1.get_values() {
+            if v.intensity <= 0.0 || v.mz_error_ppm.is_nan() {
+                continue;
+            }
+            w += v.intensity;
+            mz += v.intensity * v.mz_error_ppm as f64;
+            mob += v.intensity * v.mobility_error_pct as f64;
+        }
+        if w > 0.0 {
+            Some(((mz / w) as f32, (mob / w) as f32))
+        } else {
+            None
+        }
+    }
+
     pub fn ms1_mz_errors(&self) -> [f32; PRECURSOR_TOP_N] {
         let mut out = [0.0; PRECURSOR_TOP_N];
         let vals = self.ms1.get_values();
