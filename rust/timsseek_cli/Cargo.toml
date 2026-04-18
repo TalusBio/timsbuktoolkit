@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 timsseek = { path = "../timsseek", default-features = false }
 timsquery = { path = "../timsquery" }
+alloc_track = { path = "../alloc_track" }
 
 regex = "1.11.1"
 # tracing-profile = { version="0.10.11",features=["perfetto"] }
@@ -38,3 +39,4 @@ mimalloc = { workspace = true, features = ["secure"] }
 default = ["parallel"]
 parallel = ["timsseek/rayon"]
 instrumentation = ["timsseek/instrumentation", "tracing-profile"]
+track-alloc = ["alloc_track/enabled"]

@@ -158,6 +158,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc_track"
+version = "0.29.0"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6248,6 +6252,7 @@ dependencies = [
 name = "timsseek_cli"
 version = "0.29.0"
 dependencies = [
+ "alloc_track",
  "clap",
  "indicatif",
  "mimalloc",

@@ -139,7 +139,6 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
     let phase1_lib = calib_lib.unwrap_or(speclib);
@@ -158,6 +157,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase1_ms = step
         .finish_with(format_args!("{} calibrants", calibrants.len()))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 1: Prescore");
     info!(
         "Phase 1 detail: extraction {:?}, scoring {:?}, {} passed filter, {} scored",
         phase1_timings.extraction,
@@ -227,6 +227,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
         ))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 2: Calibrate");
     // Print tolerance summary
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
@@ -282,6 +283,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         &mut phase3_timings,
     );
     step.finish_with(format_args!("{} peptides", results.len()));
+    alloc_track::snap!("Phase 3: Score");
 
     let total_scored = results.len();
 
@@ -298,11 +300,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase4_ms = step
         .finish_with(format_args!("{} candidates", total_after_competition))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 4: Compete");
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
     let data = rescore(competed);
     let phase5_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Phase 5: Rescore");
 
     // Collect q-value threshold counts — full report to log, key result to stdout
     let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
@@ -346,6 +350,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         source: e,
     })?;
     let phase6_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
     // Key result to stdout
