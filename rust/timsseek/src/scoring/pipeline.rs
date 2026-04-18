@@ -586,7 +586,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let extr = worker
             .extraction
             .as_ref()
-            .expect("build_extraction_into populated scratch");
+            .expect("extraction set by build_extraction_into");
         Ok(super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
@@ -619,7 +619,10 @@ impl<I: ScorerQueriable> Scorer<I> {
             })
         )?;
 
-        let scoring_ctx = worker.extraction.as_ref().expect("populated above");
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
         if scoring_ctx
             .expected_intensities
             .fragment_intensities
@@ -648,7 +651,10 @@ impl<I: ScorerQueriable> Scorer<I> {
             )
         });
 
-        let scoring_ctx = worker.extraction.as_ref().expect("still populated");
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let out = timed!(
             timings.assembly,
@@ -760,7 +766,10 @@ impl<I: ScorerQueriable> Scorer<I> {
         );
         extraction_ok?;
 
-        let scoring_ctx = worker.extraction.as_ref().expect("populated above");
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
         if scoring_ctx
             .expected_intensities
             .fragment_intensities
