@@ -18,6 +18,7 @@ timsquery = { path = "../timsquery" }
 calibrt = { path = "../calibrt" }
 micromzpaf = { path = "../micromzpaf" }
 timscentroid = { path = "../timscentroid" }
+array2d = { path = "../array2d" }
 
 # Workspace-inherited deps
 rustyms = { workspace = true }

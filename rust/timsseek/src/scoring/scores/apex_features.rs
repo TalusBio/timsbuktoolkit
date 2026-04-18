@@ -4,9 +4,58 @@
 //! They operate on windows of the raw chromatogram data and implement the
 //! 11 feature functions plus helper structs described in METHODS.md Sections 3.1-3.5.
 
+use array2d::Array2D;
 use std::collections::HashMap;
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
+
+/// Reusable scratch buffers for `coelution_gradient`. Owned by the scorer so
+/// allocations happen once per rayon worker split and are reused across every
+/// peptide that worker processes. `new()` pre-sizes capacity for a typical
+/// peptide so the first hot-path call does no reallocation.
+#[derive(Debug)]
+pub struct CoelutionScratch {
+    /// Rows: active fragments. Cols: coelution window length.
+    coel_rows: Array2D<f32>,
+    /// Rows: active fragments. Cols: gradient window length - 1.
+    grad_rows: Array2D<f32>,
+    /// One weight per active fragment in `coel_rows`.
+    weights: Vec<f32>,
+    /// First-differences buffer reused across fragments inside one call.
+    diffs: Vec<f32>,
+}
+
+impl CoelutionScratch {
+    const TYP_COEL_LEN: usize = 41;
+    const TYP_DIFF_LEN: usize = 20;
+    /// Typical peptide has up to ~16 fragments; coel window = 2*20+1 = 41 cycles,
+    /// gradient diffs length = 2*10 = 20. Pre-sized to these so the first call
+    /// in a worker does not reallocate.
+    const TYP_FRAGS: usize = 16;
+
+    pub fn new() -> Self {
+        Self {
+            coel_rows: Array2D {
+                values: Vec::with_capacity(Self::TYP_FRAGS * Self::TYP_COEL_LEN),
+                n_col: 0,
+                n_row: 0,
+            },
+            grad_rows: Array2D {
+                values: Vec::with_capacity(Self::TYP_FRAGS * Self::TYP_DIFF_LEN),
+                n_col: 0,
+                n_row: 0,
+            },
+            weights: Vec::with_capacity(Self::TYP_FRAGS),
+            diffs: Vec::with_capacity(Self::TYP_DIFF_LEN),
+        }
+    }
+}
+
+impl Default for CoelutionScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Floor value for Scribe score when no signal is observed.
 pub const SCRIBE_FLOOR: f32 = -100.0;
@@ -239,6 +288,7 @@ pub fn coelution_gradient<T: KeyLike>(
     apex: usize,
     coelution_hw: usize,
     gradient_hw: usize,
+    scratch: &mut CoelutionScratch,
 ) -> CoelutionGradientResult {
     let n_cycles = fragments.num_cycles();
     if n_cycles == 0 {
@@ -249,7 +299,6 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
-    // Collect fragment windows and weights
     let coel_lo = apex.saturating_sub(coelution_hw);
     let coel_hi = (apex + coelution_hw + 1).min(n_cycles);
     let coel_len = coel_hi - coel_lo;
@@ -257,11 +306,7 @@ pub fn coelution_gradient<T: KeyLike>(
     let grad_lo = apex.saturating_sub(gradient_hw);
     let grad_hi = (apex + gradient_hw + 1).min(n_cycles);
     let grad_len = grad_hi - grad_lo;
-
-    // We work with up to ~16 fragments; use small vecs.
-    let mut windows: Vec<Vec<f32>> = Vec::new();
-    let mut weights: Vec<f32> = Vec::new();
-    let mut grad_windows: Vec<Vec<f32>> = Vec::new();
+    let diff_len = grad_len.saturating_sub(1);
 
     let weight_sum: f32 = expected.values().sum();
     if weight_sum <= 0.0 {
@@ -272,35 +317,50 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
+    // Upper bound on active fragments; we fill contiguous rows and track
+    // `n_active_coel` / `n_active_grad` ourselves.
+    let max_frags = fragments.num_ions();
+    scratch.coel_rows.reset_with_value(coel_len, max_frags, 0.0);
+    scratch.grad_rows.reset_with_value(diff_len, max_frags, 0.0);
+    scratch.weights.clear();
+    scratch.diffs.clear();
+    scratch.diffs.resize(diff_len, 0.0);
+
+    let mut n_active_coel: usize = 0;
+    let mut n_active_grad: usize = 0;
+
     for ((key, _mz), chrom) in fragments.iter_mzs() {
         let y_hat = expected.get(key).copied().unwrap_or(0.0);
         if y_hat <= 0.0 {
             continue;
         }
 
-        // Coelution window
         let coel_slice = &chrom[coel_lo..coel_hi];
-        let mut normed = vec![0.0f32; coel_len];
-        if center_normalize(coel_slice, &mut normed) {
-            windows.push(normed);
-            weights.push(y_hat / weight_sum);
+        let coel_row = scratch
+            .coel_rows
+            .get_row_mut(n_active_coel)
+            .expect("coel_rows pre-sized to max_frags");
+        if center_normalize(coel_slice, coel_row) {
+            scratch.weights.push(y_hat / weight_sum);
+            n_active_coel += 1;
         }
 
-        // Gradient window: first differences
-        if grad_len >= 2 {
+        if diff_len >= 1 && grad_len >= 2 {
             let grad_slice = &chrom[grad_lo..grad_hi];
-            let diffs: Vec<f32> = grad_slice.windows(2).map(|w| w[1] - w[0]).collect();
-            let mut normed_grad = vec![0.0f32; diffs.len()];
-            if center_normalize(&diffs, &mut normed_grad) {
-                grad_windows.push(normed_grad);
+            for (i, w) in grad_slice.windows(2).enumerate() {
+                scratch.diffs[i] = w[1] - w[0];
+            }
+            let grad_row = scratch
+                .grad_rows
+                .get_row_mut(n_active_grad)
+                .expect("grad_rows pre-sized to max_frags");
+            if center_normalize(&scratch.diffs, grad_row) {
+                n_active_grad += 1;
             }
         }
     }
 
-    let n_active = windows.len();
-
-    // Need at least 2 active fragments for pairwise correlations
-    if n_active < 2 {
+    if n_active_coel < 2 {
         return CoelutionGradientResult {
             weighted_coelution: 0.0,
             gradient_consistency: 0.0,
@@ -308,17 +368,15 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
-    // Weighted coelution: pairwise dot products (already centered+normalized = correlations)
+    // Weighted coelution: pairwise dot products (centered+normalized = correlations).
     let mut wcoel_num = 0.0f32;
     let mut wcoel_den = 0.0f32;
-    for i in 0..n_active {
-        for j in (i + 1)..n_active {
-            let corr: f32 = windows[i]
-                .iter()
-                .zip(windows[j].iter())
-                .map(|(a, b)| a * b)
-                .sum();
-            let w = weights[i] * weights[j];
+    for i in 0..n_active_coel {
+        let row_i = scratch.coel_rows.get_row(i).unwrap();
+        for j in (i + 1)..n_active_coel {
+            let row_j = scratch.coel_rows.get_row(j).unwrap();
+            let corr: f32 = row_i.iter().zip(row_j.iter()).map(|(a, b)| a * b).sum();
+            let w = scratch.weights[i] * scratch.weights[j];
             wcoel_num += w * corr;
             wcoel_den += w;
         }
@@ -329,18 +387,15 @@ pub fn coelution_gradient<T: KeyLike>(
         0.0
     };
 
-    // Gradient consistency: unweighted mean of upper-triangle correlations
-    let n_grad = grad_windows.len();
-    let gradient_consistency = if n_grad >= 2 {
+    // Gradient consistency: unweighted mean of upper-triangle correlations.
+    let gradient_consistency = if n_active_grad >= 2 {
         let mut sum_corr = 0.0f32;
         let mut count = 0u32;
-        for i in 0..n_grad {
-            for j in (i + 1)..n_grad {
-                let corr: f32 = grad_windows[i]
-                    .iter()
-                    .zip(grad_windows[j].iter())
-                    .map(|(a, b)| a * b)
-                    .sum();
+        for i in 0..n_active_grad {
+            let row_i = scratch.grad_rows.get_row(i).unwrap();
+            for j in (i + 1)..n_active_grad {
+                let row_j = scratch.grad_rows.get_row(j).unwrap();
+                let corr: f32 = row_i.iter().zip(row_j.iter()).map(|(a, b)| a * b).sum();
                 sum_corr += corr;
                 count += 1;
             }
@@ -375,6 +430,7 @@ pub fn compute_split_product<T: KeyLike>(
     scribe_profile: &[f32],
     fragments: &MzMajorIntensityArray<T, f32>,
     expected: &HashMap<T, f32>,
+    scratch: &mut CoelutionScratch,
 ) -> SplitProductScore {
     // Independent argmax on each profile
     let cos_apex = argmax(cosine_profile);
@@ -384,9 +440,9 @@ pub fn compute_split_product<T: KeyLike>(
     let cos_au = area_uniqueness(cosine_profile, cos_apex, 5);
     let scr_au = area_uniqueness(scribe_profile, scr_apex, 5);
 
-    // Coelution-gradient at each apex
-    let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10);
-    let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10);
+    // Coelution-gradient at each apex — shares the same scratch.
+    let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10, scratch);
+    let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10, scratch);
 
     let base_score = cos_au.au_score * cos_cg.combined * scr_au.au_score * scr_cg.combined;
 
@@ -1000,7 +1056,8 @@ mod tests {
             .into_iter()
             .collect();
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::new();
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
 
         // Identical traces => correlation should be ~1.0
         assert!(
@@ -1037,7 +1094,8 @@ mod tests {
             .into_iter()
             .collect();
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::new();
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         // Anti-correlated: wcoel should be negative or near zero
         assert!(
             result.weighted_coelution < 0.5,
@@ -1060,7 +1118,8 @@ mod tests {
 
         let expected: HashMap<String, f32> = [("a".to_string(), 1.0)].into_iter().collect();
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::new();
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         assert!(
             (result.combined - 1.0).abs() < 1e-6,
             "single fragment => combined should be 1.0, got {}",
@@ -1102,7 +1161,14 @@ mod tests {
             .into_iter()
             .collect();
 
-        let result = compute_split_product(&cosine_profile, &scribe_profile, &fragments, &expected);
+        let mut scratch = CoelutionScratch::new();
+        let result = compute_split_product(
+            &cosine_profile,
+            &scribe_profile,
+            &fragments,
+            &expected,
+            &mut scratch,
+        );
         assert!(result.base_score > 0.0);
         assert!(result.cosine_au > 0.0);
         assert!(result.scribe_au > 0.0);

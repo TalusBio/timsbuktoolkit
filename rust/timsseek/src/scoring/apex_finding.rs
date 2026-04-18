@@ -228,6 +228,7 @@ impl ElutionTraces {
 pub struct TraceScorer {
     pub traces: ElutionTraces,
     buffers: TraceScorerBuffers,
+    coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
 }
@@ -242,15 +243,22 @@ struct TraceScorerBuffers {
     temp_sqrt_sum: Vec<f32>,
     /// Log-intensity: sum(obs) per cycle (finalized as log1p).
     temp_raw_intensity_sum: Vec<f32>,
+    /// Scribe pred-norm list, one entry per active expected fragment.
+    /// Cleared and re-populated per peptide.
+    pred_norms: Vec<(usize, f32)>,
 }
 
 impl TraceScorerBuffers {
+    /// Typical peptide has up to ~16 fragments.
+    const TYP_FRAGS: usize = 16;
+
     fn new(size: usize) -> Self {
         Self {
             temp_ms2_dot_prod: vec![0.0f32; size],
             temp_ms2_norm_sq_obs: vec![0.0f32; size],
             temp_sqrt_sum: vec![0.0f32; size],
             temp_raw_intensity_sum: vec![0.0f32; size],
+            pred_norms: Vec::with_capacity(Self::TYP_FRAGS),
         }
     }
 
@@ -259,6 +267,7 @@ impl TraceScorerBuffers {
         self.temp_ms2_norm_sq_obs.fill(0.0);
         self.temp_sqrt_sum.fill(0.0);
         self.temp_raw_intensity_sum.fill(0.0);
+        self.pred_norms.clear();
     }
 
     fn resize(&mut self, len: usize) {
@@ -274,6 +283,7 @@ impl TraceScorer {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
             buffers: TraceScorerBuffers::new(capacity),
+            coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch::new(),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
         }
@@ -373,6 +383,7 @@ impl TraceScorer {
             &self.scribe_profile,
             &scoring_ctx.chromatograms.fragments,
             &scoring_ctx.expected_intensities.fragment_intensities,
+            &mut self.coel_scratch,
         );
 
         // Delta scores: compare apex_profile[cycle] against global 2nd/3rd peaks
@@ -509,8 +520,9 @@ impl TraceScorer {
         // Sum of sqrt(expected) for cosine norm: ||sqrt(exp)||^2 = sum(exp)
         let mut ms2_sum_exp = 0.0f32;
 
-        // Pre-compute pred_norm for scribe
-        let mut pred_norms: Vec<(usize, f32)> = Vec::new();
+        // Pre-compute pred_norm for scribe (reused buffer, cleared per peptide).
+        let pred_norms = &mut self.buffers.pred_norms;
+        pred_norms.clear();
         let mut pred_sqrt_sum = 0.0f32;
 
         for (row_idx, ((key, _mz), chrom)) in collector.fragments.iter_mzs().enumerate() {
@@ -575,7 +587,7 @@ impl TraceScorer {
             }
 
             // Pass B: accumulate SSE
-            for &(row_idx, pred_norm_i) in &pred_norms {
+            for &(row_idx, pred_norm_i) in pred_norms.iter() {
                 let row = collector
                     .fragments
                     .get_row_idx(row_idx)

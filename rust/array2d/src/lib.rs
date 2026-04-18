@@ -61,6 +61,16 @@ pub struct Array2D<T: ArrayElement> {
     pub n_row: usize,
 }
 
+impl<T: ArrayElement> Default for Array2D<T> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            n_col: 0,
+            n_row: 0,
+        }
+    }
+}
+
 impl<T: Serialize + ArrayElement> Serialize for Array2D<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
