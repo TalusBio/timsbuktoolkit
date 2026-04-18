@@ -682,7 +682,16 @@ impl<I: ScorerQueriable> Scorer<I> {
         items_to_score: &[QueryItemToScore],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings) {
-        let init_fn = || TraceScorer::new(self.num_cycles());
+        let num_cycles = self.num_cycles();
+        let init_fn = || {
+            tracing::debug!(
+                target: "alloc_track",
+                phase = "phase3_score",
+                num_cycles,
+                "rayon worker init: TraceScorer"
+            );
+            TraceScorer::new(num_cycles)
+        };
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
@@ -793,10 +802,19 @@ impl<I: ScorerQueriable> Scorer<I> {
         #[cfg(feature = "rayon")]
         let (heap, par_timings): (CalibrantHeap, super::timings::PrescoreTimings) = {
             use super::timings::PrescoreTimings;
+            let num_cycles = self.num_cycles();
+            let n_calibrants = config.n_calibrants;
             let init_fn = || {
+                tracing::debug!(
+                    target: "alloc_track",
+                    phase = "phase1_prescore",
+                    num_cycles,
+                    n_calibrants,
+                    "rayon worker init: TraceScorer + CalibrantHeap"
+                );
                 (
-                    TraceScorer::new(self.num_cycles()),
-                    CalibrantHeap::new(config.n_calibrants),
+                    TraceScorer::new(num_cycles),
+                    CalibrantHeap::new(n_calibrants),
                     PrescoreTimings::default(),
                 )
             };

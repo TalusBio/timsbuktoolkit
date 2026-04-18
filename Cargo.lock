@@ -6228,6 +6228,7 @@ dependencies = [
 name = "timsseek"
 version = "0.29.0"
 dependencies = [
+ "array2d",
  "arrow",
  "calibrt",
  "forust-ml",
