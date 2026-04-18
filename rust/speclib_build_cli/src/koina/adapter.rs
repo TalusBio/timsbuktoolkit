@@ -1,5 +1,10 @@
 use crate::koina::models::{
-    FragmentPrediction, KoinaRequest, KoinaTensor, KoinaTensorData, KoinaResponse, PredictionInput,
+    FragmentPrediction,
+    KoinaRequest,
+    KoinaResponse,
+    KoinaTensor,
+    KoinaTensorData,
+    PredictionInput,
     RtPrediction,
 };
 
@@ -191,7 +196,12 @@ fn koina_annotation_to_mzpaf(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::koina::models::{KoinaOutputTensor, KoinaResponse, KoinaTensorData, PredictionInput};
+    use crate::koina::models::{
+        KoinaOutputTensor,
+        KoinaResponse,
+        KoinaTensorData,
+        PredictionInput,
+    };
 
     fn sample_inputs() -> Vec<PredictionInput> {
         vec![
@@ -272,23 +282,21 @@ mod tests {
         // 2 peptides, 3 ions each (flat: 6 entries per tensor)
         // Peptide 0: ions [1.0, 0.0, 0.5] → only 2 survive
         // Peptide 1: ions [0.0, 0.0, 0.8] → only 1 survives
-        let annotations_data: Vec<serde_json::Value> = vec![
-            "y1^1", "b2^1", "y3^1", "y1^1", "b2^1", "y3^1",
-        ]
-        .into_iter()
-        .map(|s| serde_json::Value::String(s.to_string()))
-        .collect();
+        let annotations_data: Vec<serde_json::Value> =
+            vec!["y1^1", "b2^1", "y3^1", "y1^1", "b2^1", "y3^1"]
+                .into_iter()
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .collect();
 
         let mz_data: Vec<serde_json::Value> = vec![100.0_f64, 200.0, 300.0, 110.0, 210.0, 310.0]
             .into_iter()
             .map(serde_json::Value::from)
             .collect();
 
-        let intensity_data: Vec<serde_json::Value> =
-            vec![1.0_f64, 0.0, 0.5, 0.0, 0.0, 0.8]
-                .into_iter()
-                .map(serde_json::Value::from)
-                .collect();
+        let intensity_data: Vec<serde_json::Value> = vec![1.0_f64, 0.0, 0.5, 0.0, 0.0, 0.8]
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect();
 
         let response = KoinaResponse {
             id: "test".to_string(),

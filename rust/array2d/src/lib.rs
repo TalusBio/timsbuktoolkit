@@ -264,11 +264,7 @@ impl<T: ArrayElement> Array2D<T> {
         Ok(())
     }
 
-    pub fn try_replace_row_with(
-        &mut self,
-        row_idx: usize,
-        row: &[T],
-    ) -> Result<(), Array2DError> {
+    pub fn try_replace_row_with(&mut self, row_idx: usize, row: &[T]) -> Result<(), Array2DError> {
         let range = self
             .get_row_limits(row_idx)
             .ok_or(Array2DError::IndexOutOfBounds(row_idx))?;
@@ -709,7 +705,9 @@ mod tests {
 
     #[test]
     fn test_convolve_2d_identity() {
-        let array = Array2D::from_flat_vector(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 3, 3).unwrap();
+        let array =
+            Array2D::from_flat_vector(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 3, 3)
+                .unwrap();
         let kernel = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut output = Array2D::from_flat_vector(vec![0.0; 9], 3, 3).unwrap();
         array.convolve_2d_into(&kernel, &mut output);
@@ -718,11 +716,19 @@ mod tests {
 
     #[test]
     fn test_convolve_2d_blur() {
-        let array = Array2D::from_flat_vector(vec![0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0], 3, 3).unwrap();
+        let array =
+            Array2D::from_flat_vector(vec![0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0], 3, 3)
+                .unwrap();
         let kernel: [f64; 9] = [
-            1.0/10.0, 1.0/10.0, 1.0/10.0,
-            1.0/10.0, 2.0/10.0, 1.0/10.0,
-            1.0/10.0, 1.0/10.0, 1.0/10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            2.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
         ];
         let mut output = Array2D::from_flat_vector(vec![0.0; 9], 3, 3).unwrap();
         array.convolve_2d_into(&kernel, &mut output);

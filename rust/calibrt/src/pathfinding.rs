@@ -45,7 +45,9 @@ pub(crate) fn find_optimal_path(
         let start = if i > lookback { i - lookback } else { 0 };
         for j in start..i {
             // Only create edges where both dimensions increase (monotonic constraint)
-            if nodes[i].center.library > nodes[j].center.library && nodes[i].center.observed > nodes[j].center.observed {
+            if nodes[i].center.library > nodes[j].center.library
+                && nodes[i].center.observed > nodes[j].center.observed
+            {
                 let dx = nodes[i].center.library - nodes[j].center.library;
                 let dy = nodes[i].center.observed - nodes[j].center.observed;
                 let dist = (dx * dx + dy * dy).sqrt();
@@ -55,7 +57,8 @@ pub(crate) fn find_optimal_path(
                     // - Geometric mean of weights: Prefers high-confidence nodes but doesn't
                     //   annihilate edges to sparse-but-real cells (sqrt compresses the scale)
                     // - Division by distance: Penalizes long jumps, encouraging smooth curves
-                    let edge_weight = (nodes[i].center.weight.sqrt() * nodes[j].center.weight.sqrt()) / dist;
+                    let edge_weight =
+                        (nodes[i].center.weight.sqrt() * nodes[j].center.weight.sqrt()) / dist;
                     let new_weight = max_weights[j] + edge_weight;
 
                     if new_weight > max_weights[i] {

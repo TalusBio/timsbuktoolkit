@@ -94,11 +94,7 @@ fn apply_one_fixed_mod(sequence: &str, m: &Modification) -> String {
 /// Each element of `mods` specifies a residue and notation. The positions
 /// considered are only unmodified sites (not already followed by `[`).
 /// Returns at least the unmodified sequence (always the first element).
-pub fn expand_variable_mods(
-    sequence: &str,
-    mods: &[Modification],
-    max_mods: usize,
-) -> Vec<String> {
+pub fn expand_variable_mods(sequence: &str, mods: &[Modification], max_mods: usize) -> Vec<String> {
     // Collect all modifiable (residue_index_in_sequence, &Modification) pairs.
     // We scan character-by-character, skipping bracket contents.
     let positions = collect_modifiable_positions(sequence, mods);
@@ -135,10 +131,7 @@ struct ModSite<'a> {
 
 /// Walk the sequence, honouring existing bracket groups, and collect all
 /// positions where each mod could be applied.
-fn collect_modifiable_positions<'a>(
-    sequence: &str,
-    mods: &'a [Modification],
-) -> Vec<ModSite<'a>> {
+fn collect_modifiable_positions<'a>(sequence: &str, mods: &'a [Modification]) -> Vec<ModSite<'a>> {
     let mut sites: Vec<ModSite<'a>> = Vec::new();
     let bytes = sequence.as_bytes();
     let mut i = 0;

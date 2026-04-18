@@ -5,14 +5,20 @@ use timscentroid::rt_mapping::RTIndex;
 use timsquery::serde::IndexedPeaksHandle;
 use timsquery::traits::queriable_data::QueriableData;
 use timsquery::{
-    ChromatogramCollector, MzMobilityStatsCollector, OptionallyRestricted, SpectralCollector,
+    ChromatogramCollector,
+    MzMobilityStatsCollector,
+    OptionallyRestricted,
+    SpectralCollector,
     Tolerance,
 };
 
 use crate::chromatogram::PyChromatogramResult;
 use crate::elution_group::PyElutionGroup;
 use crate::iterator::PyChromatogramIterator;
-use crate::spectrum::{PyMzMobilityResult, PySpectralResult};
+use crate::spectrum::{
+    PyMzMobilityResult,
+    PySpectralResult,
+};
 use crate::tolerance::PyTolerance;
 
 /// Compute the RT range in milliseconds for a chromatogram query.
@@ -246,10 +252,7 @@ impl PyTimsIndex {
         let handle = &*self.handle;
         py.allow_threads(|| match &tolerances {
             ResolvedTolerances::Single(tol) => {
-                handle.par_add_query_multi(
-                    &mut collectors[..],
-                    rayon::iter::repeat_n(tol, n),
-                );
+                handle.par_add_query_multi(&mut collectors[..], rayon::iter::repeat_n(tol, n));
             }
             ResolvedTolerances::PerQuery(tols) => {
                 handle.par_add_query_multi(&mut collectors[..], &tols[..]);
@@ -288,9 +291,7 @@ impl PyTimsIndex {
 
         // Check if tolerance is a single PyTolerance or an iterable
         let tol_source = match tolerance.extract::<PyRef<'_, PyTolerance>>(py) {
-            Ok(tol_ref) => {
-                crate::iterator::ToleranceSource::Single(tol_ref.inner.clone())
-            }
+            Ok(tol_ref) => crate::iterator::ToleranceSource::Single(tol_ref.inner.clone()),
             Err(_) => {
                 let tol_iter = tolerance.call_method0(py, "__iter__").map_err(|_| {
                     PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -346,9 +347,7 @@ impl PyTimsIndex {
         (0..mapping.len() as u32)
             .map(|i| {
                 use timscentroid::rt_mapping::MS1CycleIndex;
-                mapping
-                    .rt_milis_for_index(&MS1CycleIndex::new(i))
-                    .unwrap()
+                mapping.rt_milis_for_index(&MS1CycleIndex::new(i)).unwrap()
             })
             .collect()
     }

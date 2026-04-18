@@ -4,7 +4,10 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use timsquery::serde::IndexedPeaksHandle;
 use timsquery::traits::queriable_data::QueriableData;
-use timsquery::{ChromatogramCollector, Tolerance};
+use timsquery::{
+    ChromatogramCollector,
+    Tolerance,
+};
 
 use crate::elution_group::PyElutionGroup;
 use crate::index::rt_range_ms_for_chromatogram;

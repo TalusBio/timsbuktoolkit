@@ -330,16 +330,20 @@ struct PrecomputedFeatures {
 
 impl PrecomputedFeatures {
     fn from_data(data: &[impl FeatureLike]) -> Self {
-        let ncols = data.first().map_or(0, |d| {
-            d.as_feature().into_iter().count()
-        });
+        let ncols = data
+            .first()
+            .map_or(0, |d| d.as_feature().into_iter().count());
         let mut features = Vec::with_capacity(data.len() * ncols);
         let mut responses = Vec::with_capacity(data.len());
         for elem in data {
             features.extend(elem.as_feature());
             responses.push(elem.get_y());
         }
-        Self { features, responses, ncols }
+        Self {
+            features,
+            responses,
+            ncols,
+        }
     }
 
     fn row(&self, idx: usize) -> &[f64] {
@@ -404,7 +408,11 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         self.fold_classifiers.clear();
         (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
         for fold in 0..self.n_folds {
-            let step = TimedStep::begin_stderr(format_args!("  Training fold {}/{}...", fold + 1, self.n_folds));
+            let step = TimedStep::begin_stderr(format_args!(
+                "  Training fold {}/{}...",
+                fold + 1,
+                self.n_folds
+            ));
             self.fit_fold(fold, train_buffer, val_buffer)?;
             step.finish();
         }

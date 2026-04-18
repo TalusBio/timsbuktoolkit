@@ -192,7 +192,9 @@ class TimsseekRunner:
             with open(performance_report_path, "r") as f:
                 metrics.update(json.load(f))
         else:
-            logger.warning(f"Performance report {performance_report_path} does not exist")
+            logger.warning(
+                f"Performance report {performance_report_path} does not exist"
+            )
         return metrics
 
 

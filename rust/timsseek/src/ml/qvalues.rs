@@ -106,10 +106,15 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
     scored.into_iter().map(|c| c.into_final()).collect()
 }
 
-use crate::scoring::results::{CompetedCandidate, FinalResult};
+use crate::scoring::results::{
+    CompetedCandidate,
+    FinalResult,
+};
 
 fn mean_abs_error(errs: &[f32]) -> f64 {
-    let (sum, n) = errs.iter().filter(|e| e.is_finite() && **e != 0.0)
+    let (sum, n) = errs
+        .iter()
+        .filter(|e| e.is_finite() && **e != 0.0)
         .fold((0.0f64, 0u32), |(s, n), &e| (s + (e as f64).abs(), n + 1));
     if n > 0 { sum / n as f64 } else { f64::NAN }
 }
@@ -213,7 +218,10 @@ impl FeatureLike for CompetedCandidate {
             // Derived intensity features
             {
                 let ratios = &s.ms2_intensity_ratios;
-                ratios.iter().filter(|r| r.is_finite()).fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64
+                ratios
+                    .iter()
+                    .filter(|r| r.is_finite())
+                    .fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64
             },
             // Interaction features
             (s.main_score * s.delta_next) as f64,
@@ -241,18 +249,38 @@ impl FeatureLike for CompetedCandidate {
 
 impl LabelledScore for CompetedCandidate {
     fn get_label(&self) -> TargetDecoy {
-        if self.scoring.is_target { TargetDecoy::Target } else { TargetDecoy::Decoy }
+        if self.scoring.is_target {
+            TargetDecoy::Target
+        } else {
+            TargetDecoy::Decoy
+        }
     }
-    fn assign_qval(&mut self, q: f32) { self.qvalue = q; }
-    fn get_qval(&self) -> f32 { self.qvalue }
+
+    fn assign_qval(&mut self, q: f32) {
+        self.qvalue = q;
+    }
+
+    fn get_qval(&self) -> f32 {
+        self.qvalue
+    }
 }
 
 impl LabelledScore for FinalResult {
     fn get_label(&self) -> TargetDecoy {
-        if self.scoring.is_target { TargetDecoy::Target } else { TargetDecoy::Decoy }
+        if self.scoring.is_target {
+            TargetDecoy::Target
+        } else {
+            TargetDecoy::Decoy
+        }
     }
-    fn assign_qval(&mut self, q: f32) { self.qvalue = q; }
-    fn get_qval(&self) -> f32 { self.qvalue }
+
+    fn assign_qval(&mut self, q: f32) {
+        self.qvalue = q;
+    }
+
+    fn get_qval(&self) -> f32 {
+        self.qvalue
+    }
 }
 
 #[cfg(test)]

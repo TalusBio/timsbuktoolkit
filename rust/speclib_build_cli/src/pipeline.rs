@@ -1,18 +1,39 @@
 use std::io::BufRead;
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{
+    ProgressBar,
+    ProgressStyle,
+};
 use timsseek::DigestSlice;
 use timsseek::data_sources::speclib::SpeclibWriter;
-use timsseek::digest::digestion::{DigestionEnd, DigestionParameters, DigestionPattern};
+use timsseek::digest::digestion::{
+    DigestionEnd,
+    DigestionParameters,
+    DigestionPattern,
+};
 use timsseek::protein::fasta::ProteinSequenceCollection;
 
 use crate::config::SpeclibBuildConfig;
-use crate::decoys::{DecoyMode, generate_decoy};
+use crate::decoys::{
+    DecoyMode,
+    generate_decoy,
+};
 use crate::dedup::PeptideDedup;
-use crate::entry::{EntryFilters, build_entry};
+use crate::entry::{
+    EntryFilters,
+    build_entry,
+};
 use crate::koina::KoinaClient;
-use crate::koina::models::{FragmentModel, PredictionInput, RtModel};
-use crate::mods::{Modification, apply_fixed_mods, expand_variable_mods};
+use crate::koina::models::{
+    FragmentModel,
+    PredictionInput,
+    RtModel,
+};
+use crate::mods::{
+    Modification,
+    apply_fixed_mods,
+    expand_variable_mods,
+};
 
 // ── BatchItem ───────────────────────────────────────────────────────────────
 
@@ -49,8 +70,18 @@ async fn flush_batch(
         .collect();
 
     let (fragments, rts) = tokio::try_join!(
-        async { koina.predict_fragments(&inputs).await.map_err(|e| -> Box<dyn std::error::Error> { e.into() }) },
-        async { koina.predict_rt(&inputs).await.map_err(|e| -> Box<dyn std::error::Error> { e.into() }) },
+        async {
+            koina
+                .predict_fragments(&inputs)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+        },
+        async {
+            koina
+                .predict_rt(&inputs)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+        },
     )?;
 
     for ((item, fragment), rt) in batch.drain(..).zip(fragments.iter()).zip(rts.iter()) {
@@ -64,7 +95,9 @@ async fn flush_batch(
             rt,
             filters,
         ) {
-            writer.append(&elem).map_err(|e| format!("write error: {e:?}"))?;
+            writer
+                .append(&elem)
+                .map_err(|e| format!("write error: {e:?}"))?;
             *entry_id += 1;
         }
         progress.inc(1);
@@ -98,7 +131,11 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
         // Warn about proteins containing non-standard amino acids
         for prot in &collection.sequences {
-            if prot.sequence.chars().any(|c| matches!(c, 'U' | 'B' | 'J' | 'Z' | 'X')) {
+            if prot
+                .sequence
+                .chars()
+                .any(|c| matches!(c, 'U' | 'B' | 'J' | 'Z' | 'X'))
+            {
                 tracing::warn!(
                     "Protein {} contains non-standard amino acids (U/B/J/Z/X) — affected peptides will be skipped",
                     prot.description,
@@ -114,7 +151,8 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         let raw = params.digest_multiple(&protein_seqs);
         tracing::info!("Digested into {} raw peptides", raw.len());
 
-        let estimated = PeptideDedup::estimate_from_proteins(total_aa, config.digestion.missed_cleavages);
+        let estimated =
+            PeptideDedup::estimate_from_proteins(total_aa, config.digestion.missed_cleavages);
         let deduped = PeptideDedup::dedup(raw, estimated);
         let (deduped, skipped) = filter_nonstandard_aa(deduped);
         if skipped > 0 {
@@ -191,7 +229,9 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     let nce = config.prediction.nce;
     let batch_size = config.prediction.batch_size;
     let request_delay = if config.prediction.request_delay_ms > 0 {
-        Some(std::time::Duration::from_millis(config.prediction.request_delay_ms))
+        Some(std::time::Duration::from_millis(
+            config.prediction.request_delay_ms,
+        ))
     } else {
         None
     };
@@ -205,8 +245,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
     // Estimate total items for progress bar: peptides * mod_variants * charges * (1 + decoy)
     let decoy_mult: u64 = if decoy_mode != DecoyMode::None { 2 } else { 1 };
-    let estimated_total =
-        base_peptides.len() as u64 * charges.len() as u64 * decoy_mult;
+    let estimated_total = base_peptides.len() as u64 * charges.len() as u64 * decoy_mult;
     let progress = ProgressBar::new(estimated_total);
     progress.set_style(
         ProgressStyle::with_template(
@@ -294,11 +333,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     progress.finish_with_message("done");
     writer.finish()?;
 
-    tracing::info!(
-        "Wrote {} entries to {}",
-        entry_id,
-        config.output.display(),
-    );
+    tracing::info!("Wrote {} entries to {}", entry_id, config.output.display(),);
 
     Ok(())
 }

@@ -2,7 +2,12 @@ pub mod adapter;
 pub mod models;
 
 use models::{
-    FragmentModel, FragmentPrediction, KoinaRequest, KoinaResponse, PredictionInput, RtModel,
+    FragmentModel,
+    FragmentPrediction,
+    KoinaRequest,
+    KoinaResponse,
+    PredictionInput,
+    RtModel,
     RtPrediction,
 };
 
@@ -16,7 +21,11 @@ pub struct KoinaClient {
 }
 
 impl KoinaClient {
-    pub fn new(base_url: impl Into<String>, fragment_model: FragmentModel, rt_model: RtModel) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        fragment_model: FragmentModel,
+        rt_model: RtModel,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
@@ -91,15 +100,14 @@ impl KoinaClient {
             }
 
             if status.is_success() {
-                let body = resp.text().await.map_err(|e| {
-                    format!("failed to read Koina response body: {e}")
-                })?;
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("failed to read Koina response body: {e}"))?;
                 return serde_json::from_str::<KoinaResponse>(&body).map_err(|e| {
                     // Show first 500 chars of body for debugging
                     let preview: String = body.chars().take(500).collect();
-                    format!(
-                        "failed to deserialise Koina response: {e}\nbody preview: {preview}"
-                    )
+                    format!("failed to deserialise Koina response: {e}\nbody preview: {preview}")
                 });
             }
 

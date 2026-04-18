@@ -12,8 +12,8 @@ fn test_pipeline_digestion_and_dedup() {
     let fasta_path = test_fasta_path();
     assert!(fasta_path.exists());
 
-    use timsseek::protein::fasta::ProteinSequenceCollection;
     use timsseek::digest::digestion::*;
+    use timsseek::protein::fasta::ProteinSequenceCollection;
 
     let proteins = ProteinSequenceCollection::from_fasta_file(&fasta_path).unwrap();
     assert_eq!(proteins.sequences.len(), 2);
@@ -26,7 +26,9 @@ fn test_pipeline_digestion_and_dedup() {
         max_missed_cleavages: 1,
     };
 
-    let all_digests: Vec<_> = proteins.sequences.iter()
+    let all_digests: Vec<_> = proteins
+        .sequences
+        .iter()
         .flat_map(|p| params.digest(p.sequence.clone()))
         .collect();
     assert!(all_digests.len() > 0);

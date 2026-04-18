@@ -98,7 +98,10 @@ where
     if trimmed.is_empty() || trimmed == "#N/A" {
         return Ok(None);
     }
-    trimmed.parse::<f32>().map(Some).map_err(serde::de::Error::custom)
+    trimmed
+        .parse::<f32>()
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Represents a single row from a Skyline Peptide Transition List CSV.
@@ -176,7 +179,9 @@ pub fn sniff_skyline_library_file<T: AsRef<Path>>(file: T) -> Result<(), Skyline
         SkylineSniffError::IoError(format!("Failed to open {}: {}", file.as_ref().display(), e))
     })?;
 
-    let mut rdr = csv::ReaderBuilder::new().delimiter(b',').from_reader(file_handle);
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b',')
+        .from_reader(file_handle);
 
     let headers = rdr.headers().map_err(|e| {
         SkylineSniffError::InvalidFormat(format!("Failed to parse CSV headers: {}", e))
@@ -221,9 +226,14 @@ pub fn read_library_file<T: AsRef<Path>>(
 ) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SkylinePrecursorExtras)>, SkylineReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
-    let mut rdr = csv::ReaderBuilder::new().delimiter(b',').from_reader(file_handle);
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b',')
+        .from_reader(file_handle);
 
-    info!("Reading Skyline transition list from {}", file.as_ref().display());
+    info!(
+        "Reading Skyline transition list from {}",
+        file.as_ref().display()
+    );
     warn!(
         "Skyline transition lists do not carry retention time or ion mobility; \
          falling back to 0.0. Use an RT-unrestricted search or calibrate separately."
@@ -448,7 +458,10 @@ mod tests {
             assert_eq!(extras.protein_id, "PRTC");
             assert!(!extras.is_decoy);
             assert_eq!(extras.modified_peptide, extras.stripped_peptide);
-            assert!(eg.fragment_count() > 0, "Each precursor should have fragments");
+            assert!(
+                eg.fragment_count() > 0,
+                "Each precursor should have fragments"
+            );
             assert_eq!(
                 extras.relative_intensities.len(),
                 eg.fragment_count(),

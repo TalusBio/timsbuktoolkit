@@ -23,7 +23,10 @@ impl PeptideDedup {
             } else {
                 // Maybe seen — check bucket
                 let bucket = buckets.entry(key).or_default();
-                if !bucket.iter().any(|existing| existing.as_str().as_bytes() == seq) {
+                if !bucket
+                    .iter()
+                    .any(|existing| existing.as_str().as_bytes() == seq)
+                {
                     bucket.push(slice);
                 }
             }
@@ -72,10 +75,7 @@ mod tests {
     #[test]
     fn test_dedup_same_len_different_seq() {
         // Same length, different content → both kept
-        let slices = vec![
-            make_slice("ABCDE"),
-            make_slice("VWXYZ"),
-        ];
+        let slices = vec![make_slice("ABCDE"), make_slice("VWXYZ")];
         let result = PeptideDedup::dedup(slices, 10);
         assert_eq!(result.len(), 2);
         let seqs: Vec<&str> = result.iter().map(|s| s.as_str()).collect();

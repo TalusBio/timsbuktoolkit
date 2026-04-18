@@ -7,10 +7,13 @@ mod pathfinding;
 pub mod plotting;
 pub mod types;
 pub use grid::Grid;
-pub use types::{LibraryRT, ObservedRTSeconds};
 use tracing::{
     info,
     warn,
+};
+pub use types::{
+    LibraryRT,
+    ObservedRTSeconds,
 };
 
 /// Minimum denominator for slope calculations to avoid division by zero.
@@ -69,7 +72,10 @@ impl CalibrationCurve {
 
         let slopes = points
             .windows(2)
-            .map(|p| (p[1].observed - p[0].observed) / (p[1].library - p[0].library).max(MIN_SLOPE_DENOMINATOR))
+            .map(|p| {
+                (p[1].observed - p[0].observed)
+                    / (p[1].library - p[0].library).max(MIN_SLOPE_DENOMINATOR)
+            })
             .collect();
 
         Ok(Self { points, slopes })
@@ -80,7 +86,10 @@ impl CalibrationCurve {
         &self.points
     }
 
-    pub fn wrmse(&self, test_points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) -> f64 {
+    pub fn wrmse(
+        &self,
+        test_points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
+    ) -> f64 {
         let mut total_error = 0.0;
         let mut weight: f64 = 0.0;
 
@@ -170,7 +179,7 @@ pub struct RidgeMeasurement {
 /// Used for save/load. Does not include the fitted curve (reconstructed on load).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CalibrationSnapshot {
-    pub points: Vec<[f64; 3]>,  // [library, observed, weight]
+    pub points: Vec<[f64; 3]>, // [library, observed, weight]
     pub grid_size: usize,
     pub lookback: usize,
 }
@@ -206,9 +215,16 @@ impl CalibrationState {
 
     /// Feed points into the grid. Returns an error if any point has
     /// non-finite coordinates or weight (NaN/Inf), indicating a bug upstream.
-    pub fn update(&mut self, points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>) -> Result<(), CalibRtError> {
+    pub fn update(
+        &mut self,
+        points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
+    ) -> Result<(), CalibRtError> {
         for (lib_rt, obs_rt, w) in points {
-            self.grid.add_point(&Point { library: lib_rt.0, observed: obs_rt.0, weight: w })?;
+            self.grid.add_point(&Point {
+                library: lib_rt.0,
+                observed: obs_rt.0,
+                weight: w,
+            })?;
         }
         self.stale = true;
         Ok(())
@@ -223,7 +239,9 @@ impl CalibrationState {
         }
 
         // Collect non-suppressed nodes for pathfinding
-        let mut filtered: Vec<grid::Node> = self.grid.grid_cells()
+        let mut filtered: Vec<grid::Node> = self
+            .grid
+            .grid_cells()
             .iter()
             .filter(|n| !n.suppressed && n.center.weight > 0.0)
             .copied()
@@ -241,7 +259,8 @@ impl CalibrationState {
         self.path_indices.clear();
         for pp in &path_points {
             if let Some(idx) = self.grid.grid_cells().iter().position(|n| {
-                (n.center.library - pp.library).abs() < 1e-9 && (n.center.observed - pp.observed).abs() < 1e-9
+                (n.center.library - pp.library).abs() < 1e-9
+                    && (n.center.observed - pp.observed).abs() < 1e-9
             }) {
                 self.path_indices.push(idx);
             }
@@ -345,9 +364,7 @@ impl CalibrationState {
             }
 
             // Sum all weights in this column for the in-ridge ratio
-            let column_weight: f64 = (0..bins)
-                .map(|row| self.grid.blurred_weight(row, gx))
-                .sum();
+            let column_weight: f64 = (0..bins).map(|row| self.grid.blurred_weight(row, gx)).sum();
 
             let half_width = ((upper_gy - lower_gy) as f64 + 1.0) * cell_h * 0.5;
 
@@ -363,9 +380,15 @@ impl CalibrationState {
     }
 
     /// Bundle current config into a snapshot (caller provides the points).
-    pub fn save_snapshot(&self, points: &[(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)]) -> CalibrationSnapshot {
+    pub fn save_snapshot(
+        &self,
+        points: &[(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)],
+    ) -> CalibrationSnapshot {
         CalibrationSnapshot {
-            points: points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
+            points: points
+                .iter()
+                .map(|&(lib, obs, w)| [lib.0, obs.0, w])
+                .collect(),
             grid_size: self.grid.bins,
             lookback: self.lookback,
         }
@@ -380,7 +403,12 @@ impl CalibrationState {
         let y_range = compute_range(snapshot.points.iter().map(|p| p[1]))?;
 
         let mut state = Self::new(snapshot.grid_size, x_range, y_range, snapshot.lookback)?;
-        state.update(snapshot.points.iter().map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2])))?;
+        state.update(
+            snapshot
+                .points
+                .iter()
+                .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2])),
+        )?;
         state.fit();
         Ok(state)
     }
@@ -413,13 +441,20 @@ mod calibration_state_tests {
 
         let curve = state.curve().unwrap();
         let pred = curve.predict(LibraryRT(50.0)).unwrap();
-        assert!((pred.0 - 50.0).abs() < 5.0, "predicted {} expected ~50.0", pred.0);
+        assert!(
+            (pred.0 - 50.0).abs() < 5.0,
+            "predicted {} expected ~50.0",
+            pred.0
+        );
     }
 
     #[test]
     fn test_reset_clears_state() {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-        let points = vec![(LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0), (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0)];
+        let points = vec![
+            (LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0),
+            (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0),
+        ];
         state.update(points.into_iter()).unwrap();
         state.fit();
         assert!(state.curve().is_some());
@@ -435,14 +470,30 @@ mod calibration_state_tests {
         let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
 
         // First fit: y = x
-        let points1: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 10.0 + 5.0), 1.0)).collect();
+        let points1: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    LibraryRT((i as f64) * 10.0 + 5.0),
+                    ObservedRTSeconds((i as f64) * 10.0 + 5.0),
+                    1.0,
+                )
+            })
+            .collect();
         state.update(points1.into_iter()).unwrap();
         state.fit();
         let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
         // Reset and refit: y = 2x
         state.reset();
-        let points2: Vec<_> = (0..10).map(|i| (LibraryRT((i as f64) * 10.0 + 5.0), ObservedRTSeconds((i as f64) * 20.0 + 5.0), 1.0)).collect();
+        let points2: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    LibraryRT((i as f64) * 10.0 + 5.0),
+                    ObservedRTSeconds((i as f64) * 20.0 + 5.0),
+                    1.0,
+                )
+            })
+            .collect();
         state.update(points2.into_iter()).unwrap();
         state.fit();
         let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
@@ -513,20 +564,31 @@ pub fn calibrate_with_ranges(
     let mut max_weights = Vec::new();
     let mut prev_indices = Vec::new();
     let optimal_path_points = pathfinding::find_optimal_path(
-        &mut filtered_nodes, lookback, &mut max_weights, &mut prev_indices,
+        &mut filtered_nodes,
+        lookback,
+        &mut max_weights,
+        &mut prev_indices,
     );
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
     match &calcurve {
         Ok(c) => {
-            let wrmse = c.wrmse(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)));
+            let wrmse = c.wrmse(points.iter().map(|p| {
+                (
+                    LibraryRT(p.library),
+                    ObservedRTSeconds(p.observed),
+                    p.weight,
+                )
+            }));
             info!("Calibration successful, WRMSE: {}", wrmse);
             plotting::plot_function(
                 |x| {
-                    c.predict(LibraryRT(x)).map(|obs| obs.0).map_err(|e| match e {
-                        CalibRtError::OutOfBounds(y) => y,
-                        _ => panic!("Unexpected error during plotting"),
-                    })
+                    c.predict(LibraryRT(x))
+                        .map(|obs| obs.0)
+                        .map_err(|e| match e {
+                            CalibRtError::OutOfBounds(y) => y,
+                            _ => panic!("Unexpected error during plotting"),
+                        })
                 },
                 (x_range.0, x_range.1),
                 CALIBRATION_PLOT_WIDTH,

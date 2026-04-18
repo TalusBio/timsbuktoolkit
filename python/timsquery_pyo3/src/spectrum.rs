@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
-use timsquery::{MzMobilityStatsCollector, SpectralCollector};
+use timsquery::{
+    MzMobilityStatsCollector,
+    SpectralCollector,
+};
 
 /// Result of a spectral query — total summed intensity per ion.
 ///

@@ -209,9 +209,7 @@ fn estimate_fwhm(profile: &[f32], apex: usize) -> f32 {
 pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniquenessResult {
     let n = signal.len();
     if n == 0 {
-        return AreaUniquenessResult {
-            au_score: 0.0,
-        };
+        return AreaUniquenessResult { au_score: 0.0 };
     }
     let lo = apex.saturating_sub(hw);
     let hi = (apex + hw + 1).min(n);
@@ -220,9 +218,7 @@ pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniqueness
     let total: f32 = signal.iter().sum();
 
     if total <= 0.0 {
-        return AreaUniquenessResult {
-            au_score: 0.0,
-        };
+        return AreaUniquenessResult { au_score: 0.0 };
     }
 
     let uniqueness = peak_area / total;
@@ -412,10 +408,7 @@ pub fn compute_split_product<T: KeyLike>(
 /// joint(t) = C(t) * (0.5 + P(t) / max(P))
 /// If max(P) == 0, degrades to joint(t) = C(t) * 0.5 (pure fragment apex).
 pub fn find_joint_apex(cosine_profile: &[f32], precursor_trace: &[f32]) -> usize {
-    let max_p = precursor_trace
-        .iter()
-        .copied()
-        .fold(0.0f32, f32::max);
+    let max_p = precursor_trace.iter().copied().fold(0.0f32, f32::max);
 
     let mut best_val = f32::NEG_INFINITY;
     let mut best_idx = 0usize;
@@ -477,8 +470,7 @@ pub fn compute_apex_features<T: KeyLike>(
     let fragment_coverage = compute_fragment_coverage(fragments, apex);
 
     // ---- Precursor Apex Match (Section 3.4) ----
-    let precursor_apex_match =
-        compute_precursor_apex_match(precursor_trace, apex, n_cycles);
+    let precursor_apex_match = compute_precursor_apex_match(precursor_trace, apex, n_cycles);
 
     // ---- XIC Quality (Section 3.4) ----
     let xic_quality = compute_xic_quality(fragments, apex, 8);
@@ -575,12 +567,8 @@ fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
     }
 
     // Symmetry: Pearson correlation between left flank (reversed) and right flank
-    let left_rev: Vec<f32> = (0..flank_len)
-        .map(|i| profile[apex - 1 - i])
-        .collect();
-    let right: Vec<f32> = (0..flank_len)
-        .map(|i| profile[apex + 1 + i])
-        .collect();
+    let left_rev: Vec<f32> = (0..flank_len).map(|i| profile[apex - 1 - i]).collect();
+    let right: Vec<f32> = (0..flank_len).map(|i| profile[apex + 1 + i]).collect();
     let symmetry = pearson_correlation(&left_rev, &right).clamp(0.0, 1.0);
 
     // Sharpness: 1 - mean(edges) / peak
@@ -677,11 +665,7 @@ fn compute_fragment_coverage<T: KeyLike>(
 }
 
 /// Precursor apex match = 0.5 * proximity + 0.5 * fraction (Section 3.4).
-fn compute_precursor_apex_match(
-    precursor_trace: &[f32],
-    apex: usize,
-    n_cycles: usize,
-) -> f32 {
+fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: usize) -> f32 {
     if precursor_trace.is_empty() || n_cycles == 0 {
         return 0.0;
     }
@@ -737,16 +721,13 @@ fn compute_xic_quality<T: KeyLike>(
         let window = &chrom[lo..hi];
 
         // Find local max in window
-        let (local_max_val, local_max_idx) = window
-            .iter()
-            .enumerate()
-            .fold((0.0f32, 0usize), |(best_v, best_i), (i, &v)| {
-                if v > best_v {
-                    (v, i)
-                } else {
-                    (best_v, best_i)
-                }
-            });
+        let (local_max_val, local_max_idx) =
+            window
+                .iter()
+                .enumerate()
+                .fold((0.0f32, 0usize), |(best_v, best_i), (i, &v)| {
+                    if v > best_v { (v, i) } else { (best_v, best_i) }
+                });
 
         if local_max_val <= 0.0 {
             // Fragment contributes 0
@@ -782,8 +763,10 @@ fn compute_fragment_apex_agreement<T: KeyLike>(
     let mut count = 0u32;
     for ((_key, _mz), chrom) in fragments.iter_mzs() {
         // Single pass: find argmax and check if max > 0
-        let (frag_apex, max_val) = chrom.iter().enumerate()
-            .fold((0usize, 0.0f32), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) });
+        let (frag_apex, max_val) = chrom.iter().enumerate().fold(
+            (0usize, 0.0f32),
+            |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) },
+        );
         if max_val <= 0.0 {
             continue;
         }
@@ -933,9 +916,7 @@ mod tests {
     use timsquery::models::Array2D;
 
     /// Helper: build a MzMajorIntensityArray from a Vec of (key, mz, intensities) tuples.
-    fn make_fragments<T: KeyLike>(
-        ions: Vec<(T, f64, Vec<f32>)>,
-    ) -> MzMajorIntensityArray<T, f32> {
+    fn make_fragments<T: KeyLike>(ions: Vec<(T, f64, Vec<f32>)>) -> MzMajorIntensityArray<T, f32> {
         let n_cycles = ions.first().map(|(_, _, v)| v.len()).unwrap_or(0);
         let n_ions = ions.len();
         let mz_order: Vec<(T, f64)> = ions.iter().map(|(k, mz, _)| (k.clone(), *mz)).collect();
@@ -1015,10 +996,9 @@ mod tests {
             ("b".to_string(), 200.0, peak.clone()),
         ]);
 
-        let expected: HashMap<String, f32> =
-            [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-                .into_iter()
-                .collect();
+        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
+            .into_iter()
+            .collect();
 
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
 
@@ -1053,10 +1033,9 @@ mod tests {
             ("b".to_string(), 200.0, peak_b),
         ]);
 
-        let expected: HashMap<String, f32> =
-            [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-                .into_iter()
-                .collect();
+        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
+            .into_iter()
+            .collect();
 
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
         // Anti-correlated: wcoel should be negative or near zero
@@ -1077,11 +1056,9 @@ mod tests {
             })
             .collect();
 
-        let fragments =
-            make_fragments(vec![("a".to_string(), 100.0, peak)]);
+        let fragments = make_fragments(vec![("a".to_string(), 100.0, peak)]);
 
-        let expected: HashMap<String, f32> =
-            [("a".to_string(), 1.0)].into_iter().collect();
+        let expected: HashMap<String, f32> = [("a".to_string(), 1.0)].into_iter().collect();
 
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
         assert!(
@@ -1121,10 +1098,9 @@ mod tests {
             ("a".to_string(), 100.0, peak.clone()),
             ("b".to_string(), 200.0, peak),
         ]);
-        let expected: HashMap<String, f32> =
-            [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-                .into_iter()
-                .collect();
+        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
+            .into_iter()
+            .collect();
 
         let result = compute_split_product(&cosine_profile, &scribe_profile, &fragments, &expected);
         assert!(result.base_score > 0.0);
@@ -1221,8 +1197,7 @@ mod tests {
             (1i8, 500.5, vec![0.0, 0.3, 0.0]),
             (2i8, 501.0, vec![0.0, 0.1, 0.0]),
         ]);
-        let expected: HashMap<i8, f32> =
-            [(0i8, 0.6), (1, 0.3), (2, 0.1)].into_iter().collect();
+        let expected: HashMap<i8, f32> = [(0i8, 0.6), (1, 0.3), (2, 0.1)].into_iter().collect();
         let iso = compute_isotope_correlation(&precursors, &expected, 1);
         assert!(
             (iso - 1.0).abs() < 1e-4,
@@ -1250,8 +1225,7 @@ mod tests {
         };
         let score = compute_weighted_score(100.0, &features);
         // product of offsets: 1*1*1*1*0.32*1*1*0.43*1*0.27*0.65
-        let expected = 100.0 * 1.0 * 1.0 * 1.0 * 1.0 * 0.32 * 1.0 * 1.0 * 0.43 * 1.0 * 0.27
-            * 0.65;
+        let expected = 100.0 * 1.0 * 1.0 * 1.0 * 1.0 * 0.32 * 1.0 * 1.0 * 0.43 * 1.0 * 0.27 * 0.65;
         assert!(
             (score - expected).abs() < 1e-3,
             "score {} != expected {}",

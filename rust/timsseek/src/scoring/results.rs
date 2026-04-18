@@ -9,7 +9,10 @@ use super::offsets::MzMobilityOffsets;
 use super::pipeline::SecondaryLazyScores;
 use crate::errors::DataProcessingError;
 
-use super::{NUM_MS2_IONS, NUM_MS1_IONS};
+use super::{
+    NUM_MS1_IONS,
+    NUM_MS2_IONS,
+};
 
 /// Shared scoring fields produced by Phase 3. Every field is guaranteed populated.
 #[derive(Debug, Clone, Serialize)]
@@ -297,8 +300,7 @@ impl ScoredCandidateBuilder {
 
         let mob_errors = offsets.avg_delta_mobs();
         let cum_err = mob_errors.0 + mob_errors.1;
-        let obs_mob =
-            (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
+        let obs_mob = (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
         let d_err = match (mob_errors.0.mean_mobility(), mob_errors.1.mean_mobility()) {
             (Ok(mz), Ok(mob)) => mz - mob,
             _ => f64::NAN,
@@ -352,12 +354,10 @@ impl ScoredCandidateBuilder {
         self.scribe_au = SetField::Some(split_product.scribe_au);
         self.cosine_cg = SetField::Some(split_product.cosine_cg);
         self.scribe_cg = SetField::Some(split_product.scribe_cg);
-        self.cosine_weighted_coelution =
-            SetField::Some(split_product.cosine_weighted_coelution);
+        self.cosine_weighted_coelution = SetField::Some(split_product.cosine_weighted_coelution);
         self.cosine_gradient_consistency =
             SetField::Some(split_product.cosine_gradient_consistency);
-        self.scribe_weighted_coelution =
-            SetField::Some(split_product.scribe_weighted_coelution);
+        self.scribe_weighted_coelution = SetField::Some(split_product.scribe_weighted_coelution);
         self.scribe_gradient_consistency =
             SetField::Some(split_product.scribe_gradient_consistency);
 

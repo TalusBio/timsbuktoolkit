@@ -295,7 +295,8 @@ impl TraceScorer {
             let cos = self.traces.cosine_trace[i];
             let intensity = self.traces.ms2_log_intensity[i];
             self.cosine_profile.push(cos * cos * cos * intensity);
-            self.scribe_profile.push(self.traces.ms2_scribe[i] * intensity);
+            self.scribe_profile
+                .push(self.traces.ms2_scribe[i] * intensity);
         }
     }
 
