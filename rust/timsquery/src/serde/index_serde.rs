@@ -647,23 +647,27 @@ fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReading
     };
 
     match timscentroid::storage::StorageProvider::new(storage_location) {
-        Ok(provider) => {
-            match provider.read_bytes("metadata.json") {
-                Ok(_) => Ok(true),
-                Err(e) => {
-                    if let timscentroid::serialization::SerializationError::Io(io_err) = &e {
-                        if io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                            error!("Permission denied checking for cached index at {}: {:?}", location, e);
-                            return Err(crate::errors::DataReadingError::SerializationError(e));
-                        }
+        Ok(provider) => match provider.read_bytes("metadata.json") {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                if let timscentroid::serialization::SerializationError::Io(io_err) = &e {
+                    if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                        error!(
+                            "Permission denied checking for cached index at {}: {:?}",
+                            location, e
+                        );
+                        return Err(crate::errors::DataReadingError::SerializationError(e));
                     }
-                    debug!("Cloud index sniff: {} -> not cached ({:?})", location, e);
-                    Ok(false)
                 }
+                debug!("Cloud index sniff: {} -> not cached ({:?})", location, e);
+                Ok(false)
             }
-        }
+        },
         Err(e) => {
-            debug!("Cloud index sniff: {} -> provider error ({:?})", location, e);
+            debug!(
+                "Cloud index sniff: {} -> provider error ({:?})",
+                location, e
+            );
             Ok(false)
         }
     }
@@ -732,12 +736,15 @@ pub fn load_index_auto(
     let is_cached = sniff_cached_index(input)?;
     let is_cloud = input.contains("://");
 
-    info!("Index type: {}", match (is_cached, is_cloud) {
-        (true, true) => "cloud cached index",
-        (true, false) => "local cached index",
-        (false, true) => "cloud raw (unsupported)",
-        (false, false) => "local raw .d file",
-    });
+    info!(
+        "Index type: {}",
+        match (is_cached, is_cloud) {
+            (true, true) => "cloud cached index",
+            (true, false) => "local cached index",
+            (false, true) => "cloud raw (unsupported)",
+            (false, false) => "local raw .d file",
+        }
+    );
 
     // Early validation: reject cloud raw .d files with helpful error
     if is_cloud && !is_cached {

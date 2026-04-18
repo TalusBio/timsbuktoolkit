@@ -113,7 +113,10 @@ impl ChromatogramOutput {
                     return None;
                 }
                 let out_vec = out_slc.to_vec();
-                Some(Ok::<_, crate::errors::DataProcessingError>(((mz, out_vec), format!("{}", idx))))
+                Some(Ok::<_, crate::errors::DataProcessingError>((
+                    (mz, out_vec),
+                    format!("{}", idx),
+                )))
             })
             .collect::<Result<Vec<_>, crate::errors::DataProcessingError>>()?
             .into_iter()

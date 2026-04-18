@@ -1,5 +1,5 @@
-use std::fmt::Display;
 use array2d::Array2DError;
+use std::fmt::Display;
 use timscentroid::serialization::SerializationError;
 use timsrust::{
     TimsRustError,

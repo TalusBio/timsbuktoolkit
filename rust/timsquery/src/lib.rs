@@ -1,10 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 // Re export stuff from other crates ...
-pub use {
-    micromzpaf,
-    tinyvec,
-};
+pub use micromzpaf;
+pub use tinyvec;
 
 // Re-export main structures
 pub use crate::models::Tolerance;

@@ -20,10 +20,10 @@ pub use models::{
     QueryItemToScore,
 };
 pub use scoring::{
-    Scorer,
-    ScoredCandidate,
     CompetedCandidate,
     FinalResult,
+    ScoredCandidate,
+    Scorer,
     ScoringFields,
 };
 pub use timsquery::ion::{

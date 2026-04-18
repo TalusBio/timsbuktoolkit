@@ -1,3 +1,4 @@
+use calibrt::LibraryRT;
 use eframe::egui;
 use egui::Color32;
 use egui_dock::{
@@ -9,7 +10,6 @@ use egui_dock::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use calibrt::LibraryRT;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
@@ -534,7 +534,8 @@ impl ViewerApp {
                     };
                     tracing::debug!(
                         "RT calibration: {:.1}s (library) → {:.1}s (projected)",
-                        lib_rt, calibrated_rt,
+                        lib_rt,
+                        calibrated_rt,
                     );
                     elution_group_owned.set_rt_seconds(calibrated_rt);
                 }
@@ -683,7 +684,10 @@ impl ViewerApp {
                         let lib_rt = elution_group.rt_seconds() as f64;
 
                         // Check if calibration projects to a different RT
-                        let calibrated_rt = self.calibration.calibration_state.as_ref()
+                        let calibrated_rt = self
+                            .calibration
+                            .calibration_state
+                            .as_ref()
                             .and_then(|cs| cs.curve())
                             .and_then(|curve| match curve.predict(LibraryRT(lib_rt)) {
                                 Ok(y) => Some(y.0),

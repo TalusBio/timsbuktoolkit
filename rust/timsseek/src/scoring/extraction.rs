@@ -47,12 +47,8 @@ where
         return Err(SkippingReason::RetentionTimeOutOfBounds);
     }
 
-    let mut agg = ChromatogramCollector::new(
-        elution_group.clone(),
-        rt_range,
-        cycle_mapping,
-    )
-    .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+    let mut agg = ChromatogramCollector::new(elution_group.clone(), rt_range, cycle_mapping)
+        .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
 
     index.add_query(&mut agg, tolerance);
 

@@ -1,11 +1,19 @@
 use timsseek::IonAnnot;
-use timsseek::data_sources::speclib::{PrecursorEntry, ReferenceEG, SerSpeclibElement};
+use timsseek::data_sources::speclib::{
+    PrecursorEntry,
+    ReferenceEG,
+    SerSpeclibElement,
+};
 use timsseek::fragment_mass::elution_group_converter::{
-    count_carbon_sulphur_in_sequence, supersimpleprediction,
+    count_carbon_sulphur_in_sequence,
+    supersimpleprediction,
 };
 use timsseek::isotopes::peptide_isotopes;
 
-use crate::koina::models::{FragmentPrediction, RtPrediction};
+use crate::koina::models::{
+    FragmentPrediction,
+    RtPrediction,
+};
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 
@@ -173,7 +181,10 @@ pub fn build_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::koina::models::{FragmentPrediction, RtPrediction};
+    use crate::koina::models::{
+        FragmentPrediction,
+        RtPrediction,
+    };
 
     fn make_filters(min_ions: usize) -> EntryFilters {
         EntryFilters {
@@ -209,7 +220,10 @@ mod tests {
     #[test]
     fn test_compute_precursor_mz() {
         let mz = compute_precursor_mz("PEPTIDEK", 2).unwrap();
-        assert!(mz > 400.0 && mz < 600.0, "Expected reasonable m/z, got {mz}");
+        assert!(
+            mz > 400.0 && mz < 600.0,
+            "Expected reasonable m/z, got {mz}"
+        );
     }
 
     #[test]
@@ -225,23 +239,13 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_build_entry_basic() {
         let fragment = four_ion_fragment();
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry(
-            "PEPTIDEK",
-            2,
-            false,
-            0,
-            42,
-            &fragment,
-            &rt,
-            &filters,
-        );
+        let result = build_entry("PEPTIDEK", 2, false, 0, 42, &fragment, &rt, &filters);
 
         assert!(result.is_some(), "Expected Some but got None");
     }
@@ -257,16 +261,7 @@ mod tests {
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry(
-            "PEPTIDEK",
-            2,
-            false,
-            0,
-            1,
-            &fragment,
-            &rt,
-            &filters,
-        );
+        let result = build_entry("PEPTIDEK", 2, false, 0, 1, &fragment, &rt, &filters);
 
         assert!(result.is_none(), "Expected None but got Some");
     }
@@ -285,18 +280,12 @@ mod tests {
             min_ions: 3,
         };
 
-        let result = build_entry(
-            "PEPTIDEK",
-            2,
-            false,
-            0,
-            2,
-            &fragment,
-            &rt,
-            &filters,
-        );
+        let result = build_entry("PEPTIDEK", 2, false, 0, 2, &fragment, &rt, &filters);
 
-        assert!(result.is_none(), "Expected None due to precursor m/z filter");
+        assert!(
+            result.is_none(),
+            "Expected None due to precursor m/z filter"
+        );
     }
 
     #[test]
@@ -305,16 +294,7 @@ mod tests {
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry(
-            "KEDITREP",
-            2,
-            true,
-            99,
-            7,
-            &fragment,
-            &rt,
-            &filters,
-        );
+        let result = build_entry("KEDITREP", 2, true, 99, 7, &fragment, &rt, &filters);
 
         // Decoy peptide should still build an entry if the mz/ions pass filters
         // (KEDITREP ~476 should pass default 400–2000 window).

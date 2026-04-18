@@ -9,7 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::debug;
 
-use super::results::{FinalResult, ScoringFields};
+use super::results::{
+    FinalResult,
+    ScoringFields,
+};
 
 // ---------------------------------------------------------------------------
 // Macro: build typed columns from accessor closures
@@ -218,12 +221,48 @@ pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatc
     // -----------------------------------------------------------------------
     // Array columns: expand [f32; N] into numbered columns
     // -----------------------------------------------------------------------
-    expand_f32_array_columns(results, "ms2_mz_error",       |r| &r.scoring.ms2_mz_errors,       &mut fields, &mut arrays);
-    expand_f32_array_columns(results, "ms2_mobility_error",  |r| &r.scoring.ms2_mobility_errors,  &mut fields, &mut arrays);
-    expand_f32_array_columns(results, "ms1_mz_error",       |r| &r.scoring.ms1_mz_errors,       &mut fields, &mut arrays);
-    expand_f32_array_columns(results, "ms1_mobility_error",  |r| &r.scoring.ms1_mobility_errors,  &mut fields, &mut arrays);
-    expand_f32_array_columns(results, "ms2_intensity_ratio", |r| &r.scoring.ms2_intensity_ratios, &mut fields, &mut arrays);
-    expand_f32_array_columns(results, "ms1_intensity_ratio", |r| &r.scoring.ms1_intensity_ratios, &mut fields, &mut arrays);
+    expand_f32_array_columns(
+        results,
+        "ms2_mz_error",
+        |r| &r.scoring.ms2_mz_errors,
+        &mut fields,
+        &mut arrays,
+    );
+    expand_f32_array_columns(
+        results,
+        "ms2_mobility_error",
+        |r| &r.scoring.ms2_mobility_errors,
+        &mut fields,
+        &mut arrays,
+    );
+    expand_f32_array_columns(
+        results,
+        "ms1_mz_error",
+        |r| &r.scoring.ms1_mz_errors,
+        &mut fields,
+        &mut arrays,
+    );
+    expand_f32_array_columns(
+        results,
+        "ms1_mobility_error",
+        |r| &r.scoring.ms1_mobility_errors,
+        &mut fields,
+        &mut arrays,
+    );
+    expand_f32_array_columns(
+        results,
+        "ms2_intensity_ratio",
+        |r| &r.scoring.ms2_intensity_ratios,
+        &mut fields,
+        &mut arrays,
+    );
+    expand_f32_array_columns(
+        results,
+        "ms1_intensity_ratio",
+        |r| &r.scoring.ms1_intensity_ratios,
+        &mut fields,
+        &mut arrays,
+    );
 
     // -----------------------------------------------------------------------
     // Build the RecordBatch
@@ -248,11 +287,7 @@ impl ResultParquetWriter {
         let file = match File::create_new(path.as_ref()) {
             Ok(f) => f,
             Err(err) => {
-                tracing::error!(
-                    "Failed to create file {:?}: {}",
-                    path.as_ref(),
-                    err
-                );
+                tracing::error!("Failed to create file {:?}: {}", path.as_ref(), err);
                 return Err(err);
             }
         };
@@ -289,7 +324,8 @@ impl ResultParquetWriter {
         }
         debug!("Flushing {} results to parquet", self.buffer.len());
         let batch = build_record_batch(&self.buffer)?;
-        self.writer.write(&batch)
+        self.writer
+            .write(&batch)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         self.buffer.clear();
         Ok(())
@@ -297,7 +333,8 @@ impl ResultParquetWriter {
 
     pub fn close(mut self) -> std::io::Result<()> {
         self.flush()?;
-        self.writer.close()
+        self.writer
+            .close()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         Ok(())
     }

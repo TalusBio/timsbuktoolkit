@@ -1,6 +1,6 @@
 use calibrt::{
-    Point,
     LibraryRT,
+    Point,
     calibrate,
     calibrate_with_ranges,
 };

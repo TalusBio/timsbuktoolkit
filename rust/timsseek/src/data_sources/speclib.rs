@@ -1058,9 +1058,17 @@ mod tests {
             .expect("Failed to load Skyline CSV library");
 
         // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
-        assert_eq!(speclib.len(), 42, "Expected 42 entries (14 targets + 28 decoys)");
+        assert_eq!(
+            speclib.len(),
+            42,
+            "Expected 42 entries (14 targets + 28 decoys)"
+        );
 
-        let n_targets = speclib.elems.iter().filter(|e| !e.digest.is_decoy()).count();
+        let n_targets = speclib
+            .elems
+            .iter()
+            .filter(|e| !e.digest.is_decoy())
+            .count();
         let n_decoys = speclib.elems.iter().filter(|e| e.digest.is_decoy()).count();
         assert_eq!(n_targets, 14, "Should have 14 targets");
         assert_eq!(n_decoys, 28, "Should have 28 decoys");
@@ -1421,8 +1429,7 @@ mod tests {
             writer.finish().unwrap();
         }
         let reader =
-            SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd)
-                .unwrap();
+            SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd).unwrap();
         let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(items.len(), 2);
     }

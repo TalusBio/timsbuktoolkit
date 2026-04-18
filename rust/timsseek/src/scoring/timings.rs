@@ -12,7 +12,10 @@
 
 use serde::Serialize;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::{
+    Duration,
+    Instant,
+};
 
 /// Time a block, accumulate elapsed into `$target`, return the block's value.
 ///
@@ -62,7 +65,11 @@ impl TimedStep {
             print!("{label}");
         }
         std::io::Write::flush(&mut std::io::stdout()).ok();
-        Self { start: Instant::now(), stderr: false, _span: span.entered() }
+        Self {
+            start: Instant::now(),
+            stderr: false,
+            _span: span.entered(),
+        }
     }
 
     /// Print `label` to stderr (no dot-padding), open a tracing span, start clock.
@@ -70,7 +77,11 @@ impl TimedStep {
         let label = label.to_string();
         let span = tracing::info_span!("step", label = label.as_str());
         eprint!("{label}");
-        Self { start: Instant::now(), stderr: true, _span: span.entered() }
+        Self {
+            start: Instant::now(),
+            stderr: true,
+            _span: span.entered(),
+        }
     }
 
     /// Print ` {elapsed:?}\n`, return Duration.

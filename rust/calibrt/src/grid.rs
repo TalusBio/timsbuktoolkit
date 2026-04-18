@@ -1,8 +1,8 @@
-use array2d::Array2D;
 use crate::{
     CalibRtError,
     Point,
 };
+use array2d::Array2D;
 use tracing::info;
 
 pub struct Grid {
@@ -81,7 +81,11 @@ impl Grid {
 
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
     pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
-        let Point { library, observed, weight } = point;
+        let Point {
+            library,
+            observed,
+            weight,
+        } = point;
 
         if !weight.is_finite() || !library.is_finite() || !observed.is_finite() {
             return Err(CalibRtError::UnsupportedWeight(*weight));
@@ -222,11 +226,18 @@ impl Grid {
     /// Apply 3x3 approximate gaussian blur: A -> B.
     pub(crate) fn blur_weights(&mut self) {
         const KERNEL: [f64; 9] = [
-            1.0/10.0, 1.0/10.0, 1.0/10.0,
-            1.0/10.0, 2.0/10.0, 1.0/10.0,
-            1.0/10.0, 1.0/10.0, 1.0/10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            2.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
+            1.0 / 10.0,
         ];
-        self.weights_a.convolve_2d_into(&KERNEL, &mut self.weights_b);
+        self.weights_a
+            .convolve_2d_into(&KERNEL, &mut self.weights_b);
     }
 
     /// Read access to blurred weight at grid position (row, col).
@@ -254,7 +265,12 @@ mod tests {
     #[test]
     fn test_grid_reset_preserves_allocation() {
         let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        grid.add_point(&Point { library: 50.0, observed: 50.0, weight: 1.0 }).unwrap();
+        grid.add_point(&Point {
+            library: 50.0,
+            observed: 50.0,
+            weight: 1.0,
+        })
+        .unwrap();
 
         let capacity_before = grid.nodes.capacity();
         assert!(grid.grid_cells().iter().any(|n| n.sum_w > 0.0));

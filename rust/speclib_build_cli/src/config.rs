@@ -237,8 +237,7 @@ impl SpeclibBuildConfig {
         let mut cfg: SpeclibBuildConfig = if let Some(path) = &cli.config {
             let raw = std::fs::read_to_string(path)
                 .map_err(|e| format!("cannot read config file {}: {e}", path.display()))?;
-            toml::from_str(&raw)
-                .map_err(|e| format!("invalid TOML in {}: {e}", path.display()))?
+            toml::from_str(&raw).map_err(|e| format!("invalid TOML in {}: {e}", path.display()))?
         } else {
             SpeclibBuildConfig::default()
         };
@@ -335,14 +334,10 @@ impl SpeclibBuildConfig {
         // Exactly one input source must be provided.
         match (&self.fasta, &self.peptide_list) {
             (None, None) => {
-                return Err(
-                    "provide exactly one input: --fasta or --peptide-list".to_string()
-                )
+                return Err("provide exactly one input: --fasta or --peptide-list".to_string());
             }
             (Some(_), Some(_)) => {
-                return Err(
-                    "--fasta and --peptide-list are mutually exclusive".to_string()
-                )
+                return Err("--fasta and --peptide-list are mutually exclusive".to_string());
             }
             _ => {}
         }

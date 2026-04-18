@@ -35,9 +35,9 @@ use timscentroid::rt_mapping::{
 use timscentroid::utils::OptionallyRestricted;
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
-    TraceScorer,
     ApexScore,
     Extraction,
+    TraceScorer,
 };
 
 /// Result bundle from background chromatogram computation

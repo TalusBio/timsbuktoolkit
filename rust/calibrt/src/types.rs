@@ -1,4 +1,7 @@
-use serde::{Serialize, Deserialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use std::fmt;
 
 /// Library reference retention time. Unit-agnostic — could be iRT, minutes,

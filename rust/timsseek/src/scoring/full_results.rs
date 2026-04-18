@@ -1,6 +1,6 @@
-use crate::IonAnnot;
 use super::apex_finding::ElutionTraces;
 use super::results::ScoredCandidate;
+use crate::IonAnnot;
 use serde::Serialize;
 use timsquery::models::aggregators::ChromatogramCollector;
 

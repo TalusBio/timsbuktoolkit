@@ -1,6 +1,6 @@
 use calibrt::{
-    Point,
     LibraryRT,
+    Point,
     calibrate,
 };
 use rand::Rng;
@@ -26,7 +26,11 @@ fn main() {
     for i in 0..500 {
         let x = i as f64;
         let y = real_x_to_y(x);
-        points.push(Point { library: x, observed: y, weight: 1.0 });
+        points.push(Point {
+            library: x,
+            observed: y,
+            weight: 1.0,
+        });
     }
     // Add some random noise points
     let mut rng = rand::thread_rng();
