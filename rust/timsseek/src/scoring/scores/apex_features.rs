@@ -5,9 +5,10 @@
 //! 11 feature functions plus helper structs described in METHODS.md Sections 3.1-3.5.
 
 use array2d::Array2D;
-use std::collections::HashMap;
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
+
+use crate::models::query_item::linear_get;
 
 /// Reusable scratch buffers for `coelution_gradient`. Owned by the scorer so
 /// allocations happen once per rayon worker split and are reused across every
@@ -276,7 +277,7 @@ pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniqueness
 /// Returns `combined = 1.0` if fewer than 2 active fragments in the window.
 pub fn coelution_gradient<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
     apex: usize,
     coelution_hw: usize,
     gradient_hw: usize,
@@ -300,7 +301,7 @@ pub fn coelution_gradient<T: KeyLike>(
     let grad_len = grad_hi - grad_lo;
     let diff_len = grad_len.saturating_sub(1);
 
-    let weight_sum: f32 = expected.values().sum();
+    let weight_sum: f32 = expected.iter().map(|(_, v)| *v).sum();
     if weight_sum <= 0.0 {
         return CoelutionGradientResult {
             weighted_coelution: 0.0,
@@ -322,7 +323,7 @@ pub fn coelution_gradient<T: KeyLike>(
     let mut n_active_grad: usize = 0;
 
     for ((key, _mz), chrom) in fragments.iter_mzs() {
-        let y_hat = expected.get(key).copied().unwrap_or(0.0);
+        let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat <= 0.0 {
             continue;
         }
@@ -421,7 +422,7 @@ pub fn compute_split_product<T: KeyLike>(
     cosine_profile: &[f32],
     scribe_profile: &[f32],
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
     scratch: &mut CoelutionScratch,
 ) -> SplitProductScore {
     // Independent argmax on each profile
@@ -485,7 +486,7 @@ pub fn find_joint_apex(cosine_profile: &[f32], precursor_trace: &[f32]) -> usize
 /// `precursor_trace` is the summed precursor intensity trace.
 /// `joint_apex` is the cycle index from `find_joint_apex`.
 /// `n_cycles` is the total number of cycles in the extraction window.
-pub fn compute_apex_features<T: KeyLike>(
+pub fn compute_apex_features<T: KeyLike + Default>(
     fragments: &MzMajorIntensityArray<T, f32>,
     precursors: &MzMajorIntensityArray<i8, f32>,
     expected: &crate::models::ExpectedIntensities<T>,
@@ -500,7 +501,7 @@ pub fn compute_apex_features<T: KeyLike>(
     let peak_shape = compute_peak_shape(cosine_profile, apex, 10);
 
     // ---- Ratio CV (Section 3.4) ----
-    let ratio_cv = compute_ratio_cv(fragments, &expected.fragment_intensities, apex);
+    let ratio_cv = compute_ratio_cv(fragments, expected.fragment_intensities.as_slice(), apex);
 
     // ---- Centered Apex (Section 3.4) ----
     let centered_apex = if n_cycles > 0 {
@@ -528,7 +529,7 @@ pub fn compute_apex_features<T: KeyLike>(
 
     // ---- Isotope Correlation (Section 3.4) ----
     let isotope_correlation =
-        compute_isotope_correlation(precursors, &expected.precursor_intensities, apex);
+        compute_isotope_correlation(precursors, expected.precursor_intensities.as_slice(), apex);
 
     // ---- Gaussian Correlation (Section 3.4) ----
     let gaussian_correlation = compute_gaussian_correlation(cosine_profile, apex, 15);
@@ -634,7 +635,7 @@ fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
 /// Ratio CV: consistency of observed-to-predicted ratios at apex (Section 3.4).
 fn compute_ratio_cv<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
     apex: usize,
 ) -> f32 {
     let n_cycles = fragments.num_cycles();
@@ -644,7 +645,7 @@ fn compute_ratio_cv<T: KeyLike>(
 
     let mut ratios = Vec::new();
     for ((key, _mz), chrom) in fragments.iter_mzs() {
-        let y_hat = expected.get(key).copied().unwrap_or(0.0);
+        let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat > 0.0 && apex < chrom.len() && chrom[apex] > 0.0 {
             ratios.push(chrom[apex] / y_hat);
         }
@@ -833,7 +834,7 @@ fn compute_fragment_apex_agreement<T: KeyLike>(
 /// re-implementing averagine — the codebase already has sequence-specific predictions.
 fn compute_isotope_correlation(
     precursors: &MzMajorIntensityArray<i8, f32>,
-    expected_precursor: &HashMap<i8, f32>,
+    expected_precursor: &[(i8, f32)],
     apex: usize,
 ) -> f32 {
     let n_cycles = precursors.num_cycles();
@@ -852,7 +853,7 @@ fn compute_isotope_correlation(
                 obs[iso_key as usize] = row[apex];
             }
         }
-        if let Some(&v) = expected_precursor.get(&iso_key) {
+        if let Some(v) = linear_get(expected_precursor, &iso_key) {
             exp[iso_key as usize] = v;
         }
         if obs[iso_key as usize] > 0.0 && exp[iso_key as usize] > 0.0 {
@@ -1044,9 +1045,7 @@ mod tests {
             ("b".to_string(), 200.0, peak.clone()),
         ]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::new();
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
@@ -1082,9 +1081,7 @@ mod tests {
             ("b".to_string(), 200.0, peak_b),
         ]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::new();
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
@@ -1108,7 +1105,7 @@ mod tests {
 
         let fragments = make_fragments(vec![("a".to_string(), 100.0, peak)]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0)].into_iter().collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::new();
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
@@ -1149,9 +1146,7 @@ mod tests {
             ("a".to_string(), 100.0, peak.clone()),
             ("b".to_string(), 200.0, peak),
         ]);
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::new();
         let result = compute_split_product(
@@ -1231,14 +1226,12 @@ mod tests {
             ("c".to_string(), 300.0, vec![0.0, 6.0, 0.0]),
             ("d".to_string(), 400.0, vec![0.0, 8.0, 0.0]),
         ]);
-        let expected: HashMap<String, f32> = [
+        let expected: Vec<(String, f32)> = vec![
             ("a".to_string(), 1.0),
             ("b".to_string(), 2.0),
             ("c".to_string(), 3.0),
             ("d".to_string(), 4.0),
-        ]
-        .into_iter()
-        .collect();
+        ];
         let cv = compute_ratio_cv(&fragments, &expected, 1);
         assert!(
             (cv - 1.0).abs() < 1e-6,
@@ -1255,7 +1248,7 @@ mod tests {
             (1i8, 500.5, vec![0.0, 0.3, 0.0]),
             (2i8, 501.0, vec![0.0, 0.1, 0.0]),
         ]);
-        let expected: HashMap<i8, f32> = [(0i8, 0.6), (1, 0.3), (2, 0.1)].into_iter().collect();
+        let expected: Vec<(i8, f32)> = vec![(0i8, 0.6), (1, 0.3), (2, 0.1)];
         let iso = compute_isotope_correlation(&precursors, &expected, 1);
         assert!(
             (iso - 1.0).abs() < 1e-4,

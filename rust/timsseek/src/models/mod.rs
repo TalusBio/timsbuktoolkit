@@ -1,7 +1,7 @@
 mod decoy;
 mod decoy_strategy;
 mod digest;
-mod query_item;
+pub mod query_item;
 
 pub use decoy::DecoyMarking;
 pub use decoy_strategy::DecoyStrategy;

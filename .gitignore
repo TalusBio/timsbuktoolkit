@@ -41,6 +41,7 @@ docs/superpowers/*
 .plans/*
 .claude/*
 .prompts/*
+.scratch/
 sh*/
 *plan*.md
 

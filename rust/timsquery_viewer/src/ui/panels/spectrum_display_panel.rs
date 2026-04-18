@@ -41,8 +41,8 @@ impl SpectrumPanel {
 
             let expected_norm_factor = expected_intensities
                 .fragment_intensities
-                .values()
-                .cloned()
+                .iter()
+                .map(|(_, v)| *v)
                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap_or(0.1);
 
@@ -78,8 +78,8 @@ impl SpectrumPanel {
 
                         // If expected intensities are provided, draw them as dashed lines
                         // in the negative direction
-                        let ei = expected_intensities.fragment_intensities.get(label_str);
-                        if let Some(&expected_intensity) = ei {
+                        let ei = expected_intensities.get_fragment(label_str);
+                        if let Some(expected_intensity) = ei {
                             let y_ref_value = (expected_intensity / expected_norm_factor) as f64;
                             let expected_points =
                                 PlotPoints::new(vec![[mz, 0.0], [mz, -y_ref_value]]);
