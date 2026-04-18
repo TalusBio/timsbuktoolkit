@@ -520,7 +520,6 @@ impl TraceScorer {
         // Sum of sqrt(expected) for cosine norm: ||sqrt(exp)||^2 = sum(exp)
         let mut ms2_sum_exp = 0.0f32;
 
-        // Pre-compute pred_norm for scribe (reused buffer, cleared per peptide).
         let pred_norms = &mut self.buffers.pred_norms;
         pred_norms.clear();
         let mut pred_sqrt_sum = 0.0f32;

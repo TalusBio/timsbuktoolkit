@@ -112,7 +112,9 @@ where
         }
     }
 
-    let extr = scratch.as_mut().expect("just populated");
+    let extr = scratch
+        .as_mut()
+        .expect("extraction set by build_extraction_into");
     index.add_query(&mut extr.chromatograms, tolerance);
 
     if let Some(n) = top_n_fragments {

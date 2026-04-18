@@ -35,16 +35,8 @@ impl CoelutionScratch {
 
     pub fn new() -> Self {
         Self {
-            coel_rows: Array2D {
-                values: Vec::with_capacity(Self::TYP_FRAGS * Self::TYP_COEL_LEN),
-                n_col: 0,
-                n_row: 0,
-            },
-            grad_rows: Array2D {
-                values: Vec::with_capacity(Self::TYP_FRAGS * Self::TYP_DIFF_LEN),
-                n_col: 0,
-                n_row: 0,
-            },
+            coel_rows: Array2D::with_capacity(Self::TYP_COEL_LEN, Self::TYP_FRAGS),
+            grad_rows: Array2D::with_capacity(Self::TYP_DIFF_LEN, Self::TYP_FRAGS),
             weights: Vec::with_capacity(Self::TYP_FRAGS),
             diffs: Vec::with_capacity(Self::TYP_DIFF_LEN),
         }
