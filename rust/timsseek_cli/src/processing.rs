@@ -5,16 +5,17 @@ use indicatif::{
     ProgressStyle,
 };
 use std::io::IsTerminal;
-use timsseek::scoring::timings::TimedStep;
-use timsquery::IndexedTimstofPeaks;
-use timsquery::MzMobilityStatsCollector;
-use timsquery::SpectralCollector;
-use timsquery::Tolerance;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
     QuadTolerance,
     RtTolerance,
+};
+use timsquery::{
+    IndexedTimstofPeaks,
+    MzMobilityStatsCollector,
+    SpectralCollector,
+    Tolerance,
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
@@ -22,22 +23,28 @@ use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::rescore;
 use timsseek::rt_calibration::{
     CalibRtError,
-    CalibrationResult,
     CalibratedGrid,
+    CalibrationResult,
+    DerivationParams,
+    DimensionErrors,
+    ErrorStats,
     LibraryRT,
     ObservedRTSeconds,
     Point,
+    ridge_half_width_interp,
 };
+use timsseek::scoring::offsets::MzMobilityOffsets;
+use timsseek::scoring::pipeline::Scorer;
+use timsseek::scoring::timings::TimedStep;
 use timsseek::scoring::{
     CalibrantCandidate,
     CalibrantHeap,
     CalibrationConfig,
     CompetedCandidate,
     PipelineReport,
-    ScoredCandidate,
     ScoreTimings,
+    ScoredCandidate,
 };
-use timsseek::scoring::pipeline::Scorer;
 use timsseek::{
     IonAnnot,
     ScorerQueriable,
@@ -105,7 +112,8 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     if overlap_pct < 50.0 {
         warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         warn!(
-            "!! RT SCALE WARNING: only {:.0}% overlap between main speclib !!", overlap_pct
+            "!! RT SCALE WARNING: only {:.0}% overlap between main speclib !!",
+            overlap_pct
         );
         warn!("!! and calibration library. Calibration may be unreliable.  !!");
         warn!("!! Ensure both libraries use the same iRT scale.            !!");
@@ -129,8 +137,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     chunk_size: usize,
     out_path: &OutputConfig,
     max_qvalue: f32,
+    calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    let calib_config = CalibrationConfig::default();
 
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -145,8 +153,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         info!("Phase 1: Broad prescore (unrestricted RT)...");
     }
     let step = TimedStep::begin("Phase 1: Prescore");
-    let (calibrants, phase1_timings) = phase1_prescore(phase1_lib, pipeline, chunk_size, &calib_config);
-    let phase1_ms = step.finish_with(format_args!("{} calibrants", calibrants.len())).as_millis() as u64;
+    let (calibrants, phase1_timings) =
+        phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
+    let phase1_ms = step
+        .finish_with(format_args!("{} calibrants", calibrants.len()))
+        .as_millis() as u64;
     info!(
         "Phase 1 detail: extraction {:?}, scoring {:?}, {} passed filter, {} scored",
         phase1_timings.extraction,
@@ -159,32 +170,31 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Build lookup from main speclib when using a separate calib lib.
     // Maps (quantized_precursor_mz, charge) -> Vec<(rt, sorted_fragment_mzs)>.
     // Matching requires same precursor (0.01 Da) + charge + at least 5 shared fragment masses.
-    let main_lookup: Option<
-        std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>,
-    > = if calib_lib.is_some() {
-        let mut map: std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>> =
-            std::collections::HashMap::new();
-        for item in speclib.as_slice() {
-            let mz_key = (item.query.mono_precursor_mz() * 100.0).round() as i64;
-            let charge = item.query.precursor_charge();
-            let mut frag_mzs: Vec<i64> = item
-                .query
-                .iter_fragments()
-                .map(|(_, mz)| (mz * 100.0).round() as i64)
-                .collect();
-            frag_mzs.sort_unstable();
-            map.entry((mz_key, charge))
-                .or_default()
-                .push((item.query.rt_seconds(), frag_mzs));
-        }
-        info!(
-            "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
-            map.len()
-        );
-        Some(map)
-    } else {
-        None
-    };
+    let main_lookup: Option<std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>> =
+        if calib_lib.is_some() {
+            let mut map: std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>> =
+                std::collections::HashMap::new();
+            for item in speclib.as_slice() {
+                let mz_key = (item.query.mono_precursor_mz() * 100.0).round() as i64;
+                let charge = item.query.precursor_charge();
+                let mut frag_mzs: Vec<i64> = item
+                    .query
+                    .iter_fragments()
+                    .map(|(_, mz)| (mz * 100.0).round() as i64)
+                    .collect();
+                frag_mzs.sort_unstable();
+                map.entry((mz_key, charge))
+                    .or_default()
+                    .push((item.query.rt_seconds(), frag_mzs));
+            }
+            info!(
+                "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
+                map.len()
+            );
+            Some(map)
+        } else {
+            None
+        };
 
     // Snapshot calibrant points before calibration consumes them (for saving)
     let calibrant_points: Vec<[f64; 3]> = calibrants
@@ -199,7 +209,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         phase1_lib,
         main_lookup.as_ref(),
         pipeline,
-        &calib_config,
+        calib_config,
     ) {
         Ok(calib) => {
             info!("Calibration succeeded");
@@ -210,23 +220,30 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             CalibrationResult::fallback(pipeline)
         }
     };
-    let phase2_ms = step.finish_with(format_args!(
-        "{} calibrants → {} path nodes",
-        calibrant_points.len(),
-        calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
-    )).as_millis() as u64;
+    let phase2_ms = step
+        .finish_with(format_args!(
+            "{} calibrants → {} path nodes",
+            calibrant_points.len(),
+            calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
+        ))
+        .as_millis() as u64;
     // Print tolerance summary
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
             "  RT tolerance (ridge): avg {:.0}s, min {:.0}s, max {:.0}s ({} cols, {:.0}% in-ridge)",
-            summary.weighted_avg, summary.min, summary.max, summary.n_columns,
+            summary.weighted_avg,
+            summary.min,
+            summary.max,
+            summary.n_columns,
             summary.in_ridge_ratio * 100.0,
         );
     }
     println!(
         "  m/z: ({:.1}, {:.1}) ppm   mobility: ({:.1}, {:.1}) %",
-        calibration.mz_tolerance().0, calibration.mz_tolerance().1,
-        calibration.mobility_tolerance().0, calibration.mobility_tolerance().1,
+        calibration.mz_tolerance().0,
+        calibration.mz_tolerance().1,
+        calibration.mobility_tolerance().0,
+        calibration.mobility_tolerance().1,
     );
 
     // Save calibration as JSON v1 (compatible with viewer load)
@@ -272,11 +289,15 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let step = TimedStep::begin("Phase 4: Compete");
     let mut competed = target_decoy_compete(results);
     competed.sort_unstable_by(|x, y| {
-        y.scoring.main_score.partial_cmp(&x.scoring.main_score)
+        y.scoring
+            .main_score
+            .partial_cmp(&x.scoring.main_score)
             .expect("NaN main_score should have been filtered during Phase 3 scoring")
     });
     let total_after_competition = competed.len();
-    let phase4_ms = step.finish_with(format_args!("{} candidates", total_after_competition)).as_millis() as u64;
+    let phase4_ms = step
+        .finish_with(format_args!("{} candidates", total_after_competition))
+        .as_millis() as u64;
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
@@ -305,14 +326,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
     let out_path_pq = out_path.directory.join("results.parquet");
-    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
-        &out_path_pq,
-        20_000,
-    )
-    .map_err(|e| TimsSeekError::Io {
-        path: out_path_pq.clone().into(),
-        source: e,
-    })?;
+    let mut pq_writer =
+        timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000).map_err(
+            |e| TimsSeekError::Io {
+                path: out_path_pq.clone().into(),
+                source: e,
+            },
+        )?;
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
@@ -413,21 +433,19 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     config: &CalibrationConfig,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
-    // When a separate calib lib is used, we need the main speclib's iRT as x.
-    // The calibration curve must map main_speclib_irt -> observed_rt.
-    let points: Vec<Point> = candidates
+    // With a separate calib lib, the curve's x-axis is the main speclib's iRT
+    // (matched via shared fragments). We keep this per-candidate so later
+    // stages (ridge filter, residual stats) use the same x-axis the fit saw.
+    let library_rt_for_candidate: Vec<Option<f64>> = candidates
         .iter()
-        .filter_map(|c| {
+        .map(|c| {
             let calib_item = &phase1_lib.as_slice()[c.speclib_index];
-
-            let irt_for_curve = match main_lookup {
+            match main_lookup {
                 Some(lookup) => {
-                    let mz_key =
-                        (calib_item.query.mono_precursor_mz() * 100.0).round() as i64;
+                    let mz_key = (calib_item.query.mono_precursor_mz() * 100.0).round() as i64;
                     let charge = calib_item.query.precursor_charge();
                     let bucket = lookup.get(&(mz_key, charge))?;
 
-                    // Build sorted fragment m/z list for the calib entry
                     let mut calib_frags: Vec<i64> = calib_item
                         .query
                         .iter_fragments()
@@ -435,7 +453,6 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
                         .collect();
                     calib_frags.sort_unstable();
 
-                    // Find best match: most shared fragments, break ties by closest RT
                     let calib_rt = calib_item.query.rt_seconds();
                     bucket
                         .iter()
@@ -447,16 +464,26 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
                                 None
                             }
                         })
-                        // Best = most shared fragments, then closest RT
-                        .min_by(|a, b| b.0.cmp(&a.0).then(a.1.partial_cmp(&b.1)
-                            .expect("NaN RT residual in calibrant matching")))
-                        .map(|(_, _, rt)| rt)?
+                        .min_by(|a, b| {
+                            b.0.cmp(&a.0).then(
+                                a.1.partial_cmp(&b.1)
+                                    .expect("NaN RT residual in calibrant matching"),
+                            )
+                        })
+                        .map(|(_, _, rt)| rt as f64)
                 }
-                None => calib_item.query.rt_seconds(),
-            };
+                None => Some(calib_item.query.rt_seconds() as f64),
+            }
+        })
+        .collect();
 
+    let points: Vec<Point> = candidates
+        .iter()
+        .zip(library_rt_for_candidate.iter())
+        .filter_map(|(c, lib_rt)| {
+            let lib_rt = (*lib_rt)?;
             Some(Point {
-                library: irt_for_curve as f64,
+                library: lib_rt,
                 observed: c.apex_rt.0 as f64,
                 weight: 1.0,
             })
@@ -479,38 +506,60 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             f64::INFINITY,
             f64::NEG_INFINITY,
         ),
-        |(mnx, mxx, mny, mxy), p| (mnx.min(p.library), mxx.max(p.library), mny.min(p.observed), mxy.max(p.observed)),
+        |(mnx, mxx, mny, mxy), p| {
+            (
+                mnx.min(p.library),
+                mxx.max(p.library),
+                mny.min(p.observed),
+                mxy.max(p.observed),
+            )
+        },
     );
 
     // Use CalibrationState for fitting + ridge width measurement
     let mut cal_state = CalibratedGrid::new(
-        config.grid_size, (min_x, max_x), (min_y, max_y), config.dp_lookback,
+        config.grid_size,
+        (min_x, max_x),
+        (min_y, max_y),
+        config.dp_lookback,
     )?;
-    cal_state.update(points.iter().map(|p| (LibraryRT(p.library), ObservedRTSeconds(p.observed), p.weight)))?;
+    cal_state.update(points.iter().map(|p| {
+        (
+            LibraryRT(p.library),
+            ObservedRTSeconds(p.observed),
+            p.weight,
+        )
+    }))?;
     cal_state.fit();
-    let cal_curve = cal_state.curve()
-        .ok_or(CalibRtError::NoPoints)?
-        .clone();
+    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
     // Measure ridge width for position-dependent RT tolerance
     let ridge_widths = cal_state.measure_ridge_width(0.1);
     if !ridge_widths.is_empty() {
         let total_weight: f64 = ridge_widths.iter().map(|m| m.ridge_weight).sum();
-        let weighted_hw: f64 = ridge_widths.iter()
+        let weighted_hw: f64 = ridge_widths
+            .iter()
             .map(|m| m.half_width * m.ridge_weight)
-            .sum::<f64>() / total_weight.max(1.0);
+            .sum::<f64>()
+            / total_weight.max(1.0);
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",
             weighted_hw,
             ridge_widths.len(),
-            ridge_widths.iter().map(|m| m.half_width).fold(f64::MAX, f64::min),
-            ridge_widths.iter().map(|m| m.half_width).fold(0.0f64, f64::max),
+            ridge_widths
+                .iter()
+                .map(|m| m.half_width)
+                .fold(f64::MAX, f64::min),
+            ridge_widths
+                .iter()
+                .map(|m| m.half_width)
+                .fold(0.0f64, f64::max),
         );
     }
 
     // === Step B: Measure m/z and mobility errors at calibrant apexes ===
     let query_tolerance = Tolerance {
-        ms: MzTolerance::Ppm((10.0, 10.0)),
+        ms: MzTolerance::Ppm((50.0, 50.0)),
         rt: RtTolerance::Minutes((
             config.calibration_query_rt_window_minutes,
             config.calibration_query_rt_window_minutes,
@@ -521,59 +570,87 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
 
     let mut mz_errors_ppm: Vec<f32> = Vec::with_capacity(candidates.len());
     let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut rt_residuals_seconds: Vec<f32> = Vec::with_capacity(candidates.len());
 
-    for candidate in &candidates {
+    let mut n_off_ridge = 0usize;
+    for (candidate, library_rt_opt) in candidates.iter().zip(library_rt_for_candidate.iter()) {
         let item = &phase1_lib.as_slice()[candidate.speclib_index];
-        let query_at_apex = item
-            .query
-            .clone()
-            .with_rt_seconds(candidate.apex_rt.0);
+
+        // Skip calibrants that never matched in the main speclib.
+        let Some(library_rt_s) = *library_rt_opt else {
+            continue;
+        };
+
+        let predicted_rt = match cal_curve.predict(LibraryRT(library_rt_s)) {
+            Ok(o) => o.0,
+            Err(_) => continue,
+        };
+        let rt_residual_signed = candidate.apex_rt.0 as f64 - predicted_rt;
+        let half_width = ridge_half_width_interp(&ridge_widths, library_rt_s);
+        let in_ridge = match half_width {
+            Some(hw) => rt_residual_signed.abs() <= hw,
+            None => true,
+        };
+        if !in_ridge {
+            n_off_ridge += 1;
+            continue;
+        }
+
+        let query_at_apex = item.query.clone().with_rt_seconds(candidate.apex_rt.0);
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
             SpectralCollector::new(query_at_apex);
         pipeline.index.add_query(&mut agg, &query_tolerance);
 
-        for ((_key, expected_mz), stats) in agg.iter_precursors() {
-            if let (Ok(obs_mz), Ok(obs_mob)) = (stats.mean_mz(), stats.mean_mobility()) {
-                let mz_err = (obs_mz - expected_mz) / expected_mz * 1e6;
-                mz_errors_ppm.push(mz_err as f32);
+        let expected_mob = item.query.mobility_ook0() as f64;
+        let offsets = MzMobilityOffsets::new(&agg, expected_mob);
+        let Some((mz_err_ppm, mob_err_pct)) = offsets.weighted_ms1() else {
+            continue;
+        };
 
-                let expected_mob = item.query.mobility_ook0() as f64;
-                let mob_err = (obs_mob - expected_mob) / expected_mob * 100.0;
-                mobility_errors_pct.push(mob_err as f32);
-                break;
-            }
-        }
+        mz_errors_ppm.push(mz_err_ppm);
+        mobility_errors_pct.push(mob_err_pct);
+        rt_residuals_seconds.push(rt_residual_signed as f32);
     }
 
+    info!(
+        "Ridge filter: kept {}/{} calibrants (dropped {} off-ridge)",
+        mz_errors_ppm.len(),
+        candidates.len(),
+        n_off_ridge,
+    );
+
     // === Step C: Derive tolerances from error distributions ===
-    let rt_tolerance_minutes = {
-        let mut abs_residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let predicted = cal_curve.predict(LibraryRT(p.library)).map(|v| v.0).unwrap_or(p.observed);
-                (p.observed - predicted).abs()
-            })
-            .collect();
-        abs_residuals.sort_by(|a, b| a.partial_cmp(b)
-            .expect("NaN calibration residual in tolerance estimation"));
-        let mad_seconds = abs_residuals
-            .get(abs_residuals.len() / 2)
-            .copied()
-            .unwrap_or(0.0);
-        info!(
-            "RT residuals: MAD={:.1}s, n={}",
-            mad_seconds, abs_residuals.len()
-        );
-        (config.rt_sigma_factor * mad_seconds as f32 / 60.0).max(config.min_rt_tolerance_minutes)
+    let errors = DimensionErrors {
+        mz_ppm: ErrorStats::from_slice(&mz_errors_ppm),
+        mobility_pct: ErrorStats::from_slice(&mobility_errors_pct),
+        rt_seconds: ErrorStats::from_slice(&rt_residuals_seconds),
     };
+    let mut derivation = DerivationParams::default();
+    derivation.sigma.mz = config.mz_sigma;
+    derivation.sigma.mobility = config.mobility_sigma;
+    derivation.sigma.rt = config.rt_sigma_factor;
+    derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
-    let mz_tolerance_ppm = {
-        let (l, r) = asymmetric_tolerance(&mz_errors_ppm, config.mz_sigma, 0.1);
-        (l as f64, r as f64)
-    };
+    let (mz_left, mz_right) = mad_symmetric_bounds(
+        &errors.mz_ppm,
+        derivation.sigma.mz,
+        derivation.floors.mz_ppm,
+    );
+    let mz_tolerance_ppm = (mz_left as f64, mz_right as f64);
+    let mobility_tolerance_pct = mad_symmetric_bounds(
+        &errors.mobility_pct,
+        derivation.sigma.mobility,
+        derivation.floors.mobility_pct,
+    );
 
-    let mobility_tolerance_pct =
-        asymmetric_tolerance(&mobility_errors_pct, config.mobility_sigma, 0.1);
+    // RT tolerance: sigma * 1.4826 * MAD on the signed residuals, floored.
+    let rt_mad_seconds = errors.rt_seconds.mad;
+    let rt_tolerance_minutes =
+        (derivation.sigma.rt * 1.4826 * rt_mad_seconds / 60.0).max(derivation.floors.rt_minutes);
+    info!(
+        "RT residuals: MAD={:.1}s, n={}",
+        rt_mad_seconds, errors.rt_seconds.n
+    );
 
     info!(
         "Calibration: RT tol={:.2} min, m/z tol=({:.1}, {:.1}) ppm, mob tol=({:.1}, {:.1}) %",
@@ -589,7 +666,10 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         rt_tolerance_minutes,
         mz_tolerance_ppm,
         mobility_tolerance_pct,
-    ).with_ridge_widths(ridge_widths))
+    )
+    .with_ridge_widths(ridge_widths)
+    .with_error_stats(errors)
+    .with_derivation(derivation))
 }
 
 #[cfg_attr(
@@ -609,13 +689,8 @@ fn phase3_score<I: ScorerQueriable>(
 
     let mut results = Vec::new();
 
-    for chunk in speclib
-        .as_slice()
-        .chunks(chunk_size)
-        .progress_with(pb)
-    {
-        let (batch_results, batch_timings) =
-            pipeline.score_calibrated_batch(chunk, calibration);
+    for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
+        let (batch_results, batch_timings) = pipeline.score_calibrated_batch(chunk, calibration);
         *timings += batch_timings;
         results.extend(batch_results);
     }
@@ -634,20 +709,16 @@ fn phase3_score<I: ScorerQueriable>(
     results
 }
 
-/// Derive asymmetric tolerance from error distribution.
-#[cfg_attr(
-    feature = "instrumentation",
-    tracing::instrument(skip_all, level = "trace")
-)]
-fn asymmetric_tolerance(errors: &[f32], n_sigma: f32, min_val: f32) -> (f32, f32) {
-    if errors.is_empty() {
+/// `median ± n_sigma * 1.4826 * MAD`, asymmetric, floored.
+/// Robust-to-tails tolerance derivation — matches `mean ± n_sigma * stdev`
+/// for Gaussian populations and resists outlier inflation for heavier tails.
+fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
+    if stats.n == 0 {
         return (min_val, min_val);
     }
-    let mean = errors.iter().sum::<f32>() / errors.len() as f32;
-    let variance = errors.iter().map(|e| (e - mean).powi(2)).sum::<f32>() / errors.len() as f32;
-    let std = variance.sqrt();
-    let left = (-(mean - n_sigma * std)).max(min_val);
-    let right = (mean + n_sigma * std).max(min_val);
+    let sigma = 1.4826 * stats.mad;
+    let left = (-(stats.median - n_sigma * sigma)).max(min_val);
+    let right = (stats.median + n_sigma * sigma).max(min_val);
     (left, right)
 }
 
@@ -665,7 +736,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.scoring.sequence, x.scoring.precursor_charge, x.scoring.precursor_mz, x.scoring.main_score
+                    x.scoring.sequence,
+                    x.scoring.precursor_charge,
+                    x.scoring.precursor_mz,
+                    x.scoring.main_score
                 )
             })
             .collect::<Vec<_>>()
@@ -677,7 +751,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
-        let score_ord = y.scoring.main_score.partial_cmp(&x.scoring.main_score)
+        let score_ord = y
+            .scoring
+            .main_score
+            .partial_cmp(&x.scoring.main_score)
             .expect("NaN main_score should have been filtered during Phase 3 scoring");
         let ord = seq_ord.then(score_ord);
 
@@ -709,11 +786,17 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 
     // Compete target-decoy pairs at precursor level
     results.sort_unstable_by(|x, y| {
-        x.scoring.decoy_group_id
+        x.scoring
+            .decoy_group_id
             .cmp(&y.scoring.decoy_group_id)
             .then_with(|| x.scoring.precursor_charge.cmp(&y.scoring.precursor_charge))
-            .then_with(|| x.scoring.main_score.partial_cmp(&y.scoring.main_score)
-                .expect("NaN main_score should have been filtered during Phase 3 scoring").reverse())
+            .then_with(|| {
+                x.scoring
+                    .main_score
+                    .partial_cmp(&y.scoring.main_score)
+                    .expect("NaN main_score should have been filtered during Phase 3 scoring")
+                    .reverse()
+            })
     });
     info!(
         "Number of results before t/d competition: {}",
@@ -728,7 +811,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 
     for i in 0..results.len() {
         let current = &results[i];
-        let current_key = (current.scoring.decoy_group_id, current.scoring.precursor_charge);
+        let current_key = (
+            current.scoring.decoy_group_id,
+            current.scoring.precursor_charge,
+        );
 
         if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
             let prev_key = (prev_group_id, prev_charge);
@@ -760,7 +846,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     {
         let mut last_key: Option<(u32, u8)> = None;
         for i in 0..results.len() {
-            let key = (results[i].scoring.decoy_group_id, results[i].scoring.precursor_charge);
+            let key = (
+                results[i].scoring.decoy_group_id,
+                results[i].scoring.precursor_charge,
+            );
             if last_key == Some(key) {
                 continue; // duplicate in same group
             }
@@ -769,7 +858,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         }
     }
 
-    info!("Number of results after t/d competition: {}", kept_indices.len());
+    info!(
+        "Number of results after t/d competition: {}",
+        kept_indices.len()
+    );
 
     // Build CompetedCandidate vec from the kept indices.
     // We need to pull elements out of `results` by index, but they are non-Copy.
@@ -797,10 +889,19 @@ pub fn run_pipeline(
     output: &OutputConfig,
     max_qvalue: f32,
     load_index_ms: u64,
+    calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     let performance_report_path = output.directory.join("performance_report.json");
 
-    let mut timings = execute_pipeline(speclib, calib_lib, pipeline, chunk_size, output, max_qvalue)?;
+    let mut timings = execute_pipeline(
+        speclib,
+        calib_lib,
+        pipeline,
+        chunk_size,
+        output,
+        max_qvalue,
+        calib_config,
+    )?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report
     let perf_report =

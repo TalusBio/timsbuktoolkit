@@ -5,22 +5,43 @@
 //! `calibrt::CalibrationState`, and exposes snapshots to the UI via
 //! an MPSC channel.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
+use std::sync::atomic::{
+    AtomicU8,
+    Ordering,
+};
+use std::sync::mpsc::{
+    self,
+    Receiver,
+    SyncSender,
+};
 use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use calibrt::{CalibrationState, LibraryRT, ObservedRTSeconds};
-use timscentroid::rt_mapping::{MS1CycleIndex, RTIndex};
+use calibrt::{
+    CalibrationState,
+    LibraryRT,
+    ObservedRTSeconds,
+};
+use timscentroid::rt_mapping::{
+    MS1CycleIndex,
+    RTIndex,
+};
 use timsquery::models::tolerance::{
-    MobilityTolerance, MzTolerance, QuadTolerance, RtTolerance, Tolerance,
+    MobilityTolerance,
+    MzTolerance,
+    QuadTolerance,
+    RtTolerance,
+    Tolerance,
 };
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::TraceScorer;
 use timsseek::scoring::extraction::build_extraction;
-use timsseek::scoring::pipeline::{CalibrantCandidate, CalibrantHeap};
+use timsseek::scoring::pipeline::{
+    CalibrantCandidate,
+    CalibrantHeap,
+};
 
 use crate::file_loader::ElutionGroupData;
 
@@ -190,7 +211,11 @@ impl ViewerCalibrationState {
             Some(cs.save_snapshot(&self.snapshot_points))
         } else {
             Some(calibrt::CalibrationSnapshot {
-                points: self.snapshot_points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
+                points: self
+                    .snapshot_points
+                    .iter()
+                    .map(|&(lib, obs, w)| [lib.0, obs.0, w])
+                    .collect(),
                 grid_size: DEFAULT_GRID_SIZE,
                 lookback: DEFAULT_LOOKBACK,
             })
@@ -201,11 +226,7 @@ impl ViewerCalibrationState {
     ///
     /// Requires both raw data and elution groups to be loaded.
     /// If already running, this is a no-op.
-    pub fn start(
-        &mut self,
-        index: Arc<IndexedPeaksHandle>,
-        elution_groups: Arc<ElutionGroupData>,
-    ) {
+    pub fn start(&mut self, index: Arc<IndexedPeaksHandle>, elution_groups: Arc<ElutionGroupData>) {
         if self.phase == CalibrationPhase::Running {
             return;
         }
@@ -254,8 +275,7 @@ impl ViewerCalibrationState {
     /// Pause the background thread (it will park until resumed).
     pub fn pause(&mut self) {
         if self.phase == CalibrationPhase::Running {
-            self.thread_control
-                .store(CONTROL_PAUSED, Ordering::Release);
+            self.thread_control.store(CONTROL_PAUSED, Ordering::Release);
             self.phase = CalibrationPhase::Paused;
         }
     }
@@ -305,7 +325,10 @@ impl ViewerCalibrationState {
     ///
     /// Whether the background thread is still active (Running or Paused).
     pub fn is_active(&self) -> bool {
-        matches!(self.phase, CalibrationPhase::Running | CalibrationPhase::Paused)
+        matches!(
+            self.phase,
+            CalibrationPhase::Running | CalibrationPhase::Paused
+        )
     }
 
     /// Returns `true` if any new data was received (caller should
@@ -342,12 +365,18 @@ impl ViewerCalibrationState {
                         cs.fit();
                         let has_curve = cs.curve().is_some();
                         let n_path = cs.path_indices().len();
-                        let n_retained = cs.grid_cells().iter()
+                        let n_retained = cs
+                            .grid_cells()
+                            .iter()
                             .filter(|n| !n.suppressed && n.center.weight > 0.0)
                             .count();
                         tracing::info!(
                             "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={}",
-                            n_scored, heap_len, n_retained, n_path, has_curve,
+                            n_scored,
+                            heap_len,
+                            n_retained,
+                            n_path,
+                            has_curve,
                         );
                     }
                     changed = true;
@@ -433,7 +462,12 @@ impl ViewerCalibrationState {
             let chunk_heap: CalibrantHeap = chunk
                 .par_iter()
                 .fold(
-                    || (TraceScorer::new(n_cycles), CalibrantHeap::new(heap_capacity)),
+                    || {
+                        (
+                            TraceScorer::new(n_cycles),
+                            CalibrantHeap::new(heap_capacity),
+                        )
+                    },
                     |(mut scorer, mut local_heap), &eg_idx| {
                         let Ok((elution_group, expected_intensities)) =
                             elution_groups.get_elem(eg_idx)
@@ -511,25 +545,36 @@ impl ViewerCalibrationState {
     // Save / Load
     // -----------------------------------------------------------------------
 
-    /// Serialize the current calibration state to a JSON v1 file.
+    /// Serialize the current calibration state to a JSON v2 file.
     /// Delegates to `CalibrationResult::save_json` format via shared serde types.
     pub fn save_to_file(
         &self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
-        use timsseek::rt_calibration::{SavedCalibration, SavedTolerances};
         use calibrt::CalibrationSnapshot;
+        use timsseek::rt_calibration::{
+            DerivationParams,
+            DimensionErrors,
+            SavedCalibration,
+            SavedTolerances,
+        };
 
         let tol = self.derived_tolerances.as_ref();
         let saved = SavedCalibration {
-            version: "v1".to_string(),
+            version: "v2".to_string(),
             rt_range_seconds,
             calibration: CalibrationSnapshot {
-                points: self.snapshot_points.iter().map(|&(lib, obs, w)| [lib.0, obs.0, w]).collect(),
+                points: self
+                    .snapshot_points
+                    .iter()
+                    .map(|&(lib, obs, w)| [lib.0, obs.0, w])
+                    .collect(),
                 grid_size: DEFAULT_GRID_SIZE,
                 lookback: DEFAULT_LOOKBACK,
             },
+            errors: DimensionErrors::default(),
+            derivation: DerivationParams::default(),
             tolerances: SavedTolerances {
                 rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
                 mz_ppm: [0.0, 0.0],
@@ -555,7 +600,9 @@ impl ViewerCalibrationState {
 
         // Reconstruct CalibrationState from the snapshot
         if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&loaded.snapshot) {
-            self.snapshot_points = loaded.snapshot.points
+            self.snapshot_points = loaded
+                .snapshot
+                .points
                 .iter()
                 .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2]))
                 .collect();
@@ -593,13 +640,12 @@ impl ViewerCalibrationState {
         ui.horizontal(|ui| {
             match self.phase {
                 CalibrationPhase::Idle => {
-                    let both_loaded = matches!(
-                        indexed_data,
-                        crate::app::IndexedDataState::Loaded { .. }
-                    ) && matches!(
-                        elution_groups,
-                        crate::app::ElutionGroupState::Loaded { .. }
-                    );
+                    let both_loaded =
+                        matches!(indexed_data, crate::app::IndexedDataState::Loaded { .. })
+                            && matches!(
+                                elution_groups,
+                                crate::app::ElutionGroupState::Loaded { .. }
+                            );
                     if ui
                         .add_enabled(both_loaded, egui::Button::new("\u{25B6} Start"))
                         .clicked()
@@ -618,19 +664,16 @@ impl ViewerCalibrationState {
                             .add_filter("JSON", &["json"])
                             .pick_file()
                         {
-                            let raw_rt_range = if let crate::app::IndexedDataState::Loaded {
-                                index, ..
-                            } = indexed_data
-                            {
-                                let cycle_mapping = index.ms1_cycle_mapping();
-                                let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-                                Some([
-                                    rt_min_ms as f64 / 1000.0,
-                                    rt_max_ms as f64 / 1000.0,
-                                ])
-                            } else {
-                                None
-                            };
+                            let raw_rt_range =
+                                if let crate::app::IndexedDataState::Loaded { index, .. } =
+                                    indexed_data
+                                {
+                                    let cycle_mapping = index.ms1_cycle_mapping();
+                                    let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                                    Some([rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0])
+                                } else {
+                                    None
+                                };
                             match self.load_from_file(&path, raw_rt_range) {
                                 Ok(Some(warning)) => tracing::warn!("{}", warning),
                                 Ok(None) => {
@@ -681,10 +724,7 @@ impl ViewerCalibrationState {
                 // Fallback: show "?" until we know the total
                 0
             };
-            ui.label(format!(
-                "Scored: {} / {}",
-                self.n_scored, total
-            ));
+            ui.label(format!("Scored: {} / {}", self.n_scored, total));
             ui.separator();
             ui.label(format!(
                 "Calibrants: {} / {}",
@@ -697,10 +737,9 @@ impl ViewerCalibrationState {
         ui.add_space(4.0);
 
         // -- Tolerance suggestion (pinned to bottom, reserves its natural height) --
-        egui::TopBottomPanel::bottom("calibration_footer")
-            .show_inside(ui, |ui| {
-                self.render_tolerance_suggestion(ui, tolerance);
-            });
+        egui::TopBottomPanel::bottom("calibration_footer").show_inside(ui, |ui| {
+            self.render_tolerance_suggestion(ui, tolerance);
+        });
 
         // -- Grid + curve plot (fills remaining space) -------------------------
         self.render_calibration_plot(ui, selected_library_rt);
@@ -708,7 +747,15 @@ impl ViewerCalibrationState {
 
     /// Render the scatter + curve calibration plot.
     fn render_calibration_plot(&mut self, ui: &mut egui::Ui, selected_library_rt: Option<f64>) {
-        use egui_plot::{Line, Plot, PlotPoints, Points, Polygon, VLine, HLine};
+        use egui_plot::{
+            HLine,
+            Line,
+            Plot,
+            PlotPoints,
+            Points,
+            Polygon,
+            VLine,
+        };
 
         let plot_id = format!("calibration_plot_{}", self.generation);
         let plot = Plot::new(plot_id)
@@ -732,7 +779,8 @@ impl ViewerCalibrationState {
                 let cell_h = (y_hi - y_lo) / bins as f64;
 
                 // Find max weight for color normalization (log scale)
-                let max_weight = cells.iter()
+                let max_weight = cells
+                    .iter()
                     .map(|n| n.center.weight)
                     .fold(0.0f64, f64::max)
                     .max(1.0);
@@ -774,7 +822,7 @@ impl ViewerCalibrationState {
                     plot_ui.polygon(
                         Polygon::new(format!("cell_{i}"), PlotPoints::new(rect))
                             .fill_color(color)
-                            .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT))
+                            .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)),
                     );
                 }
 
@@ -787,12 +835,9 @@ impl ViewerCalibrationState {
 
                 if !path_pts.is_empty() {
                     plot_ui.points(
-                        Points::new(
-                            "path",
-                            PlotPoints::new(path_pts),
-                        )
-                        .color(egui::Color32::from_rgb(50, 255, 50))
-                        .radius(5.0),
+                        Points::new("path", PlotPoints::new(path_pts))
+                            .color(egui::Color32::from_rgb(50, 255, 50))
+                            .radius(5.0),
                     );
                 }
 
@@ -817,12 +862,9 @@ impl ViewerCalibrationState {
 
                         if !interp_pts.is_empty() {
                             plot_ui.line(
-                                Line::new(
-                                    "fitted curve",
-                                    PlotPoints::new(interp_pts),
-                                )
-                                .color(egui::Color32::from_rgb(0, 220, 220))
-                                .width(2.0),
+                                Line::new("fitted curve", PlotPoints::new(interp_pts))
+                                    .color(egui::Color32::from_rgb(0, 220, 220))
+                                    .width(2.0),
                             );
                         }
 
@@ -874,9 +916,11 @@ impl ViewerCalibrationState {
                         // Ridge envelope: upper and lower boundary lines showing tolerance width
                         let ridge = cs.measure_ridge_width(0.1);
                         if ridge.len() >= 2 {
-                            let ridge_color = egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
+                            let ridge_color =
+                                egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
 
-                            let upper: Vec<[f64; 2]> = ridge.iter()
+                            let upper: Vec<[f64; 2]> = ridge
+                                .iter()
                                 .filter_map(|m| {
                                     let y = match curve.predict(m.library) {
                                         Ok(y) => y.0,
@@ -886,7 +930,8 @@ impl ViewerCalibrationState {
                                     Some([m.library.0, y + m.half_width])
                                 })
                                 .collect();
-                            let lower: Vec<[f64; 2]> = ridge.iter()
+                            let lower: Vec<[f64; 2]> = ridge
+                                .iter()
                                 .filter_map(|m| {
                                     let y = match curve.predict(m.library) {
                                         Ok(y) => y.0,
@@ -944,12 +989,9 @@ impl ViewerCalibrationState {
 
                         // Crosshair point at (lib_rt, predicted_rt)
                         plot_ui.points(
-                            Points::new(
-                                "query",
-                                PlotPoints::new(vec![[lib_rt, predicted_rt]]),
-                            )
-                            .color(egui::Color32::from_rgb(255, 80, 80))
-                            .radius(6.0),
+                            Points::new("query", PlotPoints::new(vec![[lib_rt, predicted_rt]]))
+                                .color(egui::Color32::from_rgb(255, 80, 80))
+                                .radius(6.0),
                         );
                     }
                 }
@@ -963,12 +1005,9 @@ impl ViewerCalibrationState {
                     .collect();
 
                 plot_ui.points(
-                    Points::new(
-                        "calibrants",
-                        PlotPoints::new(raw_pts),
-                    )
-                    .color(egui::Color32::from_rgb(70, 130, 230))
-                    .radius(3.0),
+                    Points::new("calibrants", PlotPoints::new(raw_pts))
+                        .color(egui::Color32::from_rgb(70, 130, 230))
+                        .radius(3.0),
                 );
             }
         });
@@ -979,40 +1018,49 @@ impl ViewerCalibrationState {
         // Measure ridge width: expand from path cells into adjacent cells
         // with weight above 10% of the path cell's weight. Weight-averaged
         // half-width gives the global tolerance — heavy columns count more.
-        let ridge_stats = self
-            .calibration_state
-            .as_mut()
-            .and_then(|cs| {
-                cs.curve()?; // ensure curve is fitted
-                let measurements = cs.measure_ridge_width(0.1);
-                if measurements.is_empty() {
-                    return None;
-                }
+        let ridge_stats = self.calibration_state.as_mut().and_then(|cs| {
+            cs.curve()?; // ensure curve is fitted
+            let measurements = cs.measure_ridge_width(0.1);
+            if measurements.is_empty() {
+                return None;
+            }
 
-                // Weighted average half-width (seconds)
-                let total_weight: f64 = measurements.iter().map(|m| m.ridge_weight).sum();
-                if total_weight <= 0.0 {
-                    return None;
-                }
-                let weighted_hw: f64 = measurements
-                    .iter()
-                    .map(|m| m.half_width * m.ridge_weight)
-                    .sum::<f64>()
-                    / total_weight;
+            // Weighted average half-width (seconds)
+            let total_weight: f64 = measurements.iter().map(|m| m.ridge_weight).sum();
+            if total_weight <= 0.0 {
+                return None;
+            }
+            let weighted_hw: f64 = measurements
+                .iter()
+                .map(|m| m.half_width * m.ridge_weight)
+                .sum::<f64>()
+                / total_weight;
 
-                // Also report min/max for context
-                let min_hw = measurements.iter().map(|m| m.half_width).fold(f64::MAX, f64::min);
-                let max_hw = measurements.iter().map(|m| m.half_width).fold(0.0f64, f64::max);
+            // Also report min/max for context
+            let min_hw = measurements
+                .iter()
+                .map(|m| m.half_width)
+                .fold(f64::MAX, f64::min);
+            let max_hw = measurements
+                .iter()
+                .map(|m| m.half_width)
+                .fold(0.0f64, f64::max);
 
-                let total_column_weight: f64 = measurements.iter().map(|m| m.column_weight).sum();
-                let in_ridge_pct = if total_column_weight > 0.0 {
-                    total_weight / total_column_weight * 100.0
-                } else {
-                    0.0
-                };
+            let total_column_weight: f64 = measurements.iter().map(|m| m.column_weight).sum();
+            let in_ridge_pct = if total_column_weight > 0.0 {
+                total_weight / total_column_weight * 100.0
+            } else {
+                0.0
+            };
 
-                Some((weighted_hw, min_hw, max_hw, measurements.len(), in_ridge_pct))
-            });
+            Some((
+                weighted_hw,
+                min_hw,
+                max_hw,
+                measurements.len(),
+                in_ridge_pct,
+            ))
+        });
 
         // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
         let suggested = ridge_stats.map(|(hw_s, min_s, max_s, n_cols, in_ridge_pct)| {
@@ -1094,7 +1142,9 @@ fn simple_shuffle(indices: &mut [usize]) {
     // LCG parameters (Numerical Recipes).
     let mut state: u64 = 0xDEAD_BEEF_CAFE_BABE;
     for i in (1..len).rev() {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let j = (state >> 33) as usize % (i + 1);
         indices.swap(i, j);
     }

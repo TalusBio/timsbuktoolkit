@@ -91,8 +91,8 @@ impl MzMobilityStatsCollector {
     }
 
     pub fn add(&mut self, weight: f64, mz: f64, mobility: f64) {
-        match (self.mean_mz, self.mean_mobility) {
-            (Some(mut mmz), Some(mut mmob)) => {
+        match (self.mean_mz.as_mut(), self.mean_mobility.as_mut()) {
+            (Some(mmz), Some(mmob)) => {
                 mmz.add(weight, mz);
                 mmob.add(weight, mobility);
             }

@@ -199,9 +199,11 @@ fn validate_inputs(
 }
 
 fn get_frag_range(file: &TimsTofPath) -> Result<TupleRange<f64>, errors::CliError> {
-    let reader = file.load_frame_reader().map_err(|e| errors::CliError::DataReading {
-        source: format!("Failed to load frame reader: {:?}", e),
-    })?;
+    let reader = file
+        .load_frame_reader()
+        .map_err(|e| errors::CliError::DataReading {
+            source: format!("Failed to load frame reader: {:?}", e),
+        })?;
     let dia_windows = reader
         .dia_windows
         .as_ref()
@@ -317,6 +319,7 @@ fn process_single_file(
         &file_output_config,
         max_qvalue,
         load_index_ms,
+        &config.calibration,
     )
     .map_err(|e| errors::CliError::DataReading {
         source: format!("{}", e),
@@ -326,29 +329,58 @@ fn process_single_file(
     Ok(report)
 }
 
-fn main() -> std::result::Result<(), errors::CliError> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> std::result::Result<(), errors::CliError> {
     // Parse command line arguments first
     let args = Cli::parse();
+
+    // Short-circuit flags that dump the embedded default config.
+    if args.print_default_config {
+        print!("{}", config::DEFAULT_CONFIG_TOML);
+        return Ok(());
+    }
+    if let Some(ref path) = args.write_default_config {
+        std::fs::write(path, config::DEFAULT_CONFIG_TOML).map_err(|e| errors::CliError::Io {
+            source: e.to_string(),
+            path: Some(path.to_string_lossy().to_string()),
+        })?;
+        eprintln!("Wrote default config to {}", path.display());
+        return Ok(());
+    }
 
     // Load and parse configuration, or use defaults
     let mut config = match args.config {
         Some(ref config_path) => {
-            let conf = match std::fs::File::open(config_path) {
-                Ok(x) => x,
-                Err(e) => {
-                    return Err(errors::CliError::Io {
-                        source: e.to_string(),
-                        path: Some(config_path.to_string_lossy().to_string()),
-                    });
-                }
+            let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
+                source: e.to_string(),
+                path: Some(config_path.to_string_lossy().to_string()),
+            })?;
+            let is_toml = config_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("toml"))
+                .unwrap_or(false);
+            let parsed: Result<Config, String> = if is_toml {
+                toml::from_str(&text).map_err(|e| e.to_string())
+            } else {
+                serde_json::from_str(&text).map_err(|e| e.to_string())
             };
-            let config: Result<Config, _> = serde_json::from_reader(conf);
-            match config {
-                Ok(x) => x,
-                Err(e) => {
-                    return Err(errors::CliError::ParseError { msg: e.to_string() });
-                }
-            }
+            parsed.map_err(|e| errors::CliError::ParseError {
+                msg: format!(
+                    "Failed to parse config file {}: {e}\n\n\
+                     Run `timsseek --print-default-config` for a reference template, \
+                     or `--write-default-config <path>` to drop one to disk.\n\n\
+                     Reference default:\n```toml\n{}```\n",
+                    config_path.display(),
+                    config::DEFAULT_CONFIG_TOML,
+                ),
+            })?
         }
         None => {
             info!("No config file provided, using default configuration");
@@ -408,30 +440,28 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
     // Use Option layers so we can build a single subscriber type regardless
     // of whether we're writing to a log file or to stderr.
-    let (file_layer, stderr_warn_layer, stderr_all_layer) = if let Some(ref log_path) =
-        log_file_path
-    {
-        // File mode: log file gets env_filter, stderr gets WARN+ only
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let log_file =
-            std::fs::File::create(log_path).expect("Failed to create log file");
-        let fl = fmt::layer()
-            .with_writer(std::sync::Mutex::new(log_file))
-            .with_filter(env_filter);
-        let sl = fmt::layer()
-            .with_writer(std::io::stderr)
-            .without_time()
-            .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
-        (Some(fl), Some(sl), None)
-    } else {
-        // stderr-only mode (--log-path -)
-        let sl = fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_filter(env_filter);
-        (None, None, Some(sl))
-    };
+    let (file_layer, stderr_warn_layer, stderr_all_layer) =
+        if let Some(ref log_path) = log_file_path {
+            // File mode: log file gets env_filter, stderr gets WARN+ only
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let log_file = std::fs::File::create(log_path).expect("Failed to create log file");
+            let fl = fmt::layer()
+                .with_writer(std::sync::Mutex::new(log_file))
+                .with_filter(env_filter);
+            let sl = fmt::layer()
+                .with_writer(std::io::stderr)
+                .without_time()
+                .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+            (Some(fl), Some(sl), None)
+        } else {
+            // stderr-only mode (--log-path -)
+            let sl = fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter);
+            (None, None, Some(sl))
+        };
 
     #[cfg(feature = "instrumentation")]
     let perf_filter = EnvFilter::builder()
@@ -506,13 +536,24 @@ fn main() -> std::result::Result<(), errors::CliError> {
 
     // Load speclib once (shared across all files)
     let step = TimedStep::begin("Loading speclib");
-    info!("Building database from speclib file {:?}", validated.speclib_path);
-    info!("Decoy generation strategy: {}", config.analysis.decoy_strategy);
+    info!(
+        "Building database from speclib file {:?}",
+        validated.speclib_path
+    );
+    info!(
+        "Decoy generation strategy: {}",
+        config.analysis.decoy_strategy
+    );
     let speclib = timsseek::data_sources::speclib::Speclib::from_file(
         &validated.speclib_path,
         config.analysis.decoy_strategy,
-    ).map_err(|e| errors::CliError::Config { source: format!("Failed to load speclib: {:?}", e) })?;
-    let load_speclib_ms = step.finish_with(format_args!("{} entries", speclib.len())).as_millis() as u64;
+    )
+    .map_err(|e| errors::CliError::Config {
+        source: format!("Failed to load speclib: {:?}", e),
+    })?;
+    let load_speclib_ms = step
+        .finish_with(format_args!("{} entries", speclib.len()))
+        .as_millis() as u64;
 
     // Load calibration library once (if provided)
     let (calib_lib, load_calib_lib_ms) = match &validated.calib_lib_path {
@@ -522,8 +563,13 @@ fn main() -> std::result::Result<(), errors::CliError> {
             let lib = timsseek::data_sources::speclib::Speclib::from_file(
                 p,
                 config.analysis.decoy_strategy,
-            ).map_err(|e| errors::CliError::Config { source: format!("Failed to load calib lib: {:?}", e) })?;
-            let ms = step.finish_with(format_args!("{} entries", lib.len())).as_millis() as u64;
+            )
+            .map_err(|e| errors::CliError::Config {
+                source: format!("Failed to load calib lib: {:?}", e),
+            })?;
+            let ms = step
+                .finish_with(format_args!("{} entries", lib.len()))
+                .as_millis() as u64;
             (Some(lib), ms)
         }
         None => (None, 0),

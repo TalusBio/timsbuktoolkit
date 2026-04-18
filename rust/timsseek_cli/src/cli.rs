@@ -56,4 +56,12 @@ pub struct Cli {
     /// - never: Use library as-is without decoy generation
     #[arg(long, value_name = "STRATEGY")]
     pub decoy_strategy: Option<DecoyStrategy>,
+
+    /// Print the default TOML configuration to stdout and exit.
+    #[arg(long, conflicts_with = "write_default_config")]
+    pub print_default_config: bool,
+
+    /// Write the default TOML configuration to the given path and exit.
+    #[arg(long, value_name = "PATH")]
+    pub write_default_config: Option<PathBuf>,
 }
