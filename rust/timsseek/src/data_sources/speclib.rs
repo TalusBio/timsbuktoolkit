@@ -132,26 +132,30 @@ impl From<PrecursorEntry> for DigestSlice {
     }
 }
 
-impl From<SerSpeclibElement> for QueryItemToScore {
-    fn from(x: SerSpeclibElement) -> Self {
+impl TryFrom<SerSpeclibElement> for QueryItemToScore {
+    type Error = LibraryReadingError;
+
+    fn try_from(x: SerSpeclibElement) -> Result<Self, Self::Error> {
         let charge = x.precursor.charge;
         let precursor = x.precursor.into();
         let ref_eg = x.elution_group;
-        QueryItemToScore {
-            expected_intensity: ExpectedIntensities {
-                fragment_intensities: ref_eg
-                    .fragment_labels
-                    .iter()
-                    .cloned()
-                    .zip(ref_eg.fragment_intensities.iter().cloned())
-                    .collect(),
-                precursor_intensities: ref_eg
-                    .precursor_labels
-                    .iter()
-                    .cloned()
-                    .zip(ref_eg.precursor_intensities.iter().cloned())
-                    .collect(),
-            },
+        let expected_intensity = ExpectedIntensities::try_from_pairs(
+            ref_eg
+                .fragment_labels
+                .iter()
+                .cloned()
+                .zip(ref_eg.fragment_intensities.iter().cloned()),
+            ref_eg
+                .precursor_labels
+                .iter()
+                .cloned()
+                .zip(ref_eg.precursor_intensities.iter().cloned()),
+        )
+        .map_err(|e| LibraryReadingError::UnsupportedFormat {
+            message: format!("speclib entry has {}", e),
+        })?;
+        Ok(QueryItemToScore {
+            expected_intensity,
             query: TimsElutionGroup::builder()
                 .id(ref_eg.id as u64)
                 .mobility_ook0(ref_eg.mobility_ook0)
@@ -163,7 +167,7 @@ impl From<SerSpeclibElement> for QueryItemToScore {
                 .try_build()
                 .unwrap(),
             digest: precursor,
-        }
+        })
     }
 }
 
@@ -223,10 +227,7 @@ fn convert_diann_to_query_item(
         decoy_group_id,
     );
 
-    let fragment_intensities: crate::models::query_item::FragmentIntensityVec<IonAnnot> =
-        extra.relative_intensities.into_iter().collect();
-
-    let (rebuilt_eg, precursor_intensities) = match isotope_dist_from_seq(&extra.stripped_peptide) {
+    let (rebuilt_eg, precursor_pairs) = match isotope_dist_from_seq(&extra.stripped_peptide) {
         Ok(isotope_ratios) => {
             let fragment_labels: Vec<IonAnnot> =
                 eg.iter_fragments().map(|(label, _mz)| *label).collect();
@@ -245,15 +246,12 @@ fn convert_diann_to_query_item(
                     message: format!("Failed to rebuild elution group: {:?}", e),
                 })?;
 
-            let intensities: crate::models::query_item::PrecursorIntensityVec = vec![
+            let pairs: Vec<(i8, f32)> = vec![
                 (0i8, isotope_ratios[0]),
                 (1i8, isotope_ratios[1]),
                 (2i8, isotope_ratios[2]),
-            ]
-            .into_iter()
-            .collect();
-
-            (rebuilt, intensities)
+            ];
+            (rebuilt, pairs)
         }
         Err(e) => {
             tracing::debug!(
@@ -261,17 +259,16 @@ fn convert_diann_to_query_item(
                 extra.stripped_peptide,
                 e
             );
-            (
-                eg,
-                crate::models::query_item::PrecursorIntensityVec::from_iter([(0i8, 1.0)]),
-            )
+            (eg, vec![(0i8, 1.0)])
         }
     };
 
-    let expected_intensity = ExpectedIntensities {
-        fragment_intensities,
-        precursor_intensities,
-    };
+    let expected_intensity =
+        ExpectedIntensities::try_from_pairs(extra.relative_intensities, precursor_pairs).map_err(
+            |e| LibraryReadingError::UnsupportedFormat {
+                message: format!("DIA-NN entry {}: {}", extra.stripped_peptide, e),
+            },
+        )?;
 
     Ok(QueryItemToScore {
         digest,
@@ -597,7 +594,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                     }
                 };
 
-                Some(Ok(elem.into()))
+                Some(elem.try_into())
             }
             Err(e) => Some(Err(LibraryReadingError::FileReadingError {
                 source: e,
@@ -627,7 +624,7 @@ impl<R: Read> Iterator for MessagePackReader<R> {
         use serde::Deserialize;
 
         match SerSpeclibElement::deserialize(&mut self.deserializer) {
-            Ok(elem) => Some(Ok(elem.into())),
+            Ok(elem) => Some(elem.try_into()),
             Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
                 if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
@@ -978,7 +975,10 @@ mod tests {
                 }
             };
 
-            let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
+            let speclib: Vec<QueryItemToScore> = speclib_ser
+                .into_iter()
+                .map(QueryItemToScore::try_from)
+                .collect::<Result<_, _>>()?;
 
             Ok(Self { elems: speclib })
         }
@@ -1021,7 +1021,7 @@ mod tests {
     fn test_sample_elution_group_deserialization() {
         let json = SerSpeclibElement::sample_json();
         let elem: SerSpeclibElement = serde_json::from_str(json).unwrap();
-        let query_item: QueryItemToScore = elem.into();
+        let query_item: QueryItemToScore = elem.try_into().unwrap();
 
         assert_eq!(query_item.digest.len(), "PEPTIDEPINK".len());
         assert_eq!(query_item.query.fragment_count(), 3);
@@ -1472,7 +1472,7 @@ mod tests {
         );
         let bytes = rmp_serde::to_vec(&elem).unwrap();
         let decoded: SerSpeclibElement = rmp_serde::from_slice(&bytes).unwrap();
-        let qi: QueryItemToScore = decoded.into();
+        let qi: QueryItemToScore = decoded.try_into().unwrap();
         assert_eq!(qi.digest.len(), "PEPTIDEK".len());
         assert_eq!(qi.query.fragment_count(), 2);
     }

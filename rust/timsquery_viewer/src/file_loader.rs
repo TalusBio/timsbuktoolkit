@@ -283,13 +283,7 @@ impl ElutionGroupData {
         stripped_peptide: &str,
         relative_intensities: &[(IonAnnot, f32)],
         eg: &mut TimsElutionGroup<String>,
-    ) -> ExpectedIntensities<String> {
-        let fragment_intensities = relative_intensities
-            .iter()
-            .cloned()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-
+    ) -> Result<ExpectedIntensities<String>, ViewerError> {
         let isotopes = match isotope_dist_from_seq(stripped_peptide) {
             Ok(isotopes) => isotopes,
             Err(e) => {
@@ -302,17 +296,18 @@ impl ElutionGroupData {
         };
 
         eg.set_precursor_labels([0, 1, 2].iter().cloned());
-        let precursor_intensities = isotopes
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, intensity)| (i as i8, intensity))
-            .collect();
 
-        ExpectedIntensities {
-            precursor_intensities,
-            fragment_intensities,
-        }
+        ExpectedIntensities::try_from_pairs(
+            relative_intensities
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v)),
+            isotopes
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, intensity)| (i as i8, intensity)),
+        )
+        .map_err(|e| ViewerError::General(format!("library entry {}: {}", stripped_peptide, e)))
     }
 
     pub fn get_elem(
@@ -374,14 +369,13 @@ impl ElutionGroupData {
                     &mut eg,
                 )
             }
-            None => ExpectedIntensities {
-                precursor_intensities: eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)).collect(),
-                fragment_intensities: eg
-                    .iter_fragments()
-                    .map(|(label, _mz)| (label.to_string(), 0.1))
-                    .collect(),
-            },
-        };
+            None => ExpectedIntensities::try_from_pairs(
+                eg.iter_fragments()
+                    .map(|(label, _mz)| (label.to_string(), 0.1)),
+                eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)),
+            )
+            .map_err(|e| ViewerError::General(format!("synthetic defaults: {}", e))),
+        }?;
         Ok((eg, extra))
     }
 

@@ -26,12 +26,27 @@ impl<A: GlobalAlloc> TrackingAllocator<A> {
     }
 }
 
+/// Snapshot of allocator activity since process start.
+///
+/// All fields are cumulative (monotonic) except `live_bytes`.
 #[derive(Clone, Copy, Debug)]
 pub struct Counters {
+    /// Total bytes passed to `alloc` calls (never decreases).
     pub total_bytes: u64,
+    /// Total `alloc` calls (never decreases). Deallocs NOT counted here.
     pub total_count: u64,
+    /// Currently-live bytes (alloc bytes minus dealloc bytes).
     pub live_bytes: u64,
+    /// High-water mark of `live_bytes` ever observed.
+    ///
+    /// Updated with Relaxed ordering after `live_bytes`, so a reader may
+    /// briefly observe `peak_bytes < live_bytes` between the two stores.
+    /// Self-corrects on the next alloc; acceptable for a dev-only tool.
+    /// Note: if dealloc underflow drift has occurred (see
+    /// `report_snapshot_diff`'s WARNING line), this value is a lower bound
+    /// relative to reality and does not self-correct from dealloc-only workloads.
     pub peak_bytes: u64,
+    /// Per-bucket alloc count histogram. See `BUCKET_LABELS` for bin edges.
     pub hist: [u64; 16],
 }
 
@@ -62,10 +77,18 @@ mod imp {
         Ordering,
     };
 
+    // All counters use Relaxed ordering: tracker is self-contained (no
+    // cross-thread synchronization is published through these values), and
+    // snapshots tolerate transient skew between counters. Atomicity alone
+    // suffices for eventual consistency.
     static ALLOCATED: AtomicU64 = AtomicU64::new(0);
     static COUNT: AtomicU64 = AtomicU64::new(0);
     static LIVE: AtomicU64 = AtomicU64::new(0);
     static PEAK: AtomicU64 = AtomicU64::new(0);
+    /// Number of `on_dealloc` calls whose size exceeded observed `LIVE` —
+    /// i.e. accounting drift (layout mismatch, custom allocator bug, etc.).
+    /// Reported by [`report_snapshot_diff`]; nonzero means numbers are suspect.
+    static DEALLOC_UNDERFLOWS: AtomicU64 = AtomicU64::new(0);
 
     const ZERO_ATOMIC: AtomicU64 = AtomicU64::new(0);
     static HIST: [AtomicU64; 16] = [ZERO_ATOMIC; 16];
@@ -93,7 +116,26 @@ mod imp {
 
     #[inline]
     pub(crate) fn on_dealloc(size: usize) {
-        LIVE.fetch_sub(size as u64, Ordering::Relaxed);
+        let s = size as u64;
+        // Atomic saturating sub. Drift (curr < s) means the inner allocator
+        // reported mismatched layouts — accounting is already wrong, so we
+        // clamp LIVE to 0, bump DEALLOC_UNDERFLOWS, and let report_snapshot_diff
+        // surface it. Cannot panic/log from the hook: both may allocate and
+        // recurse into this function. The debug_assert catches drift in tests;
+        // on CAS retries under contention the closure runs multiple times and
+        // the assert re-checks each time, which is intentional.
+        let _ = LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
+            debug_assert!(
+                curr >= s,
+                "alloc_track: dealloc size {} exceeds live {}",
+                s,
+                curr
+            );
+            if curr < s {
+                DEALLOC_UNDERFLOWS.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(curr.saturating_sub(s))
+        });
     }
 
     pub fn current() -> Counters {
@@ -138,6 +180,12 @@ mod imp {
             fmt_bytes(curr.peak_bytes),
             fmt_hist(&d_hist),
         );
+        let drift = DEALLOC_UNDERFLOWS.load(Ordering::Relaxed);
+        if drift > 0 {
+            eprintln!(
+                "[alloc] WARNING: {drift} dealloc underflow(s) observed — live/peak numbers above are suspect."
+            );
+        }
     }
 
     const BUCKET_LABELS: [&str; 16] = [

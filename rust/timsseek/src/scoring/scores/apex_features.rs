@@ -12,8 +12,8 @@ use crate::models::query_item::linear_get;
 
 /// Reusable scratch buffers for `coelution_gradient`. Owned by the scorer so
 /// allocations happen once per rayon worker split and are reused across every
-/// peptide that worker processes. `new()` pre-sizes capacity for a typical
-/// peptide so the first hot-path call does no reallocation.
+/// peptide that worker processes. See [`CoelutionScratch::with_frag_capacity`]
+/// for sizing.
 #[derive(Debug)]
 pub struct CoelutionScratch {
     /// Rows: active fragments. Cols: coelution window length.
@@ -29,24 +29,20 @@ pub struct CoelutionScratch {
 impl CoelutionScratch {
     const TYP_COEL_LEN: usize = 41;
     const TYP_DIFF_LEN: usize = 20;
-    /// Typical peptide has up to ~16 fragments; coel window = 2*20+1 = 41 cycles,
-    /// gradient diffs length = 2*10 = 20. Pre-sized to these so the first call
-    /// in a worker does not reallocate.
-    const TYP_FRAGS: usize = 16;
 
-    pub fn new() -> Self {
+    /// Reserve scratch capacity for a library whose peptides have at most
+    /// `frag_capacity` fragments. Coel window = 2*20+1 = 41 cycles,
+    /// gradient diffs = 2*10 = 20. If callers pass the library-wide max
+    /// (pre-scanned via `items_to_score.iter().map(|i|
+    /// i.expected_intensity.fragment_len()).max()`), no realloc occurs for
+    /// any peptide.
+    pub fn with_frag_capacity(frag_capacity: usize) -> Self {
         Self {
-            coel_rows: Array2D::with_capacity(Self::TYP_COEL_LEN, Self::TYP_FRAGS),
-            grad_rows: Array2D::with_capacity(Self::TYP_DIFF_LEN, Self::TYP_FRAGS),
-            weights: Vec::with_capacity(Self::TYP_FRAGS),
+            coel_rows: Array2D::with_capacity(Self::TYP_COEL_LEN, frag_capacity),
+            grad_rows: Array2D::with_capacity(Self::TYP_DIFF_LEN, frag_capacity),
+            weights: Vec::with_capacity(frag_capacity),
             diffs: Vec::with_capacity(Self::TYP_DIFF_LEN),
         }
-    }
-}
-
-impl Default for CoelutionScratch {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1047,7 +1043,7 @@ mod tests {
 
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let mut scratch = CoelutionScratch::new();
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
 
         // Identical traces => correlation should be ~1.0
@@ -1083,7 +1079,7 @@ mod tests {
 
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let mut scratch = CoelutionScratch::new();
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         // Anti-correlated: wcoel should be negative or near zero
         assert!(
@@ -1107,7 +1103,7 @@ mod tests {
 
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0)];
 
-        let mut scratch = CoelutionScratch::new();
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
         let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         assert!(
             (result.combined - 1.0).abs() < 1e-6,
@@ -1148,7 +1144,7 @@ mod tests {
         ]);
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let mut scratch = CoelutionScratch::new();
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
         let result = compute_split_product(
             &cosine_profile,
             &scribe_profile,

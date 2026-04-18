@@ -75,9 +75,9 @@ pub struct ScoringWorker {
 }
 
 impl ScoringWorker {
-    pub fn new(num_cycles: usize) -> Self {
+    pub fn new(num_cycles: usize, max_frags: usize) -> Self {
         Self {
-            scorer: TraceScorer::new(num_cycles),
+            scorer: TraceScorer::new(num_cycles, max_frags),
             extraction: None,
         }
     }
@@ -506,7 +506,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         item: QueryItemToScore,
         calibration: &CalibrationResult,
     ) -> Result<ViewerResult, DataProcessingError> {
-        let mut buffer = TraceScorer::new(self.num_cycles());
+        let mut buffer =
+            TraceScorer::new(self.num_cycles(), item.expected_intensity.fragment_len());
 
         // Re-implementing logic here because process_query consumes `item` and returns `Option`.
         // We want intermediate results for `ViewerResult`.
@@ -682,14 +683,21 @@ impl<I: ScorerQueriable> Scorer<I> {
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings) {
         let num_cycles = self.num_cycles();
+        // Pre-scan so scratch capacity holds every peptide — no realloc in hot path.
+        let max_frags = items_to_score
+            .iter()
+            .map(|i| i.expected_intensity.fragment_len())
+            .max()
+            .unwrap_or(0);
         let init_fn = || {
             tracing::debug!(
                 target: "alloc_track",
                 phase = "phase3_score",
                 num_cycles,
+                max_frags,
                 "rayon worker init: ScoringWorker"
             );
-            ScoringWorker::new(num_cycles)
+            ScoringWorker::new(num_cycles, max_frags)
         };
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
@@ -810,16 +818,22 @@ impl<I: ScorerQueriable> Scorer<I> {
             use super::timings::PrescoreTimings;
             let num_cycles = self.num_cycles();
             let n_calibrants = config.n_calibrants;
+            let max_frags = items_to_score
+                .iter()
+                .map(|i| i.expected_intensity.fragment_len())
+                .max()
+                .unwrap_or(0);
             let init_fn = || {
                 tracing::debug!(
                     target: "alloc_track",
                     phase = "phase1_prescore",
                     num_cycles,
                     n_calibrants,
+                    max_frags,
                     "rayon worker init: ScoringWorker + CalibrantHeap"
                 );
                 (
-                    ScoringWorker::new(num_cycles),
+                    ScoringWorker::new(num_cycles, max_frags),
                     CalibrantHeap::new(n_calibrants),
                     PrescoreTimings::default(),
                 )
@@ -865,7 +879,12 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         #[cfg(not(feature = "rayon"))]
         let heap: CalibrantHeap = {
-            let mut scorer = TraceScorer::new(self.num_cycles());
+            let max_frags = items_to_score
+                .iter()
+                .map(|i| i.expected_intensity.fragment_len())
+                .max()
+                .unwrap_or(0);
+            let mut scorer = TraceScorer::new(self.num_cycles(), max_frags);
             let mut heap = CalibrantHeap::new(config.n_calibrants);
             for (chunk_idx, item) in items_to_score.iter().enumerate() {
                 if !filter_fn(&item) {
