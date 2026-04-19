@@ -178,17 +178,19 @@ impl<K: KeyLike, V: ArrayElement> MzMajorIntensityArray<K, V> {
         }
     }
 
-    pub fn clear_with_order(
-        &mut self,
-        order: Vec<(K, f64)>,
-        num_cycles: usize,
-        cycle_offset: usize,
-    ) {
-        let minor_dim = num_cycles;
-        let major_dim = order.len();
+    /// Reset the array to `num_cycles` × `order.len()`, keeping the
+    /// existing `mz_order` / `arr` heap backings. `order` is consumed
+    /// into the pre-existing `mz_order` Vec via `clear()` + `extend()`
+    /// so that the caller's iterator stays alloc-free on the warm path.
+    pub fn clear_with_order<I>(&mut self, order: I, num_cycles: usize, cycle_offset: usize)
+    where
+        I: IntoIterator<Item = (K, f64)>,
+    {
+        self.mz_order.clear();
+        self.mz_order.extend(order);
+        let major_dim = self.mz_order.len();
         self.arr
-            .reset_with_value(minor_dim, major_dim, V::default());
-        self.mz_order = order;
+            .reset_with_value(num_cycles, major_dim, V::default());
         self.cycle_offset = cycle_offset;
     }
 
