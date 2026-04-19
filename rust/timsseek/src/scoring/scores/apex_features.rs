@@ -229,8 +229,8 @@ fn estimate_fwhm(profile: &[f32], apex: usize) -> f32 {
         }
     }
 
-    let fwhm = (left_dist + right_dist).max(1.0);
-    fwhm
+    
+    (left_dist + right_dist).max(1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -844,11 +844,10 @@ fn compute_isotope_correlation(
     let mut n_valid = 0u32;
 
     for iso_key in 0i8..=2i8 {
-        if let Some(row) = precursors.get_row(&iso_key) {
-            if apex < row.len() {
+        if let Some(row) = precursors.get_row(&iso_key)
+            && apex < row.len() {
                 obs[iso_key as usize] = row[apex];
             }
-        }
         if let Some(v) = linear_get(expected_precursor, &iso_key) {
             exp[iso_key as usize] = v;
         }

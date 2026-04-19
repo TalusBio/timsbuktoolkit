@@ -42,7 +42,7 @@ pub(crate) fn find_optimal_path(
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
 
-        let start = if i > lookback { i - lookback } else { 0 };
+        let start = i.saturating_sub(lookback);
         for j in start..i {
             // Only create edges where both dimensions increase (monotonic constraint)
             if nodes[i].center.library > nodes[j].center.library
