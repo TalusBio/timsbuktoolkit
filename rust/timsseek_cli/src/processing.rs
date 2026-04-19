@@ -44,6 +44,7 @@ use timsseek::scoring::{
     PipelineReport,
     ScoreTimings,
     ScoredCandidate,
+    SkipCounts,
 };
 use timsseek::{
     IonAnnot,
@@ -275,7 +276,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     info!("Phase 3: Scoring with calibrated extraction...");
     let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
-    let results = phase3_score(
+    let (results, phase3_skips) = phase3_score(
         &speclib,
         pipeline,
         &calibration,
@@ -375,6 +376,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         targets_at_1pct_qval,
         targets_at_5pct_qval,
         targets_at_10pct_qval,
+        phase3_skips,
     })
 }
 
@@ -688,31 +690,35 @@ fn phase3_score<I: ScorerQueriable>(
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
-) -> Vec<ScoredCandidate> {
+) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.as_slice().len();
     let n_chunks = (total_peptides + chunk_size - 1) / chunk_size;
     let pb = make_progress_bar(n_chunks as u64, "Phase 3");
 
     let mut results = Vec::new();
+    let mut skips = SkipCounts::default();
 
     for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings) = pipeline.score_calibrated_batch(chunk, calibration);
+        let (batch_results, batch_timings, batch_skips) =
+            pipeline.score_calibrated_batch(chunk, calibration);
         *timings += batch_timings;
+        skips += batch_skips;
         results.extend(batch_results);
     }
 
     let skipped = total_peptides - results.len();
     if skipped > total_peptides / 20 {
         warn!(
-            "{}/{} peptides produced no Phase 3 result (>{:.0}%). \
+            "{}/{} peptides produced no Phase 3 result (>{:.0}%): {}. \
              If this is unexpected, check calibration quality.",
             skipped,
             total_peptides,
-            (skipped as f64 / total_peptides as f64) * 100.0
+            (skipped as f64 / total_peptides as f64) * 100.0,
+            skips,
         );
     }
 
-    results
+    (results, skips)
 }
 
 /// `median ± n_sigma * 1.4826 * MAD`, asymmetric, floored.

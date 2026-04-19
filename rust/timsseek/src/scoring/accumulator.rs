@@ -1,9 +1,13 @@
 //! Accumulator for parallel scoring results.
 //!
-//! This module provides efficient collection of scoring results from parallel iterators.
-//! It aggregates both successful search results and timing measurements across threads.
+//! Aggregates successful `ScoredCandidate`s, per-reason skip counts, and
+//! phase timings across Rayon workers using fold-reduce.
 
 use super::results::ScoredCandidate;
+use super::skip::{
+    SkipCounts,
+    SkipReason,
+};
 use super::timings::ScoreTimings;
 #[cfg(feature = "rayon")]
 use rayon::iter::{
@@ -12,52 +16,37 @@ use rayon::iter::{
     ParallelIterator,
 };
 
-/// Accumulator for collecting scoring results and timings from parallel operations.
-///
-/// This struct is used internally by `score_iter()` to efficiently collect results
-/// from Rayon's parallel iterator. It implements both sequential and parallel collection
-/// via `FromIterator` and `FromParallelIterator`.
-///
-/// # Design
-///
-/// The accumulator uses the fold-reduce pattern for parallel aggregation:
-/// 1. **Fold**: Each thread accumulates results into a local accumulator
-/// 2. **Reduce**: Local accumulators are merged pairwise to produce final result
-///
-/// This minimizes contention and allows efficient parallel collection of results.
+pub(super) type ScoreItem = (Result<ScoredCandidate, SkipReason>, ScoreTimings);
+
 #[derive(Default)]
 pub(super) struct IonSearchAccumulator {
     pub(super) res: Vec<ScoredCandidate>,
+    pub(super) skips: SkipCounts,
     pub(super) timings: ScoreTimings,
 }
 
 impl IonSearchAccumulator {
-    /// Merges two accumulators by extending results and summing timings.
-    ///
-    /// Used in the reduce phase of parallel collection.
     pub(super) fn reduce(mut self, other: Self) -> Self {
         self.res.extend(other.res);
+        self.skips += other.skips;
         self.timings += other.timings;
         self
     }
 
-    /// Adds a single scoring result (if present) to the accumulator.
-    ///
-    /// Used in the fold phase of parallel collection. Successful results are collected,
-    /// while `None` results (failed scoring) are discarded.
-    pub(super) fn fold(mut self, item: (Option<ScoredCandidate>, ScoreTimings)) -> Self {
-        if let Some(elem) = item.0 {
-            self.res.push(elem);
+    pub(super) fn fold(mut self, item: ScoreItem) -> Self {
+        match item.0 {
+            Ok(elem) => self.res.push(elem),
+            Err(reason) => self.skips.bump(reason),
         }
         self.timings += item.1;
         self
     }
 }
 
-impl FromIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumulator {
+impl FromIterator<ScoreItem> for IonSearchAccumulator {
     fn from_iter<I>(iter: I) -> Self
     where
-        I: IntoIterator<Item = (Option<ScoredCandidate>, ScoreTimings)>,
+        I: IntoIterator<Item = ScoreItem>,
     {
         iter.into_iter()
             .fold(IonSearchAccumulator::default(), IonSearchAccumulator::fold)
@@ -65,10 +54,10 @@ impl FromIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumula
 }
 
 #[cfg(feature = "rayon")]
-impl FromParallelIterator<(Option<ScoredCandidate>, ScoreTimings)> for IonSearchAccumulator {
+impl FromParallelIterator<ScoreItem> for IonSearchAccumulator {
     fn from_par_iter<I>(par_iter: I) -> Self
     where
-        I: IntoParallelIterator<Item = (Option<ScoredCandidate>, ScoreTimings)>,
+        I: IntoParallelIterator<Item = ScoreItem>,
     {
         par_iter
             .into_par_iter()

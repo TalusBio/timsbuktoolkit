@@ -56,6 +56,12 @@ use super::results::{
     ScoredCandidate,
     ScoredCandidateBuilder,
 };
+use super::skip::{
+    SkipCounts,
+    SkipReason,
+    apex_error_to_skip,
+    finalize_error_to_skip,
+};
 use super::timings::ScoreTimings;
 use crate::rt_calibration::{
     CalibrationResult,
@@ -333,11 +339,6 @@ pub struct Scorer<I: ScorerQueriable> {
     pub fragmented_range: TupleRange<f64>,
 }
 
-pub enum SkippingReason {
-    // TODO: Implement more options and a counter ...
-    RetentionTimeOutOfBounds,
-}
-
 impl<I: ScorerQueriable> Scorer<I> {
     #[cfg_attr(
         feature = "instrumentation",
@@ -351,7 +352,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             super::apex_finding::PeptideMetadata,
             super::apex_finding::Extraction<IonAnnot>,
         ),
-        SkippingReason,
+        SkipReason,
     > {
         let extraction = super::extraction::build_extraction(
             &item.query,
@@ -557,7 +558,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         item: &QueryItemToScore,
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
-    ) -> Result<super::apex_finding::PeptideMetadata, SkippingReason> {
+    ) -> Result<super::apex_finding::PeptideMetadata, SkipReason> {
         let original_irt = LibraryRT(item.query.rt_seconds());
         let calibrated_rt = calibration.convert_irt(original_irt);
         let tolerance = calibration.get_tolerance(
@@ -603,13 +604,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
-    ) -> Option<ScoredCandidate> {
+    ) -> Result<ScoredCandidate, SkipReason> {
         let metadata = timed!(
             timings.extraction,
-            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| {
-                self.build_calibrated_extraction_into(item, calibration, worker)
-                    .ok()
-            })
+            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction")
+                .in_scope(|| self.build_calibrated_extraction_into(item, calibration, worker))
         )?;
 
         let scoring_ctx = worker
@@ -621,7 +620,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .fragment_intensities
             .is_empty()
         {
-            return None;
+            return Err(SkipReason::NoExpectedFragments);
         }
 
         let apex_score = timed!(
@@ -631,7 +630,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     worker
                         .scorer
                         .find_apex(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                        .ok()
+                        .map_err(|e| apex_error_to_skip(&e))
                 },
             )
         )?;
@@ -659,7 +658,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .as_ref()
             .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
-        let out = timed!(
+        timed!(
             timings.assembly,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(|| {
                 self.finalize_results(
@@ -669,16 +668,12 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &inner_collector,
                     &isotope_collector,
                 )
-            },)
-        );
-
-        match out {
-            Ok(res) => Some(res),
-            Err(e) => {
-                warn!("Error in scoring: {:?}", e);
-                None
-            }
-        }
+                .map_err(|e| {
+                    warn!("Error in scoring: {:?}", e);
+                    finalize_error_to_skip(&e)
+                })
+            })
+        )
     }
 
     /// Phase 3 batch: Score all peptides with calibrated tolerances.
@@ -690,7 +685,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         items_to_score: &[QueryItemToScore],
         calibration: &CalibrationResult,
-    ) -> (Vec<ScoredCandidate>, ScoreTimings) {
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let num_cycles = self.num_cycles();
         // Pre-scan so scratch capacity holds every peptide — no realloc in hot path.
         let max_frags = items_to_score
@@ -714,8 +709,12 @@ impl<I: ScorerQueriable> Scorer<I> {
             self.fragmented_range.intersects(lims)
         };
 
+        // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
+        // a second pass keeps the rayon hot loop free of synchronised counters.
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(&x)).count() as u32;
+
         #[cfg(feature = "rayon")]
-        let results: IonSearchAccumulator = {
+        let mut results: IonSearchAccumulator = {
             items_to_score
                 .par_iter()
                 .filter(filter_fn)
@@ -729,7 +728,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         };
 
         #[cfg(not(feature = "rayon"))]
-        let results: IonSearchAccumulator = {
+        let mut results: IonSearchAccumulator = {
             let mut scorer = init_fn();
             items_to_score
                 .iter()
@@ -745,7 +744,8 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .collect()
         };
 
-        (results.res, results.timings)
+        results.skips.precursor_out_of_fragmented_range = precursor_oofr_count;
+        (results.res, results.timings, results.skips)
     }
 
     /// Phase 1: Lightweight prescore — broad extraction + find_apex_location only.
@@ -759,8 +759,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         item: &QueryItemToScore,
         worker: &mut ScoringWorker,
         timings: &mut super::timings::PrescoreTimings,
-    ) -> Option<ApexLocation> {
-        let extraction_ok = timed!(
+    ) -> Result<ApexLocation, SkipReason> {
+        timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
                 super::extraction::build_extraction_into(
@@ -772,10 +772,8 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &self.broad_tolerance,
                     Some(TOP_N_FRAGMENTS),
                 )
-                .ok()
             })
-        );
-        extraction_ok?;
+        )?;
 
         let scoring_ctx = worker
             .extraction
@@ -786,7 +784,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .fragment_intensities
             .is_empty()
         {
-            return None;
+            return Err(SkipReason::NoExpectedFragments);
         }
 
         let result = timed!(
@@ -795,11 +793,11 @@ impl<I: ScorerQueriable> Scorer<I> {
                 worker
                     .scorer
                     .find_apex_location(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                    .ok()
+                    .map_err(|e| apex_error_to_skip(&e))
             })
         );
 
-        if result.is_some() {
+        if result.is_ok() {
             timings.n_scored += 1;
         }
         result
@@ -822,6 +820,10 @@ impl<I: ScorerQueriable> Scorer<I> {
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
+
+        // Count pre-filter rejects once; keeps the rayon loop counter-free.
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(&x)).count() as u32;
+        timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         #[cfg(feature = "rayon")]
         let (heap, par_timings): (CalibrantHeap, super::timings::PrescoreTimings) = {
@@ -857,13 +859,18 @@ impl<I: ScorerQueriable> Scorer<I> {
                     init_fn,
                     |(mut worker, mut heap, mut t), (chunk_idx, item)| {
                         t.n_passed_filter += 1;
-                        if let Some(loc) = self.prescore(item, &mut worker, &mut t) {
-                            heap.push(CalibrantCandidate {
-                                score: loc.score,
-                                apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                                speclib_index: speclib_offset + chunk_idx,
-                                library_rt: LibraryRT(item.query.rt_seconds()),
-                            });
+                        match self.prescore(item, &mut worker, &mut t) {
+                            Ok(loc) => {
+                                heap.push(CalibrantCandidate {
+                                    score: loc.score,
+                                    apex_rt: ObservedRTSeconds(
+                                        loc.retention_time_ms as f32 / 1000.0,
+                                    ),
+                                    speclib_index: speclib_offset + chunk_idx,
+                                    library_rt: LibraryRT(item.query.rt_seconds()),
+                                });
+                            }
+                            Err(reason) => t.skips.bump(reason),
                         }
                         (worker, heap, t)
                     },
@@ -901,13 +908,16 @@ impl<I: ScorerQueriable> Scorer<I> {
                     continue;
                 }
                 timings.n_passed_filter += 1;
-                if let Some(loc) = self.prescore(item, &mut scorer, timings) {
-                    heap.push(CalibrantCandidate {
-                        score: loc.score,
-                        apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                        speclib_index: speclib_offset + chunk_idx,
-                        library_rt: LibraryRT(item.query.rt_seconds()),
-                    });
+                match self.prescore(item, &mut scorer, timings) {
+                    Ok(loc) => {
+                        heap.push(CalibrantCandidate {
+                            score: loc.score,
+                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
+                            speclib_index: speclib_offset + chunk_idx,
+                            library_rt: LibraryRT(item.query.rt_seconds()),
+                        });
+                    }
+                    Err(reason) => timings.skips.bump(reason),
                 }
             }
             heap
