@@ -239,16 +239,27 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
             return; // No RT intersection, early exit
         };
 
+        // Locally-accumulated counters: incrementing aggregator fields inside
+        // `iter_mut_*` would conflict with the mutable borrow; write back once
+        // the loops release it.
+        let mut local_ms1_peaks: u64 = 0;
+        let mut local_ms2_peaks: u64 = 0;
+        let mut local_quads: u32 = 0;
+
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), mut chr)| {
                 let mz_range = tolerance.mz_range_f32(*mz as f32);
                 self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
-                    .for_each(|peak| chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity));
+                    .for_each(|peak| {
+                        chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
+                        local_ms1_peaks += 1;
+                    });
             });
 
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
             .for_each(|(quad_info, peaks)| {
+                local_quads += 1;
                 let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
                 aggregator
                     .iter_mut_fragments()
@@ -262,9 +273,20 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
                             .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
                             .for_each(|x| {
                                 chr.add_at_index(x.cycle_index.as_u32(), x.intensity);
+                                local_ms2_peaks += 1;
                             });
                     });
-            })
+            });
+
+        aggregator.n_precursor_peaks_added = aggregator
+            .n_precursor_peaks_added
+            .saturating_add(local_ms1_peaks);
+        aggregator.n_fragment_peaks_added = aggregator
+            .n_fragment_peaks_added
+            .saturating_add(local_ms2_peaks);
+        aggregator.n_quad_windows_matched = aggregator
+            .n_quad_windows_matched
+            .saturating_add(local_quads);
     }
 }
 
@@ -389,6 +411,12 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                 // The eager implementation does not because it is usually used in already parallel contexts.
                 // (other 10 queries running in parallel..)
 
+                // See the eager impl above: local counters avoid the
+                // `iter_mut_*` mutable-borrow conflict, written back at end.
+                let mut local_ms1_peaks: u64 = 0;
+                let mut local_ms2_peaks: u64 = 0;
+                let mut local_quads: u32 = 0;
+
                 // Query MS1 precursors
                 aggregator
                     .iter_mut_precursors()
@@ -396,7 +424,8 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
                         lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
                             .for_each(|peak| {
-                                chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity)
+                                chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
+                                local_ms1_peaks += 1;
                             });
                     });
 
@@ -415,11 +444,23 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
 
                         // Iterate through all matching window groups and their peaks
                         for (_isolation_scheme, peaks) in results {
+                            local_quads += 1;
                             for peak in peaks {
                                 chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
+                                local_ms2_peaks += 1;
                             }
                         }
                     });
+
+                aggregator.n_precursor_peaks_added = aggregator
+                    .n_precursor_peaks_added
+                    .saturating_add(local_ms1_peaks);
+                aggregator.n_fragment_peaks_added = aggregator
+                    .n_fragment_peaks_added
+                    .saturating_add(local_ms2_peaks);
+                aggregator.n_quad_windows_matched = aggregator
+                    .n_quad_windows_matched
+                    .saturating_add(local_quads);
             }
         }
     }

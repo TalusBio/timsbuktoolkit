@@ -216,6 +216,18 @@ impl Default for CalibrationConfig {
 /// Number of top fragments to retain for scoring (by predicted intensity).
 const TOP_N_FRAGMENTS: usize = 8;
 
+/// Speclib-only pre-gate: reject peptides whose library entry carries no
+/// predicted fragments before doing any extraction work. Shared by the
+/// broad (prescore) and calibrated (score_calibrated) paths so the two
+/// don't drift.
+#[inline]
+fn gate_expected_fragments(item: &QueryItemToScore) -> Result<(), SkipReason> {
+    if item.expected_intensity.fragment_len() == 0 {
+        return Err(SkipReason::NoExpectedFragments);
+    }
+    Ok(())
+}
+
 /// Retain only the top `n` fragments by predicted intensity.
 ///
 /// Removes lower-ranked fragments from the chromatogram collector (fragments array + eg)
@@ -605,6 +617,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
     ) -> Result<ScoredCandidate, SkipReason> {
+        gate_expected_fragments(item)?;
+
         let metadata = timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction")
@@ -615,13 +629,6 @@ impl<I: ScorerQueriable> Scorer<I> {
             .extraction
             .as_ref()
             .expect("extraction set by build_extraction_into");
-        if scoring_ctx
-            .expected_intensities
-            .fragment_intensities
-            .is_empty()
-        {
-            return Err(SkipReason::NoExpectedFragments);
-        }
 
         let apex_score = timed!(
             timings.scoring,
@@ -760,6 +767,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         worker: &mut ScoringWorker,
         timings: &mut super::timings::PrescoreTimings,
     ) -> Result<ApexLocation, SkipReason> {
+        gate_expected_fragments(item)?;
+
         timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
@@ -779,13 +788,6 @@ impl<I: ScorerQueriable> Scorer<I> {
             .extraction
             .as_ref()
             .expect("extraction set by build_extraction_into");
-        if scoring_ctx
-            .expected_intensities
-            .fragment_intensities
-            .is_empty()
-        {
-            return Err(SkipReason::NoExpectedFragments);
-        }
 
         let result = timed!(
             timings.scoring,
