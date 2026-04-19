@@ -159,6 +159,24 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
             .position(|(k, _)| *k == key)?;
         Some(self.precursor_intensities.swap_remove(idx).1)
     }
+
+    /// In-place copy from `other` reusing each TinyVec's current backing.
+    /// For ≤13 entries this stays fully inline. For spilled buffers the
+    /// heap allocation is reused when `other.len() <= self.capacity()`.
+    /// Prefer this over `*self = other.clone()` on the scoring hot path —
+    /// the default `Clone::clone_from` drops the destination buffer
+    /// before reallocating.
+    pub fn clone_from_ref(&mut self, other: &Self)
+    where
+        T: Clone,
+    {
+        self.fragment_intensities.clear();
+        self.fragment_intensities
+            .extend(other.fragment_intensities.iter().cloned());
+        self.precursor_intensities.clear();
+        self.precursor_intensities
+            .extend(other.precursor_intensities.iter().cloned());
+    }
 }
 
 #[derive(Debug, Clone)]
