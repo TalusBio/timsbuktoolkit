@@ -524,8 +524,8 @@ impl ViewerApp {
             let index_owned = index.clone();
             // If calibration is available, project the library RT to measured RT
             let mut elution_group_owned = elution_group.clone();
-            if let Some(cs) = &self.calibration.calibration_state {
-                if let Some(curve) = cs.curve() {
+            if let Some(cs) = &self.calibration.calibration_state
+                && let Some(curve) = cs.curve() {
                     let lib_rt = elution_group_owned.rt_seconds();
                     let calibrated_rt = match curve.predict(LibraryRT(lib_rt as f64)) {
                         Ok(y) => y.0 as f32,
@@ -539,7 +539,6 @@ impl ViewerApp {
                     );
                     elution_group_owned.set_rt_seconds(calibrated_rt);
                 }
-            }
             let expected_intensities_owned = expected_intensities.clone();
             let tolerance_owned = self.data.tolerance.clone();
             let smoothing_owned = self.data.smoothing;

@@ -147,12 +147,11 @@ impl CalibrantHeap {
         }
         if self.heap.len() < self.capacity {
             self.heap.push(std::cmp::Reverse(candidate));
-        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
-            if candidate.score > min.score {
+        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
+            && candidate.score > min.score {
                 self.heap.pop();
                 self.heap.push(std::cmp::Reverse(candidate));
             }
-        }
     }
 
     pub fn merge(mut self, other: Self) -> Self {
@@ -597,7 +596,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
             library_id: extr.chromatograms.id as u32,
-            library_rt: original_irt.0 as f32,
+            library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
@@ -672,8 +671,8 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &metadata,
                     nqueries,
                     &apex_score,
-                    &inner_collector,
-                    &isotope_collector,
+                    inner_collector,
+                    isotope_collector,
                 )
                 .map_err(|e| {
                     warn!("Error in scoring: {:?}", e);
@@ -718,7 +717,7 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
         // a second pass keeps the rayon hot loop free of synchronised counters.
-        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(&x)).count() as u32;
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
 
         #[cfg(feature = "rayon")]
         let mut results: IonSearchAccumulator = {
@@ -824,7 +823,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         };
 
         // Count pre-filter rejects once; keeps the rayon loop counter-free.
-        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(&x)).count() as u32;
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         #[cfg(feature = "rayon")]

@@ -301,7 +301,7 @@ impl ResultParquetWriter {
             .build();
 
         let writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
 
         Ok(Self {
             writer,
@@ -326,7 +326,7 @@ impl ResultParquetWriter {
         let batch = build_record_batch(&self.buffer)?;
         self.writer
             .write(&batch)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
         self.buffer.clear();
         Ok(())
     }
@@ -335,7 +335,7 @@ impl ResultParquetWriter {
         self.flush()?;
         self.writer
             .close()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
         Ok(())
     }
 }

@@ -661,8 +661,8 @@ impl ViewerCalibrationState {
                             self.start(Arc::clone(index), Arc::clone(data));
                         }
                     }
-                    if ui.button("Load").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
+                    if ui.button("Load").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
                             .add_filter("JSON", &["json"])
                             .pick_file()
                         {
@@ -684,7 +684,6 @@ impl ViewerCalibrationState {
                                 Err(e) => tracing::error!("Failed to load calibration: {}", e),
                             }
                         }
-                    }
                 }
                 CalibrationPhase::Running => {
                     if ui.button("\u{23F8} Pause").clicked() {

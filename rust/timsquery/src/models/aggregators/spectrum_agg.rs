@@ -118,7 +118,6 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
             .copied()
             .zip(self.precursor_mzs.iter().copied())
             .zip(self.precursors.iter_mut())
-            .map(|((k, mz), v)| ((k, mz), v))
     }
 
     pub fn iter_mut_fragments(&mut self) -> impl Iterator<Item = ((&T, &f64), &mut V)> {
@@ -126,7 +125,6 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
             .iter()
             .zip(self.fragment_mzs.iter())
             .zip(self.fragments.iter_mut())
-            .map(|((k, mz), v)| ((k, mz), v))
     }
 
     pub fn iter_precursors(&self) -> impl Iterator<Item = ((i8, f64), &V)> {
@@ -135,7 +133,6 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
             .copied()
             .zip(self.precursor_mzs.iter().copied())
             .zip(self.precursors.iter())
-            .map(|((k, mz), v)| ((k, mz), v))
     }
 
     pub fn iter_fragments(&self) -> impl Iterator<Item = ((&T, &f64), &V)> {
@@ -143,7 +140,6 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
             .iter()
             .zip(self.fragment_mzs.iter())
             .zip(self.fragments.iter())
-            .map(|((k, mz), v)| ((k, mz), v))
     }
 }
 

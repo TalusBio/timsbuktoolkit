@@ -14,6 +14,12 @@ pub struct TrackingAllocator<A: GlobalAlloc = System> {
     inner: A,
 }
 
+impl Default for TrackingAllocator<System> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrackingAllocator<System> {
     pub const fn new() -> Self {
         Self { inner: System }
