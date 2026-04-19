@@ -52,6 +52,8 @@ where
 
     index.add_query(&mut agg, tolerance);
 
+    classify_post_add_query(&agg)?;
+
     if let Some(n) = top_n_fragments {
         super::pipeline::filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
         super::pipeline::select_top_n_fragments(&mut agg, &mut expected_intensities, n);
@@ -61,6 +63,25 @@ where
         expected_intensities,
         chromatograms: agg,
     })
+}
+
+/// Fast-path classification of a freshly-populated collector before any
+/// per-cycle scoring runs. Uses the counters bumped inside `add_query`:
+///
+/// - `n_quad_windows_matched == 0` → fragments could not possibly match any
+///   peak (scan-schedule / library mismatch), distinct from a mere absence.
+/// - `n_peaks_added == 0` with nonzero quad matches → peptide is absent or
+///   below LoD; no reason to run `find_apex` / `filter_zero_intensity_ions`.
+fn classify_post_add_query<T: KeyLike>(
+    agg: &ChromatogramCollector<T, f32>,
+) -> Result<(), SkipReason> {
+    if agg.n_fragment_peaks_added == 0 {
+        if agg.n_quad_windows_matched == 0 {
+            return Err(SkipReason::FragmentsOutsideScanRange);
+        }
+        return Err(SkipReason::NoObservedSignal);
+    }
+    Ok(())
 }
 
 /// Like [`build_extraction`] but writes into a caller-owned scratch slot,
@@ -121,6 +142,8 @@ where
         .as_mut()
         .expect("extraction set by build_extraction_into");
     index.add_query(&mut extr.chromatograms, tolerance);
+
+    classify_post_add_query(&extr.chromatograms)?;
 
     if let Some(n) = top_n_fragments {
         super::pipeline::filter_zero_intensity_ions(

@@ -21,6 +21,15 @@ pub enum SkipReason {
     RetentionTimeOutOfBounds,
     /// Speclib entry carries zero predicted fragments — nothing to score.
     NoExpectedFragments,
+    /// Extraction ran but zero quad isolation windows overlapped the query's
+    /// precursor range. Signals a library / instrument scan-schedule mismatch
+    /// (all fragment m/z queries would miss every window) rather than peptide
+    /// absence.
+    FragmentsOutsideScanRange,
+    /// Extraction ran, quad windows matched, but zero peaks landed in any
+    /// chromatogram cell. Common for true-negative peptides. Lets us skip
+    /// `filter_zero_intensity_ions` and `find_apex` work.
+    NoObservedSignal,
     /// Extraction ran, but `find_apex` / `find_apex_location` saw no observed
     /// intensity at all (all traces empty).
     ApexEmptyData,
@@ -83,6 +92,8 @@ pub struct SkipCounts {
     pub precursor_out_of_fragmented_range: u32,
     pub retention_time_out_of_bounds: u32,
     pub no_expected_fragments: u32,
+    pub fragments_outside_scan_range: u32,
+    pub no_observed_signal: u32,
     pub apex_empty_data: u32,
     pub apex_insufficient_data: u32,
     pub apex_non_finite_score: u32,
@@ -98,6 +109,8 @@ impl SkipCounts {
             }
             SkipReason::RetentionTimeOutOfBounds => &mut self.retention_time_out_of_bounds,
             SkipReason::NoExpectedFragments => &mut self.no_expected_fragments,
+            SkipReason::FragmentsOutsideScanRange => &mut self.fragments_outside_scan_range,
+            SkipReason::NoObservedSignal => &mut self.no_observed_signal,
             SkipReason::ApexEmptyData => &mut self.apex_empty_data,
             SkipReason::ApexInsufficientData => &mut self.apex_insufficient_data,
             SkipReason::ApexNonFiniteScore => &mut self.apex_non_finite_score,
@@ -108,27 +121,67 @@ impl SkipCounts {
     }
 
     pub fn total(&self) -> u64 {
-        self.precursor_out_of_fragmented_range as u64
-            + self.retention_time_out_of_bounds as u64
-            + self.no_expected_fragments as u64
-            + self.apex_empty_data as u64
-            + self.apex_insufficient_data as u64
-            + self.apex_non_finite_score as u64
-            + self.finalize_error as u64
-            + self.invariant_violation as u64
+        self.named_fields().iter().map(|(n, _)| *n as u64).sum()
+    }
+
+    /// Single source of truth for field enumeration: exhaustive destructure
+    /// so adding a `SkipReason` variant (which requires a new field) is a
+    /// compile error here, propagating to `total` / `AddAssign` / `Display`.
+    fn named_fields(&self) -> [(u32, &'static str); 10] {
+        let Self {
+            precursor_out_of_fragmented_range,
+            retention_time_out_of_bounds,
+            no_expected_fragments,
+            fragments_outside_scan_range,
+            no_observed_signal,
+            apex_empty_data,
+            apex_insufficient_data,
+            apex_non_finite_score,
+            finalize_error,
+            invariant_violation,
+        } = *self;
+        [
+            (precursor_out_of_fragmented_range, "precursor_oofr"),
+            (retention_time_out_of_bounds, "rt_oob"),
+            (no_expected_fragments, "no_expected_frags"),
+            (fragments_outside_scan_range, "frags_outside_scan"),
+            (no_observed_signal, "no_observed_signal"),
+            (apex_empty_data, "apex_empty"),
+            (apex_insufficient_data, "apex_insufficient"),
+            (apex_non_finite_score, "apex_nonfinite"),
+            (finalize_error, "finalize_err"),
+            (invariant_violation, "invariant"),
+        ]
     }
 }
 
 impl std::ops::AddAssign for SkipCounts {
     fn add_assign(&mut self, rhs: Self) {
-        self.precursor_out_of_fragmented_range += rhs.precursor_out_of_fragmented_range;
-        self.retention_time_out_of_bounds += rhs.retention_time_out_of_bounds;
-        self.no_expected_fragments += rhs.no_expected_fragments;
-        self.apex_empty_data += rhs.apex_empty_data;
-        self.apex_insufficient_data += rhs.apex_insufficient_data;
-        self.apex_non_finite_score += rhs.apex_non_finite_score;
-        self.finalize_error += rhs.finalize_error;
-        self.invariant_violation += rhs.invariant_violation;
+        // Exhaustive destructure on `rhs` so adding a new field forces an
+        // update here (the struct literal below would otherwise silently
+        // drop the new field into `..`).
+        let Self {
+            precursor_out_of_fragmented_range,
+            retention_time_out_of_bounds,
+            no_expected_fragments,
+            fragments_outside_scan_range,
+            no_observed_signal,
+            apex_empty_data,
+            apex_insufficient_data,
+            apex_non_finite_score,
+            finalize_error,
+            invariant_violation,
+        } = rhs;
+        self.precursor_out_of_fragmented_range += precursor_out_of_fragmented_range;
+        self.retention_time_out_of_bounds += retention_time_out_of_bounds;
+        self.no_expected_fragments += no_expected_fragments;
+        self.fragments_outside_scan_range += fragments_outside_scan_range;
+        self.no_observed_signal += no_observed_signal;
+        self.apex_empty_data += apex_empty_data;
+        self.apex_insufficient_data += apex_insufficient_data;
+        self.apex_non_finite_score += apex_non_finite_score;
+        self.finalize_error += finalize_error;
+        self.invariant_violation += invariant_violation;
     }
 }
 
@@ -136,18 +189,8 @@ impl std::fmt::Display for SkipCounts {
     /// One-line summary of non-zero buckets. Zero buckets omitted to keep
     /// stderr/log output readable on healthy runs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let fields: [(u32, &str); 8] = [
-            (self.precursor_out_of_fragmented_range, "precursor_oofr"),
-            (self.retention_time_out_of_bounds, "rt_oob"),
-            (self.no_expected_fragments, "no_expected_frags"),
-            (self.apex_empty_data, "apex_empty"),
-            (self.apex_insufficient_data, "apex_insufficient"),
-            (self.apex_non_finite_score, "apex_nonfinite"),
-            (self.finalize_error, "finalize_err"),
-            (self.invariant_violation, "invariant"),
-        ];
         let mut first = true;
-        for (n, name) in fields {
+        for (n, name) in self.named_fields() {
             if n == 0 {
                 continue;
             }

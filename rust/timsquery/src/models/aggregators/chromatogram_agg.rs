@@ -40,6 +40,26 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
     pub rt_range_ms: TupleRange<u32>,
+
+    /// MS1 peaks written into any precursor chromatogram cell during the
+    /// most recent `add_query`. Informational only — downstream fast-path
+    /// decisions key off `n_fragment_peaks_added`.
+    pub n_precursor_peaks_added: u64,
+
+    /// MS2 peaks written into any fragment chromatogram cell during the
+    /// most recent `add_query`. Bumped inside the inner peak-insert loop.
+    /// `== 0` lets downstream code skip `filter_zero_intensity_ions` +
+    /// `find_apex` work for peptides that did not match any MS2 signal.
+    pub n_fragment_peaks_added: u64,
+
+    /// Quad isolation windows that intersected the query's precursor range
+    /// during the most recent `add_query`. Distinguishes "fragments fall
+    /// outside the run's quad schedule entirely" (counter == 0) from
+    /// "fragments in window but no observed peaks" (counter > 0 &&
+    /// n_fragment_peaks_added == 0). Note: exact value is impl-defined
+    /// (eager counts windows once, lazy counts windows×fragments); only
+    /// the zero / nonzero distinction is meaningful.
+    pub n_quad_windows_matched: u32,
 }
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
@@ -79,6 +99,9 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             precursors,
             fragments,
             rt_range_ms,
+            n_precursor_peaks_added: 0,
+            n_fragment_peaks_added: 0,
+            n_quad_windows_matched: 0,
         })
     }
 
@@ -125,6 +148,9 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.precursor_charge = eg.precursor_charge();
         self.precursor_mz_limits = eg.get_precursor_mz_limits();
         self.rt_range_ms = rt_range_ms;
+        self.n_precursor_peaks_added = 0;
+        self.n_fragment_peaks_added = 0;
+        self.n_quad_windows_matched = 0;
         self.precursors
             .clear_with_order(precursor_order, num_cycles, start.index());
         self.fragments
