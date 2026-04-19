@@ -143,15 +143,19 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
     let phase1_lib = calib_lib.unwrap_or(speclib);
-    if let Some(ref clib) = calib_lib {
+    if let Some(clib) = calib_lib {
         info!(
             "Phase 1: Broad prescore using calibration library ({} entries)...",
             clib.len()
         );
-        check_rt_scale_compatibility(&speclib, clib);
+        check_rt_scale_compatibility(speclib, clib);
     } else {
         info!("Phase 1: Broad prescore (unrestricted RT)...");
     }
+    // Reset the `for_each_peak` filter-funnel counters so the per-phase
+    // dump reflects just this phase's work. Both calls no-op when the
+    // `query-instr` feature is disabled.
+    timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 1: Prescore");
     let (calibrants, phase1_timings) =
         phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
@@ -159,6 +163,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         .finish_with(format_args!("{} calibrants", calibrants.len()))
         .as_millis() as u64;
     alloc_track::snap!("Phase 1: Prescore");
+    timscentroid::indexing::dump_for_each_peak_funnel("Phase 1");
+    timscentroid::indexing::reset_for_each_peak_funnel();
     info!(
         "Phase 1 detail: extraction {:?}, scoring {:?}, {} passed filter, {} scored",
         phase1_timings.extraction,
@@ -274,10 +280,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
+    timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
     let (results, phase3_skips) = phase3_score(
-        &speclib,
+        speclib,
         pipeline,
         &calibration,
         chunk_size,
@@ -285,6 +292,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     );
     step.finish_with(format_args!("{} peptides", results.len()));
     alloc_track::snap!("Phase 3: Score");
+    timscentroid::indexing::dump_for_each_peak_funnel("Phase 3");
+    timscentroid::indexing::reset_for_each_peak_funnel();
 
     let total_scored = results.len();
 
@@ -390,7 +399,7 @@ fn phase1_prescore<I: ScorerQueriable>(
     chunk_size: usize,
     config: &CalibrationConfig,
 ) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
-    let n_chunks = (speclib.as_slice().len() + chunk_size - 1) / chunk_size;
+    let n_chunks = speclib.as_slice().len().div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 1");
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
@@ -692,7 +701,7 @@ fn phase3_score<I: ScorerQueriable>(
     timings: &mut ScoreTimings,
 ) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.as_slice().len();
-    let n_chunks = (total_peptides + chunk_size - 1) / chunk_size;
+    let n_chunks = total_peptides.div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 3");
 
     let mut results = Vec::new();

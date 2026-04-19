@@ -164,6 +164,21 @@ impl IndexedTimstofPeaks {
         )
     }
 
+    /// Rebuild every peak group (MS1 + all MS2 window groups) at a new
+    /// bucket size. See `IndexedPeakGroup::rebucket` for the tradeoff.
+    pub fn rebucket(self, new_bucket_size: usize) -> Self {
+        let ms1_peaks = self.ms1_peaks.rebucket(new_bucket_size);
+        let ms2_window_groups = self
+            .ms2_window_groups
+            .into_iter()
+            .map(|(quad, pg)| (quad, pg.rebucket(new_bucket_size)))
+            .collect();
+        Self {
+            ms1_peaks,
+            ms2_window_groups,
+        }
+    }
+
     pub fn fragmented_range(&self) -> TupleRange<f64> {
         let mut min_mz = f64::MAX;
         let mut max_mz = f64::MIN;
@@ -479,6 +494,211 @@ impl IndexedPeakGroupBuildingStats {
     }
 }
 
+// Filter-funnel counters for `for_each_peak`, gated behind the
+// `query-instr` feature. Inside `for_each_peak` we accumulate into a
+// `FepLocal` (stack-local u32 fields) and flush once per call via a
+// handful of atomic adds. With the feature off, `FepLocal` becomes a
+// zero-sized struct and every bump / flush compiles to nothing.
+#[cfg(feature = "query-instr")]
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "query-instr")]
+pub static FEP_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "query-instr")]
+pub static FEP_BUCKETS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "query-instr")]
+pub static FEP_BUCKETS_MZ_CONTAINED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "query-instr")]
+pub static FEP_PEAKS_IN_CYCLE_RANGE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "query-instr")]
+pub static FEP_PEAKS_AFTER_MZ: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "query-instr")]
+pub static FEP_PEAKS_AFTER_IM: AtomicU64 = AtomicU64::new(0);
+
+/// Per-call filter-funnel counters. Fields only exist when the
+/// `query-instr` feature is enabled; the struct is zero-sized
+/// otherwise and every method body compiles to nothing.
+#[derive(Default)]
+struct FepLocal {
+    #[cfg(feature = "query-instr")]
+    buckets: u32,
+    #[cfg(feature = "query-instr")]
+    buckets_mz_contained: u32,
+    #[cfg(feature = "query-instr")]
+    peaks_in_cycle_range: u32,
+    #[cfg(feature = "query-instr")]
+    peaks_after_mz: u32,
+    #[cfg(feature = "query-instr")]
+    peaks_after_im: u32,
+}
+
+impl FepLocal {
+    #[inline(always)]
+    #[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+    fn bump_bucket(&mut self, mz_contained: bool) {
+        #[cfg(feature = "query-instr")]
+        {
+            self.buckets += 1;
+            if mz_contained {
+                self.buckets_mz_contained += 1;
+            }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+    fn bump_in_cycle(&mut self, n: u32) {
+        #[cfg(feature = "query-instr")]
+        {
+            self.peaks_in_cycle_range += n;
+        }
+    }
+
+    #[inline(always)]
+    #[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+    fn bump_after_mz(&mut self, n: u32) {
+        #[cfg(feature = "query-instr")]
+        {
+            self.peaks_after_mz += n;
+        }
+    }
+
+    #[inline(always)]
+    fn bump_after_im(&mut self) {
+        #[cfg(feature = "query-instr")]
+        {
+            self.peaks_after_im += 1;
+        }
+    }
+
+    /// Push local counts into the global atomics. One fetch_add per
+    /// counter, once per `for_each_peak` call. Destructured so adding
+    /// a new field to `FepLocal` fails to compile here unless
+    /// matched + flushed.
+    #[inline(always)]
+    fn flush(&self) {
+        #[cfg(feature = "query-instr")]
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let Self {
+                buckets,
+                buckets_mz_contained,
+                peaks_in_cycle_range,
+                peaks_after_mz,
+                peaks_after_im,
+            } = *self;
+            FEP_CALLS.fetch_add(1, Relaxed);
+            FEP_BUCKETS.fetch_add(buckets as u64, Relaxed);
+            FEP_BUCKETS_MZ_CONTAINED.fetch_add(buckets_mz_contained as u64, Relaxed);
+            FEP_PEAKS_IN_CYCLE_RANGE.fetch_add(peaks_in_cycle_range as u64, Relaxed);
+            FEP_PEAKS_AFTER_MZ.fetch_add(peaks_after_mz as u64, Relaxed);
+            FEP_PEAKS_AFTER_IM.fetch_add(peaks_after_im as u64, Relaxed);
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+pub fn dump_for_each_peak_funnel(label: &str) {
+    #[cfg(feature = "query-instr")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let calls = FEP_CALLS.load(Relaxed);
+        let buckets = FEP_BUCKETS.load(Relaxed);
+        let buckets_contained = FEP_BUCKETS_MZ_CONTAINED.load(Relaxed);
+        let cyc = FEP_PEAKS_IN_CYCLE_RANGE.load(Relaxed);
+        let mz_ok = FEP_PEAKS_AFTER_MZ.load(Relaxed);
+        let im_ok = FEP_PEAKS_AFTER_IM.load(Relaxed);
+        let denom = cyc.max(1);
+        eprintln!(
+            "[fep-funnel:{label}] calls={calls} buckets={buckets} \
+             buckets_mz_contained={buckets_contained} ({:.1}% of visited) \
+             in_cycle_range={cyc} after_mz={mz_ok} ({:.1}% pass) \
+             after_im={im_ok} ({:.1}% pass, {:.1}% of total) \
+             mz_killed={} ({:.1}%) im_killed={} ({:.1}%)",
+            100.0 * buckets_contained as f64 / buckets.max(1) as f64,
+            100.0 * mz_ok as f64 / denom as f64,
+            100.0 * im_ok as f64 / mz_ok.max(1) as f64,
+            100.0 * im_ok as f64 / denom as f64,
+            cyc - mz_ok,
+            100.0 * (cyc - mz_ok) as f64 / denom as f64,
+            mz_ok - im_ok,
+            100.0 * (mz_ok - im_ok) as f64 / denom as f64,
+        );
+        if buckets > 0 {
+            eprintln!(
+                "[fep-funnel:{label}] avg peaks-in-cycle per bucket = {:.1}, avg buckets per call = {:.2}",
+                cyc as f64 / buckets as f64,
+                buckets as f64 / calls.max(1) as f64,
+            );
+        }
+    }
+}
+
+/// Zero the funnel counters — call between phases so each phase's dump
+/// shows its own contribution, not cumulative. No-op when `query-instr`
+/// is disabled.
+pub fn reset_for_each_peak_funnel() {
+    #[cfg(feature = "query-instr")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        FEP_CALLS.store(0, Relaxed);
+        FEP_BUCKETS.store(0, Relaxed);
+        FEP_BUCKETS_MZ_CONTAINED.store(0, Relaxed);
+        FEP_PEAKS_IN_CYCLE_RANGE.store(0, Relaxed);
+        FEP_PEAKS_AFTER_MZ.store(0, Relaxed);
+        FEP_PEAKS_AFTER_IM.store(0, Relaxed);
+    }
+}
+
+/// Per-bucket inner scan for `for_each_peak`. `mz_filter =
+/// Unrestricted` means "the whole bucket is known to be inside the
+/// query mz range, skip the per-peak mz compare". With
+/// `#[inline(always)]` + the `OptionallyRestricted` split at each call
+/// site, LLVM specializes two code paths — one that branches on mz
+/// per peak, one that doesn't.
+#[inline(always)]
+fn scan_bucket_slice<T, F>(
+    slice: &[IndexedPeak<T>],
+    mz_filter: OptionallyRestricted<TupleRange<f32>>,
+    im_range: OptionallyRestricted<TupleRange<f16>>,
+    f: &mut F,
+    local: &mut FepLocal,
+) where
+    T: RTIndex,
+    F: FnMut(&IndexedPeak<T>),
+{
+    let im_ok = |mobility: f16| match im_range {
+        Restricted(r) => r.contains(mobility),
+        Unrestricted => true,
+    };
+    match mz_filter {
+        Unrestricted => {
+            // Bucket fully inside query mz — bulk-credit every peak to
+            // the "passed mz" counter, skip the per-peak compare.
+            local.bump_after_mz(slice.len() as u32);
+            for peak in slice {
+                if !im_ok(peak.mobility_ook0) {
+                    continue;
+                }
+                local.bump_after_im();
+                f(peak);
+            }
+        }
+        Restricted(mz_range) => {
+            for peak in slice {
+                if !mz_range.contains(peak.mz) {
+                    continue;
+                }
+                local.bump_after_mz(1);
+                if !im_ok(peak.mobility_ook0) {
+                    continue;
+                }
+                local.bump_after_im();
+                f(peak);
+            }
+        }
+    }
+}
+
 impl<T: RTIndex> IndexedPeakGroup<T> {
     /// Query peaks based on m/z, rt, and im ranges.
     pub fn query_peaks(
@@ -507,11 +727,17 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     ) where
         F: FnMut(&IndexedPeak<T>),
     {
+        let mut local = FepLocal::default();
         let bucket_range = self.query_bucket_range(mz_range);
         for bucket_idx in bucket_range {
             let Some(bucket) = self.get_bucket(bucket_idx) else {
                 continue;
             };
+            // Bucket fully inside query mz -> skip per-peak mz compare.
+            // `scan_bucket_slice` has two specialized bodies the LLVM
+            // inliner folds the `OptionallyRestricted` match down to.
+            let bucket_mz_contained = mz_range.encloses(self.bucket_mz_ranges[bucket_idx]);
+            local.bump_bucket(bucket_mz_contained);
             let (start, end) = match cycle_range.as_ref() {
                 Restricted(cr) => {
                     let r = bucket.find_cycle_range(*cr);
@@ -519,17 +745,15 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                 }
                 Unrestricted => (0, bucket.len()),
             };
-            for i in start..end {
-                let peak = &bucket.inner[i];
-                if mz_range.contains(peak.mz)
-                    && im_range
-                        .as_ref()
-                        .is_unrestricted_or(|r| r.contains(peak.mobility_ook0))
-                {
-                    f(peak);
-                }
+            local.bump_in_cycle((end - start) as u32);
+            let slice = &bucket.inner[start..end];
+            if bucket_mz_contained {
+                scan_bucket_slice(slice, Unrestricted, im_range, &mut f, &mut local);
+            } else {
+                scan_bucket_slice(slice, Restricted(mz_range), im_range, &mut f, &mut local);
             }
         }
+        local.flush();
     }
 
     /// Create a new IndexedPeakGroup from a vector of peaks.
@@ -675,6 +899,48 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         let res = internally_sorted_heuristic && buckets_ordered;
         tracing::Span::current().record("result", res);
         res
+    }
+
+    /// Rebuild the bucket layout at a different `new_bucket_size`.
+    ///
+    /// Consumes `self` and returns a new `IndexedPeakGroup` with the
+    /// same peaks, re-chunked. Useful to adjust bucket granularity
+    /// between query stages: narrow-tolerance queries (Phase 3) prefer
+    /// small buckets, wide queries (Phase 1) tolerate larger ones.
+    ///
+    /// Cost: a full par-sort of the peak vec by mz (since within-bucket
+    /// peaks are cycle-sorted, not mz-sorted), plus per-new-chunk cycle
+    /// sort. Expected to be dominated by the mz sort, O(N log N).
+    pub fn rebucket(mut self, new_bucket_size: usize) -> Self {
+        assert!(new_bucket_size > 0, "bucket_size must be > 0");
+        if new_bucket_size == self.bucket_size {
+            return self;
+        }
+        self.peaks
+            .par_sort_unstable_by(|x, y| x.mz.total_cmp(&y.mz));
+        // `par_chunks_mut(N)` with `N > 0` yields non-empty chunks, so
+        // `first`/`last` and `TupleRange::try_new` never return None.
+        let bucket_mz_ranges: Vec<TupleRange<f32>> = self
+            .peaks
+            .par_chunks_mut(new_bucket_size)
+            .map(|chunk| {
+                let start = chunk.first().unwrap().mz;
+                let end = chunk.last().unwrap().mz;
+                chunk.sort_unstable_by(|x, y| {
+                    x.cycle_index
+                        .partial_cmp(&y.cycle_index)
+                        .unwrap()
+                        .then(x.mobility_ook0.total_cmp(&y.mobility_ook0))
+                });
+                TupleRange::try_new(start, end).unwrap()
+            })
+            .collect();
+        Self {
+            peaks: self.peaks,
+            bucket_mz_ranges,
+            bucket_size: new_bucket_size,
+            cycle_to_rt_ms: self.cycle_to_rt_ms,
+        }
     }
 
     pub fn unpack(self) -> (Vec<IndexedPeak<T>>, Vec<u32>, usize, Vec<TupleRange<f32>>) {

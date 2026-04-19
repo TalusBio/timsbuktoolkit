@@ -141,6 +141,11 @@ impl<T: Copy + PartialOrd + std::fmt::Debug> TupleRange<T> {
         !(self.end() < other.start() || other.end() < self.start())
     }
 
+    /// True iff `other` is fully contained within `self` (closed interval).
+    pub fn encloses(&self, other: Self) -> bool {
+        self.start() <= other.start() && other.end() <= self.end()
+    }
+
     pub fn try_intercept(&self, other: Self) -> Option<Self> {
         let left = match self.start().partial_cmp(&other.start()) {
             Some(std::cmp::Ordering::Equal) => self.start(),

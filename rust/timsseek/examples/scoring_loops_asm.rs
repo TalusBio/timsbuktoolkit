@@ -314,6 +314,64 @@ fn check_parity() {
     eprintln!("parity OK: scalar == chunked{{4,8,16,32}} at len={odd_len}");
 }
 
+// ---------------------------------------------------------------------------
+// Bench 3 — sink cost isolation: point-sum vs chromatogram-scatter on
+// the same peak stream. Helps answer "is the hot loop iteration-bound
+// or write-bound?".
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct FakePeak {
+    cycle_index: u32,
+    intensity: f32,
+}
+
+/// Point sink: single scalar accumulator. Baseline — one fadd per peak,
+/// no addressing, writes land in a single register.
+#[inline(never)]
+pub fn point_sink(peaks: &[FakePeak]) -> f64 {
+    let mut total = 0.0f64;
+    for p in peaks {
+        total += p.intensity as f64;
+    }
+    total
+}
+
+/// Chromatogram sink: scatter-write into a cycle-indexed buffer,
+/// matching `ChromatogramCollector::add_at_index`. Out-of-bounds indices
+/// fold to the last slot so there's still a branch per peak.
+#[inline(never)]
+pub fn chrom_sink(peaks: &[FakePeak], buf: &mut [f32], cycle_offset: u32) {
+    for p in peaks {
+        let idx = p.cycle_index.saturating_sub(cycle_offset);
+        let idx = (idx as usize).min(buf.len() - 1);
+        buf[idx] += p.intensity;
+    }
+}
+
+/// Chromatogram sink without the bounds branch — pure unchecked index,
+/// to see how much of chrom's overhead is the bounds check vs the
+/// scatter itself.
+#[inline(never)]
+pub fn chrom_sink_unchecked(peaks: &[FakePeak], buf: &mut [f32], cycle_offset: u32) {
+    for p in peaks {
+        let idx = (p.cycle_index - cycle_offset) as usize;
+        unsafe {
+            *buf.get_unchecked_mut(idx) += p.intensity;
+        }
+    }
+}
+
+fn build_peaks(n: usize, n_cycles: usize, seed: u32) -> Vec<FakePeak> {
+    let mut state = seed;
+    (0..n)
+        .map(|_| FakePeak {
+            cycle_index: xorshift32(&mut state) % (n_cycles as u32),
+            intensity: rand_f32(&mut state) * 1e5,
+        })
+        .collect()
+}
+
 fn main() {
     check_parity();
 
@@ -444,6 +502,64 @@ fn main() {
         let total = N_ITERS * N_CASES * N_CYCLES;
         eprintln!(
             "cms_pass1_chunked    {:?}  ({:.2} ns/elem)",
+            e,
+            e.as_nanos() as f64 / total as f64
+        );
+    }
+
+    // --- Sink cost isolation ---
+    // Peak stream per pepside: typical 50-300 peaks land within the query
+    // window in real Hela data. Use 200 as midpoint.
+    const N_PEAKS: usize = 200;
+    eprintln!(
+        "\n=== sink cost: {} peaks × {} cycles × {} iters ===",
+        N_PEAKS, N_CYCLES, N_ITERS
+    );
+    let peaks = build_peaks(N_PEAKS, N_CYCLES, 0xC0DE);
+    // point sink
+    {
+        let start = Instant::now();
+        let mut sum = 0.0f64;
+        for _ in 0..N_ITERS {
+            sum += point_sink(black_box(&peaks));
+        }
+        black_box(sum);
+        let e = start.elapsed();
+        let total = N_ITERS * N_PEAKS;
+        eprintln!(
+            "point_sink           {:?}  ({:.2} ns/peak)",
+            e,
+            e.as_nanos() as f64 / total as f64
+        );
+    }
+    // chrom sink (bounds-checked, matches add_at_index)
+    {
+        let mut buf = vec![0.0f32; N_CYCLES];
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            chrom_sink(black_box(&peaks), &mut buf, 0);
+            black_box(&buf);
+        }
+        let e = start.elapsed();
+        let total = N_ITERS * N_PEAKS;
+        eprintln!(
+            "chrom_sink           {:?}  ({:.2} ns/peak)",
+            e,
+            e.as_nanos() as f64 / total as f64
+        );
+    }
+    // chrom sink unchecked (what could we hope for if we hoist the bounds check?)
+    {
+        let mut buf = vec![0.0f32; N_CYCLES];
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            chrom_sink_unchecked(black_box(&peaks), &mut buf, 0);
+            black_box(&buf);
+        }
+        let e = start.elapsed();
+        let total = N_ITERS * N_PEAKS;
+        eprintln!(
+            "chrom_sink_unchecked {:?}  ({:.2} ns/peak)",
             e,
             e.as_nanos() as f64 / total as f64
         );
