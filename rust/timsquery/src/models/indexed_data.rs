@@ -207,10 +207,9 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
             aggregator.iter_fragments().map(|(_, mz)| mz).collect();
         prec_mzs.iter().for_each(|&mz| {
             let mz_range = tolerance.mz_range_f32(mz as f32);
-            self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
-                .for_each(|peak| {
-                    aggregator.intensity += peak.intensity as f64;
-                });
+            self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
+                aggregator.intensity += peak.intensity as f64;
+            });
         });
 
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
@@ -218,11 +217,9 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
                 let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
                 frag_mzs.iter().for_each(|&mz| {
                     let mz_range = tolerance.mz_range_f32(mz as f32);
-                    peaks
-                        .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
-                        .for_each(|peak| {
-                            aggregator.intensity += peak.intensity as f64;
-                        });
+                    peaks.for_each_peak(mz_range, ranges.ms2_cycle_range, constrained_im, |peak| {
+                        aggregator.intensity += peak.intensity as f64;
+                    });
                 });
             })
     }
@@ -250,11 +247,10 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
             .iter_mut_precursors()
             .for_each(|((_idx, mz), mut chr)| {
                 let mz_range = tolerance.mz_range_f32(*mz as f32);
-                self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
-                    .for_each(|peak| {
-                        chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
-                        local_ms1_peaks += 1;
-                    });
+                self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
+                    chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
+                    local_ms1_peaks += 1;
+                });
             });
 
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
@@ -269,12 +265,15 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
                         // TODO: fix later ...
 
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
-                        peaks
-                            .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
-                            .for_each(|x| {
+                        peaks.for_each_peak(
+                            mz_range,
+                            ranges.ms2_cycle_range,
+                            constrained_im,
+                            |x| {
                                 chr.add_at_index(x.cycle_index.as_u32(), x.intensity);
                                 local_ms2_peaks += 1;
-                            });
+                            },
+                        );
                     });
             });
 
@@ -299,10 +298,9 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
             .iter_mut_precursors()
             .for_each(|((_idx, mz), ion)| {
                 let mz_range = tolerance.mz_range_f32(mz as f32);
-                self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
-                    .for_each(|peak| {
-                        *ion += peak.intensity;
-                    });
+                self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
+                    *ion += peak.intensity;
+                });
             });
 
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
@@ -315,11 +313,14 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
                         // calculating the mz range for each quad instead of once per ion ...
                         // TODO: Fix later ...
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
-                        peaks
-                            .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
-                            .for_each(|x| {
+                        peaks.for_each_peak(
+                            mz_range,
+                            ranges.ms2_cycle_range,
+                            constrained_im,
+                            |x| {
                                 *ion += x.intensity;
-                            });
+                            },
+                        );
                     });
             });
     }
@@ -336,10 +337,9 @@ impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
             .iter_mut_precursors()
             .for_each(|((_idx, mz), ion)| {
                 let mz_range = tolerance.mz_range_f32(mz as f32);
-                self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
-                    .for_each(|peak| {
-                        *ion += *peak;
-                    });
+                self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
+                    *ion += *peak;
+                });
             });
 
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
@@ -352,11 +352,14 @@ impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
                         // calculating the mz range for each quad instead of once per ion ...
                         // TODO: Fix later ...
                         let mz_range = tolerance.mz_range_f32(*mz as f32);
-                        peaks
-                            .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
-                            .for_each(|x| {
+                        peaks.for_each_peak(
+                            mz_range,
+                            ranges.ms2_cycle_range,
+                            constrained_im,
+                            |x| {
                                 *ion += *x;
-                            });
+                            },
+                        );
                     });
             });
     }

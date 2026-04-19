@@ -208,6 +208,21 @@ impl IndexedTimstofPeaks {
         self.ms1_peaks.query_peaks(mz_range, cycle_range, im_range)
     }
 
+    /// Callback-style MS1 peak scan (see `IndexedPeakGroup::for_each_peak`).
+    #[inline]
+    pub fn for_each_ms1_peak<F>(
+        &self,
+        mz_range: TupleRange<f32>,
+        cycle_range: OptionallyRestricted<TupleRange<MS1CycleIndex>>,
+        im_range: OptionallyRestricted<TupleRange<f16>>,
+        f: F,
+    ) where
+        F: FnMut(&IndexedPeak<MS1CycleIndex>),
+    {
+        self.ms1_peaks
+            .for_each_peak(mz_range, cycle_range, im_range, f)
+    }
+
     /// Query MS2 peaks based on precursor m/z range, fragment m/z range, rt range, and im range.
     /// All ranges are inclusive.
     ///
@@ -473,6 +488,48 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         im_range: OptionallyRestricted<TupleRange<f16>>,
     ) -> impl Iterator<Item = &IndexedPeak<T>> {
         QueryPeaksIterator::new(self, mz_range, cycle_range, im_range)
+    }
+
+    /// Callback-style peak scan. Mirrors `query_peaks` but fuses the
+    /// consumer body into the inner bucket loop — no
+    /// `Iterator::next` call boundary per peak. Per the flamegraph,
+    /// `QueryPeaksIterator::next` takes ~63% of wall at
+    /// `RAYON_NUM_THREADS=1`; inlining the consumer via `#[inline]`
+    /// lets LLVM schedule the mz/im filter + user body as a single
+    /// basic block.
+    #[inline]
+    pub fn for_each_peak<F>(
+        &self,
+        mz_range: TupleRange<f32>,
+        cycle_range: OptionallyRestricted<TupleRange<T>>,
+        im_range: OptionallyRestricted<TupleRange<f16>>,
+        mut f: F,
+    ) where
+        F: FnMut(&IndexedPeak<T>),
+    {
+        let bucket_range = self.query_bucket_range(mz_range);
+        for bucket_idx in bucket_range {
+            let Some(bucket) = self.get_bucket(bucket_idx) else {
+                continue;
+            };
+            let (start, end) = match cycle_range.as_ref() {
+                Restricted(cr) => {
+                    let r = bucket.find_cycle_range(*cr);
+                    (r.start, r.end)
+                }
+                Unrestricted => (0, bucket.len()),
+            };
+            for i in start..end {
+                let peak = &bucket.inner[i];
+                if mz_range.contains(peak.mz)
+                    && im_range
+                        .as_ref()
+                        .is_unrestricted_or(|r| r.contains(peak.mobility_ook0))
+                {
+                    f(peak);
+                }
+            }
+        }
     }
 
     /// Create a new IndexedPeakGroup from a vector of peaks.
