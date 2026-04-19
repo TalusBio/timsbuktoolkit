@@ -162,6 +162,66 @@ pub struct ApexScore {
     pub falling_cycles: u8,
 }
 
+/// Chunk-8 vectorized accumulator for `compute_pass_1`'s 4 cheap
+/// per-cycle accumulators (dot-product, norm-sq, sqrt-sum, raw-sum).
+///
+/// Parity with the scalar branched form (`if intensity > 0.0 { ... }`)
+/// holds because chromatogram intensities are non-negative in practice:
+/// for `intensity <= 0.0`, `v = intensity.max(0.0) == 0` makes every
+/// contribution zero, matching the branched form exactly. Zero negative
+/// intensities expected; chromatograms are peak-intensity sums.
+///
+/// Chunk width chosen by micro-bench
+/// (`examples/scoring_loops_asm.rs`): 4→4.5×, 8→6.6×, 16→6.9×, 32→6.7×.
+/// Width 8 picked as the plateau starts at 8 and 16 gains are noise.
+#[inline]
+fn accumulate_pass1_chunks(
+    chrom: &[f32],
+    sqrt_exp: f32,
+    ms2_dot_prod: &mut [f32],
+    ms2_norm_sq_obs: &mut [f32],
+    sqrt_sum: &mut [f32],
+    raw_sum: &mut [f32],
+) {
+    // Invariant: all slices are sized to num_cycles and must match, else
+    // `zip` will silently truncate and downstream accumulators diverge
+    // from the reference impl. Programming error, not a recoverable
+    // condition — panic.
+    let n = chrom.len();
+    assert_eq!(ms2_dot_prod.len(), n, "ms2_dot_prod length mismatch");
+    assert_eq!(ms2_norm_sq_obs.len(), n, "ms2_norm_sq_obs length mismatch");
+    assert_eq!(sqrt_sum.len(), n, "sqrt_sum length mismatch");
+    assert_eq!(raw_sum.len(), n, "raw_sum length mismatch");
+
+    let (c_ch, c_tail) = chrom.as_chunks::<8>();
+    let (d_ch, d_tail) = ms2_dot_prod.as_chunks_mut::<8>();
+    let (n_ch, n_tail) = ms2_norm_sq_obs.as_chunks_mut::<8>();
+    let (s_ch, s_tail) = sqrt_sum.as_chunks_mut::<8>();
+    let (r_ch, r_tail) = raw_sum.as_chunks_mut::<8>();
+    for ((((c, d), n), s), r) in c_ch.iter().zip(d_ch).zip(n_ch).zip(s_ch).zip(r_ch) {
+        for k in 0..8 {
+            let v = c[k].max(0.0);
+            d[k] += v * sqrt_exp;
+            n[k] += v * v;
+            s[k] += v.sqrt();
+            r[k] += v;
+        }
+    }
+    for ((((c, d), n), s), r) in c_tail
+        .iter()
+        .zip(d_tail)
+        .zip(n_tail)
+        .zip(s_tail)
+        .zip(r_tail)
+    {
+        let v = c.max(0.0);
+        *d += v * sqrt_exp;
+        *n += v * v;
+        *s += v.sqrt();
+        *r += v;
+    }
+}
+
 /// Stores time-resolved scores for every cycle in the chromatogram.
 #[derive(Debug, Clone, Serialize)]
 pub struct ElutionTraces {
@@ -542,20 +602,32 @@ impl TraceScorer {
             pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
+            // Lazyscore: gated on positive intensity; keep scalar because
+            // the gate avoids expensive `logf` calls on zero-intensity
+            // cycles. This is a small fraction of the inner-loop cost.
+            let ms2_lazyscore = &mut self.traces.ms2_lazyscore;
             for (i, &intensity) in chrom.iter().enumerate() {
                 if intensity > 0.0 {
-                    // Lazyscore accumulation
-                    self.traces.ms2_lazyscore[i] += intensity.max(1.0).ln();
-                    // Cosine: dot(obs, sqrt(exp))
-                    ms2_dot_prod[i] += intensity * sqrt_exp;
-                    // Cosine: obs norm
-                    ms2_norm_sq_obs[i] += intensity * intensity;
-                    // Scribe: sqrt(obs) sum
-                    sqrt_sum[i] += intensity.sqrt();
+                    ms2_lazyscore[i] += intensity.max(1.0).ln();
                 }
-                // Raw intensity sum (for log-intensity, includes zeros)
-                raw_sum[i] += intensity.max(0.0);
             }
+
+            // 4 cheap accumulators vectorized via chunked loop. The
+            // `if intensity > 0.0` branch is replaced by `v =
+            // intensity.max(0.0)`: for non-positive intensity every
+            // contribution is zero (0*x = 0, 0*0 = 0, sqrt(0) = 0),
+            // matching the branched form exactly since chromatogram
+            // intensities are always non-negative in practice.
+            // Micro-benchmark: chunk-8 is ~6.6× faster than scalar.
+            // See `examples/scoring_loops_asm.rs` for parity + ASM.
+            accumulate_pass1_chunks(
+                chrom,
+                sqrt_exp,
+                ms2_dot_prod,
+                ms2_norm_sq_obs,
+                sqrt_sum,
+                raw_sum,
+            );
         }
 
         // Finalize cosine, lazyscore, log-intensity
