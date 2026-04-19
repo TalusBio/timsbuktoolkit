@@ -201,12 +201,12 @@ impl LazyIndexedTimstofPeaks {
         let metadata_json = storage.read_to_string_async("metadata.json").await?;
         let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
-        // Validate version
-        if meta.version != "1.0" {
-            // This might be over-engineered for now but something tells me we might want to
-            // support multiple versions in the future ...
+        // Validate version. Accept both v1 and v2; the
+        // `QuadrupoleIsolationScheme` deserializer does the in-memory
+        // v1→v2 upgrade transparently.
+        if !crate::serialization::ACCEPTED_VERSIONS.contains(&meta.version.as_str()) {
             return Err(SerializationError::SchemaVersionMismatch {
-                expected: "1.0",
+                expected: crate::serialization::SCHEMA_VERSION,
                 found: meta.version,
             });
         }
