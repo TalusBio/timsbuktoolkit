@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 timsseek = { path = "../timsseek", default-features = false }
 timsquery = { path = "../timsquery" }
+timscentroid = { path = "../timscentroid" }
 alloc_track = { path = "../alloc_track" }
 
 regex = "1.11.1"

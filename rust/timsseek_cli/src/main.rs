@@ -271,6 +271,20 @@ fn process_single_file(
     let load_index_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Loading index");
 
+    // Rebucket to the scoring-optimal size. Existing on-disk caches
+    // are written with `bucket_size=4096`, which is too large for the
+    // tight mz tolerances used by Phase 1 / Phase 3 (measured: ~−24%
+    // wall at bucket_size=256). `BUCKET_SIZE` env var overrides for
+    // experiments.
+    let new_bucket_size: usize = std::env::var("BUCKET_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&bs| bs > 0)
+        .unwrap_or(256);
+    let step = TimedStep::begin(format_args!("Rebucket at {}", new_bucket_size));
+    let index = index.rebucket(new_bucket_size);
+    step.finish();
+
     let fragmented_range = get_frag_range(&timstofpath)?;
 
     let pipeline = Scorer {
