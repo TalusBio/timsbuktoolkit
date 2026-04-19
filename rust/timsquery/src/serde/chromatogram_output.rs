@@ -123,9 +123,9 @@ impl ChromatogramOutput {
             .unzip();
 
         Ok(ChromatogramOutput {
-            id: collector.eg.id(),
-            mobility_ook0: collector.eg.mobility_ook0(),
-            rt_seconds: collector.eg.rt_seconds(),
+            id: collector.id,
+            mobility_ook0: collector.mobility_ook0,
+            rt_seconds: collector.rt_seconds,
             precursor_mzs,
             fragment_mzs,
             precursor_intensities,

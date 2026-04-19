@@ -273,7 +273,7 @@ impl ComputedState {
     ) -> Result<ChromatogramCollector<String, f32>, ViewerError> {
         let max_range = index.ms1_cycle_mapping().range_milis();
         let collector = ChromatogramCollector::new(
-            elution_group,
+            &elution_group,
             TupleRange::try_new(max_range.0, max_range.1)
                 .expect("Reference RTs should be sorted and valid"),
             index.ms1_cycle_mapping(),
@@ -318,7 +318,7 @@ impl ComputedState {
         Ok(output)
     }
 
-    #[instrument(skip_all, fields(eg_id = %context.chromatograms.eg.id()))]
+    #[instrument(skip_all, fields(eg_id = %context.chromatograms.id))]
     fn find_apex(
         trace_scorer: &mut TraceScorer,
         context: &Extraction<String>,
@@ -333,11 +333,15 @@ impl ComputedState {
             let user_msg = match &x {
                 DataProcessingError::ExpectedNonEmptyData { context: err_context } => {
                     tracing::warn!(
-                        "{:#?}", context.chromatograms.eg,
+                        "collector id={} rt={} mob={} prec_mz={}",
+                        context.chromatograms.id,
+                        context.chromatograms.rt_seconds,
+                        context.chromatograms.mobility_ook0,
+                        context.chromatograms.precursor_mono_mz,
                     );
                     tracing::warn!(
                         "Apex finding failed for elution group {}: No valid data found in context {:?}",
-                        context.chromatograms.eg.id(),
+                        context.chromatograms.id,
                         err_context
                     );
                     "No data found with the current tolerances. \
@@ -348,7 +352,7 @@ impl ComputedState {
                 _ => {
                     tracing::error!(
                         "Apex finding failed for elution group {}: {:?}",
-                        context.chromatograms.eg.id(),
+                        context.chromatograms.id,
                         x
                     );
                     format!("Apex finding failed: {:?}", x)
@@ -540,17 +544,15 @@ impl ComputedState {
         }
         self.mobility.last_requested_rt = Some(rt_seconds);
 
-        let (eg, ref_mobility) = {
+        let (eg, ref_mobility, rt_override) = {
             let Some(result) = &self.result else {
                 tracing::warn!("No chromatogram data available for mobility extraction");
                 return false;
             };
             (
-                result
-                    .elution_group
-                    .clone()
-                    .with_rt_seconds(rt_seconds as f32),
+                result.elution_group.clone(),
                 result.output.mobility_ook0 as f64,
+                rt_seconds as f32,
             )
         };
 
@@ -563,7 +565,8 @@ impl ComputedState {
             .with_wider_mobility(2.0);
 
         let mut collector: SpectralCollector<String, MzMobilityStatsCollector> =
-            SpectralCollector::new(eg);
+            SpectralCollector::new(&eg);
+        collector.reset_with_overrides(&eg, Some(rt_override), None);
         index.add_query(&mut collector, &wide_tolerance);
 
         // Compute 1x and 2x mobility ranges for overlays

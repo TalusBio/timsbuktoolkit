@@ -60,15 +60,15 @@ impl<T: KeyLike + Display> From<&SpectralCollector<T, f32>> for SpectrumOutput {
             .unzip();
 
         SpectrumOutput {
-            id: agg.eg.id(),
-            mobility_ook0: agg.eg.mobility_ook0(),
-            rt_seconds: agg.eg.rt_seconds(),
-            precursor_mz: agg.eg.precursor_mz(),
+            id: agg.id,
+            mobility_ook0: agg.mobility_ook0,
+            rt_seconds: agg.rt_seconds,
+            precursor_mz: agg.precursor_mono_mz,
             fragment_mzs,
             precursor_intensities,
             fragment_intensities,
             precursor_labels,
-            precursor_charge: agg.eg.precursor_charge() as i8,
+            precursor_charge: agg.precursor_charge as i8,
         }
     }
 }
@@ -105,15 +105,15 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                             }
                             timsquery::OptionallyRestricted::Restricted(r) => r,
                         };
-                        ChromatogramCollector::new(x, rt_range, ref_rts)
+                        ChromatogramCollector::new(&x, rt_range, ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 AggregatorContainer::Chromatogram(collectors)
             }
-            PossibleAggregator::SpectrumAggregator => AggregatorContainer::Spectrum(
-                queries.into_iter().map(SpectralCollector::new).collect(),
-            ),
+            PossibleAggregator::SpectrumAggregator => {
+                AggregatorContainer::Spectrum(queries.iter().map(SpectralCollector::new).collect())
+            }
         })
     }
 
@@ -149,7 +149,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
                     .filter_map(|mut agg| {
-                        let agg_id = agg.eg.id();
+                        let agg_id = agg.id;
                         match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {

@@ -601,9 +601,10 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             continue;
         }
 
-        let query_at_apex = item.query.clone().with_rt_seconds(candidate.apex_rt.0);
+        // No clone: build collector from &item.query with an rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(query_at_apex);
+            SpectralCollector::new(&item.query);
+        agg.reset_with_overrides(&item.query, Some(candidate.apex_rt.0), None);
         pipeline.index.add_query(&mut agg, &query_tolerance);
 
         let expected_mob = item.query.mobility_ook0() as f64;

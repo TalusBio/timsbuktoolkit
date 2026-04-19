@@ -5,6 +5,7 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
+use crate::models::elution_group::TimsElutionGroup;
 use crate::{
     KeyLike,
     Tolerance,
@@ -13,6 +14,55 @@ use rayon::prelude::*;
 use std::ops::AddAssign;
 use timscentroid::indexing::IndexedPeak;
 use timscentroid::rt_mapping::RTIndex;
+
+/// Data needed to build a query against the index.
+///
+/// Exposes exactly what `QueryRanges::from_query_data` and per-aggregator
+/// `add_query` impls read — scalars for range building + iterators for
+/// precursor and fragment m/z windows. A fully immutable view, implemented
+/// by `TimsElutionGroup` as well as by aggregators that carry their own
+/// query scalars.
+pub trait HasQueryData<FH: KeyLike> {
+    fn id(&self) -> u64;
+    fn precursor_mz_limits(&self) -> (f64, f64);
+    fn mobility_ook0(&self) -> f32;
+    fn rt_seconds(&self) -> f32;
+    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_;
+    /// Borrowed label + copied mz. Named `iter_fragments` (not `_refs`)
+    /// since the mz is Copy — the `_refs` name would mislead readers.
+    fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a
+    where
+        FH: 'a;
+}
+
+impl<FH: KeyLike> HasQueryData<FH> for TimsElutionGroup<FH> {
+    fn id(&self) -> u64 {
+        TimsElutionGroup::id(self)
+    }
+
+    fn precursor_mz_limits(&self) -> (f64, f64) {
+        self.get_precursor_mz_limits()
+    }
+
+    fn mobility_ook0(&self) -> f32 {
+        TimsElutionGroup::mobility_ook0(self)
+    }
+
+    fn rt_seconds(&self) -> f32 {
+        TimsElutionGroup::rt_seconds(self)
+    }
+
+    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
+        TimsElutionGroup::iter_precursors(self)
+    }
+
+    fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a
+    where
+        FH: 'a,
+    {
+        self.iter_fragments_refs().map(|(k, mz)| (k, *mz))
+    }
+}
 
 /// Trait indicating that indexed data can be queried with a specific aggregator type.
 ///

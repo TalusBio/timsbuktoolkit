@@ -72,7 +72,7 @@ fn extract_arrays(
     let rt = collector.rt_range_milis();
 
     Ok(PyChromatogramArrays {
-        id: collector.eg.id(),
+        id: collector.id,
         precursor_intensities: prec_np.into_any().unbind(),
         fragment_intensities: frag_np.into_any().unbind(),
         precursor_labels: collector
@@ -158,13 +158,13 @@ impl PyChromatogramIterator {
 
                     if i < self.pool.len() {
                         self.pool[i]
-                            .try_reset_with(eg, rt_range_ms, ref_rt)
+                            .try_reset_with(&eg, rt_range_ms, ref_rt)
                             .map_err(|e| {
                                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e:?}"))
                             })?;
                     } else {
                         let collector =
-                            ChromatogramCollector::<usize, f32>::new(eg, rt_range_ms, ref_rt)
+                            ChromatogramCollector::<usize, f32>::new(&eg, rt_range_ms, ref_rt)
                                 .map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                         "{e:?}"

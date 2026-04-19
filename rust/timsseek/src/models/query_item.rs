@@ -130,6 +130,19 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
         linear_get(&self.precursor_intensities, &key)
     }
 
+    /// Keep only the `n` fragments with largest predicted intensity,
+    /// partial-sorting in place and truncating. Zero alloc. O(len).
+    /// No-op if `len <= n`. Surviving order is unspecified.
+    pub fn retain_top_n_fragments(&mut self, n: usize) {
+        if self.fragment_intensities.len() <= n {
+            return;
+        }
+        // Partition by intensity descending: the `n`th element splits top-n / rest.
+        self.fragment_intensities
+            .select_nth_unstable_by(n, |a, b| b.1.total_cmp(&a.1));
+        self.fragment_intensities.truncate(n);
+    }
+
     /// Swap-remove by key. Returns the removed value if present.
     pub fn remove_fragment(&mut self, key: &T) -> Option<f32> {
         let idx = self
@@ -251,6 +264,40 @@ mod tests {
         )
         .expect_err("duplicate precursor must error");
         assert_eq!(err.which, "precursor");
+    }
+
+    #[test]
+    fn retain_top_n_noop_when_under_cap() {
+        let mut ei = ExpectedIntensities::<IonAnnot>::try_from_pairs(
+            [(yi("y1"), 0.5), (yi("y2"), 0.7)],
+            std::iter::empty::<(i8, f32)>(),
+        )
+        .unwrap();
+        ei.retain_top_n_fragments(8);
+        assert_eq!(ei.fragment_len(), 2);
+    }
+
+    #[test]
+    fn retain_top_n_keeps_highest() {
+        let mut ei = ExpectedIntensities::<IonAnnot>::try_from_pairs(
+            [
+                (yi("y1"), 0.1),
+                (yi("y2"), 0.9),
+                (yi("y3"), 0.5),
+                (yi("y4"), 0.2),
+            ],
+            std::iter::empty::<(i8, f32)>(),
+        )
+        .unwrap();
+        ei.retain_top_n_fragments(2);
+        assert_eq!(ei.fragment_len(), 2);
+        // Both survivors must have intensity >= 0.5
+        for (_, v) in ei.fragment_intensities.iter() {
+            assert!(*v >= 0.5, "unexpected survivor {}", v);
+        }
+        // y2 (0.9) and y3 (0.5) must both be present
+        assert!(ei.get_fragment(&yi("y2")).is_some());
+        assert!(ei.get_fragment(&yi("y3")).is_some());
     }
 
     #[test]

@@ -70,6 +70,7 @@ use crate::models::aggregators::{
     SpectralCollector,
 };
 use crate::serde::IndexedPeaksHandle;
+use crate::traits::queriable_data::HasQueryData;
 use crate::traits::{
     PeakAddable,
     QueriableData,
@@ -104,23 +105,17 @@ struct QueryRanges {
 }
 
 impl QueryRanges {
-    /// Compute query ranges from an elution group and tolerance.
-    ///
-    /// This is the standard conversion used by most aggregators.
-    fn from_elution_group<FH: KeyLike, A>(
-        aggregator: &A,
+    /// Compute query ranges from query data + tolerance.
+    fn from_query_data<FH: KeyLike>(
+        query: &impl crate::traits::queriable_data::HasQueryData<FH>,
         tolerance: &Tolerance,
         rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
-    ) -> Self
-    where
-        A: HasElutionGroup<FH>,
-    {
-        let prec_mz_limits = aggregator.elution_group().get_precursor_mz_limits();
+    ) -> Self {
+        let prec_mz_limits = query.precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.elution_group().mobility_ook0());
-        let rt_range_milliseconds =
-            tolerance.rt_range_as_milis(aggregator.elution_group().rt_seconds());
+        let im_range = tolerance.mobility_range_f16(query.mobility_ook0());
+        let rt_range_milliseconds = tolerance.rt_range_as_milis(query.rt_seconds());
         let ms1_cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
                 TupleRange::try_new(rt_ms_to_cycle(x.start()), rt_ms_to_cycle(x.end())).unwrap(),
@@ -137,25 +132,22 @@ impl QueryRanges {
         }
     }
 
-    /// Compute query ranges with RT intersection for ChromatogramCollector.
-    ///
-    /// Returns None if the RT ranges don't intersect (early termination case).
-    fn from_elution_group_with_rt_intersection<FH: KeyLike, A>(
-        aggregator: &A,
+    /// Compute query ranges with RT intersection (for ChromatogramCollector's
+    /// pre-scoped rt_range_ms window). Returns None if the RT ranges don't
+    /// intersect — caller early-exits.
+    fn from_query_data_with_rt_intersection<FH: KeyLike>(
+        query: &impl crate::traits::queriable_data::HasQueryData<FH>,
         tolerance: &Tolerance,
         rt_limits_milis: TupleRange<u32>,
         rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
-    ) -> Option<Self>
-    where
-        A: HasElutionGroup<FH>,
-    {
-        let prec_mz_limits = aggregator.elution_group().get_precursor_mz_limits();
+    ) -> Option<Self> {
+        let prec_mz_limits = query.precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(aggregator.elution_group().mobility_ook0());
+        let im_range = tolerance.mobility_range_f16(query.mobility_ook0());
 
         let rt_range_milliseconds = match tolerance
-            .rt_range_as_milis(aggregator.elution_group().rt_seconds())
+            .rt_range_as_milis(query.rt_seconds())
             .map(|x| x.try_intercept(rt_limits_milis))
         {
             Restricted(Some(x)) => Restricted(x),
@@ -202,38 +194,18 @@ impl QueryRanges {
     }
 }
 
-/// Trait to abstract access to the elution group from different aggregator types.
-trait HasElutionGroup<FH: KeyLike> {
-    fn elution_group(&self) -> &crate::models::elution_group::TimsElutionGroup<FH>;
-}
-
-impl<FH: KeyLike> HasElutionGroup<FH> for PointIntensityAggregator<FH> {
-    fn elution_group(&self) -> &crate::models::elution_group::TimsElutionGroup<FH> {
-        &self.eg
-    }
-}
-
-impl<FH: KeyLike> HasElutionGroup<FH> for ChromatogramCollector<FH, f32> {
-    fn elution_group(&self) -> &crate::models::elution_group::TimsElutionGroup<FH> {
-        &self.eg
-    }
-}
-
-impl<FH: KeyLike, V: Default + crate::traits::ValueLike> HasElutionGroup<FH>
-    for SpectralCollector<FH, V>
-{
-    fn elution_group(&self) -> &crate::models::elution_group::TimsElutionGroup<FH> {
-        &self.eg
-    }
-}
-
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstofPeaks {
     fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
-        let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
-            self.rt_ms_to_cycle_index(rt)
-        });
+        let ranges =
+            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
 
-        aggregator.eg.iter_precursors().for_each(|(_idx, mz)| {
+        // Copy iterators to stack before the closures — can't borrow aggregator
+        // immutably (for the iterator) and mutably (for `.intensity +=`) at once.
+        let prec_mzs: tinyvec::TinyVec<[f64; 16]> =
+            aggregator.iter_precursors().map(|(_, mz)| mz).collect();
+        let frag_mzs: tinyvec::TinyVec<[f64; 16]> =
+            aggregator.iter_fragments().map(|(_, mz)| mz).collect();
+        prec_mzs.iter().for_each(|&mz| {
             let mz_range = tolerance.mz_range_f32(mz as f32);
             self.query_peaks_ms1(mz_range, ranges.ms1_cycle_range, ranges.im_range)
                 .for_each(|peak| {
@@ -244,8 +216,8 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
         self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
-                aggregator.eg.iter_fragments_refs().for_each(|(_idx, mz)| {
-                    let mz_range = tolerance.mz_range_f32(*mz as f32);
+                frag_mzs.iter().for_each(|&mz| {
+                    let mz_range = tolerance.mz_range_f32(mz as f32);
                     peaks
                         .query_peaks(mz_range, ranges.ms2_cycle_range, constrained_im)
                         .for_each(|peak| {
@@ -258,7 +230,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
 
 impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimstofPeaks {
     fn add_query(&self, aggregator: &mut ChromatogramCollector<FH, f32>, tolerance: &Tolerance) {
-        let Some(ranges) = QueryRanges::from_elution_group_with_rt_intersection(
+        let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
             aggregator,
             tolerance,
             aggregator.rt_range_milis(),
@@ -298,9 +270,8 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
 
 impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPeaks {
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
-        let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
-            self.rt_ms_to_cycle_index(rt)
-        });
+        let ranges =
+            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
 
         aggregator
             .iter_mut_precursors()
@@ -336,9 +307,8 @@ impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
     QueriableData<SpectralCollector<FH, V>> for IndexedTimstofPeaks
 {
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
-        let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
-            self.rt_ms_to_cycle_index(rt)
-        });
+        let ranges =
+            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
 
         aggregator
             .iter_mut_precursors()
@@ -397,7 +367,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
             }
             IndexedPeaksHandle::Lazy(lazy) => {
                 // Use QueryRanges to compute common tolerances, then convert to u32 for lazy API
-                let Some(ranges) = QueryRanges::from_elution_group_with_rt_intersection(
+                let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
                     aggregator,
                     tolerance,
                     aggregator.rt_range_milis(),
@@ -460,7 +430,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedPeaksHand
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
             IndexedPeaksHandle::Lazy(lazy) => {
-                let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
+                let ranges = QueryRanges::from_query_data(aggregator, tolerance, |rt| {
                     lazy.rt_ms_to_cycle_index(rt)
                 });
 
@@ -513,7 +483,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
             IndexedPeaksHandle::Lazy(lazy) => {
-                let ranges = QueryRanges::from_elution_group(aggregator, tolerance, |rt| {
+                let ranges = QueryRanges::from_query_data(aggregator, tolerance, |rt| {
                     lazy.rt_ms_to_cycle_index(rt)
                 });
 

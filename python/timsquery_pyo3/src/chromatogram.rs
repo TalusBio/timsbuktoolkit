@@ -64,13 +64,13 @@ impl PyChromatogramResult {
 
     #[getter]
     fn id(&self) -> u64 {
-        self.collector.eg.id()
+        self.collector.id
     }
 
     fn __repr__(&self) -> String {
         format!(
             "ChromatogramResult(id={}, precursors={}x{}, fragments={}x{}, rt_ms=({}, {}))",
-            self.collector.eg.id(),
+            self.collector.id,
             self.collector.precursors.arr.nrows(),
             self.collector.precursors.arr.ncols(),
             self.collector.fragments.arr.nrows(),
