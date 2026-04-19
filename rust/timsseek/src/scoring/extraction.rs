@@ -94,7 +94,7 @@ pub fn build_extraction_into<T, I>(
     scratch: &mut Option<Extraction<T>>,
     elution_group: &timsquery::TimsElutionGroup<T>,
     rt_override: Option<f32>,
-    expected_intensities: ExpectedIntensities<T>,
+    expected_intensities: &ExpectedIntensities<T>,
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
@@ -123,7 +123,8 @@ where
             extr.chromatograms
                 .try_reset_with_overrides(elution_group, rt_override, None, rt_range, cycle_mapping)
                 .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
-            extr.expected_intensities = expected_intensities;
+            extr.expected_intensities
+                .clone_from_ref(expected_intensities);
         }
         None => {
             let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
@@ -132,7 +133,7 @@ where
                 agg.rt_seconds = rt;
             }
             *scratch = Some(Extraction {
-                expected_intensities,
+                expected_intensities: expected_intensities.clone(),
                 chromatograms: agg,
             });
         }
