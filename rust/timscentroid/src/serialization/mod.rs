@@ -177,7 +177,13 @@ impl From<url::ParseError> for SerializationError {
     }
 }
 
-const SCHEMA_VERSION: &str = "1.0";
+/// Current on-disk schema version. Writes always emit this.
+pub(crate) const SCHEMA_VERSION: &str = "2.0";
+
+/// Schema versions the loader accepts. Older entries are upgraded in memory
+/// via the `QuadrupoleIsolationScheme` `QuadWire` deserializer, which emits
+/// its own `tracing::warn!` on the upgrade path.
+pub(crate) const ACCEPTED_VERSIONS: &[&str] = &["1.0", "2.0"];
 
 /// Normalize a path to always use forward slashes (for object_store compatibility)
 ///
@@ -476,7 +482,7 @@ impl IndexedTimstofPeaks {
         let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
         // Validate schema version
-        if meta.version != SCHEMA_VERSION {
+        if !ACCEPTED_VERSIONS.contains(&meta.version.as_str()) {
             return Err(SerializationError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: meta.version,
@@ -496,7 +502,7 @@ impl IndexedTimstofPeaks {
         let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
         // Validate schema version
-        if meta.version != SCHEMA_VERSION {
+        if !ACCEPTED_VERSIONS.contains(&meta.version.as_str()) {
             return Err(SerializationError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: meta.version,
