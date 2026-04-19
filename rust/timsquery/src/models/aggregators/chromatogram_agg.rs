@@ -129,12 +129,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
         let num_cycles = end.index() - start.index() + 1;
 
-        let precursor_order: Vec<_> = eg.iter_precursors().collect();
-        let fragment_order: Vec<_> = eg
-            .iter_fragments_refs()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        if precursor_order.is_empty() && fragment_order.is_empty() {
+        if eg.precursor_count() == 0 && eg.fragment_count() == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
         if num_cycles == 0 {
@@ -152,9 +147,12 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.n_fragment_peaks_added = 0;
         self.n_quad_windows_matched = 0;
         self.precursors
-            .clear_with_order(precursor_order, num_cycles, start.index());
-        self.fragments
-            .clear_with_order(fragment_order, num_cycles, start.index());
+            .clear_with_order(eg.iter_precursors(), num_cycles, start.index());
+        self.fragments.clear_with_order(
+            eg.iter_fragments_refs().map(|(k, v)| (k.clone(), *v)),
+            num_cycles,
+            start.index(),
+        );
         Ok(())
     }
 
