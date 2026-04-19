@@ -83,10 +83,19 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+/// Fixed shuffle seed used by `rescore`. Makes the pre-rescore shuffle
+/// (and therefore the fold assignment + downstream target counts)
+/// reproducible across runs, eliminating RNG-driven noise in benches.
+/// `GBMConfig::default().seed == 0` already makes the boosting itself
+/// deterministic; this seals the only remaining entropy source.
+const RESCORE_SHUFFLE_SEED: u64 = 42;
+
 pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
     let config = GBMConfig::default();
 
-    data.shuffle(&mut rand::rng());
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
+    data.shuffle(&mut rng);
 
     let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled(3, data, config);
     scorer
