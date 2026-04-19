@@ -7,6 +7,7 @@ pub mod parquet_writer;
 pub mod pipeline;
 pub mod results;
 mod scores;
+pub mod skip;
 pub mod timings;
 
 pub use scores::hyperscore;
@@ -22,6 +23,10 @@ pub use results::{
     FinalResult,
     ScoredCandidate,
     ScoringFields,
+};
+pub use skip::{
+    SkipCounts,
+    SkipReason,
 };
 pub use timings::{
     FileReport,

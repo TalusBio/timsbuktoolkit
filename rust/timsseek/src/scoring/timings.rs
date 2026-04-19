@@ -10,6 +10,7 @@
 //! - [`TimedStep`] — progressive CLI output: prints a label immediately, then
 //!   appends elapsed time when the work finishes.
 
+use super::skip::SkipCounts;
 use serde::Serialize;
 use std::fmt;
 use std::time::{
@@ -170,6 +171,9 @@ pub struct PrescoreTimings {
     pub n_passed_filter: usize,
     /// Number of items where prescore returned Some (successful apex).
     pub n_scored: usize,
+    /// Per-reason skip counts for peptides that entered prescore but did not
+    /// produce an apex.
+    pub skips: SkipCounts,
 }
 
 impl Serialize for PrescoreTimings {
@@ -178,11 +182,12 @@ impl Serialize for PrescoreTimings {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PrescoreTimings", 4)?;
+        let mut state = serializer.serialize_struct("PrescoreTimings", 5)?;
         state.serialize_field("extraction_thread_ms", &self.extraction.as_millis())?;
         state.serialize_field("scoring_thread_ms", &self.scoring.as_millis())?;
         state.serialize_field("n_passed_filter", &self.n_passed_filter)?;
         state.serialize_field("n_scored", &self.n_scored)?;
+        state.serialize_field("skips", &self.skips)?;
         state.end()
     }
 }
@@ -193,6 +198,7 @@ impl std::ops::AddAssign for PrescoreTimings {
         self.scoring += rhs.scoring;
         self.n_passed_filter += rhs.n_passed_filter;
         self.n_scored += rhs.n_scored;
+        self.skips += rhs.skips;
     }
 }
 
@@ -221,6 +227,10 @@ pub struct PipelineReport {
     pub targets_at_1pct_qval: usize,
     pub targets_at_5pct_qval: usize,
     pub targets_at_10pct_qval: usize,
+
+    // Skip breakdown per phase (peptides that entered the phase but did not
+    // produce a result, grouped by reason).
+    pub phase3_skips: SkipCounts,
 }
 
 /// Top-level report for an entire CLI invocation.

@@ -12,7 +12,7 @@ use timsquery::{
     Tolerance,
 };
 
-use super::pipeline::SkippingReason;
+use super::skip::SkipReason;
 
 /// Build an Extraction from an elution group + index query.
 ///
@@ -28,7 +28,7 @@ pub fn build_extraction<T, I>(
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
-) -> Result<Extraction<T>, SkippingReason>
+) -> Result<Extraction<T>, SkipReason>
 where
     T: KeyLike,
     I: QueriableData<ChromatogramCollector<T, f32>> + MappableRTCycles,
@@ -44,11 +44,11 @@ where
     };
 
     if !max_range.intersects(rt_range) {
-        return Err(SkippingReason::RetentionTimeOutOfBounds);
+        return Err(SkipReason::RetentionTimeOutOfBounds);
     }
 
     let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
-        .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
 
     index.add_query(&mut agg, tolerance);
 
@@ -77,7 +77,7 @@ pub fn build_extraction_into<T, I>(
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
-) -> Result<(), SkippingReason>
+) -> Result<(), SkipReason>
 where
     T: KeyLike,
     I: QueriableData<ChromatogramCollector<T, f32>> + MappableRTCycles,
@@ -94,19 +94,19 @@ where
     };
 
     if !max_range.intersects(rt_range) {
-        return Err(SkippingReason::RetentionTimeOutOfBounds);
+        return Err(SkipReason::RetentionTimeOutOfBounds);
     }
 
     match scratch {
         Some(extr) => {
             extr.chromatograms
                 .try_reset_with_overrides(elution_group, rt_override, None, rt_range, cycle_mapping)
-                .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
             extr.expected_intensities = expected_intensities;
         }
         None => {
             let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
-                .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
             if let Some(rt) = rt_override {
                 agg.rt_seconds = rt;
             }
