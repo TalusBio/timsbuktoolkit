@@ -211,13 +211,13 @@ impl ElutionTraces {
     }
 
     pub fn iter_scores(&self) -> impl Iterator<Item = (&'static str, &[f32])> + '_ {
-        vec![
-            ("cosine_trace", &self.cosine_trace[..]),
-            ("ms2_lazyscore", &self.ms2_lazyscore[..]),
-            ("ms2_scribe", &self.ms2_scribe[..]),
-            ("ms2_log_intensity", &self.ms2_log_intensity[..]),
-            ("ms1_precursor_trace", &self.ms1_precursor_trace[..]),
-            ("apex_profile", &self.apex_profile[..]),
+        [
+            ("cosine_trace", self.cosine_trace.as_slice()),
+            ("ms2_lazyscore", self.ms2_lazyscore.as_slice()),
+            ("ms2_scribe", self.ms2_scribe.as_slice()),
+            ("ms2_log_intensity", self.ms2_log_intensity.as_slice()),
+            ("ms1_precursor_trace", self.ms1_precursor_trace.as_slice()),
+            ("apex_profile", self.apex_profile.as_slice()),
         ]
         .into_iter()
     }
