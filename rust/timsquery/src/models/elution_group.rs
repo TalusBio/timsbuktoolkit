@@ -120,34 +120,26 @@ impl<T: KeyLike> TimsElutionGroup<T> {
         self.rt_seconds = rt_seconds;
     }
 
+    /// In-place copy reusing Vec/TinyVec capacity. `Vec::clone_from` preserves
+    /// the destination's heap buffer if `src.len() <= self.capacity()` — after
+    /// warm-up, zero alloc. Used by the isotope-offset scratch in timsseek.
+    pub fn reset_from(&mut self, src: &Self) {
+        self.id = src.id;
+        self.mobility_ook0 = src.mobility_ook0;
+        self.rt_seconds = src.rt_seconds;
+        self.precursor_mono_mz = src.precursor_mono_mz;
+        self.precursor_charge = src.precursor_charge;
+        self.fragment_mzs.clone_from(&src.fragment_mzs);
+        self.fragment_labels.clear();
+        self.fragment_labels
+            .extend(src.fragment_labels.iter().cloned());
+        self.precursor_labels.clear();
+        self.precursor_labels
+            .extend(src.precursor_labels.iter().cloned());
+    }
+
     pub fn mobility_ook0(&self) -> f32 {
         self.mobility_ook0
-    }
-
-    pub fn try_drop_fragment(&mut self, key: &T) -> Result<(), crate::errors::DataProcessingError> {
-        let idx = self
-            .fragment_labels
-            .iter()
-            .position(|label| label == key)
-            .ok_or(crate::DataProcessingError::KeyNotFound)?;
-
-        self.fragment_labels.remove(idx);
-        self.fragment_mzs.remove(idx);
-        Ok(())
-    }
-
-    pub fn try_drop_precursor(
-        &mut self,
-        key: i8,
-    ) -> Result<(), crate::errors::DataProcessingError> {
-        let idx = self
-            .precursor_labels
-            .iter()
-            .position(|label| *label == key)
-            .ok_or(crate::DataProcessingError::KeyNotFound)?;
-
-        self.precursor_labels.remove(idx);
-        Ok(())
     }
 
     fn precursor_mz_iter(&self) -> impl Iterator<Item = f64> + '_ {
@@ -203,17 +195,6 @@ impl<T: KeyLike> TimsElutionGroup<T> {
             .iter()
             .zip(self.fragment_mzs.iter())
             .map(|(label, mz)| (label, *mz))
-    }
-
-    pub fn with_rt_seconds(self, rt_seconds: f32) -> Self {
-        Self { rt_seconds, ..self }
-    }
-
-    pub fn with_mobility(self, mobility: f32) -> Self {
-        Self {
-            mobility_ook0: mobility,
-            ..self
-        }
     }
 
     pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> TimsElutionGroup<U> {

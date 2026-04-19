@@ -138,7 +138,7 @@ impl PyTimsIndex {
         let rt_range_ms = rt_range_ms_for_chromatogram(tol, eg.rt_seconds(), &self.handle)?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
-        let mut collector = ChromatogramCollector::<usize, f32>::new(eg, rt_range_ms, ref_rt)
+        let mut collector = ChromatogramCollector::<usize, f32>::new(&eg, rt_range_ms, ref_rt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
         self.handle.add_query(&mut collector, tol);
@@ -168,7 +168,7 @@ impl PyTimsIndex {
 
         result
             .collector
-            .try_reset_with(eg, rt_range_ms, ref_rt)
+            .try_reset_with(&eg, rt_range_ms, ref_rt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
         self.handle.add_query(&mut result.collector, tol);
@@ -190,7 +190,7 @@ impl PyTimsIndex {
     ) -> PyResult<PySpectralResult> {
         let eg = elution_group.inner.clone();
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, f32>::new(eg);
+        let mut collector = SpectralCollector::<usize, f32>::new(&eg);
         self.handle.add_query(&mut collector, tol);
         Ok(PySpectralResult::new(collector))
     }
@@ -210,7 +210,7 @@ impl PyTimsIndex {
     ) -> PyResult<PyMzMobilityResult> {
         let eg = elution_group.inner.clone();
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(eg);
+        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&eg);
         self.handle.add_query(&mut collector, tol);
         Ok(PyMzMobilityResult::new(collector))
     }
@@ -242,7 +242,7 @@ impl PyTimsIndex {
                 let tol = tolerances.get(i);
                 let rt_range_ms =
                     rt_range_ms_for_chromatogram(tol, inner.rt_seconds(), &self.handle)?;
-                ChromatogramCollector::<usize, f32>::new(inner, rt_range_ms, ref_rt).map_err(|e| {
+                ChromatogramCollector::<usize, f32>::new(&inner, rt_range_ms, ref_rt).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e))
                 })
             })

@@ -47,7 +47,7 @@ where
         return Err(SkippingReason::RetentionTimeOutOfBounds);
     }
 
-    let mut agg = ChromatogramCollector::new(elution_group.clone(), rt_range, cycle_mapping)
+    let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
         .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
 
     index.add_query(&mut agg, tolerance);
@@ -72,6 +72,7 @@ where
 pub fn build_extraction_into<T, I>(
     scratch: &mut Option<Extraction<T>>,
     elution_group: &timsquery::TimsElutionGroup<T>,
+    rt_override: Option<f32>,
     expected_intensities: ExpectedIntensities<T>,
     index: &I,
     tolerance: &Tolerance,
@@ -86,7 +87,8 @@ where
     let max_range = TupleRange::try_new(max_range.0, max_range.1)
         .expect("Reference RTs should be sorted and valid");
 
-    let rt_range = match tolerance.rt_range_as_milis(elution_group.rt_seconds()) {
+    let query_rt = rt_override.unwrap_or_else(|| elution_group.rt_seconds());
+    let rt_range = match tolerance.rt_range_as_milis(query_rt) {
         OptionallyRestricted::Unrestricted => max_range,
         OptionallyRestricted::Restricted(r) => r,
     };
@@ -98,13 +100,16 @@ where
     match scratch {
         Some(extr) => {
             extr.chromatograms
-                .try_reset_with(elution_group.clone(), rt_range, cycle_mapping)
+                .try_reset_with_overrides(elution_group, rt_override, None, rt_range, cycle_mapping)
                 .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
             extr.expected_intensities = expected_intensities;
         }
         None => {
-            let agg = ChromatogramCollector::new(elution_group.clone(), rt_range, cycle_mapping)
+            let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
                 .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+            if let Some(rt) = rt_override {
+                agg.rt_seconds = rt;
+            }
             *scratch = Some(Extraction {
                 expected_intensities,
                 chromatograms: agg,
