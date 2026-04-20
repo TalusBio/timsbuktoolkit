@@ -430,10 +430,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Performs refined secondary query at detected apex with two-pass strategy.
     #[cfg_attr(
         feature = "instrumentation",
-        tracing::instrument(
-            skip(self, item, main_score, spectral_tol, isotope_tol),
-            level = "trace"
-        )
+        tracing::instrument(skip_all, level = "trace")
     )]
     /// Performs refined secondary query at detected apex with two-pass strategy.
     /// Results populate `worker.inner_collector` and `worker.isotope_collector` in place.
