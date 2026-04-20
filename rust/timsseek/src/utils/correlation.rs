@@ -454,6 +454,7 @@ mod tests {
     /// with very different apex intensities (100 vs 1,000,000) in a background of noise.
     /// The cosine similarity should still be accurate despite the large dynamic range.
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_extreme_range_stability() {
         // Create two chromatograms with Gaussian peaks at different intensities
         let n = 100;
@@ -505,7 +506,7 @@ mod tests {
                     val
                 );
                 assert!(
-                    val >= -0.01 && val <= 1.01,
+                    (-0.01..=1.01).contains(&val),
                     "Cosine similarity out of range at index {}: {}",
                     i,
                     val

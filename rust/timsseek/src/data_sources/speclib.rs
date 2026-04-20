@@ -187,6 +187,7 @@ pub struct ReferenceEG {
 }
 
 impl ReferenceEG {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: u32,
         precursor_mz: f64,
@@ -1315,7 +1316,7 @@ mod tests {
         for entry in &speclib.elems {
             groups
                 .entry(entry.digest.decoy_group)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(entry);
         }
 
@@ -1357,7 +1358,7 @@ mod tests {
         for entry in &speclib.elems {
             groups
                 .entry(entry.digest.decoy_group)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(entry);
         }
 

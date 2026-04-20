@@ -678,11 +678,10 @@ fn compute_precursor_coelution<T: KeyLike>(
     let win_len = hi - lo;
     let mut frag_sum = vec![0.0f32; win_len];
     for ((_key, _mz), chrom) in fragments.iter_mzs() {
-        for i in 0..win_len {
-            let idx = lo + i;
-            if idx < chrom.len() {
-                frag_sum[i] += chrom[idx];
-            }
+        let avail = chrom.len().saturating_sub(lo).min(win_len);
+        let chrom_win = &chrom[lo..lo + avail];
+        for (sum, &x) in frag_sum.iter_mut().zip(chrom_win.iter()) {
+            *sum += x;
         }
     }
 
