@@ -26,8 +26,6 @@ use crate::{
     ScorerQueriable,
     timed,
 };
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -700,16 +698,6 @@ impl<I: ScorerQueriable> Scorer<I> {
             .map(|i| i.expected_intensity.fragment_len())
             .max()
             .unwrap_or(0);
-        let init_fn = || {
-            tracing::debug!(
-                target: "alloc_track",
-                phase = "phase3_score",
-                num_cycles,
-                max_frags,
-                "rayon worker init: ScoringWorker"
-            );
-            ScoringWorker::new(num_cycles, max_frags)
-        };
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
@@ -720,36 +708,35 @@ impl<I: ScorerQueriable> Scorer<I> {
         // a second pass keeps the rayon hot loop free of synchronised counters.
         let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
 
-        #[cfg(feature = "rayon")]
-        let mut results: IonSearchAccumulator = {
-            items_to_score
-                .par_iter()
-                .filter(filter_fn)
-                .map_init(init_fn, |worker, item| {
-                    let mut t = ScoreTimings::default();
-                    let result =
-                        self.score_calibrated_extraction(item, calibration, worker, &mut t);
-                    (result, t)
-                })
-                .collect()
-        };
-
-        #[cfg(not(feature = "rayon"))]
-        let mut results: IonSearchAccumulator = {
-            let mut scorer = init_fn();
-            items_to_score
-                .iter()
-                .filter(filter_fn)
-                .map(|item| {
+        let (_worker, mut results): (ScoringWorker, IonSearchAccumulator) =
+            super::maybe_par::fold_reduce(
+                items_to_score,
+                || {
+                    tracing::debug!(
+                        target: "alloc_track",
+                        phase = "phase3_score",
+                        num_cycles,
+                        max_frags,
+                        "worker init: ScoringWorker + IonSearchAccumulator"
+                    );
+                    (
+                        ScoringWorker::new(num_cycles, max_frags),
+                        IonSearchAccumulator::default(),
+                    )
+                },
+                |(mut worker, acc), (_idx, item)| {
+                    if !filter_fn(&item) {
+                        return (worker, acc);
+                    }
                     let _span =
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     let result =
-                        self.score_calibrated_extraction(item, calibration, &mut scorer, &mut t);
-                    (result, t)
-                })
-                .collect()
-        };
+                        self.score_calibrated_extraction(item, calibration, &mut worker, &mut t);
+                    (worker, acc.fold((result, t)))
+                },
+                |(wa, a), (_wb, b)| (wa, a.reduce(b)),
+            );
 
         results.skips.precursor_out_of_fragmented_range = precursor_oofr_count;
         (results.res, results.timings, results.skips)
@@ -827,104 +814,54 @@ impl<I: ScorerQueriable> Scorer<I> {
         let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
-        #[cfg(feature = "rayon")]
-        let (heap, par_timings): (CalibrantHeap, super::timings::PrescoreTimings) = {
-            use super::timings::PrescoreTimings;
-            let num_cycles = self.num_cycles();
-            let n_calibrants = config.n_calibrants;
-            let max_frags = items_to_score
-                .iter()
-                .map(|i| i.expected_intensity.fragment_len())
-                .max()
-                .unwrap_or(0);
-            let init_fn = || {
+        use super::timings::PrescoreTimings;
+        let num_cycles = self.num_cycles();
+        let n_calibrants = config.n_calibrants;
+        let max_frags = items_to_score
+            .iter()
+            .map(|i| i.expected_intensity.fragment_len())
+            .max()
+            .unwrap_or(0);
+
+        let (_worker, heap, par_timings) = super::maybe_par::fold_reduce(
+            items_to_score,
+            || {
                 tracing::debug!(
                     target: "alloc_track",
                     phase = "phase1_prescore",
                     num_cycles,
                     n_calibrants,
                     max_frags,
-                    "rayon worker init: ScoringWorker + CalibrantHeap"
+                    "worker init: ScoringWorker + CalibrantHeap"
                 );
                 (
                     ScoringWorker::new(num_cycles, max_frags),
                     CalibrantHeap::new(n_calibrants),
                     PrescoreTimings::default(),
                 )
-            };
-
-            items_to_score
-                .par_iter()
-                .enumerate()
-                .filter(|(_, x)| filter_fn(x))
-                .fold(
-                    init_fn,
-                    |(mut worker, mut heap, mut t), (chunk_idx, item)| {
-                        t.n_passed_filter += 1;
-                        match self.prescore(item, &mut worker, &mut t) {
-                            Ok(loc) => {
-                                heap.push(CalibrantCandidate {
-                                    score: loc.score,
-                                    apex_rt: ObservedRTSeconds(
-                                        loc.retention_time_ms as f32 / 1000.0,
-                                    ),
-                                    speclib_index: speclib_offset + chunk_idx,
-                                    library_rt: LibraryRT(item.query.rt_seconds()),
-                                });
-                            }
-                            Err(reason) => t.skips.bump(reason),
-                        }
-                        (worker, heap, t)
-                    },
-                )
-                .map(|(_, heap, t)| (heap, t))
-                .reduce(
-                    || {
-                        (
-                            CalibrantHeap::new(config.n_calibrants),
-                            PrescoreTimings::default(),
-                        )
-                    },
-                    |(a_heap, mut a_t), (b_heap, b_t)| {
-                        a_t += b_t;
-                        (a_heap.merge(b_heap), a_t)
-                    },
-                )
-        };
-        #[cfg(feature = "rayon")]
-        {
-            *timings += par_timings;
-        }
-
-        #[cfg(not(feature = "rayon"))]
-        let heap: CalibrantHeap = {
-            let max_frags = items_to_score
-                .iter()
-                .map(|i| i.expected_intensity.fragment_len())
-                .max()
-                .unwrap_or(0);
-            let mut scorer = ScoringWorker::new(self.num_cycles(), max_frags);
-            let mut heap = CalibrantHeap::new(config.n_calibrants);
-            for (chunk_idx, item) in items_to_score.iter().enumerate() {
+            },
+            |(mut worker, mut heap, mut t), (chunk_idx, item)| {
                 if !filter_fn(&item) {
-                    continue;
+                    return (worker, heap, t);
                 }
-                timings.n_passed_filter += 1;
-                match self.prescore(item, &mut scorer, timings) {
-                    Ok(loc) => {
-                        heap.push(CalibrantCandidate {
-                            score: loc.score,
-                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                            speclib_index: speclib_offset + chunk_idx,
-                            library_rt: LibraryRT(item.query.rt_seconds()),
-                        });
-                    }
-                    Err(reason) => timings.skips.bump(reason),
+                t.n_passed_filter += 1;
+                match self.prescore(item, &mut worker, &mut t) {
+                    Ok(loc) => heap.push(CalibrantCandidate {
+                        score: loc.score,
+                        apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
+                        speclib_index: speclib_offset + chunk_idx,
+                        library_rt: LibraryRT(item.query.rt_seconds()),
+                    }),
+                    Err(reason) => t.skips.bump(reason),
                 }
-            }
-            heap
-        };
-
+                (worker, heap, t)
+            },
+            |(wa, ha, mut ta), (_wb, hb, tb)| {
+                ta += tb;
+                (wa, ha.merge(hb), ta)
+            },
+        );
+        *timings += par_timings;
         heap
     }
 
