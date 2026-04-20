@@ -171,8 +171,7 @@ pub struct ApexScore {
 /// contribution zero, matching the branched form exactly. Zero negative
 /// intensities expected; chromatograms are peak-intensity sums.
 ///
-/// Chunk width chosen by micro-bench
-/// (`examples/scoring_loops_asm.rs`): 4→4.5×, 8→6.6×, 16→6.9×, 32→6.7×.
+/// Chunk width chosen by micro-bench ... 16 can work too
 /// Width 8 picked as the plateau starts at 8 and 16 gains are noise.
 #[inline]
 fn accumulate_pass1_chunks(
