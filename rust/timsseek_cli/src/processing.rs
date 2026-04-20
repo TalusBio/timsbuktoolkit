@@ -44,6 +44,7 @@ use timsseek::scoring::{
     PipelineReport,
     ScoreTimings,
     ScoredCandidate,
+    SkipCounts,
 };
 use timsseek::{
     IonAnnot,
@@ -139,25 +140,31 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
     let phase1_lib = calib_lib.unwrap_or(speclib);
-    if let Some(ref clib) = calib_lib {
+    if let Some(clib) = calib_lib {
         info!(
             "Phase 1: Broad prescore using calibration library ({} entries)...",
             clib.len()
         );
-        check_rt_scale_compatibility(&speclib, clib);
+        check_rt_scale_compatibility(speclib, clib);
     } else {
         info!("Phase 1: Broad prescore (unrestricted RT)...");
     }
+    // Reset the `for_each_peak` filter-funnel counters so the per-phase
+    // dump reflects just this phase's work. Both calls no-op when the
+    // `query-instr` feature is disabled.
+    timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 1: Prescore");
     let (calibrants, phase1_timings) =
         phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
     let phase1_ms = step
         .finish_with(format_args!("{} calibrants", calibrants.len()))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 1: Prescore");
+    timscentroid::indexing::dump_for_each_peak_funnel("Phase 1");
+    timscentroid::indexing::reset_for_each_peak_funnel();
     info!(
         "Phase 1 detail: extraction {:?}, scoring {:?}, {} passed filter, {} scored",
         phase1_timings.extraction,
@@ -227,6 +234,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
         ))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 2: Calibrate");
     // Print tolerance summary
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
@@ -272,16 +280,20 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
+    timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
-    let results = phase3_score(
-        &speclib,
+    let (results, phase3_skips) = phase3_score(
+        speclib,
         pipeline,
         &calibration,
         chunk_size,
         &mut phase3_timings,
     );
     step.finish_with(format_args!("{} peptides", results.len()));
+    alloc_track::snap!("Phase 3: Score");
+    timscentroid::indexing::dump_for_each_peak_funnel("Phase 3");
+    timscentroid::indexing::reset_for_each_peak_funnel();
 
     let total_scored = results.len();
 
@@ -298,11 +310,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase4_ms = step
         .finish_with(format_args!("{} candidates", total_after_competition))
         .as_millis() as u64;
+    alloc_track::snap!("Phase 4: Compete");
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
     let data = rescore(competed);
     let phase5_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Phase 5: Rescore");
 
     // Collect q-value threshold counts — full report to log, key result to stdout
     let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
@@ -346,6 +360,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         source: e,
     })?;
     let phase6_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
     // Key result to stdout
@@ -370,6 +385,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         targets_at_1pct_qval,
         targets_at_5pct_qval,
         targets_at_10pct_qval,
+        phase3_skips,
     })
 }
 
@@ -383,7 +399,7 @@ fn phase1_prescore<I: ScorerQueriable>(
     chunk_size: usize,
     config: &CalibrationConfig,
 ) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
-    let n_chunks = (speclib.as_slice().len() + chunk_size - 1) / chunk_size;
+    let n_chunks = speclib.as_slice().len().div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 1");
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
@@ -596,9 +612,10 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             continue;
         }
 
-        let query_at_apex = item.query.clone().with_rt_seconds(candidate.apex_rt.0);
+        // No clone: build collector from &item.query with an rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(query_at_apex);
+            SpectralCollector::new(&item.query);
+        agg.reset_with_overrides(&item.query, Some(candidate.apex_rt.0), None);
         pipeline.index.add_query(&mut agg, &query_tolerance);
 
         let expected_mob = item.query.mobility_ook0() as f64;
@@ -682,31 +699,35 @@ fn phase3_score<I: ScorerQueriable>(
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
-) -> Vec<ScoredCandidate> {
+) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.as_slice().len();
-    let n_chunks = (total_peptides + chunk_size - 1) / chunk_size;
+    let n_chunks = total_peptides.div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 3");
 
     let mut results = Vec::new();
+    let mut skips = SkipCounts::default();
 
     for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings) = pipeline.score_calibrated_batch(chunk, calibration);
+        let (batch_results, batch_timings, batch_skips) =
+            pipeline.score_calibrated_batch(chunk, calibration);
         *timings += batch_timings;
+        skips += batch_skips;
         results.extend(batch_results);
     }
 
     let skipped = total_peptides - results.len();
     if skipped > total_peptides / 20 {
         warn!(
-            "{}/{} peptides produced no Phase 3 result (>{:.0}%). \
+            "{}/{} peptides produced no Phase 3 result (>{:.0}%): {}. \
              If this is unexpected, check calibration quality.",
             skipped,
             total_peptides,
-            (skipped as f64 / total_peptides as f64) * 100.0
+            (skipped as f64 / total_peptides as f64) * 100.0,
+            skips,
         );
     }
 
-    results
+    (results, skips)
 }
 
 /// `median ± n_sigma * 1.4826 * MAD`, asymmetric, floored.

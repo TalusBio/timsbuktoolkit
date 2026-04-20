@@ -28,9 +28,10 @@
 
 use crate::geometry::QuadrupoleIsolationScheme;
 use crate::indexing::{
-    IndexedPeak,
     IndexedPeakGroup,
     IndexedTimstofPeaks,
+    PeakColumns,
+    PeakColumnsView,
 };
 use crate::rt_mapping::{
     CycleToRTMapping,
@@ -177,7 +178,13 @@ impl From<url::ParseError> for SerializationError {
     }
 }
 
-const SCHEMA_VERSION: &str = "1.0";
+/// Current on-disk schema version. Writes always emit this.
+pub(crate) const SCHEMA_VERSION: &str = "2.0";
+
+/// Schema versions the loader accepts. Older entries are upgraded in memory
+/// via the `QuadrupoleIsolationScheme` `QuadWire` deserializer, which emits
+/// its own `tracing::warn!` on the upgrade path.
+pub(crate) const ACCEPTED_VERSIONS: &[&str] = &["1.0", "2.0"];
 
 /// Normalize a path to always use forward slashes (for object_store compatibility)
 ///
@@ -410,7 +417,7 @@ impl IndexedTimstofPeaks {
         ) = rayon::join(
             // Write MS1 in parallel thread
             || {
-                let ms1_bytes = write_peaks_to_parquet_bytes(&self.ms1_peaks.peaks, config)?;
+                let ms1_bytes = write_peaks_to_parquet_bytes(self.ms1_peaks.columns(), config)?;
                 storage.write_bytes("ms1.parquet", ms1_bytes)?;
 
                 Ok(PeakGroupMetadata {
@@ -429,7 +436,7 @@ impl IndexedTimstofPeaks {
                         // Always use forward slashes for storage paths (object_store requirement)
                         let path = format!("ms2/{}", filename);
 
-                        let bytes = write_peaks_to_parquet_bytes(&group.peaks, config)?;
+                        let bytes = write_peaks_to_parquet_bytes(group.columns(), config)?;
                         storage.write_bytes(&path, bytes)?;
 
                         Ok(Ms2GroupMetadata {
@@ -476,7 +483,7 @@ impl IndexedTimstofPeaks {
         let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
         // Validate schema version
-        if meta.version != SCHEMA_VERSION {
+        if !ACCEPTED_VERSIONS.contains(&meta.version.as_str()) {
             return Err(SerializationError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: meta.version,
@@ -496,7 +503,7 @@ impl IndexedTimstofPeaks {
         let meta: TimscentroidMetadata = serde_json::from_str(&metadata_json)?;
 
         // Validate schema version
-        if meta.version != SCHEMA_VERSION {
+        if !ACCEPTED_VERSIONS.contains(&meta.version.as_str()) {
             return Err(SerializationError::SchemaVersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: meta.version,
@@ -536,10 +543,10 @@ impl IndexedTimstofPeaks {
             || {
                 // Normalize path separators for cross-platform compatibility
                 let ms1_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
-                let ms1_peaks_vec = storage.read_parquet_peaks(&ms1_path)?;
+                let ms1_cols = storage.read_parquet_peaks(&ms1_path)?;
 
-                let (ms1_peaks, _stats) = IndexedPeakGroup::new(
-                    ms1_peaks_vec,
+                let (ms1_peaks, _stats) = IndexedPeakGroup::new_from_soa(
+                    ms1_cols,
                     meta.ms1_peaks.cycle_to_rt_ms.clone(),
                     meta.ms1_peaks.bucket_size,
                 );
@@ -552,10 +559,10 @@ impl IndexedTimstofPeaks {
                     .map(|group_meta| {
                         // Normalize path separators for cross-platform compatibility
                         let path = normalize_storage_path(&group_meta.group_info.relative_path);
-                        let peaks_vec = storage.read_parquet_peaks(&path)?;
+                        let cols = storage.read_parquet_peaks(&path)?;
 
-                        let (group, _stats) = IndexedPeakGroup::new(
-                            peaks_vec,
+                        let (group, _stats) = IndexedPeakGroup::new_from_soa(
+                            cols,
                             group_meta.group_info.cycle_to_rt_ms.clone(),
                             group_meta.group_info.bucket_size,
                         );
@@ -586,9 +593,9 @@ impl IndexedTimstofPeaks {
     ) -> Result<Self, SerializationError> {
         // Load MS1 first (normalize path for cross-platform compatibility)
         let ms1_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
-        let ms1_peaks_vec = storage.read_parquet_peaks(&ms1_path)?;
-        let (ms1_peaks, _stats) = IndexedPeakGroup::new(
-            ms1_peaks_vec,
+        let ms1_cols = storage.read_parquet_peaks(&ms1_path)?;
+        let (ms1_peaks, _stats) = IndexedPeakGroup::new_from_soa(
+            ms1_cols,
             meta.ms1_peaks.cycle_to_rt_ms.clone(),
             meta.ms1_peaks.bucket_size,
         );
@@ -600,10 +607,10 @@ impl IndexedTimstofPeaks {
             .map(|group_meta| {
                 // Normalize path separators for cross-platform compatibility
                 let path = normalize_storage_path(&group_meta.group_info.relative_path);
-                let peaks_vec = storage.read_parquet_peaks(&path)?;
+                let cols = storage.read_parquet_peaks(&path)?;
 
-                let (group, _stats) = IndexedPeakGroup::new(
-                    peaks_vec,
+                let (group, _stats) = IndexedPeakGroup::new_from_soa(
+                    cols,
                     group_meta.group_info.cycle_to_rt_ms.clone(),
                     group_meta.group_info.bucket_size,
                 );
@@ -618,15 +625,17 @@ impl IndexedTimstofPeaks {
     }
 }
 
-// Helper function to write parquet to bytes (used by cloud storage)
+// Helper function to write parquet to bytes (used by cloud storage).
+//
+// All four slices in `cols` share the same length — enforced by
+// `IndexedPeakGroup::columns`.
 fn write_peaks_to_parquet_bytes<T: RTIndex>(
-    peaks: &[IndexedPeak<T>],
+    cols: PeakColumnsView<'_, T>,
     config: SerializationConfig,
 ) -> Result<Vec<u8>, SerializationError> {
     let mut buffer = Vec::new();
     let cursor = std::io::Cursor::new(&mut buffer);
 
-    // Build writer properties with provided configuration
     let props = WriterProperties::builder()
         .set_compression(config.compression)
         .set_max_row_group_size(config.row_group_size)
@@ -642,13 +651,18 @@ fn write_peaks_to_parquet_bytes<T: RTIndex>(
     let schema = Arc::new(PeakSchema::canonical());
     let mut writer = ArrowWriter::try_new(cursor, schema.clone(), Some(props))?;
 
-    // Write peaks in chunks to control memory usage and row group size
-    for chunk in peaks.chunks(config.row_group_size) {
-        let mz_array = Float32Array::from_iter_values(chunk.iter().map(|p| p.mz));
-        let intensity_array = Float32Array::from_iter_values(chunk.iter().map(|p| p.intensity));
-        let mobility_array = Float16Array::from_iter_values(chunk.iter().map(|p| p.mobility_ook0));
+    let rgs = config.row_group_size;
+    let total = cols.len();
+    let mut off = 0;
+    while off < total {
+        let end = (off + rgs).min(total);
+        let chunk = cols.slice(off..end);
+        let mz_array = Float32Array::from_iter_values(chunk.mz().iter().copied());
+        let intensity_array = Float32Array::from_iter_values(chunk.intensity().iter().copied());
+        let mobility_array =
+            Float16Array::from_iter_values(chunk.mobility().iter().map(|m| m.to_f16()));
         let cycle_array =
-            UInt32Array::from_iter_values(chunk.iter().map(|p| p.cycle_index.as_u32()));
+            UInt32Array::from_iter_values(chunk.cycle_index().iter().map(|c| c.as_u32()));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -661,24 +675,23 @@ fn write_peaks_to_parquet_bytes<T: RTIndex>(
         )?;
 
         writer.write(&batch)?;
+        off = end;
     }
 
     writer.close()?;
     Ok(buffer)
 }
 
-/// Convert a RecordBatch to peaks
+/// Extend SoA column buffers from a single Arrow RecordBatch.
 ///
-/// This helper extracts peaks from an Arrow RecordBatch, validating
-/// column types and indices. Used by both file-based and cloud-based
-/// parquet readers.
-pub(crate) fn batch_to_peaks<T: RTIndex>(
+/// Validates schema + mobility invariants (non-negative, non-NaN) at the
+/// boundary — the inner scan loop assumes this.
+pub(crate) fn extend_soa_from_batch<T: RTIndex>(
+    dst: &mut PeakColumns<T>,
     batch: &RecordBatch,
-) -> Result<Vec<IndexedPeak<T>>, SerializationError> {
-    // Validate schema and get column indices
+) -> Result<(), SerializationError> {
     let peak_schema = PeakSchema::validate(batch.schema().as_ref())?;
 
-    // Use validated column indices - no string lookups in hot loop
     let mz = batch
         .column(peak_schema.mz_idx)
         .as_any()
@@ -699,7 +712,6 @@ pub(crate) fn batch_to_peaks<T: RTIndex>(
             got: format!("{:?}", batch.column(peak_schema.intensity_idx).data_type()),
         })?;
 
-    // Read as f16 directly - no conversion!
     let mobility = batch
         .column(peak_schema.mobility_idx)
         .as_any()
@@ -720,19 +732,19 @@ pub(crate) fn batch_to_peaks<T: RTIndex>(
             got: format!("{:?}", batch.column(peak_schema.cycle_idx).data_type()),
         })?;
 
-    // Pre-allocate for this batch
-    let mut peaks = Vec::with_capacity(batch.num_rows());
+    let n = batch.num_rows();
+    dst.reserve(n);
 
-    // Use iterator-based approach for better optimization
-    // Arrow guarantees all columns have the same length in a RecordBatch
-    for i in 0..batch.num_rows() {
-        peaks.push(IndexedPeak {
-            mz: mz.value(i),
-            intensity: intensity.value(i),
-            mobility_ook0: mobility.value(i), // No conversion needed!
-            cycle_index: T::new(cycle.value(i)),
-        });
+    for i in 0..n {
+        let mob = crate::utils::MobInt::from_f16(mobility.value(i)).map_err(|e| {
+            SerializationError::WrongColumnType {
+                column: "mobility_ook0".to_string(),
+                expected: "non-negative non-NaN f16",
+                got: format!("{e}"),
+            }
+        })?;
+        dst.push(mz.value(i), intensity.value(i), mob, T::new(cycle.value(i)));
     }
 
-    Ok(peaks)
+    Ok(())
 }

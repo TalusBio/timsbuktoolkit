@@ -36,12 +36,16 @@ use config::{
 };
 // use tracing_profile::PerfettoLayer;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
 use mimalloc::MiMalloc;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[cfg(feature = "track-alloc")]
+#[global_allocator]
+static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::new();
 
 /// Validated inputs ready for processing
 struct ValidatedInputs {
@@ -265,6 +269,21 @@ fn process_single_file(
     )?
     .into_eager()?;
     let load_index_ms = step.finish().as_millis() as u64;
+    alloc_track::snap!("Loading index");
+
+    // Rebucket to the scoring-optimal size. Existing on-disk caches
+    // are written with `bucket_size=4096`, which is too large for the
+    // tight mz tolerances used by Phase 1 / Phase 3 (measured: ~−24%
+    // wall at bucket_size=256). `BUCKET_SIZE` env var overrides for
+    // experiments.
+    let new_bucket_size: usize = std::env::var("BUCKET_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&bs| bs > 0)
+        .unwrap_or(256);
+    let step = TimedStep::begin(format_args!("Rebucket at {}", new_bucket_size));
+    let index = index.rebucket(new_bucket_size);
+    step.finish();
 
     let fragmented_range = get_frag_range(&timstofpath)?;
 
@@ -507,6 +526,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     info!("Parsed configuration: {:#?}", config.clone());
+    alloc_track::snap!("start");
 
     let validated = validate_inputs(&config, &args)?;
 
@@ -554,6 +574,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     let load_speclib_ms = step
         .finish_with(format_args!("{} entries", speclib.len()))
         .as_millis() as u64;
+    alloc_track::snap!("Loading speclib");
 
     // Load calibration library once (if provided)
     let (calib_lib, load_calib_lib_ms) = match &validated.calib_lib_path {
@@ -570,6 +591,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
             let ms = step
                 .finish_with(format_args!("{} entries", lib.len()))
                 .as_millis() as u64;
+            alloc_track::snap!("Loading calib lib");
             (Some(lib), ms)
         }
         None => (None, 0),

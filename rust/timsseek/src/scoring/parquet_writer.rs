@@ -300,8 +300,8 @@ impl ResultParquetWriter {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let writer =
+            ArrowWriter::try_new(file, schema, Some(props)).map_err(std::io::Error::other)?;
 
         Ok(Self {
             writer,
@@ -324,18 +324,14 @@ impl ResultParquetWriter {
         }
         debug!("Flushing {} results to parquet", self.buffer.len());
         let batch = build_record_batch(&self.buffer)?;
-        self.writer
-            .write(&batch)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        self.writer.write(&batch).map_err(std::io::Error::other)?;
         self.buffer.clear();
         Ok(())
     }
 
     pub fn close(mut self) -> std::io::Result<()> {
         self.flush()?;
-        self.writer
-            .close()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        self.writer.close().map_err(std::io::Error::other)?;
         Ok(())
     }
 }

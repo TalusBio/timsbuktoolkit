@@ -162,6 +162,66 @@ pub struct ApexScore {
     pub falling_cycles: u8,
 }
 
+/// Chunk-8 vectorized accumulator for `compute_pass_1`'s 4 cheap
+/// per-cycle accumulators (dot-product, norm-sq, sqrt-sum, raw-sum).
+///
+/// Parity with the scalar branched form (`if intensity > 0.0 { ... }`)
+/// holds because chromatogram intensities are non-negative in practice:
+/// for `intensity <= 0.0`, `v = intensity.max(0.0) == 0` makes every
+/// contribution zero, matching the branched form exactly. Zero negative
+/// intensities expected; chromatograms are peak-intensity sums.
+///
+/// Chunk width chosen by micro-bench
+/// (`examples/scoring_loops_asm.rs`): 4→4.5×, 8→6.6×, 16→6.9×, 32→6.7×.
+/// Width 8 picked as the plateau starts at 8 and 16 gains are noise.
+#[inline]
+fn accumulate_pass1_chunks(
+    chrom: &[f32],
+    sqrt_exp: f32,
+    ms2_dot_prod: &mut [f32],
+    ms2_norm_sq_obs: &mut [f32],
+    sqrt_sum: &mut [f32],
+    raw_sum: &mut [f32],
+) {
+    // Invariant: all slices are sized to num_cycles and must match, else
+    // `zip` will silently truncate and downstream accumulators diverge
+    // from the reference impl. Programming error, not a recoverable
+    // condition — panic.
+    let n = chrom.len();
+    assert_eq!(ms2_dot_prod.len(), n, "ms2_dot_prod length mismatch");
+    assert_eq!(ms2_norm_sq_obs.len(), n, "ms2_norm_sq_obs length mismatch");
+    assert_eq!(sqrt_sum.len(), n, "sqrt_sum length mismatch");
+    assert_eq!(raw_sum.len(), n, "raw_sum length mismatch");
+
+    let (c_ch, c_tail) = chrom.as_chunks::<8>();
+    let (d_ch, d_tail) = ms2_dot_prod.as_chunks_mut::<8>();
+    let (n_ch, n_tail) = ms2_norm_sq_obs.as_chunks_mut::<8>();
+    let (s_ch, s_tail) = sqrt_sum.as_chunks_mut::<8>();
+    let (r_ch, r_tail) = raw_sum.as_chunks_mut::<8>();
+    for ((((c, d), n), s), r) in c_ch.iter().zip(d_ch).zip(n_ch).zip(s_ch).zip(r_ch) {
+        for k in 0..8 {
+            let v = c[k].max(0.0);
+            d[k] += v * sqrt_exp;
+            n[k] += v * v;
+            s[k] += v.sqrt();
+            r[k] += v;
+        }
+    }
+    for ((((c, d), n), s), r) in c_tail
+        .iter()
+        .zip(d_tail)
+        .zip(n_tail)
+        .zip(s_tail)
+        .zip(r_tail)
+    {
+        let v = c.max(0.0);
+        *d += v * sqrt_exp;
+        *n += v * v;
+        *s += v.sqrt();
+        *r += v;
+    }
+}
+
 /// Stores time-resolved scores for every cycle in the chromatogram.
 #[derive(Debug, Clone, Serialize)]
 pub struct ElutionTraces {
@@ -211,13 +271,13 @@ impl ElutionTraces {
     }
 
     pub fn iter_scores(&self) -> impl Iterator<Item = (&'static str, &[f32])> + '_ {
-        vec![
-            ("cosine_trace", &self.cosine_trace[..]),
-            ("ms2_lazyscore", &self.ms2_lazyscore[..]),
-            ("ms2_scribe", &self.ms2_scribe[..]),
-            ("ms2_log_intensity", &self.ms2_log_intensity[..]),
-            ("ms1_precursor_trace", &self.ms1_precursor_trace[..]),
-            ("apex_profile", &self.apex_profile[..]),
+        [
+            ("cosine_trace", self.cosine_trace.as_slice()),
+            ("ms2_lazyscore", self.ms2_lazyscore.as_slice()),
+            ("ms2_scribe", self.ms2_scribe.as_slice()),
+            ("ms2_log_intensity", self.ms2_log_intensity.as_slice()),
+            ("ms1_precursor_trace", self.ms1_precursor_trace.as_slice()),
+            ("apex_profile", self.apex_profile.as_slice()),
         ]
         .into_iter()
     }
@@ -228,6 +288,7 @@ impl ElutionTraces {
 pub struct TraceScorer {
     pub traces: ElutionTraces,
     buffers: TraceScorerBuffers,
+    coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
 }
@@ -242,15 +303,19 @@ struct TraceScorerBuffers {
     temp_sqrt_sum: Vec<f32>,
     /// Log-intensity: sum(obs) per cycle (finalized as log1p).
     temp_raw_intensity_sum: Vec<f32>,
+    /// Scribe pred-norm list, one entry per active expected fragment.
+    /// Cleared and re-populated per peptide.
+    pred_norms: Vec<(usize, f32)>,
 }
 
 impl TraceScorerBuffers {
-    fn new(size: usize) -> Self {
+    fn new(size: usize, max_frags: usize) -> Self {
         Self {
             temp_ms2_dot_prod: vec![0.0f32; size],
             temp_ms2_norm_sq_obs: vec![0.0f32; size],
             temp_sqrt_sum: vec![0.0f32; size],
             temp_raw_intensity_sum: vec![0.0f32; size],
+            pred_norms: Vec::with_capacity(max_frags),
         }
     }
 
@@ -259,6 +324,7 @@ impl TraceScorerBuffers {
         self.temp_ms2_norm_sq_obs.fill(0.0);
         self.temp_sqrt_sum.fill(0.0);
         self.temp_raw_intensity_sum.fill(0.0);
+        self.pred_norms.clear();
     }
 
     fn resize(&mut self, len: usize) {
@@ -270,10 +336,14 @@ impl TraceScorerBuffers {
 }
 
 impl TraceScorer {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, max_frags: usize) -> Self {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
-            buffers: TraceScorerBuffers::new(capacity),
+            buffers: TraceScorerBuffers::new(capacity, max_frags),
+            coel_scratch:
+                crate::scoring::scores::apex_features::CoelutionScratch::with_frag_capacity(
+                    max_frags,
+                ),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
         }
@@ -372,7 +442,11 @@ impl TraceScorer {
             &self.cosine_profile,
             &self.scribe_profile,
             &scoring_ctx.chromatograms.fragments,
-            &scoring_ctx.expected_intensities.fragment_intensities,
+            scoring_ctx
+                .expected_intensities
+                .fragment_intensities
+                .as_slice(),
+            &mut self.coel_scratch,
         );
 
         // Delta scores: compare apex_profile[cycle] against global 2nd/3rd peaks
@@ -509,16 +583,14 @@ impl TraceScorer {
         // Sum of sqrt(expected) for cosine norm: ||sqrt(exp)||^2 = sum(exp)
         let mut ms2_sum_exp = 0.0f32;
 
-        // Pre-compute pred_norm for scribe
-        let mut pred_norms: Vec<(usize, f32)> = Vec::new();
+        let pred_norms = &mut self.buffers.pred_norms;
+        pred_norms.clear();
         let mut pred_sqrt_sum = 0.0f32;
 
         for (row_idx, ((key, _mz), chrom)) in collector.fragments.iter_mzs().enumerate() {
             let expected = scoring_ctx
                 .expected_intensities
-                .fragment_intensities
-                .get(key)
-                .copied()
+                .get_fragment(key)
                 .unwrap_or(0.0);
 
             if expected <= 0.0 {
@@ -530,20 +602,32 @@ impl TraceScorer {
             pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
+            // Lazyscore: gated on positive intensity; keep scalar because
+            // the gate avoids expensive `logf` calls on zero-intensity
+            // cycles. This is a small fraction of the inner-loop cost.
+            let ms2_lazyscore = &mut self.traces.ms2_lazyscore;
             for (i, &intensity) in chrom.iter().enumerate() {
                 if intensity > 0.0 {
-                    // Lazyscore accumulation
-                    self.traces.ms2_lazyscore[i] += intensity.max(1.0).ln();
-                    // Cosine: dot(obs, sqrt(exp))
-                    ms2_dot_prod[i] += intensity * sqrt_exp;
-                    // Cosine: obs norm
-                    ms2_norm_sq_obs[i] += intensity * intensity;
-                    // Scribe: sqrt(obs) sum
-                    sqrt_sum[i] += intensity.sqrt();
+                    ms2_lazyscore[i] += intensity.max(1.0).ln();
                 }
-                // Raw intensity sum (for log-intensity, includes zeros)
-                raw_sum[i] += intensity.max(0.0);
             }
+
+            // 4 cheap accumulators vectorized via chunked loop. The
+            // `if intensity > 0.0` branch is replaced by `v =
+            // intensity.max(0.0)`: for non-positive intensity every
+            // contribution is zero (0*x = 0, 0*0 = 0, sqrt(0) = 0),
+            // matching the branched form exactly since chromatogram
+            // intensities are always non-negative in practice.
+            // Micro-benchmark: chunk-8 is ~6.6× faster than scalar.
+            // See `examples/scoring_loops_asm.rs` for parity + ASM.
+            accumulate_pass1_chunks(
+                chrom,
+                sqrt_exp,
+                ms2_dot_prod,
+                ms2_norm_sq_obs,
+                sqrt_sum,
+                raw_sum,
+            );
         }
 
         // Finalize cosine, lazyscore, log-intensity
@@ -575,7 +659,7 @@ impl TraceScorer {
             }
 
             // Pass B: accumulate SSE
-            for &(row_idx, pred_norm_i) in &pred_norms {
+            for &(row_idx, pred_norm_i) in pred_norms.iter() {
                 let row = collector
                     .fragments
                     .get_row_idx(row_idx)

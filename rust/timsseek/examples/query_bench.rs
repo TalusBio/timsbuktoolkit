@@ -1,0 +1,208 @@
+//! Real-speclib per-peak iteration bench.
+//!
+//! Runs `add_query` against the production index + speclib for three
+//! aggregators that touch every matching peak with different sink
+//! costs:
+//!   - `SpectralCollector<_, NoOpSink>`: `counter += 1` per peak
+//!     (pure iteration + filter ceiling)
+//!   - `PointIntensityAggregator`: `agg.intensity += peak.intensity as f64`
+//!   - `ChromatogramCollector`: scatter-write into cycle-indexed rows
+//!
+//! All three go through the same `for_each_peak` / `for_each_ms1_peak`
+//! scan machinery, so time-delta between them attributes to sink cost.
+//! Total time per aggregator attributes the hot path (scan + filter +
+//! sink) at realistic peak density — library fragment m/zs cluster
+//! around real peptide peaks, unlike a uniform-random mz bench.
+//!
+//! Run: cargo run -r -p timsseek --example query_bench
+//!
+//! Env overrides:
+//!   BENCH_DOTD    — .d path (default Hela)
+//!   BENCH_SPECLIB — speclib path (default asdad)
+//!   QB_N         — number of speclib entries to process (default 2000)
+//!   QB_ITERS     — outer repeat count (default 1)
+//!   QB_BUCKET    — rebucket to this size before benching (default 256,
+//!                  set 0 to skip rebucket and use on-disk size)
+
+use std::ops::AddAssign;
+use std::path::Path;
+use std::time::Instant;
+use timscentroid::indexing::IndexedPeak;
+use timscentroid::rt_mapping::RTIndex;
+use timsquery::models::aggregators::{
+    ChromatogramCollector,
+    PointIntensityAggregator,
+    SpectralCollector,
+};
+use timsquery::models::tolerance::Tolerance;
+use timsquery::serde::{
+    IndexedPeaksHandle,
+    load_index_auto,
+};
+use timsquery::traits::queriable_data::{
+    PeakAddable,
+    QueriableData,
+};
+use timsquery::utils::TupleRange;
+use timsseek::IonAnnot;
+use timsseek::data_sources::speclib::Speclib;
+use timsseek::models::DecoyStrategy;
+
+/// Counting peak sink — single u32 increment per peak. One dependent
+/// scalar store (no fadd, no scatter, no memory fence) → cleanest
+/// "iteration + filter" cost ceiling. LLVM can't elide the counter
+/// because it's read from the aggregator after the call.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct NoOpSink(u32);
+
+impl<T: RTIndex> AddAssign<IndexedPeak<T>> for NoOpSink {
+    #[inline(always)]
+    fn add_assign(&mut self, _rhs: IndexedPeak<T>) {
+        self.0 += 1;
+    }
+}
+
+impl<T: RTIndex> PeakAddable<T> for NoOpSink {}
+
+fn env(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn main() {
+    let dotd = env(
+        "BENCH_DOTD",
+        "/Users/sebastianpaez/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
+    );
+    let speclib_path = env(
+        "BENCH_SPECLIB",
+        "/Users/sebastianpaez/fasta/asdad.msgpack.zstd",
+    );
+    let n: usize = env("QB_N", "2000").parse().unwrap();
+    let iters: usize = env("QB_ITERS", "1").parse().unwrap();
+    let bucket_size: usize = env("QB_BUCKET", "256").parse().unwrap();
+
+    eprintln!("Loading index from {dotd}...");
+    let t0 = Instant::now();
+    let handle = load_index_auto(&dotd, None).expect("load index");
+    let index = match handle {
+        IndexedPeaksHandle::Eager(eager) => eager,
+        IndexedPeaksHandle::Lazy(_) => panic!("lazy index not supported by this bench"),
+    };
+    eprintln!("  index ready in {:?}", t0.elapsed());
+
+    let index = if bucket_size > 0 {
+        eprintln!("Rebucketing to bucket_size={}...", bucket_size);
+        let t0 = Instant::now();
+        let i = index.rebucket(bucket_size);
+        eprintln!("  rebucket done in {:?}", t0.elapsed());
+        i
+    } else {
+        eprintln!("Skipping rebucket (QB_BUCKET=0)");
+        index
+    };
+
+    eprintln!("Loading speclib from {speclib_path}...");
+    let t0 = Instant::now();
+    let speclib = Speclib::from_file(Path::new(&speclib_path), DecoyStrategy::default())
+        .expect("load speclib");
+    eprintln!(
+        "  speclib ready in {:?} ({} entries)",
+        t0.elapsed(),
+        speclib.len()
+    );
+
+    let tolerance = Tolerance::default();
+    eprintln!("Tolerance: {:?}", tolerance);
+
+    // Cycle-mapping range — use the index's full range so no RT filtering
+    // prunes peaks away; isolates per-peak iteration cost.
+    let cycle_mapping = index.ms1_cycle_mapping();
+    let (min_rt, max_rt) = cycle_mapping.range_milis();
+    let rt_range = TupleRange::try_new(min_rt, max_rt).expect("rt range valid");
+
+    let items: Vec<_> = speclib.as_slice().iter().take(n).collect();
+    eprintln!("Benching {} items × {} iters each", items.len(), iters);
+
+    // ---- Counting sink (pure iteration cost via SpectralCollector + blanket impl) ----
+    {
+        let t0 = Instant::now();
+        let mut total_peaks = 0u64;
+        for _ in 0..iters {
+            for item in &items {
+                let mut agg = SpectralCollector::<IonAnnot, NoOpSink>::new(&item.query);
+                index.add_query(&mut agg, &tolerance);
+                for (_, s) in agg.iter_precursors() {
+                    total_peaks += s.0 as u64;
+                }
+                for (_, s) in agg.iter_fragments() {
+                    total_peaks += s.0 as u64;
+                }
+            }
+        }
+        let e = t0.elapsed();
+        let pep_total = items.len() * iters;
+        eprintln!(
+            "NOOP    total={:?} per-pep={:.1}µs total_peaks={} (ns/peak ≈ {:.1})",
+            e,
+            e.as_nanos() as f64 / pep_total as f64 / 1000.0,
+            total_peaks,
+            e.as_nanos() as f64 / total_peaks.max(1) as f64,
+        );
+    }
+
+    // ---- Point aggregator ----
+    {
+        let t0 = Instant::now();
+        let mut total_intensity = 0.0f64;
+        for _ in 0..iters {
+            for item in &items {
+                let mut agg = PointIntensityAggregator::<IonAnnot>::new(&item.query);
+                index.add_query(&mut agg, &tolerance);
+                total_intensity += agg.intensity;
+            }
+        }
+        let e = t0.elapsed();
+        let pep_total = items.len() * iters;
+        eprintln!(
+            "POINT   total={:?} per-pep={:.1}µs total_intensity={:.3e}",
+            e,
+            e.as_nanos() as f64 / pep_total as f64 / 1000.0,
+            total_intensity,
+        );
+    }
+
+    // ---- Chromatogram aggregator ----
+    {
+        let t0 = Instant::now();
+        let mut total_frag_peaks = 0u64;
+        for _ in 0..iters {
+            for item in &items {
+                let Ok(mut agg) = ChromatogramCollector::<IonAnnot, f32>::new(
+                    &item.query,
+                    rt_range,
+                    cycle_mapping,
+                ) else {
+                    continue;
+                };
+                index.add_query(&mut agg, &tolerance);
+                total_frag_peaks += agg.n_fragment_peaks_added;
+            }
+        }
+        let e = t0.elapsed();
+        let pep_total = items.len() * iters;
+        eprintln!(
+            "CHROM   total={:?} per-pep={:.1}µs total_ms2_peaks={}",
+            e,
+            e.as_nanos() as f64 / pep_total as f64 / 1000.0,
+            total_frag_peaks,
+        );
+        eprintln!(
+            "  (ns/peak ≈ {:.1})",
+            e.as_nanos() as f64 / total_frag_peaks as f64,
+        );
+    }
+
+    // No-op when built without `query-instr`; prints filter-funnel
+    // counts when built `--features timscentroid/query-instr`.
+    timscentroid::indexing::dump_for_each_peak_funnel("query_bench");
+}

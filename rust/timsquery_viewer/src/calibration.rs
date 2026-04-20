@@ -464,7 +464,9 @@ impl ViewerCalibrationState {
                 .fold(
                     || {
                         (
-                            TraceScorer::new(n_cycles),
+                            // Viewer is interactive, not a hot path — a conservative
+                            // default capacity is fine; realloc on outliers is free.
+                            TraceScorer::new(n_cycles, 16),
                             CalibrantHeap::new(heap_capacity),
                         )
                     },
@@ -659,28 +661,28 @@ impl ViewerCalibrationState {
                             self.start(Arc::clone(index), Arc::clone(data));
                         }
                     }
-                    if ui.button("Load").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
+                    if ui.button("Load").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
                             .add_filter("JSON", &["json"])
                             .pick_file()
+                    {
+                        let raw_rt_range = if let crate::app::IndexedDataState::Loaded {
+                            index,
+                            ..
+                        } = indexed_data
                         {
-                            let raw_rt_range =
-                                if let crate::app::IndexedDataState::Loaded { index, .. } =
-                                    indexed_data
-                                {
-                                    let cycle_mapping = index.ms1_cycle_mapping();
-                                    let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-                                    Some([rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0])
-                                } else {
-                                    None
-                                };
-                            match self.load_from_file(&path, raw_rt_range) {
-                                Ok(Some(warning)) => tracing::warn!("{}", warning),
-                                Ok(None) => {
-                                    tracing::info!("Calibration loaded from {:?}", path)
-                                }
-                                Err(e) => tracing::error!("Failed to load calibration: {}", e),
+                            let cycle_mapping = index.ms1_cycle_mapping();
+                            let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                            Some([rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0])
+                        } else {
+                            None
+                        };
+                        match self.load_from_file(&path, raw_rt_range) {
+                            Ok(Some(warning)) => tracing::warn!("{}", warning),
+                            Ok(None) => {
+                                tracing::info!("Calibration loaded from {:?}", path)
                             }
+                            Err(e) => tracing::error!("Failed to load calibration: {}", e),
                         }
                     }
                 }

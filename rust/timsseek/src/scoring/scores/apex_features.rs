@@ -4,9 +4,47 @@
 //! They operate on windows of the raw chromatogram data and implement the
 //! 11 feature functions plus helper structs described in METHODS.md Sections 3.1-3.5.
 
-use std::collections::HashMap;
+use array2d::Array2D;
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
+
+use crate::models::query_item::linear_get;
+
+/// Reusable scratch buffers for `coelution_gradient`. Owned by the scorer so
+/// allocations happen once per rayon worker split and are reused across every
+/// peptide that worker processes. See [`CoelutionScratch::with_frag_capacity`]
+/// for sizing.
+#[derive(Debug)]
+pub struct CoelutionScratch {
+    /// Rows: active fragments. Cols: coelution window length.
+    coel_rows: Array2D<f32>,
+    /// Rows: active fragments. Cols: gradient window length - 1.
+    grad_rows: Array2D<f32>,
+    /// One weight per active fragment in `coel_rows`.
+    weights: Vec<f32>,
+    /// First-differences buffer reused across fragments inside one call.
+    diffs: Vec<f32>,
+}
+
+impl CoelutionScratch {
+    const TYP_COEL_LEN: usize = 41;
+    const TYP_DIFF_LEN: usize = 20;
+
+    /// Reserve scratch capacity for a library whose peptides have at most
+    /// `frag_capacity` fragments. Coel window = 2*20+1 = 41 cycles,
+    /// gradient diffs = 2*10 = 20. If callers pass the library-wide max
+    /// (pre-scanned via `items_to_score.iter().map(|i|
+    /// i.expected_intensity.fragment_len()).max()`), no realloc occurs for
+    /// any peptide.
+    pub fn with_frag_capacity(frag_capacity: usize) -> Self {
+        Self {
+            coel_rows: Array2D::with_capacity(Self::TYP_COEL_LEN, frag_capacity),
+            grad_rows: Array2D::with_capacity(Self::TYP_DIFF_LEN, frag_capacity),
+            weights: Vec::with_capacity(frag_capacity),
+            diffs: Vec::with_capacity(Self::TYP_DIFF_LEN),
+        }
+    }
+}
 
 /// Floor value for Scribe score when no signal is observed.
 pub const SCRIBE_FLOOR: f32 = -100.0;
@@ -191,8 +229,7 @@ fn estimate_fwhm(profile: &[f32], apex: usize) -> f32 {
         }
     }
 
-    let fwhm = (left_dist + right_dist).max(1.0);
-    fwhm
+    (left_dist + right_dist).max(1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,10 +272,11 @@ pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniqueness
 /// Returns `combined = 1.0` if fewer than 2 active fragments in the window.
 pub fn coelution_gradient<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
     apex: usize,
     coelution_hw: usize,
     gradient_hw: usize,
+    scratch: &mut CoelutionScratch,
 ) -> CoelutionGradientResult {
     let n_cycles = fragments.num_cycles();
     if n_cycles == 0 {
@@ -249,7 +287,6 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
-    // Collect fragment windows and weights
     let coel_lo = apex.saturating_sub(coelution_hw);
     let coel_hi = (apex + coelution_hw + 1).min(n_cycles);
     let coel_len = coel_hi - coel_lo;
@@ -257,13 +294,9 @@ pub fn coelution_gradient<T: KeyLike>(
     let grad_lo = apex.saturating_sub(gradient_hw);
     let grad_hi = (apex + gradient_hw + 1).min(n_cycles);
     let grad_len = grad_hi - grad_lo;
+    let diff_len = grad_len.saturating_sub(1);
 
-    // We work with up to ~16 fragments; use small vecs.
-    let mut windows: Vec<Vec<f32>> = Vec::new();
-    let mut weights: Vec<f32> = Vec::new();
-    let mut grad_windows: Vec<Vec<f32>> = Vec::new();
-
-    let weight_sum: f32 = expected.values().sum();
+    let weight_sum: f32 = expected.iter().map(|(_, v)| *v).sum();
     if weight_sum <= 0.0 {
         return CoelutionGradientResult {
             weighted_coelution: 0.0,
@@ -272,35 +305,50 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
+    // Upper bound on active fragments; we fill contiguous rows and track
+    // `n_active_coel` / `n_active_grad` ourselves.
+    let max_frags = fragments.num_ions();
+    scratch.coel_rows.reset_with_value(coel_len, max_frags, 0.0);
+    scratch.grad_rows.reset_with_value(diff_len, max_frags, 0.0);
+    scratch.weights.clear();
+    scratch.diffs.clear();
+    scratch.diffs.resize(diff_len, 0.0);
+
+    let mut n_active_coel: usize = 0;
+    let mut n_active_grad: usize = 0;
+
     for ((key, _mz), chrom) in fragments.iter_mzs() {
-        let y_hat = expected.get(key).copied().unwrap_or(0.0);
+        let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat <= 0.0 {
             continue;
         }
 
-        // Coelution window
         let coel_slice = &chrom[coel_lo..coel_hi];
-        let mut normed = vec![0.0f32; coel_len];
-        if center_normalize(coel_slice, &mut normed) {
-            windows.push(normed);
-            weights.push(y_hat / weight_sum);
+        let coel_row = scratch
+            .coel_rows
+            .get_row_mut(n_active_coel)
+            .expect("coel_rows pre-sized to max_frags");
+        if center_normalize(coel_slice, coel_row) {
+            scratch.weights.push(y_hat / weight_sum);
+            n_active_coel += 1;
         }
 
-        // Gradient window: first differences
-        if grad_len >= 2 {
+        if diff_len >= 1 && grad_len >= 2 {
             let grad_slice = &chrom[grad_lo..grad_hi];
-            let diffs: Vec<f32> = grad_slice.windows(2).map(|w| w[1] - w[0]).collect();
-            let mut normed_grad = vec![0.0f32; diffs.len()];
-            if center_normalize(&diffs, &mut normed_grad) {
-                grad_windows.push(normed_grad);
+            for (i, w) in grad_slice.windows(2).enumerate() {
+                scratch.diffs[i] = w[1] - w[0];
+            }
+            let grad_row = scratch
+                .grad_rows
+                .get_row_mut(n_active_grad)
+                .expect("grad_rows pre-sized to max_frags");
+            if center_normalize(&scratch.diffs, grad_row) {
+                n_active_grad += 1;
             }
         }
     }
 
-    let n_active = windows.len();
-
-    // Need at least 2 active fragments for pairwise correlations
-    if n_active < 2 {
+    if n_active_coel < 2 {
         return CoelutionGradientResult {
             weighted_coelution: 0.0,
             gradient_consistency: 0.0,
@@ -308,17 +356,15 @@ pub fn coelution_gradient<T: KeyLike>(
         };
     }
 
-    // Weighted coelution: pairwise dot products (already centered+normalized = correlations)
+    // Weighted coelution: pairwise dot products (centered+normalized = correlations).
     let mut wcoel_num = 0.0f32;
     let mut wcoel_den = 0.0f32;
-    for i in 0..n_active {
-        for j in (i + 1)..n_active {
-            let corr: f32 = windows[i]
-                .iter()
-                .zip(windows[j].iter())
-                .map(|(a, b)| a * b)
-                .sum();
-            let w = weights[i] * weights[j];
+    for i in 0..n_active_coel {
+        let row_i = scratch.coel_rows.get_row(i).unwrap();
+        for j in (i + 1)..n_active_coel {
+            let row_j = scratch.coel_rows.get_row(j).unwrap();
+            let corr: f32 = row_i.iter().zip(row_j.iter()).map(|(a, b)| a * b).sum();
+            let w = scratch.weights[i] * scratch.weights[j];
             wcoel_num += w * corr;
             wcoel_den += w;
         }
@@ -329,18 +375,15 @@ pub fn coelution_gradient<T: KeyLike>(
         0.0
     };
 
-    // Gradient consistency: unweighted mean of upper-triangle correlations
-    let n_grad = grad_windows.len();
-    let gradient_consistency = if n_grad >= 2 {
+    // Gradient consistency: unweighted mean of upper-triangle correlations.
+    let gradient_consistency = if n_active_grad >= 2 {
         let mut sum_corr = 0.0f32;
         let mut count = 0u32;
-        for i in 0..n_grad {
-            for j in (i + 1)..n_grad {
-                let corr: f32 = grad_windows[i]
-                    .iter()
-                    .zip(grad_windows[j].iter())
-                    .map(|(a, b)| a * b)
-                    .sum();
+        for i in 0..n_active_grad {
+            let row_i = scratch.grad_rows.get_row(i).unwrap();
+            for j in (i + 1)..n_active_grad {
+                let row_j = scratch.grad_rows.get_row(j).unwrap();
+                let corr: f32 = row_i.iter().zip(row_j.iter()).map(|(a, b)| a * b).sum();
                 sum_corr += corr;
                 count += 1;
             }
@@ -374,7 +417,8 @@ pub fn compute_split_product<T: KeyLike>(
     cosine_profile: &[f32],
     scribe_profile: &[f32],
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
+    scratch: &mut CoelutionScratch,
 ) -> SplitProductScore {
     // Independent argmax on each profile
     let cos_apex = argmax(cosine_profile);
@@ -384,9 +428,9 @@ pub fn compute_split_product<T: KeyLike>(
     let cos_au = area_uniqueness(cosine_profile, cos_apex, 5);
     let scr_au = area_uniqueness(scribe_profile, scr_apex, 5);
 
-    // Coelution-gradient at each apex
-    let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10);
-    let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10);
+    // Coelution-gradient at each apex — shares the same scratch.
+    let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10, scratch);
+    let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10, scratch);
 
     let base_score = cos_au.au_score * cos_cg.combined * scr_au.au_score * scr_cg.combined;
 
@@ -437,7 +481,7 @@ pub fn find_joint_apex(cosine_profile: &[f32], precursor_trace: &[f32]) -> usize
 /// `precursor_trace` is the summed precursor intensity trace.
 /// `joint_apex` is the cycle index from `find_joint_apex`.
 /// `n_cycles` is the total number of cycles in the extraction window.
-pub fn compute_apex_features<T: KeyLike>(
+pub fn compute_apex_features<T: KeyLike + Default>(
     fragments: &MzMajorIntensityArray<T, f32>,
     precursors: &MzMajorIntensityArray<i8, f32>,
     expected: &crate::models::ExpectedIntensities<T>,
@@ -452,7 +496,7 @@ pub fn compute_apex_features<T: KeyLike>(
     let peak_shape = compute_peak_shape(cosine_profile, apex, 10);
 
     // ---- Ratio CV (Section 3.4) ----
-    let ratio_cv = compute_ratio_cv(fragments, &expected.fragment_intensities, apex);
+    let ratio_cv = compute_ratio_cv(fragments, expected.fragment_intensities.as_slice(), apex);
 
     // ---- Centered Apex (Section 3.4) ----
     let centered_apex = if n_cycles > 0 {
@@ -480,7 +524,7 @@ pub fn compute_apex_features<T: KeyLike>(
 
     // ---- Isotope Correlation (Section 3.4) ----
     let isotope_correlation =
-        compute_isotope_correlation(precursors, &expected.precursor_intensities, apex);
+        compute_isotope_correlation(precursors, expected.precursor_intensities.as_slice(), apex);
 
     // ---- Gaussian Correlation (Section 3.4) ----
     let gaussian_correlation = compute_gaussian_correlation(cosine_profile, apex, 15);
@@ -586,7 +630,7 @@ fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
 /// Ratio CV: consistency of observed-to-predicted ratios at apex (Section 3.4).
 fn compute_ratio_cv<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
-    expected: &HashMap<T, f32>,
+    expected: &[(T, f32)],
     apex: usize,
 ) -> f32 {
     let n_cycles = fragments.num_cycles();
@@ -596,7 +640,7 @@ fn compute_ratio_cv<T: KeyLike>(
 
     let mut ratios = Vec::new();
     for ((key, _mz), chrom) in fragments.iter_mzs() {
-        let y_hat = expected.get(key).copied().unwrap_or(0.0);
+        let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat > 0.0 && apex < chrom.len() && chrom[apex] > 0.0 {
             ratios.push(chrom[apex] / y_hat);
         }
@@ -785,7 +829,7 @@ fn compute_fragment_apex_agreement<T: KeyLike>(
 /// re-implementing averagine — the codebase already has sequence-specific predictions.
 fn compute_isotope_correlation(
     precursors: &MzMajorIntensityArray<i8, f32>,
-    expected_precursor: &HashMap<i8, f32>,
+    expected_precursor: &[(i8, f32)],
     apex: usize,
 ) -> f32 {
     let n_cycles = precursors.num_cycles();
@@ -799,12 +843,12 @@ fn compute_isotope_correlation(
     let mut n_valid = 0u32;
 
     for iso_key in 0i8..=2i8 {
-        if let Some(row) = precursors.get_row(&iso_key) {
-            if apex < row.len() {
-                obs[iso_key as usize] = row[apex];
-            }
+        if let Some(row) = precursors.get_row(&iso_key)
+            && apex < row.len()
+        {
+            obs[iso_key as usize] = row[apex];
         }
-        if let Some(&v) = expected_precursor.get(&iso_key) {
+        if let Some(v) = linear_get(expected_precursor, &iso_key) {
             exp[iso_key as usize] = v;
         }
         if obs[iso_key as usize] > 0.0 && exp[iso_key as usize] > 0.0 {
@@ -996,11 +1040,10 @@ mod tests {
             ("b".to_string(), 200.0, peak.clone()),
         ]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
 
         // Identical traces => correlation should be ~1.0
         assert!(
@@ -1033,11 +1076,10 @@ mod tests {
             ("b".to_string(), 200.0, peak_b),
         ]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         // Anti-correlated: wcoel should be negative or near zero
         assert!(
             result.weighted_coelution < 0.5,
@@ -1058,9 +1100,10 @@ mod tests {
 
         let fragments = make_fragments(vec![("a".to_string(), 100.0, peak)]);
 
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0)].into_iter().collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0)];
 
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10);
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
+        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
         assert!(
             (result.combined - 1.0).abs() < 1e-6,
             "single fragment => combined should be 1.0, got {}",
@@ -1098,11 +1141,16 @@ mod tests {
             ("a".to_string(), 100.0, peak.clone()),
             ("b".to_string(), 200.0, peak),
         ]);
-        let expected: HashMap<String, f32> = [("a".to_string(), 1.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
-        let result = compute_split_product(&cosine_profile, &scribe_profile, &fragments, &expected);
+        let mut scratch = CoelutionScratch::with_frag_capacity(16);
+        let result = compute_split_product(
+            &cosine_profile,
+            &scribe_profile,
+            &fragments,
+            &expected,
+            &mut scratch,
+        );
         assert!(result.base_score > 0.0);
         assert!(result.cosine_au > 0.0);
         assert!(result.scribe_au > 0.0);
@@ -1173,14 +1221,12 @@ mod tests {
             ("c".to_string(), 300.0, vec![0.0, 6.0, 0.0]),
             ("d".to_string(), 400.0, vec![0.0, 8.0, 0.0]),
         ]);
-        let expected: HashMap<String, f32> = [
+        let expected: Vec<(String, f32)> = vec![
             ("a".to_string(), 1.0),
             ("b".to_string(), 2.0),
             ("c".to_string(), 3.0),
             ("d".to_string(), 4.0),
-        ]
-        .into_iter()
-        .collect();
+        ];
         let cv = compute_ratio_cv(&fragments, &expected, 1);
         assert!(
             (cv - 1.0).abs() < 1e-6,
@@ -1197,7 +1243,7 @@ mod tests {
             (1i8, 500.5, vec![0.0, 0.3, 0.0]),
             (2i8, 501.0, vec![0.0, 0.1, 0.0]),
         ]);
-        let expected: HashMap<i8, f32> = [(0i8, 0.6), (1, 0.3), (2, 0.1)].into_iter().collect();
+        let expected: Vec<(i8, f32)> = vec![(0i8, 0.6), (1, 0.3), (2, 0.1)];
         let iso = compute_isotope_correlation(&precursors, &expected, 1);
         assert!(
             (iso - 1.0).abs() < 1e-4,

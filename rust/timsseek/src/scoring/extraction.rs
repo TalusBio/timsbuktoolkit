@@ -12,7 +12,7 @@ use timsquery::{
     Tolerance,
 };
 
-use super::pipeline::SkippingReason;
+use super::skip::SkipReason;
 
 /// Build an Extraction from an elution group + index query.
 ///
@@ -28,7 +28,7 @@ pub fn build_extraction<T, I>(
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
-) -> Result<Extraction<T>, SkippingReason>
+) -> Result<Extraction<T>, SkipReason>
 where
     T: KeyLike,
     I: QueriableData<ChromatogramCollector<T, f32>> + MappableRTCycles,
@@ -44,13 +44,15 @@ where
     };
 
     if !max_range.intersects(rt_range) {
-        return Err(SkippingReason::RetentionTimeOutOfBounds);
+        return Err(SkipReason::RetentionTimeOutOfBounds);
     }
 
-    let mut agg = ChromatogramCollector::new(elution_group.clone(), rt_range, cycle_mapping)
-        .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
+    let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
+        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
 
     index.add_query(&mut agg, tolerance);
+
+    classify_post_add_query(&agg)?;
 
     if let Some(n) = top_n_fragments {
         super::pipeline::filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
@@ -61,4 +63,100 @@ where
         expected_intensities,
         chromatograms: agg,
     })
+}
+
+/// Fast-path classification of a freshly-populated collector before any
+/// per-cycle scoring runs. Uses the counters bumped inside `add_query`:
+///
+/// - `n_quad_windows_matched == 0` → fragments could not possibly match any
+///   peak (scan-schedule / library mismatch), distinct from a mere absence.
+/// - `n_peaks_added == 0` with nonzero quad matches → peptide is absent or
+///   below LoD; no reason to run `find_apex` / `filter_zero_intensity_ions`.
+fn classify_post_add_query<T: KeyLike>(
+    agg: &ChromatogramCollector<T, f32>,
+) -> Result<(), SkipReason> {
+    if agg.n_fragment_peaks_added == 0 {
+        if agg.n_quad_windows_matched == 0 {
+            return Err(SkipReason::FragmentsOutsideScanRange);
+        }
+        return Err(SkipReason::NoObservedSignal);
+    }
+    Ok(())
+}
+
+/// Like [`build_extraction`] but writes into a caller-owned scratch slot,
+/// reusing the underlying `ChromatogramCollector` backing storage across
+/// peptides via `try_reset_with`.
+///
+/// On first call the `scratch` slot is `None` and a fresh `Extraction` is
+/// allocated. Subsequent calls reset the existing one in place.
+pub fn build_extraction_into<T, I>(
+    scratch: &mut Option<Extraction<T>>,
+    elution_group: &timsquery::TimsElutionGroup<T>,
+    rt_override: Option<f32>,
+    expected_intensities: &ExpectedIntensities<T>,
+    index: &I,
+    tolerance: &Tolerance,
+    top_n_fragments: Option<usize>,
+) -> Result<(), SkipReason>
+where
+    T: KeyLike,
+    I: QueriableData<ChromatogramCollector<T, f32>> + MappableRTCycles,
+{
+    let cycle_mapping = index.ms1_cycle_mapping();
+    let max_range = cycle_mapping.range_milis();
+    let max_range = TupleRange::try_new(max_range.0, max_range.1)
+        .expect("Reference RTs should be sorted and valid");
+
+    let query_rt = rt_override.unwrap_or_else(|| elution_group.rt_seconds());
+    let rt_range = match tolerance.rt_range_as_milis(query_rt) {
+        OptionallyRestricted::Unrestricted => max_range,
+        OptionallyRestricted::Restricted(r) => r,
+    };
+
+    if !max_range.intersects(rt_range) {
+        return Err(SkipReason::RetentionTimeOutOfBounds);
+    }
+
+    match scratch {
+        Some(extr) => {
+            extr.chromatograms
+                .try_reset_with_overrides(elution_group, rt_override, None, rt_range, cycle_mapping)
+                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
+            extr.expected_intensities
+                .clone_from_ref(expected_intensities);
+        }
+        None => {
+            let mut agg = ChromatogramCollector::new(elution_group, rt_range, cycle_mapping)
+                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
+            if let Some(rt) = rt_override {
+                agg.rt_seconds = rt;
+            }
+            *scratch = Some(Extraction {
+                expected_intensities: expected_intensities.clone(),
+                chromatograms: agg,
+            });
+        }
+    }
+
+    let extr = scratch
+        .as_mut()
+        .expect("extraction set by build_extraction_into");
+    index.add_query(&mut extr.chromatograms, tolerance);
+
+    classify_post_add_query(&extr.chromatograms)?;
+
+    if let Some(n) = top_n_fragments {
+        super::pipeline::filter_zero_intensity_ions(
+            &mut extr.chromatograms,
+            &mut extr.expected_intensities,
+        );
+        super::pipeline::select_top_n_fragments(
+            &mut extr.chromatograms,
+            &mut extr.expected_intensities,
+            n,
+        );
+    }
+
+    Ok(())
 }

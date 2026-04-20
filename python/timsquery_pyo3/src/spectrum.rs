@@ -62,7 +62,7 @@ impl PySpectralResult {
     /// The elution group id.
     #[getter]
     fn id(&self) -> u64 {
-        self.collector.eg.id()
+        self.collector.id
     }
 
     fn __repr__(&self) -> String {
@@ -70,9 +70,9 @@ impl PySpectralResult {
         let frag_sum: f32 = self.collector.iter_fragments().map(|(_, v)| v).sum();
         format!(
             "SpectralResult(id={}, precursors={}, fragments={}, prec_total={:.1}, frag_total={:.1})",
-            self.collector.eg.id(),
-            self.collector.eg.precursor_count(),
-            self.collector.eg.fragment_count(),
+            self.collector.id,
+            self.collector.precursor_labels.len(),
+            self.collector.fragment_labels.len(),
             prec_sum,
             frag_sum,
         )
@@ -154,15 +154,15 @@ impl PyMzMobilityResult {
     /// The elution group id.
     #[getter]
     fn id(&self) -> u64 {
-        self.collector.eg.id()
+        self.collector.id
     }
 
     fn __repr__(&self) -> String {
         format!(
             "MzMobilityResult(id={}, precursors={}, fragments={})",
-            self.collector.eg.id(),
-            self.collector.eg.precursor_count(),
-            self.collector.eg.fragment_count(),
+            self.collector.id,
+            self.collector.precursor_labels.len(),
+            self.collector.fragment_labels.len(),
         )
     }
 }

@@ -20,7 +20,6 @@
 //! 2. **Calibrated scoring** (Phase 3): Narrow calibrated extraction + `find_apex` + secondary query.
 
 use crate::errors::DataProcessingError;
-use crate::utils::elution_group_ops::isotope_offset_fragments;
 use crate::{
     IonAnnot,
     QueryItemToScore,
@@ -38,7 +37,6 @@ use timsquery::{
     ChromatogramCollector,
     KeyLike,
     MzMobilityStatsCollector,
-    OptionallyRestricted,
     SpectralCollector,
     Tolerance,
 };
@@ -47,6 +45,7 @@ use super::accumulator::IonSearchAccumulator;
 use super::apex_finding::{
     ApexLocation,
     ApexScore,
+    Extraction,
     RelativeIntensities,
     TraceScorer,
 };
@@ -57,6 +56,12 @@ use super::results::{
     ScoredCandidate,
     ScoredCandidateBuilder,
 };
+use super::skip::{
+    SkipCounts,
+    SkipReason,
+    apex_error_to_skip,
+    finalize_error_to_skip,
+};
 use super::timings::ScoreTimings;
 use crate::rt_calibration::{
     CalibrationResult,
@@ -64,6 +69,32 @@ use crate::rt_calibration::{
     ObservedRTSeconds,
 };
 use tracing::warn;
+
+/// Per-rayon-worker scoring state. Holds a `TraceScorer` plus reusable scratch:
+/// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
+/// - `inner_collector` / `isotope_collector` reused across Phase 3 secondary queries
+/// - `isotope_scratch_eg` holds the neutron-offset-applied eg; `Option<>` because
+///   `TimsElutionGroup` has no `Default` (bon builder with required fields) —
+///   init lazily on first peptide.
+pub struct ScoringWorker {
+    pub scorer: TraceScorer,
+    pub extraction: Option<Extraction<IonAnnot>>,
+    pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
+    pub isotope_collector: Option<SpectralCollector<IonAnnot, f32>>,
+    pub isotope_scratch_eg: Option<timsquery::TimsElutionGroup<IonAnnot>>,
+}
+
+impl ScoringWorker {
+    pub fn new(num_cycles: usize, max_frags: usize) -> Self {
+        Self {
+            scorer: TraceScorer::new(num_cycles, max_frags),
+            extraction: None,
+            inner_collector: None,
+            isotope_collector: None,
+            isotope_scratch_eg: None,
+        }
+    }
+}
 
 /// Lightweight calibrant candidate — just enough to re-query in Phase 2.
 /// Implements Ord by score (ascending) for use in BinaryHeap<Reverse<_>>.
@@ -116,11 +147,11 @@ impl CalibrantHeap {
         }
         if self.heap.len() < self.capacity {
             self.heap.push(std::cmp::Reverse(candidate));
-        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
-            if candidate.score > min.score {
-                self.heap.pop();
-                self.heap.push(std::cmp::Reverse(candidate));
-            }
+        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
+            && candidate.score > min.score
+        {
+            self.heap.pop();
+            self.heap.push(std::cmp::Reverse(candidate));
         }
     }
 
@@ -185,11 +216,23 @@ impl Default for CalibrationConfig {
 /// Number of top fragments to retain for scoring (by predicted intensity).
 const TOP_N_FRAGMENTS: usize = 8;
 
+/// Speclib-only pre-gate: reject peptides whose library entry carries no
+/// predicted fragments before doing any extraction work. Shared by the
+/// broad (prescore) and calibrated (score_calibrated) paths so the two
+/// don't drift.
+#[inline]
+fn gate_expected_fragments(item: &QueryItemToScore) -> Result<(), SkipReason> {
+    if item.expected_intensity.fragment_len() == 0 {
+        return Err(SkipReason::NoExpectedFragments);
+    }
+    Ok(())
+}
+
 /// Retain only the top `n` fragments by predicted intensity.
 ///
 /// Removes lower-ranked fragments from the chromatogram collector (fragments array + eg)
 /// and from expected intensities, maintaining the invariant that all three agree on count.
-pub(crate) fn select_top_n_fragments<T: KeyLike>(
+pub(crate) fn select_top_n_fragments<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
     n: usize,
@@ -205,11 +248,7 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
         .iter_mzs()
         .enumerate()
         .map(|(idx, ((key, _mz), _chrom))| {
-            let intensity = expected
-                .fragment_intensities
-                .get(key)
-                .copied()
-                .unwrap_or(0.0);
+            let intensity = expected.get_fragment(key).unwrap_or(0.0);
             (idx, key.clone(), intensity)
         })
         .collect();
@@ -231,17 +270,10 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
         agg.fragments
             .drop_row_idx(idx)
             .expect("index should be in bounds");
-        agg.eg
-            .try_drop_fragment(&key)
-            .expect("key should exist in eg");
-        expected.fragment_intensities.remove(&key);
+        expected.remove_fragment(&key);
     }
 
-    debug_assert_eq!(agg.fragments.num_ions(), agg.eg.fragment_count());
-    debug_assert_eq!(
-        agg.fragments.num_ions(),
-        expected.fragment_intensities.len()
-    );
+    debug_assert_eq!(agg.fragments.num_ions(), expected.fragment_len());
 }
 
 /// Filter out zero-intensity ions and update expected intensities in one pass.
@@ -252,7 +284,7 @@ pub(crate) fn select_top_n_fragments<T: KeyLike>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
+pub(crate) fn filter_zero_intensity_ions<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
 ) {
@@ -261,29 +293,19 @@ pub(crate) fn filter_zero_intensity_ions<T: KeyLike>(
 
     // Filter precursors
     for (k, _mz) in agg.drain_nonmatching_precursors(predicate) {
-        expected.precursor_intensities.remove(&k);
+        expected.remove_precursor(k);
     }
 
     // Filter fragments
     for (k, _mz) in agg.drain_nonmatching_fragments(predicate) {
-        expected.fragment_intensities.remove(&k);
+        expected.remove_fragment(&k);
     }
 
-    // Assert all lengths match
+    // Assert arrays and expected masks agree (eg is no longer mutated here).
     assert_eq!(
         agg.precursors.num_ions(),
-        agg.eg.precursor_count(),
-        "Precursor count mismatch after filtering"
-    );
-    assert_eq!(
-        agg.precursors.num_ions(),
-        expected.precursor_intensities.len(),
+        expected.precursor_len(),
         "Precursor expected intensities count mismatch after filtering"
-    );
-    assert_eq!(
-        agg.fragments.num_ions(),
-        agg.eg.fragment_count(),
-        "Fragment count mismatch after filtering"
     );
 }
 
@@ -329,11 +351,6 @@ pub struct Scorer<I: ScorerQueriable> {
     pub fragmented_range: TupleRange<f64>,
 }
 
-pub enum SkippingReason {
-    // TODO: Implement more options and a counter ...
-    RetentionTimeOutOfBounds,
-}
-
 impl<I: ScorerQueriable> Scorer<I> {
     #[cfg_attr(
         feature = "instrumentation",
@@ -347,7 +364,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             super::apex_finding::PeptideMetadata,
             super::apex_finding::Extraction<IonAnnot>,
         ),
-        SkippingReason,
+        SkipReason,
     > {
         let extraction = super::extraction::build_extraction(
             &item.query,
@@ -361,7 +378,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let metadata = super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
-            library_id: extraction.chromatograms.eg.id() as u32,
+            library_id: extraction.chromatograms.id as u32,
             library_rt,
             calibrated_rt_seconds: library_rt, // no calibration in broad path
             ref_mobility_ook0: item.query.mobility_ook0(),
@@ -420,46 +437,52 @@ impl<I: ScorerQueriable> Scorer<I> {
             level = "trace"
         )
     )]
+    /// Performs refined secondary query at detected apex with two-pass strategy.
+    /// Results populate `worker.inner_collector` and `worker.isotope_collector` in place.
     fn execute_secondary_query(
         &self,
         item: &QueryItemToScore,
         main_score: &ApexScore,
         spectral_tol: &Tolerance,
         isotope_tol: &Tolerance,
-    ) -> (
-        SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
-        SpectralCollector<IonAnnot, f32>,
+        worker: &mut ScoringWorker,
     ) {
         let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
 
-        // **Pass 1**: Query at apex RT to determine observed mobility
-        let new_query = item.query.clone().with_rt_seconds(new_rt_seconds);
-        let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
-            SpectralCollector::new(new_query);
-        self.index.add_query(&mut agg, spectral_tol);
+        // **Pass 1**: query at apex RT to determine observed mobility.
+        let inner = worker
+            .inner_collector
+            .get_or_insert_with(|| SpectralCollector::new(&item.query));
+        inner.reset_with_overrides(&item.query, Some(new_rt_seconds), None);
+        self.index.add_query(inner, spectral_tol);
 
-        // Calculate weighted mean mobility from observed data
-        let mobility = Self::get_mobility(&agg);
+        let mobility = Self::get_mobility(inner);
 
-        // **Pass 2**: Query at apex RT + observed mobility with tight tolerance
-        let new_query = item
-            .query
-            .clone()
-            .with_rt_seconds(new_rt_seconds)
-            .with_mobility(mobility as f32);
+        // **Pass 2**: same collector, now with mobility override.
+        let inner = worker.inner_collector.as_mut().expect("init above");
+        inner.reset_with_overrides(&item.query, Some(new_rt_seconds), Some(mobility as f32));
 
-        // Query isotope pattern (+1 neutron offset) for ratio scoring
-        let mut isotope_agg: SpectralCollector<_, f32> =
-            SpectralCollector::new(isotope_offset_fragments(&new_query, 1i8));
+        // Isotope scratch eg holds item.query with +1 neutron offset applied
+        // (buffer-override — reuses Vec capacity after warm-up).
+        let scratch_eg = worker
+            .isotope_scratch_eg
+            .get_or_insert_with(|| item.query.clone());
+        crate::utils::elution_group_ops::apply_isotope_offset_fragments_into(
+            scratch_eg,
+            &item.query,
+            1i8,
+        );
 
-        // Query main pattern with tight mobility tolerance
-        let mut agg: SpectralCollector<_, MzMobilityStatsCollector> =
-            SpectralCollector::new(new_query);
+        let isotope = worker
+            .isotope_collector
+            .get_or_insert_with(|| SpectralCollector::new(scratch_eg));
+        isotope.reset_with_overrides(scratch_eg, Some(new_rt_seconds), Some(mobility as f32));
 
-        self.index.add_query(&mut agg, isotope_tol);
-        self.index.add_query(&mut isotope_agg, isotope_tol);
-
-        (agg, isotope_agg)
+        // Both queries share the same isotope_tol per existing logic.
+        let inner = worker.inner_collector.as_mut().expect("init above");
+        self.index.add_query(inner, isotope_tol);
+        let isotope = worker.isotope_collector.as_mut().expect("init above");
+        self.index.add_query(isotope, isotope_tol);
     }
 
     #[cfg_attr(
@@ -495,10 +518,9 @@ impl<I: ScorerQueriable> Scorer<I> {
         item: QueryItemToScore,
         calibration: &CalibrationResult,
     ) -> Result<ViewerResult, DataProcessingError> {
-        let mut buffer = TraceScorer::new(self.num_cycles());
-
-        // Re-implementing logic here because process_query consumes `item` and returns `Option`.
-        // We want intermediate results for `ViewerResult`.
+        // One-shot worker for the viewer path (not hot).
+        let mut worker =
+            ScoringWorker::new(self.num_cycles(), item.expected_intensity.fragment_len());
 
         let (metadata, scoring_ctx) = self.build_broad_extraction(&item).map_err(|_| {
             DataProcessingError::ExpectedNonEmptyData {
@@ -506,27 +528,30 @@ impl<I: ScorerQueriable> Scorer<I> {
             }
         })?;
 
-        let apex_score = buffer.find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
+        let apex_score = worker
+            .scorer
+            .find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
         let spectral_tol = calibration.get_spectral_tolerance();
         let isotope_tol = calibration.get_isotope_tolerance();
-        let (inner_collector, isotope_collector) =
-            self.execute_secondary_query(&item, &apex_score, &spectral_tol, &isotope_tol);
+        self.execute_secondary_query(&item, &apex_score, &spectral_tol, &isotope_tol, &mut worker);
+        let inner_collector = worker.inner_collector.as_ref().expect("set by secondary");
+        let isotope_collector = worker.isotope_collector.as_ref().expect("set by secondary");
 
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
         let scored = self.finalize_results(
             &metadata,
             nqueries,
             &apex_score,
-            &inner_collector,
-            &isotope_collector,
+            inner_collector,
+            isotope_collector,
         )?;
 
         // Extract chromatograms before it's consumed
         let chromatograms = scoring_ctx.chromatograms;
 
         Ok(ViewerResult {
-            traces: buffer.traces.clone(),
-            longitudinal_apex_profile: buffer.traces.apex_profile.clone(),
+            traces: worker.scorer.traces.clone(),
+            longitudinal_apex_profile: worker.scorer.traces.apex_profile.clone(),
             chromatograms,
             scored,
         })
@@ -538,17 +563,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn build_calibrated_extraction(
+    /// Populate `worker.extraction` with a calibrated-tolerance extraction.
+    /// Reuses the worker's backing `ChromatogramCollector` storage.
+    fn build_calibrated_extraction_into(
         &self,
         item: &QueryItemToScore,
         calibration: &CalibrationResult,
-    ) -> Result<
-        (
-            super::apex_finding::PeptideMetadata,
-            super::apex_finding::Extraction<IonAnnot>,
-        ),
-        SkippingReason,
-    > {
+        worker: &mut ScoringWorker,
+    ) -> Result<super::apex_finding::PeptideMetadata, SkipReason> {
         let original_irt = LibraryRT(item.query.rt_seconds());
         let calibrated_rt = calibration.convert_irt(original_irt);
         let tolerance = calibration.get_tolerance(
@@ -557,46 +579,29 @@ impl<I: ScorerQueriable> Scorer<I> {
             original_irt, // library RT — ridge widths are indexed by library RT
         );
 
-        let calibrated_query = item.query.clone().with_rt_seconds(calibrated_rt.0);
+        super::extraction::build_extraction_into(
+            &mut worker.extraction,
+            &item.query,
+            Some(calibrated_rt.0),
+            &item.expected_intensity,
+            &self.index,
+            &tolerance,
+            Some(TOP_N_FRAGMENTS),
+        )?;
 
-        let max_range = self.index.ms1_cycle_mapping().range_milis();
-        let max_range = TupleRange::try_new(max_range.0, max_range.1)
-            .expect("Reference RTs should be sorted and valid");
-        let rt_range = match tolerance.rt_range_as_milis(calibrated_rt.0) {
-            OptionallyRestricted::Unrestricted => max_range,
-            OptionallyRestricted::Restricted(r) => r,
-        };
-
-        if !max_range.intersects(rt_range) {
-            return Err(SkippingReason::RetentionTimeOutOfBounds);
-        }
-
-        let mut agg =
-            ChromatogramCollector::new(calibrated_query, rt_range, self.index.ms1_cycle_mapping())
-                .map_err(|_| SkippingReason::RetentionTimeOutOfBounds)?;
-
-        self.index.add_query(&mut agg, &tolerance);
-
-        let mut expected_intensities = item.expected_intensity.clone();
-        filter_zero_intensity_ions(&mut agg, &mut expected_intensities);
-        select_top_n_fragments(&mut agg, &mut expected_intensities, TOP_N_FRAGMENTS);
-
-        let metadata = super::apex_finding::PeptideMetadata {
+        let extr = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
+        Ok(super::apex_finding::PeptideMetadata {
             digest: item.digest.clone(),
             charge: item.query.precursor_charge(),
-            library_id: agg.eg.id() as u32,
-            library_rt: original_irt.0 as f32,
+            library_id: extr.chromatograms.id as u32,
+            library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: item.query.mobility_ook0(),
             ref_precursor_mz: item.query.mono_precursor_mz(),
-        };
-
-        let scoring_ctx = super::apex_finding::Extraction {
-            expected_intensities,
-            chromatograms: agg,
-        };
-
-        Ok((metadata, scoring_ctx))
+        })
     }
 
     /// Phase 3: Score a peptide using calibrated extraction window.
@@ -609,67 +614,73 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: &QueryItemToScore,
         calibration: &CalibrationResult,
-        buffer: &mut TraceScorer,
+        worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
-    ) -> Option<ScoredCandidate> {
-        let (metadata, scoring_ctx) = timed!(
+    ) -> Result<ScoredCandidate, SkipReason> {
+        gate_expected_fragments(item)?;
+
+        let metadata = timed!(
             timings.extraction,
-            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| {
-                match self.build_calibrated_extraction(item, calibration) {
-                    Ok(result) => Some(result),
-                    Err(_) => None,
-                }
-            },)
+            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction")
+                .in_scope(|| self.build_calibrated_extraction_into(item, calibration, worker))
         )?;
 
-        if scoring_ctx
-            .expected_intensities
-            .fragment_intensities
-            .is_empty()
-        {
-            return None;
-        }
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
 
         let apex_score = timed!(
             timings.scoring,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::apex_scoring").in_scope(
                 || {
-                    buffer
-                        .find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                        .ok()
+                    worker
+                        .scorer
+                        .find_apex(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
+                        .map_err(|e| apex_error_to_skip(&e))
                 },
             )
         )?;
 
-        let (inner_collector, isotope_collector) = timed!(timings.spectral_query, {
+        timed!(timings.spectral_query, {
             let spectral_tol = calibration.get_spectral_tolerance();
             let isotope_tol = calibration.get_isotope_tolerance();
             tracing::span!(tracing::Level::TRACE, "score_calibrated::secondary_query").in_scope(
-                || self.execute_secondary_query(item, &apex_score, &spectral_tol, &isotope_tol),
+                || {
+                    self.execute_secondary_query(
+                        item,
+                        &apex_score,
+                        &spectral_tol,
+                        &isotope_tol,
+                        worker,
+                    )
+                },
             )
         });
+        let inner_collector = worker.inner_collector.as_ref().expect("set by secondary");
+        let isotope_collector = worker.isotope_collector.as_ref().expect("set by secondary");
 
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
-        let out = timed!(
+        timed!(
             timings.assembly,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(|| {
                 self.finalize_results(
                     &metadata,
                     nqueries,
                     &apex_score,
-                    &inner_collector,
-                    &isotope_collector,
+                    inner_collector,
+                    isotope_collector,
                 )
-            },)
-        );
-
-        match out {
-            Ok(res) => Some(res),
-            Err(e) => {
-                warn!("Error in scoring: {:?}", e);
-                None
-            }
-        }
+                .map_err(|e| {
+                    warn!("Error in scoring: {:?}", e);
+                    finalize_error_to_skip(&e)
+                })
+            })
+        )
     }
 
     /// Phase 3 batch: Score all peptides with calibrated tolerances.
@@ -681,30 +692,50 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         items_to_score: &[QueryItemToScore],
         calibration: &CalibrationResult,
-    ) -> (Vec<ScoredCandidate>, ScoreTimings) {
-        let init_fn = || TraceScorer::new(self.num_cycles());
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        let num_cycles = self.num_cycles();
+        // Pre-scan so scratch capacity holds every peptide — no realloc in hot path.
+        let max_frags = items_to_score
+            .iter()
+            .map(|i| i.expected_intensity.fragment_len())
+            .max()
+            .unwrap_or(0);
+        let init_fn = || {
+            tracing::debug!(
+                target: "alloc_track",
+                phase = "phase3_score",
+                num_cycles,
+                max_frags,
+                "rayon worker init: ScoringWorker"
+            );
+            ScoringWorker::new(num_cycles, max_frags)
+        };
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
 
+        // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
+        // a second pass keeps the rayon hot loop free of synchronised counters.
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
+
         #[cfg(feature = "rayon")]
-        let results: IonSearchAccumulator = {
+        let mut results: IonSearchAccumulator = {
             items_to_score
                 .par_iter()
                 .filter(filter_fn)
-                .map_init(init_fn, |scorer, item| {
+                .map_init(init_fn, |worker, item| {
                     let mut t = ScoreTimings::default();
                     let result =
-                        self.score_calibrated_extraction(item, calibration, scorer, &mut t);
+                        self.score_calibrated_extraction(item, calibration, worker, &mut t);
                     (result, t)
                 })
                 .collect()
         };
 
         #[cfg(not(feature = "rayon"))]
-        let results: IonSearchAccumulator = {
+        let mut results: IonSearchAccumulator = {
             let mut scorer = init_fn();
             items_to_score
                 .iter()
@@ -720,7 +751,8 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .collect()
         };
 
-        (results.res, results.timings)
+        results.skips.precursor_out_of_fragmented_range = precursor_oofr_count;
+        (results.res, results.timings, results.skips)
     }
 
     /// Phase 1: Lightweight prescore — broad extraction + find_apex_location only.
@@ -732,41 +764,42 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn prescore(
         &self,
         item: &QueryItemToScore,
-        buffer: &mut TraceScorer,
+        worker: &mut ScoringWorker,
         timings: &mut super::timings::PrescoreTimings,
-    ) -> Option<ApexLocation> {
-        let scoring_ctx = timed!(
+    ) -> Result<ApexLocation, SkipReason> {
+        gate_expected_fragments(item)?;
+
+        timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
-                super::extraction::build_extraction(
+                super::extraction::build_extraction_into(
+                    &mut worker.extraction,
                     &item.query,
-                    item.expected_intensity.clone(),
+                    None,
+                    &item.expected_intensity,
                     &self.index,
                     &self.broad_tolerance,
                     Some(TOP_N_FRAGMENTS),
                 )
-                .ok()
             })
         )?;
 
-        if scoring_ctx
-            .expected_intensities
-            .fragment_intensities
-            .is_empty()
-        {
-            return None;
-        }
+        let scoring_ctx = worker
+            .extraction
+            .as_ref()
+            .expect("extraction set by build_extraction_into");
 
         let result = timed!(
             timings.scoring,
             tracing::span!(tracing::Level::TRACE, "prescore::scoring").in_scope(|| {
-                buffer
-                    .find_apex_location(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                    .ok()
+                worker
+                    .scorer
+                    .find_apex_location(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
+                    .map_err(|e| apex_error_to_skip(&e))
             })
         );
 
-        if result.is_some() {
+        if result.is_ok() {
             timings.n_scored += 1;
         }
         result
@@ -790,13 +823,32 @@ impl<I: ScorerQueriable> Scorer<I> {
             self.fragmented_range.intersects(lims)
         };
 
+        // Count pre-filter rejects once; keeps the rayon loop counter-free.
+        let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
+        timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
+
         #[cfg(feature = "rayon")]
         let (heap, par_timings): (CalibrantHeap, super::timings::PrescoreTimings) = {
             use super::timings::PrescoreTimings;
+            let num_cycles = self.num_cycles();
+            let n_calibrants = config.n_calibrants;
+            let max_frags = items_to_score
+                .iter()
+                .map(|i| i.expected_intensity.fragment_len())
+                .max()
+                .unwrap_or(0);
             let init_fn = || {
+                tracing::debug!(
+                    target: "alloc_track",
+                    phase = "phase1_prescore",
+                    num_cycles,
+                    n_calibrants,
+                    max_frags,
+                    "rayon worker init: ScoringWorker + CalibrantHeap"
+                );
                 (
-                    TraceScorer::new(self.num_cycles()),
-                    CalibrantHeap::new(config.n_calibrants),
+                    ScoringWorker::new(num_cycles, max_frags),
+                    CalibrantHeap::new(n_calibrants),
                     PrescoreTimings::default(),
                 )
             };
@@ -807,17 +859,22 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .filter(|(_, x)| filter_fn(x))
                 .fold(
                     init_fn,
-                    |(mut scorer, mut heap, mut t), (chunk_idx, item)| {
+                    |(mut worker, mut heap, mut t), (chunk_idx, item)| {
                         t.n_passed_filter += 1;
-                        if let Some(loc) = self.prescore(item, &mut scorer, &mut t) {
-                            heap.push(CalibrantCandidate {
-                                score: loc.score,
-                                apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                                speclib_index: speclib_offset + chunk_idx,
-                                library_rt: LibraryRT(item.query.rt_seconds()),
-                            });
+                        match self.prescore(item, &mut worker, &mut t) {
+                            Ok(loc) => {
+                                heap.push(CalibrantCandidate {
+                                    score: loc.score,
+                                    apex_rt: ObservedRTSeconds(
+                                        loc.retention_time_ms as f32 / 1000.0,
+                                    ),
+                                    speclib_index: speclib_offset + chunk_idx,
+                                    library_rt: LibraryRT(item.query.rt_seconds()),
+                                });
+                            }
+                            Err(reason) => t.skips.bump(reason),
                         }
-                        (scorer, heap, t)
+                        (worker, heap, t)
                     },
                 )
                 .map(|(_, heap, t)| (heap, t))
@@ -841,20 +898,28 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         #[cfg(not(feature = "rayon"))]
         let heap: CalibrantHeap = {
-            let mut scorer = TraceScorer::new(self.num_cycles());
+            let max_frags = items_to_score
+                .iter()
+                .map(|i| i.expected_intensity.fragment_len())
+                .max()
+                .unwrap_or(0);
+            let mut scorer = ScoringWorker::new(self.num_cycles(), max_frags);
             let mut heap = CalibrantHeap::new(config.n_calibrants);
             for (chunk_idx, item) in items_to_score.iter().enumerate() {
                 if !filter_fn(&item) {
                     continue;
                 }
                 timings.n_passed_filter += 1;
-                if let Some(loc) = self.prescore(item, &mut scorer, timings) {
-                    heap.push(CalibrantCandidate {
-                        score: loc.score,
-                        apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                        speclib_index: speclib_offset + chunk_idx,
-                        library_rt: LibraryRT(item.query.rt_seconds()),
-                    });
+                match self.prescore(item, &mut scorer, timings) {
+                    Ok(loc) => {
+                        heap.push(CalibrantCandidate {
+                            score: loc.score,
+                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
+                            speclib_index: speclib_offset + chunk_idx,
+                            library_rt: LibraryRT(item.query.rt_seconds()),
+                        });
+                    }
+                    Err(reason) => timings.skips.bump(reason),
                 }
             }
             heap

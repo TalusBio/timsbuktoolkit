@@ -13,7 +13,6 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
 use std::io::{
     BufRead,
     BufReader,
@@ -133,26 +132,30 @@ impl From<PrecursorEntry> for DigestSlice {
     }
 }
 
-impl From<SerSpeclibElement> for QueryItemToScore {
-    fn from(x: SerSpeclibElement) -> Self {
+impl TryFrom<SerSpeclibElement> for QueryItemToScore {
+    type Error = LibraryReadingError;
+
+    fn try_from(x: SerSpeclibElement) -> Result<Self, Self::Error> {
         let charge = x.precursor.charge;
         let precursor = x.precursor.into();
         let ref_eg = x.elution_group;
-        QueryItemToScore {
-            expected_intensity: ExpectedIntensities {
-                fragment_intensities: ref_eg
-                    .fragment_labels
-                    .iter()
-                    .cloned()
-                    .zip(ref_eg.fragment_intensities.iter().cloned())
-                    .collect(),
-                precursor_intensities: ref_eg
-                    .precursor_labels
-                    .iter()
-                    .cloned()
-                    .zip(ref_eg.precursor_intensities.iter().cloned())
-                    .collect(),
-            },
+        let expected_intensity = ExpectedIntensities::try_from_pairs(
+            ref_eg
+                .fragment_labels
+                .iter()
+                .cloned()
+                .zip(ref_eg.fragment_intensities.iter().cloned()),
+            ref_eg
+                .precursor_labels
+                .iter()
+                .cloned()
+                .zip(ref_eg.precursor_intensities.iter().cloned()),
+        )
+        .map_err(|e| LibraryReadingError::UnsupportedFormat {
+            message: format!("speclib entry has {}", e),
+        })?;
+        Ok(QueryItemToScore {
+            expected_intensity,
             query: TimsElutionGroup::builder()
                 .id(ref_eg.id as u64)
                 .mobility_ook0(ref_eg.mobility_ook0)
@@ -164,7 +167,7 @@ impl From<SerSpeclibElement> for QueryItemToScore {
                 .try_build()
                 .unwrap(),
             digest: precursor,
-        }
+        })
     }
 }
 
@@ -224,10 +227,7 @@ fn convert_diann_to_query_item(
         decoy_group_id,
     );
 
-    let fragment_intensities: HashMap<IonAnnot, f32> =
-        extra.relative_intensities.into_iter().collect();
-
-    let (rebuilt_eg, precursor_intensities) = match isotope_dist_from_seq(&extra.stripped_peptide) {
+    let (rebuilt_eg, precursor_pairs) = match isotope_dist_from_seq(&extra.stripped_peptide) {
         Ok(isotope_ratios) => {
             let fragment_labels: Vec<IonAnnot> =
                 eg.iter_fragments().map(|(label, _mz)| *label).collect();
@@ -246,15 +246,12 @@ fn convert_diann_to_query_item(
                     message: format!("Failed to rebuild elution group: {:?}", e),
                 })?;
 
-            let intensities: HashMap<i8, f32> = vec![
+            let pairs: Vec<(i8, f32)> = vec![
                 (0i8, isotope_ratios[0]),
                 (1i8, isotope_ratios[1]),
                 (2i8, isotope_ratios[2]),
-            ]
-            .into_iter()
-            .collect();
-
-            (rebuilt, intensities)
+            ];
+            (rebuilt, pairs)
         }
         Err(e) => {
             tracing::debug!(
@@ -262,14 +259,16 @@ fn convert_diann_to_query_item(
                 extra.stripped_peptide,
                 e
             );
-            (eg, HashMap::from_iter([(0i8, 1.0)]))
+            (eg, vec![(0i8, 1.0)])
         }
     };
 
-    let expected_intensity = ExpectedIntensities {
-        fragment_intensities,
-        precursor_intensities,
-    };
+    let expected_intensity =
+        ExpectedIntensities::try_from_pairs(extra.relative_intensities, precursor_pairs).map_err(
+            |e| LibraryReadingError::UnsupportedFormat {
+                message: format!("DIA-NN entry {}: {}", extra.stripped_peptide, e),
+            },
+        )?;
 
     Ok(QueryItemToScore {
         digest,
@@ -595,7 +594,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                     }
                 };
 
-                Some(Ok(elem.into()))
+                Some(elem.try_into())
             }
             Err(e) => Some(Err(LibraryReadingError::FileReadingError {
                 source: e,
@@ -625,7 +624,7 @@ impl<R: Read> Iterator for MessagePackReader<R> {
         use serde::Deserialize;
 
         match SerSpeclibElement::deserialize(&mut self.deserializer) {
-            Ok(elem) => Some(Ok(elem.into())),
+            Ok(elem) => Some(elem.try_into()),
             Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
                 if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
@@ -690,7 +689,9 @@ impl Speclib {
         let speclib = convert_elution_group_collection(collection)?;
 
         // Apply decoy strategy to the loaded speclib
-        Self::apply_decoy_strategy(speclib, decoy_strategy)
+        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        speclib.log_entry_stats();
+        Ok(speclib)
     }
 
     /// Apply decoy strategy to an already-loaded speclib (works for any format)
@@ -838,7 +839,9 @@ impl Speclib {
         let speclib = Self { elems };
 
         // Apply decoy strategy to the loaded speclib
-        Self::apply_decoy_strategy(speclib, decoy_strategy)
+        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        speclib.log_entry_stats();
+        Ok(speclib)
     }
 
     pub fn sample() -> Self {
@@ -849,6 +852,69 @@ impl Speclib {
 
     pub fn as_slice(&self) -> &[QueryItemToScore] {
         &self.elems
+    }
+
+    /// Log a summary of per-entry fragment and precursor counts.
+    ///
+    /// Entries whose fragment count exceeds [`INLINE_FRAG_CAPACITY`] spill out
+    /// of the inline storage for `ExpectedIntensities` and incur a heap
+    /// allocation per clone, so the spillover count is worth surfacing.
+    pub fn log_entry_stats(&self) {
+        use crate::models::query_item::{
+            INLINE_FRAG_CAPACITY,
+            INLINE_PREC_CAPACITY,
+        };
+
+        let n = self.elems.len();
+        if n == 0 {
+            tracing::info!("Speclib stats: empty library");
+            return;
+        }
+
+        let mut frag_max = 0usize;
+        let mut prec_max = 0usize;
+        let mut frag_sum = 0usize;
+        let mut frag_spill = 0usize;
+        let mut prec_spill = 0usize;
+
+        for item in &self.elems {
+            let nf = item.expected_intensity.fragment_len();
+            let np = item.expected_intensity.precursor_len();
+            frag_sum += nf;
+            frag_max = frag_max.max(nf);
+            prec_max = prec_max.max(np);
+            if nf > INLINE_FRAG_CAPACITY {
+                frag_spill += 1;
+            }
+            if np > INLINE_PREC_CAPACITY {
+                prec_spill += 1;
+            }
+        }
+
+        let frag_mean = frag_sum as f64 / n as f64;
+
+        tracing::info!(
+            "Speclib stats: {} entries; fragments per entry: mean={:.1} max={} (inline cap={}, spillover entries={}); precursors per entry: max={} (inline cap={}, spillover entries={})",
+            n,
+            frag_mean,
+            frag_max,
+            INLINE_FRAG_CAPACITY,
+            frag_spill,
+            prec_max,
+            INLINE_PREC_CAPACITY,
+            prec_spill,
+        );
+
+        if frag_spill > 0 {
+            let pct = (frag_spill as f64 / n as f64) * 100.0;
+            tracing::warn!(
+                "{}/{} speclib entries ({:.2}%) exceed INLINE_FRAG_CAPACITY={} — those entries will heap-allocate on every clone. Consider raising the inline cap in `models::query_item` if this is a large fraction.",
+                frag_spill,
+                n,
+                pct,
+                INLINE_FRAG_CAPACITY,
+            );
+        }
     }
 }
 
@@ -909,7 +975,10 @@ mod tests {
                 }
             };
 
-            let speclib = speclib_ser.into_iter().map(|x| x.into()).collect();
+            let speclib: Vec<QueryItemToScore> = speclib_ser
+                .into_iter()
+                .map(QueryItemToScore::try_from)
+                .collect::<Result<_, _>>()?;
 
             Ok(Self { elems: speclib })
         }
@@ -952,7 +1021,7 @@ mod tests {
     fn test_sample_elution_group_deserialization() {
         let json = SerSpeclibElement::sample_json();
         let elem: SerSpeclibElement = serde_json::from_str(json).unwrap();
-        let query_item: QueryItemToScore = elem.into();
+        let query_item: QueryItemToScore = elem.try_into().unwrap();
 
         assert_eq!(query_item.digest.len(), "PEPTIDEPINK".len());
         assert_eq!(query_item.query.fragment_count(), 3);
@@ -1016,24 +1085,15 @@ mod tests {
 
         // Verify all intensities are present
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&0),
+            first_target.expected_intensity.get_precursor(0).is_some(),
             "Should have intensity for isotope 0"
         );
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&1),
+            first_target.expected_intensity.get_precursor(1).is_some(),
             "Should have intensity for isotope 1"
         );
         assert!(
-            first_target
-                .expected_intensity
-                .precursor_intensities
-                .contains_key(&2),
+            first_target.expected_intensity.get_precursor(2).is_some(),
             "Should have intensity for isotope 2"
         );
     }
@@ -1194,26 +1254,25 @@ mod tests {
         for entry in &speclib.elems {
             let m0_intensity = entry
                 .expected_intensity
-                .precursor_intensities
-                .get(&0)
+                .get_precursor(0)
                 .expect("Should have M0 intensity");
 
             // M0 should be the highest intensity (normalized to 1.0)
             assert!(
-                (*m0_intensity - 1.0).abs() < 0.01,
+                (m0_intensity - 1.0).abs() < 0.01,
                 "M0 should be normalized to ~1.0, got {}",
                 m0_intensity
             );
 
             // M+1 and M+2 should be less than M0
-            let m1_intensity = entry.expected_intensity.precursor_intensities.get(&1);
-            let m2_intensity = entry.expected_intensity.precursor_intensities.get(&2);
+            let m1_intensity = entry.expected_intensity.get_precursor(1);
+            let m2_intensity = entry.expected_intensity.get_precursor(2);
 
             if let Some(m1) = m1_intensity {
-                assert!(*m1 <= 1.0, "M+1 intensity should be <= 1.0, got {}", m1);
+                assert!(m1 <= 1.0, "M+1 intensity should be <= 1.0, got {}", m1);
             }
             if let Some(m2) = m2_intensity {
-                assert!(*m2 <= 1.0, "M+2 intensity should be <= 1.0, got {}", m2);
+                assert!(m2 <= 1.0, "M+2 intensity should be <= 1.0, got {}", m2);
             }
         }
     }
@@ -1413,7 +1472,7 @@ mod tests {
         );
         let bytes = rmp_serde::to_vec(&elem).unwrap();
         let decoded: SerSpeclibElement = rmp_serde::from_slice(&bytes).unwrap();
-        let qi: QueryItemToScore = decoded.into();
+        let qi: QueryItemToScore = decoded.try_into().unwrap();
         assert_eq!(qi.digest.len(), "PEPTIDEK".len());
         assert_eq!(qi.query.fragment_count(), 2);
     }

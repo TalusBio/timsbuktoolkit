@@ -83,10 +83,30 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+/// Fixed shuffle seed used by `rescore`. Makes the pre-rescore shuffle
+/// (and therefore the fold assignment + downstream target counts)
+/// reproducible across runs, eliminating RNG-driven noise in benches.
+/// `GBMConfig::default().seed == 0` already makes the boosting itself
+/// deterministic; this seals the only remaining entropy source.
+const RESCORE_SHUFFLE_SEED: u64 = 42;
+
 pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
     let config = GBMConfig::default();
 
-    data.shuffle(&mut rand::rng());
+    // Canonicalize input order before the seeded shuffle. Upstream
+    // stages can emit candidates in an order that drifts with
+    // floating-point accumulation quirks (e.g. different peak-bucket
+    // layouts produce identical features but different vec orderings).
+    // Without a stable sort here, the seeded shuffle sees different
+    // inputs across runs -> different fold assignment -> different
+    // q-values -> drifting target counts across equivalent configs.
+    // (library_id, precursor_charge) is a non-FP composite key that
+    // should be unique per candidate after target-decoy competition.
+    data.sort_unstable_by_key(|c| (c.scoring.library_id, c.scoring.precursor_charge));
+
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
+    data.shuffle(&mut rng);
 
     let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled(3, data, config);
     scorer

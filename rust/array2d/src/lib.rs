@@ -61,6 +61,30 @@ pub struct Array2D<T: ArrayElement> {
     pub n_row: usize,
 }
 
+impl<T: ArrayElement> Default for Array2D<T> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            n_col: 0,
+            n_row: 0,
+        }
+    }
+}
+
+impl<T: ArrayElement> Array2D<T> {
+    /// Construct a zero-dimensional `Array2D` whose backing `Vec` has enough
+    /// capacity for `ncols * nrows` elements. Use this for scratch buffers
+    /// that will be populated via [`Array2D::reset_with_value`] — the first
+    /// call won't reallocate as long as its size fits the reserved capacity.
+    pub fn with_capacity(ncols: usize, nrows: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(ncols * nrows),
+            n_col: 0,
+            n_row: 0,
+        }
+    }
+}
+
 impl<T: Serialize + ArrayElement> Serialize for Array2D<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

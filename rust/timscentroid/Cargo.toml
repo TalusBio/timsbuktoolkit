@@ -47,3 +47,8 @@ default = []
 aws = ["object_store/aws", "aws-config", "aws-credential-types"]
 gcp = ["object_store/gcp"]
 azure = ["object_store/azure"]
+# Dev-only: filter-funnel counters inside `IndexedPeakGroup::for_each_peak`.
+# Each per-peak atomic add costs ~5 ns → phases that pump billions of
+# peaks are 10× inflated when this is on. Leave off for wall-time
+# measurement; turn on for funnel shape + filter-pass rates.
+query-instr = []
