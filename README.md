@@ -61,21 +61,6 @@ DOTD_FILE="$HOME/data/my_data.d"
 FASTA_FILE="$HOME/fasta/VIMENTIN.fasta"
 SPECLIB_NAME="vimentin.ndjson"
 RESULTS_DIR="vimentin_search_results"
-SUMMARY_DIR="vimentin_search_summary"
-
-# Write the config file
-cat << EOF > config_use.json
-{
-    "analysis": {
-        "chunk_size": 20000,
-        "tolerance": {
-            "ms": {"ppm":  [15.0, 15.0]},
-            "mobility": {"percent": [3.0, 3.0]},
-            "quad": {"absolute": [0.1, 0.1]}
-        }
-    }
-}
-EOF
 
 # Build the spectral lib using Koina (Prosit) for fragment/RT prediction.
 # Requires network access to https://koina.wilhelmlab.org or a local Koina server.
@@ -85,12 +70,13 @@ cargo run --release -p speclib_build_cli -- \
     --max-ions 10 \
     -o $SPECLIB_NAME
 
-# Run timsseek using the generated speclib + config
+# Run timsseek. Config is optional; defaults work for most runs.
+# To tweak tolerances: `timsseek --write-default-config config.toml`, edit, pass with `-c`.
+# TOML and JSON both accepted (sniffed by extension).
 cargo run --release --bin timsseek -- \
-    --config config_use.json \
     --speclib-file $SPECLIB_NAME \
     --output-dir $RESULTS_DIR \
-    --dotd-file $DOTD_FILE
+    --dotd-files $DOTD_FILE
 ```
 
 ## Development
