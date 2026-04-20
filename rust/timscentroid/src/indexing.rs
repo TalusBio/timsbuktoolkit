@@ -555,12 +555,14 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
             .zip(mob_c.iter())
             .zip(int_c.iter())
             .zip(cyc_c.iter())
-            .map(|(((mz, mobility), intensity), cycle_index)| PeakColumnsChunk {
-                mz,
-                mobility,
-                intensity,
-                cycle_index,
-            });
+            .map(
+                |(((mz, mobility), intensity), cycle_index)| PeakColumnsChunk {
+                    mz,
+                    mobility,
+                    intensity,
+                    cycle_index,
+                },
+            );
         let tail = PeakColumnsView {
             mz: mz_t,
             mobility: mob_t,
@@ -1037,8 +1039,8 @@ fn scan_bucket_slice<T, F>(
             apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
         }
         local.count_after_im_mask::<N>(&mask);
-        for i in 0..N {
-            if mask[i] {
+        for (i, &pass) in mask.iter().enumerate() {
+            if pass {
                 let peak = chunk.materialize(i);
                 f(&peak);
             }
