@@ -36,3 +36,6 @@ default = ["rayon"]
 instrumentation = []
 
 [lib]
+
+[lints]
+workspace = true

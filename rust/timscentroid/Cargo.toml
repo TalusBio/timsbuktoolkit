@@ -52,3 +52,6 @@ azure = ["object_store/azure"]
 # peaks are 10× inflated when this is on. Leave off for wall-time
 # measurement; turn on for funnel shape + filter-pass rates.
 query-instr = []
+
+[lints]
+workspace = true

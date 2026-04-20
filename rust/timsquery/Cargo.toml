@@ -33,3 +33,6 @@ arrow = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }
+
+[lints]
+workspace = true
