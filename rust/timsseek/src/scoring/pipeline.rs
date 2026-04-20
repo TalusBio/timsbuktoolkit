@@ -903,7 +903,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 .map(|i| i.expected_intensity.fragment_len())
                 .max()
                 .unwrap_or(0);
-            let mut scorer = TraceScorer::new(self.num_cycles(), max_frags);
+            let mut scorer = ScoringWorker::new(self.num_cycles(), max_frags);
             let mut heap = CalibrantHeap::new(config.n_calibrants);
             for (chunk_idx, item) in items_to_score.iter().enumerate() {
                 if !filter_fn(&item) {
