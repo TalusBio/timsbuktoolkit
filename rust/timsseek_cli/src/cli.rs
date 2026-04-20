@@ -15,7 +15,7 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", default_value = "info")]
     pub log_level: String,
 
-    /// Path to the JSON configuration file (optional, uses defaults if not provided)
+    /// Path to the configuration file, TOML or JSON (sniffed by extension). Optional; defaults are used if omitted. Use `--write-default-config` to scaffold one.
     #[arg(short, long)]
     pub config: Option<PathBuf>,
 
