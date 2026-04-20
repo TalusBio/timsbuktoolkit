@@ -113,7 +113,7 @@ pub struct CalibrantCandidate {
 
 impl PartialEq for CalibrantCandidate {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
+        self.cmp(other).is_eq()
     }
 }
 
@@ -121,7 +121,7 @@ impl Eq for CalibrantCandidate {}
 
 impl PartialOrd for CalibrantCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.score.partial_cmp(&other.score)
+        Some(self.cmp(other))
     }
 }
 
@@ -146,9 +146,17 @@ impl CalibrantHeap {
         }
     }
 
-    pub fn push(&mut self, candidate: CalibrantCandidate) {
+    /// Returns `Err(SkipReason::CalibrantNanScore)` when `candidate.score` is
+    /// NaN so the caller can surface the count in reports. Non-positive or
+    /// +Inf scores are silently discarded — they are either sentinel
+    /// (`score <= 0.0` means "no usable signal") or already dominated by any
+    /// finite positive candidate in the heap.
+    pub fn push(&mut self, candidate: CalibrantCandidate) -> Result<(), SkipReason> {
+        if candidate.score.is_nan() {
+            return Err(SkipReason::CalibrantNanScore);
+        }
         if !candidate.score.is_finite() || candidate.score <= 0.0 {
-            return;
+            return Ok(());
         }
         if self.heap.len() < self.capacity {
             self.heap.push(std::cmp::Reverse(candidate));
@@ -158,11 +166,13 @@ impl CalibrantHeap {
             self.heap.pop();
             self.heap.push(std::cmp::Reverse(candidate));
         }
+        Ok(())
     }
 
     pub fn merge(mut self, other: Self) -> Self {
         for item in other.heap {
-            self.push(item.0);
+            // Ignore: other heap already filtered on its own push.
+            let _ = self.push(item.0);
         }
         self
     }
@@ -849,12 +859,17 @@ impl<I: ScorerQueriable> Scorer<I> {
                 }
                 t.n_passed_filter += 1;
                 match self.prescore(item, &mut worker, &mut t) {
-                    Ok(loc) => heap.push(CalibrantCandidate {
-                        score: loc.score,
-                        apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                        speclib_index: speclib_offset + chunk_idx,
-                        library_rt: LibraryRT(item.query.rt_seconds()),
-                    }),
+                    Ok(loc) => {
+                        let cand = CalibrantCandidate {
+                            score: loc.score,
+                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
+                            speclib_index: speclib_offset + chunk_idx,
+                            library_rt: LibraryRT(item.query.rt_seconds()),
+                        };
+                        if let Err(reason) = heap.push(cand) {
+                            t.skips.bump(reason);
+                        }
+                    }
                     Err(reason) => t.skips.bump(reason),
                 }
                 (worker, heap, t)

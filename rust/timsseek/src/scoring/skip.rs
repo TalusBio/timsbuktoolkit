@@ -37,6 +37,11 @@ pub enum SkipReason {
     ApexInsufficientData,
     /// NaN / Inf surfaced in scoring math (indicates upstream data pathology).
     ApexNonFiniteScore,
+    /// Phase 1 `find_apex_location` returned NaN for a calibrant score —
+    /// dropped before entering `CalibrantHeap` so downstream ordering stays
+    /// well-defined. Non-zero count signals pathological fragment intensities
+    /// or a divide-by-zero in the scoring math.
+    CalibrantNanScore,
     /// `finalize_results` failed to assemble the ScoredCandidate.
     FinalizeError,
     /// Invariant violation (KeyNotFound / IndexOutOfBounds / VectorLength).
@@ -97,6 +102,7 @@ pub struct SkipCounts {
     pub apex_empty_data: u32,
     pub apex_insufficient_data: u32,
     pub apex_non_finite_score: u32,
+    pub calibrant_nan_score: u32,
     pub finalize_error: u32,
     pub invariant_violation: u32,
 }
@@ -114,6 +120,7 @@ impl SkipCounts {
             SkipReason::ApexEmptyData => &mut self.apex_empty_data,
             SkipReason::ApexInsufficientData => &mut self.apex_insufficient_data,
             SkipReason::ApexNonFiniteScore => &mut self.apex_non_finite_score,
+            SkipReason::CalibrantNanScore => &mut self.calibrant_nan_score,
             SkipReason::FinalizeError => &mut self.finalize_error,
             SkipReason::InvariantViolation => &mut self.invariant_violation,
         };
@@ -127,7 +134,7 @@ impl SkipCounts {
     /// Single source of truth for field enumeration: exhaustive destructure
     /// so adding a `SkipReason` variant (which requires a new field) is a
     /// compile error here, propagating to `total` / `AddAssign` / `Display`.
-    fn named_fields(&self) -> [(u32, &'static str); 10] {
+    fn named_fields(&self) -> [(u32, &'static str); 11] {
         let Self {
             precursor_out_of_fragmented_range,
             retention_time_out_of_bounds,
@@ -137,6 +144,7 @@ impl SkipCounts {
             apex_empty_data,
             apex_insufficient_data,
             apex_non_finite_score,
+            calibrant_nan_score,
             finalize_error,
             invariant_violation,
         } = *self;
@@ -149,6 +157,7 @@ impl SkipCounts {
             (apex_empty_data, "apex_empty"),
             (apex_insufficient_data, "apex_insufficient"),
             (apex_non_finite_score, "apex_nonfinite"),
+            (calibrant_nan_score, "calibrant_nan"),
             (finalize_error, "finalize_err"),
             (invariant_violation, "invariant"),
         ]
@@ -169,6 +178,7 @@ impl std::ops::AddAssign for SkipCounts {
             apex_empty_data,
             apex_insufficient_data,
             apex_non_finite_score,
+            calibrant_nan_score,
             finalize_error,
             invariant_violation,
         } = rhs;
@@ -180,6 +190,7 @@ impl std::ops::AddAssign for SkipCounts {
         self.apex_empty_data += apex_empty_data;
         self.apex_insufficient_data += apex_insufficient_data;
         self.apex_non_finite_score += apex_non_finite_score;
+        self.calibrant_nan_score += calibrant_nan_score;
         self.finalize_error += finalize_error;
         self.invariant_violation += invariant_violation;
     }
