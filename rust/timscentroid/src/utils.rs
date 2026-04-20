@@ -60,11 +60,6 @@ impl MobInt {
     pub fn to_f16(self) -> f16 {
         f16::from_bits(self.0)
     }
-
-    #[inline(always)]
-    pub fn bits(self) -> u16 {
-        self.0
-    }
 }
 
 impl From<MobInt> for f16 {
@@ -362,7 +357,6 @@ mod tests {
         let m = f16::from_f32(0.85);
         let mob = MobInt::from_f16(m).unwrap();
         assert_eq!(mob.to_f16(), m);
-        assert_eq!(mob.bits(), m.to_bits());
     }
 
     #[test]
