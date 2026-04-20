@@ -46,8 +46,8 @@ where
         items
             .par_iter()
             .enumerate()
-            .fold(&init, |acc, pair| fold(acc, pair))
-            .reduce(&init, |a, b| reduce(a, b))
+            .fold(&init, fold)
+            .reduce(&init, reduce)
     }
     #[cfg(not(feature = "rayon"))]
     {

@@ -679,12 +679,18 @@ impl TraceScorer {
             }
 
             // Finalize scribe: -log(sse)
-            for t in 0..n {
-                if sqrt_sum[t] == 0.0 {
-                    self.traces.ms2_scribe[t] = SCRIBE_FLOOR;
+            for (scribe, &ss) in self
+                .traces
+                .ms2_scribe
+                .iter_mut()
+                .zip(sqrt_sum.iter())
+                .take(n)
+            {
+                if ss == 0.0 {
+                    *scribe = SCRIBE_FLOOR;
                 } else {
-                    let sse = self.traces.ms2_scribe[t].max(f32::EPSILON);
-                    self.traces.ms2_scribe[t] = -sse.ln();
+                    let sse = scribe.max(f32::EPSILON);
+                    *scribe = -sse.ln();
                 }
             }
         } else {

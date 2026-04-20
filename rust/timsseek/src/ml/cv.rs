@@ -256,6 +256,9 @@ pub trait FeatureLike {
     fn get_score(&self) -> f64;
 }
 
+/// Materialized view into a `DataBuffer`: feature matrix + label slice.
+type FoldView<'a> = (Matrix<'a, f64>, &'a [f64]);
+
 #[derive(Default)]
 pub struct DataBuffer {
     fold_buffer: Vec<f64>,
@@ -300,7 +303,7 @@ impl DataBuffer {
         Ok(())
     }
 
-    fn as_matrix(&self) -> (Matrix<'_, f64>, &'_ [f64]) {
+    fn as_matrix(&self) -> FoldView<'_> {
         let ncols = self.fold_buffer.len() / self.nrows;
         let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, ncols);
         assert_eq!(self.fold_buffer.len(), self.nrows * self.ncols);
@@ -484,7 +487,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         fold: u8,
         train_buffer: &'a mut DataBuffer,
         val_buffer: &'a mut DataBuffer,
-    ) -> ((Matrix<'a, f64>, &'a [f64]), (Matrix<'a, f64>, &'a [f64])) {
+    ) -> (FoldView<'a>, FoldView<'a>) {
         let next_fold_id = self.next_fold(fold);
         (
             self.fold_to_matrix(fold, train_buffer),
@@ -492,11 +495,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         )
     }
 
-    fn fold_to_matrix<'a>(
-        &self,
-        fold: u8,
-        buffer: &'a mut DataBuffer,
-    ) -> (Matrix<'a, f64>, &'a [f64]) {
+    fn fold_to_matrix<'a>(&self, fold: u8, buffer: &'a mut DataBuffer) -> FoldView<'a> {
         buffer
             .fill_buffer_precomputed(self.assigned_fold.as_slice(), &self.precomputed, fold)
             .unwrap();
