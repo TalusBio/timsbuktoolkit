@@ -48,6 +48,7 @@ sh*/
 docs/superpowers/
 
 # Bench / scratch scratch
+bench.bash
 bench_*.bash
 quichbench*.bash
 run_instrument.bash

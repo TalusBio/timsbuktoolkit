@@ -354,10 +354,10 @@ impl StorageProvider {
     /// # Returns
     /// Vector of indexed peaks loaded from the parquet file
     #[instrument(skip(self), fields(path = %path))]
-    pub fn read_parquet_peaks<T: crate::rt_mapping::RTIndex>(
+    pub(crate) fn read_parquet_peaks<T: crate::rt_mapping::RTIndex>(
         &self,
         path: &str,
-    ) -> Result<Vec<crate::indexing::IndexedPeak<T>>, SerializationError> {
+    ) -> Result<crate::serialization::PeakColumns<T>, SerializationError> {
         use futures::stream::StreamExt;
         use parquet::arrow::ParquetRecordBatchStreamBuilder;
         use parquet::arrow::async_reader::ParquetObjectReader;
@@ -373,16 +373,15 @@ impl StorageProvider {
             let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
             let mut stream = builder.build()?;
 
-            let mut peaks = Vec::new();
+            let mut columns = crate::serialization::PeakColumns::<T>::new();
 
-            // Stream record batches
+            // Stream record batches, appending directly into SoA columns.
             while let Some(batch_result) = stream.next().await {
                 let batch = batch_result?;
-                // Convert batch to peaks (reuse logic from serialization module)
-                peaks.extend(crate::serialization::batch_to_peaks::<T>(&batch)?);
+                crate::serialization::extend_soa_from_batch::<T>(&mut columns, &batch)?;
             }
 
-            Ok(peaks)
+            Ok(columns)
         })
     }
 }

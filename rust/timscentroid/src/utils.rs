@@ -1,5 +1,78 @@
+use half::f16;
 use std::ops::RangeInclusive;
 use thiserror::Error;
+
+/// Non-negative non-NaN f16 mobility, stored as raw bits.
+///
+/// Invariant: `bits` encodes a non-negative, non-NaN f16 value.
+/// Enforced at construction via `try_new` / `from_f16` — every `MobInt`
+/// in flight has already passed the check.
+///
+/// For values in the valid range, `u16` bit comparison matches `f16`
+/// comparison, so `Ord` can be derived from the u16 representation
+/// (no f32 widening required). This is what makes the SoA filter
+/// hot path SIMD-trivial.
+///
+/// `#[repr(transparent)]` ensures `Vec<MobInt>` is byte-identical to
+/// `Vec<u16>` — zero-cost reinterpretation in either direction when
+/// needed (though construction must still go through `try_new`).
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[repr(transparent)]
+pub struct MobInt(u16);
+
+#[derive(Error, Debug)]
+pub enum MobIntError {
+    #[error("mobility is NaN (bits = {bits:#06x})")]
+    Nan { bits: u16 },
+    #[error("mobility is negative (bits = {bits:#06x})")]
+    Negative { bits: u16 },
+}
+
+impl MobInt {
+    /// Construct from raw f16 bits. Validates non-negative + non-NaN
+    /// via direct bit tests (no f16 widen needed).
+    #[inline]
+    pub fn try_new(bits: u16) -> Result<Self, MobIntError> {
+        // IEEE 754 binary16:
+        //   sign: bit 15
+        //   exp:  bits 10-14 (0x7C00 mask)
+        //   mantissa: bits 0-9 (0x03FF mask)
+        // Negative: sign bit set. Mobility must be non-negative.
+        if bits & 0x8000 != 0 {
+            return Err(MobIntError::Negative { bits });
+        }
+        // NaN: exp all-ones AND mantissa != 0.
+        if (bits & 0x7C00) == 0x7C00 && (bits & 0x03FF) != 0 {
+            return Err(MobIntError::Nan { bits });
+        }
+        Ok(Self(bits))
+    }
+
+    #[inline]
+    pub fn from_f16(m: f16) -> Result<Self, MobIntError> {
+        Self::try_new(m.to_bits())
+    }
+
+    /// Free reinterpret — same bits, same register.
+    #[inline(always)]
+    pub fn to_f16(self) -> f16 {
+        f16::from_bits(self.0)
+    }
+
+    #[inline(always)]
+    pub fn bits(self) -> u16 {
+        self.0
+    }
+}
+
+impl From<MobInt> for f16 {
+    #[inline(always)]
+    fn from(m: MobInt) -> Self {
+        m.to_f16()
+    }
+}
 
 /// Finds the index range of elements in a sorted slice whose keys fall within the specified range.
 ///
@@ -260,6 +333,52 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mi(v: f32) -> Result<MobInt, MobIntError> {
+        MobInt::from_f16(f16::from_f32(v))
+    }
+
+    #[test]
+    fn mobint_accepts_non_negative_non_nan() {
+        for v in [0.0, f32::MIN_POSITIVE, 0.85, 1.5, 1000.0, f32::INFINITY] {
+            mi(v).unwrap_or_else(|e| panic!("{v}: {e}"));
+        }
+    }
+
+    #[test]
+    fn mobint_rejects_negative() {
+        for v in [-0.0, -1.0e-5, -0.85, -1.5, f32::NEG_INFINITY] {
+            assert!(matches!(mi(v), Err(MobIntError::Negative { .. })), "{v}");
+        }
+    }
+
+    #[test]
+    fn mobint_rejects_nan() {
+        assert!(matches!(mi(f32::NAN), Err(MobIntError::Nan { .. })));
+    }
+
+    #[test]
+    fn mobint_f16_roundtrip() {
+        let m = f16::from_f32(0.85);
+        let mob = MobInt::from_f16(m).unwrap();
+        assert_eq!(mob.to_f16(), m);
+        assert_eq!(mob.bits(), m.to_bits());
+    }
+
+    #[test]
+    fn mobint_ord_matches_f16() {
+        // For validated (non-negative, non-NaN) f16, u16 bit order == f16 order.
+        let values = [0.0f32, 0.25, 0.5, 0.9, 1.0, 1.25, 10.0, 1000.0];
+        for (i, a) in values.iter().enumerate() {
+            for b in &values[i..] {
+                let fa = f16::from_f32(*a);
+                let fb = f16::from_f32(*b);
+                let ma = MobInt::from_f16(fa).unwrap();
+                let mb = MobInt::from_f16(fb).unwrap();
+                assert_eq!(ma.cmp(&mb), fa.partial_cmp(&fb).unwrap(), "{a} vs {b}");
+            }
+        }
+    }
 
     #[test]
     fn test_slice_search() {
