@@ -9,13 +9,6 @@ use super::skip::{
     SkipReason,
 };
 use super::timings::ScoreTimings;
-#[cfg(feature = "rayon")]
-use rayon::iter::{
-    FromParallelIterator,
-    IntoParallelIterator,
-    ParallelIterator,
-};
-
 pub(super) type ScoreItem = (Result<ScoredCandidate, SkipReason>, ScoreTimings);
 
 #[derive(Default)]
@@ -40,28 +33,5 @@ impl IonSearchAccumulator {
         }
         self.timings += item.1;
         self
-    }
-}
-
-impl FromIterator<ScoreItem> for IonSearchAccumulator {
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = ScoreItem>,
-    {
-        iter.into_iter()
-            .fold(IonSearchAccumulator::default(), IonSearchAccumulator::fold)
-    }
-}
-
-#[cfg(feature = "rayon")]
-impl FromParallelIterator<ScoreItem> for IonSearchAccumulator {
-    fn from_par_iter<I>(par_iter: I) -> Self
-    where
-        I: IntoParallelIterator<Item = ScoreItem>,
-    {
-        par_iter
-            .into_par_iter()
-            .fold(IonSearchAccumulator::default, IonSearchAccumulator::fold)
-            .reduce(IonSearchAccumulator::default, IonSearchAccumulator::reduce)
     }
 }
