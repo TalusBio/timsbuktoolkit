@@ -6,11 +6,15 @@
 //! throughput, it's critical to minimize allocations in the hot path.
 //!
 //! Each scoring operation requires several buffers:
-//! - `TraceScorer` holds time-series feature buffers (size varies with query)
+//! - `ScoringWorker` holds time-series feature buffers (size varies with query)
 //! - Chromatogram collectors (size varies with query complexity)
 //!
-//! `prescore_batch` and `score_calibrated_batch` use Rayon's `map_init()` / `fold` to create
-//! one `TraceScorer` buffer per thread, which is reused across thousands of queries.
+//! `prescore_batch` and `score_calibrated_batch` dispatch through
+//! `super::maybe_par::fold_reduce`, which is compile-time gated on the
+//! `rayon` feature. With rayon, each worker thread gets its own
+//! `ScoringWorker` via the `init` closure and reuses it across thousands
+//! of queries; without rayon, a single `ScoringWorker` is built and reused
+//! for the whole batch. Either way the same closure bodies run.
 //!
 //! ## Scoring Pipeline
 //!
@@ -60,7 +64,10 @@ use super::skip::{
     apex_error_to_skip,
     finalize_error_to_skip,
 };
-use super::timings::ScoreTimings;
+use super::timings::{
+    PrescoreTimings,
+    ScoreTimings,
+};
 use crate::rt_calibration::{
     CalibrationResult,
     LibraryRT,
@@ -749,7 +756,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         item: &QueryItemToScore,
         worker: &mut ScoringWorker,
-        timings: &mut super::timings::PrescoreTimings,
+        timings: &mut PrescoreTimings,
     ) -> Result<ApexLocation, SkipReason> {
         gate_expected_fragments(item)?;
 
@@ -799,7 +806,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         items_to_score: &[QueryItemToScore],
         speclib_offset: usize,
         config: &CalibrationConfig,
-        timings: &mut super::timings::PrescoreTimings,
+        timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
         let filter_fn = |x: &&QueryItemToScore| {
             let tmp = x.query.get_precursor_mz_limits();
@@ -811,7 +818,6 @@ impl<I: ScorerQueriable> Scorer<I> {
         let precursor_oofr_count = items_to_score.iter().filter(|x| !filter_fn(x)).count() as u32;
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
-        use super::timings::PrescoreTimings;
         let num_cycles = self.num_cycles();
         let n_calibrants = config.n_calibrants;
         let max_frags = items_to_score

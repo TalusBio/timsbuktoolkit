@@ -19,6 +19,12 @@ use rayon::prelude::*;
 ///   batch fns share one helper.
 /// * `reduce` merges accumulators from different workers. In serial mode the
 ///   closure is never invoked but is still type-checked.
+/// * `init()` must produce an identity element for `reduce`: for all `x`,
+///   `reduce(init(), x) == x` and `reduce(x, init()) == x`. Rayon calls
+///   `init` to seed BOTH the fold identity and the reduce identity, so a
+///   non-identity init can silently miscount on empty / tiny inputs. The
+///   serial branch ignores this, but writing closures that honor it keeps
+///   parallel semantics correct.
 pub(super) fn fold_reduce<Item, Acc, Init, Fold, Reduce>(
     items: &[Item],
     init: Init,
@@ -26,6 +32,9 @@ pub(super) fn fold_reduce<Item, Acc, Init, Fold, Reduce>(
     reduce: Reduce,
 ) -> Acc
 where
+    // `Item: Sync` is required by rayon's par_iter; the serial branch does not
+    // need it, but keeping the bound unified means callers don't have to think
+    // about feature-flag-dependent trait bounds.
     Item: Sync,
     Acc: Send,
     Init: Fn() -> Acc + Send + Sync,
