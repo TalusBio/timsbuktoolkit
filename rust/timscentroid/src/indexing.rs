@@ -533,6 +533,73 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
             start_idx + self.cycle_index[start_idx..].partition_point(|x| *x <= cycle_range.end());
         start_idx..end_idx
     }
+
+    /// Split into an iterator of fixed-N chunks plus a sub-view over the
+    /// `< N` remainder. Mirrors `slice::as_chunks` across all four columns.
+    #[inline(always)]
+    pub fn as_chunks<const N: usize>(
+        &self,
+    ) -> (
+        impl Iterator<Item = PeakColumnsChunk<'a, T, N>> + use<'a, T, N>,
+        PeakColumnsView<'a, T>,
+    )
+    where
+        T: Copy,
+    {
+        let (mz_c, mz_t) = self.mz.as_chunks::<N>();
+        let (mob_c, mob_t) = self.mobility.as_chunks::<N>();
+        let (int_c, int_t) = self.intensity.as_chunks::<N>();
+        let (cyc_c, cyc_t) = self.cycle_index.as_chunks::<N>();
+        let iter = mz_c
+            .iter()
+            .zip(mob_c.iter())
+            .zip(int_c.iter())
+            .zip(cyc_c.iter())
+            .map(|(((mz, mobility), intensity), cycle_index)| PeakColumnsChunk {
+                mz,
+                mobility,
+                intensity,
+                cycle_index,
+            });
+        let tail = PeakColumnsView {
+            mz: mz_t,
+            mobility: mob_t,
+            intensity: int_t,
+            cycle_index: cyc_t,
+        };
+        (iter, tail)
+    }
+}
+
+/// Borrowed fixed-N chunk across the four SoA columns. Yielded by
+/// `PeakColumnsView::as_chunks`.
+#[derive(Debug, Clone, Copy)]
+pub struct PeakColumnsChunk<'a, T: RTIndex, const N: usize> {
+    mz: &'a [f32; N],
+    mobility: &'a [MobInt; N],
+    intensity: &'a [f32; N],
+    cycle_index: &'a [T; N],
+}
+
+impl<'a, T: RTIndex + Copy, const N: usize> PeakColumnsChunk<'a, T, N> {
+    pub fn mz(&self) -> &'a [f32; N] {
+        self.mz
+    }
+
+    pub fn mobility(&self) -> &'a [MobInt; N] {
+        self.mobility
+    }
+
+    /// Materialize a single peak from chunk-local index `i`.
+    #[inline(always)]
+    pub fn materialize(&self, i: usize) -> IndexedPeak<T> {
+        IndexedPeak {
+            mz: self.mz[i],
+            intensity: self.intensity[i],
+            mobility_ook0: self.mobility[i].to_f16(),
+            cycle_index: self.cycle_index[i],
+        }
+    }
 }
 
 /// Represents a group of indexed peaks, organized into buckets based on m/z ranges.
@@ -687,6 +754,36 @@ impl FepLocal {
         #[cfg(feature = "query-instr")]
         {
             self.peaks_after_im += 1;
+        }
+    }
+
+    /// Count survivors in a chunk mask and add them to `peaks_after_mz`.
+    /// The count loop is compiled out when `query-instr` is disabled.
+    #[inline(always)]
+    #[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+    fn count_after_mz_mask<const N: usize>(&mut self, mask: &[bool; N]) {
+        #[cfg(feature = "query-instr")]
+        {
+            let mut c: u32 = 0;
+            for i in 0..N {
+                c += mask[i] as u32;
+            }
+            self.peaks_after_mz += c;
+        }
+    }
+
+    /// Count survivors in a chunk mask and add them to `peaks_after_im`.
+    /// The count loop is compiled out when `query-instr` is disabled.
+    #[inline(always)]
+    #[cfg_attr(not(feature = "query-instr"), allow(unused_variables))]
+    fn count_after_im_mask<const N: usize>(&mut self, mask: &[bool; N]) {
+        #[cfg(feature = "query-instr")]
+        {
+            let mut c: u32 = 0;
+            for i in 0..N {
+                c += mask[i] as u32;
+            }
+            self.peaks_after_im += c;
         }
     }
 
@@ -880,6 +977,37 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
 /// so the callback sees the same `&IndexedPeak<T>` API as the AoS
 /// version. LLVM SROA elides the temporary struct when the callback
 /// reads a single field.
+/// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and
+/// unrolls NEON (4×f32 × 2). Remainder falls through to scalar tail.
+const SCAN_CHUNK: usize = 8;
+
+#[inline(always)]
+fn apply_mz_mask<const N: usize>(
+    mask: &mut [bool; N],
+    mz_chunk: &[f32; N],
+    range: TupleRange<f32>,
+) {
+    let lo = range.start();
+    let hi = range.end();
+    for i in 0..N {
+        let v = mz_chunk[i];
+        mask[i] = lo <= v && v <= hi;
+    }
+}
+
+#[inline(always)]
+fn apply_mob_mask<const N: usize>(
+    mask: &mut [bool; N],
+    mob_chunk: &[MobInt; N],
+    lo: MobInt,
+    hi: MobInt,
+) {
+    for i in 0..N {
+        let v = mob_chunk[i];
+        mask[i] &= lo <= v && v <= hi;
+    }
+}
+
 #[inline(always)]
 fn scan_bucket_slice<T, F>(
     view: PeakColumnsView<'_, T>,
@@ -891,40 +1019,54 @@ fn scan_bucket_slice<T, F>(
     T: RTIndex + Copy,
     F: FnMut(&IndexedPeak<T>),
 {
+    const N: usize = SCAN_CHUNK;
     let im_bounds = im_range_to_mob_bounds(im_range);
-    let im_ok = |mob: MobInt| match im_bounds {
-        Restricted((lo, hi)) => lo <= mob && mob <= hi,
+    let (chunks, tail) = view.as_chunks::<N>();
+
+    // Bulk chunked path: fixed-N mask compute is autovec-friendly.
+    // Unrestricted filters leave the mask at [true; N] and the counter
+    // tallies N; `count_*_mask` methods are compiled out without the
+    // `query-instr` feature.
+    for chunk in chunks {
+        let mut mask = [true; N];
+        if let Restricted(r) = mz_filter {
+            apply_mz_mask::<N>(&mut mask, chunk.mz(), r);
+        }
+        local.count_after_mz_mask::<N>(&mask);
+        if let Restricted((lo, hi)) = im_bounds {
+            apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
+        }
+        local.count_after_im_mask::<N>(&mask);
+        for i in 0..N {
+            if mask[i] {
+                let peak = chunk.materialize(i);
+                f(&peak);
+            }
+        }
+    }
+
+    // Tail scalar scan over remainder < N.
+    let im_ok = |m: MobInt| match im_bounds {
+        Restricted((lo, hi)) => lo <= m && m <= hi,
         Unrestricted => true,
     };
-    let n = view.len();
-    match mz_filter {
-        Unrestricted => {
-            // Bucket fully inside query mz — bulk-credit every row to
-            // the "passed mz" counter, skip the per-peak compare.
-            local.bump_after_mz(n as u32);
-            for i in 0..n {
-                if !im_ok(view.mobility()[i]) {
-                    continue;
-                }
-                local.bump_after_im();
-                let peak = view.materialize(i);
-                f(&peak);
-            }
+    let tail_mz = tail.mz();
+    let tail_mob = tail.mobility();
+    for i in 0..tail.len() {
+        let mz_pass = match mz_filter {
+            Restricted(r) => r.contains(tail_mz[i]),
+            Unrestricted => true,
+        };
+        if !mz_pass {
+            continue;
         }
-        Restricted(mz_range) => {
-            for i in 0..n {
-                if !mz_range.contains(view.mz()[i]) {
-                    continue;
-                }
-                local.bump_after_mz(1);
-                if !im_ok(view.mobility()[i]) {
-                    continue;
-                }
-                local.bump_after_im();
-                let peak = view.materialize(i);
-                f(&peak);
-            }
+        local.bump_after_mz(1);
+        if !im_ok(tail_mob[i]) {
+            continue;
         }
+        local.bump_after_im();
+        let peak = tail.materialize(i);
+        f(&peak);
     }
 }
 
