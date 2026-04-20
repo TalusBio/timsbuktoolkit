@@ -651,13 +651,14 @@ fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReading
             Ok(_) => Ok(true),
             Err(e) => {
                 if let timscentroid::serialization::SerializationError::Io(io_err) = &e
-                    && io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                        error!(
-                            "Permission denied checking for cached index at {}: {:?}",
-                            location, e
-                        );
-                        return Err(crate::errors::DataReadingError::SerializationError(e));
-                    }
+                    && io_err.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    error!(
+                        "Permission denied checking for cached index at {}: {:?}",
+                        location, e
+                    );
+                    return Err(crate::errors::DataReadingError::SerializationError(e));
+                }
                 debug!("Cloud index sniff: {} -> not cached ({:?})", location, e);
                 Ok(false)
             }

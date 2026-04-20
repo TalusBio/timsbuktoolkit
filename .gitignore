@@ -46,3 +46,16 @@ sh*/
 *plan*.md
 
 docs/superpowers/
+
+# Bench / scratch scratch
+bench_*.bash
+quichbench*.bash
+run_instrument.bash
+*.log
+results.tsv
+config_use.json
+latest_metrics.json
+plot_calib.py
+LEARNINGS.md
+research.md
+reading.md
