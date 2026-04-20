@@ -16,9 +16,7 @@ mass spectrometry data. The project consists of several components:
 - `timsquery_cli`: Command-line interface for querying timsTOF data using the timsquery library.
 - `timsseek`: Implement spectral library reading+build and core logic to score peptide-data matches.
 - `timsseek_cli`: Command-line interface for a peptide-centric search engine.
-- `timsseek_rts`
-    - Command-line program that starts a server where on-demand search of peptides can be performed.
-    - It also includes an example receiver server in streamlit (python) to show how to interface with it.
+- `speclib_build_cli`: CLI that builds a spectral library from FASTA using Koina.
 - `timscentroid`: Internal library for indexing and centroiding timsTOF data.
 - `calibrt`: Internal library for retention time calibration.
 - `alloc_track`: Dev-only tracking global allocator. Opt-in via `--features track-alloc` on `timsseek_cli`; emits per-phase allocation deltas on stderr.
@@ -92,62 +90,12 @@ cargo run --release --bin timsseek -- \
     --config config_use.json \
     --speclib-file $SPECLIB_NAME \
     --output-dir $RESULTS_DIR \
-    --dotd-file $DOTD_FILE $EXTRAS
-```
-
-#### On-Demand Search
-
-```bash
-RAW_FILE=$HOME/data/mysupercoolfile.d
-
-# Write the config file
-cat << EOF > tolconfig.json
-{
-    "ms": {"ppm":  [15.0, 15.0]},
-    "mobility": {"percent": [10.0, 10.0]},
-    "quad": {"absolute": [0.1, 0.1]}
-}
-EOF
-
-# This initializes the server from the file.
-# Depending on the system/file it might take ~7-30 seconds.
-# To index the data
-cargo run --bin timsseek_rts --release -- \
-    --config ./tolconfig.json \
-    --dotd-file $RAW_FILE &
-SERVER_PID=$!
-
-kill $SERVER_PID
-wait
-
+    --dotd-file $DOTD_FILE
 ```
 
 ## Development
 
-### Setting up the Development Environment
-
-TODO
-
-### Common Tasks
-
-Most common tasks are defined in the `Taskfile.yml` file and can be run using the `task` command:
-
-```bash
-# Run tests
-task test
-
-# Format code
-task fmt
-
-# Run linter
-task clippy
-
-# Check dependencies
-task license_check
-
-# Run benchmarks
-task bench
-```
+See [docs/development.md](docs/development.md) for dev utilities, compile flags, env vars, Taskfile targets, and scripts.
 
 ## License
 
