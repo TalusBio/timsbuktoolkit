@@ -343,21 +343,15 @@ impl StorageProvider {
         Ok(())
     }
 
-    /// Read indexed peaks from a parquet file
+    /// Read indexed peaks from a parquet file into SoA columns.
     ///
     /// Uses `ParquetObjectReader` with async streaming for both local and cloud storage.
-    /// This provides efficient reading without intermediate copies or temp files.
-    ///
-    /// # Arguments
-    /// * `path` - Relative path to the parquet file
-    ///
-    /// # Returns
-    /// Vector of indexed peaks loaded from the parquet file
+    /// Validates mobility invariants (non-negative, non-NaN) at the boundary.
     #[instrument(skip(self), fields(path = %path))]
     pub(crate) fn read_parquet_peaks<T: crate::rt_mapping::RTIndex>(
         &self,
         path: &str,
-    ) -> Result<crate::serialization::PeakColumns<T>, SerializationError> {
+    ) -> Result<crate::indexing::PeakColumns<T>, SerializationError> {
         use futures::stream::StreamExt;
         use parquet::arrow::ParquetRecordBatchStreamBuilder;
         use parquet::arrow::async_reader::ParquetObjectReader;
@@ -366,16 +360,19 @@ impl StorageProvider {
         let object_path = ObjectPath::from(full_path.as_str());
 
         block_on_or_in_place(async {
-            // Create ParquetObjectReader - works for both local and cloud storage
             let reader = ParquetObjectReader::new(self.store.clone(), object_path);
-
-            // Build stream
             let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
+            // Pre-size the SoA buffers using the file's row count so the
+            // per-batch extends don't re-grow log2(n) times.
+            let total_rows: usize = builder
+                .metadata()
+                .file_metadata()
+                .num_rows()
+                .try_into()
+                .unwrap_or(0);
+            let mut columns = crate::indexing::PeakColumns::<T>::with_capacity(total_rows);
+
             let mut stream = builder.build()?;
-
-            let mut columns = crate::serialization::PeakColumns::<T>::new();
-
-            // Stream record batches, appending directly into SoA columns.
             while let Some(batch_result) = stream.next().await {
                 let batch = batch_result?;
                 crate::serialization::extend_soa_from_batch::<T>(&mut columns, &batch)?;
