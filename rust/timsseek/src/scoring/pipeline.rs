@@ -148,10 +148,11 @@ impl CalibrantHeap {
         if self.heap.len() < self.capacity {
             self.heap.push(std::cmp::Reverse(candidate));
         } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
-            && candidate.score > min.score {
-                self.heap.pop();
-                self.heap.push(std::cmp::Reverse(candidate));
-            }
+            && candidate.score > min.score
+        {
+            self.heap.pop();
+            self.heap.push(std::cmp::Reverse(candidate));
+        }
     }
 
     pub fn merge(mut self, other: Self) -> Self {

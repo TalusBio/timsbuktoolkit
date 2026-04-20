@@ -665,25 +665,26 @@ impl ViewerCalibrationState {
                         && let Some(path) = rfd::FileDialog::new()
                             .add_filter("JSON", &["json"])
                             .pick_file()
+                    {
+                        let raw_rt_range = if let crate::app::IndexedDataState::Loaded {
+                            index,
+                            ..
+                        } = indexed_data
                         {
-                            let raw_rt_range =
-                                if let crate::app::IndexedDataState::Loaded { index, .. } =
-                                    indexed_data
-                                {
-                                    let cycle_mapping = index.ms1_cycle_mapping();
-                                    let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-                                    Some([rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0])
-                                } else {
-                                    None
-                                };
-                            match self.load_from_file(&path, raw_rt_range) {
-                                Ok(Some(warning)) => tracing::warn!("{}", warning),
-                                Ok(None) => {
-                                    tracing::info!("Calibration loaded from {:?}", path)
-                                }
-                                Err(e) => tracing::error!("Failed to load calibration: {}", e),
+                            let cycle_mapping = index.ms1_cycle_mapping();
+                            let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
+                            Some([rt_min_ms as f64 / 1000.0, rt_max_ms as f64 / 1000.0])
+                        } else {
+                            None
+                        };
+                        match self.load_from_file(&path, raw_rt_range) {
+                            Ok(Some(warning)) => tracing::warn!("{}", warning),
+                            Ok(None) => {
+                                tracing::info!("Calibration loaded from {:?}", path)
                             }
+                            Err(e) => tracing::error!("Failed to load calibration: {}", e),
                         }
+                    }
                 }
                 CalibrationPhase::Running => {
                     if ui.button("\u{23F8} Pause").clicked() {
