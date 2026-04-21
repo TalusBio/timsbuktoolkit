@@ -6098,6 +6098,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tims_stage"
+version = "0.30.0"
+dependencies = [
+ "bytes",
+ "indicatif",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "timscentroid",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "timscentroid"
 version = "0.30.0"
 dependencies = [
