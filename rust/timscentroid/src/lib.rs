@@ -6,7 +6,11 @@ pub mod lazy;
 pub mod rt_mapping;
 pub mod serialization;
 pub mod storage;
+pub mod timings;
 pub mod utils;
+
+#[doc(inline)]
+pub use timings::TimedStep;
 
 #[doc(inline)]
 pub use geometry::QuadrupoleIsolationScheme;
