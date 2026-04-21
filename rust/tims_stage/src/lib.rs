@@ -14,6 +14,13 @@ pub mod tar;
 pub mod upload;
 pub mod uri;
 
+pub use backend::{
+    PerRunTempdir,
+    StagedDotD,
+    StagingBackend,
+    StagingConfig,
+    run_on_staged,
+};
 pub use error::StageError;
 pub use open::open_reader;
 pub use resolve::{
