@@ -15,3 +15,15 @@ pub mod upload;
 pub mod uri;
 
 pub use error::StageError;
+pub use open::open_reader;
+pub use resolve::{
+    Resolved,
+    SourceSpec,
+    resolve,
+};
+pub use upload::upload_file;
+pub use uri::{
+    canonical_uri,
+    sidecar_of,
+    split_uri,
+};

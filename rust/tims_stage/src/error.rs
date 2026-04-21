@@ -14,9 +14,14 @@ pub enum StageError {
     PrefixCapExceeded { prefix: String, cap: usize },
 
     #[error(".d source missing required basenames {missing:?}; found {found:?}")]
-    MissingRequiredFiles { missing: Vec<String>, found: Vec<String> },
+    MissingRequiredFiles {
+        missing: Vec<String>,
+        found: Vec<String>,
+    },
 
-    #[error("GNU long-name tar entries are not supported; rebuild with `tar --format=ustar` or upload as an S3 prefix")]
+    #[error(
+        "GNU long-name tar entries are not supported; rebuild with `tar --format=ustar` or upload as an S3 prefix"
+    )]
     UnsupportedTarFeature,
 
     #[error("tar payload short read: expected {expected} bytes, got {actual}")]
