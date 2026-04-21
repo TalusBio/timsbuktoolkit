@@ -26,11 +26,23 @@ const BLOCK: usize = 512;
 const PREFETCH: usize = 64 * 1024;
 const REQUIRED: &[&str] = &["analysis.tdf", "analysis.tdf_bin"];
 
-/// Abstraction over "something we can pull byte ranges out of". S3 impl uses
-/// range-GETs; local impl uses `File::seek + read_exact`.
+/// Abstraction over "something we can pull byte ranges out of".
+///
+/// `read_range` is for small header reads (up to a few KiB). For large
+/// payload copies (often GBs), use `copy_range_to_file` which streams — the
+/// S3 impl routes that through one range-GET whose response body writes
+/// directly to disk. Never loop `read_range` for big payloads: each call
+/// is a separate HTTP GET on S3.
 pub trait TarReader {
     fn read_range(&mut self, offset: u64, len: usize) -> Result<Bytes, StageError>;
     fn total_len(&self) -> u64;
+    fn copy_range_to_file(
+        &mut self,
+        offset: u64,
+        size: u64,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), StageError>;
 }
 
 /// Range-GET backed reader over an S3 object. Prefetches the first 64 KiB at
@@ -104,6 +116,24 @@ impl TarReader for S3TarReader {
     fn total_len(&self) -> u64 {
         self.size
     }
+
+    fn copy_range_to_file(
+        &mut self,
+        offset: u64,
+        size: u64,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), StageError> {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| StageError::ShapeMismatch("offset+size overflow".into()))?;
+        self.provider
+            .range_get_to_file(&self.key, offset..end, dst, bar)
+            .map_err(|e| StageError::Transport {
+                uri: redact_uri(&self.key),
+                source: e,
+            })
+    }
 }
 
 /// File-backed reader over a local `.tar`.
@@ -132,6 +162,35 @@ impl TarReader for LocalTarReader {
 
     fn total_len(&self) -> u64 {
         self.size
+    }
+
+    fn copy_range_to_file(
+        &mut self,
+        offset: u64,
+        size: u64,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), StageError> {
+        use std::io::Write;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(StageError::Io)?;
+        }
+        let mut out = std::fs::File::create(dst).map_err(StageError::Io)?;
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(StageError::Io)?;
+        let mut remaining = size;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        while remaining > 0 {
+            let take = std::cmp::min(buf.len() as u64, remaining) as usize;
+            self.file
+                .read_exact(&mut buf[..take])
+                .map_err(StageError::Io)?;
+            out.write_all(&buf[..take]).map_err(StageError::Io)?;
+            bar.inc(take as u64);
+            remaining -= take as u64;
+        }
+        Ok(())
     }
 }
 
@@ -291,31 +350,10 @@ fn materialize(
     for bn in REQUIRED {
         let (offset, size) = *index.get(*bn).expect("preflight guarantees presence");
         let bar = make_bar(size, bn);
-        write_range_to_file(reader, offset, size, &dotd.join(bn), &bar)?;
+        reader.copy_range_to_file(offset, size, &dotd.join(bn), &bar)?;
         bar.finish_and_clear();
     }
     Ok(StagedDotD::owned(tempdir, dotd))
-}
-
-fn write_range_to_file(
-    reader: &mut dyn TarReader,
-    offset: u64,
-    size: u64,
-    dst: &Path,
-    bar: &indicatif::ProgressBar,
-) -> Result<(), StageError> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(dst).map_err(StageError::Io)?;
-    const CHUNK: usize = 4 * 1024 * 1024;
-    let mut written = 0u64;
-    while written < size {
-        let take = std::cmp::min(CHUNK as u64, size - written) as usize;
-        let chunk = reader.read_range(offset + written, take)?;
-        f.write_all(&chunk).map_err(StageError::Io)?;
-        bar.inc(chunk.len() as u64);
-        written += chunk.len() as u64;
-    }
-    Ok(())
 }
 
 fn make_bar(size: u64, label: &str) -> indicatif::ProgressBar {
@@ -377,6 +415,19 @@ mod walker_tests {
 
         fn total_len(&self) -> u64 {
             self.data.len() as u64
+        }
+
+        fn copy_range_to_file(
+            &mut self,
+            offset: u64,
+            size: u64,
+            dst: &Path,
+            bar: &indicatif::ProgressBar,
+        ) -> Result<(), StageError> {
+            let bytes = self.read_range(offset, size as usize)?;
+            std::fs::write(dst, &bytes).map_err(StageError::Io)?;
+            bar.inc(bytes.len() as u64);
+            Ok(())
         }
     }
 

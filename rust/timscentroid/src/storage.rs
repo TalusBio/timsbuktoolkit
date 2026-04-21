@@ -260,6 +260,56 @@ impl StorageProvider {
         })
     }
 
+    /// Stream a specific byte range directly to a local file, ticking the
+    /// progress bar per chunk. One HTTP GET with a Range header; the
+    /// response body streams to disk without buffering the whole range in
+    /// memory. Use this for large tar payloads; prefer `get_to_file` when
+    /// you want the whole object.
+    pub fn range_get_to_file(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), SerializationError> {
+        use futures::StreamExt;
+        use object_store::GetRange;
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        let dst = dst.to_path_buf();
+        let expected = range.end.saturating_sub(range.start);
+        block_on_or_in_place(async move {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::File::create(&dst)?;
+            let opts = object_store::GetOptions {
+                range: Some(GetRange::Bounded(range)),
+                ..Default::default()
+            };
+            let got = store
+                .get_opts(&full, opts)
+                .await
+                .map_err(SerializationError::from)?;
+            let mut stream = got.into_stream();
+            let mut written: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(SerializationError::from)?;
+                use std::io::Write;
+                file.write_all(&chunk)?;
+                bar.inc(chunk.len() as u64);
+                written += chunk.len() as u64;
+            }
+            if written < expected {
+                return Err(SerializationError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("range_get_to_file short read: expected {expected}, got {written}"),
+                )));
+            }
+            Ok(())
+        })
+    }
+
     /// Build a fully-qualified `ObjectPath` from a caller-provided key, applying
     /// the provider's URL-path prefix when present.
     fn qualified_path(&self, key: &str) -> ObjectPath {

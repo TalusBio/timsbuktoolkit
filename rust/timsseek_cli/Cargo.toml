@@ -43,3 +43,7 @@ default = ["parallel"]
 parallel = ["timsseek/rayon"]
 instrumentation = ["timsseek/instrumentation", "tracing-profile"]
 track-alloc = ["alloc_track/enabled"]
+# S3/GCS/Azure passthroughs — opt in when you want to read/write cloud URIs.
+aws = ["tims_stage/aws", "timscentroid/aws"]
+gcp = ["tims_stage/gcp", "timscentroid/gcp"]
+azure = ["tims_stage/azure", "timscentroid/azure"]

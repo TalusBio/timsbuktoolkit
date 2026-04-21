@@ -30,3 +30,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 toml = "0.8"
 bloomfilter = "1"
+
+[features]
+default = []
+aws = ["tims_stage/aws"]
+gcp = ["tims_stage/gcp"]
+azure = ["tims_stage/azure"]
