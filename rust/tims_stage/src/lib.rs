@@ -6,6 +6,7 @@
 //! `timsquery`.
 
 pub mod backend;
+pub(crate) mod common;
 pub mod error;
 pub mod open;
 pub mod prefix;
@@ -30,6 +31,7 @@ pub use resolve::{
 pub use upload::upload_file;
 pub use uri::{
     canonical_uri,
+    is_remote_uri,
     sidecar_of,
     split_uri,
 };

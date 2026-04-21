@@ -43,7 +43,7 @@ pub enum StageError {
 
 /// Strip query strings from a URI before embedding in an error message —
 /// presigned-style URLs carry credentials in the query.
-pub fn redact_uri(uri: &str) -> String {
+pub(crate) fn redact_uri(uri: &str) -> String {
     match uri.split_once('?') {
         Some((base, _)) => base.to_string(),
         None => uri.to_string(),

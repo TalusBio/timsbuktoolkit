@@ -59,9 +59,7 @@ struct ValidatedInputs {
     overwrite: bool,
 }
 
-fn is_remote_uri(uri: &str) -> bool {
-    uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://")
-}
+use tims_stage::is_remote_uri;
 
 /// Validates all inputs and outputs before processing begins.
 /// Returns ValidatedInputs on success, or an error if any validation fails.
@@ -217,20 +215,58 @@ fn validate_inputs(
     })
 }
 
-/// Extract a sample name from a raw-input URI. Handles trailing slashes and
-/// `.d`/`.tar`/`.idx` suffixes so the result is stable across input kinds.
+/// Extract a sample name from a raw-input URI. Strips trailing slashes and
+/// each of `.idx`, `.tar`, `.d` in turn so `sample.d.tar`, `sample.d/`,
+/// `sample.d.idx/` all collapse to `sample`. Previously used short-circuit
+/// `.or_else` which left `.d` in place on `.d.tar` inputs.
 fn sample_name_from_uri(uri: &str) -> Option<String> {
     let trimmed = uri.trim_end_matches('/');
-    let last = trimmed.rsplit('/').next()?;
-    let stem = last
-        .strip_suffix(".d")
-        .or_else(|| last.strip_suffix(".tar"))
-        .or_else(|| last.strip_suffix(".idx"))
-        .unwrap_or(last);
+    let mut stem = trimmed.rsplit('/').next()?;
+    // Strip known suffixes in outer-to-inner order, looping so chained
+    // suffixes (e.g. `.d.tar`) collapse fully. Order matters: `.idx`/`.tar`
+    // come off before `.d` so they can't leave a bare `.d` behind.
+    loop {
+        let before = stem;
+        for ext in [".idx", ".tar", ".d"] {
+            if let Some(s) = stem.strip_suffix(ext) {
+                stem = s;
+            }
+        }
+        if stem == before {
+            break;
+        }
+    }
     if stem.is_empty() {
         None
     } else {
         Some(stem.to_string())
+    }
+}
+
+#[cfg(test)]
+mod sample_name_tests {
+    use super::sample_name_from_uri;
+    #[test]
+    fn local_dotd_plain() {
+        assert_eq!(sample_name_from_uri("/data/run.d").as_deref(), Some("run"));
+    }
+    #[test]
+    fn local_dotd_trailing_slash() {
+        assert_eq!(sample_name_from_uri("/data/run.d/").as_deref(), Some("run"));
+    }
+    #[test]
+    fn s3_tar_collapses_both_suffixes() {
+        assert_eq!(
+            sample_name_from_uri("s3://bkt/run.d.tar").as_deref(),
+            Some("run")
+        );
+    }
+    #[test]
+    fn s3_idx_directory() {
+        assert_eq!(
+            sample_name_from_uri("s3://bkt/run.d.idx/").as_deref(),
+            Some("run")
+        );
     }
 }
 
@@ -483,8 +519,9 @@ fn speclib_from_uri(
         return Ok((lib, None));
     }
 
-    // Remote: stream into a tempfile preserving the filename so
-    // format-by-extension detection still works.
+    // Remote: stream directly to a tempfile via Layer-0 get_to_file (one
+    // bounded streaming GET, no in-memory buffer). Preserve the filename
+    // so format-by-extension detection still works.
     let trimmed = uri.trim_end_matches('/');
     let fname = trimmed
         .rsplit('/')
@@ -499,25 +536,21 @@ fn speclib_from_uri(
             path: None,
         })?;
     let local = td.path().join(fname);
-    {
-        use std::io::Write;
-        let mut reader = tims_stage::open_reader(uri).map_err(|e| errors::CliError::Io {
-            source: format!("open speclib {uri}: {e}"),
+    let (loc, key) = tims_stage::split_uri(uri).map_err(|e| errors::CliError::Io {
+        source: format!("split_uri {uri}: {e}"),
+        path: Some(uri.to_string()),
+    })?;
+    let provider = timscentroid::StorageProvider::open(loc).map_err(|e| errors::CliError::Io {
+        source: format!("open speclib provider {uri}: {e}"),
+        path: Some(uri.to_string()),
+    })?;
+    let bar = indicatif::ProgressBar::hidden();
+    provider
+        .get_to_file(&key, &local, &bar)
+        .map_err(|e| errors::CliError::Io {
+            source: format!("download speclib {uri}: {e}"),
             path: Some(uri.to_string()),
         })?;
-        let mut f = std::fs::File::create(&local).map_err(|e| errors::CliError::Io {
-            source: format!("create tempfile: {e}"),
-            path: Some(local.to_string_lossy().to_string()),
-        })?;
-        std::io::copy(&mut reader, &mut f).map_err(|e| errors::CliError::Io {
-            source: format!("write tempfile: {e}"),
-            path: Some(local.to_string_lossy().to_string()),
-        })?;
-        f.flush().map_err(|e| errors::CliError::Io {
-            source: format!("flush tempfile: {e}"),
-            path: Some(local.to_string_lossy().to_string()),
-        })?;
-    }
     let lib = timsseek::data_sources::speclib::Speclib::from_file(&local, decoy_strategy).map_err(
         |e| errors::CliError::Config {
             source: format!("Failed to load speclib {uri}: {:?}", e),

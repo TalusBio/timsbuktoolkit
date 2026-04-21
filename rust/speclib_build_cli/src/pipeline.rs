@@ -398,9 +398,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn is_remote_uri(uri: &str) -> bool {
-    uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://")
-}
+use tims_stage::is_remote_uri;
 
 const NONSTANDARD_AA: &[char] = &['U', 'B', 'J', 'Z', 'X'];
 

@@ -907,10 +907,7 @@ fn build_index(
 
 fn write_sidecar(orig_uri: &str, idx: &IndexedTimstofPeaks) -> Result<(), LoadIndexError> {
     let sidecar_uri = sidecar_of(orig_uri);
-    let loc = if sidecar_uri.starts_with("s3://")
-        || sidecar_uri.starts_with("gs://")
-        || sidecar_uri.starts_with("az://")
-    {
+    let loc = if tims_stage::is_remote_uri(&sidecar_uri) {
         StorageLocation::from_url(&sidecar_uri).map_err(|e| {
             LoadIndexError::Stage(StageError::InvalidUri(format!("{sidecar_uri}: {e}")))
         })?

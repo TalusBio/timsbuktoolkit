@@ -104,8 +104,7 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
 /// `StorageLocation::Url(<uri>)`.
 fn idx_location_for(idx_uri: &str) -> Result<StorageLocation, StageError> {
     let trimmed = idx_uri.trim_end_matches('/');
-    if trimmed.starts_with("s3://") || trimmed.starts_with("gs://") || trimmed.starts_with("az://")
-    {
+    if crate::uri::is_remote_uri(trimmed) {
         StorageLocation::from_url(trimmed)
             .map_err(|e| StageError::InvalidUri(format!("{idx_uri}: {e}")))
     } else {

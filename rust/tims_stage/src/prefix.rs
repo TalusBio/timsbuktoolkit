@@ -1,17 +1,15 @@
-//! S3-prefix materializer.
-
 use crate::backend::{
     PerRunTempdir,
     StagedDotD,
 };
-use crate::error::{
-    StageError,
-    redact_uri,
+use crate::common::{
+    REQUIRED_DOTD_FILES as REQUIRED,
+    make_bar,
+    transport_err,
 };
+use crate::error::StageError;
 use crate::resolve::SourceSpec;
 use timscentroid::StorageProvider;
-
-const REQUIRED: &[&str] = &["analysis.tdf", "analysis.tdf_bin"];
 
 pub(crate) fn stage_s3_prefix(
     backend: &PerRunTempdir,
@@ -24,10 +22,7 @@ pub(crate) fn stage_s3_prefix(
     let uri_for_err = format!("{loc:?}/{prefix}");
 
     // Read-only: do not create local dirs.
-    let provider = StorageProvider::open(loc.clone()).map_err(|e| StageError::Transport {
-        uri: redact_uri(&uri_for_err),
-        source: e,
-    })?;
+    let provider = StorageProvider::open(loc.clone()).map_err(transport_err(&uri_for_err))?;
 
     let listing = provider
         .list_capped(prefix, backend.config().max_prefix_keys)
@@ -36,7 +31,7 @@ pub(crate) fn stage_s3_prefix(
                 StageError::PrefixCapExceeded { cap, prefix }
             }
             other => StageError::Transport {
-                uri: redact_uri(&uri_for_err),
+                uri: crate::error::redact_uri(&uri_for_err),
                 source: other,
             },
         })?;
@@ -73,28 +68,9 @@ pub(crate) fn stage_s3_prefix(
         let full_key = meta.location.to_string();
         provider
             .get_to_file(&full_key, &dotd.join(bn), &bar)
-            .map_err(|e| StageError::Transport {
-                uri: redact_uri(&full_key),
-                source: e,
-            })?;
+            .map_err(transport_err(&full_key))?;
         bar.finish_and_clear();
     }
     step.finish();
     Ok(StagedDotD::owned(tempdir, dotd))
-}
-
-fn make_bar(size: u64, label: &str) -> indicatif::ProgressBar {
-    use std::io::IsTerminal;
-    if !std::io::stderr().is_terminal() {
-        return indicatif::ProgressBar::hidden();
-    }
-    let bar = indicatif::ProgressBar::new(size);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{spinner:.green} {msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-        )
-        .unwrap(),
-    );
-    bar.set_message(label.to_string());
-    bar
 }

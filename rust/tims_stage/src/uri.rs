@@ -6,30 +6,31 @@ use timscentroid::StorageLocation;
 
 /// Where an URI points — local filesystem or remote object store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocKind {
+pub(crate) enum LocKind {
     Local,
     Remote,
 }
 
 /// What kind of artifact the URI names, by suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NameKind {
+pub(crate) enum NameKind {
     Idx,
     DotD,
     Tar,
 }
 
 #[derive(Debug, Clone)]
-pub struct UriShape {
+pub(crate) struct UriShape {
     pub loc: LocKind,
     pub name: NameKind,
+    #[allow(dead_code)]
     pub raw: String,
 }
 
 /// Classify a URI string by scheme + suffix. Pure logic, no I/O.
-pub fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
+pub(crate) fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
     let trimmed = uri.trim_end_matches('/');
-    let loc = if has_remote_scheme(uri) {
+    let loc = if is_remote_uri(uri) {
         LocKind::Remote
     } else {
         LocKind::Local
@@ -50,7 +51,9 @@ pub fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
     })
 }
 
-fn has_remote_scheme(uri: &str) -> bool {
+/// Cheap test for a supported remote URI scheme.
+/// Exported so consumers don't re-implement `uri.starts_with("s3://") || ...`.
+pub fn is_remote_uri(uri: &str) -> bool {
     remote_scheme_prefix(uri).is_some()
 }
 
@@ -108,7 +111,7 @@ pub fn split_uri(uri: &str) -> Result<(StorageLocation, String), StageError> {
 ///   otherwise returns the trimmed input unchanged.
 pub fn canonical_uri(uri: &str) -> String {
     let trimmed = uri.trim_end_matches('/').to_string();
-    if has_remote_scheme(&trimmed) {
+    if is_remote_uri(&trimmed) {
         return trimmed;
     }
     match std::fs::canonicalize(&trimmed) {

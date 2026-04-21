@@ -7,11 +7,12 @@
 //! `read()` call is reentrancy-hostile under rayon, so we front-load into a
 //! single buffer. Speclibs and FASTAs are MBs to a few GB max — fits RAM.
 
-use crate::error::{
-    StageError,
-    redact_uri,
+use crate::common::transport_err;
+use crate::error::StageError;
+use crate::uri::{
+    is_remote_uri,
+    split_uri,
 };
-use crate::uri::split_uri;
 use bytes::Bytes;
 use std::io::{
     Cursor,
@@ -20,7 +21,7 @@ use std::io::{
 use timscentroid::StorageProvider;
 
 pub fn open_reader(uri: &str) -> Result<Box<dyn Read + Send>, StageError> {
-    if is_remote(uri) {
+    if is_remote_uri(uri) {
         let bytes = fetch_remote_bytes(uri)?;
         Ok(Box::new(Cursor::new(bytes)))
     } else {
@@ -29,20 +30,10 @@ pub fn open_reader(uri: &str) -> Result<Box<dyn Read + Send>, StageError> {
     }
 }
 
-fn is_remote(uri: &str) -> bool {
-    uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://")
-}
-
 fn fetch_remote_bytes(uri: &str) -> Result<Bytes, StageError> {
     let (loc, key) = split_uri(uri)?;
-    let provider = StorageProvider::open(loc).map_err(|e| StageError::Transport {
-        uri: redact_uri(uri),
-        source: e,
-    })?;
-    provider.get_bytes(&key).map_err(|e| StageError::Transport {
-        uri: redact_uri(uri),
-        source: e,
-    })
+    let provider = StorageProvider::open(loc).map_err(transport_err(uri))?;
+    provider.get_bytes(&key).map_err(transport_err(uri))
 }
 
 #[cfg(test)]

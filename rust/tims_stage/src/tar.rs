@@ -1,13 +1,13 @@
-//! TarReader trait + ustar walker + stage_{s3,local}_tar helpers.
-
 use crate::backend::{
     PerRunTempdir,
     StagedDotD,
 };
-use crate::error::{
-    StageError,
-    redact_uri,
+use crate::common::{
+    REQUIRED_DOTD_FILES as REQUIRED,
+    make_bar,
+    transport_err,
 };
+use crate::error::StageError;
 use crate::resolve::SourceSpec;
 use bytes::Bytes;
 use std::collections::BTreeMap;
@@ -24,7 +24,6 @@ use timscentroid::{
 
 const BLOCK: usize = 512;
 const PREFETCH: usize = 64 * 1024;
-const REQUIRED: &[&str] = &["analysis.tdf", "analysis.tdf_bin"];
 
 /// Abstraction over "something we can pull byte ranges out of".
 ///
@@ -33,7 +32,7 @@ const REQUIRED: &[&str] = &["analysis.tdf", "analysis.tdf_bin"];
 /// S3 impl routes that through one range-GET whose response body writes
 /// directly to disk. Never loop `read_range` for big payloads: each call
 /// is a separate HTTP GET on S3.
-pub trait TarReader {
+pub(crate) trait TarReader {
     fn read_range(&mut self, offset: u64, len: usize) -> Result<Bytes, StageError>;
     fn total_len(&self) -> u64;
     fn copy_range_to_file(
@@ -48,7 +47,7 @@ pub trait TarReader {
 /// Range-GET backed reader over an S3 object. Prefetches the first 64 KiB at
 /// construction so walks that fit in the prefetch window complete in one
 /// round-trip.
-pub struct S3TarReader {
+pub(crate) struct S3TarReader {
     provider: StorageProvider,
     key: String,
     size: u64,
@@ -57,16 +56,10 @@ pub struct S3TarReader {
 }
 
 impl S3TarReader {
-    pub fn new(loc: &StorageLocation, key: &str) -> Result<Self, StageError> {
+    pub(crate) fn new(loc: &StorageLocation, key: &str) -> Result<Self, StageError> {
         let uri_for_err = format!("{loc:?}/{key}");
-        let provider = StorageProvider::open(loc.clone()).map_err(|e| StageError::Transport {
-            uri: redact_uri(&uri_for_err),
-            source: e,
-        })?;
-        let meta = provider.head(key).map_err(|e| StageError::Transport {
-            uri: redact_uri(&uri_for_err),
-            source: e,
-        })?;
+        let provider = StorageProvider::open(loc.clone()).map_err(transport_err(&uri_for_err))?;
+        let meta = provider.head(key).map_err(transport_err(&uri_for_err))?;
         let size = meta.size;
         let window = std::cmp::min(PREFETCH as u64, size);
         let prefix = if window == 0 {
@@ -74,10 +67,7 @@ impl S3TarReader {
         } else {
             provider
                 .range_get(key, 0..window)
-                .map_err(|e| StageError::Transport {
-                    uri: redact_uri(&uri_for_err),
-                    source: e,
-                })?
+                .map_err(transport_err(&uri_for_err))?
         };
         Ok(Self {
             provider,
@@ -100,10 +90,7 @@ impl TarReader for S3TarReader {
         let got = self
             .provider
             .range_get(&self.key, offset..end)
-            .map_err(|e| StageError::Transport {
-                uri: redact_uri(&self.key),
-                source: e,
-            })?;
+            .map_err(transport_err(&self.key))?;
         if got.len() < len {
             return Err(StageError::ShortRead {
                 expected: len as u64,
@@ -129,21 +116,18 @@ impl TarReader for S3TarReader {
             .ok_or_else(|| StageError::ShapeMismatch("offset+size overflow".into()))?;
         self.provider
             .range_get_to_file(&self.key, offset..end, dst, bar)
-            .map_err(|e| StageError::Transport {
-                uri: redact_uri(&self.key),
-                source: e,
-            })
+            .map_err(transport_err(&self.key))
     }
 }
 
 /// File-backed reader over a local `.tar`.
-pub struct LocalTarReader {
+pub(crate) struct LocalTarReader {
     file: std::fs::File,
     size: u64,
 }
 
 impl LocalTarReader {
-    pub fn new(path: &Path) -> Result<Self, StageError> {
+    pub(crate) fn new(path: &Path) -> Result<Self, StageError> {
         let file = std::fs::File::open(path).map_err(StageError::Io)?;
         let size = file.metadata().map_err(StageError::Io)?.len();
         Ok(Self { file, size })
@@ -354,22 +338,6 @@ fn materialize(
         bar.finish_and_clear();
     }
     Ok(StagedDotD::owned(tempdir, dotd))
-}
-
-fn make_bar(size: u64, label: &str) -> indicatif::ProgressBar {
-    use std::io::IsTerminal;
-    if !std::io::stderr().is_terminal() {
-        return indicatif::ProgressBar::hidden();
-    }
-    let bar = indicatif::ProgressBar::new(size);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{spinner:.green} {msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-        )
-        .unwrap(),
-    );
-    bar.set_message(label.to_string());
-    bar
 }
 
 // -------- walker unit tests --------
