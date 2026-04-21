@@ -13,5 +13,14 @@ timsquery = { path = "../../rust/timsquery" }
 timscentroid = { path = "../../rust/timscentroid" }
 
 rayon = { workspace = true }
-pyo3 = { version = "0.25", features = ["extension-module"] }
+pyo3 = { version = "0.25" }
 numpy = "0.25"
+
+[features]
+default = []
+# Enable when building the wheel via maturin so pyo3 doesn't try to link
+# libpython (symbols resolve at runtime from the host Python). Plain
+# `cargo build -p timsquery_pyo3` without this feature builds but the
+# produced cdylib is only usable inside a Python interpreter that
+# provides libpython at load time.
+extension-module = ["pyo3/extension-module"]
