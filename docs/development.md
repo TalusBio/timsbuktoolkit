@@ -46,6 +46,33 @@ Not shown by `--help`. Read directly via `std::env::var`.
 
 Per-crate: `rust/timsseek/Taskfile.yml` adds a watch loop (`task timsseek`) — rebuild + test + fmt + clippy on source change.
 
+## S3 staging
+
+`timsseek_cli` config:
+
+```toml
+[staging]
+tempdir_root = "/scratch/timsseek"   # default: system temp
+max_prefix_keys = 256
+save_sidecar = false                  # write .idx next to raw input
+stale_sweep_age_hours = 24            # 0 disables startup sweep
+```
+
+Startup sweeps `timsseek-staging-*` subdirs older than threshold that lack a `.lock` sentinel. Reclaims tempdirs from SIGKILL'd/crashed runs.
+
+Env vars (via `object_store` default chain): `AWS_{ACCESS_KEY_ID,SECRET_ACCESS_KEY,SESSION_TOKEN,REGION}`, `AWS_ENDPOINT_URL` (MinIO/R2), `AWS_S3_FORCE_PATH_STYLE` (auto-on with endpoint).
+
+Enable with `--features aws` on `timscentroid` / `tims_stage`. Default build omits AWS SDK.
+
+MinIO smoke test (needs pre-seeded bucket):
+
+```bash
+MINIO_TEST_ENDPOINT=http://localhost:9000 \
+AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+MINIO_TEST_BUCKET=tims-stage-ci \
+cargo test -p tims_stage --features aws --test minio_smoke
+```
+
 ## Tracked scripts
 
 | Path | Purpose |

@@ -79,6 +79,21 @@ cargo run --release --bin timsseek -- \
     --dotd-files $DOTD_FILE
 ```
 
+## S3 inputs
+
+Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.d` can be a directory, `.tar`, or S3 prefix; `.idx` sidecars short-circuit staging.
+
+```bash
+timsseek --raw-inputs s3://bkt/sample.d.tar \
+         --speclib-uri s3://bkt/lib.msgpack.zst \
+         --output-uri s3://bkt/runs/out
+
+speclib_build_cli --fasta s3://bkt/proteome.fasta \
+                  --output s3://bkt/lib.msgpack.zst
+```
+
+Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
+
 ## Development
 
 See [docs/development.md](docs/development.md) for dev utilities, compile flags, env vars, Taskfile targets, and scripts.
