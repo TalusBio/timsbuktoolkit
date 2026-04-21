@@ -2,6 +2,7 @@ use std::io::BufRead;
 
 use indicatif::{
     ProgressBar,
+    ProgressFinish,
     ProgressStyle,
 };
 use timsseek::DigestSlice;

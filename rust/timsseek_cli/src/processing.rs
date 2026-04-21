@@ -1,9 +1,9 @@
 use super::config::OutputConfig;
 use indicatif::{
     ProgressBar,
+    ProgressFinish,
     ProgressIterator,
     ProgressStyle,
-    ProgressFinish,
 };
 use std::io::IsTerminal;
 use timsquery::models::tolerance::{
@@ -68,7 +68,9 @@ fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
         label
     ))
     .unwrap();
-    ProgressBar::new(len).with_style(style).with_finish(ProgressFinish::AndLeave)
+    ProgressBar::new(len)
+        .with_style(style)
+        .with_finish(ProgressFinish::AndLeave)
 }
 
 /// Check that two speclibs are on a compatible RT scale.

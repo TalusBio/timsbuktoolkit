@@ -100,6 +100,10 @@ pub enum SerializationError {
         expected: &'static str,
         found: String,
     },
+    PrefixCapExceeded {
+        prefix: String,
+        cap: usize,
+    },
 }
 
 impl fmt::Display for SerializationError {
@@ -134,6 +138,13 @@ impl fmt::Display for SerializationError {
                     f,
                     "Schema version mismatch. Expected {}, found {}",
                     expected, found
+                )
+            }
+            Self::PrefixCapExceeded { prefix, cap } => {
+                write!(
+                    f,
+                    "prefix yields more than {} entries; refusing to list (prefix={})",
+                    cap, prefix
                 )
             }
         }
