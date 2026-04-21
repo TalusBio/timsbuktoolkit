@@ -3,6 +3,7 @@ use indicatif::{
     ProgressBar,
     ProgressIterator,
     ProgressStyle,
+    ProgressFinish,
 };
 use std::io::IsTerminal;
 use timsquery::models::tolerance::{
@@ -67,7 +68,7 @@ fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
         label
     ))
     .unwrap();
-    ProgressBar::new(len).with_style(style)
+    ProgressBar::new(len).with_style(style).with_finish(ProgressFinish::AndLeave)
 }
 
 /// Check that two speclibs are on a compatible RT scale.
@@ -160,7 +161,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let (calibrants, phase1_timings) =
         phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
     let phase1_ms = step
-        .finish_with(format_args!("{} calibrants", calibrants.len()))
+        .finish_with(format_args!(
+            "{} calibrants/ {} candidates",
+            calibrants.len(),
+            phase1_timings.n_scored
+        ))
         .as_millis() as u64;
     alloc_track::snap!("Phase 1: Prescore");
     timscentroid::indexing::dump_for_each_peak_funnel("Phase 1");

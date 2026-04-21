@@ -246,14 +246,14 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     // Estimate total items for progress bar: peptides * mod_variants * charges * (1 + decoy)
     let decoy_mult: u64 = if decoy_mode != DecoyMode::None { 2 } else { 1 };
     let estimated_total = base_peptides.len() as u64 * charges.len() as u64 * decoy_mult;
-    let progress = ProgressBar::new(estimated_total);
-    progress.set_style(
+    let progress = ProgressBar::new(estimated_total).with_style(
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec}, ETA {eta})",
         )
         .unwrap()
         .progress_chars("#>-"),
-    );
+
+        ).with_finish(ProgressFinish::AndLeave);
 
     let mut batch: Vec<BatchItem> = Vec::with_capacity(batch_size);
     let mut entry_id: u32 = 0;
