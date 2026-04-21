@@ -1,5 +1,5 @@
 //! StagingBackend trait, PerRunTempdir implementation, StagedDotD handle,
-//! and the `run_on_staged` ergonomic wrapper.
+//! plus a startup sweep for stale tempdirs.
 
 use crate::error::StageError;
 use crate::resolve::SourceSpec;
@@ -49,14 +49,6 @@ impl StagedDotD {
     pub(crate) fn owned(tempdir: tempfile::TempDir, dotd: PathBuf) -> Self {
         Self {
             _tempdir: Some(tempdir),
-            dotd,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn borrowed(dotd: PathBuf) -> Self {
-        Self {
-            _tempdir: None,
             dotd,
         }
     }
@@ -111,23 +103,6 @@ impl StagingBackend for PerRunTempdir {
             SourceSpec::LocalTar { .. } => crate::tar::stage_local_tar(self, spec),
         }
     }
-}
-
-/// Ergonomic wrapper — stage, run the supplied closure against the local
-/// `.d` path, drop the tempdir on return. Both success and error paths
-/// drop the handle. Free function (not a trait method) so `StagingBackend`
-/// stays dyn-safe.
-///
-/// Abnormal mid-operation termination (SIGKILL, crash) leaves the tempdir;
-/// the startup sweep reclaims it on the next run.
-pub fn run_on_staged<B, W, F>(backend: &B, spec: &SourceSpec, op: F) -> Result<W, StageError>
-where
-    B: StagingBackend + ?Sized,
-    F: FnOnce(&Path) -> Result<W, StageError>,
-{
-    let staged = backend.stage(spec)?;
-    op(staged.as_ref())
-    // staged drops here regardless of Ok or Err path
 }
 
 fn sweep_stale(root: &Path, age_hours: u64) -> Result<(), StageError> {

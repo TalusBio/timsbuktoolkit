@@ -19,7 +19,6 @@ pub use backend::{
     StagedDotD,
     StagingBackend,
     StagingConfig,
-    run_on_staged,
 };
 pub use error::StageError;
 pub use open::open_reader;

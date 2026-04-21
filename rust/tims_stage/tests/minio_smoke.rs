@@ -19,8 +19,7 @@ fn stage_s3_prefix_against_minio() {
     let bucket = minio::minio_bucket();
     let uri = format!("s3://{bucket}/smoke/sample.d/");
 
-    let backend =
-        tims_stage::PerRunTempdir::new(tims_stage::StagingConfig::default()).unwrap();
+    let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig::default()).unwrap();
     let resolved = tims_stage::resolve(&uri).unwrap();
     let spec = match resolved {
         tims_stage::Resolved::Stageable { spec } => spec,

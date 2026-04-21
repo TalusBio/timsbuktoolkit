@@ -30,9 +30,6 @@ pub enum StageError {
     #[error("shape mismatch: {0}")]
     ShapeMismatch(String),
 
-    #[error("not found: {0}")]
-    NotFound(String),
-
     #[error("storage transport error at {uri}: {source}")]
     Transport {
         uri: String,
