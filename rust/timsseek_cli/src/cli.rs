@@ -21,12 +21,12 @@ pub struct Cli {
 
     /// Path to the .d file(s) (will over-write the config file)
     /// Can be specified multiple times for batch processing
-    #[arg(short, long, value_name = "FILE")]
-    pub dotd_files: Vec<PathBuf>,
+    #[arg(long = "raw-inputs", alias = "dotd-files", value_name = "URI")]
+    pub raw_inputs: Vec<String>,
 
     /// Path to the speclib file (will over-write the config file)
-    #[arg(short, long)]
-    pub speclib_file: Option<PathBuf>,
+    #[arg(long = "speclib-uri", alias = "speclib-file")]
+    pub speclib_uri: Option<String>,
 
     /// Path to a calibration library (optional).
     /// If provided, Phase 1 prescore uses this library for calibrant selection,
@@ -36,8 +36,8 @@ pub struct Cli {
     pub calib_lib: Option<PathBuf>,
 
     /// Path to the output directory
-    #[arg(short, long)]
-    pub output_dir: Option<PathBuf>,
+    #[arg(long = "output-uri", short = 'o', alias = "output-dir")]
+    pub output_uri: Option<String>,
 
     /// Overwrite existing output directory if it exists
     #[arg(short = 'O', long)]

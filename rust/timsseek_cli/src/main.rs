@@ -4,9 +4,12 @@ mod errors;
 mod processing;
 
 use clap::Parser;
-use timsquery::TimsTofPath;
-use timsquery::serde::load_index_auto;
 use timsquery::utils::TupleRange;
+use timsquery::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    load_index,
+};
 use timsseek::scoring::Scorer;
 use timsseek::scoring::timings::TimedStep;
 use tracing::{
@@ -49,11 +52,15 @@ static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::
 
 /// Validated inputs ready for processing
 struct ValidatedInputs {
-    dotd_files: Vec<std::path::PathBuf>,
-    speclib_path: std::path::PathBuf,
-    calib_lib_path: Option<std::path::PathBuf>,
-    output_directory: std::path::PathBuf,
+    raw_inputs: Vec<String>,
+    speclib_uri: String,
+    calib_lib_uri: Option<String>,
+    output_uri: String,
     overwrite: bool,
+}
+
+fn is_remote_uri(uri: &str) -> bool {
+    uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://")
 }
 
 /// Validates all inputs and outputs before processing begins.
@@ -65,18 +72,18 @@ fn validate_inputs(
     info!("Validating inputs and outputs before processing...");
 
     // Get list of raw files to process
-    let dotd_files = match config.analysis.dotd_files.clone() {
+    let raw_inputs = match config.analysis.raw_inputs.clone() {
         Some(files) => files,
         None => {
             return Err(errors::CliError::Config {
-                source: "No raw files provided, please provide dotd_files in either the config file or with the --dotd-files flag".to_string(),
+                source: "No raw files provided, please provide raw_inputs in either the config file or with the --raw-inputs flag".to_string(),
             });
         }
     };
 
-    // Get speclib path
-    let speclib_path = match &config.input {
-        Some(InputConfig::Speclib { path }) => path.clone(),
+    // Get speclib URI
+    let speclib_uri = match &config.input {
+        Some(InputConfig::Speclib { uri }) => uri.clone(),
         None => {
             return Err(errors::CliError::Config {
                 source: "No input specified".to_string(),
@@ -84,9 +91,9 @@ fn validate_inputs(
         }
     };
 
-    // Get output directory
-    let output_directory = match &config.output {
-        Some(output_config) => output_config.directory.clone(),
+    // Get output URI (local path or s3:// etc.)
+    let output_uri: String = match &config.output {
+        Some(output_config) => output_config.uri.clone(),
         None => {
             return Err(errors::CliError::Config {
                 source: "No output directory specified".to_string(),
@@ -94,156 +101,166 @@ fn validate_inputs(
         }
     };
 
-    // Validate speclib exists
-    if !speclib_path.exists() {
+    // Validate speclib exists (local only — remote resolution happens at open)
+    if !is_remote_uri(&speclib_uri) && !std::path::Path::new(&speclib_uri).exists() {
         return Err(errors::CliError::Io {
             source: "Speclib file does not exist".to_string(),
-            path: Some(speclib_path.to_string_lossy().to_string()),
+            path: Some(speclib_uri.clone()),
         });
     }
-    info!("✓ Speclib file exists: {:?}", speclib_path);
+    info!("✓ Speclib URI: {}", speclib_uri);
 
     // Validate calib lib if provided
-    let calib_lib_path = args.calib_lib.clone();
-    if let Some(ref path) = calib_lib_path {
-        if !path.exists() {
+    let calib_lib_uri: Option<String> = args
+        .calib_lib
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    if let Some(ref uri) = calib_lib_uri {
+        if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
             return Err(errors::CliError::Io {
                 source: "Calibration library file does not exist".to_string(),
-                path: Some(path.to_string_lossy().to_string()),
+                path: Some(uri.clone()),
             });
         }
-        info!("✓ Calibration library exists: {:?}", path);
+        info!("✓ Calibration library URI: {}", uri);
     }
 
-    // Validate all raw files exist
-    for dotd_file in &dotd_files {
-        if !dotd_file.exists() {
+    // Validate all raw inputs: local-path existence only. Remote URIs are
+    // resolved by tims_stage at staging time.
+    for raw_uri in &raw_inputs {
+        if !is_remote_uri(raw_uri) && !std::path::Path::new(raw_uri.as_str()).exists() {
             return Err(errors::CliError::Io {
                 source: "Raw file does not exist".to_string(),
-                path: Some(dotd_file.to_string_lossy().to_string()),
+                path: Some(raw_uri.clone()),
             });
         }
     }
-    info!("✓ All {} raw file(s) exist", dotd_files.len());
+    info!("✓ All {} raw input(s) validated", raw_inputs.len());
 
-    // Check if output directory exists and handle based on overwrite flag
-    if output_directory.exists() && !args.overwrite {
-        return Err(errors::CliError::Config {
-            source: format!(
-                "Output directory {:?} already exists. Use --overwrite/-O to overwrite.",
-                output_directory
-            ),
-        });
-    }
+    // Local-output path checks: existence and write probe. Remote outputs
+    // (s3://, gs://, az://) skip these — the upload itself is the write test.
+    if !is_remote_uri(&output_uri) {
+        let output_dir_path = std::path::Path::new(&output_uri);
 
-    // Create output directory and test write permissions
-    match std::fs::create_dir_all(&output_directory) {
-        Ok(_) => {
-            if args.overwrite {
-                info!("✓ Using existing output directory (overwrite mode)");
-            } else {
-                info!("✓ Created output directory");
-            }
-        }
-        Err(e) => {
-            return Err(errors::CliError::Io {
-                source: format!("Failed to create output directory: {}", e),
-                path: Some(output_directory.to_string_lossy().to_string()),
-            });
-        }
-    };
-
-    // Test write permissions by creating a test file
-    let test_file = output_directory.join(".write_test");
-    match std::fs::write(&test_file, "test") {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-            info!("✓ Output directory is writable");
-        }
-        Err(e) => {
-            return Err(errors::CliError::Io {
-                source: format!("Output directory is not writable: {}", e),
-                path: Some(output_directory.to_string_lossy().to_string()),
-            });
-        }
-    }
-
-    // Validate per-file output subdirectories
-    for dotd_file in &dotd_files {
-        let file_stem = dotd_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| errors::CliError::Io {
-                source: "Unable to extract file stem".to_string(),
-                path: Some(dotd_file.to_string_lossy().to_string()),
-            })?;
-        let file_output_dir = output_directory.join(file_stem);
-
-        // Check if per-file directory exists when not in overwrite mode
-        if file_output_dir.exists() && !args.overwrite {
+        if output_dir_path.exists() && !args.overwrite {
             return Err(errors::CliError::Config {
                 source: format!(
-                    "Output subdirectory {:?} already exists. Use --overwrite/-O to overwrite.",
-                    file_output_dir
+                    "Output directory {:?} already exists. Use --overwrite/-O to overwrite.",
+                    output_uri
                 ),
             });
         }
+
+        match std::fs::create_dir_all(output_dir_path) {
+            Ok(_) => {
+                if args.overwrite {
+                    info!("✓ Using existing output directory (overwrite mode)");
+                } else {
+                    info!("✓ Created output directory");
+                }
+            }
+            Err(e) => {
+                return Err(errors::CliError::Io {
+                    source: format!("Failed to create output directory: {}", e),
+                    path: Some(output_uri.clone()),
+                });
+            }
+        };
+
+        let test_file = output_dir_path.join(".write_test");
+        match std::fs::write(&test_file, "test") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_file);
+                info!("✓ Output directory is writable");
+            }
+            Err(e) => {
+                return Err(errors::CliError::Io {
+                    source: format!("Output directory is not writable: {}", e),
+                    path: Some(output_uri.clone()),
+                });
+            }
+        }
+
+        // Validate per-file output subdirectories (local only)
+        for raw_uri in &raw_inputs {
+            let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
+                source: "Unable to extract file stem".to_string(),
+                path: Some(raw_uri.clone()),
+            })?;
+            let file_output_dir = output_dir_path.join(&file_stem);
+
+            if file_output_dir.exists() && !args.overwrite {
+                return Err(errors::CliError::Config {
+                    source: format!(
+                        "Output subdirectory {:?} already exists. Use --overwrite/-O to overwrite.",
+                        file_output_dir
+                    ),
+                });
+            }
+        }
+        info!("✓ All output subdirectories validated");
+    } else {
+        info!(
+            "✓ Remote output URI, skipping local path checks: {}",
+            output_uri
+        );
     }
-    info!("✓ All output subdirectories validated");
 
     info!("All validations passed! Starting processing...");
 
     Ok(ValidatedInputs {
-        dotd_files,
-        speclib_path,
-        calib_lib_path,
-        output_directory,
+        raw_inputs,
+        speclib_uri,
+        calib_lib_uri,
+        output_uri,
         overwrite: args.overwrite,
     })
 }
 
-fn get_frag_range(file: &TimsTofPath) -> Result<TupleRange<f64>, errors::CliError> {
-    let reader = file
-        .load_frame_reader()
-        .map_err(|e| errors::CliError::DataReading {
-            source: format!("Failed to load frame reader: {:?}", e),
-        })?;
-    let dia_windows = reader
-        .dia_windows
-        .as_ref()
-        .ok_or_else(|| errors::CliError::DataReading {
-            source: "File does not contain DIA windows — is this a DIA run?".to_string(),
-        })?;
+/// Extract a sample name from a raw-input URI. Handles trailing slashes and
+/// `.d`/`.tar`/`.idx` suffixes so the result is stable across input kinds.
+fn sample_name_from_uri(uri: &str) -> Option<String> {
+    let trimmed = uri.trim_end_matches('/');
+    let last = trimmed.rsplit('/').next()?;
+    let stem = last
+        .strip_suffix(".d")
+        .or_else(|| last.strip_suffix(".tar"))
+        .or_else(|| last.strip_suffix(".idx"))
+        .unwrap_or(last);
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
 
-    let upper_mz = dia_windows
-        .iter()
-        .map(|w| {
-            w.isolation_mz
-                .iter()
-                .zip(w.isolation_width.iter())
-                .map(|(imz, iw)| imz + (iw / 2.0))
-                .fold(0.0, f64::max)
-        })
-        .fold(0.0, f64::max);
-
-    let lower_mz = dia_windows
-        .iter()
-        .map(|w| {
-            w.isolation_mz
-                .iter()
-                .zip(w.isolation_width.iter())
-                .map(|(imz, iw)| imz - (iw / 2.0))
-                .fold(f64::MAX, f64::min)
-        })
-        .fold(f64::MAX, f64::min);
-
-    TupleRange::try_new(lower_mz, upper_mz).map_err(|e| errors::CliError::DataReading {
-        source: format!("Invalid DIA m/z range: {:?}", e),
-    })
+fn get_frag_range_from_index(
+    index: &IndexedTimstofPeaks,
+) -> Result<TupleRange<f64>, errors::CliError> {
+    // `IndexedTimstofPeaks::fragmented_range` already folds over every
+    // ms2 window-group via `QuadrupoleIsolationScheme::fragmented_range`,
+    // which is defined on the ring-shape geometry (AABB/Trapezoid/Polygon).
+    // It panics only if there are no window groups — treat that as a
+    // non-DIA run and surface a readable error instead.
+    //
+    // NOTE: the task spec proposed reaching into raw `isolation_mz` /
+    // `isolation_width` Vec<f32> fields, but `QuadrupoleIsolationScheme`
+    // stores classified ring shapes (not the raw arrays). Using the
+    // existing public accessor is both correct and narrower.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| index.fragmented_range()));
+    match result {
+        Ok(r) => Ok(r),
+        Err(_) => Err(errors::CliError::DataReading {
+            source: "Index has no MS2 window groups — is this a DIA run?".to_string(),
+        }),
+    }
 }
 
 fn process_single_file(
-    dotd_file: &std::path::Path,
+    raw_uri: &str,
+    backend: &tims_stage::PerRunTempdir,
+    save_sidecar: bool,
     speclib: &timsseek::data_sources::speclib::Speclib,
     calib_lib: Option<&timsseek::data_sources::speclib::Speclib>,
     config: &Config,
@@ -251,23 +268,16 @@ fn process_single_file(
     overwrite: bool,
     max_qvalue: f32,
 ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
-    info!("Processing file: {:?}", dotd_file);
-
-    let timstofpath =
-        TimsTofPath::new(dotd_file.to_str().unwrap()).map_err(|e| errors::CliError::Io {
-            source: format!("Failed to open raw file: {:?}", e),
-            path: Some(dotd_file.to_string_lossy().to_string()),
-        })?;
+    info!("Processing raw input: {}", raw_uri);
 
     let step = TimedStep::begin("Loading index");
-    let index = load_index_auto(
-        dotd_file.to_str().ok_or_else(|| errors::CliError::Io {
-            source: "Invalid path encoding".to_string(),
-            path: None,
-        })?,
-        None,
-    )?
-    .into_eager()?;
+    let index =
+        load_index(raw_uri, backend, save_sidecar, CentroidingConfig::default()).map_err(|e| {
+            errors::CliError::Io {
+                source: format!("load_index({raw_uri}): {e}"),
+                path: Some(raw_uri.to_string()),
+            }
+        })?;
     let load_index_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Loading index");
 
@@ -285,7 +295,7 @@ fn process_single_file(
     let index = index.rebucket(new_bucket_size);
     step.finish();
 
-    let fragmented_range = get_frag_range(&timstofpath)?;
+    let fragmented_range = get_frag_range_from_index(&index)?;
 
     let pipeline = Scorer {
         index,
@@ -293,14 +303,11 @@ fn process_single_file(
         fragmented_range,
     };
 
-    let file_stem = dotd_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| errors::CliError::Io {
-            source: "Unable to extract file stem".to_string(),
-            path: Some(dotd_file.to_string_lossy().to_string()),
-        })?;
-    let file_output_dir = base_output_dir.join(file_stem);
+    let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
+        source: "Unable to derive sample name from URI".to_string(),
+        path: Some(raw_uri.to_string()),
+    })?;
+    let file_output_dir = base_output_dir.join(&file_stem);
 
     std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
         source: format!("Failed to create output subdirectory: {}", e),
@@ -327,7 +334,7 @@ fn process_single_file(
     }
 
     let file_output_config = OutputConfig {
-        directory: file_output_dir,
+        uri: file_output_dir.to_string_lossy().to_string(),
     };
 
     let report = processing::run_pipeline(
@@ -344,8 +351,179 @@ fn process_single_file(
         source: format!("{}", e),
     })?;
 
-    info!("Successfully processed {:?}", dotd_file);
+    info!("Successfully processed {}", raw_uri);
     Ok(report)
+}
+
+/// Handles local-vs-remote output routing. When `dest_uri` is an s3:// /
+/// gs:// / az:// URL, writes into a tempdir and uploads per-sample; when
+/// local, writes directly.
+struct OutputSink {
+    dest_uri: String,
+    working_dir: std::path::PathBuf,
+    remote: bool,
+    _tempdir: Option<tempfile::TempDir>,
+}
+
+impl OutputSink {
+    fn new(dest_uri: &str) -> Result<Self, errors::CliError> {
+        if is_remote_uri(dest_uri) {
+            let td = tempfile::Builder::new()
+                .prefix("timsseek-output-")
+                .tempdir()
+                .map_err(|e| errors::CliError::Io {
+                    source: format!("output tempdir: {e}"),
+                    path: None,
+                })?;
+            let working_dir = td.path().to_path_buf();
+            Ok(Self {
+                dest_uri: dest_uri.to_string(),
+                working_dir,
+                remote: true,
+                _tempdir: Some(td),
+            })
+        } else {
+            std::fs::create_dir_all(dest_uri).map_err(|e| errors::CliError::Io {
+                source: format!("create output dir: {e}"),
+                path: Some(dest_uri.to_string()),
+            })?;
+            Ok(Self {
+                dest_uri: dest_uri.to_string(),
+                working_dir: std::path::PathBuf::from(dest_uri),
+                remote: false,
+                _tempdir: None,
+            })
+        }
+    }
+
+    fn sample_dir(&self, sample: &str) -> std::path::PathBuf {
+        self.working_dir.join(sample)
+    }
+
+    fn root(&self) -> &std::path::Path {
+        &self.working_dir
+    }
+
+    /// Upload and remove a per-sample subdir after the sample has finished
+    /// writing; no-op for local destinations.
+    fn finalize_sample(&self, sample: &str) -> Result<(), errors::CliError> {
+        if !self.remote {
+            return Ok(());
+        }
+        let local = self.sample_dir(sample);
+        for entry in std::fs::read_dir(&local).map_err(|e| errors::CliError::Io {
+            source: format!("read sample dir: {e}"),
+            path: Some(local.to_string_lossy().to_string()),
+        })? {
+            let entry = entry.map_err(|e| errors::CliError::Io {
+                source: format!("read dir entry: {e}"),
+                path: None,
+            })?;
+            let bn = entry.file_name().to_string_lossy().to_string();
+            let dest = format!("{}/{}/{}", self.dest_uri.trim_end_matches('/'), sample, bn);
+            tims_stage::upload_file(&entry.path(), &dest).map_err(|e| errors::CliError::Io {
+                source: format!("upload {dest}: {e}"),
+                path: None,
+            })?;
+        }
+        std::fs::remove_dir_all(&local).map_err(|e| errors::CliError::Io {
+            source: format!("cleanup sample dir: {e}"),
+            path: Some(local.to_string_lossy().to_string()),
+        })?;
+        Ok(())
+    }
+
+    /// Upload named top-level files (run_report.json, config_used.json)
+    /// that exist in the working dir; no-op for local destinations.
+    fn finalize_run(&self, files: &[&str]) -> Result<(), errors::CliError> {
+        if !self.remote {
+            return Ok(());
+        }
+        for bn in files {
+            let local = self.working_dir.join(bn);
+            if !local.exists() {
+                continue;
+            }
+            let dest = format!("{}/{}", self.dest_uri.trim_end_matches('/'), bn);
+            tims_stage::upload_file(&local, &dest).map_err(|e| errors::CliError::Io {
+                source: format!("upload {dest}: {e}"),
+                path: None,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Load a Speclib from a local path or remote URI. Remote URIs are
+/// downloaded to a tempfile (preserving the original filename so
+/// `SpeclibFormat::detect_from_path` still works on extension), then
+/// handed to the existing path-based `Speclib::from_file`.
+///
+/// NOTE: the task spec suggested wiring `tims_stage::open_reader` directly
+/// into the speclib loader, but `Speclib::from_file` takes a `Path` (it
+/// sniffs format by extension and re-opens the file) rather than a
+/// `Read`. Rerouting through a tempfile keeps the change scoped to
+/// `timsseek_cli` and preserves format auto-detection.
+fn speclib_from_uri(
+    uri: &str,
+    decoy_strategy: timsseek::DecoyStrategy,
+) -> Result<
+    (
+        timsseek::data_sources::speclib::Speclib,
+        Option<tempfile::TempDir>,
+    ),
+    errors::CliError,
+> {
+    if !is_remote_uri(uri) {
+        let path = std::path::Path::new(uri);
+        let lib = timsseek::data_sources::speclib::Speclib::from_file(path, decoy_strategy)
+            .map_err(|e| errors::CliError::Config {
+                source: format!("Failed to load speclib {uri}: {:?}", e),
+            })?;
+        return Ok((lib, None));
+    }
+
+    // Remote: stream into a tempfile preserving the filename so
+    // format-by-extension detection still works.
+    let trimmed = uri.trim_end_matches('/');
+    let fname = trimmed
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("speclib.bin");
+    let td = tempfile::Builder::new()
+        .prefix("timsseek-speclib-")
+        .tempdir()
+        .map_err(|e| errors::CliError::Io {
+            source: format!("speclib tempdir: {e}"),
+            path: None,
+        })?;
+    let local = td.path().join(fname);
+    {
+        use std::io::Write;
+        let mut reader = tims_stage::open_reader(uri).map_err(|e| errors::CliError::Io {
+            source: format!("open speclib {uri}: {e}"),
+            path: Some(uri.to_string()),
+        })?;
+        let mut f = std::fs::File::create(&local).map_err(|e| errors::CliError::Io {
+            source: format!("create tempfile: {e}"),
+            path: Some(local.to_string_lossy().to_string()),
+        })?;
+        std::io::copy(&mut reader, &mut f).map_err(|e| errors::CliError::Io {
+            source: format!("write tempfile: {e}"),
+            path: Some(local.to_string_lossy().to_string()),
+        })?;
+        f.flush().map_err(|e| errors::CliError::Io {
+            source: format!("flush tempfile: {e}"),
+            path: Some(local.to_string_lossy().to_string()),
+        })?;
+    }
+    let lib = timsseek::data_sources::speclib::Speclib::from_file(&local, decoy_strategy).map_err(
+        |e| errors::CliError::Config {
+            source: format!("Failed to load speclib {uri}: {:?}", e),
+        },
+    )?;
+    Ok((lib, Some(td)))
 }
 
 fn main() {
@@ -408,22 +586,22 @@ fn run() -> std::result::Result<(), errors::CliError> {
     };
 
     // Override config with command line arguments if provided
-    if !args.dotd_files.is_empty() {
-        config.analysis.dotd_files = Some(args.dotd_files.clone());
+    if !args.raw_inputs.is_empty() {
+        config.analysis.raw_inputs = Some(args.raw_inputs.clone());
     }
-    if let Some(ref speclib_file) = args.speclib_file {
+    if let Some(ref speclib_uri) = args.speclib_uri {
         config.input = Some(InputConfig::Speclib {
-            path: speclib_file.clone(),
+            uri: speclib_uri.clone(),
         });
     }
     if config.input.is_none() {
         return Err(errors::CliError::Config {
-            source: "No input provided, please provide one in either the config file or with the --speclib-file flag".to_string(),
+            source: "No input provided, please provide one in either the config file or with the --speclib-uri flag".to_string(),
         });
     }
-    if let Some(ref output_dir) = args.output_dir {
+    if let Some(ref output_uri) = args.output_uri {
         config.output = Some(OutputConfig {
-            directory: output_dir.clone(),
+            uri: output_uri.clone(),
         });
     }
 
@@ -435,15 +613,18 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // === Set up tracing subscriber ===
     // We defer this until after config/validation so we know the output directory for the log file.
 
-    // Determine log file path
+    // Determine log file path. Remote output URIs skip the default file-log
+    // path — we'd be writing to a non-local directory; use `--log-path` to
+    // point at a local file explicitly in that case.
     let log_file_path = match args.log_path {
         Some(ref p) if p.to_str() == Some("-") => None, // stderr-only mode
         Some(ref p) => Some(p.clone()),
         None => args
-            .output_dir
+            .output_uri
             .as_ref()
-            .or(config.output.as_ref().map(|o| &o.directory))
-            .map(|d| d.join("timsseek.log")),
+            .or(config.output.as_ref().map(|o| &o.uri))
+            .filter(|d| !is_remote_uri(d.as_str()))
+            .map(|d| std::path::Path::new(d).join("timsseek.log")),
     };
 
     // Build the env filter for the main logging layer
@@ -530,9 +711,30 @@ fn run() -> std::result::Result<(), errors::CliError> {
 
     let validated = validate_inputs(&config, &args)?;
 
-    let config_output_path = validated.output_directory.join("config_used.json");
+    // Build staging backend once from [staging] config (falls back to
+    // defaults when absent). The sweep runs in `PerRunTempdir::new`.
+    let staging_cfg = config.staging.clone().unwrap_or_default();
+    let save_sidecar_flag = staging_cfg.save_sidecar;
+    let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig {
+        tempdir_root: staging_cfg.tempdir_root.clone(),
+        max_prefix_keys: staging_cfg.max_prefix_keys,
+        stale_sweep_age_hours: staging_cfg.stale_sweep_age_hours,
+    })
+    .map_err(|e| errors::CliError::Io {
+        source: format!("staging backend: {e}"),
+        path: None,
+    })?;
 
-    // If overwrite mode, delete existing config file
+    // Route outputs through a local tempdir when the destination is remote
+    // (s3://, gs://, az://). Per-sample subdirs are uploaded + removed
+    // after each sample finishes; run-level files are uploaded after the
+    // batch.
+    let sink = OutputSink::new(&validated.output_uri)?;
+
+    let config_output_path = sink.root().join("config_used.json");
+
+    // If overwrite mode, delete existing config file (local-only; remote
+    // will simply overwrite on upload).
     if validated.overwrite && config_output_path.exists() {
         std::fs::remove_file(&config_output_path).map_err(|e| errors::CliError::Io {
             source: format!("Failed to remove existing config file: {}", e),
@@ -551,50 +753,39 @@ fn run() -> std::result::Result<(), errors::CliError> {
     info!("Wrote final configuration to {:?}", config_output_path);
 
     let mut run_report = timsseek::scoring::RunReport::default();
-    let mut failed_files: Vec<(std::path::PathBuf, errors::CliError)> = Vec::new();
-    let mut successful_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut failed_files: Vec<(String, errors::CliError)> = Vec::new();
+    let mut successful_files: Vec<String> = Vec::new();
 
     // Load speclib once (shared across all files)
     let step = TimedStep::begin("Loading speclib");
     info!(
-        "Building database from speclib file {:?}",
-        validated.speclib_path
+        "Building database from speclib URI {}",
+        validated.speclib_uri
     );
     info!(
         "Decoy generation strategy: {}",
         config.analysis.decoy_strategy
     );
-    let speclib = timsseek::data_sources::speclib::Speclib::from_file(
-        &validated.speclib_path,
-        config.analysis.decoy_strategy,
-    )
-    .map_err(|e| errors::CliError::Config {
-        source: format!("Failed to load speclib: {:?}", e),
-    })?;
+    let (speclib, _speclib_td) =
+        speclib_from_uri(&validated.speclib_uri, config.analysis.decoy_strategy)?;
     let load_speclib_ms = step
         .finish_with(format_args!("{} entries", speclib.len()))
         .as_millis() as u64;
     alloc_track::snap!("Loading speclib");
 
     // Load calibration library once (if provided)
-    let (calib_lib, load_calib_lib_ms) = match &validated.calib_lib_path {
-        Some(p) => {
+    let (calib_lib, _calib_td, load_calib_lib_ms) = match &validated.calib_lib_uri {
+        Some(uri) => {
             let step = TimedStep::begin("Loading calib lib");
-            info!("Loading calibration library from {:?}", p);
-            let lib = timsseek::data_sources::speclib::Speclib::from_file(
-                p,
-                config.analysis.decoy_strategy,
-            )
-            .map_err(|e| errors::CliError::Config {
-                source: format!("Failed to load calib lib: {:?}", e),
-            })?;
+            info!("Loading calibration library from {}", uri);
+            let (lib, td) = speclib_from_uri(uri, config.analysis.decoy_strategy)?;
             let ms = step
                 .finish_with(format_args!("{} entries", lib.len()))
                 .as_millis() as u64;
             alloc_track::snap!("Loading calib lib");
-            (Some(lib), ms)
+            (Some(lib), td, ms)
         }
-        None => (None, 0),
+        None => (None, None, 0),
     };
 
     run_report.load_speclib_ms = load_speclib_ms;
@@ -602,59 +793,83 @@ fn run() -> std::result::Result<(), errors::CliError> {
     run_report.speclib_entries = speclib.len();
     run_report.calib_lib_entries = calib_lib.as_ref().map_or(0, |l| l.len());
 
-    let total_files = validated.dotd_files.len();
-    info!("Processing {} raw file(s)", total_files);
+    let total_files = validated.raw_inputs.len();
+    info!("Processing {} raw input(s)", total_files);
 
-    for (idx, dotd_file) in validated.dotd_files.iter().enumerate() {
+    for (idx, raw_uri) in validated.raw_inputs.iter().enumerate() {
         info!(
-            "Processing file {} of {}: {:?}",
+            "Processing input {} of {}: {}",
             idx + 1,
             total_files,
-            dotd_file
+            raw_uri
         );
 
+        let sample_name = match sample_name_from_uri(raw_uri) {
+            Some(s) => s,
+            None => {
+                let e = errors::CliError::Io {
+                    source: "Unable to derive sample name from URI".to_string(),
+                    path: Some(raw_uri.clone()),
+                };
+                error!("Failed to process {}: {}", raw_uri, e);
+                failed_files.push((raw_uri.clone(), e));
+                continue;
+            }
+        };
+
         match process_single_file(
-            dotd_file,
+            raw_uri,
+            &backend,
+            save_sidecar_flag,
             &speclib,
             calib_lib.as_ref(),
             &config,
-            &validated.output_directory,
+            sink.root(),
             validated.overwrite,
             args.max_qvalue,
         ) {
             Ok(report) => {
-                successful_files.push(dotd_file.clone());
+                if let Err(e) = sink.finalize_sample(&sample_name) {
+                    error!("Failed to finalize sample {}: {}", sample_name, e);
+                    failed_files.push((raw_uri.clone(), e));
+                    error!("Aborting batch due to upload failure");
+                    break;
+                }
+                successful_files.push(raw_uri.clone());
                 run_report.files.push(timsseek::scoring::FileReport {
-                    file_name: dotd_file.to_string_lossy().to_string(),
+                    file_name: raw_uri.clone(),
                     pipeline: report,
                 });
             }
             Err(e) => {
-                error!("Failed to process {:?}: {}", dotd_file, e);
+                error!("Failed to process {}: {}", raw_uri, e);
                 // I/O errors are likely systemic (disk full, permissions) —
                 // abort the batch instead of failing every remaining file.
                 if matches!(e, errors::CliError::Io { .. }) {
-                    failed_files.push((dotd_file.clone(), e));
+                    failed_files.push((raw_uri.clone(), e));
                     error!("Aborting batch due to I/O error");
                     break;
                 }
-                failed_files.push((dotd_file.clone(), e));
+                failed_files.push((raw_uri.clone(), e));
             }
         }
     }
 
-    // Write run-level report
-    let run_report_path = validated.output_directory.join("run_report.json");
+    // Write run-level report into the sink's working dir.
+    let run_report_path = sink.root().join("run_report.json");
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
         let _ = std::fs::write(&run_report_path, json);
         info!("Wrote run report to {:?}", run_report_path);
     }
 
+    // Upload run-level artifacts for remote destinations (no-op locally).
+    sink.finalize_run(&["run_report.json", "config_used.json"])?;
+
     info!("Successfully processed {} file(s)", successful_files.len());
     if !failed_files.is_empty() {
         error!("Failed to process {} file(s):", failed_files.len());
         for (file, err) in &failed_files {
-            error!("  {:?}: {}", file, err);
+            error!("  {}: {}", file, err);
         }
         return Err(errors::CliError::Config {
             source: format!("Failed to process {} file(s)", failed_files.len()),

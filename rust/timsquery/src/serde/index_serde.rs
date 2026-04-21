@@ -824,3 +824,99 @@ pub fn load_index_auto(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Layer-3 orchestrator: `load_index`
+// ---------------------------------------------------------------------------
+
+use tims_stage::{
+    Resolved,
+    StageError,
+    StagingBackend,
+    canonical_uri,
+    resolve,
+    sidecar_of,
+};
+use timscentroid::serialization::SerializationError;
+
+/// Load an eagerly-materialized index from a URI.
+///
+/// - `uri` — local path or `s3://` URL. May point at a `.idx` directory, a
+///   `.d` directory, a `.tar`, or an S3 `.d` prefix.
+/// - `backend` — the staging backend to use when the URI resolves to
+///   `Stageable`. Typically `&tims_stage::PerRunTempdir::new(cfg)?`.
+/// - `save_sidecar` — when true, and we built an index from a `.d`/tar/prefix
+///   input, write a `.idx` sidecar to `sidecar_of(uri)` so the next run
+///   short-circuits on the sidecar fast-path.
+/// - `centroid_cfg` — centroiding configuration threaded through
+///   `from_timstof_file` on the build paths.
+pub fn load_index(
+    uri: &str,
+    backend: &dyn StagingBackend,
+    save_sidecar: bool,
+    centroid_cfg: CentroidingConfig,
+) -> Result<IndexedTimstofPeaks, LoadIndexError> {
+    let canon = canonical_uri(uri);
+    match resolve(&canon)? {
+        Resolved::LocalIdx { loc } | Resolved::RemoteIdx { loc } => {
+            IndexedTimstofPeaks::load_from_storage(loc).map_err(LoadIndexError::Load)
+        }
+        Resolved::LocalDotD { path } => {
+            let idx = build_index(&path, centroid_cfg)?;
+            if save_sidecar {
+                write_sidecar(&canon, &idx)?;
+            }
+            Ok(idx)
+        }
+        Resolved::Stageable { spec } => {
+            let staged = backend.stage(&spec).map_err(LoadIndexError::Stage)?;
+            let idx = build_index(staged.as_ref(), centroid_cfg)?;
+            if save_sidecar {
+                write_sidecar(&canon, &idx)?;
+            }
+            Ok(idx)
+            // staged drops here (RAII) — tempdir removed.
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadIndexError {
+    #[error(transparent)]
+    Stage(#[from] StageError),
+    #[error("index build from local .d failed: {0}")]
+    Build(String),
+    #[error("index load from storage failed: {0:?}")]
+    Load(SerializationError),
+    #[error("sidecar save failed: {0:?}")]
+    SidecarWrite(SerializationError),
+}
+
+fn build_index(
+    dotd: &Path,
+    centroid_cfg: CentroidingConfig,
+) -> Result<IndexedTimstofPeaks, LoadIndexError> {
+    let path_str = dotd
+        .to_str()
+        .ok_or_else(|| LoadIndexError::Build(format!("path is not valid UTF-8: {:?}", dotd)))?;
+    let tt = TimsTofPath::new(path_str)
+        .map_err(|e| LoadIndexError::Build(format!("failed to open {:?}: {:?}", dotd, e)))?;
+    let (idx, _stats) = IndexedTimstofPeaks::from_timstof_file(&tt, centroid_cfg);
+    Ok(idx)
+}
+
+fn write_sidecar(orig_uri: &str, idx: &IndexedTimstofPeaks) -> Result<(), LoadIndexError> {
+    let sidecar_uri = sidecar_of(orig_uri);
+    let loc = if sidecar_uri.starts_with("s3://")
+        || sidecar_uri.starts_with("gs://")
+        || sidecar_uri.starts_with("az://")
+    {
+        StorageLocation::from_url(&sidecar_uri).map_err(|e| {
+            LoadIndexError::Stage(StageError::InvalidUri(format!("{sidecar_uri}: {e}")))
+        })?
+    } else {
+        StorageLocation::from_path(&sidecar_uri)
+    };
+    idx.save_to_storage(loc, SerializationConfig::default())
+        .map_err(LoadIndexError::SidecarWrite)
+}

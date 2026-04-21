@@ -270,7 +270,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
-        let cal_json_path = out_path.directory.join("calibration.json");
+        let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
         if let Err(e) = calibration.save_json(
             &cal_points_tuples,
             [rt_lo, rt_hi],
@@ -346,7 +346,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
-    let out_path_pq = out_path.directory.join("results.parquet");
+    let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
     let mut pq_writer =
         timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000).map_err(
             |e| TimsSeekError::Io {
@@ -919,7 +919,7 @@ pub fn run_pipeline(
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    let performance_report_path = output.directory.join("performance_report.json");
+    let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
 
     let mut timings = execute_pipeline(
         speclib,

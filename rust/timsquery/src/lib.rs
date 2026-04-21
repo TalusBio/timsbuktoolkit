@@ -61,3 +61,8 @@ pub mod ion {
 }
 
 pub use ion::IonAnnot;
+
+pub use crate::serde::index_serde::{
+    LoadIndexError,
+    load_index,
+};

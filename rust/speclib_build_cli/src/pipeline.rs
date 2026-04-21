@@ -1,4 +1,7 @@
-use std::io::BufRead;
+use std::io::{
+    BufRead,
+    Write,
+};
 
 use indicatif::{
     ProgressBar,
@@ -112,9 +115,27 @@ async fn flush_batch(
 pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // ── Phase 1: Get base peptides ──────────────────────────────────────────
 
-    let base_peptides: Vec<DigestSlice> = if let Some(fasta_path) = &config.fasta {
-        tracing::info!("Reading FASTA: {}", fasta_path.display());
-        let collection = ProteinSequenceCollection::from_fasta_file(fasta_path)?;
+    let base_peptides: Vec<DigestSlice> = if let Some(fasta_uri) = &config.fasta {
+        tracing::info!("Reading FASTA: {}", fasta_uri);
+        let collection = if is_remote_uri(fasta_uri) {
+            // Download remote FASTA to a tempfile (preserving extension for any
+            // downstream sniffing), then parse as usual.
+            let mut reader = tims_stage::open_reader(fasta_uri)
+                .map_err(|e| format!("open fasta {fasta_uri}: {e}"))?;
+            let ext = std::path::Path::new(fasta_uri.trim_end_matches('/'))
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("fasta");
+            let mut tf = tempfile::Builder::new()
+                .prefix("speclib-fasta-")
+                .suffix(&format!(".{ext}"))
+                .tempfile()?;
+            std::io::copy(&mut reader, tf.as_file_mut())?;
+            tf.as_file_mut().flush()?;
+            ProteinSequenceCollection::from_fasta_file(tf.path())?
+        } else {
+            ProteinSequenceCollection::from_fasta_file(std::path::Path::new(fasta_uri))?
+        };
         let total_aa: usize = collection.sequences.iter().map(|p| p.sequence.len()).sum();
         tracing::info!(
             "Read {} proteins ({} amino acids)",
@@ -161,10 +182,11 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         }
         tracing::info!("Deduplicated to {} unique peptides", deduped.len());
         deduped
-    } else if let Some(list_path) = &config.peptide_list {
-        tracing::info!("Reading peptide list: {}", list_path.display());
-        let file = std::fs::File::open(list_path)?;
-        let reader = std::io::BufReader::new(file);
+    } else if let Some(list_uri) = &config.peptide_list {
+        tracing::info!("Reading peptide list: {}", list_uri);
+        let raw_reader = tims_stage::open_reader(list_uri)
+            .map_err(|e| format!("open peptide list {list_uri}: {e}"))?;
+        let reader = std::io::BufReader::new(raw_reader);
         let mut slices: Vec<DigestSlice> = Vec::new();
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
@@ -241,7 +263,36 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
     // ── Phase 3: Streaming expansion + prediction ───────────────────────────
 
-    let out_file = std::fs::File::create(&config.output)?;
+    let output_uri = &config.output;
+    let remote_output = is_remote_uri(output_uri);
+    // Keep the tempfile handle alive until after upload so the file isn't
+    // dropped out from under us.
+    let output_tempfile: Option<tempfile::NamedTempFile> = if remote_output {
+        let ext = std::path::Path::new(output_uri.trim_end_matches('/'))
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("msgpack.zst");
+        let tf = tempfile::Builder::new()
+            .prefix("speclib-out-")
+            .suffix(&format!(".{ext}"))
+            .tempfile()?;
+        Some(tf)
+    } else {
+        // Ensure parent directory exists for local output.
+        if let Some(parent) = std::path::Path::new(output_uri).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        None
+    };
+    let working_path: std::path::PathBuf = if let Some(tf) = &output_tempfile {
+        tf.path().to_path_buf()
+    } else {
+        std::path::PathBuf::from(output_uri)
+    };
+
+    let out_file = std::fs::File::create(&working_path)?;
     let mut writer = SpeclibWriter::new_msgpack_zstd(out_file)?;
 
     // Estimate total items for progress bar: peptides * mod_variants * charges * (1 + decoy)
@@ -334,9 +385,21 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     progress.finish_with_message("done");
     writer.finish()?;
 
-    tracing::info!("Wrote {} entries to {}", entry_id, config.output.display(),);
+    // Upload tempfile for remote outputs. Hold tempfile alive until upload
+    // completes, then let it drop (which removes the local file).
+    if remote_output {
+        tims_stage::upload_file(&working_path, output_uri)
+            .map_err(|e| format!("upload {output_uri}: {e}"))?;
+    }
+    drop(output_tempfile);
+
+    tracing::info!("Wrote {} entries to {}", entry_id, output_uri);
 
     Ok(())
+}
+
+fn is_remote_uri(uri: &str) -> bool {
+    uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://")
 }
 
 const NONSTANDARD_AA: &[char] = &['U', 'B', 'J', 'Z', 'X'];

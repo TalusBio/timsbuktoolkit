@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::path::PathBuf;
 
 use crate::cli::Cli;
 
@@ -62,8 +61,8 @@ fn default_max_ion_mz() -> f32 {
 fn default_min_ions() -> usize {
     3
 }
-fn default_output() -> PathBuf {
-    PathBuf::from("library.msgpack.zst")
+fn default_output() -> String {
+    "library.msgpack.zst".to_string()
 }
 
 // ── Sub-structs ──────────────────────────────────────────────────────────────
@@ -198,12 +197,13 @@ impl Default for FiltersConfig {
 #[serde(default)]
 pub struct SpeclibBuildConfig {
     // Inputs — not directly deserialised from TOML but set after merging CLI args.
+    // URIs: either local paths or remote (s3://...).
     #[serde(skip)]
-    pub fasta: Option<PathBuf>,
+    pub fasta: Option<String>,
     #[serde(skip)]
-    pub peptide_list: Option<PathBuf>,
+    pub peptide_list: Option<String>,
 
-    pub output: PathBuf,
+    pub output: String,
     pub digestion: DigestionConfig,
     pub modifications: ModificationsConfig,
     pub charges: ChargesConfig,

@@ -8,7 +8,9 @@ license.workspace = true
 timsseek = { path = "../timsseek", default-features = false }
 timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
+tims_stage = { path = "../tims_stage" }
 alloc_track = { path = "../alloc_track" }
+tempfile = { workspace = true }
 
 regex = "1.11.1"
 # tracing-profile = { version="0.10.11",features=["perfetto"] }
