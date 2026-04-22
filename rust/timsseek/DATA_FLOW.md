@@ -302,7 +302,11 @@ The `as_feature()` method produces the following features for rescoring:
 
 ```
 QueryItemToScore
-├── digest: ProteinSlice             sequence + modifications
+├── digest: Peptide                  raw sequence + optional parsed residues/mods
+│   ├── raw: Arc<str>                on-disk modified-sequence string
+│   ├── parsed: Option<ParsedSequence>  None iff speclib gate=off (all-or-none)
+│   ├── decoy: DecoyMarking          Target / ReversedDecoy
+│   └── decoy_group: u32
 ├── query: TimsElutionGroup<IonAnnot> precursor/fragment m/z, RT, mobility
 └── expected_intensity: ExpectedIntensities<IonAnnot>
 
