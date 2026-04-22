@@ -68,7 +68,7 @@ fn default_output() -> String {
 // ── Sub-structs ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DigestionConfig {
     /// Enzyme name (currently only "trypsin" is recognised).
     pub enzyme: String,
@@ -89,7 +89,7 @@ impl Default for DigestionConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModificationsConfig {
     /// Fixed modifications applied to every matching residue, e.g. ["Carbamidomethyl@C"].
     pub fixed: Vec<String>,
@@ -110,7 +110,7 @@ impl Default for ModificationsConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ChargesConfig {
     pub min: u8,
     pub max: u8,
@@ -126,7 +126,7 @@ impl Default for ChargesConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DecoysConfig {
     /// Strategy for generating decoy entries: "none", "reverse", or "edge_mutate".
     pub strategy: String,
@@ -141,7 +141,7 @@ impl Default for DecoysConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PredictionConfig {
     pub fragment_model: String,
     pub rt_model: String,
@@ -167,7 +167,7 @@ impl Default for PredictionConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FiltersConfig {
     pub max_ions: usize,
     pub min_mz: f32,
@@ -194,7 +194,7 @@ impl Default for FiltersConfig {
 // ── Top-level config ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpeclibBuildConfig {
     // Inputs — not directly deserialised from TOML but set after merging CLI args.
     // URIs: either local paths or remote (s3://...).

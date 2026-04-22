@@ -584,6 +584,125 @@ fn speclib_from_uri(
     Ok((lib, Some(td)))
 }
 
+/// Handle returned by [`init_tracing`]. Holds resources whose lifetime must
+/// span the entire run — notably the `instrumentation`-feature flush guard,
+/// which flushes aggregated spans on drop. Callers bind with a `_`-prefixed
+/// name and drop at end of scope.
+///
+/// The guard is type-erased via `Box<dyn Any>` so we don't have to name the
+/// `tracing_profile` guard type from outside the feature-gated section.
+/// Dropping the box runs the guard's `Drop` impl.
+struct TracingHandle {
+    #[cfg(feature = "instrumentation")]
+    _tree_guard: Box<dyn std::any::Any>,
+    #[cfg(not(feature = "instrumentation"))]
+    _empty: (),
+}
+
+/// Install the tracing subscriber. Returns a handle whose lifetime keeps
+/// the flush guard alive for the whole run.
+///
+/// Resolution order for the log file:
+///   1. `--log-path -`  → stderr-only, no file
+///   2. `--log-path <p>` → that path
+///   3. default        → `<output_dir>/timsseek.log`, iff output is local
+///
+/// Remote output URIs (s3://, gs://, az://) skip the default file-log path
+/// because we'd be writing through a non-filesystem backend; callers who
+/// want a log file must pass `--log-path <local>` explicitly.
+fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
+    let log_file_path: Option<std::path::PathBuf> = match args.log_path {
+        Some(ref p) if p.to_str() == Some("-") => None,
+        Some(ref p) => Some(p.clone()),
+        None => args
+            .output_uri
+            .as_ref()
+            .or(config.output.as_ref().map(|o| &o.uri))
+            .filter(|d| !is_remote_uri(d.as_str()))
+            .map(|d| std::path::Path::new(d).join("timsseek.log")),
+    };
+
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(
+            args.log_level
+                .parse()
+                .unwrap_or_else(|_| "info".parse().unwrap()),
+        )
+        .from_env_lossy()
+        .add_directive("forust_ml=warn".parse().unwrap())
+        .add_directive("timscentroid::storage=warn".parse().unwrap());
+
+    let (file_layer, stderr_warn_layer, stderr_all_layer) =
+        if let Some(ref log_path) = log_file_path {
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let log_file = std::fs::File::create(log_path).expect("Failed to create log file");
+            let fl = fmt::layer()
+                .with_writer(std::sync::Mutex::new(log_file))
+                .with_filter(env_filter);
+            let sl = fmt::layer()
+                .with_writer(std::io::stderr)
+                .without_time()
+                .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+            (Some(fl), Some(sl), None)
+        } else {
+            let sl = fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter);
+            (None, None, Some(sl))
+        };
+
+    #[cfg(feature = "instrumentation")]
+    let perf_filter = EnvFilter::builder()
+        .with_default_directive("trace".parse().unwrap())
+        .with_env_var("RUST_PERF_LOG")
+        .from_env_lossy()
+        .add_directive("forust_ml::gradientbooster=warn".parse().unwrap());
+
+    #[cfg(feature = "instrumentation")]
+    let events_filter = tracing_subscriber::filter::filter_fn(|metadata| !metadata.is_event());
+
+    #[cfg(feature = "instrumentation")]
+    let (tree_layer, _tree_guard) = PrintTreeLayer::new(PrintTreeConfig {
+        attention_above_percent: 25.0,
+        relevant_above_percent: 2.5,
+        hide_below_percent: 0.0,
+        display_unaccounted: true,
+        no_color: false,
+        accumulate_spans_count: false,
+        accumulate_events: false,
+        aggregate_similar_siblings: true,
+    });
+    #[cfg(feature = "instrumentation")]
+    let tree_layer = tree_layer
+        .with_filter(perf_filter)
+        .with_filter(events_filter);
+
+    let reg = tracing_subscriber::registry()
+        .with(file_layer)
+        .with(stderr_warn_layer)
+        .with(stderr_all_layer);
+
+    #[cfg(feature = "instrumentation")]
+    let reg = reg.with(tree_layer);
+
+    reg.init();
+
+    if let Some(ref log_path) = log_file_path {
+        println!("timsseek v{}", env!("CARGO_PKG_VERSION"));
+        println!("Log: {}", log_path.display());
+        println!();
+    }
+
+    TracingHandle {
+        #[cfg(feature = "instrumentation")]
+        _tree_guard: Box::new(_tree_guard),
+        #[cfg(not(feature = "instrumentation"))]
+        _empty: (),
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("{e}");
@@ -668,101 +787,11 @@ fn run() -> std::result::Result<(), errors::CliError> {
         config.analysis.decoy_strategy = strategy;
     }
 
-    // === Set up tracing subscriber ===
-    // We defer this until after config/validation so we know the output directory for the log file.
-
-    // Determine log file path. Remote output URIs skip the default file-log
-    // path — we'd be writing to a non-local directory; use `--log-path` to
-    // point at a local file explicitly in that case.
-    let log_file_path = match args.log_path {
-        Some(ref p) if p.to_str() == Some("-") => None, // stderr-only mode
-        Some(ref p) => Some(p.clone()),
-        None => args
-            .output_uri
-            .as_ref()
-            .or(config.output.as_ref().map(|o| &o.uri))
-            .filter(|d| !is_remote_uri(d.as_str()))
-            .map(|d| std::path::Path::new(d).join("timsseek.log")),
-    };
-
-    // Build the env filter for the main logging layer
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(
-            args.log_level
-                .parse()
-                .unwrap_or_else(|_| "info".parse().unwrap()),
-        )
-        .from_env_lossy()
-        .add_directive("forust_ml=warn".parse().unwrap())
-        .add_directive("timscentroid::storage=warn".parse().unwrap());
-
-    // Use Option layers so we can build a single subscriber type regardless
-    // of whether we're writing to a log file or to stderr.
-    let (file_layer, stderr_warn_layer, stderr_all_layer) =
-        if let Some(ref log_path) = log_file_path {
-            // File mode: log file gets env_filter, stderr gets WARN+ only
-            if let Some(parent) = log_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let log_file = std::fs::File::create(log_path).expect("Failed to create log file");
-            let fl = fmt::layer()
-                .with_writer(std::sync::Mutex::new(log_file))
-                .with_filter(env_filter);
-            let sl = fmt::layer()
-                .with_writer(std::io::stderr)
-                .without_time()
-                .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
-            (Some(fl), Some(sl), None)
-        } else {
-            // stderr-only mode (--log-path -)
-            let sl = fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_filter(env_filter);
-            (None, None, Some(sl))
-        };
-
-    #[cfg(feature = "instrumentation")]
-    let perf_filter = EnvFilter::builder()
-        .with_default_directive("trace".parse().unwrap())
-        .with_env_var("RUST_PERF_LOG")
-        .from_env_lossy()
-        .add_directive("forust_ml::gradientbooster=warn".parse().unwrap());
-
-    #[cfg(feature = "instrumentation")]
-    let events_filter = tracing_subscriber::filter::filter_fn(|metadata| !metadata.is_event());
-
-    #[cfg(feature = "instrumentation")]
-    let (tree_layer, _guard) = PrintTreeLayer::new(PrintTreeConfig {
-        attention_above_percent: 25.0,
-        relevant_above_percent: 2.5,
-        hide_below_percent: 0.0,
-        display_unaccounted: true,
-        no_color: false,
-        accumulate_spans_count: false,
-        accumulate_events: false,
-        aggregate_similar_siblings: true,
-    });
-    #[cfg(feature = "instrumentation")]
-    let tree_layer = tree_layer
-        .with_filter(perf_filter)
-        .with_filter(events_filter);
-
-    let reg = tracing_subscriber::registry()
-        .with(file_layer)
-        .with(stderr_warn_layer)
-        .with(stderr_all_layer);
-
-    #[cfg(feature = "instrumentation")]
-    let reg = reg.with(tree_layer);
-
-    reg.init();
-
-    // Print version and log path to stdout
-    if let Some(ref log_path) = log_file_path {
-        println!("timsseek v{}", env!("CARGO_PKG_VERSION"));
-        println!("Log: {}", log_path.display());
-        println!();
-    }
+    // Install tracing subscriber. The returned handle carries the log file
+    // path (if any) plus — under the `instrumentation` feature — the
+    // PrintTreeLayer flush guard that must outlive every traced span. Hold
+    // it in `run()`'s scope so drop order flushes after all work completes.
+    let _tracing = init_tracing(&args, &config);
 
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");
