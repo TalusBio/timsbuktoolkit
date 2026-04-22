@@ -15,10 +15,12 @@ use timsseek::scoring::timings::TimedStep;
 use tracing::{
     error,
     info,
+    info_span,
 };
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::{
     self,
+    format::FmtSpan,
 };
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{
@@ -351,6 +353,11 @@ fn process_single_file(
     overwrite: bool,
     max_qvalue: f32,
 ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
+    let file_name = std::path::Path::new(raw_uri)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw_uri);
+    let _file_span = info_span!("file", name = file_name).entered();
     info!("Processing raw input: {}", raw_uri);
 
     let step = TimedStep::begin("Loading index");
@@ -651,15 +658,17 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
         }
     };
 
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(
-            args.log_level
-                .parse()
-                .unwrap_or_else(|_| "info".parse().unwrap()),
-        )
-        .from_env_lossy()
-        .add_directive("forust_ml=warn".parse().unwrap())
-        .add_directive("timscentroid::storage=warn".parse().unwrap());
+    let build_env_filter = || {
+        EnvFilter::builder()
+            .with_default_directive(
+                args.log_level
+                    .parse()
+                    .unwrap_or_else(|_| "info".parse().unwrap()),
+            )
+            .from_env_lossy()
+            .add_directive("forust_ml=warn".parse().unwrap())
+            .add_directive("timscentroid::storage=warn".parse().unwrap())
+    };
 
     let (file_layer, stderr_warn_layer, stderr_all_layer) =
         if let Some(ref log_path) = log_file_path {
@@ -669,7 +678,7 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
             let log_file = std::fs::File::create(log_path).expect("Failed to create log file");
             let fl = fmt::layer()
                 .with_writer(std::sync::Mutex::new(log_file))
-                .with_filter(env_filter);
+                .with_filter(build_env_filter());
             let sl = fmt::layer()
                 .with_writer(std::io::stderr)
                 .without_time()
@@ -678,9 +687,26 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
         } else {
             let sl = fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_filter(env_filter);
+                .with_filter(build_env_filter());
             (None, None, Some(sl))
         };
+
+    let spans_layer = log_file_path.as_ref().map(|log_path| {
+        let mut spans_path = log_path.clone();
+        let fname = spans_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("timsseek.log")
+            .to_string();
+        spans_path.set_file_name(format!("{fname}.spans.jsonl"));
+        let spans_file =
+            std::fs::File::create(&spans_path).expect("Failed to create spans file");
+        fmt::layer()
+            .json()
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_writer(std::sync::Mutex::new(spans_file))
+            .with_filter(build_env_filter())
+    });
 
     #[cfg(feature = "instrumentation")]
     let perf_filter = EnvFilter::builder()
@@ -710,6 +736,7 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
 
     let reg = tracing_subscriber::registry()
         .with(file_layer)
+        .with(spans_layer)
         .with(stderr_warn_layer)
         .with(stderr_all_layer);
 
@@ -1010,6 +1037,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
 
     // Write run-level report into the sink's working dir.
     // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
+    let finalize_step = TimedStep::begin("Finalize run");
     let run_report_path = sink.root().join("run_report.json");
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
         let _ = std::fs::write(&run_report_path, json);
@@ -1019,6 +1047,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // Upload run-level artifacts for remote destinations (no-op locally).
     // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
     sink.finalize_run(&["run_report.json", "config_used.json"])?;
+    finalize_step.finish();
 
     info!("Successfully processed {} file(s)", successful_files.len());
     if !failed_files.is_empty() {
