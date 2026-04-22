@@ -2,7 +2,7 @@ use crate::errors::LibraryReadingError;
 use crate::fragment_mass::elution_group_converter::isotope_dist_from_seq;
 use crate::models::{
     DecoyMarking,
-    DigestSlice,
+    ProteinSlice,
 };
 use crate::{
     ExpectedIntensities,
@@ -116,7 +116,7 @@ impl PrecursorEntry {
     }
 }
 
-impl From<PrecursorEntry> for DigestSlice {
+impl From<PrecursorEntry> for ProteinSlice {
     fn from(x: PrecursorEntry) -> Self {
         let decoy = if x.decoy {
             DecoyMarking::ReversedDecoy
@@ -128,7 +128,7 @@ impl From<PrecursorEntry> for DigestSlice {
             panic!("Sequence too long (gt: {}): {}", u16::MAX, seq);
         }
         let range = 0u16..seq.as_ref().len() as u16;
-        DigestSlice::new(seq, range, decoy, x.decoy_group)
+        ProteinSlice::new(seq, range, decoy, x.decoy_group)
     }
 }
 
@@ -222,7 +222,7 @@ fn convert_diann_to_query_item(
     extra: DiannPrecursorExtras,
     decoy_group_id: u32,
 ) -> Result<QueryItemToScore, LibraryReadingError> {
-    let digest = DigestSlice::from_string(
+    let digest = ProteinSlice::from_string(
         extra.stripped_peptide.clone(),
         extra.is_decoy,
         decoy_group_id,
@@ -288,7 +288,7 @@ fn create_mass_shifted_decoy(
     mass_shift_da: f64,
 ) -> Result<QueryItemToScore, LibraryReadingError> {
     let target_sequence: String = target.digest.clone().into();
-    let decoy_digest = DigestSlice::from_string(target_sequence, true, decoy_group_id);
+    let decoy_digest = ProteinSlice::from_string(target_sequence, true, decoy_group_id);
 
     let charge = target.query.precursor_charge();
     let mz_shift = mass_shift_da / charge as f64;

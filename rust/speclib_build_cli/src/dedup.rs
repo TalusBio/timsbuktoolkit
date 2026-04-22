@@ -1,16 +1,16 @@
 use bloomfilter::Bloom;
 use std::collections::HashMap;
-use timsseek::DigestSlice;
+use timsseek::ProteinSlice;
 
 pub struct PeptideDedup;
 
 impl PeptideDedup {
-    /// Deduplicate DigestSlices using bloom filter fast-pass + bucket HashMap.
+    /// Deduplicate ProteinSlices using bloom filter fast-pass + bucket HashMap.
     /// `estimated_count` used to preallocate bloom + HashMap capacity.
-    pub fn dedup(slices: Vec<DigestSlice>, estimated_count: usize) -> Vec<DigestSlice> {
+    pub fn dedup(slices: Vec<ProteinSlice>, estimated_count: usize) -> Vec<ProteinSlice> {
         let est = estimated_count.max(64);
         let mut bloom = Bloom::new_for_fp_rate(est, 0.01);
-        let mut buckets: HashMap<(u8, u16), Vec<DigestSlice>> = HashMap::with_capacity(est / 20);
+        let mut buckets: HashMap<(u8, u16), Vec<ProteinSlice>> = HashMap::with_capacity(est / 20);
 
         for slice in slices {
             let seq = slice.as_str().as_bytes();
@@ -47,10 +47,10 @@ mod tests {
     use std::sync::Arc;
     use timsseek::models::DecoyMarking;
 
-    fn make_slice(seq: &str) -> DigestSlice {
+    fn make_slice(seq: &str) -> ProteinSlice {
         let s: Arc<str> = seq.into();
         let len = s.len() as u16;
-        DigestSlice::new(s, 0..len, DecoyMarking::Target, 0)
+        ProteinSlice::new(s, 0..len, DecoyMarking::Target, 0)
     }
 
     #[test]
@@ -88,8 +88,8 @@ mod tests {
         // Two slices from same Arc, same range → deduped
         let backbone: Arc<str> = "PEPTIDEPINKTOMATO".into();
         let len = backbone.len() as u16;
-        let slice1 = DigestSlice::new(backbone.clone(), 0..len, DecoyMarking::Target, 0);
-        let slice2 = DigestSlice::new(backbone.clone(), 0..len, DecoyMarking::Target, 0);
+        let slice1 = ProteinSlice::new(backbone.clone(), 0..len, DecoyMarking::Target, 0);
+        let slice2 = ProteinSlice::new(backbone.clone(), 0..len, DecoyMarking::Target, 0);
         let slices = vec![slice1, slice2];
         let result = PeptideDedup::dedup(slices, 10);
         assert_eq!(result.len(), 1);

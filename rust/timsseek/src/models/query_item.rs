@@ -1,4 +1,4 @@
-use super::DigestSlice;
+use super::ProteinSlice;
 use micromzpaf::IonAnnot;
 use serde::{
     Deserialize,
@@ -182,7 +182,7 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
 #[derive(Debug, Clone)]
 pub struct QueryItemToScore {
     // Kinda hate this
-    pub digest: DigestSlice,
+    pub digest: ProteinSlice,
     pub query: TimsElutionGroup<IonAnnot>,
     pub expected_intensity: ExpectedIntensities<IonAnnot>,
 }
@@ -226,7 +226,7 @@ impl QueryItemToScore {
             ),
         };
         let pepseq = "PEPTIDEPINKPEPTIDE".into();
-        let digest = DigestSlice::from_string(pepseq, false, 1);
+        let digest = ProteinSlice::from_string(pepseq, false, 1);
         let query = eg;
         let expected_intensity = ei;
         QueryItemToScore {

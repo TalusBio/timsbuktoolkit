@@ -34,8 +34,8 @@ use super::{
 use crate::IonAnnot;
 use crate::errors::DataProcessingError;
 use crate::models::{
-    DigestSlice,
     ExpectedIntensities,
+    ProteinSlice,
 };
 use crate::scoring::scores::apex_features::{
     ApexFeatures,
@@ -81,7 +81,7 @@ pub struct CandidateContext<T: KeyLike, L: Display> {
 #[derive(Debug, Clone)]
 pub struct PeptideMetadata {
     /// The peptide sequence and modification information.
-    pub digest: DigestSlice,
+    pub digest: ProteinSlice,
 
     /// The precursor charge state.
     pub charge: u8,

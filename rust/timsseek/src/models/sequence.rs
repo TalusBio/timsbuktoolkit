@@ -1,7 +1,6 @@
 //! Peptide and mod representation for per-entry speclib rows.
 //!
-//! `Peptide` replaces `DigestSlice` on scoring paths. `DigestSlice` (renamed
-//! `ProteinSlice`) stays on FASTA digestion.
+//! `Peptide` is used on scoring paths. `ProteinSlice` stays on FASTA digestion.
 
 use crate::models::decoy::DecoyMarking;
 use smallvec::SmallVec;

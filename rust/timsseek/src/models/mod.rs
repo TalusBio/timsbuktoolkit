@@ -7,7 +7,7 @@ pub mod sequence;
 pub use decoy::DecoyMarking;
 pub use decoy_strategy::DecoyStrategy;
 pub use digest::{
-    DigestSlice,
+    ProteinSlice,
     deduplicate_digests,
 };
 pub use query_item::{

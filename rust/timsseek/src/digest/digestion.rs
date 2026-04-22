@@ -1,6 +1,6 @@
 use crate::models::{
     DecoyMarking,
-    DigestSlice,
+    ProteinSlice,
 };
 use regex::Regex;
 use std::ops::Range;
@@ -82,7 +82,7 @@ impl DigestionParameters {
         sites
     }
 
-    pub fn digest(&self, sequence: Arc<str>) -> Vec<DigestSlice> {
+    pub fn digest(&self, sequence: Arc<str>) -> Vec<ProteinSlice> {
         let sites = self.cleavage_sites(sequence.as_ref());
         let num_sites = sites.len();
         let mut out = Vec::new();
@@ -99,7 +99,7 @@ impl DigestionParameters {
                 if span < self.min_length || span > self.max_length {
                     return;
                 }
-                out.push(DigestSlice::new(
+                out.push(ProteinSlice::new(
                     sequence.clone(),
                     start as u16..end as u16,
                     DecoyMarking::Target,
@@ -112,7 +112,7 @@ impl DigestionParameters {
         out
     }
 
-    pub fn digest_multiple(&self, sequences: &[Arc<str>]) -> Vec<DigestSlice> {
+    pub fn digest_multiple(&self, sequences: &[Arc<str>]) -> Vec<ProteinSlice> {
         let mut out = Vec::new();
         let mut last_id = 0;
         sequences.iter().for_each(|seq| {

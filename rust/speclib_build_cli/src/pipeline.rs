@@ -8,7 +8,7 @@ use indicatif::{
     ProgressFinish,
     ProgressStyle,
 };
-use timsseek::DigestSlice;
+use timsseek::ProteinSlice;
 use timsseek::data_sources::speclib::SpeclibWriter;
 use timsseek::digest::digestion::{
     DigestionEnd,
@@ -115,7 +115,7 @@ async fn flush_batch(
 pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // ── Phase 1: Get base peptides ──────────────────────────────────────────
 
-    let base_peptides: Vec<DigestSlice> = if let Some(fasta_uri) = &config.fasta {
+    let base_peptides: Vec<ProteinSlice> = if let Some(fasta_uri) = &config.fasta {
         tracing::info!("Reading FASTA: {}", fasta_uri);
         let collection = if is_remote_uri(fasta_uri) {
             // Download remote FASTA to a tempfile (preserving extension for any
@@ -187,14 +187,14 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         let raw_reader = tims_stage::open_reader(list_uri)
             .map_err(|e| format!("open peptide list {list_uri}: {e}"))?;
         let reader = std::io::BufReader::new(raw_reader);
-        let mut slices: Vec<DigestSlice> = Vec::new();
+        let mut slices: Vec<ProteinSlice> = Vec::new();
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
             let seq = line.trim().to_string();
             if seq.is_empty() || seq.starts_with('#') {
                 continue;
             }
-            slices.push(DigestSlice::from_string(seq, false, i as u32));
+            slices.push(ProteinSlice::from_string(seq, false, i as u32));
         }
         tracing::info!("Read {} peptides from list", slices.len());
 
@@ -404,9 +404,9 @@ const NONSTANDARD_AA: &[char] = &['U', 'B', 'J', 'Z', 'X'];
 
 /// Filter out peptides containing non-standard amino acids (U, B, J, Z, X).
 /// Returns (kept, skipped_count).
-fn filter_nonstandard_aa(peptides: Vec<DigestSlice>) -> (Vec<DigestSlice>, usize) {
+fn filter_nonstandard_aa(peptides: Vec<ProteinSlice>) -> (Vec<ProteinSlice>, usize) {
     let before = peptides.len();
-    let kept: Vec<DigestSlice> = peptides
+    let kept: Vec<ProteinSlice> = peptides
         .into_iter()
         .filter(|p| !p.as_str().chars().any(|c| NONSTANDARD_AA.contains(&c)))
         .collect();

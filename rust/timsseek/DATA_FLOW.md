@@ -302,7 +302,7 @@ The `as_feature()` method produces the following features for rescoring:
 
 ```
 QueryItemToScore
-├── digest: DigestSlice              sequence + modifications
+├── digest: ProteinSlice             sequence + modifications
 ├── query: TimsElutionGroup<IonAnnot> precursor/fragment m/z, RT, mobility
 └── expected_intensity: ExpectedIntensities<IonAnnot>
 
