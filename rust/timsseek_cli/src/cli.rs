@@ -28,12 +28,13 @@ pub struct Cli {
     #[arg(long = "speclib-uri", alias = "speclib-file")]
     pub speclib_uri: Option<String>,
 
-    /// Path to a calibration library (optional).
+    /// URI of a calibration library (optional).
     /// If provided, Phase 1 prescore uses this library for calibrant selection,
     /// while Phase 3 scoring uses the main speclib.
     /// If not provided, the main speclib is used for both phases.
-    #[arg(long)]
-    pub calib_lib: Option<PathBuf>,
+    /// Accepts local paths or s3:// URIs.
+    #[arg(long, value_name = "URI")]
+    pub calib_lib: Option<String>,
 
     /// Path to the output directory
     #[arg(long = "output-uri", short = 'o', alias = "output-dir")]

@@ -160,10 +160,28 @@ pub struct PipelineReport {
     pub phase3_skips: SkipCounts,
 }
 
+/// Terminal state of a run. `Completed` is the normal happy path; `Aborted`
+/// means the batch loop stopped early (e.g. I/O error) and the file list is
+/// a partial prefix of what was requested. Consumers reading `run_report.json`
+/// should treat anything other than `Completed` as incomplete.
+#[derive(Debug, Default, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    #[default]
+    Completed,
+    Aborted,
+}
+
 /// Top-level report for an entire CLI invocation.
 /// Contains shared loading costs and per-file pipeline reports.
 #[derive(Debug, Default, Serialize)]
 pub struct RunReport {
+    /// Terminal status of the run. See [`RunStatus`].
+    pub status: RunStatus,
+    /// When `status == Aborted`, a short human-readable reason. `None` on
+    /// successful runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_reason: Option<String>,
     pub load_speclib_ms: u64,
     pub load_calib_lib_ms: u64,
     pub speclib_entries: usize,

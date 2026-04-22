@@ -109,10 +109,7 @@ fn validate_inputs(
     info!("✓ Speclib URI: {}", speclib_uri);
 
     // Validate calib lib if provided
-    let calib_lib_uri: Option<String> = args
-        .calib_lib
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
+    let calib_lib_uri: Option<String> = args.calib_lib.clone();
     if let Some(ref uri) = calib_lib_uri {
         if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
             return Err(errors::CliError::Io {
@@ -135,27 +132,14 @@ fn validate_inputs(
     }
     info!("✓ All {} raw input(s) validated", raw_inputs.len());
 
-    // Local-output path checks: existence and write probe. Remote outputs
-    // (s3://, gs://, az://) skip these — the upload itself is the write test.
+    // Local-output path checks: writability probe. Remote outputs skip this
+    // — the upload itself is the write test.
     if !is_remote_uri(&output_uri) {
         let output_dir_path = std::path::Path::new(&output_uri);
 
-        if output_dir_path.exists() && !args.overwrite {
-            return Err(errors::CliError::Config {
-                source: format!(
-                    "Output directory {:?} already exists. Use --overwrite/-O to overwrite.",
-                    output_uri
-                ),
-            });
-        }
-
         match std::fs::create_dir_all(output_dir_path) {
             Ok(_) => {
-                if args.overwrite {
-                    info!("✓ Using existing output directory (overwrite mode)");
-                } else {
-                    info!("✓ Created output directory");
-                }
+                info!("✓ Output directory ready");
             }
             Err(e) => {
                 return Err(errors::CliError::Io {
@@ -178,30 +162,65 @@ fn validate_inputs(
                 });
             }
         }
+    }
 
-        // Validate per-file output subdirectories (local only)
+    // Proactive overwrite check: probe every artifact this run will write
+    // (local or remote) and abort up-front if any exists and --overwrite
+    // isn't set. Fails fast before heavy analysis instead of after.
+    //
+    // IMPORTANT — keep the two artifact lists below in sync with the writer
+    // sites. If you add or rename an output file, update both here and the
+    // writer. Drift-aware writer sites (search for `ARTIFACT-LIST`):
+    //   per-sample:
+    //     - processing.rs — results.parquet, performance_report.json
+    //     - main.rs overwrite-cleanup block (same two)
+    //   run-level:
+    //     - main.rs — run_report.json, config_used.json
+    //     - OutputSink::finalize_run call site
+    if !args.overwrite {
+        let mut collisions: Vec<String> = Vec::new();
         for raw_uri in &raw_inputs {
-            let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
+            let sample = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
                 source: "Unable to extract file stem".to_string(),
                 path: Some(raw_uri.clone()),
             })?;
-            let file_output_dir = output_dir_path.join(&file_stem);
-
-            if file_output_dir.exists() && !args.overwrite {
-                return Err(errors::CliError::Config {
-                    source: format!(
-                        "Output subdirectory {:?} already exists. Use --overwrite/-O to overwrite.",
-                        file_output_dir
-                    ),
-                });
+            // ARTIFACT-LIST (per-sample)
+            for artifact in ["results.parquet", "performance_report.json"] {
+                let uri = join_output_uri(&output_uri, &format!("{sample}/{artifact}"));
+                if probe_uri_exists(&uri)? {
+                    collisions.push(uri);
+                }
             }
         }
-        info!("✓ All output subdirectories validated");
+        // ARTIFACT-LIST (run-level)
+        for artifact in ["run_report.json", "config_used.json"] {
+            let uri = join_output_uri(&output_uri, artifact);
+            if probe_uri_exists(&uri)? {
+                collisions.push(uri);
+            }
+        }
+        if !collisions.is_empty() {
+            let list = collisions
+                .iter()
+                .take(8)
+                .map(|s| format!("  - {s}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let more = if collisions.len() > 8 {
+                format!("\n  ... and {} more", collisions.len() - 8)
+            } else {
+                String::new()
+            };
+            return Err(errors::CliError::Config {
+                source: format!(
+                    "{} output artifact(s) already exist; pass --overwrite/-O to replace them:\n{list}{more}",
+                    collisions.len()
+                ),
+            });
+        }
+        info!("✓ No output collisions (checked local + remote artifacts)");
     } else {
-        info!(
-            "✓ Remote output URI, skipping local path checks: {}",
-            output_uri
-        );
+        info!("✓ --overwrite set; existing output artifacts will be replaced");
     }
 
     info!("All validations passed! Starting processing...");
@@ -212,6 +231,28 @@ fn validate_inputs(
         calib_lib_uri,
         output_uri,
         overwrite: args.overwrite,
+    })
+}
+
+/// Join an artifact path onto a base output URI. For remote URIs this is a
+/// plain `base/rel` concat (single trailing slash); for local paths it goes
+/// through `PathBuf::join` so OS-specific separators are respected.
+fn join_output_uri(base: &str, rel: &str) -> String {
+    if is_remote_uri(base) {
+        format!("{}/{}", base.trim_end_matches('/'), rel)
+    } else {
+        std::path::Path::new(base)
+            .join(rel)
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+/// Cheap existence probe: local `Path::exists` or remote HEAD.
+fn probe_uri_exists(uri: &str) -> Result<bool, errors::CliError> {
+    tims_stage::uri_exists(uri).map_err(|e| errors::CliError::Io {
+        source: format!("existence probe {uri}: {e}"),
+        path: Some(uri.to_string()),
     })
 }
 
@@ -350,7 +391,8 @@ fn process_single_file(
         path: Some(file_output_dir.to_string_lossy().to_string()),
     })?;
 
-    // If overwrite mode, delete the specific files we're about to write
+    // If overwrite mode, delete the specific files we're about to write.
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs proactive check.
     if overwrite {
         let results_file = file_output_dir.join("results.parquet");
         if results_file.exists() {
@@ -490,16 +532,13 @@ impl OutputSink {
     }
 }
 
-/// Load a Speclib from a local path or remote URI. Remote URIs are
-/// downloaded to a tempfile (preserving the original filename so
-/// `SpeclibFormat::detect_from_path` still works on extension), then
-/// handed to the existing path-based `Speclib::from_file`.
+/// Load a Speclib from a local path or remote URI.
 ///
-/// NOTE: the task spec suggested wiring `tims_stage::open_reader` directly
-/// into the speclib loader, but `Speclib::from_file` takes a `Path` (it
-/// sniffs format by extension and re-opens the file) rather than a
-/// `Read`. Rerouting through a tempfile keeps the change scoped to
-/// `timsseek_cli` and preserves format auto-detection.
+/// `Speclib::from_file` takes a `Path` (it sniffs format by extension), so
+/// remote URIs are streamed to a tempfile via `tims_stage::download_to_file`
+/// — preserving the original basename so extension-based format detection
+/// still works. Streaming (not `open_reader`) is used because speclibs can
+/// be multi-GB parquet files.
 fn speclib_from_uri(
     uri: &str,
     decoy_strategy: timsseek::DecoyStrategy,
@@ -519,9 +558,6 @@ fn speclib_from_uri(
         return Ok((lib, None));
     }
 
-    // Remote: stream directly to a tempfile via Layer-0 get_to_file (one
-    // bounded streaming GET, no in-memory buffer). Preserve the filename
-    // so format-by-extension detection still works.
     let trimmed = uri.trim_end_matches('/');
     let fname = trimmed
         .rsplit('/')
@@ -536,21 +572,10 @@ fn speclib_from_uri(
             path: None,
         })?;
     let local = td.path().join(fname);
-    let (loc, key) = tims_stage::split_uri(uri).map_err(|e| errors::CliError::Io {
-        source: format!("split_uri {uri}: {e}"),
+    tims_stage::download_to_file(uri, &local).map_err(|e| errors::CliError::Io {
+        source: format!("download speclib {uri}: {e}"),
         path: Some(uri.to_string()),
     })?;
-    let provider = timscentroid::StorageProvider::open(loc).map_err(|e| errors::CliError::Io {
-        source: format!("open speclib provider {uri}: {e}"),
-        path: Some(uri.to_string()),
-    })?;
-    let bar = indicatif::ProgressBar::hidden();
-    provider
-        .get_to_file(&key, &local, &bar)
-        .map_err(|e| errors::CliError::Io {
-            source: format!("download speclib {uri}: {e}"),
-            path: Some(uri.to_string()),
-        })?;
     let lib = timsseek::data_sources::speclib::Speclib::from_file(&local, decoy_strategy).map_err(
         |e| errors::CliError::Config {
             source: format!("Failed to load speclib {uri}: {:?}", e),
@@ -764,6 +789,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // batch.
     let sink = OutputSink::new(&validated.output_uri)?;
 
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
     let config_output_path = sink.root().join("config_used.json");
 
     // If overwrite mode, delete existing config file (local-only; remote
@@ -864,6 +890,9 @@ fn run() -> std::result::Result<(), errors::CliError> {
             Ok(report) => {
                 if let Err(e) = sink.finalize_sample(&sample_name) {
                     error!("Failed to finalize sample {}: {}", sample_name, e);
+                    run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
+                    run_report.abort_reason =
+                        Some(format!("upload failure on sample {sample_name}: {e}"));
                     failed_files.push((raw_uri.clone(), e));
                     error!("Aborting batch due to upload failure");
                     break;
@@ -879,6 +908,8 @@ fn run() -> std::result::Result<(), errors::CliError> {
                 // I/O errors are likely systemic (disk full, permissions) —
                 // abort the batch instead of failing every remaining file.
                 if matches!(e, errors::CliError::Io { .. }) {
+                    run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
+                    run_report.abort_reason = Some(format!("I/O error on {raw_uri}: {e}"));
                     failed_files.push((raw_uri.clone(), e));
                     error!("Aborting batch due to I/O error");
                     break;
@@ -889,6 +920,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     // Write run-level report into the sink's working dir.
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
     let run_report_path = sink.root().join("run_report.json");
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
         let _ = std::fs::write(&run_report_path, json);
@@ -896,6 +928,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     // Upload run-level artifacts for remote destinations (no-op locally).
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
     sink.finalize_run(&["run_report.json", "config_used.json"])?;
 
     info!("Successfully processed {} file(s)", successful_files.len());

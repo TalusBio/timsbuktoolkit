@@ -46,6 +46,9 @@ impl From<UnsupportedDataError> for DataReadingError {
 pub enum UnsupportedDataError {
     NoMS2DataError,
     CloudRawDataNotSupported { url: String, suggestion: String },
+    LazyMaterializationUnsupported,
+    CacheDisabled,
+    InvalidCacheUrl { url: String },
 }
 
 impl Display for UnsupportedDataError {
@@ -58,6 +61,19 @@ impl Display for UnsupportedDataError {
                     "Cannot read raw .d files from cloud storage: {}\n\n{}",
                     url, suggestion
                 )
+            }
+            Self::LazyMaterializationUnsupported => write!(
+                f,
+                "Lazy -> eager materialization not yet implemented; \
+                 load the index eagerly from source instead"
+            ),
+            Self::CacheDisabled => write!(
+                f,
+                "Cache is disabled; cannot convert eager index to lazy \
+                 without a cache location"
+            ),
+            Self::InvalidCacheUrl { url } => {
+                write!(f, "Cache URL is not a valid StorageLocation: {}", url)
             }
         }
     }

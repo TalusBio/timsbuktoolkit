@@ -346,6 +346,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
     let mut pq_writer =
         timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000).map_err(
@@ -919,6 +920,7 @@ pub fn run_pipeline(
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
 
     let mut timings = execute_pipeline(

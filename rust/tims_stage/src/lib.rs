@@ -7,6 +7,7 @@
 
 pub mod backend;
 pub(crate) mod common;
+pub mod download;
 pub mod error;
 pub mod open;
 pub mod prefix;
@@ -21,14 +22,24 @@ pub use backend::{
     StagingBackend,
     StagingConfig,
 };
+pub use download::download_to_file;
 pub use error::StageError;
-pub use open::open_reader;
+pub use open::{
+    DEFAULT_IN_MEMORY_CAP,
+    open_reader,
+    open_reader_with_cap,
+    uri_exists,
+};
 pub use resolve::{
     Resolved,
     SourceSpec,
     resolve,
 };
-pub use upload::upload_file;
+pub use upload::{
+    DEFAULT_UPLOAD_CAP,
+    upload_file,
+    upload_file_with_cap,
+};
 pub use uri::{
     canonical_uri,
     is_remote_uri,

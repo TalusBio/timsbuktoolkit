@@ -34,6 +34,7 @@ pub use timings::{
     PipelineReport,
     PrescoreTimings,
     RunReport,
+    RunStatus,
     ScoreTimings,
 };
 

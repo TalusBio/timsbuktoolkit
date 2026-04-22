@@ -158,7 +158,7 @@ impl IndexedPeaksHandle {
                 // TODO: Implement lazy -> eager materialization
                 // The lazy type needs to expose its storage location so we can reload as eager
                 Err(crate::errors::DataReadingError::UnsupportedDataError(
-                    crate::errors::UnsupportedDataError::NoMS2DataError,
+                    crate::errors::UnsupportedDataError::LazyMaterializationUnsupported,
                 ))
             }
         }
@@ -194,15 +194,22 @@ impl IndexedPeaksHandle {
             Self::Eager(eager) => {
                 if matches!(cache_location, CacheLocation::Disabled) {
                     return Err(crate::errors::DataReadingError::UnsupportedDataError(
-                        crate::errors::UnsupportedDataError::NoMS2DataError,
+                        crate::errors::UnsupportedDataError::CacheDisabled,
                     ));
                 }
 
+                let cache_url_repr = match &cache_location {
+                    CacheLocation::Url(u) => u.clone(),
+                    CacheLocation::Local(p) => p.display().to_string(),
+                    CacheLocation::Auto | CacheLocation::Disabled => String::new(),
+                };
                 let storage_location = match cache_location.to_storage_location() {
                     Some(Ok(loc)) => loc,
                     Some(Err(_)) | None => {
                         return Err(crate::errors::DataReadingError::UnsupportedDataError(
-                            crate::errors::UnsupportedDataError::NoMS2DataError,
+                            crate::errors::UnsupportedDataError::InvalidCacheUrl {
+                                url: cache_url_repr,
+                            },
                         ));
                     }
                 };

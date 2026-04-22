@@ -39,6 +39,12 @@ pub enum StageError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error(
+        "payload at {uri} is {size} bytes, exceeds in-memory load cap of {cap}; \
+         use a streaming/staging path instead"
+    )]
+    PayloadTooLarge { uri: String, size: u64, cap: u64 },
 }
 
 /// Strip query strings from a URI before embedding in an error message —

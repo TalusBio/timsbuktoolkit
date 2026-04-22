@@ -442,10 +442,14 @@ impl StorageProvider {
                     std::io::ErrorKind::Other
                 };
 
-                return Err(SerializationError::Io(std::io::Error::new(
-                    error_kind,
-                    format!("Failed to read object at path {}: {}", full_path, e),
-                )));
+                let msg = format!("Failed to read object at path {}: {}", full_path, e);
+                return Err(SerializationError::Io(
+                    if error_kind == std::io::ErrorKind::Other {
+                        std::io::Error::other(msg)
+                    } else {
+                        std::io::Error::new(error_kind, msg)
+                    },
+                ));
             }
         };
         let bytes = result.bytes().await?;
@@ -633,9 +637,7 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
             let credentials = credentials_provider
                 .provide_credentials()
                 .await
-                .map_err(|e| {
-                    SerializationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                })?;
+                .map_err(|e| SerializationError::Io(std::io::Error::other(e)))?;
 
             // 3. Initialize the builder using the resolved credentials
             let mut builder = AmazonS3Builder::new()
