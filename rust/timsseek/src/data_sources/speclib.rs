@@ -222,7 +222,13 @@ fn convert_diann_to_query_item(
     extra: DiannPrecursorExtras,
     decoy_group_id: u32,
 ) -> Result<QueryItemToScore, LibraryReadingError> {
-    let raw: Arc<str> = extra.stripped_peptide.clone().into();
+    // Prefer modified form for raw; fall back to stripped if empty.
+    let raw_src = if extra.modified_peptide.is_empty() {
+        extra.stripped_peptide.clone()
+    } else {
+        extra.modified_peptide.clone()
+    };
+    let raw: Arc<str> = raw_src.into();
     let normalized = normalize_to_proforma(&raw);
     let parsed = parse_sequence(&normalized);
     let digest = Peptide {
@@ -1166,6 +1172,25 @@ mod tests {
         assert!(
             first_target.expected_intensity.get_precursor(2).is_some(),
             "Should have intensity for isotope 2"
+        );
+    }
+
+    #[test]
+    fn test_diann_tsv_parsable_gate() {
+        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("timsquery")
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+            .expect("Failed to load DIA-NN TSV library");
+
+        assert!(
+            speclib.meta.parsable_sequences,
+            "DIA-NN sample fixture should all parse with modified_peptide"
         );
     }
 
