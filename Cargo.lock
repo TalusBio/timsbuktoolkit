@@ -6110,6 +6110,7 @@ dependencies = [
  "rustyms",
  "serde",
  "serde_json",
+ "smallvec",
  "timscentroid",
  "timsquery",
  "timsrust",

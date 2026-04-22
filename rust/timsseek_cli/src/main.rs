@@ -18,9 +18,9 @@ use tracing::{
     info_span,
 };
 use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::{
     self,
-    format::FmtSpan,
 };
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{
@@ -699,8 +699,7 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
             .unwrap_or("timsseek.log")
             .to_string();
         spans_path.set_file_name(format!("{fname}.spans.jsonl"));
-        let spans_file =
-            std::fs::File::create(&spans_path).expect("Failed to create spans file");
+        let spans_file = std::fs::File::create(&spans_path).expect("Failed to create spans file");
         fmt::layer()
             .json()
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)

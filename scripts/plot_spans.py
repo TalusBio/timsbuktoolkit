@@ -205,14 +205,10 @@ def plot(spans: list[Span], out: Path, min_ms: float) -> None:
         name_totals[s.name] += s.end - s.start
         name_counts[s.name] += 1
     top = sorted(name_totals.items(), key=lambda kv: -kv[1])[:8]
-    stats = " · ".join(
-        f"{n}:{t:.1f}s (x{name_counts[n]})" for n, t in top
-    )
+    stats = " · ".join(f"{n}:{t:.1f}s (x{name_counts[n]})" for n, t in top)
     fig.text(0.01, 0.01, stats, fontsize=7, color="#444")
 
-    handles = [
-        plt.Rectangle((0, 0), 1, 1, color=color_for[n], label=n) for n in names
-    ]
+    handles = [plt.Rectangle((0, 0), 1, 1, color=color_for[n], label=n) for n in names]
     ax.legend(
         handles=handles,
         loc="upper left",
