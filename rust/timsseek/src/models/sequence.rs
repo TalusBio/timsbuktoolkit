@@ -139,6 +139,19 @@ impl Default for SpeclibMeta {
     }
 }
 
+/// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
+/// ProForma. Strips `_..._` wrapping used by DIA-NN and normalizes UNIMOD tag
+/// casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`). Pass-through otherwise.
+/// Off the hot path — allocates on every replacement, which is fine at load.
+pub fn normalize_to_proforma(raw: &str) -> String {
+    let trimmed = raw.trim_matches('_');
+    // Longer prefixes first so `[Uni...` doesn't partially-rewrite over `[U:`.
+    trimmed
+        .replace("[UniMod:", "[UNIMOD:")
+        .replace("[Unimod:", "[UNIMOD:")
+        .replace("[U:", "[UNIMOD:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +196,43 @@ mod tests {
         assert_eq!(AminoAcid::from_ascii(b'Y').0, 24);
         assert_eq!(AminoAcid::from_ascii(b'Z').0, 25);
         assert_eq!(AminoAcid::from_ascii(b'!').0, u8::MAX);
+    }
+
+    #[test]
+    fn normalize_strips_underscores() {
+        assert_eq!(normalize_to_proforma("_PEPTIDEK_"), "PEPTIDEK");
+    }
+
+    #[test]
+    fn normalize_diann_unimod_case() {
+        assert_eq!(
+            normalize_to_proforma("_LSHPGC[UniMod:4]K_"),
+            "LSHPGC[UNIMOD:4]K"
+        );
+        assert_eq!(
+            normalize_to_proforma("_C[Unimod:4]TVPGHK_"),
+            "C[UNIMOD:4]TVPGHK"
+        );
+    }
+
+    #[test]
+    fn normalize_short_u_form() {
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+    }
+
+    #[test]
+    fn normalize_mass_shift_unchanged() {
+        assert_eq!(
+            normalize_to_proforma("PEPTM[+15.995]IDEK"),
+            "PEPTM[+15.995]IDEK"
+        );
+    }
+
+    #[test]
+    fn normalize_plain_unchanged() {
+        assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
     }
 }
