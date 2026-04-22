@@ -139,6 +139,73 @@ impl Default for SpeclibMeta {
     }
 }
 
+/// Parse a ProForma-normalized peptide string into our thin representation.
+/// Returns `None` on parse error, non-linear peptides, or mods outside the
+/// `Unimod`/`Mass` subset. Off the hot path — runs once per speclib load.
+pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
+    use rustyms::prelude::IsAminoAcid;
+    use rustyms::sequence::Peptidoform;
+
+    let pf = Peptidoform::pro_forma(normalized, None).ok()?;
+    let linear = pf.into_linear()?;
+
+    let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
+    let mut mods: SmallVec<[ModEntry; 2]> = SmallVec::new();
+
+    for (i, el) in linear.sequence().iter().enumerate() {
+        if i > 253 {
+            return None;
+        }
+        let c = el.aminoacid.pro_forma_definition().chars().next()?;
+        residues.push(AminoAcid::from_ascii(c as u8));
+
+        for m in &el.modifications {
+            let kind = modification_to_mod(m)?;
+            mods.push(ModEntry { pos: i as u8, kind });
+        }
+    }
+
+    for m in linear.get_n_term() {
+        let kind = modification_to_mod(m)?;
+        mods.push(ModEntry {
+            pos: POS_N_TERM,
+            kind,
+        });
+    }
+    for m in linear.get_c_term() {
+        let kind = modification_to_mod(m)?;
+        mods.push(ModEntry {
+            pos: POS_C_TERM,
+            kind,
+        });
+    }
+
+    Some(ParsedSequence { residues, mods })
+}
+
+fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
+    use rustyms::ontology::Ontology;
+    use rustyms::sequence::{
+        Modification,
+        SimpleModificationInner,
+    };
+    let simple = match m {
+        Modification::Simple(s) => s,
+        _ => return None, // Cross-link / ambiguous — out of v1 scope
+    };
+    match simple.as_ref() {
+        SimpleModificationInner::Mass(mass) => Some(Mod::Mass(mass.value as f32)),
+        SimpleModificationInner::Database { id, .. } => {
+            if id.ontology == Ontology::Unimod {
+                Some(Mod::Unimod(id.id? as u16))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
 /// ProForma. Strips `_..._` wrapping used by DIA-NN and normalizes UNIMOD tag
 /// casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`). Pass-through otherwise.
@@ -234,5 +301,52 @@ mod tests {
     #[test]
     fn normalize_plain_unchanged() {
         assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
+    }
+
+    #[test]
+    fn parse_plain() {
+        let p = parse_sequence("PEPTIDEK").expect("parse");
+        assert_eq!(p.residues.len(), 8);
+        assert_eq!(p.mods.len(), 0);
+        assert_eq!(p.residues[0], AminoAcid::from_ascii(b'P'));
+        assert_eq!(p.residues[7], AminoAcid::from_ascii(b'K'));
+    }
+
+    #[test]
+    fn parse_with_unimod() {
+        // PEPTC[UNIMOD:4]IDEK = 9 residues: P-E-P-T-C-I-D-E-K, C at index 4
+        let p = parse_sequence("PEPTC[UNIMOD:4]IDEK").expect("parse");
+        assert_eq!(p.residues.len(), 9);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, 4);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn parse_with_mass_shift() {
+        // PEPTM[+15.995]IDEK = 9 residues: P-E-P-T-M-I-D-E-K, M at index 4
+        let p = parse_sequence("PEPTM[+15.995]IDEK").expect("parse");
+        assert_eq!(p.residues.len(), 9);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, 4);
+        match p.mods[0].kind {
+            Mod::Mass(m) => assert!((m - 15.995).abs() < 1e-3),
+            _ => panic!("expected Mass variant"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert!(parse_sequence("not a peptide!!!").is_none());
+    }
+
+    #[test]
+    fn parse_n_term_mod() {
+        // Acetyl (UNIMOD:1) on n-term
+        let p = parse_sequence("[Acetyl]-PEPTIDEK").expect("parse");
+        assert_eq!(p.residues.len(), 8);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, POS_N_TERM);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(1));
     }
 }
