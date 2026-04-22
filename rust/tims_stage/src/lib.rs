@@ -42,6 +42,7 @@ pub use upload::{
 };
 pub use uri::{
     canonical_uri,
+    expand_local_uri,
     is_remote_uri,
     sidecar_of,
     split_uri,

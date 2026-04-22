@@ -57,6 +57,26 @@ pub fn is_remote_uri(uri: &str) -> bool {
     remote_scheme_prefix(uri).is_some()
 }
 
+/// Expand `~/` (and bare `~`) in local-path URIs to `$HOME`. Remote URIs
+/// pass through unchanged. `Path::exists()` and `File::open()` don't
+/// recognise `~`; callers pulling paths from config files / non-shell
+/// sources should run this before any filesystem probe.
+pub fn expand_local_uri(uri: &str) -> String {
+    if is_remote_uri(uri) {
+        return uri.to_string();
+    }
+    let home = std::env::var_os("HOME");
+    match (uri, &home) {
+        ("~", Some(h)) => h.to_string_lossy().into_owned(),
+        (u, Some(h)) if u.starts_with("~/") => {
+            let mut p = std::path::PathBuf::from(h);
+            p.push(&u[2..]);
+            p.to_string_lossy().into_owned()
+        }
+        _ => uri.to_string(),
+    }
+}
+
 fn remote_scheme_prefix(uri: &str) -> Option<&'static str> {
     if uri.starts_with("s3://") {
         Some("s3://")
@@ -211,5 +231,19 @@ mod tests {
     fn canonical_uri_local_nonexistent_returns_trimmed() {
         let got = canonical_uri("/tmp/definitely-does-not-exist-xyz123/");
         assert_eq!(got, "/tmp/definitely-does-not-exist-xyz123");
+    }
+
+    #[test]
+    fn expand_local_uri_tilde() {
+        // SAFETY: test-only env mutation; tests are serial within this module.
+        unsafe {
+            std::env::set_var("HOME", "/home/test");
+        }
+        assert_eq!(expand_local_uri("~/data/a.txt"), "/home/test/data/a.txt");
+        assert_eq!(expand_local_uri("~"), "/home/test");
+        assert_eq!(expand_local_uri("/abs/path"), "/abs/path");
+        assert_eq!(expand_local_uri("relative/path"), "relative/path");
+        // Remote URIs pass through even if they start with ~ by accident.
+        assert_eq!(expand_local_uri("s3://bkt/key"), "s3://bkt/key");
     }
 }

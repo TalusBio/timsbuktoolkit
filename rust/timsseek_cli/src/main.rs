@@ -59,7 +59,10 @@ struct ValidatedInputs {
     overwrite: bool,
 }
 
-use tims_stage::is_remote_uri;
+use tims_stage::{
+    expand_local_uri,
+    is_remote_uri,
+};
 
 /// Validates all inputs and outputs before processing begins.
 /// Returns ValidatedInputs on success, or an error if any validation fails.
@@ -69,9 +72,12 @@ fn validate_inputs(
 ) -> std::result::Result<ValidatedInputs, errors::CliError> {
     info!("Validating inputs and outputs before processing...");
 
-    // Get list of raw files to process
-    let raw_inputs = match config.analysis.raw_inputs.clone() {
-        Some(files) => files,
+    // Get list of raw files to process. `~` in local paths is not expanded
+    // by `Path::exists` / `File::open`; canonicalise via tims_stage once so
+    // every downstream consumer (validation, staging, probes) sees the same
+    // expanded form.
+    let raw_inputs: Vec<String> = match config.analysis.raw_inputs.clone() {
+        Some(files) => files.iter().map(|f| expand_local_uri(f)).collect(),
         None => {
             return Err(errors::CliError::Config {
                 source: "No raw files provided, please provide raw_inputs in either the config file or with the --raw-inputs flag".to_string(),
@@ -80,8 +86,8 @@ fn validate_inputs(
     };
 
     // Get speclib URI
-    let speclib_uri = match &config.input {
-        Some(InputConfig::Speclib { uri }) => uri.clone(),
+    let speclib_uri: String = match &config.input {
+        Some(InputConfig::Speclib { uri }) => expand_local_uri(uri),
         None => {
             return Err(errors::CliError::Config {
                 source: "No input specified".to_string(),
@@ -91,7 +97,7 @@ fn validate_inputs(
 
     // Get output URI (local path or s3:// etc.)
     let output_uri: String = match &config.output {
-        Some(output_config) => output_config.uri.clone(),
+        Some(output_config) => expand_local_uri(&output_config.uri),
         None => {
             return Err(errors::CliError::Config {
                 source: "No output directory specified".to_string(),
@@ -109,7 +115,7 @@ fn validate_inputs(
     info!("✓ Speclib URI: {}", speclib_uri);
 
     // Validate calib lib if provided
-    let calib_lib_uri: Option<String> = args.calib_lib.clone();
+    let calib_lib_uri: Option<String> = args.calib_lib.as_deref().map(expand_local_uri);
     if let Some(ref uri) = calib_lib_uri {
         if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
             return Err(errors::CliError::Io {
