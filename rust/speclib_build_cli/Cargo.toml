@@ -32,7 +32,7 @@ toml = "0.8"
 bloomfilter = "1"
 
 [features]
-default = []
+default = ["aws"]
 aws = ["tims_stage/aws"]
 gcp = ["tims_stage/gcp"]
 azure = ["tims_stage/azure"]

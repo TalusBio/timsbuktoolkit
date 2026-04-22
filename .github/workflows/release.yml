@@ -45,7 +45,7 @@ jobs:
             artifact_name: windows-x64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -59,6 +59,12 @@ jobs:
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Apply crate patches (rustyms gnome.dat stub)
+        shell: bash
+        run: |
+          cargo install patch-crate --locked
+          cargo patch-crate
 
       - name: Build Binaries
         shell: bash

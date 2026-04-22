@@ -4,6 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# rustyms is patched (see workspace Cargo.toml `[patch.crates-io]` + patches/)
+# to drop the 60MB gnome.dat glycan database we don't use. Fresh-clone setup:
+#     cargo install patch-crate && cargo patch-crate
+# This extracts rustyms into target/patch/ and applies patches/rustyms+0.11.0.patch.
+# Can't use build.rs automation: patch-crate depends on `cargo = "0.96"` which
+# pulls libsqlite3-sys 0.36; timsrust pins rusqlite 0.37→libsqlite3-sys 0.35,
+# and both declare `links = "sqlite3"` → cargo rejects.
+[package.metadata.patch]
+crates = ["rustyms"]
+
 [dependencies]
 timsseek = { path = "../timsseek", default-features = false }
 timsquery = { path = "../timsquery" }
@@ -39,11 +49,11 @@ path = "src/sample_speclib.rs"
 mimalloc = { workspace = true, features = ["secure"] }
 
 [features]
-default = ["parallel"]
+default = ["parallel", "aws"]
 parallel = ["timsseek/rayon"]
 instrumentation = ["timsseek/instrumentation", "tracing-profile"]
 track-alloc = ["alloc_track/enabled"]
-# S3/GCS/Azure passthroughs — opt in when you want to read/write cloud URIs.
+# S3 is default (see above). GCS/Azure stay opt-in — add when actually needed.
 aws = ["tims_stage/aws", "timscentroid/aws"]
 gcp = ["tims_stage/gcp", "timscentroid/gcp"]
 azure = ["tims_stage/azure", "timscentroid/azure"]

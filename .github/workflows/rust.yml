@@ -21,6 +21,10 @@ jobs:
           - "--no-default-features"  # serial
     steps:
       - uses: actions/checkout@v6
+      - name: Apply crate patches (rustyms gnome.dat stub)
+        run: |
+          cargo install patch-crate --locked
+          cargo patch-crate
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests

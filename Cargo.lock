@@ -315,10 +315,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-cast",
- "arrow-csv",
  "arrow-data",
- "arrow-ipc",
- "arrow-json",
  "arrow-ord",
  "arrow-row",
  "arrow-schema",
@@ -392,21 +389,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrow-csv"
-version = "57.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8da746f4180004e3ce7b83c977daf6394d768332349d3d913998b10a120b790a"
-dependencies = [
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "chrono",
- "csv",
- "csv-core",
- "regex",
-]
-
-[[package]]
 name = "arrow-data"
 version = "57.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -431,30 +413,6 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "flatbuffers",
-]
-
-[[package]]
-name = "arrow-json"
-version = "57.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ff8357658bedc49792b13e2e862b80df908171275f8e6e075c460da5ee4bf86"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-cast",
- "arrow-data",
- "arrow-schema",
- "chrono",
- "half",
- "indexmap",
- "itoa",
- "lexical-core",
- "memchr",
- "num-traits",
- "ryu",
- "serde_core",
- "serde_json",
- "simdutf8",
 ]
 
 [[package]]
@@ -1172,15 +1130,6 @@ checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
 dependencies = [
  "outref",
  "vsimd",
-]
-
-[[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -2373,15 +2322,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "font-types"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d9237c6d82152100c691fb77ea18037b402bcc7257d2c876a4ffac81bc22a1c"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3263,12 +3203,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
-name = "identity-hash"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfdd7caa900436d8f13b2346fe10257e0c05c1f1f9e351f4f5d57c03bd5f45da"
-
-[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3835,35 +3769,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "mzdata"
-version = "0.59.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e6c319f4111abe43bbcc33433b727968e30163f0a90e440386978656df8685c"
-dependencies = [
- "base64-simd",
- "bitflags 2.11.0",
- "bytemuck",
- "chrono",
- "flate2",
- "identity-hash",
- "indexmap",
- "log",
- "mzpeaks",
- "num-traits",
- "regex",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mzpeaks"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "543be9eac70437bfc915b3339e6ae4f23dc034922f13eb2535dcc19e7e9e9481"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -4723,16 +4628,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "probability"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42746b805e424b759d46c22c65dc66ccca057a2db96e9db4fda6c337a287e485"
-dependencies = [
- "random",
- "special",
-]
-
-[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4999,12 +4894,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "random"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "474c42c904f04dfe2a595a02f71e1a0e5e92ffb5761cc9a4c02140b93b8dd504"
-
-[[package]]
 name = "range-alloc"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5040,16 +4929,6 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "read-fonts"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
-dependencies = [
- "bytemuck",
- "font-types",
 ]
 
 [[package]]
@@ -5442,28 +5321,18 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "rustyms"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "011d3d672ae44d5e07db0488d855f2b5ed178e3d6bb7ef5b18c6415c20bbd61e"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "context_error",
  "flate2",
  "itertools 0.14.0",
- "mzdata",
- "ndarray",
  "ordered-float 5.3.0",
- "paste",
- "probability",
- "rand 0.9.3",
- "rayon",
  "regex",
  "serde",
  "serde_json",
  "similar",
- "swash",
  "thin-vec",
  "uom",
- "zeno",
 ]
 
 [[package]]
@@ -5707,16 +5576,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
-name = "skrifa"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fbdfe3d2475fbd7ddd1f3e5cf8288a30eb3e5f95832829570cd88115a7434ac"
-dependencies = [
- "bytemuck",
- "read-fonts",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5838,15 +5697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "special"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b89cf0d71ae639fdd8097350bfac415a41aabf1d5ddd356295fdc95f09760382"
-dependencies = [
- "libm",
-]
-
-[[package]]
 name = "speclib_build_cli"
 version = "0.30.0"
 dependencies = [
@@ -5914,17 +5764,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "swash"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "842f3cd369c2ba38966204f983eaa5e54a8e84a7d7159ed36ade2b6c335aae64"
-dependencies = [
- "skrifa",
- "yazi",
- "zeno",
-]
 
 [[package]]
 name = "syn"
@@ -6161,7 +6000,6 @@ version = "0.30.0"
 dependencies = [
  "array2d",
  "arrow",
- "bincode 1.3.3",
  "bon",
  "csv",
  "half",
@@ -6178,7 +6016,6 @@ dependencies = [
  "timsrust",
  "tinyvec",
  "tracing",
- "zstd",
 ]
 
 [[package]]
@@ -7897,12 +7734,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
-name = "yazi"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01738255b5a16e78bbb83e7fbba0a1e7dd506905cfc53f4622d89015a03fbb5"
-
-[[package]]
 name = "yoke"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8021,12 +7852,6 @@ dependencies = [
  "zbus_names",
  "zvariant",
 ]
-
-[[package]]
-name = "zeno"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
 
 [[package]]
 name = "zerocopy"
