@@ -274,7 +274,7 @@ impl ScoredCandidateBuilder {
     /// Populate identity fields and reference values from peptide metadata.
     pub fn with_metadata(mut self, metadata: &PeptideMetadata) -> Self {
         self.library_id = SetField::Some(metadata.library_id);
-        self.sequence = SetField::Some(String::from(metadata.digest.clone()));
+        self.sequence = SetField::Some(metadata.digest.as_str().to_owned());
         self.is_target = SetField::Some(metadata.digest.decoy.is_target());
         self.decoy_group_id = SetField::Some(metadata.digest.decoy_group);
         self.precursor_charge = SetField::Some(metadata.charge);

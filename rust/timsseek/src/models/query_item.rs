@@ -1,4 +1,4 @@
-use super::ProteinSlice;
+use crate::models::sequence::Peptide;
 use micromzpaf::IonAnnot;
 use serde::{
     Deserialize,
@@ -182,7 +182,7 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
 #[derive(Debug, Clone)]
 pub struct QueryItemToScore {
     // Kinda hate this
-    pub digest: ProteinSlice,
+    pub digest: Peptide,
     pub query: TimsElutionGroup<IonAnnot>,
     pub expected_intensity: ExpectedIntensities<IonAnnot>,
 }
@@ -225,8 +225,13 @@ impl QueryItemToScore {
                 (2, 0.3),
             ),
         };
-        let pepseq = "PEPTIDEPINKPEPTIDE".into();
-        let digest = ProteinSlice::from_string(pepseq, false, 1);
+        let raw: std::sync::Arc<str> = "PEPTIDEPINKPEPTIDE".into();
+        let digest = Peptide {
+            raw,
+            parsed: None,
+            decoy: crate::models::decoy::DecoyMarking::Target,
+            decoy_group: 1,
+        };
         let query = eg;
         let expected_intensity = ei;
         QueryItemToScore {

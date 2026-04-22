@@ -1,8 +1,12 @@
 use crate::errors::LibraryReadingError;
 use crate::fragment_mass::elution_group_converter::isotope_dist_from_seq;
-use crate::models::{
-    DecoyMarking,
-    ProteinSlice,
+use crate::models::DecoyMarking;
+use crate::models::sequence::{
+    Peptide,
+    SeqFormat,
+    SpeclibMeta,
+    normalize_to_proforma,
+    parse_sequence,
 };
 use crate::{
     ExpectedIntensities,
@@ -116,28 +120,24 @@ impl PrecursorEntry {
     }
 }
 
-impl From<PrecursorEntry> for ProteinSlice {
-    fn from(x: PrecursorEntry) -> Self {
-        let decoy = if x.decoy {
-            DecoyMarking::ReversedDecoy
-        } else {
-            DecoyMarking::Target
-        };
-        let seq: Arc<str> = x.sequence.clone().into();
-        if seq.as_ref().len() >= u16::MAX as usize {
-            panic!("Sequence too long (gt: {}): {}", u16::MAX, seq);
-        }
-        let range = 0u16..seq.as_ref().len() as u16;
-        ProteinSlice::new(seq, range, decoy, x.decoy_group)
-    }
-}
-
 impl TryFrom<SerSpeclibElement> for QueryItemToScore {
     type Error = LibraryReadingError;
 
     fn try_from(x: SerSpeclibElement) -> Result<Self, Self::Error> {
         let charge = x.precursor.charge;
-        let precursor = x.precursor.into();
+        let raw: Arc<str> = x.precursor.sequence.clone().into();
+        let normalized = normalize_to_proforma(&raw);
+        let parsed = parse_sequence(&normalized);
+        let precursor = Peptide {
+            raw,
+            parsed,
+            decoy: if x.precursor.decoy {
+                DecoyMarking::ReversedDecoy
+            } else {
+                DecoyMarking::Target
+            },
+            decoy_group: x.precursor.decoy_group,
+        };
         let ref_eg = x.elution_group;
         let expected_intensity = ExpectedIntensities::try_from_pairs(
             ref_eg
@@ -222,11 +222,19 @@ fn convert_diann_to_query_item(
     extra: DiannPrecursorExtras,
     decoy_group_id: u32,
 ) -> Result<QueryItemToScore, LibraryReadingError> {
-    let digest = ProteinSlice::from_string(
-        extra.stripped_peptide.clone(),
-        extra.is_decoy,
-        decoy_group_id,
-    );
+    let raw: Arc<str> = extra.stripped_peptide.clone().into();
+    let normalized = normalize_to_proforma(&raw);
+    let parsed = parse_sequence(&normalized);
+    let digest = Peptide {
+        raw,
+        parsed,
+        decoy: if extra.is_decoy {
+            DecoyMarking::ReversedDecoy
+        } else {
+            DecoyMarking::Target
+        },
+        decoy_group: decoy_group_id,
+    };
 
     let (rebuilt_eg, precursor_pairs) = match isotope_dist_from_seq(&extra.stripped_peptide) {
         Ok(isotope_ratios) => {
@@ -287,8 +295,12 @@ fn create_mass_shifted_decoy(
     decoy_group_id: u32,
     mass_shift_da: f64,
 ) -> Result<QueryItemToScore, LibraryReadingError> {
-    let target_sequence: String = target.digest.clone().into();
-    let decoy_digest = ProteinSlice::from_string(target_sequence, true, decoy_group_id);
+    let decoy_digest = Peptide {
+        raw: target.digest.raw.clone(),
+        parsed: target.digest.parsed.clone(),
+        decoy: DecoyMarking::ReversedDecoy,
+        decoy_group: decoy_group_id,
+    };
 
     let charge = target.query.precursor_charge();
     let mz_shift = mass_shift_da / charge as f64;
@@ -385,7 +397,10 @@ fn convert_elution_group_collection(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(Speclib { elems })
+            Ok(Speclib {
+                elems,
+                meta: SpeclibMeta::default(),
+            })
         }
         ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Skyline(extras))) => {
             if egs.len() != extras.len() {
@@ -414,7 +429,10 @@ fn convert_elution_group_collection(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(Speclib { elems })
+            Ok(Speclib {
+                elems,
+                meta: SpeclibMeta::default(),
+            })
         }
         ElutionGroupCollection::MzpafLabels(_, None) => {
             Err(LibraryReadingError::UnsupportedFormat {
@@ -435,6 +453,7 @@ fn convert_elution_group_collection(
 #[derive(Debug, Clone)]
 pub struct Speclib {
     pub elems: Vec<QueryItemToScore>,
+    pub meta: SpeclibMeta,
 }
 
 struct SpeclibIterator<'a> {
@@ -647,6 +666,38 @@ impl<R: Read> Iterator for MessagePackReader<R> {
     }
 }
 
+/// Inspect every `Peptide.parsed`. If any is `None`, zero them all, flip
+/// `parsable_sequences` off, log counts. Returns the finalized meta.
+///
+/// MUST run AFTER all decoy generation (including `create_mass_shifted_decoy`
+/// and DIA-NN target-decoy pairing). Otherwise decoys generated post-gate
+/// inherit `parsed: Some(...)` from their target while the gate said off.
+fn apply_parse_gate(items: &mut [QueryItemToScore], expected_format: SeqFormat) -> SpeclibMeta {
+    let total = items.len();
+    let parsed = items.iter().filter(|q| q.digest.parsed.is_some()).count();
+    let parsable = parsed == total && total > 0;
+    if !parsable {
+        tracing::warn!(
+            "speclib load: n_total={}, n_parsed={}, n_unparsed={}; sequence features disabled",
+            total,
+            parsed,
+            total.saturating_sub(parsed)
+        );
+        for q in items.iter_mut() {
+            q.digest.parsed = None;
+        }
+    } else {
+        tracing::info!(
+            "speclib load: n_total={}, all parsed; sequence features enabled",
+            total
+        );
+    }
+    SpeclibMeta {
+        parsable_sequences: parsable,
+        sequence_format: expected_format,
+    }
+}
+
 impl Speclib {
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = QueryItemToScore> + 'a {
         SpeclibIterator {
@@ -690,7 +741,9 @@ impl Speclib {
         let speclib = convert_elution_group_collection(collection)?;
 
         // Apply decoy strategy to the loaded speclib
-        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        let mut speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified);
+        speclib.meta = meta;
         speclib.log_entry_stats();
         Ok(speclib)
     }
@@ -723,6 +776,7 @@ impl Speclib {
                 );
                 Ok(Speclib {
                     elems: targets.into_iter().chain(decoys).collect(),
+                    meta: SpeclibMeta::default(),
                 })
             }
 
@@ -766,7 +820,10 @@ impl Speclib {
                     all_entries.len() * 2 / 3
                 );
 
-                Ok(Speclib { elems: all_entries })
+                Ok(Speclib {
+                    elems: all_entries,
+                    meta: SpeclibMeta::default(),
+                })
             }
 
             DecoyStrategy::IfMissing => {
@@ -778,6 +835,7 @@ impl Speclib {
                     );
                     Ok(Speclib {
                         elems: targets.into_iter().chain(decoys).collect(),
+                        meta: SpeclibMeta::default(),
                     })
                 } else {
                     tracing::warn!(
@@ -815,7 +873,10 @@ impl Speclib {
                         all_entries.len() * 2 / 3
                     );
 
-                    Ok(Speclib { elems: all_entries })
+                    Ok(Speclib {
+                        elems: all_entries,
+                        meta: SpeclibMeta::default(),
+                    })
                 }
             }
         }
@@ -837,10 +898,15 @@ impl Speclib {
         let elements: Result<Vec<_>, _> = reader.collect();
         let elems = elements?;
 
-        let speclib = Self { elems };
+        let speclib = Self {
+            elems,
+            meta: SpeclibMeta::default(),
+        };
 
         // Apply decoy strategy to the loaded speclib
-        let speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        let mut speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
+        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified);
+        speclib.meta = meta;
         speclib.log_entry_stats();
         Ok(speclib)
     }
@@ -848,6 +914,7 @@ impl Speclib {
     pub fn sample() -> Self {
         Self {
             elems: vec![QueryItemToScore::sample()],
+            meta: SpeclibMeta::default(),
         }
     }
 
@@ -981,7 +1048,10 @@ mod tests {
                 .map(QueryItemToScore::try_from)
                 .collect::<Result<_, _>>()?;
 
-            Ok(Self { elems: speclib })
+            Ok(Self {
+                elems: speclib,
+                meta: SpeclibMeta::default(),
+            })
         }
     }
 
@@ -1492,5 +1562,84 @@ mod tests {
             SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd).unwrap();
         let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(items.len(), 2);
+    }
+
+    #[cfg(test)]
+    fn fixture_query_item(
+        raw_seq: &str,
+        parsed: Option<crate::models::sequence::ParsedSequence>,
+    ) -> QueryItemToScore {
+        let elem = SerSpeclibElement::new(
+            PrecursorEntry::new(raw_seq.to_string(), 2, false, 0),
+            ReferenceEG::new(
+                0,
+                500.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.8, 0.3],
+                0.75,
+                120.0,
+            ),
+        );
+        let mut q: QueryItemToScore = elem.try_into().expect("fixture convert");
+        q.digest.parsed = parsed;
+        q
+    }
+
+    #[test]
+    fn test_parse_gate_off_on_poisoned_row() {
+        use crate::models::sequence::{
+            ParsedSequence,
+            SeqFormat,
+        };
+        use smallvec::SmallVec;
+
+        let mut items = vec![
+            fixture_query_item(
+                "PEPTIDEK",
+                Some(ParsedSequence {
+                    residues: SmallVec::new(),
+                    mods: SmallVec::new(),
+                }),
+            ),
+            fixture_query_item("GARBAGE!!!", None),
+        ];
+        let meta = apply_parse_gate(&mut items, SeqFormat::Modified);
+        assert!(!meta.parsable_sequences);
+        assert!(items.iter().all(|q| q.digest.parsed.is_none()));
+    }
+
+    #[test]
+    fn test_parse_gate_on_when_all_parsed() {
+        use crate::models::sequence::{
+            ParsedSequence,
+            SeqFormat,
+        };
+        use smallvec::SmallVec;
+
+        let mut items = vec![
+            fixture_query_item(
+                "PEPTIDEK",
+                Some(ParsedSequence {
+                    residues: SmallVec::new(),
+                    mods: SmallVec::new(),
+                }),
+            ),
+            fixture_query_item(
+                "ABCDEK",
+                Some(ParsedSequence {
+                    residues: SmallVec::new(),
+                    mods: SmallVec::new(),
+                }),
+            ),
+        ];
+        let meta = apply_parse_gate(&mut items, SeqFormat::Modified);
+        assert!(meta.parsable_sequences);
+        assert!(items.iter().all(|q| q.digest.parsed.is_some()));
     }
 }

@@ -101,6 +101,23 @@ impl Peptide {
         &self.raw
     }
 
+    /// Byte length of the raw sequence string (not residue count).
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// `true` when this entry is a decoy (reversed or mass-shifted).
+    pub fn is_decoy(&self) -> bool {
+        matches!(
+            self.decoy,
+            crate::models::decoy::DecoyMarking::ReversedDecoy
+        )
+    }
+
     pub fn length(&self) -> Option<u8> {
         self.parsed.as_ref().map(|p| p.residues.len() as u8)
     }
