@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Apply crate patches (rustyms gnome.dat stub)
         run: |
-          cargo install patch-crate --locked
+          cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
           cargo patch-crate
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}

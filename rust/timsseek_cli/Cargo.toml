@@ -6,11 +6,10 @@ license.workspace = true
 
 # rustyms is patched (see workspace Cargo.toml `[patch.crates-io]` + patches/)
 # to drop the 60MB gnome.dat glycan database we don't use. Fresh-clone setup:
-#     cargo install patch-crate && cargo patch-crate
-# This extracts rustyms into target/patch/ and applies patches/rustyms+0.11.0.patch.
-# Can't use build.rs automation: patch-crate depends on `cargo = "0.96"` which
-# pulls libsqlite3-sys 0.36; timsrust pins rusqlite 0.37→libsqlite3-sys 0.35,
-# and both declare `links = "sqlite3"` → cargo rejects.
+#     task setup  (or: cargo install patch-crate --locked && cargo patch-crate)
+# The [patch.crates-io] path in the workspace Cargo.toml requires target/patch/
+# to exist before any cargo resolution — build.rs automation isn't possible
+# because cargo reads [patch] before any build script runs.
 [package.metadata.patch]
 crates = ["rustyms"]
 

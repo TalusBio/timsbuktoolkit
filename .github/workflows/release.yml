@@ -63,7 +63,7 @@ jobs:
       - name: Apply crate patches (rustyms gnome.dat stub)
         shell: bash
         run: |
-          cargo install patch-crate --locked
+          cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
           cargo patch-crate
 
       - name: Build Binaries
