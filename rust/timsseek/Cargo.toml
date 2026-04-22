@@ -32,6 +32,9 @@ parquet = { workspace = true }
 arrow = { workspace = true }
 smallvec = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = ["rayon"]
 instrumentation = []

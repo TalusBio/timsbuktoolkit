@@ -3,6 +3,7 @@ use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::path::Path;
@@ -283,7 +284,11 @@ pub struct ResultParquetWriter {
 }
 
 impl ResultParquetWriter {
-    pub fn new(path: impl AsRef<Path>, row_group_size: usize) -> std::io::Result<Self> {
+    pub fn new(
+        path: impl AsRef<Path>,
+        row_group_size: usize,
+        parsable_sequences: bool,
+    ) -> std::io::Result<Self> {
         let file = match File::create_new(path.as_ref()) {
             Ok(f) => f,
             Err(err) => {
@@ -296,8 +301,13 @@ impl ResultParquetWriter {
         let empty_batch = build_record_batch(&[])?;
         let schema = empty_batch.schema();
 
+        let kv = vec![KeyValue {
+            key: "parsable_sequences".to_string(),
+            value: Some(parsable_sequences.to_string()),
+        }];
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
+            .set_key_value_metadata(Some(kv))
             .build();
 
         let writer =
@@ -333,5 +343,47 @@ impl ResultParquetWriter {
         self.flush()?;
         self.writer.close().map_err(std::io::Error::other)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parquet::file::reader::{
+        FileReader,
+        SerializedFileReader,
+    };
+    use std::fs::File;
+
+    #[test]
+    fn parsable_sequences_key_in_parquet_metadata() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        let path = tmp.path().to_path_buf();
+        // Close the NamedTempFile so ResultParquetWriter can create the file
+        // (File::create_new fails if the path already exists on some platforms,
+        //  but NamedTempFile holds it open; drop it first).
+        drop(tmp);
+        {
+            let writer = ResultParquetWriter::new(&path, 1024, true).expect("create writer");
+            writer.close().expect("close");
+        }
+        let file = File::open(&path).expect("open");
+        let reader = SerializedFileReader::new(file).expect("reader");
+        let meta = reader.metadata().file_metadata();
+        let kv_list = meta.key_value_metadata().expect("kv metadata present");
+        let found: Vec<_> = kv_list
+            .iter()
+            .filter(|k| k.key == "parsable_sequences")
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one parsable_sequences key"
+        );
+        assert_eq!(
+            found[0].value.as_deref(),
+            Some("true"),
+            "parsable_sequences value should be 'true'"
+        );
     }
 }

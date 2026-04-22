@@ -348,13 +348,15 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let step = TimedStep::begin("Phase 6: Write output");
     // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
-    let mut pq_writer =
-        timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000).map_err(
-            |e| TimsSeekError::Io {
-                path: out_path_pq.clone().into(),
-                source: e,
-            },
-        )?;
+    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
+        &out_path_pq,
+        20_000,
+        speclib.meta.parsable_sequences,
+    )
+    .map_err(|e| TimsSeekError::Io {
+        path: out_path_pq.clone().into(),
+        source: e,
+    })?;
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
