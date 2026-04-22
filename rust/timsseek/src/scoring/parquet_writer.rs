@@ -75,7 +75,7 @@ pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatc
         let FinalResult {
             scoring:
                 ScoringFields {
-                    sequence: _,
+                    peptide: _,
                     library_id: _,
                     decoy_group_id: _,
                     precursor_mz: _,
@@ -143,7 +143,7 @@ pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatc
     // -----------------------------------------------------------------------
     let (mut fields, mut arrays) = columns!(results;
         // Identity
-        "sequence"         => DataType::Utf8,    StringArray(|r: &FinalResult| Some(r.scoring.sequence.as_str()));
+        "sequence"         => DataType::Utf8,    StringArray(|r: &FinalResult| Some(r.scoring.peptide.as_str()));
         "library_id"       => DataType::UInt32,  UInt32Array(|r: &FinalResult| Some(r.scoring.library_id));
         "decoy_group_id"   => DataType::UInt32,  UInt32Array(|r: &FinalResult| Some(r.scoring.decoy_group_id));
         "precursor_mz"     => DataType::Float64, Float64Array(|r: &FinalResult| Some(r.scoring.precursor_mz));

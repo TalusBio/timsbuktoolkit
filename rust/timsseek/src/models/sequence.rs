@@ -3,6 +3,7 @@
 //! `Peptide` is used on scoring paths. `ProteinSlice` stays on FASTA digestion.
 
 use crate::models::decoy::DecoyMarking;
+use serde::Serialize;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -128,6 +129,12 @@ impl Peptide {
 
     pub fn n_mods(&self) -> Option<u8> {
         self.parsed.as_ref().map(|p| p.mods.len() as u8)
+    }
+}
+
+impl Serialize for Peptide {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.raw)
     }
 }
 

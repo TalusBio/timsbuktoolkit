@@ -766,7 +766,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.scoring.sequence,
+                    x.scoring.peptide.as_str(),
                     x.scoring.precursor_charge,
                     x.scoring.precursor_mz,
                     x.scoring.main_score
@@ -777,7 +777,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     // Deduplicate by sequence, keeping the best scoring target
     // This is meant to remove instances where reversing a target creates another target.
     results.sort_unstable_by(|x, y| {
-        let seq_ord = x.scoring.sequence.cmp(&y.scoring.sequence);
+        let seq_ord = x.scoring.peptide.as_str().cmp(y.scoring.peptide.as_str());
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
@@ -805,7 +805,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         glimpse_result_head(&results)
     );
     results.dedup_by(|x, y| {
-        (x.scoring.sequence == y.scoring.sequence)
+        (x.scoring.peptide.as_str() == y.scoring.peptide.as_str())
             && (x.scoring.precursor_charge == y.scoring.precursor_charge)
             && (x.scoring.precursor_mz == y.scoring.precursor_mz)
     });
