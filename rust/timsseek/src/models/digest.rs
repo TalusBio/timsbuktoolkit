@@ -1,7 +1,4 @@
-use super::decoy::{
-    DecoyMarking,
-    as_decoy_string,
-};
+use super::decoy::DecoyMarking;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt::Display as FmtDisplay;
@@ -55,21 +52,6 @@ impl ProteinSlice {
         }
     }
 
-    pub fn as_decoy(&self) -> ProteinSlice {
-        ProteinSlice {
-            ref_seq: self.ref_seq.clone(),
-            range: self.range.clone(),
-            decoy: DecoyMarking::NonReversedDecoy,
-            decoy_group: self.decoy_group,
-        }
-    }
-
-    pub fn as_decoy_string(&self) -> String {
-        as_decoy_string(
-            &self.ref_seq.as_ref()[(self.range.start as usize)..(self.range.end as usize)],
-        )
-    }
-
     pub fn len(&self) -> usize {
         self.range.len()
     }
@@ -79,18 +61,12 @@ impl ProteinSlice {
     }
 
     /// Returns the peptide sequence as a string slice without allocation.
-    /// For Target and ReversedDecoy, returns the raw slice.
-    /// For NonReversedDecoy, this returns the ORIGINAL (non-reversed) sequence —
-    /// use `Into::<String>` if you need the decoy form.
     pub fn as_str(&self) -> &str {
         &self.ref_seq[self.range.start as usize..self.range.end as usize]
     }
 
     pub fn is_decoy(&self) -> bool {
-        matches!(
-            self.decoy,
-            DecoyMarking::ReversedDecoy | DecoyMarking::NonReversedDecoy
-        )
+        matches!(self.decoy, DecoyMarking::ReversedDecoy)
     }
 }
 
@@ -102,15 +78,8 @@ impl FmtDisplay for ProteinSlice {
 }
 
 impl From<ProteinSlice> for String {
-    // TODO make this a cow ... maybe ...
     fn from(x: ProteinSlice) -> Self {
-        let tmp = &x.ref_seq.as_ref()[(x.range.start as usize)..(x.range.end as usize)];
-
-        match x.decoy {
-            DecoyMarking::Target => tmp.to_string(),
-            DecoyMarking::ReversedDecoy => tmp.to_string(),
-            DecoyMarking::NonReversedDecoy => as_decoy_string(tmp),
-        }
+        x.ref_seq.as_ref()[(x.range.start as usize)..(x.range.end as usize)].to_string()
     }
 }
 
