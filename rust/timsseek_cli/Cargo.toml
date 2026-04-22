@@ -23,6 +23,7 @@ alloc_track = { path = "../alloc_track" }
 tempfile = { workspace = true }
 
 regex = "1.11.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # tracing-profile = { version="0.10.11",features=["perfetto"] }
 tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common", optional = true }
 

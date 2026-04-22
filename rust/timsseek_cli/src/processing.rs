@@ -371,10 +371,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
-    // Key result to stdout
+    // Key result to stdout. The final output URI is printed by main.rs
+    // per-file footer — out_path_pq here is the local working path (which
+    // is a tempdir for remote destinations), not the eventual location.
     println!();
     println!("{} targets at 1% FDR", targets_at_1pct_qval);
-    println!("Output: {}", out_path_pq.display());
 
     Ok(PipelineReport {
         load_index_ms: 0, // set by caller after return

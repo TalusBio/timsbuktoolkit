@@ -488,6 +488,18 @@ impl OutputSink {
         &self.working_dir
     }
 
+    /// Final destination URI for a sample's output directory — the s3:// /
+    /// gs:// / local path where files *end up*, not the working tempdir.
+    /// Use this for user-facing output (log lines, reports) so users see the
+    /// real location instead of a transient tempdir that will be wiped.
+    fn dest_uri_for_sample(&self, sample: &str) -> String {
+        if self.remote {
+            format!("{}/{}", self.dest_uri.trim_end_matches('/'), sample)
+        } else {
+            self.sample_dir(sample).to_string_lossy().into_owned()
+        }
+    }
+
     /// Upload and remove a per-sample subdir after the sample has finished
     /// writing; no-op for local destinations.
     fn finalize_sample(&self, sample: &str) -> Result<(), errors::CliError> {
@@ -495,6 +507,7 @@ impl OutputSink {
             return Ok(());
         }
         let local = self.sample_dir(sample);
+        let sample_dest = self.dest_uri_for_sample(sample);
         for entry in std::fs::read_dir(&local).map_err(|e| errors::CliError::Io {
             source: format!("read sample dir: {e}"),
             path: Some(local.to_string_lossy().to_string()),
@@ -504,7 +517,7 @@ impl OutputSink {
                 path: None,
             })?;
             let bn = entry.file_name().to_string_lossy().to_string();
-            let dest = format!("{}/{}/{}", self.dest_uri.trim_end_matches('/'), sample, bn);
+            let dest = format!("{sample_dest}/{bn}");
             tims_stage::upload_file(&entry.path(), &dest).map_err(|e| errors::CliError::Io {
                 source: format!("upload {dest}: {e}"),
                 path: None,
@@ -609,23 +622,33 @@ struct TracingHandle {
 /// the flush guard alive for the whole run.
 ///
 /// Resolution order for the log file:
-///   1. `--log-path -`  → stderr-only, no file
-///   2. `--log-path <p>` → that path
-///   3. default        → `<output_dir>/timsseek.log`, iff output is local
+///   1. `--log-path -`          → stderr-only, no file
+///   2. `--log-path <p>`         → that path verbatim
+///   3. default, local output   → `<output_dir>/timsseek-<ts>.log`
+///   4. default, no/remote output → `./timsseek-<ts>.log` in CWD
 ///
-/// Remote output URIs (s3://, gs://, az://) skip the default file-log path
-/// because we'd be writing through a non-filesystem backend; callers who
-/// want a log file must pass `--log-path <local>` explicitly.
+/// The timestamp suffix (`YYYYMMDDTHHMMSS`, local time) avoids clobbering
+/// previous runs that share the same directory. Tracing spans/logs
+/// always go to a file unless `--log-path -` explicitly opts in to
+/// stderr — matches the "no cli args, never tracing logs on terminal"
+/// contract.
 fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
     let log_file_path: Option<std::path::PathBuf> = match args.log_path {
         Some(ref p) if p.to_str() == Some("-") => None,
         Some(ref p) => Some(p.clone()),
-        None => args
-            .output_uri
-            .as_ref()
-            .or(config.output.as_ref().map(|o| &o.uri))
-            .filter(|d| !is_remote_uri(d.as_str()))
-            .map(|d| std::path::Path::new(d).join("timsseek.log")),
+        None => {
+            let base: std::path::PathBuf = args
+                .output_uri
+                .as_ref()
+                .or(config.output.as_ref().map(|o| &o.uri))
+                .filter(|d| !is_remote_uri(d.as_str()))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                });
+            let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
+            Some(base.join(format!("timsseek-{ts}.log")))
+        }
     };
 
     let env_filter = EnvFilter::builder()
@@ -695,11 +718,12 @@ fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
 
     reg.init();
 
-    if let Some(ref log_path) = log_file_path {
-        println!("timsseek v{}", env!("CARGO_PKG_VERSION"));
-        println!("Log: {}", log_path.display());
-        println!();
+    println!("timsseek v{}", env!("CARGO_PKG_VERSION"));
+    match log_file_path {
+        Some(ref log_path) => println!("Log: {}", log_path.display()),
+        None => println!("Log: <stderr> (--log-path -)"),
     }
+    println!();
 
     TracingHandle {
         #[cfg(feature = "instrumentation")]
@@ -911,6 +935,13 @@ fn run() -> std::result::Result<(), errors::CliError> {
             }
         };
 
+        // Per-file wall clock, printed as a footer so user sees total time per
+        // input even when several are batched. Intermediate phase output from
+        // `processing::run_pipeline` lands between the header and footer.
+        println!("=== [{}/{}] {} ===", idx + 1, total_files, sample_name);
+        let file_start = std::time::Instant::now();
+        let sample_dest = sink.dest_uri_for_sample(&sample_name);
+
         match process_single_file(
             raw_uri,
             &backend,
@@ -925,6 +956,13 @@ fn run() -> std::result::Result<(), errors::CliError> {
             Ok(report) => {
                 if let Err(e) = sink.finalize_sample(&sample_name) {
                     error!("Failed to finalize sample {}: {}", sample_name, e);
+                    println!(
+                        "=== [{}/{}] {} failed upload after {:?} ===",
+                        idx + 1,
+                        total_files,
+                        sample_name,
+                        file_start.elapsed()
+                    );
                     run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
                     run_report.abort_reason =
                         Some(format!("upload failure on sample {sample_name}: {e}"));
@@ -932,6 +970,14 @@ fn run() -> std::result::Result<(), errors::CliError> {
                     error!("Aborting batch due to upload failure");
                     break;
                 }
+                println!("Output: {sample_dest}");
+                println!(
+                    "=== [{}/{}] {} done in {:?} ===",
+                    idx + 1,
+                    total_files,
+                    sample_name,
+                    file_start.elapsed()
+                );
                 successful_files.push(raw_uri.clone());
                 run_report.files.push(timsseek::scoring::FileReport {
                     file_name: raw_uri.clone(),
@@ -940,6 +986,14 @@ fn run() -> std::result::Result<(), errors::CliError> {
             }
             Err(e) => {
                 error!("Failed to process {}: {}", raw_uri, e);
+                println!(
+                    "=== [{}/{}] {} FAILED after {:?}: {} ===",
+                    idx + 1,
+                    total_files,
+                    sample_name,
+                    file_start.elapsed(),
+                    e
+                );
                 // I/O errors are likely systemic (disk full, permissions) —
                 // abort the batch instead of failing every remaining file.
                 if matches!(e, errors::CliError::Io { .. }) {
