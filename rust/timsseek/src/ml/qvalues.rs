@@ -134,6 +134,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
 
+use crate::models::AA_COUNT_NAMES;
 use crate::scoring::results::{
     CompetedCandidate,
     FinalResult,
@@ -150,32 +151,6 @@ fn mean_abs_error(errs: &[f32]) -> f64 {
 // ---------------------------------------------------------------------------
 // CompetedCandidate: FeatureLike + LabelledScore
 // ---------------------------------------------------------------------------
-
-/// Canonical 20-dim AA-count feature names, aligned with
-/// `ParsedSequence::aa_counts` output order (see `CANONICAL_AA_LETTERS`):
-/// A C D E F G H I K L M N P Q R S T V W Y.
-pub const AA_COUNT_NAMES: [&str; 20] = [
-    "aa_count_A",
-    "aa_count_C",
-    "aa_count_D",
-    "aa_count_E",
-    "aa_count_F",
-    "aa_count_G",
-    "aa_count_H",
-    "aa_count_I",
-    "aa_count_K",
-    "aa_count_L",
-    "aa_count_M",
-    "aa_count_N",
-    "aa_count_P",
-    "aa_count_Q",
-    "aa_count_R",
-    "aa_count_S",
-    "aa_count_T",
-    "aa_count_V",
-    "aa_count_W",
-    "aa_count_Y",
-];
 
 impl CompetedCandidate {
     /// Single source of truth for feature values and names.
@@ -307,10 +282,6 @@ impl CompetedCandidate {
             (self.delta_group as f64, "delta_group"),
             (self.delta_group_ratio as f64, "delta_group_ratio"),
             (s.calibrated_rt_seconds as f64, "calibrated_rt_seconds"),
-            (
-                s.calibrated_sq_delta_rt as f64,
-                "calibrated_sq_delta_rt_dup",
-            ),
             // Derived intensity features
             (
                 {
@@ -680,10 +651,10 @@ mod feature_tests {
     fn base_feature_count_locked() {
         let off = sample_competed_candidate_unparsed().feature_names().len();
         assert_eq!(
-            off, 87,
-            "base (gate-off) feature count is locked at 87; update this test if the set intentionally changes"
+            off, 86,
+            "base (gate-off) feature count is locked at 86; update this test if the set intentionally changes"
         );
         let on = sample_competed_candidate_parsed().feature_names().len();
-        assert_eq!(on, 109, "gate-on total is 87 base + 22 sequence = 109");
+        assert_eq!(on, 108, "gate-on total is 86 base + 22 sequence = 108");
     }
 }

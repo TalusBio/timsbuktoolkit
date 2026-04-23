@@ -133,42 +133,61 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     }
 }
 
+pub const FEATURE_STATS_FILENAME: &str = "results.feature_stats.tsv";
+pub const FEATURE_IMPORTANCE_FILENAME: &str = "results.feature_importance.tsv";
+
+fn write_tsv(
+    path: &std::path::Path,
+    header: &str,
+    mut write_rows: impl FnMut(&mut String),
+    label: &str,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+    writeln!(buf, "{header}").unwrap();
+    write_rows(&mut buf);
+    std::fs::write(path, buf)?;
+    eprintln!("wrote {label}: {}", path.display());
+    tracing::info!(path = %path.display(), "wrote {} tsv", label);
+    Ok(())
+}
+
 fn write_feature_stats_sidecar(
     stats: &RescoreFeatureStats,
     parquet_path: &std::path::Path,
 ) -> std::io::Result<()> {
     use std::fmt::Write as _;
 
-    // results.feature_stats.tsv — long format: name, mean, missing, fold
-    let stats_path = parquet_path.with_file_name("results.feature_stats.tsv");
-    let mut buf = String::new();
-    writeln!(buf, "name\tmean\tmissing\tfold").unwrap();
-    for fold in stats.iter() {
-        for fs in fold.feature_stats.iter() {
-            writeln!(
-                buf,
-                "{}\t{}\t{}\t{}",
-                fs.name, fs.mean, fs.nan_ratio, fold.fold
-            )
-            .unwrap();
-        }
-    }
-    std::fs::write(&stats_path, buf)?;
-    eprintln!("wrote feature stats: {}", stats_path.display());
-    tracing::info!(path = %stats_path.display(), "wrote feature_stats tsv");
+    write_tsv(
+        &parquet_path.with_file_name(FEATURE_STATS_FILENAME),
+        "name\tmean\tmissing\tfold",
+        |buf| {
+            for fold in stats.iter() {
+                for fs in fold.feature_stats.iter() {
+                    writeln!(
+                        buf,
+                        "{}\t{}\t{}\t{}",
+                        fs.name, fs.mean, fs.nan_ratio, fold.fold
+                    )
+                    .unwrap();
+                }
+            }
+        },
+        "feature stats",
+    )?;
 
-    // results.feature_importance.tsv — long format: name, gain, fold
-    let imp_path = parquet_path.with_file_name("results.feature_importance.tsv");
-    let mut buf = String::new();
-    writeln!(buf, "name\tgain\tfold").unwrap();
-    for fold in stats.iter() {
-        for (name, gain) in fold.feature_importance.iter() {
-            writeln!(buf, "{}\t{}\t{}", name, gain, fold.fold).unwrap();
-        }
-    }
-    std::fs::write(&imp_path, buf)?;
-    eprintln!("wrote feature importance: {}", imp_path.display());
-    tracing::info!(path = %imp_path.display(), "wrote feature_importance tsv");
+    write_tsv(
+        &parquet_path.with_file_name(FEATURE_IMPORTANCE_FILENAME),
+        "name\tgain\tfold",
+        |buf| {
+            for fold in stats.iter() {
+                for (name, gain) in fold.feature_importance.iter() {
+                    writeln!(buf, "{}\t{}\t{}", name, gain, fold.fold).unwrap();
+                }
+            }
+        },
+        "feature importance",
+    )?;
 
     Ok(())
 }

@@ -1010,8 +1010,14 @@ fn run() -> std::result::Result<(), errors::CliError> {
                 successful_files.push(raw_uri.clone());
                 let mut outputs = vec![format!("{sample_dest}/results.parquet")];
                 if !args.no_feature_stats {
-                    outputs.push(format!("{sample_dest}/results.feature_stats.tsv"));
-                    outputs.push(format!("{sample_dest}/results.feature_importance.tsv"));
+                    outputs.push(format!(
+                        "{sample_dest}/{}",
+                        processing::FEATURE_STATS_FILENAME
+                    ));
+                    outputs.push(format!(
+                        "{sample_dest}/{}",
+                        processing::FEATURE_IMPORTANCE_FILENAME
+                    ));
                 }
                 run_report.files.push(timsseek::scoring::FileReport {
                     file_name: raw_uri.clone(),

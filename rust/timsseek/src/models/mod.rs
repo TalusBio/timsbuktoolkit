@@ -15,6 +15,7 @@ pub use query_item::{
     QueryItemToScore,
 };
 pub use sequence::{
+    AA_COUNT_NAMES,
     AminoAcid,
     CANONICAL_AA_INDICES,
     CANONICAL_AA_LETTERS,

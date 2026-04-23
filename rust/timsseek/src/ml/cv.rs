@@ -543,12 +543,9 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             let mut n: usize = 0;
             for (i, item) in self.data.iter().enumerate() {
                 if self.assigned_fold.get(i) == Some(&fold) {
-                    debug_assert_eq!(
-                        item.as_feature().into_iter().count(),
-                        names.len(),
-                        "as_feature length drift for item {i}"
-                    );
+                    let mut seen = 0usize;
                     for (j, v) in item.as_feature().into_iter().enumerate() {
+                        seen += 1;
                         if j < sums.len() {
                             if v.is_finite() {
                                 sums[j] += v;
@@ -558,6 +555,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                             }
                         }
                     }
+                    debug_assert_eq!(seen, names.len(), "as_feature length drift for item {i}");
                     n += 1;
                 }
             }

@@ -27,6 +27,20 @@ pub const CANONICAL_AA_INDICES: [usize; 20] = [
 
 pub const CANONICAL_AA_LETTERS: [u8; 20] = *b"ACDEFGHIKLMNPQRSTVWY";
 
+/// Feature-vector names for the 20-dim AA-count block, derived from
+/// [`CANONICAL_AA_LETTERS`] so the order can never drift out of sync.
+/// `AA_COUNT_NAMES[i]` is `format!("aa_count_{}", CANONICAL_AA_LETTERS[i] as char)`
+/// with a single one-time allocation leaked to `&'static str`.
+pub static AA_COUNT_NAMES: std::sync::LazyLock<[&'static str; 20]> =
+    std::sync::LazyLock::new(|| {
+        let mut out: [&'static str; 20] = [""; 20];
+        for (i, &c) in CANONICAL_AA_LETTERS.iter().enumerate() {
+            let s = format!("aa_count_{}", c as char);
+            out[i] = Box::leak(s.into_boxed_str());
+        }
+        out
+    });
+
 impl AminoAcid {
     pub fn from_ascii(c: u8) -> AminoAcid {
         if c.is_ascii_uppercase() {
@@ -235,6 +249,10 @@ fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
 /// Off the hot path — allocates on every replacement, which is fine at load.
 pub fn normalize_to_proforma(raw: &str) -> String {
     let trimmed = raw.trim_matches('_');
+    // Fast path: plain-AA sequences (no mod tags) skip the replace chain.
+    if !trimmed.contains('[') {
+        return trimmed.to_owned();
+    }
     // Longer prefixes first so `[Uni...` doesn't partially-rewrite over `[U:`.
     trimmed
         .replace("[UniMod:", "[UNIMOD:")
