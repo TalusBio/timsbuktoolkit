@@ -65,4 +65,8 @@ pub struct Cli {
     /// Write the default TOML configuration to the given path and exit.
     #[arg(long, value_name = "PATH")]
     pub write_default_config: Option<PathBuf>,
+
+    /// Skip writing results.feature_stats.json sidecar after rescoring.
+    #[arg(long)]
+    pub no_feature_stats: bool,
 }

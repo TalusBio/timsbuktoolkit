@@ -352,6 +352,7 @@ fn process_single_file(
     base_output_dir: &std::path::Path,
     overwrite: bool,
     max_qvalue: f32,
+    no_feature_stats: bool,
 ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
     let file_name = std::path::Path::new(raw_uri)
         .file_name()
@@ -437,6 +438,7 @@ fn process_single_file(
         max_qvalue,
         load_index_ms,
         &config.calibration,
+        no_feature_stats,
     )
     .map_err(|e| errors::CliError::DataReading {
         source: format!("{}", e),
@@ -978,6 +980,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
             sink.root(),
             validated.overwrite,
             args.max_qvalue,
+            args.no_feature_stats,
         ) {
             Ok(report) => {
                 if let Err(e) = sink.finalize_sample(&sample_name) {
@@ -1005,9 +1008,15 @@ fn run() -> std::result::Result<(), errors::CliError> {
                     file_start.elapsed()
                 );
                 successful_files.push(raw_uri.clone());
+                let mut outputs = vec![format!("{sample_dest}/results.parquet")];
+                if !args.no_feature_stats {
+                    outputs.push(format!("{sample_dest}/results.feature_stats.tsv"));
+                    outputs.push(format!("{sample_dest}/results.feature_importance.tsv"));
+                }
                 run_report.files.push(timsseek::scoring::FileReport {
                     file_name: raw_uri.clone(),
                     pipeline: report,
+                    outputs,
                 });
             }
             Err(e) => {
@@ -1037,6 +1046,16 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // Write run-level report into the sink's working dir.
     // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
     let finalize_step = TimedStep::begin("Finalize run");
+    // Populate top-level artifact list with final destination URIs before
+    // serialization so the report self-describes where to fetch everything.
+    let dest_root = sink
+        .dest_uri_for_sample("")
+        .trim_end_matches('/')
+        .to_string();
+    run_report.artifacts = vec![
+        format!("{dest_root}/run_report.json"),
+        format!("{dest_root}/config_used.json"),
+    ];
     let run_report_path = sink.root().join("run_report.json");
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
         let _ = std::fs::write(&run_report_path, json);

@@ -3,6 +3,7 @@ use super::cv::{
     DataBuffer,
     FeatureLike,
     GBMConfig,
+    RescoreFeatureStats,
 };
 use super::{
     LabelledScore,
@@ -90,7 +91,7 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
 /// deterministic; this seals the only remaining entropy source.
 const RESCORE_SHUFFLE_SEED: u64 = 42;
 
-pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
+pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     let config = GBMConfig::default();
 
     // Canonicalize input order before the seeded shuffle. Upstream
@@ -113,6 +114,13 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
         .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
         .unwrap();
 
+    let names: Vec<&'static str> = scorer
+        .data()
+        .first()
+        .map(|c| c.feature_names())
+        .unwrap_or_default();
+    let stats = scorer.feature_stats(&names);
+
     let mut scored = scorer.score();
     // Sort by score descending
     #[cfg(feature = "rayon")]
@@ -123,7 +131,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> Vec<FinalResult> {
     debug!("Best:\n{:#?}", scored.first());
     debug!("Worst:\n{:#?}", scored.last());
 
-    scored.into_iter().map(|c| c.into_final()).collect()
+    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
 
 use crate::scoring::results::{

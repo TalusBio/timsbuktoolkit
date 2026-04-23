@@ -187,11 +187,19 @@ pub struct RunReport {
     pub speclib_entries: usize,
     pub calib_lib_entries: usize,
     pub files: Vec<FileReport>,
+    /// Top-level run artifacts (run_report.json, config_used.json, etc).
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
-/// Per-file report: file name + pipeline report.
+/// Per-file report: file name + pipeline report + output locations.
+/// `outputs` lists every file written for this sample (parquet + sidecars)
+/// at their final destination URI so a downstream consumer can transfer
+/// them with no extra discovery step.
 #[derive(Debug, Serialize)]
 pub struct FileReport {
     pub file_name: String,
     pub pipeline: PipelineReport,
+    #[serde(default)]
+    pub outputs: Vec<String>,
 }

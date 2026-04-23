@@ -7,6 +7,7 @@ pub use forust_ml::constraints::{
 pub use forust_ml::errors::ForustError;
 pub use forust_ml::gradientbooster::{
     GrowPolicy,
+    ImportanceMethod,
     MissingNodeTreatment,
 };
 pub use forust_ml::metric::{
@@ -19,7 +20,11 @@ pub use forust_ml::{
     GradientBooster,
     Matrix,
 };
-pub use std::collections::HashSet;
+use serde::Serialize;
+pub use std::collections::{
+    HashMap,
+    HashSet,
+};
 
 pub struct GBMConfig {
     iterations: usize,
@@ -354,6 +359,28 @@ impl PrecomputedFeatures {
     }
 }
 
+/// Per-feature summary within a fold. `mean` is computed over finite
+/// values only (NaN/+-Inf skipped). `nan_ratio` is the fraction of
+/// non-finite values seen for this feature in the fold (0.0..=1.0).
+#[derive(Debug, Serialize)]
+pub struct FeatureStat {
+    pub name: &'static str,
+    pub mean: f32,
+    pub nan_ratio: f32,
+}
+
+/// Per-fold feature statistics. `feature_stats` preserves `feature_names`
+/// insertion order. `feature_importance` sorted by gain descending
+/// (top features first) so the JSON reads top-down.
+#[derive(Debug, Serialize)]
+pub struct FoldStats {
+    pub fold: u8,
+    pub feature_stats: Vec<FeatureStat>,
+    pub feature_importance: Vec<(&'static str, f32)>,
+}
+
+pub type RescoreFeatureStats = Vec<FoldStats>;
+
 pub struct CrossValidatedScorer<T: FeatureLike> {
     n_folds: u8,
     data: Vec<T>,
@@ -471,6 +498,95 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
 
     pub fn score(self) -> Vec<T> {
         self.data
+    }
+
+    /// Read-only access to the scored items (e.g. to query feature names).
+    pub fn data(&self) -> &[T] {
+        &self.data
+    }
+
+    /// Compute per-fold feature means + Forust Gain importance.
+    ///
+    /// `names` must be the feature-name list in the same order `as_feature` emits.
+    /// Folds with no classifier (shouldn't happen post-fit) produce empty maps.
+    pub fn feature_stats(&self, names: &[&'static str]) -> RescoreFeatureStats {
+        let mut out: RescoreFeatureStats = Vec::with_capacity(self.n_folds as usize);
+        for fold in 0..self.n_folds {
+            // --- Gain importance from the booster (sorted desc by gain) ---
+            let importance: Vec<(&'static str, f32)> = match self
+                .fold_classifiers
+                .get(fold as usize)
+                .and_then(|o| o.as_ref())
+            {
+                Some(booster) => {
+                    let raw_imp =
+                        booster.calculate_feature_importance(ImportanceMethod::Gain, true);
+                    debug_assert!(
+                        raw_imp.keys().all(|&idx| idx < names.len()),
+                        "forust importance index exceeds feature name list"
+                    );
+                    let mut pairs: Vec<(&'static str, f32)> = raw_imp
+                        .into_iter()
+                        .filter_map(|(idx, v)| names.get(idx).map(|n| (*n, v)))
+                        .collect();
+                    pairs
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    pairs
+                }
+                None => Vec::new(),
+            };
+
+            // --- Per-feature finite-only means + NaN ratio ---
+            let mut sums: Vec<f64> = vec![0.0; names.len()];
+            let mut finite_counts: Vec<u32> = vec![0; names.len()];
+            let mut nan_counts: Vec<u32> = vec![0; names.len()];
+            let mut n: usize = 0;
+            for (i, item) in self.data.iter().enumerate() {
+                if self.assigned_fold.get(i) == Some(&fold) {
+                    debug_assert_eq!(
+                        item.as_feature().into_iter().count(),
+                        names.len(),
+                        "as_feature length drift for item {i}"
+                    );
+                    for (j, v) in item.as_feature().into_iter().enumerate() {
+                        if j < sums.len() {
+                            if v.is_finite() {
+                                sums[j] += v;
+                                finite_counts[j] += 1;
+                            } else {
+                                nan_counts[j] += 1;
+                            }
+                        }
+                    }
+                    n += 1;
+                }
+            }
+            let feature_stats: Vec<FeatureStat> = if n > 0 {
+                names
+                    .iter()
+                    .zip(sums.iter())
+                    .zip(finite_counts.iter())
+                    .zip(nan_counts.iter())
+                    .map(|(((name, s), fc), nc)| {
+                        let mean = if *fc > 0 { *s / *fc as f64 } else { f64::NAN };
+                        FeatureStat {
+                            name: *name,
+                            mean: mean as f32,
+                            nan_ratio: *nc as f32 / n as f32,
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            out.push(FoldStats {
+                fold,
+                feature_stats,
+                feature_importance: importance,
+            });
+        }
+        out
     }
 
     fn next_fold(&self, fold: u8) -> u8 {

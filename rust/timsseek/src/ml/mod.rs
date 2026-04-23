@@ -1,5 +1,6 @@
 pub mod cv;
 pub mod qvalues;
+pub use cv::RescoreFeatureStats;
 pub use qvalues::rescore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

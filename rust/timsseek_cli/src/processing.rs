@@ -21,7 +21,10 @@ use timsquery::{
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
-use timsseek::ml::rescore;
+use timsseek::ml::{
+    RescoreFeatureStats,
+    rescore,
+};
 use timsseek::rt_calibration::{
     CalibRtError,
     CalibratedGrid,
@@ -130,6 +133,46 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     }
 }
 
+fn write_feature_stats_sidecar(
+    stats: &RescoreFeatureStats,
+    parquet_path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+
+    // results.feature_stats.tsv — long format: name, mean, missing, fold
+    let stats_path = parquet_path.with_file_name("results.feature_stats.tsv");
+    let mut buf = String::new();
+    writeln!(buf, "name\tmean\tmissing\tfold").unwrap();
+    for fold in stats.iter() {
+        for fs in fold.feature_stats.iter() {
+            writeln!(
+                buf,
+                "{}\t{}\t{}\t{}",
+                fs.name, fs.mean, fs.nan_ratio, fold.fold
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(&stats_path, buf)?;
+    eprintln!("wrote feature stats: {}", stats_path.display());
+    tracing::info!(path = %stats_path.display(), "wrote feature_stats tsv");
+
+    // results.feature_importance.tsv — long format: name, gain, fold
+    let imp_path = parquet_path.with_file_name("results.feature_importance.tsv");
+    let mut buf = String::new();
+    writeln!(buf, "name\tgain\tfold").unwrap();
+    for fold in stats.iter() {
+        for (name, gain) in fold.feature_importance.iter() {
+            writeln!(buf, "{}\t{}\t{}", name, gain, fold.fold).unwrap();
+        }
+    }
+    std::fs::write(&imp_path, buf)?;
+    eprintln!("wrote feature importance: {}", imp_path.display());
+    tracing::info!(path = %imp_path.display(), "wrote feature_importance tsv");
+
+    Ok(())
+}
+
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
@@ -142,6 +185,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     out_path: &OutputConfig,
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
+    no_feature_stats: bool,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -321,7 +365,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    let data = rescore(competed);
+    let (data, feature_stats) = rescore(competed);
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -372,6 +416,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase6_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
+
+    if !no_feature_stats {
+        if let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
+            // Non-fatal: log and continue.
+            tracing::warn!("Failed to write feature_stats sidecar: {}", e);
+        }
+    }
 
     // Key result to stdout. The final output URI is printed by main.rs
     // per-file footer — out_path_pq here is the local working path (which
@@ -922,6 +973,7 @@ pub fn run_pipeline(
     max_qvalue: f32,
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
+    no_feature_stats: bool,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
@@ -934,6 +986,7 @@ pub fn run_pipeline(
         output,
         max_qvalue,
         calib_config,
+        no_feature_stats,
     )?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report
