@@ -1176,15 +1176,6 @@ dependencies = [
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -5434,7 +5425,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "011d3d672ae44d5e07db0488d855f2b5ed178e3d6bb7ef5b18c6415c20bbd61e"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "context_error",
  "flate2",
  "itertools 0.14.0",
@@ -6133,7 +6124,7 @@ version = "0.30.0"
 dependencies = [
  "array2d",
  "arrow",
- "bincode 1.3.3",
+ "bincode",
  "bon",
  "csv",
  "half",
