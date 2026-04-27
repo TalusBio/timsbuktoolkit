@@ -55,7 +55,7 @@ parquet_derive = { version = "57.1" }
 parquet = { version = "57.1" }
 arrow = { version = "57.1" }
 
-mimalloc = { version = "0.1.46", features = ["secure"] }
+mimalloc = { version = "0.1.50", features = ["secure"] }
 thiserror = "2"
 insta = { version = "1.34.0" }
 bon = "3.8.1"
