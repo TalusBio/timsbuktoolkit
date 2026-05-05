@@ -10,10 +10,10 @@
 #
 # The CLI also accepts JSON configs; TOML is preferred for hand-authored ones.
 
-## Input spectral library (optional — `--speclib-file` overrides this).
+## Input spectral library (optional — `--speclib-uri` overrides this).
 # [input]
 # type = "speclib"
-# path = "path/to/library.msgpack.zst"
+# uri = "path/to/library.msgpack.zst"
 
 
 [analysis]
@@ -69,6 +69,18 @@ min_rt_tolerance_minutes = 0.5
 calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 
 
-## Output directory (optional — `--output-dir` overrides this).
+## Output directory (optional — `--output-uri` overrides this).
 # [output]
-# directory = "./results"
+# uri = "./results"
+
+
+## Staging controls for S3/remote raw inputs (all optional).
+## Tempdirs are created under `tempdir_root` (system temp when unset);
+## remote prefixes are capped at `max_prefix_keys` keys; `save_sidecar`
+## persists a `.idx` next to the input so repeat runs skip the build;
+## `stale_sweep_age_hours` reclaims leaked tempdirs from prior crashes.
+# [staging]
+# tempdir_root = "/scratch/timsseek"
+# max_prefix_keys = 256
+# save_sidecar = false
+# stale_sweep_age_hours = 24

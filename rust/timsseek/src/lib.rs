@@ -15,8 +15,8 @@ pub use micromzpaf;
 pub use data_sources::Speclib;
 pub use models::{
     DecoyStrategy,
-    DigestSlice,
     ExpectedIntensities,
+    ProteinSlice,
     QueryItemToScore,
 };
 pub use scoring::{

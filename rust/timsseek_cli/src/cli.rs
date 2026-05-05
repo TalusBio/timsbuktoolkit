@@ -21,23 +21,24 @@ pub struct Cli {
 
     /// Path to the .d file(s) (will over-write the config file)
     /// Can be specified multiple times for batch processing
-    #[arg(short, long, value_name = "FILE")]
-    pub dotd_files: Vec<PathBuf>,
+    #[arg(long = "raw-inputs", alias = "dotd-files", value_name = "URI")]
+    pub raw_inputs: Vec<String>,
 
     /// Path to the speclib file (will over-write the config file)
-    #[arg(short, long)]
-    pub speclib_file: Option<PathBuf>,
+    #[arg(long = "speclib-uri", alias = "speclib-file")]
+    pub speclib_uri: Option<String>,
 
-    /// Path to a calibration library (optional).
+    /// URI of a calibration library (optional).
     /// If provided, Phase 1 prescore uses this library for calibrant selection,
     /// while Phase 3 scoring uses the main speclib.
     /// If not provided, the main speclib is used for both phases.
-    #[arg(long)]
-    pub calib_lib: Option<PathBuf>,
+    /// Accepts local paths or s3:// URIs.
+    #[arg(long, value_name = "URI")]
+    pub calib_lib: Option<String>,
 
     /// Path to the output directory
-    #[arg(short, long)]
-    pub output_dir: Option<PathBuf>,
+    #[arg(long = "output-uri", short = 'o', alias = "output-dir")]
+    pub output_uri: Option<String>,
 
     /// Overwrite existing output directory if it exists
     #[arg(short = 'O', long)]
@@ -64,4 +65,8 @@ pub struct Cli {
     /// Write the default TOML configuration to the given path and exit.
     #[arg(long, value_name = "PATH")]
     pub write_default_config: Option<PathBuf>,
+
+    /// Skip writing results.feature_stats.json sidecar after rescoring.
+    #[arg(long)]
+    pub no_feature_stats: bool,
 }

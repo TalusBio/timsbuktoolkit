@@ -100,6 +100,10 @@ pub enum SerializationError {
         expected: &'static str,
         found: String,
     },
+    PrefixCapExceeded {
+        prefix: String,
+        cap: usize,
+    },
 }
 
 impl fmt::Display for SerializationError {
@@ -134,6 +138,13 @@ impl fmt::Display for SerializationError {
                     f,
                     "Schema version mismatch. Expected {}, found {}",
                     expected, found
+                )
+            }
+            Self::PrefixCapExceeded { prefix, cap } => {
+                write!(
+                    f,
+                    "prefix yields more than {} entries; refusing to list (prefix={})",
+                    cap, prefix
                 )
             }
         }
@@ -518,16 +529,11 @@ impl IndexedTimstofPeaks {
         storage: StorageProvider,
         meta: TimscentroidMetadata,
     ) -> Result<Self, SerializationError> {
-        // Choose loading strategy based on storage type:
-        // - Local: CPU bottleneck → parallel loading benefits from multi-core
-        // - Cloud: Network I/O bottleneck → serial loading avoids connection overhead
-        let use_parallel = storage.is_local();
-
-        if use_parallel {
-            Self::load_from_storage_parallel(storage, meta)
-        } else {
-            Self::load_from_storage_serial(storage, meta)
-        }
+        // Always parallel — measured 144s serial vs <expected ~20s parallel on
+        // a 1.1 GB / 9-shard index from S3. S3 supports thousands of concurrent
+        // GETs per prefix, so the prior serial heuristic was pessimistic. Local
+        // stays parallel (CPU-bound decode).
+        Self::load_from_storage_parallel(storage, meta)
     }
 
     /// Parallel loading: optimized for local storage where CPU is the bottleneck
@@ -578,49 +584,6 @@ impl IndexedTimstofPeaks {
         Ok(Self {
             ms1_peaks,
             ms2_window_groups,
-        })
-    }
-
-    /// Serial loading: optimized for cloud storage where network I/O is the bottleneck
-    ///
-    /// Avoids creating multiple concurrent connections which can cause:
-    /// - Rate limiting from cloud providers
-    /// - Connection overhead
-    /// - Inefficient use of network bandwidth
-    fn load_from_storage_serial(
-        storage: StorageProvider,
-        meta: TimscentroidMetadata,
-    ) -> Result<Self, SerializationError> {
-        // Load MS1 first (normalize path for cross-platform compatibility)
-        let ms1_path = normalize_storage_path(&meta.ms1_peaks.relative_path);
-        let ms1_cols = storage.read_parquet_peaks(&ms1_path)?;
-        let (ms1_peaks, _stats) = IndexedPeakGroup::new_from_soa(
-            ms1_cols,
-            meta.ms1_peaks.cycle_to_rt_ms.clone(),
-            meta.ms1_peaks.bucket_size,
-        );
-
-        // Load MS2 groups sequentially
-        let ms2_window_groups: Result<Vec<_>, SerializationError> = meta
-            .ms2_window_groups
-            .iter()
-            .map(|group_meta| {
-                // Normalize path separators for cross-platform compatibility
-                let path = normalize_storage_path(&group_meta.group_info.relative_path);
-                let cols = storage.read_parquet_peaks(&path)?;
-
-                let (group, _stats) = IndexedPeakGroup::new_from_soa(
-                    cols,
-                    group_meta.group_info.cycle_to_rt_ms.clone(),
-                    group_meta.group_info.bucket_size,
-                );
-                Ok((group_meta.quadrupole_isolation.clone(), group))
-            })
-            .collect();
-
-        Ok(Self {
-            ms1_peaks,
-            ms2_window_groups: ms2_window_groups?,
         })
     }
 }

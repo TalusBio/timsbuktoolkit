@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "timsquery_pyo3"
-version = "0.30.0"
+version = "0.31.0"
 requires-python = ">=3.11,<3.14"
 classifiers = [
     "Programming Language :: Rust",
@@ -13,5 +13,5 @@ classifiers = [
 dynamic = ["version"]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
 manifest-path = "Cargo.toml"

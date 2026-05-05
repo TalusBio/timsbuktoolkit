@@ -2,7 +2,6 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::path::PathBuf;
 use timsquery::Tolerance;
 use timsquery::models::tolerance::{
     MobilityTolerance,
@@ -26,19 +25,56 @@ pub struct Config {
     #[serde(default = "CalibrationConfig::default")]
     pub calibration: CalibrationConfig,
     pub output: Option<OutputConfig>,
+    #[serde(default)]
+    pub staging: Option<StagingConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StagingConfig {
+    #[serde(default)]
+    pub tempdir_root: Option<std::path::PathBuf>,
+    #[serde(default = "default_max_prefix_keys")]
+    pub max_prefix_keys: usize,
+    #[serde(default)]
+    pub save_sidecar: bool,
+    #[serde(default = "default_sweep_age")]
+    pub stale_sweep_age_hours: u64,
+}
+
+fn default_max_prefix_keys() -> usize {
+    256
+}
+fn default_sweep_age() -> u64 {
+    24
+}
+
+impl Default for StagingConfig {
+    fn default() -> Self {
+        Self {
+            tempdir_root: None,
+            max_prefix_keys: 256,
+            save_sidecar: false,
+            stale_sweep_age_hours: 24,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum InputConfig {
     #[serde(rename = "speclib")]
-    Speclib { path: PathBuf },
+    Speclib {
+        #[serde(alias = "path")]
+        uri: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisConfig {
-    pub dotd_files: Option<Vec<PathBuf>>,
+    #[serde(alias = "dotd_files")]
+    pub raw_inputs: Option<Vec<String>>,
     pub chunk_size: usize,
     pub tolerance: Tolerance,
 
@@ -49,7 +85,8 @@ pub struct AnalysisConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
-    pub directory: PathBuf,
+    #[serde(alias = "directory")]
+    pub uri: String,
 }
 
 impl Config {
@@ -64,7 +101,7 @@ impl Config {
         Config {
             input: None,
             analysis: AnalysisConfig {
-                dotd_files: None,
+                raw_inputs: None,
                 chunk_size: 20000,
                 tolerance: Tolerance {
                     ms: MzTolerance::Ppm((15.0, 15.0)),
@@ -76,6 +113,7 @@ impl Config {
             },
             calibration: CalibrationConfig::default(),
             output: None,
+            staging: None,
         }
     }
 }

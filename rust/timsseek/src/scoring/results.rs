@@ -8,6 +8,7 @@ use super::apex_finding::{
 use super::offsets::MzMobilityOffsets;
 use super::pipeline::SecondaryLazyScores;
 use crate::errors::DataProcessingError;
+use crate::models::sequence::Peptide;
 
 use super::{
     NUM_MS1_IONS,
@@ -18,7 +19,7 @@ use super::{
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringFields {
     // Identity
-    pub sequence: String,
+    pub peptide: Peptide,
     pub library_id: u32,
     pub decoy_group_id: u32,
     pub precursor_mz: f64,
@@ -194,7 +195,7 @@ impl<T> SetField<T> {
 #[derive(Debug, Default)]
 pub struct ScoredCandidateBuilder {
     // --- Identity ---
-    sequence: SetField<String>,
+    peptide: SetField<Peptide>,
     library_id: SetField<u32>,
     decoy_group_id: SetField<u32>,
     precursor_mz: SetField<f64>,
@@ -274,7 +275,7 @@ impl ScoredCandidateBuilder {
     /// Populate identity fields and reference values from peptide metadata.
     pub fn with_metadata(mut self, metadata: &PeptideMetadata) -> Self {
         self.library_id = SetField::Some(metadata.library_id);
-        self.sequence = SetField::Some(String::from(metadata.digest.clone()));
+        self.peptide = SetField::Some(metadata.digest.clone());
         self.is_target = SetField::Some(metadata.digest.decoy.is_target());
         self.decoy_group_id = SetField::Some(metadata.digest.decoy_group);
         self.precursor_charge = SetField::Some(metadata.charge);
@@ -408,7 +409,7 @@ impl ScoredCandidateBuilder {
 
         let scoring = ScoringFields {
             // Identity
-            sequence: expect_some!(sequence),
+            peptide: expect_some!(peptide),
             library_id: expect_some!(library_id),
             decoy_group_id: expect_some!(decoy_group_id),
             precursor_mz: expect_some!(precursor_mz),

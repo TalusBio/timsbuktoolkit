@@ -12,6 +12,7 @@ members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/speclib_build_cli",
+    "rust/tims_stage",
     "python/timsquery_pyo3"
 ]
 default-members = [
@@ -25,11 +26,12 @@ default-members = [
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
-    "rust/speclib_build_cli"
+    "rust/speclib_build_cli",
+    "rust/tims_stage"
 ]
 
 [workspace.package]
-version = "0.30.0"
+version = "0.31.0"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "Apache-2.0"
@@ -42,6 +44,7 @@ serde_json = "1.0.141"
 tracing-subscriber = { version = "0.3.18", features = [
   "registry",
   "env-filter",
+  "json",
 ] }
 timsrust = { git = "https://github.com/jspaezp/timsrust", branch = "experimental/recalib_iter" }
 rusqlite = "0.37.0"
@@ -49,21 +52,37 @@ rayon = "1.5"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
 
-# Parquet and arrow usually need to be kept in sync
-# Its not needed but makes binaries smaller
+# Parquet and arrow usually need to be kept in sync.
+# arrow: drop csv/ipc/json default features — we don't read/write those formats.
+# parquet: keep default compression codecs (zstd/snap/lz4/brotli/flate2) so we can
+# read speclibs written with any of them.
 parquet_derive = { version = "57.1" }
 parquet = { version = "57.1" }
-arrow = { version = "57.1" }
+arrow = { version = "57.1", default-features = false }
 
 mimalloc = { version = "0.1.46", features = ["secure"] }
 thiserror = "2"
 insta = { version = "1.34.0" }
 bon = "3.8.1"
 tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
-rustyms = "0.11.0"
+smallvec = { version = "1.13", features = ["const_generics", "union"] }
+rustyms = { version = "0.11.0", default-features = false }
 csv = "1.3"
 
 tempfile = "3.23.0"
+
+# Patch rustyms to drop gnome.dat (60MB glycan ontology, unused here) and
+# panic with a clear message if anything reaches the GNOME code path.
+# Saves ~60MB in release binaries. The actual edits live in
+# patches/rustyms+0.11.0.patch and are applied to target/patch/rustyms-0.11.0
+# by the `patch-crate` build-dep + build.rs in the crates below.
+# Patch rustyms to drop gnome.dat (60MB glycan ontology) + panic-with-link on
+# access. Diff lives in patches/rustyms+0.11.0.patch; `patch-crate` extracts
+# rustyms into target/patch/ via timsseek_cli's build.rs. On a clean checkout
+# run `cargo patch-crate` once to populate target/patch/ before building, or
+# trigger a first build of timsseek_cli to let its build.rs handle it.
+[patch.crates-io]
+rustyms = { path = "./target/patch/rustyms-0.11.0" }
 
 [workspace.lints.clippy]
 len_without_is_empty = "allow"
@@ -73,5 +92,6 @@ lto = 'thin'
 codegen-units = 1
 panic = 'abort'
 opt-level = 3
-# Needed for flamegraph
+strip = "symbols"
+# Flip `strip` off and `debug = true` on when profiling / flamegraph.
 # debug = true

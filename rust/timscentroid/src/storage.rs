@@ -169,6 +169,157 @@ impl StorageProvider {
         })
     }
 
+    /// Non-creating constructor for read-only callers. Does NOT `create_dir_all`
+    /// on a local path — use `new` when you want writes (which may implicitly
+    /// create the parent directory).
+    pub fn open(location: StorageLocation) -> Result<Self, SerializationError> {
+        let (store, is_local, prefix): (Arc<dyn ObjectStore>, bool, String) = match location {
+            StorageLocation::Local(path) => (
+                Arc::new(LocalFileSystem::new_with_prefix(path)?),
+                true,
+                String::new(),
+            ),
+            StorageLocation::Url(url) => {
+                let prefix = url.path().trim_start_matches('/').to_string();
+                (block_on_or_in_place(parse_url(&url))?, false, prefix)
+            }
+        };
+        Ok(Self {
+            store,
+            is_local,
+            prefix,
+            metrics: None,
+        })
+    }
+
+    /// HEAD an object. Returns its metadata.
+    pub fn head(&self, key: &str) -> Result<object_store::ObjectMeta, SerializationError> {
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        block_on_or_in_place(
+            async move { store.head(&full).await.map_err(SerializationError::from) },
+        )
+    }
+
+    /// Check whether an object exists. Returns `Ok(false)` for NotFound,
+    /// `Err(..)` for other transport errors.
+    pub fn exists(&self, key: &str) -> Result<bool, SerializationError> {
+        match self.head(key) {
+            Ok(_) => Ok(true),
+            Err(SerializationError::ObjectStore(object_store::Error::NotFound { .. })) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fetch the whole object into memory.
+    pub fn get_bytes(&self, key: &str) -> Result<Bytes, SerializationError> {
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        block_on_or_in_place(async move {
+            let got = store.get(&full).await.map_err(SerializationError::from)?;
+            let bytes = got.bytes().await.map_err(SerializationError::from)?;
+            Ok(bytes)
+        })
+    }
+
+    /// Fetch a specific byte range. Errors on short read — S3 returns 416 on
+    /// out-of-bounds, but `LocalFileSystem` silently truncates to EOF, so we
+    /// post-check the returned length against the requested length. No
+    /// pre-HEAD; the tar walker issues many small range GETs and doubling
+    /// the request count is expensive.
+    pub fn range_get(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes, SerializationError> {
+        use object_store::GetRange;
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        let expected = range.end.saturating_sub(range.start);
+        block_on_or_in_place(async move {
+            let opts = object_store::GetOptions {
+                range: Some(GetRange::Bounded(range)),
+                ..Default::default()
+            };
+            let got = store
+                .get_opts(&full, opts)
+                .await
+                .map_err(SerializationError::from)?;
+            let bytes = got.bytes().await.map_err(SerializationError::from)?;
+            if (bytes.len() as u64) < expected {
+                return Err(SerializationError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "range_get short read: expected {} bytes, got {}",
+                        expected,
+                        bytes.len()
+                    ),
+                )));
+            }
+            Ok(bytes)
+        })
+    }
+
+    /// Stream a specific byte range directly to a local file, ticking the
+    /// progress bar per chunk. One HTTP GET with a Range header; the
+    /// response body streams to disk without buffering the whole range in
+    /// memory. Use this for large tar payloads; prefer `get_to_file` when
+    /// you want the whole object.
+    pub fn range_get_to_file(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), SerializationError> {
+        use futures::StreamExt;
+        use object_store::GetRange;
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        let dst = dst.to_path_buf();
+        let expected = range.end.saturating_sub(range.start);
+        block_on_or_in_place(async move {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::File::create(&dst)?;
+            let opts = object_store::GetOptions {
+                range: Some(GetRange::Bounded(range)),
+                ..Default::default()
+            };
+            let got = store
+                .get_opts(&full, opts)
+                .await
+                .map_err(SerializationError::from)?;
+            let mut stream = got.into_stream();
+            let mut written: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(SerializationError::from)?;
+                use std::io::Write;
+                file.write_all(&chunk)?;
+                bar.inc(chunk.len() as u64);
+                written += chunk.len() as u64;
+            }
+            if written < expected {
+                return Err(SerializationError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("range_get_to_file short read: expected {expected}, got {written}"),
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    /// Build a fully-qualified `ObjectPath` from a caller-provided key, applying
+    /// the provider's URL-path prefix when present.
+    fn qualified_path(&self, key: &str) -> ObjectPath {
+        if self.prefix.is_empty() {
+            ObjectPath::from(key)
+        } else {
+            ObjectPath::from(format!("{}/{}", self.prefix.trim_end_matches('/'), key))
+        }
+    }
+
     /// Enable instrumentation for this storage provider
     ///
     /// This wraps the underlying ObjectStore with an InstrumentedStore that tracks:
@@ -291,10 +442,14 @@ impl StorageProvider {
                     std::io::ErrorKind::Other
                 };
 
-                return Err(SerializationError::Io(std::io::Error::new(
-                    error_kind,
-                    format!("Failed to read object at path {}: {}", full_path, e),
-                )));
+                let msg = format!("Failed to read object at path {}: {}", full_path, e);
+                return Err(SerializationError::Io(
+                    if error_kind == std::io::ErrorKind::Other {
+                        std::io::Error::other(msg)
+                    } else {
+                        std::io::Error::new(error_kind, msg)
+                    },
+                ));
             }
         };
         let bytes = result.bytes().await?;
@@ -321,12 +476,48 @@ impl StorageProvider {
 
     /// Write bytes to a file
     pub fn write_bytes(&self, path: &str, data: Vec<u8>) -> Result<(), SerializationError> {
-        let full_path = self.build_path(path);
-        let object_path = ObjectPath::from(full_path.as_str());
-        block_on_or_in_place(async {
-            self.store
-                .put(&object_path, Bytes::from(data).into())
-                .await?;
+        use object_store::buffered::BufWriter;
+        use tokio::io::AsyncWriteExt;
+        let full = self.qualified_path(path);
+        let store = self.store.clone();
+        block_on_or_in_place(async move {
+            let mut w = BufWriter::new(store, full);
+            w.write_all(&data).await.map_err(|e| {
+                SerializationError::Io(std::io::Error::other(format!("buffered write failed: {e}")))
+            })?;
+            w.shutdown().await.map_err(|e| {
+                SerializationError::Io(std::io::Error::other(format!(
+                    "buffered write shutdown failed: {e}"
+                )))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// Stream an object into a local file, ticking the progress bar per chunk.
+    pub fn get_to_file(
+        &self,
+        key: &str,
+        dst: &Path,
+        bar: &indicatif::ProgressBar,
+    ) -> Result<(), SerializationError> {
+        use futures::StreamExt;
+        let full = self.qualified_path(key);
+        let store = self.store.clone();
+        let dst = dst.to_path_buf();
+        block_on_or_in_place(async move {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::File::create(&dst)?;
+            let got = store.get(&full).await.map_err(SerializationError::from)?;
+            let mut stream = got.into_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(SerializationError::from)?;
+                use std::io::Write;
+                file.write_all(&chunk)?;
+                bar.inc(chunk.len() as u64);
+            }
             Ok(())
         })
     }
@@ -341,6 +532,36 @@ impl StorageProvider {
         // Object stores don't have directories, so this is a no-op
         // Local filesystem handles this via put() creating parent "directories" as needed
         Ok(())
+    }
+
+    /// List up to `cap` entries under `prefix`. Errors with
+    /// `SerializationError::PrefixCapExceeded` as soon as the listing yields
+    /// more than `cap` items. This is a fail-fast mechanism to prevent callers
+    /// from accidentally listing a whole bucket.
+    pub fn list_capped(
+        &self,
+        prefix: &str,
+        cap: usize,
+    ) -> Result<Vec<object_store::ObjectMeta>, SerializationError> {
+        use futures::StreamExt;
+        let full = self.qualified_path(prefix);
+        let store = self.store.clone();
+        let prefix_display = full.to_string();
+        block_on_or_in_place(async move {
+            let mut stream = store.list(Some(&full));
+            let mut out = Vec::with_capacity(cap);
+            while let Some(item) = stream.next().await {
+                let meta = item.map_err(SerializationError::from)?;
+                out.push(meta);
+                if out.len() > cap {
+                    return Err(SerializationError::PrefixCapExceeded {
+                        prefix: prefix_display.clone(),
+                        cap,
+                    });
+                }
+            }
+            Ok(out)
+        })
     }
 
     /// Read indexed peaks from a parquet file into SoA columns.
@@ -416,9 +637,7 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
             let credentials = credentials_provider
                 .provide_credentials()
                 .await
-                .map_err(|e| {
-                    SerializationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                })?;
+                .map_err(|e| SerializationError::Io(std::io::Error::other(e)))?;
 
             // 3. Initialize the builder using the resolved credentials
             let mut builder = AmazonS3Builder::new()
@@ -497,5 +716,120 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
                 ),
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod s3_layer0_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn local_provider() -> (TempDir, StorageProvider) {
+        let dir = TempDir::new().unwrap();
+        let loc = StorageLocation::from_path(dir.path());
+        let p = StorageProvider::new(loc).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn head_reports_size_for_existing_file() {
+        let (_dir, p) = local_provider();
+        p.write_bytes("a.bin", vec![1u8; 17]).unwrap();
+        let meta = p.head("a.bin").unwrap();
+        assert_eq!(meta.size, 17u64);
+    }
+
+    #[test]
+    fn head_errors_for_missing_file() {
+        let (_dir, p) = local_provider();
+        assert!(p.head("missing.bin").is_err());
+    }
+
+    #[test]
+    fn exists_returns_true_for_existing_file() {
+        let (_dir, p) = local_provider();
+        p.write_bytes("a.bin", vec![1u8; 3]).unwrap();
+        assert!(p.exists("a.bin").unwrap());
+    }
+
+    #[test]
+    fn exists_returns_false_for_missing_file() {
+        let (_dir, p) = local_provider();
+        assert!(!p.exists("missing.bin").unwrap());
+    }
+
+    #[test]
+    fn get_bytes_roundtrips() {
+        let (_dir, p) = local_provider();
+        let payload = b"hello world".to_vec();
+        p.write_bytes("a.bin", payload.clone()).unwrap();
+        let out = p.get_bytes("a.bin").unwrap();
+        assert_eq!(out.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn range_get_returns_exact_slice() {
+        let (_dir, p) = local_provider();
+        let payload: Vec<u8> = (0..100u8).collect();
+        p.write_bytes("a.bin", payload.clone()).unwrap();
+        let slice = p.range_get("a.bin", 10..50).unwrap();
+        assert_eq!(slice.as_ref(), &payload[10..50]);
+    }
+
+    #[test]
+    fn range_get_errors_on_out_of_bounds() {
+        let (_dir, p) = local_provider();
+        p.write_bytes("a.bin", vec![0u8; 10]).unwrap();
+        assert!(p.range_get("a.bin", 0..100).is_err());
+    }
+
+    #[test]
+    fn list_capped_returns_all_below_cap() {
+        let (_dir, p) = local_provider();
+        p.write_bytes("sample.d/analysis.tdf", vec![0u8; 3])
+            .unwrap();
+        p.write_bytes("sample.d/analysis.tdf_bin", vec![0u8; 3])
+            .unwrap();
+        let list = p.list_capped("sample.d", 10).unwrap();
+        assert_eq!(list.len(), 2);
+        let names: Vec<String> = list.iter().map(|m| m.location.to_string()).collect();
+        assert!(names.iter().any(|n| n.ends_with("/analysis.tdf")));
+        assert!(names.iter().any(|n| n.ends_with("/analysis.tdf_bin")));
+    }
+
+    #[test]
+    fn list_capped_errors_on_cap_exceeded() {
+        let (_dir, p) = local_provider();
+        for i in 0..5 {
+            p.write_bytes(&format!("many/f{i}.bin"), vec![0u8; 1])
+                .unwrap();
+        }
+        let err = p.list_capped("many", 3).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::PrefixCapExceeded { cap: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn get_to_file_copies_object_to_local_path() {
+        let (_dir, p) = local_provider();
+        p.write_bytes("a.bin", vec![7u8; 100]).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let dst = out_dir.path().join("a_copy.bin");
+        let bar = indicatif::ProgressBar::hidden();
+        p.get_to_file("a.bin", &dst, &bar).unwrap();
+        let got = std::fs::read(&dst).unwrap();
+        assert_eq!(got, vec![7u8; 100]);
+    }
+
+    #[test]
+    fn write_bytes_uses_multipart_for_large_buffers() {
+        // Local filesystem doesn't care; exercise the path.
+        let (_dir, p) = local_provider();
+        let big = vec![9u8; 16 * 1024 * 1024];
+        p.write_bytes("big.bin", big.clone()).unwrap();
+        let got = p.get_bytes("big.bin").unwrap();
+        assert_eq!(got.as_ref(), big.as_slice());
     }
 }

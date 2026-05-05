@@ -6,13 +6,13 @@ use std::path::PathBuf;
 #[command(name = "speclib_build", version, about)]
 pub struct Cli {
     // ── Input ──────────────────────────────────────────────────────────────
-    /// FASTA file to digest into peptides.
+    /// FASTA URI (local path or s3://...).
     #[arg(long)]
-    pub fasta: Option<PathBuf>,
+    pub fasta: Option<String>,
 
-    /// Pre-digested peptide list (one bare sequence per line).
+    /// Peptide list URI (local path or s3://...). One bare sequence per line.
     #[arg(long)]
-    pub peptide_list: Option<PathBuf>,
+    pub peptide_list: Option<String>,
 
     // ── Config ─────────────────────────────────────────────────────────────
     /// TOML config file; CLI flags override values from this file.
@@ -20,9 +20,10 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     // ── Output ─────────────────────────────────────────────────────────────
-    /// Output path for the spectral library (default: library.msgpack.zst).
+    /// Output URI for the spectral library (local path or s3://...; default:
+    /// library.msgpack.zst).
     #[arg(long, short = 'o')]
-    pub output: Option<PathBuf>,
+    pub output: Option<String>,
 
     // ── Modifications ──────────────────────────────────────────────────────
     /// Fixed modification, e.g. `Carbamidomethyl@C`. Repeatable.

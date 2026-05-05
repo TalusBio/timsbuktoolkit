@@ -1,9 +1,9 @@
 use super::config::OutputConfig;
 use indicatif::{
     ProgressBar,
+    ProgressFinish,
     ProgressIterator,
     ProgressStyle,
-    ProgressFinish,
 };
 use std::io::IsTerminal;
 use timsquery::models::tolerance::{
@@ -21,7 +21,10 @@ use timsquery::{
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
-use timsseek::ml::rescore;
+use timsseek::ml::{
+    RescoreFeatureStats,
+    rescore,
+};
 use timsseek::rt_calibration::{
     CalibRtError,
     CalibratedGrid,
@@ -68,7 +71,9 @@ fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
         label
     ))
     .unwrap();
-    ProgressBar::new(len).with_style(style).with_finish(ProgressFinish::AndLeave)
+    ProgressBar::new(len)
+        .with_style(style)
+        .with_finish(ProgressFinish::AndLeave)
 }
 
 /// Check that two speclibs are on a compatible RT scale.
@@ -128,6 +133,65 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     }
 }
 
+pub const FEATURE_STATS_FILENAME: &str = "results.feature_stats.tsv";
+pub const FEATURE_IMPORTANCE_FILENAME: &str = "results.feature_importance.tsv";
+
+fn write_tsv(
+    path: &std::path::Path,
+    header: &str,
+    mut write_rows: impl FnMut(&mut String),
+    label: &str,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+    writeln!(buf, "{header}").unwrap();
+    write_rows(&mut buf);
+    std::fs::write(path, buf)?;
+    eprintln!("wrote {label}: {}", path.display());
+    tracing::info!(path = %path.display(), "wrote {} tsv", label);
+    Ok(())
+}
+
+fn write_feature_stats_sidecar(
+    stats: &RescoreFeatureStats,
+    parquet_path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+
+    write_tsv(
+        &parquet_path.with_file_name(FEATURE_STATS_FILENAME),
+        "name\tmean\tmissing\tfold",
+        |buf| {
+            for fold in stats.iter() {
+                for fs in fold.feature_stats.iter() {
+                    writeln!(
+                        buf,
+                        "{}\t{}\t{}\t{}",
+                        fs.name, fs.mean, fs.nan_ratio, fold.fold
+                    )
+                    .unwrap();
+                }
+            }
+        },
+        "feature stats",
+    )?;
+
+    write_tsv(
+        &parquet_path.with_file_name(FEATURE_IMPORTANCE_FILENAME),
+        "name\tgain\tfold",
+        |buf| {
+            for fold in stats.iter() {
+                for (name, gain) in fold.feature_importance.iter() {
+                    writeln!(buf, "{}\t{}\t{}", name, gain, fold.fold).unwrap();
+                }
+            }
+        },
+        "feature importance",
+    )?;
+
+    Ok(())
+}
+
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
@@ -140,6 +204,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     out_path: &OutputConfig,
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
+    no_feature_stats: bool,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -268,7 +333,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
-        let cal_json_path = out_path.directory.join("calibration.json");
+        let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
         if let Err(e) = calibration.save_json(
             &cal_points_tuples,
             [rt_lo, rt_hi],
@@ -319,7 +384,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    let data = rescore(competed);
+    let (data, feature_stats) = rescore(competed);
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -344,14 +409,17 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
-    let out_path_pq = out_path.directory.join("results.parquet");
-    let mut pq_writer =
-        timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000).map_err(
-            |e| TimsSeekError::Io {
-                path: out_path_pq.clone().into(),
-                source: e,
-            },
-        )?;
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
+    let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
+    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
+        &out_path_pq,
+        20_000,
+        speclib.meta.parsable_sequences,
+    )
+    .map_err(|e| TimsSeekError::Io {
+        path: out_path_pq.clone().into(),
+        source: e,
+    })?;
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
@@ -368,10 +436,18 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
-    // Key result to stdout
+    if !no_feature_stats {
+        if let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
+            // Non-fatal: log and continue.
+            tracing::warn!("Failed to write feature_stats sidecar: {}", e);
+        }
+    }
+
+    // Key result to stdout. The final output URI is printed by main.rs
+    // per-file footer — out_path_pq here is the local working path (which
+    // is a tempdir for remote destinations), not the eventual location.
     println!();
     println!("{} targets at 1% FDR", targets_at_1pct_qval);
-    println!("Output: {}", out_path_pq.display());
 
     Ok(PipelineReport {
         load_index_ms: 0, // set by caller after return
@@ -762,7 +838,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.scoring.sequence,
+                    x.scoring.peptide.as_str(),
                     x.scoring.precursor_charge,
                     x.scoring.precursor_mz,
                     x.scoring.main_score
@@ -773,7 +849,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     // Deduplicate by sequence, keeping the best scoring target
     // This is meant to remove instances where reversing a target creates another target.
     results.sort_unstable_by(|x, y| {
-        let seq_ord = x.scoring.sequence.cmp(&y.scoring.sequence);
+        let seq_ord = x.scoring.peptide.as_str().cmp(y.scoring.peptide.as_str());
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
@@ -801,7 +877,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         glimpse_result_head(&results)
     );
     results.dedup_by(|x, y| {
-        (x.scoring.sequence == y.scoring.sequence)
+        (x.scoring.peptide.as_str() == y.scoring.peptide.as_str())
             && (x.scoring.precursor_charge == y.scoring.precursor_charge)
             && (x.scoring.precursor_mz == y.scoring.precursor_mz)
     });
@@ -916,8 +992,10 @@ pub fn run_pipeline(
     max_qvalue: f32,
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
+    no_feature_stats: bool,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    let performance_report_path = output.directory.join("performance_report.json");
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
+    let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
 
     let mut timings = execute_pipeline(
         speclib,
@@ -927,6 +1005,7 @@ pub fn run_pipeline(
         output,
         max_qvalue,
         calib_config,
+        no_feature_stats,
     )?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report

@@ -5,15 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-bincode = "1.3"
-zstd = "0.13"
-
-
 
 # Workspace member deps
 array2d = { path = "../array2d" }
 timscentroid = { path = "../timscentroid" }
 micromzpaf = { path = "../micromzpaf" }
+tims_stage = { path = "../tims_stage" }
 
 # Workspace-inherited deps
 timsrust = { workspace = true }
@@ -27,6 +24,10 @@ bon = { workspace = true }
 csv = { workspace = true }
 parquet = { workspace = true }
 arrow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 
 [lib]

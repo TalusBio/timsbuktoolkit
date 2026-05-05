@@ -47,18 +47,13 @@ pub fn strip_mods(seq: &str) -> String {
     out
 }
 
-/// Convert our short mod notation to ProForma for rustyms.
-/// `C[U:4]` → `C[UNIMOD:4]`, mass-shift mods like `[+57.02]` pass through.
-/// Note: rustyms parses `[U:N]` as element Uranium, not UNIMOD — must expand.
-fn to_proforma(seq: &str) -> String {
-    seq.replace("[U:", "[UNIMOD:")
-}
+use timsseek::models::sequence::normalize_to_proforma;
 
 /// Compute the monoisotopic precursor m/z using rustyms.
 /// Input should be the modified sequence (mods included in mass).
 fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
     use rustyms::prelude::*;
-    let proforma = to_proforma(modified_seq);
+    let proforma = normalize_to_proforma(modified_seq);
     let peptide = Peptidoform::pro_forma(&proforma, None).ok()?;
     let linear = peptide.as_linear()?;
     let formulas = linear.formulas();
@@ -72,7 +67,7 @@ fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
 
 /// Count carbon and sulphur from modified sequence (mods affect formula).
 fn count_cs_modified(modified_seq: &str) -> Option<(u16, u16)> {
-    let proforma = to_proforma(modified_seq);
+    let proforma = normalize_to_proforma(modified_seq);
     count_carbon_sulphur_in_sequence(&proforma).ok()
 }
 

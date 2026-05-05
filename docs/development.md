@@ -2,6 +2,19 @@
 
 Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flags. Environment variables are NOT listed by `--help`; see the Env vars table below.
 
+## First-time setup
+
+`rustyms`'s 60 MB `gnome.dat` glycan database is stripped from the build via
+`[patch.crates-io]` in the workspace `Cargo.toml`, pointing at
+`target/patch/rustyms-0.11.0/` which must be populated before cargo runs. On a
+fresh clone:
+
+```bash
+task setup    # installs jspaezp/cargo-patch-crate fork + applies patches/
+```
+
+Then `cargo build` normally. CI runs the same step. Details in `patches/rustyms+0.11.0.patch`.
+
 ## Binaries
 
 | Binary | Crate | Purpose |
@@ -45,6 +58,33 @@ Not shown by `--help`. Read directly via `std::env::var`.
 - `task license_check`, `task todos`, `task bumpver`, `task build_python`.
 
 Per-crate: `rust/timsseek/Taskfile.yml` adds a watch loop (`task timsseek`) — rebuild + test + fmt + clippy on source change.
+
+## S3 staging
+
+`timsseek_cli` config:
+
+```toml
+[staging]
+tempdir_root = "/scratch/timsseek"   # default: system temp
+max_prefix_keys = 256
+save_sidecar = false                  # write .idx next to raw input
+stale_sweep_age_hours = 24            # 0 disables startup sweep
+```
+
+Startup sweeps `timsseek-staging-*` subdirs older than threshold that lack a `.lock` sentinel. Reclaims tempdirs from SIGKILL'd/crashed runs.
+
+Env vars (via `object_store` default chain): `AWS_{ACCESS_KEY_ID,SECRET_ACCESS_KEY,SESSION_TOKEN,REGION}`, `AWS_ENDPOINT_URL` (MinIO/R2), `AWS_S3_FORCE_PATH_STYLE` (auto-on with endpoint).
+
+Enable with `--features aws` on `timscentroid` / `tims_stage`. Default build omits AWS SDK.
+
+MinIO smoke test (needs pre-seeded bucket):
+
+```bash
+MINIO_TEST_ENDPOINT=http://localhost:9000 \
+AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+MINIO_TEST_BUCKET=tims-stage-ci \
+cargo test -p tims_stage --features aws --test minio_smoke
+```
 
 ## Tracked scripts
 

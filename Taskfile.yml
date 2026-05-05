@@ -11,6 +11,17 @@ tasks:
     cmds:
       - cargo deny check
 
+  # One-time setup after a fresh clone. Installs patch-crate (if missing) and
+  # applies patches/rustyms+0.11.0.patch into target/patch/rustyms-0.11.0 so
+  # [patch.crates-io] in Cargo.toml resolves. Without this, first `cargo build`
+  # errors with "failed to read manifest at target/patch/rustyms-0.11.0/...".
+  # Uses the jspaezp fork of cargo-patch-crate (dropped the cargo-as-library
+  # sqlite transitive — faster install, no system sqlite needed).
+  setup:
+    cmds:
+      - command -v cargo-patch-crate >/dev/null 2>&1 || cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
+      - cargo patch-crate
+
   test:
     cmds:
       - cargo test -- --nocapture

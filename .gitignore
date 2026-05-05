@@ -52,6 +52,9 @@ bench.bash
 bench_*.bash
 quichbench*.bash
 run_instrument.bash
+run_remote.bash
+stage.bash
+here.toml
 *.log
 results.tsv
 config_use.json
