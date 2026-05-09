@@ -1,0 +1,15 @@
+name = "hela_iccoff_gt20peps"
+description = ""
+
+[inputs]
+speclib = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_iccoff_gt20peps/lib.msgpack.zst"
+raw = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_iccoff_gt20peps/sample.d"
+
+# === embedded timsseek config ===
+[config.analysis]
+chunk_size = 20000
+
+[config.analysis.tolerance]
+ms       = { ppm      = [15.0, 15.0] }
+mobility = { percent  = [10.0, 10.0] }
+quad     = { absolute = [0.1,  0.1]  }

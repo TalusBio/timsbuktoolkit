@@ -263,3 +263,47 @@ def test_tilde_path_expanded(tmp_path):
     )
     f = load_fixture(p)
     assert f.inputs.target_peptides == f"{home}/peps.txt"
+
+
+def test_minimal_fixture_without_target_peptides(tmp_path):
+    """Non-entrap fixtures don't need target_peptides."""
+    p = _write(
+        tmp_path,
+        """
+        name = "hela"
+        description = "test"
+
+        [inputs]
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    f = load_fixture(p)
+    assert f.inputs.target_peptides is None
+    assert not f.has_entrapment()
+
+
+def test_entrapment_without_target_peptides_rejected(tmp_path):
+    """If entrapment_peptides is set, target_peptides must be too."""
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 1.0
+        entrapment_mode = "foreign"
+
+        [config.analysis]
+        chunk_size = 1
+        """,
+    )
+    with pytest.raises(ValueError, match="target_peptides"):
+        load_fixture(p)

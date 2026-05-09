@@ -36,7 +36,7 @@ def _require_uri(value: str, field: str) -> str:
 class FixtureInputs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_peptides: str
+    target_peptides: str | None = None
     speclib: str
     raw: str
     entrapment_peptides: str | None = None
@@ -45,13 +45,13 @@ class FixtureInputs(BaseModel):
     pairing: str | None = None
     calibration_speclib: str | None = None
 
-    @field_validator("target_peptides", "speclib", "raw")
+    @field_validator("speclib", "raw")
     @classmethod
     def _required_uri(cls, v: str, info: ValidationInfo) -> str:
         return _require_uri(v, info.field_name or "")
 
     @field_validator(
-        "entrapment_peptides", "calibration_speclib", "pairing"
+        "target_peptides", "entrapment_peptides", "calibration_speclib", "pairing"
     )
     @classmethod
     def _optional_uri(cls, v: str | None, info: ValidationInfo) -> str | None:
@@ -64,6 +64,10 @@ class FixtureInputs(BaseModel):
         has_pep = self.entrapment_peptides is not None
         has_ratio = self.entrapment_ratio is not None
         has_mode = self.entrapment_mode is not None
+        if has_pep and self.target_peptides is None:
+            raise ValueError(
+                "entrapment_peptides requires target_peptides to also be set"
+            )
         if has_pep and not (has_ratio and has_mode):
             raise ValueError(
                 "entrapment_peptides requires both entrapment_ratio and entrapment_mode"
