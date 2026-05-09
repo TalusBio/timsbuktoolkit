@@ -174,3 +174,46 @@ def plot_fdr_curve(
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
+
+
+def _scalar_at_q(
+    curve: pl.DataFrame, q_threshold: float, suffix: str
+) -> dict[str, float | int]:
+    """Read off n_target / n_entrap / empirical_fdr at q <= q_threshold."""
+    sub = curve.filter(pl.col("qvalue") <= q_threshold)
+    if sub.height == 0:
+        return {
+            f"entrap/n_target_at_{suffix}": 0,
+            f"entrap/n_entrap_at_{suffix}": 0,
+            f"entrap/empirical_fdr_at_{suffix}": 0.0,
+        }
+    last = sub.row(-1, named=True)
+    return {
+        f"entrap/n_target_at_{suffix}": int(last["n_target"]),
+        f"entrap/n_entrap_at_{suffix}": int(last["n_entrap"]),
+        f"entrap/empirical_fdr_at_{suffix}": float(last["empirical_fdr"]),
+    }
+
+
+def analyse(
+    results_parquet: str | Path,
+    target_fasta: str | Path,
+    entrapment_fasta: str | Path,
+    out_parquet: str | Path,
+    out_plot: str | Path,
+    title: str = "Reported q-value vs empirical entrapment FDR",
+) -> dict[str, float | int]:
+    """End-to-end: classify -> FDR walk -> write parquet + plot -> return scalars."""
+    results = pl.read_parquet(results_parquet)
+    classified = classify_peptides(results, target_fasta, entrapment_fasta)
+    Path(out_parquet).parent.mkdir(parents=True, exist_ok=True)
+    classified.write_parquet(out_parquet)
+
+    curve = compute_fdr_curve(classified)
+    Path(out_plot).parent.mkdir(parents=True, exist_ok=True)
+    plot_fdr_curve(curve, out_plot, title=title)
+
+    scalars: dict[str, float | int] = {}
+    scalars.update(_scalar_at_q(curve, 0.01, "q01"))
+    scalars.update(_scalar_at_q(curve, 0.05, "q05"))
+    return scalars

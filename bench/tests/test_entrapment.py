@@ -2,6 +2,7 @@ import polars as pl
 
 from bench.entrapment import (
     PeptideClass,
+    analyse,
     classify_peptides,
     compute_fdr_curve,
     parse_fasta,
@@ -111,3 +112,41 @@ def test_plot_fdr_curve_writes_png(tmp_path):
     plot_fdr_curve(curve, out, title="test")
     assert out.exists()
     assert out.stat().st_size > 1000  # not an empty or stub file
+
+
+def test_analyse_end_to_end(tmp_path):
+    target = tmp_path / "t.fasta"
+    target.write_text(">T1\nAAAAPEPTIDEKBBBB\n")
+    entrap = tmp_path / "e.fasta"
+    entrap.write_text(">E1\nQQQQENTRAPEPTKZZZZ\n")
+
+    results = pl.DataFrame(
+        {
+            "sequence": ["PEPTIDEK", "ENTRAPEPTK", "PEPTIDEK", "ENTRAPEPTK"],
+            "qvalue": [0.001, 0.02, 0.005, 0.04],
+        }
+    )
+    results_path = tmp_path / "results.parquet"
+    results.write_parquet(results_path)
+
+    out = analyse(
+        results_parquet=results_path,
+        target_fasta=target,
+        entrapment_fasta=entrap,
+        out_parquet=tmp_path / "classified.parquet",
+        out_plot=tmp_path / "fdr.png",
+    )
+
+    # Returned scalars
+    assert out["entrap/n_target_at_q01"] == 2  # both PEPTIDEK rows have q <= 0.01
+    assert out["entrap/n_entrap_at_q01"] == 0
+    assert out["entrap/empirical_fdr_at_q01"] == 0.0
+    assert out["entrap/n_target_at_q05"] == 2
+    assert out["entrap/n_entrap_at_q05"] == 2
+
+    # Outputs
+    assert (tmp_path / "classified.parquet").exists()
+    assert (tmp_path / "fdr.png").exists()
+
+    classified = pl.read_parquet(tmp_path / "classified.parquet")
+    assert "class" in classified.columns and "is_entrapment" in classified.columns
