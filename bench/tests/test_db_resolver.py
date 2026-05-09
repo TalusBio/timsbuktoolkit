@@ -111,3 +111,14 @@ def test_resolve_s3_uses_aws_cp(tmp_path):
         resolve_dbs(["s3://bkt/p.fasta"], out)
     m.assert_called_once()
     assert ">s3" in out.read_text()
+
+
+def test_classify_shuffled_sentinel():
+    spec = classify_db_spec("SHUFFLED")
+    assert spec.kind == DbSpecKind.SHUFFLED
+
+
+def test_resolve_dbs_rejects_shuffled(tmp_path):
+    out = tmp_path / "merged.fasta"
+    with pytest.raises(ValueError, match="SHUFFLED"):
+        resolve_dbs(["SHUFFLED"], out)

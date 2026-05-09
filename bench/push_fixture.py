@@ -1,22 +1,26 @@
 """Build a fixture and push its inputs to S3.
 
-Resolves polymorphic --db specs into concatenated FASTAs, uploads them and
-the raw .d directory, builds the speclib via speclib_build_cli, and writes
+Resolves polymorphic --db specs into peptide lists, uploads them and the raw
+.d directory, builds the speclib via speclib_build_cli --peptides, and writes
 the fixture TOML to bench/fixtures/<name>.toml.
 """
 
 from __future__ import annotations
 
 import argparse
+import random
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 from loguru import logger
 
 from bench._db_resolver import resolve_dbs
+from bench._digest import digest_proteins, length_filter, parse_fasta
 from bench._s3 import s3_upload_dir, s3_upload_file
+from bench._shuffle import generate_shuffled_entrapment
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -32,13 +36,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         required=True,
         metavar="SPEC",
-        help="Target FASTA source (repeatable)",
+        help="Target proteome source (repeatable)",
     )
     p.add_argument("--raw", required=True, help="Raw .d / .idx (local dir or s3://...)")
     p.add_argument(
         "--config", required=True, help="Local timsseek config TOML to embed"
     )
-    p.add_argument("--entrap-db", action="append", default=[], metavar="SPEC")
+    p.add_argument(
+        "--entrap-db",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Foreign entrapment db specs, OR exactly 'SHUFFLED' for Algorithm 1",
+    )
     p.add_argument("--calib-db", action="append", default=[], metavar="SPEC")
     p.add_argument(
         "--speclib",
@@ -57,6 +67,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=500,
         help="Per-request delay passed to speclib_build_cli (ms; default 500)",
     )
+    p.add_argument(
+        "--entrap-ratio",
+        type=float,
+        default=1.0,
+        help="Entrapment ratio r >= 1.0 (default 1.0)",
+    )
+    p.add_argument(
+        "--peptide-min-len",
+        type=int,
+        default=7,
+        help="Minimum peptide length after digestion (default 7)",
+    )
+    p.add_argument(
+        "--peptide-max-len",
+        type=int,
+        default=30,
+        help="Maximum peptide length after digestion (default 30)",
+    )
+    p.add_argument(
+        "--missed-cleavages",
+        type=int,
+        default=1,
+        help="Number of missed cleavages for trypsin digestion (default 1)",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for shuffle / subsample (default 42)",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument(
@@ -64,12 +104,60 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Re-upload S3 objects even if they already exist",
     )
-    return p.parse_args(argv)
+
+    args = p.parse_args(argv)
+
+    if args.entrap_ratio < 1.0:
+        p.error("--entrap-ratio must be >= 1.0")
+
+    if len(args.entrap_db) > 1 and "SHUFFLED" in args.entrap_db:
+        p.error("SHUFFLED cannot be mixed with other --entrap-db specs")
+
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _subsample_set(s: set[str], k: int, seed: int) -> set[str]:
+    rng = random.Random(seed)
+    if k >= len(s):
+        return set(s)
+    return set(rng.sample(sorted(s), k))
+
+
+def _write_peptides(peptides: set[str], path: Path) -> None:
+    path.write_text("\n".join(sorted(peptides)) + "\n")
+
+
+def _write_pairing(pairs: list[tuple[str, str]], path: Path) -> None:
+    lines = ["target_peptide\tentrap_peptide"]
+    for t, s in pairs:
+        lines.append(f"{t}\t{s}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _digest_fasta(
+    fasta_path: Path,
+    missed_cleavages: int,
+    min_len: int,
+    max_len: int,
+) -> set[str]:
+    proteins = parse_fasta(fasta_path)
+    raw = digest_proteins(proteins, missed_cleavages=missed_cleavages)
+    return length_filter(raw, min_len=min_len, max_len=max_len)
+
+
+# ---------------------------------------------------------------------------
+# Speclib build
+# ---------------------------------------------------------------------------
 
 
 def run_speclib_build(
-    fasta_s3: str,
-    speclib_s3: str,
+    peptides_uri: str,
+    speclib_uri: str,
     koina_url: str | None,
     request_delay_ms: int = 500,
 ) -> None:
@@ -80,14 +168,14 @@ def run_speclib_build(
         "-p",
         "speclib_build_cli",
         "--",
-        "--fasta",
-        fasta_s3,
+        "--peptides",
+        peptides_uri,
         "--fixed-mod",
         "C[U:4]",
         "--max-ions",
         "10",
         "-o",
-        speclib_s3,
+        speclib_uri,
     ]
     if koina_url:
         cmd.extend(["--koina-url", koina_url])
@@ -96,15 +184,23 @@ def run_speclib_build(
     subprocess.run(cmd, check=True)
 
 
+# ---------------------------------------------------------------------------
+# Fixture TOML builder
+# ---------------------------------------------------------------------------
+
+
 def build_fixture_toml(
     name: str,
     description: str,
     config_path: Path,
-    fasta_uri: str,
+    target_peptides_uri: str,
     speclib_uri: str,
     raw_uri: str,
-    entrapment_fasta_uri: str | None,
-    calibration_speclib_uri: str | None,
+    entrapment_peptides_uri: str | None = None,
+    entrapment_ratio: float | None = None,
+    entrapment_mode: str | None = None,
+    pairing_uri: str | None = None,
+    calibration_speclib_uri: str | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f'name = "{name}"')
@@ -112,11 +208,17 @@ def build_fixture_toml(
     lines.append(f'description = "{desc}"')
     lines.append("")
     lines.append("[inputs]")
-    lines.append(f'fasta = "{fasta_uri}"')
+    lines.append(f'target_peptides = "{target_peptides_uri}"')
     lines.append(f'speclib = "{speclib_uri}"')
     lines.append(f'raw = "{raw_uri}"')
-    if entrapment_fasta_uri is not None:
-        lines.append(f'entrapment_fasta = "{entrapment_fasta_uri}"')
+    if entrapment_peptides_uri is not None:
+        lines.append(f'entrapment_peptides = "{entrapment_peptides_uri}"')
+    if entrapment_ratio is not None:
+        lines.append(f"entrapment_ratio = {entrapment_ratio}")
+    if entrapment_mode is not None:
+        lines.append(f'entrapment_mode = "{entrapment_mode}"')
+    if pairing_uri is not None:
+        lines.append(f'pairing = "{pairing_uri}"')
     if calibration_speclib_uri is not None:
         lines.append(f'calibration_speclib = "{calibration_speclib_uri}"')
     lines.append("")
@@ -137,16 +239,9 @@ def build_fixture_toml(
     return "\n".join(lines)
 
 
-def _resolve_and_upload_fasta(
-    specs: list[str],
-    s3_dest: str,
-    label: str,
-    workdir: Path,
-    skip_if_exists: bool = False,
-) -> None:
-    local = workdir / f"{label}.fasta"
-    resolve_dbs(specs, local)
-    s3_upload_file(str(local), s3_dest, skip_if_exists=skip_if_exists)
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 
 def run_pipeline(
@@ -167,31 +262,27 @@ def run_pipeline(
     dry_run: bool,
     force: bool = False,
     request_delay_ms: int = 500,
+    entrap_ratio: float = 1.0,
+    peptide_min_len: int = 7,
+    peptide_max_len: int = 30,
+    missed_cleavages: int = 1,
+    seed: int = 42,
 ) -> None:
     """Execute the full upload + build + write-toml flow."""
+    # Validate SHUFFLED mixing up-front (defensive; parse_args also checks)
+    if len(entrap_db) > 1 and "SHUFFLED" in entrap_db:
+        raise ValueError("SHUFFLED cannot be mixed with other --entrap-db specs")
+    if entrap_ratio < 1.0:
+        raise ValueError("entrap_ratio must be >= 1.0")
+
     dest_prefix = f"s3://{bucket}/{prefix.rstrip('/')}/{name}"
-    target_fasta_uri = f"{dest_prefix}/proteome.fasta"
-    entrap_fasta_uri = f"{dest_prefix}/entrap.fasta" if entrap_db else None
-    calib_fasta_uri = f"{dest_prefix}/calib.fasta" if calib_db else None
 
     main_speclib_uri = speclib_uri or f"{dest_prefix}/lib.msgpack.zst"
-    # When entrap_db is present, the speclib must cover both target+entrap so
-    # the search can score entrapment peptides. We upload a concatenated fasta
-    # to a separate URI and point speclib_build_cli at it. The per-fasta
-    # target/entrap files are still uploaded separately so analyse() can
-    # classify hits by source.
-    speclib_input_fasta_uri = (
-        f"{dest_prefix}/speclib_input.fasta" if entrap_db else None
-    )
     final_calib_speclib_uri: str | None = calibration_speclib_uri
     if final_calib_speclib_uri is None and calib_db:
         final_calib_speclib_uri = f"{dest_prefix}/calib_lib.msgpack.zst"
 
-    # Raw is either a local dir we upload or an existing s3 URI we just reference
-    if raw.startswith("s3://"):
-        raw_uri = raw
-    else:
-        raw_uri = f"{dest_prefix}/sample.d"
+    raw_uri = raw if raw.startswith("s3://") else f"{dest_prefix}/sample.d"
 
     if fixture_target.exists() and not overwrite and not dry_run:
         raise FileExistsError(
@@ -199,17 +290,20 @@ def run_pipeline(
             " (pass --overwrite to replace)"
         )
 
+    use_shuffled = entrap_db == ["SHUFFLED"]
+    use_foreign = bool(entrap_db) and not use_shuffled
+
     plan = {
         "name": name,
         "dest_prefix": dest_prefix,
-        "target_fasta_uri": target_fasta_uri,
-        "entrap_fasta_uri": entrap_fasta_uri,
-        "calib_fasta_uri": calib_fasta_uri,
+        "use_shuffled": use_shuffled,
+        "use_foreign": use_foreign,
+        "entrap_ratio": entrap_ratio,
         "raw_uri": raw_uri,
         "main_speclib_uri": main_speclib_uri,
         "calib_speclib_uri": final_calib_speclib_uri,
         "build_main_speclib": speclib_uri is None,
-        "build_calib_speclib": (calib_db != [] and calibration_speclib_uri is None),
+        "build_calib_speclib": (bool(calib_db) and calibration_speclib_uri is None),
     }
     logger.info("plan: {}", plan)
     if dry_run:
@@ -219,71 +313,148 @@ def run_pipeline(
     with tempfile.TemporaryDirectory() as td:
         workdir = Path(td)
 
-        # 1. Resolve and upload target FASTA
-        _resolve_and_upload_fasta(
-            db, target_fasta_uri, "proteome", workdir, skip_if_exists=not force
+        # 1. Resolve target proteome → target peptides
+        target_fasta = workdir / "target.fasta"
+        resolve_dbs(db, target_fasta)
+        p_target = _digest_fasta(
+            target_fasta,
+            missed_cleavages=missed_cleavages,
+            min_len=peptide_min_len,
+            max_len=peptide_max_len,
         )
 
-        # 2. Optional entrapment FASTA
+        # 2. Entrapment handling
+        p_foreign: set[str] = set()
+        pairs: list[tuple[str, str]] = []
+        actual_r: float | None = None
+        mode: str | None = None
+        emit_pairing = False
+
+        if use_shuffled:
+            # Algorithm 1: shuffled entrapment
+            r_int = int(entrap_ratio)
+            pairs = generate_shuffled_entrapment(p_target, r=r_int, seed=seed)
+            kept_targets = {t for (t, _) in pairs}
+            p_target = kept_targets
+            p_foreign = {s for (_, s) in pairs}
+            actual_r = float(r_int)
+            mode = "shuffled"
+            emit_pairing = r_int == 1
+
+        elif use_foreign:
+            # Algorithm 2: foreign entrapment
+            entrap_fasta = workdir / "entrap.fasta"
+            resolve_dbs(entrap_db, entrap_fasta)
+            all_foreign = _digest_fasta(
+                entrap_fasta,
+                missed_cleavages=missed_cleavages,
+                min_len=peptide_min_len,
+                max_len=peptide_max_len,
+            )
+            # Remove any peptides that appear in the target
+            all_foreign -= p_target
+            n_needed = int(entrap_ratio * len(p_target))
+            if n_needed <= len(all_foreign):
+                p_foreign = _subsample_set(all_foreign, n_needed, seed)
+                actual_r = entrap_ratio
+            else:
+                p_foreign = all_foreign
+                actual_r = len(p_foreign) / len(p_target) if p_target else 0.0
+                warnings.warn(
+                    f"Not enough foreign peptides: needed {n_needed}, "
+                    f"got {len(p_foreign)}. Actual r = {actual_r:.4f}",
+                    stacklevel=2,
+                )
+            pairs = []
+            mode = "foreign"
+            emit_pairing = False
+
+        # 3. Build database peptide list (target ∪ entrap)
+        p_database = p_target | p_foreign
+
+        # 4. Write local peptide files
+        target_pep_local = workdir / "target.peptides.txt"
+        database_pep_local = workdir / "database.peptides.txt"
+        _write_peptides(p_target, target_pep_local)
+        _write_peptides(p_database, database_pep_local)
+
+        entrap_pep_local: Path | None = None
+        pairing_local: Path | None = None
         if entrap_db:
-            assert entrap_fasta_uri is not None
-            _resolve_and_upload_fasta(
-                entrap_db, entrap_fasta_uri, "entrap", workdir, skip_if_exists=not force
-            )
+            entrap_pep_local = workdir / "entrap.peptides.txt"
+            _write_peptides(p_foreign, entrap_pep_local)
+        if emit_pairing:
+            pairing_local = workdir / "pairing.tsv"
+            _write_pairing(pairs, pairing_local)
 
-        # 3. Optional calibration FASTA
-        if calib_db:
-            assert calib_fasta_uri is not None
-            _resolve_and_upload_fasta(
-                calib_db, calib_fasta_uri, "calib", workdir, skip_if_exists=not force
-            )
+        # 5. Upload peptide files
+        target_pep_uri = f"{dest_prefix}/target.peptides.txt"
+        database_pep_uri = f"{dest_prefix}/database.peptides.txt"
+        s3_upload_file(str(target_pep_local), target_pep_uri, skip_if_exists=not force)
+        s3_upload_file(
+            str(database_pep_local), database_pep_uri, skip_if_exists=not force
+        )
 
-        # 4. Upload raw dir if local
+        entrap_pep_uri: str | None = None
+        pairing_uri: str | None = None
+        if entrap_pep_local is not None:
+            entrap_pep_uri = f"{dest_prefix}/entrap.peptides.txt"
+            s3_upload_file(
+                str(entrap_pep_local), entrap_pep_uri, skip_if_exists=not force
+            )
+        if pairing_local is not None:
+            pairing_uri = f"{dest_prefix}/pairing.tsv"
+            s3_upload_file(str(pairing_local), pairing_uri, skip_if_exists=not force)
+
+        # 6. Upload raw if local
         if not raw.startswith("s3://"):
             s3_upload_dir(raw, raw_uri, idempotent=not force)
 
-        # 4b. If entrap_db present, build a merged target+entrap fasta locally
-        # and upload it as the speclib build input.
-        if speclib_input_fasta_uri is not None:
-            merged_local = workdir / "speclib_input.fasta"
-            target_local = workdir / "proteome.fasta"
-            entrap_local = workdir / "entrap.fasta"
-            with merged_local.open("wb") as out:
-                for src in (target_local, entrap_local):
-                    out.write(src.read_bytes())
-                    if not src.read_bytes().endswith(b"\n"):
-                        out.write(b"\n")
+        # 7. Calibration db peptides (Algorithm 2 path, no entrapment subtract)
+        calib_pep_uri: str | None = None
+        if calib_db:
+            calib_fasta = workdir / "calib.fasta"
+            resolve_dbs(calib_db, calib_fasta)
+            p_calib = _digest_fasta(
+                calib_fasta,
+                missed_cleavages=missed_cleavages,
+                min_len=peptide_min_len,
+                max_len=peptide_max_len,
+            )
+            calib_pep_local = workdir / "calib.peptides.txt"
+            _write_peptides(p_calib, calib_pep_local)
+            calib_pep_uri = f"{dest_prefix}/calib.peptides.txt"
             s3_upload_file(
-                str(merged_local),
-                speclib_input_fasta_uri,
-                skip_if_exists=not force,
+                str(calib_pep_local), calib_pep_uri, skip_if_exists=not force
             )
 
-        # 5. Build speclib(s) if not user-provided
+        # 8. Build speclib(s)
         if speclib_uri is None:
-            speclib_input_uri = speclib_input_fasta_uri or target_fasta_uri
             run_speclib_build(
-                speclib_input_uri, main_speclib_uri, koina_url, request_delay_ms
+                database_pep_uri, main_speclib_uri, koina_url, request_delay_ms
             )
         if calib_db and calibration_speclib_uri is None:
-            assert calib_fasta_uri is not None
+            assert calib_pep_uri is not None
             assert final_calib_speclib_uri is not None
             run_speclib_build(
-                calib_fasta_uri,
+                calib_pep_uri,
                 final_calib_speclib_uri,
                 koina_url,
                 request_delay_ms,
             )
 
-    # 6. Emit fixture TOML
+    # 9. Emit fixture TOML
     body = build_fixture_toml(
         name=name,
         description="",
         config_path=Path(config),
-        fasta_uri=target_fasta_uri,
+        target_peptides_uri=target_pep_uri,
         speclib_uri=main_speclib_uri,
         raw_uri=raw_uri,
-        entrapment_fasta_uri=entrap_fasta_uri,
+        entrapment_peptides_uri=entrap_pep_uri,
+        entrapment_ratio=actual_r,
+        entrapment_mode=mode,
+        pairing_uri=pairing_uri,
         calibration_speclib_uri=final_calib_speclib_uri,
     )
     fixture_target.parent.mkdir(parents=True, exist_ok=True)
@@ -312,6 +483,11 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         force=args.force,
         request_delay_ms=args.request_delay_ms,
+        entrap_ratio=args.entrap_ratio,
+        peptide_min_len=args.peptide_min_len,
+        peptide_max_len=args.peptide_max_len,
+        missed_cleavages=args.missed_cleavages,
+        seed=args.seed,
     )
     return 0
 

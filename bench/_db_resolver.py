@@ -33,6 +33,7 @@ class DbSpecKind(enum.Enum):
     S3_FASTA = "s3_fasta"
     UNIPROT_PROTEOME = "uniprot_proteome"
     UNIPROT_ACCESSION = "uniprot_accession"
+    SHUFFLED = "shuffled"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ class DbSpec:
 
 def classify_db_spec(spec: str) -> DbSpec:
     """Classify a single --db value. Raises ValueError for unrecognised input."""
+    if spec == "SHUFFLED":
+        return DbSpec(DbSpecKind.SHUFFLED, spec)
+
     if spec.startswith("s3://"):
         return DbSpec(DbSpecKind.S3_FASTA, spec)
 
@@ -106,6 +110,13 @@ def resolve_dbs(specs: list[str], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     classified = [classify_db_spec(raw) for raw in specs]
+
+    for spec in classified:
+        if spec.kind is DbSpecKind.SHUFFLED:
+            raise ValueError(
+                "SHUFFLED is not resolvable to a fasta"
+                " — push_fixture handles it directly"
+            )
 
     # Coalesce all bare UNIPROT_ACCESSION specs into one batch.
     bare_accessions: list[str] = [
