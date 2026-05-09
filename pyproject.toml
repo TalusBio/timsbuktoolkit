@@ -35,6 +35,10 @@ bench = [
 [tool.pytest.ini_options]
 testpaths = ["bench/tests"]
 
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.12"
+
 [tool.ruff]
 target-version = "py312"
 
