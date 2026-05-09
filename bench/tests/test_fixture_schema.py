@@ -2,7 +2,7 @@ import textwrap
 
 import pytest
 
-from bench._fixture_schema import Fixture, load_fixture
+from bench._fixture_schema import load_fixture
 
 
 def _write(tmp_path, content: str):
@@ -57,6 +57,7 @@ def test_entrapment_and_calib_optional_present(tmp_path):
     f = load_fixture(p)
     assert f.has_entrapment()
     assert f.inputs.calibration_speclib == "s3://b/calib.msgpack.zst"
+    assert f.has_calibration_speclib()
 
 
 def test_local_path_in_inputs_rejected(tmp_path):
@@ -93,5 +94,5 @@ def test_missing_required_input_rejected(tmp_path):
         chunk_size = 20000
         """,
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="speclib"):
         load_fixture(p)

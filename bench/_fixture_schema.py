@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # noqa: F401  (fallback path; we target 3.12)
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 def _require_s3(value: str, field: str) -> str:
@@ -31,12 +26,12 @@ class FixtureInputs(BaseModel):
 
     @field_validator("fasta", "speclib", "raw")
     @classmethod
-    def _required_s3(cls, v: str, info) -> str:
+    def _required_s3(cls, v: str, info: ValidationInfo) -> str:
         return _require_s3(v, info.field_name)
 
     @field_validator("entrapment_fasta", "calibration_speclib")
     @classmethod
-    def _optional_s3(cls, v: str | None, info) -> str | None:
+    def _optional_s3(cls, v: str | None, info: ValidationInfo) -> str | None:
         if v is None:
             return v
         return _require_s3(v, info.field_name)
