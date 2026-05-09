@@ -19,7 +19,7 @@ def test_minimal_fixture_loads(tmp_path):
         description = "test"
 
         [inputs]
-        fasta = "s3://b/p.fasta"
+        target_peptides = "s3://b/peps.txt"
         speclib = "s3://b/lib.msgpack.zst"
         raw = "s3://b/sample.d"
 
@@ -29,26 +29,31 @@ def test_minimal_fixture_loads(tmp_path):
     )
     f = load_fixture(p)
     assert f.name == "hela"
-    assert f.inputs.fasta == "s3://b/p.fasta"
-    assert f.inputs.entrapment_fasta is None
+    assert f.inputs.target_peptides == "s3://b/peps.txt"
+    assert f.inputs.entrapment_peptides is None
+    assert f.inputs.entrapment_ratio is None
+    assert f.inputs.entrapment_mode is None
+    assert f.inputs.pairing is None
     assert f.inputs.calibration_speclib is None
     assert not f.has_entrapment()
-    assert f.config["analysis"]["chunk_size"] == 20000
+    assert not f.has_pairing()
 
 
-def test_entrapment_and_calib_optional_present(tmp_path):
+def test_full_entrapment_fixture(tmp_path):
     p = _write(
         tmp_path,
         """
-        name = "hela_entrap"
+        name = "h_y"
         description = "test"
 
         [inputs]
-        fasta = "s3://b/p.fasta"
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 1.0
+        entrapment_mode = "shuffled"
+        pairing = "s3://b/pairs.tsv"
         speclib = "s3://b/lib.msgpack.zst"
         raw = "s3://b/sample.d"
-        entrapment_fasta = "s3://b/entrap.fasta"
-        calibration_speclib = "s3://b/calib.msgpack.zst"
 
         [config.analysis]
         chunk_size = 20000
@@ -56,8 +61,146 @@ def test_entrapment_and_calib_optional_present(tmp_path):
     )
     f = load_fixture(p)
     assert f.has_entrapment()
-    assert f.inputs.calibration_speclib == "s3://b/calib.msgpack.zst"
-    assert f.has_calibration_speclib()
+    assert f.has_pairing()
+    assert f.inputs.entrapment_ratio == 1.0
+    assert f.inputs.entrapment_mode == "shuffled"
+
+
+def test_foreign_mode_no_pairing(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "h_y"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 1.0
+        entrapment_mode = "foreign"
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    f = load_fixture(p)
+    assert f.has_entrapment()
+    assert not f.has_pairing()
+    assert f.inputs.entrapment_mode == "foreign"
+
+
+def test_entrapment_peptides_without_ratio_rejected(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_mode = "foreign"
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    with pytest.raises(ValueError, match="entrapment_ratio"):
+        load_fixture(p)
+
+
+def test_entrapment_peptides_without_mode_rejected(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 1.0
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    with pytest.raises(ValueError, match="entrapment_mode"):
+        load_fixture(p)
+
+
+def test_orphan_ratio_rejected(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_ratio = 1.0
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    with pytest.raises(ValueError, match="without entrapment_peptides"):
+        load_fixture(p)
+
+
+def test_pairing_only_for_shuffled_mode(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 1.0
+        entrapment_mode = "foreign"
+        pairing = "s3://b/pairs.tsv"
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    with pytest.raises(ValueError, match="pairing"):
+        load_fixture(p)
+
+
+def test_ratio_below_one_rejected(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "bad"
+        description = "test"
+
+        [inputs]
+        target_peptides = "s3://b/t.txt"
+        entrapment_peptides = "s3://b/e.txt"
+        entrapment_ratio = 0.5
+        entrapment_mode = "foreign"
+        speclib = "s3://b/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    with pytest.raises(ValueError, match="entrapment_ratio must be >= 1.0"):
+        load_fixture(p)
 
 
 def test_relative_path_in_inputs_rejected(tmp_path):
@@ -68,7 +211,7 @@ def test_relative_path_in_inputs_rejected(tmp_path):
         description = "test"
 
         [inputs]
-        fasta = "relative/path.fasta"
+        target_peptides = "relative/path.txt"
         speclib = "s3://b/lib.msgpack.zst"
         raw = "s3://b/sample.d"
 
@@ -80,7 +223,7 @@ def test_relative_path_in_inputs_rejected(tmp_path):
         load_fixture(p)
 
 
-def test_absolute_local_path_in_inputs_accepted(tmp_path):
+def test_absolute_local_path_accepted(tmp_path):
     p = _write(
         tmp_path,
         """
@@ -88,7 +231,7 @@ def test_absolute_local_path_in_inputs_accepted(tmp_path):
         description = "test"
 
         [inputs]
-        fasta = "/abs/path/proteome.fasta"
+        target_peptides = "/abs/path/peps.txt"
         speclib = "/abs/path/lib.msgpack.zst"
         raw = "/abs/path/sample.d"
 
@@ -97,7 +240,7 @@ def test_absolute_local_path_in_inputs_accepted(tmp_path):
         """,
     )
     f = load_fixture(p)
-    assert f.inputs.fasta == "/abs/path/proteome.fasta"
+    assert f.inputs.target_peptides == "/abs/path/peps.txt"
 
 
 def test_tilde_path_expanded(tmp_path):
@@ -110,7 +253,7 @@ def test_tilde_path_expanded(tmp_path):
         description = "test"
 
         [inputs]
-        fasta = "~/proteome.fasta"
+        target_peptides = "~/peps.txt"
         speclib = "{home}/lib.msgpack.zst"
         raw = "s3://b/sample.d"
 
@@ -119,23 +262,4 @@ def test_tilde_path_expanded(tmp_path):
         """,
     )
     f = load_fixture(p)
-    assert f.inputs.fasta == f"{home}/proteome.fasta"
-    assert f.inputs.speclib == f"{home}/lib.msgpack.zst"
-
-
-def test_missing_required_input_rejected(tmp_path):
-    p = _write(
-        tmp_path,
-        """
-        name = "missing"
-        description = "test"
-
-        [inputs]
-        fasta = "s3://b/p.fasta"
-
-        [config.analysis]
-        chunk_size = 20000
-        """,
-    )
-    with pytest.raises(ValueError, match="speclib"):
-        load_fixture(p)
+    assert f.inputs.target_peptides == f"{home}/peps.txt"
