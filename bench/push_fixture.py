@@ -51,6 +51,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip calib speclib build, reference this URI",
     )
     p.add_argument("--koina-url")
+    p.add_argument(
+        "--request-delay-ms",
+        type=int,
+        default=500,
+        help="Per-request delay passed to speclib_build_cli (ms; default 500)",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument(
@@ -65,6 +71,7 @@ def run_speclib_build(
     fasta_s3: str,
     speclib_s3: str,
     koina_url: str | None,
+    request_delay_ms: int = 500,
 ) -> None:
     cmd = [
         "cargo",
@@ -84,8 +91,7 @@ def run_speclib_build(
     ]
     if koina_url:
         cmd.extend(["--koina-url", koina_url])
-    else:
-        cmd.extend(["--request-delay-ms", "500"])
+    cmd.extend(["--request-delay-ms", str(request_delay_ms)])
     logger.info("$ {}", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
@@ -160,6 +166,7 @@ def run_pipeline(
     overwrite: bool,
     dry_run: bool,
     force: bool = False,
+    request_delay_ms: int = 500,
 ) -> None:
     """Execute the full upload + build + write-toml flow."""
     dest_prefix = f"s3://{bucket}/{prefix.rstrip('/')}/{name}"
@@ -229,11 +236,18 @@ def run_pipeline(
 
         # 5. Build speclib(s) if not user-provided
         if speclib_uri is None:
-            run_speclib_build(target_fasta_uri, main_speclib_uri, koina_url)
+            run_speclib_build(
+                target_fasta_uri, main_speclib_uri, koina_url, request_delay_ms
+            )
         if calib_db and calibration_speclib_uri is None:
             assert calib_fasta_uri is not None
             assert final_calib_speclib_uri is not None
-            run_speclib_build(calib_fasta_uri, final_calib_speclib_uri, koina_url)
+            run_speclib_build(
+                calib_fasta_uri,
+                final_calib_speclib_uri,
+                koina_url,
+                request_delay_ms,
+            )
 
     # 6. Emit fixture TOML
     body = build_fixture_toml(
@@ -271,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         force=args.force,
+        request_delay_ms=args.request_delay_ms,
     )
     return 0
 
