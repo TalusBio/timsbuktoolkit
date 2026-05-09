@@ -1,0 +1,7 @@
+[analysis]
+chunk_size = 20000
+
+[analysis.tolerance]
+ms       = { ppm      = [15.0, 15.0] }
+mobility = { percent  = [10.0, 10.0] }
+quad     = { absolute = [0.1,  0.1]  }
