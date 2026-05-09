@@ -170,12 +170,15 @@ def test_run_pipeline_minimal(tmp_path, fake_runtime):
 
     # Resolved + uploaded the target fasta
     assert fake_runtime["res"].call_count == 1
-    fake_runtime["up_file"].assert_any_call(ANY, "s3://bk/fx/hela/proteome.fasta")
+    fake_runtime["up_file"].assert_any_call(
+        ANY, "s3://bk/fx/hela/proteome.fasta", skip_if_exists=True
+    )
     # Uploaded the raw directory
     fake_runtime["up_dir"].assert_called_once()
     args = fake_runtime["up_dir"].call_args.args
     assert args[0] == str(raw)
     assert args[1] == "s3://bk/fx/hela/sample.d"
+    assert fake_runtime["up_dir"].call_args.kwargs.get("idempotent") is True
     # Built the speclib
     fake_runtime["build"].assert_called_once()
     # Wrote fixture TOML
@@ -293,3 +296,62 @@ def test_run_pipeline_dry_run(tmp_path, fake_runtime):
     fake_runtime["up_dir"].assert_not_called()
     fake_runtime["build"].assert_not_called()
     assert not target.exists()
+
+
+def test_run_pipeline_default_skips_existing_uploads(tmp_path, fake_runtime):
+    """By default (no --force), uploads are idempotent: existing S3 objects skipped."""
+    cfg, raw = _common_args(tmp_path)
+    from bench.push_fixture import run_pipeline
+
+    output_toml = fake_runtime["fx_dir"] / "hela.toml"
+    run_pipeline(
+        name="hela",
+        bucket="bk",
+        prefix="fx",
+        db=["UP000005640"],
+        raw=str(raw),
+        config=str(cfg),
+        entrap_db=[],
+        calib_db=[],
+        speclib_uri=None,
+        calibration_speclib_uri=None,
+        koina_url=None,
+        fixture_target=output_toml,
+        overwrite=False,
+        dry_run=False,
+        # force NOT passed — defaults to False
+    )
+    # s3_upload_file got called with skip_if_exists=True
+    fasta_call = fake_runtime["up_file"].call_args
+    assert fasta_call.kwargs.get("skip_if_exists") is True
+    # s3_upload_dir got called with idempotent=True
+    raw_call = fake_runtime["up_dir"].call_args
+    assert raw_call.kwargs.get("idempotent") is True
+
+
+def test_run_pipeline_force_overrides_skip(tmp_path, fake_runtime):
+    cfg, raw = _common_args(tmp_path)
+    from bench.push_fixture import run_pipeline
+
+    output_toml = fake_runtime["fx_dir"] / "hela.toml"
+    run_pipeline(
+        name="hela",
+        bucket="bk",
+        prefix="fx",
+        db=["UP000005640"],
+        raw=str(raw),
+        config=str(cfg),
+        entrap_db=[],
+        calib_db=[],
+        speclib_uri=None,
+        calibration_speclib_uri=None,
+        koina_url=None,
+        fixture_target=output_toml,
+        overwrite=False,
+        dry_run=False,
+        force=True,
+    )
+    fasta_call = fake_runtime["up_file"].call_args
+    assert fasta_call.kwargs.get("skip_if_exists") is False
+    raw_call = fake_runtime["up_dir"].call_args
+    assert raw_call.kwargs.get("idempotent") is False

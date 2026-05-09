@@ -53,6 +53,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--koina-url")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-upload S3 objects even if they already exist",
+    )
     return p.parse_args(argv)
 
 
@@ -131,10 +136,11 @@ def _resolve_and_upload_fasta(
     s3_dest: str,
     label: str,
     workdir: Path,
+    skip_if_exists: bool = False,
 ) -> None:
     local = workdir / f"{label}.fasta"
     resolve_dbs(specs, local)
-    s3_upload_file(str(local), s3_dest)
+    s3_upload_file(str(local), s3_dest, skip_if_exists=skip_if_exists)
 
 
 def run_pipeline(
@@ -153,6 +159,7 @@ def run_pipeline(
     fixture_target: Path,
     overwrite: bool,
     dry_run: bool,
+    force: bool = False,
 ) -> None:
     """Execute the full upload + build + write-toml flow."""
     dest_prefix = f"s3://{bucket}/{prefix.rstrip('/')}/{name}"
@@ -198,21 +205,27 @@ def run_pipeline(
         workdir = Path(td)
 
         # 1. Resolve and upload target FASTA
-        _resolve_and_upload_fasta(db, target_fasta_uri, "proteome", workdir)
+        _resolve_and_upload_fasta(
+            db, target_fasta_uri, "proteome", workdir, skip_if_exists=not force
+        )
 
         # 2. Optional entrapment FASTA
         if entrap_db:
             assert entrap_fasta_uri is not None
-            _resolve_and_upload_fasta(entrap_db, entrap_fasta_uri, "entrap", workdir)
+            _resolve_and_upload_fasta(
+                entrap_db, entrap_fasta_uri, "entrap", workdir, skip_if_exists=not force
+            )
 
         # 3. Optional calibration FASTA
         if calib_db:
             assert calib_fasta_uri is not None
-            _resolve_and_upload_fasta(calib_db, calib_fasta_uri, "calib", workdir)
+            _resolve_and_upload_fasta(
+                calib_db, calib_fasta_uri, "calib", workdir, skip_if_exists=not force
+            )
 
         # 4. Upload raw dir if local
         if not raw.startswith("s3://"):
-            s3_upload_dir(raw, raw_uri)
+            s3_upload_dir(raw, raw_uri, idempotent=not force)
 
         # 5. Build speclib(s) if not user-provided
         if speclib_uri is None:
@@ -257,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         fixture_target=fixture_target,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
+        force=args.force,
     )
     return 0
 
