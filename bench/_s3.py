@@ -65,3 +65,11 @@ def s3_upload_dir(local_dir: str, s3_uri: str, idempotent: bool = False) -> None
         _aws_sync(local_dir, s3_uri)
     else:
         _aws_cp(local_dir, s3_uri, recursive=True)
+
+
+def s3_sync_dir(s3_uri: str, local_dir: str) -> None:
+    """Download (sync) a directory tree from S3 to a local path. Idempotent."""
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"not an s3:// URI: {s3_uri}")
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+    _aws_sync(s3_uri, local_dir)
