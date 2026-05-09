@@ -221,12 +221,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--match", help="Glob pattern over fixture names")
     p.add_argument("--notes", help="Free-form note added to wandb run")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--fixtures-dir",
+        type=Path,
+        default=DEFAULT_FIXTURES_DIR,
+        help="Directory containing fixture TOMLs (default: bench/fixtures/)",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    fixtures = select_fixtures(args.fixtures, args.all_, args.match)
+    fixtures = select_fixtures(args.fixtures, args.all_, args.match, args.fixtures_dir)
     for fx in fixtures:
         run_one(fx, notes=args.notes, dry_run=args.dry_run)
     return 0

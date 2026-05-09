@@ -217,3 +217,19 @@ def test_run_one_dry_run_no_subprocess(tmp_path, fake_wandb):
         )
     sp.assert_not_called()
     fake_wandb["wandb"].init.assert_not_called()
+
+
+def test_parse_args_fixtures_dir_flag():
+    from bench.wandb_bench import parse_args
+    args = parse_args([
+        "--fixtures-dir", "bench_out/staged",
+        "myfix",
+    ])
+    assert args.fixtures_dir == Path("bench_out/staged")
+    assert args.fixtures == ["myfix"]
+
+
+def test_parse_args_fixtures_dir_default():
+    from bench.wandb_bench import DEFAULT_FIXTURES_DIR, parse_args
+    args = parse_args(["myfix"])
+    assert args.fixtures_dir == DEFAULT_FIXTURES_DIR
