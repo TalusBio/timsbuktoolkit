@@ -33,6 +33,7 @@ def test_select_positional(tmp_path):
     _write_fx(tmp_path, "hela")
     _write_fx(tmp_path, "yeast")
     from bench.wandb_bench import select_fixtures
+
     out = select_fixtures(["hela"], all_=False, match=None, fixtures_dir=tmp_path)
     assert [f.name for f in out] == ["hela"]
 
@@ -41,6 +42,7 @@ def test_select_all(tmp_path):
     _write_fx(tmp_path, "a")
     _write_fx(tmp_path, "b")
     from bench.wandb_bench import select_fixtures
+
     out = select_fixtures([], all_=True, match=None, fixtures_dir=tmp_path)
     assert sorted(f.name for f in out) == ["a", "b"]
 
@@ -50,6 +52,7 @@ def test_select_match_glob(tmp_path):
     _write_fx(tmp_path, "hela_b")
     _write_fx(tmp_path, "yeast_c")
     from bench.wandb_bench import select_fixtures
+
     out = select_fixtures([], all_=False, match="hela*", fixtures_dir=tmp_path)
     assert sorted(f.name for f in out) == ["hela_a", "hela_b"]
 
@@ -57,6 +60,7 @@ def test_select_match_glob(tmp_path):
 def test_select_unknown_name_errors(tmp_path):
     _write_fx(tmp_path, "hela")
     from bench.wandb_bench import select_fixtures
+
     with pytest.raises(SystemExit) as exc:
         select_fixtures(["nope"], all_=False, match=None, fixtures_dir=tmp_path)
     assert "nope" in str(exc.value)
@@ -65,6 +69,7 @@ def test_select_unknown_name_errors(tmp_path):
 def test_select_combinations_error(tmp_path):
     _write_fx(tmp_path, "hela")
     from bench.wandb_bench import select_fixtures
+
     with pytest.raises(SystemExit):
         select_fixtures(["hela"], all_=True, match=None, fixtures_dir=tmp_path)
     with pytest.raises(SystemExit):
@@ -77,6 +82,7 @@ def test_select_no_args_lists_available(tmp_path, capsys):
     _write_fx(tmp_path, "hela")
     _write_fx(tmp_path, "yeast")
     from bench.wandb_bench import select_fixtures
+
     with pytest.raises(SystemExit):
         select_fixtures([], all_=False, match=None, fixtures_dir=tmp_path)
     err = capsys.readouterr().err
@@ -118,6 +124,7 @@ def test_run_one_fixture_logs_perf_report(tmp_path, fake_wandb):
         return MagicMock(returncode=0)
 
     from bench.wandb_bench import run_one
+
     with patch("bench.wandb_bench.subprocess.run", side_effect=fake_subprocess):
         run_one(
             load_fixture(fixture),
@@ -165,12 +172,14 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
         _write_perf_report(out, raw_stem, {"runtime_s": 1.0})
         # Also drop a results.parquet so analyse() can read it
         import polars as pl
+
         pl.DataFrame({"sequence": ["MK"], "qvalue": [0.001]}).write_parquet(
             out / raw_stem / "results.parquet"
         )
         return MagicMock(returncode=0)
 
     from bench.wandb_bench import run_one
+
     with (
         patch("bench.wandb_bench.subprocess.run", side_effect=fake_subprocess),
         patch("bench.wandb_bench.analyse") as analyse_mock,
@@ -181,6 +190,7 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
 
         def _dl(uri, dst):
             Path(dst).write_text(">x\nMK\n")
+
         s3_dl.side_effect = _dl
 
         run_one(load_fixture(p), out_root=out_root, notes=None, dry_run=False)
@@ -197,6 +207,7 @@ def test_run_one_dry_run_no_subprocess(tmp_path, fake_wandb):
     fixture = _write_fx(fx_dir, "hela")
 
     from bench.wandb_bench import run_one
+
     with patch("bench.wandb_bench.subprocess.run") as sp:
         run_one(
             load_fixture(fixture),

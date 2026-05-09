@@ -8,16 +8,20 @@ from bench.push_fixture import build_fixture_toml, parse_args
 
 
 def test_parse_args_minimal():
-    args = parse_args(
-        [
-            "--name", "hela",
-            "--bucket", "bk",
-            "--prefix", "fx",
-            "--db", "UP000005640",
-            "--raw", "/tmp/sample.d",
-            "--config", "/tmp/cfg.toml",
-        ]
-    )
+    args = parse_args([
+        "--name",
+        "hela",
+        "--bucket",
+        "bk",
+        "--prefix",
+        "fx",
+        "--db",
+        "UP000005640",
+        "--raw",
+        "/tmp/sample.d",
+        "--config",
+        "/tmp/cfg.toml",
+    ])
     assert args.name == "hela"
     assert args.bucket == "bk"
     assert args.prefix == "fx"
@@ -29,19 +33,25 @@ def test_parse_args_minimal():
 
 
 def test_parse_args_multiple_db_and_entrap():
-    args = parse_args(
-        [
-            "--name", "hy",
-            "--bucket", "bk",
-            "--prefix", "fx",
-            "--db", "UP000005640",
-            "--db", "/tmp/extra.fasta",
-            "--entrap-db", "UP000002311",
-            "--raw", "/tmp/sample.d",
-            "--config", "/tmp/cfg.toml",
-            "--dry-run",
-        ]
-    )
+    args = parse_args([
+        "--name",
+        "hy",
+        "--bucket",
+        "bk",
+        "--prefix",
+        "fx",
+        "--db",
+        "UP000005640",
+        "--db",
+        "/tmp/extra.fasta",
+        "--entrap-db",
+        "UP000002311",
+        "--raw",
+        "/tmp/sample.d",
+        "--config",
+        "/tmp/cfg.toml",
+        "--dry-run",
+    ])
     assert args.db == ["UP000005640", "/tmp/extra.fasta"]
     assert args.entrap_db == ["UP000002311"]
     assert args.dry_run is True
@@ -71,6 +81,7 @@ def test_build_fixture_toml(tmp_path: Path):
     target_path = tmp_path / "fx.toml"
     target_path.write_text(out)
     from bench._fixture_schema import load_fixture
+
     fx = load_fixture(target_path)
     assert fx.name == "hela"
     assert fx.inputs.entrapment_fasta is None
@@ -93,6 +104,7 @@ def test_build_fixture_toml_with_entrap_and_calib(tmp_path: Path):
     p = tmp_path / "fx.toml"
     p.write_text(out)
     from bench._fixture_schema import load_fixture
+
     fx = load_fixture(p)
     assert fx.has_entrapment()
     assert fx.has_calibration_speclib()

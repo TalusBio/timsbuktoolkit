@@ -129,14 +129,13 @@ def compute_fdr_curve(classified: pl.DataFrame) -> pl.DataFrame:
         raise ValueError("classified dataframe missing 'qvalue' column")
 
     keep = classified.filter(
-        pl.col("class").is_in(
-            [PeptideClass.TARGET.value, PeptideClass.ENTRAPMENT.value]
-        )
+        pl.col("class").is_in([
+            PeptideClass.TARGET.value,
+            PeptideClass.ENTRAPMENT.value,
+        ])
     ).sort("qvalue")
 
-    n_target = (
-        (keep["class"] == PeptideClass.TARGET.value).cast(pl.UInt32).cum_sum()
-    )
+    n_target = (keep["class"] == PeptideClass.TARGET.value).cast(pl.UInt32).cum_sum()
     n_entrap = (
         (keep["class"] == PeptideClass.ENTRAPMENT.value).cast(pl.UInt32).cum_sum()
     )

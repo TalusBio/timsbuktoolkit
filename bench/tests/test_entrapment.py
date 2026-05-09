@@ -32,9 +32,7 @@ def test_classify_peptides(tmp_path):
     entrap = tmp_path / "e.fasta"
     entrap.write_text(">E1\nQQQQENTRAPEPTKZZZZ\n>E2\nMMMMSHAREDYYYY\n")
 
-    df = pl.DataFrame(
-        {"sequence": ["PEPTIDEK", "ENTRAPEPTK", "SHARED", "GHOSTAA"]}
-    )
+    df = pl.DataFrame({"sequence": ["PEPTIDEK", "ENTRAPEPTK", "SHARED", "GHOSTAA"]})
     classified = classify_peptides(df, target, entrap)
 
     classes = dict(zip(classified["sequence"], classified["class"]))
@@ -68,12 +66,10 @@ def test_classify_peptides_strips_mods_before_match(tmp_path):
 
 
 def test_compute_fdr_curve_basic():
-    classified = pl.DataFrame(
-        {
-            "qvalue": [0.001, 0.005, 0.01, 0.02, 0.05],
-            "class": ["target", "target", "entrapment", "target", "entrapment"],
-        }
-    )
+    classified = pl.DataFrame({
+        "qvalue": [0.001, 0.005, 0.01, 0.02, 0.05],
+        "class": ["target", "target", "entrapment", "target", "entrapment"],
+    })
     curve = compute_fdr_curve(classified)
     # Sorted ascending by qvalue
     assert curve["qvalue"].to_list() == [0.001, 0.005, 0.01, 0.02, 0.05]
@@ -87,12 +83,10 @@ def test_compute_fdr_curve_basic():
 
 
 def test_compute_fdr_curve_excludes_shared_and_unknown():
-    classified = pl.DataFrame(
-        {
-            "qvalue": [0.01, 0.01, 0.01, 0.01],
-            "class": ["target", "shared_dropped", "unknown", "entrapment"],
-        }
-    )
+    classified = pl.DataFrame({
+        "qvalue": [0.01, 0.01, 0.01, 0.01],
+        "class": ["target", "shared_dropped", "unknown", "entrapment"],
+    })
     curve = compute_fdr_curve(classified)
     # Only one target + one entrapment row contribute
     assert curve.height == 2
@@ -100,14 +94,12 @@ def test_compute_fdr_curve_excludes_shared_and_unknown():
 
 
 def test_plot_fdr_curve_writes_png(tmp_path):
-    curve = pl.DataFrame(
-        {
-            "qvalue": [0.001, 0.01, 0.05],
-            "n_target": [10, 50, 100],
-            "n_entrap": [0, 1, 5],
-            "empirical_fdr": [0.0, 1 / 51, 5 / 105],
-        }
-    )
+    curve = pl.DataFrame({
+        "qvalue": [0.001, 0.01, 0.05],
+        "n_target": [10, 50, 100],
+        "n_entrap": [0, 1, 5],
+        "empirical_fdr": [0.0, 1 / 51, 5 / 105],
+    })
     out = tmp_path / "fdr.png"
     plot_fdr_curve(curve, out, title="test")
     assert out.exists()
@@ -120,12 +112,10 @@ def test_analyse_end_to_end(tmp_path):
     entrap = tmp_path / "e.fasta"
     entrap.write_text(">E1\nQQQQENTRAPEPTKZZZZ\n")
 
-    results = pl.DataFrame(
-        {
-            "sequence": ["PEPTIDEK", "ENTRAPEPTK", "PEPTIDEK", "ENTRAPEPTK"],
-            "qvalue": [0.001, 0.02, 0.005, 0.04],
-        }
-    )
+    results = pl.DataFrame({
+        "sequence": ["PEPTIDEK", "ENTRAPEPTK", "PEPTIDEK", "ENTRAPEPTK"],
+        "qvalue": [0.001, 0.02, 0.005, 0.04],
+    })
     results_path = tmp_path / "results.parquet"
     results.write_parquet(results_path)
 

@@ -140,9 +140,7 @@ def run_one(
         "git.branch": branch,
         "host": os.uname().nodename,
         **{
-            f"inputs.{k}": v
-            for k, v in fx.inputs.model_dump().items()
-            if v is not None
+            f"inputs.{k}": v for k, v in fx.inputs.model_dump().items() if v is not None
         },
         **_flatten_config(fx.config),
     }
@@ -156,12 +154,21 @@ def run_one(
     )
     try:
         cmd = [
-            "cargo", "run", "--release", "--bin", "timsseek", "--",
+            "cargo",
+            "run",
+            "--release",
+            "--bin",
+            "timsseek",
+            "--",
             "--overwrite",
-            "--config", str(config_path),
-            "--speclib-file", fx.inputs.speclib,
-            "--output-dir", str(res_dir),
-            "--dotd-files", fx.inputs.raw,
+            "--config",
+            str(config_path),
+            "--speclib-file",
+            fx.inputs.speclib,
+            "--output-dir",
+            str(res_dir),
+            "--dotd-files",
+            fx.inputs.raw,
         ]
         if fx.has_calibration_speclib():
             assert fx.inputs.calibration_speclib is not None

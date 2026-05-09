@@ -27,7 +27,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bucket", required=True, help="S3 bucket")
     p.add_argument("--prefix", required=True, help="S3 prefix under the bucket")
     p.add_argument(
-        "--db", action="append", default=[], required=True, metavar="SPEC",
+        "--db",
+        action="append",
+        default=[],
+        required=True,
+        metavar="SPEC",
         help="Target FASTA source (repeatable)",
     )
     p.add_argument("--raw", required=True, help="Raw .d / .idx (local dir or s3://...)")
@@ -37,7 +41,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--entrap-db", action="append", default=[], metavar="SPEC")
     p.add_argument("--calib-db", action="append", default=[], metavar="SPEC")
     p.add_argument(
-        "--speclib", dest="speclib_uri",
+        "--speclib",
+        dest="speclib_uri",
         help="Skip main speclib build, reference this URI",
     )
     p.add_argument(
@@ -57,12 +62,20 @@ def run_speclib_build(
     koina_url: str | None,
 ) -> None:
     cmd = [
-        "cargo", "run", "--release",
-        "-p", "speclib_build_cli", "--",
-        "--fasta", fasta_s3,
-        "--fixed-mod", "C[U:4]",
-        "--max-ions", "10",
-        "-o", speclib_s3,
+        "cargo",
+        "run",
+        "--release",
+        "-p",
+        "speclib_build_cli",
+        "--",
+        "--fasta",
+        fasta_s3,
+        "--fixed-mod",
+        "C[U:4]",
+        "--max-ions",
+        "10",
+        "-o",
+        speclib_s3,
     ]
     if koina_url:
         cmd.extend(["--koina-url", koina_url])
