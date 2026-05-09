@@ -3,7 +3,9 @@ import polars as pl
 from bench.entrapment import (
     PeptideClass,
     classify_peptides,
+    compute_fdr_curve,
     parse_fasta,
+    plot_fdr_curve,
     strip_mods,
 )
 
@@ -62,3 +64,50 @@ def test_classify_peptides_strips_mods_before_match(tmp_path):
     df2 = pl.DataFrame({"sequence": ["PEPT[U:4]IDEK"]})
     classified2 = classify_peptides(df2, target, entrap)
     assert classified2["class"][0] == PeptideClass.TARGET.value
+
+
+def test_compute_fdr_curve_basic():
+    classified = pl.DataFrame(
+        {
+            "qvalue": [0.001, 0.005, 0.01, 0.02, 0.05],
+            "class": ["target", "target", "entrapment", "target", "entrapment"],
+        }
+    )
+    curve = compute_fdr_curve(classified)
+    # Sorted ascending by qvalue
+    assert curve["qvalue"].to_list() == [0.001, 0.005, 0.01, 0.02, 0.05]
+    # n_target cumulative
+    assert curve["n_target"].to_list() == [1, 2, 2, 3, 3]
+    # n_entrap cumulative
+    assert curve["n_entrap"].to_list() == [0, 0, 1, 1, 2]
+    # empirical_fdr = n_e / (n_t + n_e)
+    last = curve.row(-1, named=True)
+    assert last["empirical_fdr"] == 2 / 5
+
+
+def test_compute_fdr_curve_excludes_shared_and_unknown():
+    classified = pl.DataFrame(
+        {
+            "qvalue": [0.01, 0.01, 0.01, 0.01],
+            "class": ["target", "shared_dropped", "unknown", "entrapment"],
+        }
+    )
+    curve = compute_fdr_curve(classified)
+    # Only one target + one entrapment row contribute
+    assert curve.height == 2
+    assert sorted(curve["class"].to_list()) == ["entrapment", "target"]
+
+
+def test_plot_fdr_curve_writes_png(tmp_path):
+    curve = pl.DataFrame(
+        {
+            "qvalue": [0.001, 0.01, 0.05],
+            "n_target": [10, 50, 100],
+            "n_entrap": [0, 1, 5],
+            "empirical_fdr": [0.0, 1 / 51, 5 / 105],
+        }
+    )
+    out = tmp_path / "fdr.png"
+    plot_fdr_curve(curve, out, title="test")
+    assert out.exists()
+    assert out.stat().st_size > 1000  # not an empty or stub file

@@ -117,3 +117,60 @@ def classify_peptides(
         classes.alias("class"),
         is_entrap.alias("is_entrapment"),
     )
+
+
+def compute_fdr_curve(classified: pl.DataFrame) -> pl.DataFrame:
+    """Sort by qvalue, accumulate target/entrapment counts, return curve.
+
+    Rows whose class is SHARED_DROPPED or UNKNOWN are excluded from both
+    numerator and denominator.
+    """
+    if "qvalue" not in classified.columns:
+        raise ValueError("classified dataframe missing 'qvalue' column")
+
+    keep = classified.filter(
+        pl.col("class").is_in(
+            [PeptideClass.TARGET.value, PeptideClass.ENTRAPMENT.value]
+        )
+    ).sort("qvalue")
+
+    n_target = (
+        (keep["class"] == PeptideClass.TARGET.value).cast(pl.UInt32).cum_sum()
+    )
+    n_entrap = (
+        (keep["class"] == PeptideClass.ENTRAPMENT.value).cast(pl.UInt32).cum_sum()
+    )
+    empirical = (n_entrap / (n_target + n_entrap)).fill_nan(0.0)
+
+    return keep.with_columns(
+        n_target.alias("n_target"),
+        n_entrap.alias("n_entrap"),
+        empirical.alias("empirical_fdr"),
+    )
+
+
+def plot_fdr_curve(
+    curve: pl.DataFrame,
+    output_path: str | Path,
+    title: str = "Reported q-value vs empirical entrapment FDR",
+) -> None:
+    """Render a FDR-vs-qvalue plot to a PNG file."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=150)
+    ax.plot(curve["qvalue"], curve["empirical_fdr"], lw=1.5, label="empirical")
+    _max_qv = curve["qvalue"].cast(pl.Float64).max()
+    lim: float = max(0.05, _max_qv if isinstance(_max_qv, float) else 0.05)
+    ax.plot([0, lim], [0, lim], color="grey", ls="--", lw=1.0, label="y=x")
+    ax.set_xlabel("reported q-value")
+    ax.set_ylabel("empirical FDR (n_entrap / (n_target + n_entrap))")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_title(title)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
