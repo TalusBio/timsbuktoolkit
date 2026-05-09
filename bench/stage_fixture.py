@@ -95,18 +95,24 @@ def stage(
     cache_root = cache_dir / name
     cache_root.mkdir(parents=True, exist_ok=True)
 
-    fasta_local = _stage_one_file(
-        fx.inputs.fasta, cache_root / "proteome.fasta", force
+    target_pep_local = _stage_one_file(
+        fx.inputs.target_peptides, cache_root / "target.peptides.txt", force
     )
     speclib_local = _stage_one_file(
         fx.inputs.speclib, cache_root / "lib.msgpack.zst", force
     )
     raw_local = _stage_one_dir(fx.inputs.raw, cache_root / "sample.d", force)
 
-    entrap_local: str | None = None
-    if fx.inputs.entrapment_fasta is not None:
-        entrap_local = _stage_one_file(
-            fx.inputs.entrapment_fasta, cache_root / "entrap.fasta", force
+    entrap_pep_local: str | None = None
+    if fx.inputs.entrapment_peptides is not None:
+        entrap_pep_local = _stage_one_file(
+            fx.inputs.entrapment_peptides, cache_root / "entrap.peptides.txt", force
+        )
+
+    pairing_local: str | None = None
+    if fx.inputs.pairing is not None:
+        pairing_local = _stage_one_file(
+            fx.inputs.pairing, cache_root / "pairing.tsv", force
         )
 
     calib_local: str | None = None
@@ -119,10 +125,13 @@ def stage(
         name=name,
         description=fx.description,
         config=fx.config,
-        fasta_uri=fasta_local,
+        target_peptides_uri=target_pep_local,
         speclib_uri=speclib_local,
         raw_uri=raw_local,
-        entrapment_fasta_uri=entrap_local,
+        entrapment_peptides_uri=entrap_pep_local,
+        entrapment_ratio=fx.inputs.entrapment_ratio,
+        entrapment_mode=fx.inputs.entrapment_mode,
+        pairing_uri=pairing_local,
         calibration_speclib_uri=calib_local,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -139,10 +148,13 @@ def _build_staged_toml(
     name: str,
     description: str,
     config: dict,
-    fasta_uri: str,
+    target_peptides_uri: str,
     speclib_uri: str,
     raw_uri: str,
-    entrapment_fasta_uri: str | None,
+    entrapment_peptides_uri: str | None,
+    entrapment_ratio: float | None,
+    entrapment_mode: str | None,
+    pairing_uri: str | None,
     calibration_speclib_uri: str | None,
 ) -> str:
     """Emit a staged-fixture TOML body. Mirrors push_fixture.build_fixture_toml's
@@ -154,11 +166,17 @@ def _build_staged_toml(
     lines.append(f'description = "{desc}"')
     lines.append("")
     lines.append("[inputs]")
-    lines.append(f'fasta = "{fasta_uri}"')
+    lines.append(f'target_peptides = "{target_peptides_uri}"')
     lines.append(f'speclib = "{speclib_uri}"')
     lines.append(f'raw = "{raw_uri}"')
-    if entrapment_fasta_uri is not None:
-        lines.append(f'entrapment_fasta = "{entrapment_fasta_uri}"')
+    if entrapment_peptides_uri is not None:
+        lines.append(f'entrapment_peptides = "{entrapment_peptides_uri}"')
+    if entrapment_ratio is not None:
+        lines.append(f"entrapment_ratio = {_toml_value(entrapment_ratio)}")
+    if entrapment_mode is not None:
+        lines.append(f'entrapment_mode = "{entrapment_mode}"')
+    if pairing_uri is not None:
+        lines.append(f'pairing = "{pairing_uri}"')
     if calibration_speclib_uri is not None:
         lines.append(f'calibration_speclib = "{calibration_speclib_uri}"')
     lines.append("")

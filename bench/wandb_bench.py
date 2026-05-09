@@ -12,9 +12,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-import wandb
 from loguru import logger
 
+import wandb
 from bench._fixture_schema import Fixture, load_fixture
 from bench._s3 import s3_download_file
 from bench.entrapment import analyse
@@ -186,27 +186,42 @@ def run_one(
             logger.warning("performance_report.json missing at {}", perf)
 
         if fx.has_entrapment():
-            assert fx.inputs.entrapment_fasta is not None
+            assert fx.inputs.entrapment_peptides is not None
+            assert fx.inputs.entrapment_ratio is not None
             with tempfile.TemporaryDirectory() as td:
-                target_local = Path(td) / "target.fasta"
-                entrap_local = Path(td) / "entrap.fasta"
-                s3_download_file(fx.inputs.fasta, str(target_local))
-                s3_download_file(fx.inputs.entrapment_fasta, str(entrap_local))
+                target_local = Path(td) / "target.peptides.txt"
+                entrap_local = Path(td) / "entrap.peptides.txt"
+                s3_download_file(fx.inputs.target_peptides, str(target_local))
+                s3_download_file(fx.inputs.entrapment_peptides, str(entrap_local))
+
+                pairing_local: Path | None = None
+                if fx.has_pairing():
+                    assert fx.inputs.pairing is not None
+                    pairing_local = Path(td) / "pairing.tsv"
+                    s3_download_file(fx.inputs.pairing, str(pairing_local))
+
                 results_parquet = res_dir / raw_stem / "results.parquet"
                 out_parquet = (
                     out_root / "parquets" / f"{fx.name}-{ts}-classified.parquet"
                 )
-                out_plot = out_root / "plots" / f"{fx.name}-fdr_curve-{ts}.png"
+                out_fdr_plot = out_root / "plots" / f"{fx.name}-fdr_curve-{ts}.png"
+                out_hist_plot = (
+                    out_root / "plots" / f"{fx.name}-mainscore_hist-{ts}.png"
+                )
                 scalars = analyse(
                     results_parquet=results_parquet,
-                    target_fasta=target_local,
-                    entrapment_fasta=entrap_local,
+                    target_peptides=target_local,
+                    entrapment_peptides=entrap_local,
+                    ratio=fx.inputs.entrapment_ratio,
+                    pairing_path=pairing_local,
                     out_parquet=out_parquet,
-                    out_plot=out_plot,
+                    out_fdr_plot=out_fdr_plot,
+                    out_hist_plot=out_hist_plot,
                     title=f"{fx.name} entrapment FDR",
                 )
             run.log(scalars)
-            run.log({"entrap/fdr_curve": wandb.Image(str(out_plot))})
+            run.log({"entrap/fdr_curve": wandb.Image(str(out_fdr_plot))})
+            run.log({"entrap/mainscore_hist": wandb.Image(str(out_hist_plot))})
             artifact = wandb.Artifact(f"{fx.name}-classified", type="dataset")
             artifact.add_file(str(out_parquet))
             run.log_artifact(artifact)

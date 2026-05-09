@@ -17,7 +17,7 @@ def _write_fx(dir: Path, name: str) -> Path:
             description = "x"
 
             [inputs]
-            fasta = "s3://b/p.fasta"
+            target_peptides = "s3://b/target.peptides.txt"
             speclib = "s3://b/lib.msgpack.zst"
             raw = "s3://b/sample.d"
 
@@ -152,10 +152,12 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
             description = "x"
 
             [inputs]
-            fasta = "s3://b/p.fasta"
+            target_peptides = "s3://b/t.peptides.txt"
+            entrapment_peptides = "s3://b/e.peptides.txt"
+            entrapment_ratio = 1.0
+            entrapment_mode = "foreign"
             speclib = "s3://b/lib.msgpack.zst"
             raw = "s3://b/sample.d"
-            entrapment_fasta = "s3://b/entrap.fasta"
 
             [config.analysis]
             chunk_size = 20000
@@ -169,13 +171,17 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
         out = Path(cmd[idx + 1])
         raw_idx = cmd.index("--dotd-files")
         raw_stem = Path(cmd[raw_idx + 1]).stem
-        _write_perf_report(out, raw_stem, {"runtime_s": 1.0})
-        # Also drop a results.parquet so analyse() can read it
+        sub = out / raw_stem
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "performance_report.json").write_text(json.dumps({"runtime_s": 1.0}))
         import polars as pl
 
-        pl.DataFrame({"sequence": ["MK"], "qvalue": [0.001]}).write_parquet(
-            out / raw_stem / "results.parquet"
-        )
+        pl.DataFrame({
+            "sequence":  ["MK", "LL"],
+            "qvalue":    [0.001, 0.002],
+            "is_target": [True, True],
+            "main_score": [100.0, 90.0],
+        }).write_parquet(sub / "results.parquet")
         return MagicMock(returncode=0)
 
     from bench.wandb_bench import run_one
@@ -185,20 +191,88 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
         patch("bench.wandb_bench.analyse") as analyse_mock,
         patch("bench.wandb_bench.s3_download_file") as s3_dl,
     ):
-        # entrapment.analyse returns scalars; s3_download fetches the two fastas locally
-        analyse_mock.return_value = {"entrap/empirical_fdr_at_q01": 0.012}
+        analyse_mock.return_value = {"entrap/empirical_fdr_combined_at_q01": 0.012}
 
         def _dl(uri, dst):
-            Path(dst).write_text(">x\nMK\n")
+            Path(dst).write_text("MK\nLL\n")
 
         s3_dl.side_effect = _dl
 
         run_one(load_fixture(p), out_root=out_root, notes=None, dry_run=False)
 
     analyse_mock.assert_called_once()
-    # wandb.run.log should have been called with the entrapment scalars at some point
+    # Verify analyse was called with peptide paths (not fasta) AND ratio
+    kwargs = analyse_mock.call_args.kwargs
+    assert "target_peptides" in kwargs
+    assert "entrapment_peptides" in kwargs
+    assert kwargs["ratio"] == 1.0
+    assert kwargs["pairing_path"] is None
+    assert "out_hist_plot" in kwargs
+    # wandb.run.log was called with the entrap scalars + with the histogram image
     log_payloads = [c.args[0] for c in fake_wandb["run"].log.call_args_list]
-    assert any("entrap/empirical_fdr_at_q01" in p for p in log_payloads)
+    assert any("entrap/empirical_fdr_combined_at_q01" in pp for pp in log_payloads)
+    assert any("entrap/mainscore_hist" in pp for pp in log_payloads)
+
+
+def test_run_one_fixture_with_pairing(tmp_path, fake_wandb):
+    """When pairing is set, the runner downloads it and forwards path to analyse."""
+    fx_dir = tmp_path / "fx"
+    fx_dir.mkdir()
+    p = fx_dir / "shuffle.toml"
+    p.write_text(
+        textwrap.dedent(
+            """
+            name = "shuffle"
+            description = "x"
+
+            [inputs]
+            target_peptides = "s3://b/t.peptides.txt"
+            entrapment_peptides = "s3://b/e.peptides.txt"
+            entrapment_ratio = 1.0
+            entrapment_mode = "shuffled"
+            pairing = "s3://b/pairs.tsv"
+            speclib = "s3://b/lib.msgpack.zst"
+            raw = "s3://b/sample.d"
+
+            [config.analysis]
+            chunk_size = 20000
+            """
+        ).strip()
+    )
+
+    def fake_subprocess(cmd, *a, **kw):
+        idx = cmd.index("--output-dir")
+        out = Path(cmd[idx + 1])
+        raw_idx = cmd.index("--dotd-files")
+        raw_stem = Path(cmd[raw_idx + 1]).stem
+        sub = out / raw_stem
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "performance_report.json").write_text(json.dumps({"runtime_s": 1.0}))
+        import polars as pl
+
+        pl.DataFrame({
+            "sequence":  ["MK"],
+            "qvalue":    [0.001],
+            "is_target": [True],
+            "main_score": [100.0],
+        }).write_parquet(sub / "results.parquet")
+        return MagicMock(returncode=0)
+
+    from bench.wandb_bench import run_one
+
+    with (
+        patch("bench.wandb_bench.subprocess.run", side_effect=fake_subprocess),
+        patch("bench.wandb_bench.analyse") as analyse_mock,
+        patch("bench.wandb_bench.s3_download_file") as s3_dl,
+    ):
+        analyse_mock.return_value = {"entrap/empirical_fdr_matched_at_q01": 0.005}
+        s3_dl.side_effect = lambda uri, dst: Path(dst).write_text("MK\n")
+        run_one(load_fixture(p), out_root=tmp_path / "out", notes=None, dry_run=False)
+
+    # 3 downloads: target, entrap, pairing
+    assert s3_dl.call_count == 3
+    # analyse received a non-None pairing_path
+    assert analyse_mock.call_args.kwargs["pairing_path"] is not None
 
 
 def test_run_one_dry_run_no_subprocess(tmp_path, fake_wandb):
