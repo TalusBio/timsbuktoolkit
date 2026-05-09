@@ -175,6 +175,14 @@ def run_pipeline(
     calib_fasta_uri = f"{dest_prefix}/calib.fasta" if calib_db else None
 
     main_speclib_uri = speclib_uri or f"{dest_prefix}/lib.msgpack.zst"
+    # When entrap_db is present, the speclib must cover both target+entrap so
+    # the search can score entrapment peptides. We upload a concatenated fasta
+    # to a separate URI and point speclib_build_cli at it. The per-fasta
+    # target/entrap files are still uploaded separately so analyse() can
+    # classify hits by source.
+    speclib_input_fasta_uri = (
+        f"{dest_prefix}/speclib_input.fasta" if entrap_db else None
+    )
     final_calib_speclib_uri: str | None = calibration_speclib_uri
     if final_calib_speclib_uri is None and calib_db:
         final_calib_speclib_uri = f"{dest_prefix}/calib_lib.msgpack.zst"
@@ -234,10 +242,28 @@ def run_pipeline(
         if not raw.startswith("s3://"):
             s3_upload_dir(raw, raw_uri, idempotent=not force)
 
+        # 4b. If entrap_db present, build a merged target+entrap fasta locally
+        # and upload it as the speclib build input.
+        if speclib_input_fasta_uri is not None:
+            merged_local = workdir / "speclib_input.fasta"
+            target_local = workdir / "proteome.fasta"
+            entrap_local = workdir / "entrap.fasta"
+            with merged_local.open("wb") as out:
+                for src in (target_local, entrap_local):
+                    out.write(src.read_bytes())
+                    if not src.read_bytes().endswith(b"\n"):
+                        out.write(b"\n")
+            s3_upload_file(
+                str(merged_local),
+                speclib_input_fasta_uri,
+                skip_if_exists=not force,
+            )
+
         # 5. Build speclib(s) if not user-provided
         if speclib_uri is None:
+            speclib_input_uri = speclib_input_fasta_uri or target_fasta_uri
             run_speclib_build(
-                target_fasta_uri, main_speclib_uri, koina_url, request_delay_ms
+                speclib_input_uri, main_speclib_uri, koina_url, request_delay_ms
             )
         if calib_db and calibration_speclib_uri is None:
             assert calib_fasta_uri is not None
