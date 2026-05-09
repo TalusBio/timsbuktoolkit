@@ -9,10 +9,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
-def _require_s3(value: str, field: str) -> str:
-    if not value.startswith("s3://"):
-        raise ValueError(f"{field} must be an s3:// URI, got {value!r}")
-    return value
+def _require_uri(value: str, field: str) -> str:
+    """Accept s3:// URIs or absolute local paths. Expands `~` to home.
+
+    Relative paths and other URI schemes (file://, http://, etc.) are
+    rejected. Existence is NOT checked here — the runner will surface a
+    clearer error at use time.
+    """
+    if value.startswith("s3://"):
+        return value
+    expanded = str(Path(value).expanduser())
+    if Path(expanded).is_absolute():
+        return expanded
+    raise ValueError(
+        f"{field} must be an s3:// URI or an absolute local path, got {value!r}"
+    )
 
 
 class FixtureInputs(BaseModel):
@@ -26,15 +37,15 @@ class FixtureInputs(BaseModel):
 
     @field_validator("fasta", "speclib", "raw")
     @classmethod
-    def _required_s3(cls, v: str, info: ValidationInfo) -> str:
-        return _require_s3(v, info.field_name or "")
+    def _required_uri(cls, v: str, info: ValidationInfo) -> str:
+        return _require_uri(v, info.field_name or "")
 
     @field_validator("entrapment_fasta", "calibration_speclib")
     @classmethod
-    def _optional_s3(cls, v: str | None, info: ValidationInfo) -> str | None:
+    def _optional_uri(cls, v: str | None, info: ValidationInfo) -> str | None:
         if v is None:
             return v
-        return _require_s3(v, info.field_name or "")
+        return _require_uri(v, info.field_name or "")
 
 
 class Fixture(BaseModel):

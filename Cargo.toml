@@ -81,8 +81,9 @@ tempfile = "3.23.0"
 # rustyms into target/patch/ via timsseek_cli's build.rs. On a clean checkout
 # run `cargo patch-crate` once to populate target/patch/ before building, or
 # trigger a first build of timsseek_cli to let its build.rs handle it.
-[patch.crates-io]
-rustyms = { path = "./target/patch/rustyms-0.11.0" }
+## DISABLING FOR NOW
+## [patch.crates-io]
+## rustyms = { path = "./target/patch/rustyms-0.11.0" }
 
 [workspace.lints.clippy]
 len_without_is_empty = "allow"

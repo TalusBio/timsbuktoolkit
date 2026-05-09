@@ -60,7 +60,7 @@ def test_entrapment_and_calib_optional_present(tmp_path):
     assert f.has_calibration_speclib()
 
 
-def test_local_path_in_inputs_rejected(tmp_path):
+def test_relative_path_in_inputs_rejected(tmp_path):
     p = _write(
         tmp_path,
         """
@@ -68,7 +68,7 @@ def test_local_path_in_inputs_rejected(tmp_path):
         description = "test"
 
         [inputs]
-        fasta = "/home/me/p.fasta"
+        fasta = "relative/path.fasta"
         speclib = "s3://b/lib.msgpack.zst"
         raw = "s3://b/sample.d"
 
@@ -76,8 +76,51 @@ def test_local_path_in_inputs_rejected(tmp_path):
         chunk_size = 20000
         """,
     )
-    with pytest.raises(ValueError, match="must be an s3:// URI"):
+    with pytest.raises(ValueError, match="absolute local path"):
         load_fixture(p)
+
+
+def test_absolute_local_path_in_inputs_accepted(tmp_path):
+    p = _write(
+        tmp_path,
+        """
+        name = "ok"
+        description = "test"
+
+        [inputs]
+        fasta = "/abs/path/proteome.fasta"
+        speclib = "/abs/path/lib.msgpack.zst"
+        raw = "/abs/path/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    f = load_fixture(p)
+    assert f.inputs.fasta == "/abs/path/proteome.fasta"
+
+
+def test_tilde_path_expanded(tmp_path):
+    import os
+    home = os.path.expanduser("~")
+    p = _write(
+        tmp_path,
+        f"""
+        name = "ok"
+        description = "test"
+
+        [inputs]
+        fasta = "~/proteome.fasta"
+        speclib = "{home}/lib.msgpack.zst"
+        raw = "s3://b/sample.d"
+
+        [config.analysis]
+        chunk_size = 20000
+        """,
+    )
+    f = load_fixture(p)
+    assert f.inputs.fasta == f"{home}/proteome.fasta"
+    assert f.inputs.speclib == f"{home}/lib.msgpack.zst"
 
 
 def test_missing_required_input_rejected(tmp_path):
