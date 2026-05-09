@@ -19,6 +19,21 @@ interactive = [
   "matplotlib",
   "vizta",
 ]
+bench = [
+  "wandb[media]",
+  "loguru",
+  "pydantic>=2.6",
+  "pyahocorasick>=2.0",
+  "pyarrow>=15",
+  "polars>=1",
+  "matplotlib>=3.8",
+  "requests>=2.31",
+  "responses>=0.25",
+  "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["bench/tests"]
 
 [tool.ruff]
 target-version = "py312"

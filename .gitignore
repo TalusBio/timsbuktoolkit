@@ -37,6 +37,7 @@ results.json
 *search_results*/*
 
 wandb/*
+bench_out/
 docs/superpowers/*
 .plans/*
 .claude/*
