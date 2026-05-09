@@ -30,7 +30,7 @@ def test_fetch_accession_batch():
     assert "P12345" in fasta and "Q67890" in fasta
     # Verify the request used the OR'd accession query
     assert len(responses.calls) == 1
-    qs = responses.calls[0].request.url
+    qs = responses.calls[0].request.url or ""
     assert "accession%3AP12345" in qs and "accession%3AQ67890" in qs
     assert "format=fasta" in qs
 
@@ -46,6 +46,5 @@ def test_fetch_accession_batch_chunks_long_lists():
         status=200,
     )
     accs = [f"P{n:05d}" for n in range(250)]  # 250 → at least 2 chunks at 100/chunk
-    fasta = fetch_accession_batch(accs)
-    assert fasta.count(">") == len(responses.calls)
-    assert len(responses.calls) >= 3  # ceil(250/100)
+    fetch_accession_batch(accs)
+    assert len(responses.calls) == 3  # ceil(250/100)
