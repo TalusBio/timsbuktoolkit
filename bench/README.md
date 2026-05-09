@@ -18,7 +18,7 @@ Requires `aws` CLI (auth via env / profile).
 
     uv run --group bench python -m bench.push_fixture \
       --name hela_iccoff_gt20peps \
-      --bucket timsbukto-bench --prefix fixtures \
+      --bucket terraform-workstations-bucket --prefix jspaezp/timsseek_fixtures \
       --db ~/fasta/hela_gt20peps.fasta \
       --raw ~/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_off_DIA.d \
       --config bench/configs/default.toml \

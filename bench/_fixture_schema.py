@@ -27,14 +27,14 @@ class FixtureInputs(BaseModel):
     @field_validator("fasta", "speclib", "raw")
     @classmethod
     def _required_s3(cls, v: str, info: ValidationInfo) -> str:
-        return _require_s3(v, info.field_name)
+        return _require_s3(v, info.field_name or "")
 
     @field_validator("entrapment_fasta", "calibration_speclib")
     @classmethod
     def _optional_s3(cls, v: str | None, info: ValidationInfo) -> str | None:
         if v is None:
             return v
-        return _require_s3(v, info.field_name)
+        return _require_s3(v, info.field_name or "")
 
 
 class Fixture(BaseModel):
