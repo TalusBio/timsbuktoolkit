@@ -4,7 +4,7 @@ from bench._uniprot import fetch_accession_batch, fetch_proteome
 
 
 @responses.activate
-def test_fetch_proteome():
+def test_fetch_proteome_default_reviewed():
     responses.add(
         responses.GET,
         "https://rest.uniprot.org/uniprotkb/stream",
@@ -15,6 +15,21 @@ def test_fetch_proteome():
     fasta = fetch_proteome("UP000005640")
     assert fasta.startswith(">sp|P12345")
     assert "MKLAA" in fasta
+    qs = responses.calls[0].request.url or ""
+    assert "reviewed%3Atrue" in qs
+
+
+@responses.activate
+def test_fetch_proteome_unreviewed_off():
+    responses.add(
+        responses.GET,
+        "https://rest.uniprot.org/uniprotkb/stream",
+        body=">tr|Q11111|X\nMK\n",
+        status=200,
+    )
+    fetch_proteome("UP000005640", reviewed_only=False)
+    qs = responses.calls[0].request.url or ""
+    assert "reviewed%3Atrue" not in qs
 
 
 @responses.activate

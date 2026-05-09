@@ -23,9 +23,18 @@ def _get(params: dict[str, str]) -> str:
     return r.text
 
 
-def fetch_proteome(proteome_id: str) -> str:
-    """Fetch a full uniprot proteome (e.g. UP000005640) as FASTA text."""
-    return _get({"query": f"proteome:{proteome_id}", "format": "fasta"})
+def fetch_proteome(proteome_id: str, reviewed_only: bool = True) -> str:
+    """Fetch a uniprot proteome (e.g. UP000005640) as FASTA text.
+
+    Defaults to Swiss-Prot only (`reviewed:true`) to keep search spaces
+    tractable; full proteome (incl. TrEMBL) is rarely what bench fixtures
+    actually want and is much slower to build a speclib over. Pass
+    `reviewed_only=False` for the unfiltered set.
+    """
+    query = f"proteome:{proteome_id}"
+    if reviewed_only:
+        query += " AND reviewed:true"
+    return _get({"query": query, "format": "fasta"})
 
 
 def fetch_accession_batch(accessions: Iterable[str]) -> str:
