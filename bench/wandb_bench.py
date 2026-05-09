@@ -1,276 +1,78 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#   "wandb[media]",
-#   "loguru",
-# ]
-# ///
+"""Bench runner: load named fixtures, run timsseek, log to wandb."""
+
+from __future__ import annotations
 
 import argparse
-import json
-import subprocess
-import tempfile
-from contextlib import contextmanager
-from dataclasses import dataclass
+import fnmatch
+import sys
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
-import wandb
+from bench._fixture_schema import Fixture, load_fixture
 
+DEFAULT_FIXTURES_DIR = Path("bench/fixtures")
 ENTITY = "jspaezp"
 PROJECT = "timsseek"
 
 
-@dataclass
-class TimsseekRunner:
-    fasta_file_location: Path
-    speclib_location: Path
-    raw_file_location: Path
-    config_dict: dict[str, Any] | None = None
-    koina_url: str | None = None
+def _list_fixtures(fixtures_dir: Path) -> list[str]:
+    return sorted(p.stem for p in fixtures_dir.glob("*.toml"))
 
-    def build_speclib(self):
-        if self.speclib_location.exists():
-            logger.info("Skipping speclib build bc already exists")
-            return
 
-        logger.info("Building speclib")
-        args = [
-            "cargo",
-            "run",
-            "--release",
-            "-p",
-            "speclib_build_cli",
-            "--",
-            "--fasta",
-            str(self.fasta_file_location),
-            "--fixed-mod",
-            "C[U:4]",
-            "--max-ions",
-            "10",
-            "-o",
-            str(self.speclib_location),
-        ]
-        if self.koina_url:
-            args.extend(["--koina-url", self.koina_url])
-        else:
-            # Public Koina: use delay to avoid rate limiting
-            args.extend(["--request-delay-ms", "500"])
-        res = subprocess.run(args, check=True)
-        return res
-
-    def setup_run(self):
-        if self.config_dict is None:
-            self.config_dict = self.default_timsseek_config()
-
-        logger.info("Building release versions")
-        subprocess.run(["cargo", "b", "--release"], check=True)
-
-    def loggable_config_dict(self) -> dict[str, Any]:
-        out = {}
-        out.update(self.config_dict)
-        out["raw_file"] = self.raw_file_location.name
-        out["speclib"] = self.speclib_location.name
-        return out
-
-    def run(
-        self,
-        output_loc: Path | None = None,
-        wandb_kwargs: dict | None = None,
-    ):
-        self.setup_run()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            tmpdir = Path(temp_dir)
-            if output_loc is None:
-                output_loc = tmpdir
-
-            results_path = output_loc / "res"
-            summary_dir = output_loc / "summ"
-            results_path.mkdir(exist_ok=True, parents=True)
-            summary_dir.mkdir(exist_ok=True, parents=True)
-            config_path = results_path / "config.json"
-
-            with open(config_path, "w") as f:
-                f.write(json.dumps(self.config_dict))
-
-            with wandb_context(
-                self.loggable_config_dict(),
-                wandb_kwargs=wandb_kwargs,
-            ) as wandb_experiment:
-                self._run(
-                    config_path=config_path,
-                    speclib_path=self.speclib_location,
-                    output_path=results_path,
-                    raw_file=self.raw_file_location,
-                )
-                # Results are now in a subdirectory named after the raw file
-                raw_file_stem = self.raw_file_location.stem
-                self.log_results(wandb_experiment, output_loc, raw_file_stem)
-
-    @staticmethod
-    def _run(config_path, speclib_path, output_path, raw_file):
-        if not raw_file.exists():
-            raise FileNotFoundError(f"Raw file {raw_file} does not exist")
-        if not speclib_path.exists():
-            raise FileNotFoundError(f"Speclib file {speclib_path} does not exist")
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config file {config_path} does not exist")
-
-        logger.info(f"Running timsseek on {raw_file.name}")
-        args = [
-            "cargo",
-            "run",
-            "--release",
-            "--bin",
-            "timsseek",
-            "--",
-            "--overwrite",
-            "--config",
-            str(config_path),
-            "--speclib-file",
-            str(speclib_path),
-            "--output-dir",
-            str(output_path),
-            "--dotd-files",
-            str(raw_file),
-        ]
-        logger.info(f"Running command: {' '.join(args)}")
-        stdout_file = output_path / "timsseek_stdout.log"
-        stderr_file = output_path / "timsseek_stderr.log"
-
-        logger.info(f"Starting timsseek, logging to {stdout_file} and {stderr_file}")
-        try:
-            res = subprocess.run(
-                args,
-                stdout=open(stdout_file, "w"),
-                stderr=open(stderr_file, "w"),
-                check=True,
-            )
-        finally:
-            # Log stdout and stderr
-            logger.info(stdout_file.read_text())
-            logger.error(stderr_file.read_text())
-        logger.info(f"Timsseek completed with return code {res.returncode}")
-        return res
-
-    def log_results(self, wandb_experiment, results_loc, raw_file_stem):
-        metrics = self.crunch_metrics(results_loc, raw_file_stem)
-        with open("latest_metrics.json", "w") as f:
-            serializable_metrics = {
-                k: v
-                for k, v in metrics.items()
-                if isinstance(v, (int, float, str, bool, list, dict))
-            }
-            assert serializable_metrics
-            json.dump(serializable_metrics, f, indent=4)
-        wandb_experiment.log(metrics)
-
-    @staticmethod
-    def default_timsseek_config():
-        config = {
-            "analysis": {
-                "chunk_size": 20000,
-                "tolerance": {
-                    "ms": {"ppm": [15.0, 15.0]},
-                    "mobility": {"percent": [10.0, 10.0]},
-                    "quad": {"absolute": [0.1, 0.1]},
-                },
-            }
-        }
-        return config
-
-    @staticmethod
-    def crunch_metrics(output_dir: Path, raw_file_stem: str) -> dict[str, Any]:
-        metrics = {}
-        performance_report_path = (
-            output_dir / "res" / raw_file_stem / "performance_report.json"
+def select_fixtures(
+    names: list[str],
+    all_: bool,
+    match: str | None,
+    fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
+) -> list[Fixture]:
+    """Resolve CLI selection flags into a list of loaded fixtures."""
+    selectors = sum([bool(names), all_, match is not None])
+    if selectors == 0:
+        avail = _list_fixtures(fixtures_dir)
+        sys.stderr.write(
+            "no fixture selected. available: " + ", ".join(avail or ["(none)"]) + "\n"
         )
-        if performance_report_path.exists():
-            with open(performance_report_path, "r") as f:
-                metrics.update(json.load(f))
-        else:
-            logger.warning(
-                f"Performance report {performance_report_path} does not exist"
-            )
-        return metrics
-
-
-@contextmanager
-def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
-    if wandb_kwargs is None:
-        wandb_kwargs = {}
-    # Start a new wandb run to track this script.
-    run = wandb.init(
-        # Set the wandb entity where your project will be logged (generally your team name).
-        entity=ENTITY,
-        # Set the wandb project where this run will be logged.
-        project=PROJECT,
-        # Track hyperparameters and run metadata.
-        config=config_dict,
-        **wandb_kwargs,
-    )
-    try:
-        yield run
-    except KeyboardInterrupt as e:
-        logger.warning("Keyboard interrupt, finishing wandb run")
-        run.finish(1)
-        raise e
-    finally:
-        run.finish()
-
-
-def main(wandb_kwargs: dict | None = None, koina_url: str | None = None):
-
-    fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
-    speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
-
-    prefix = Path.home() / "data/decompressed_timstof/"
-    dotd_files = [
-        # prefix / "MSR28858_EXP80_Plate3_G08_DMSO_DIA_S5-G8_1_7079.d",
-        # prefix / "MSR28893_EXP80_Plate4_B07_DMSO_DIA_S6-B7_1_7115.d",
-        # prefix / "250225_Desnaux_200ng_Hela_ICC_on_DIA.d",
-        prefix / "250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
-    ]
-
-    for file in dotd_files:
-        runner = TimsseekRunner(
-            fasta_file_location=fasta_file,
-            speclib_location=speclib_path,
-            raw_file_location=file,
-            koina_url=koina_url,
+        raise SystemExit(2)
+    if selectors > 1:
+        sys.stderr.write(
+            "--all, --match, and positional names are mutually exclusive\n"
         )
-        runner.build_speclib()
-        runner.run(wandb_kwargs=wandb_kwargs)
+        raise SystemExit(2)
+
+    if all_:
+        chosen = _list_fixtures(fixtures_dir)
+    elif match is not None:
+        chosen = [n for n in _list_fixtures(fixtures_dir) if fnmatch.fnmatch(n, match)]
+    else:
+        chosen = list(names)
+
+    out: list[Fixture] = []
+    avail = set(_list_fixtures(fixtures_dir))
+    for n in chosen:
+        if n not in avail:
+            raise SystemExit(f"fixture not found: {n!r} (in {fixtures_dir})")
+        out.append(load_fixture(fixtures_dir / f"{n}.toml"))
+    return out
 
 
-def build_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--notes",
-        type=str,
-        help="The notes to add to the wandb run",
-    )
-    parser.add_argument(
-        "--koina-url",
-        type=str,
-        default=None,
-        help="Koina server URL (e.g. http://localhost:8501/v2/models for local)",
-    )
-    return parser
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("fixtures", nargs="*", help="Fixture names to run")
+    p.add_argument("--all", dest="all_", action="store_true")
+    p.add_argument("--match", help="Glob pattern over fixture names")
+    p.add_argument("--notes", help="Free-form note added to wandb run")
+    p.add_argument("--dry-run", action="store_true", help="Print plan and stop")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    fixtures = select_fixtures(args.fixtures, args.all_, args.match)
+    for fx in fixtures:
+        logger.info("would run fixture: {}", fx.name)
+    raise NotImplementedError("timsseek invocation lands in Task 12")
 
 
 if __name__ == "__main__":
-    parser = build_parser()
-    args, unkargs = parser.parse_known_args()
-    if unkargs:
-        raise ValueError(f"Unknown arguments: {unkargs}")
-
-    wandb_kwargs = {}
-
-    if args.notes is not None:
-        wandb_kwargs["notes"] = args.notes
-
-    main(wandb_kwargs=wandb_kwargs, koina_url=args.koina_url)
+    sys.exit(main())
