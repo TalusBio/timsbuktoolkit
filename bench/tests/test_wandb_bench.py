@@ -84,7 +84,9 @@ def test_select_no_args_lists_available(tmp_path, capsys):
 
 
 def _write_perf_report(out_dir: Path, raw_stem: str, payload: dict) -> None:
-    sub = out_dir / "res" / raw_stem
+    """`out_dir` is timsseek's `--output-dir` (i.e., the runner's `res_dir`).
+    Timsseek writes its outputs under `<output-dir>/<raw_stem>/`."""
+    sub = out_dir / raw_stem
     sub.mkdir(parents=True, exist_ok=True)
     (sub / "performance_report.json").write_text(json.dumps(payload))
 
@@ -164,7 +166,7 @@ def test_run_one_fixture_runs_entrapment_when_field_present(tmp_path, fake_wandb
         # Also drop a results.parquet so analyse() can read it
         import polars as pl
         pl.DataFrame({"sequence": ["MK"], "qvalue": [0.001]}).write_parquet(
-            out / "res" / raw_stem / "results.parquet"
+            out / raw_stem / "results.parquet"
         )
         return MagicMock(returncode=0)
 

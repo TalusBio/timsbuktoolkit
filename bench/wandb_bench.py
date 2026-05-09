@@ -160,7 +160,7 @@ def run_one(
             "--overwrite",
             "--config", str(config_path),
             "--speclib-file", fx.inputs.speclib,
-            "--output-dir", str(run_dir),
+            "--output-dir", str(res_dir),
             "--dotd-files", fx.inputs.raw,
         ]
         if fx.has_calibration_speclib():
