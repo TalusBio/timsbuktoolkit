@@ -11,7 +11,8 @@ import os
 import re
 from dataclasses import dataclass
 
-_FASTA_EXTS = (".fasta", ".fa", ".fasta.gz", ".fa.gz")
+# Longest suffixes first so 'foo.fasta.gz' does not short-circuit on '.fasta'.
+_FASTA_EXTS = (".fasta.gz", ".fa.gz", ".fasta", ".fa")
 _TXT_EXTS = (".txt",)
 _UNIPROT_PROTEOME_RE = re.compile(r"^UP\d{9}$")
 _UNIPROT_ACCESSION_RE = re.compile(

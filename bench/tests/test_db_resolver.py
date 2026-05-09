@@ -24,7 +24,7 @@ def test_classify_local_accession_list(tmp_path):
     assert spec.kind == DbSpecKind.ACCESSION_LIST_FILE
 
 
-def test_classify_s3(tmp_path):
+def test_classify_s3():
     spec = classify_db_spec("s3://bkt/proteome.fasta")
     assert spec.kind == DbSpecKind.S3_FASTA
 
@@ -47,3 +47,10 @@ def test_classify_unknown_raises():
 def test_classify_local_missing_file_raises(tmp_path):
     with pytest.raises(ValueError, match="unrecognised"):
         classify_db_spec(str(tmp_path / "nope.fasta"))
+
+
+def test_classify_local_bad_extension_raises(tmp_path):
+    p = tmp_path / "sequences.parquet"
+    p.write_bytes(b"PAR1")
+    with pytest.raises(ValueError, match="unrecognised"):
+        classify_db_spec(str(p))
