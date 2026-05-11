@@ -168,7 +168,7 @@ def run_speclib_build(
         "-p",
         "speclib_build_cli",
         "--",
-        "--peptides",
+        "--peptide-list",
         peptides_uri,
         "--fixed-mod",
         "C[U:4]",
