@@ -29,6 +29,14 @@ def _list_fixtures(fixtures_dir: Path) -> list[str]:
     return sorted(p.stem for p in fixtures_dir.glob("*.toml"))
 
 
+def _materialize_uri(uri: str, dst: Path) -> Path:
+    """Return a local Path for `uri`. Downloads if s3, passes through if local."""
+    if uri.startswith("s3://"):
+        s3_download_file(uri, str(dst))
+        return dst
+    return Path(uri)
+
+
 def select_fixtures(
     names: list[str],
     all_: bool,
@@ -188,17 +196,21 @@ def run_one(
         if fx.has_entrapment():
             assert fx.inputs.entrapment_peptides is not None
             assert fx.inputs.entrapment_ratio is not None
+            assert fx.inputs.target_peptides is not None
             with tempfile.TemporaryDirectory() as td:
-                target_local = Path(td) / "target.peptides.txt"
-                entrap_local = Path(td) / "entrap.peptides.txt"
-                s3_download_file(fx.inputs.target_peptides, str(target_local))
-                s3_download_file(fx.inputs.entrapment_peptides, str(entrap_local))
+                target_local = _materialize_uri(
+                    fx.inputs.target_peptides, Path(td) / "target.peptides.txt"
+                )
+                entrap_local = _materialize_uri(
+                    fx.inputs.entrapment_peptides, Path(td) / "entrap.peptides.txt"
+                )
 
                 pairing_local: Path | None = None
                 if fx.has_pairing():
                     assert fx.inputs.pairing is not None
-                    pairing_local = Path(td) / "pairing.tsv"
-                    s3_download_file(fx.inputs.pairing, str(pairing_local))
+                    pairing_local = _materialize_uri(
+                        fx.inputs.pairing, Path(td) / "pairing.tsv"
+                    )
 
                 results_parquet = res_dir / raw_stem / "results.parquet"
                 out_parquet = (

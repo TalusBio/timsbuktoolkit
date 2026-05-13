@@ -52,28 +52,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _stage_one_file(uri: str, dst: Path, force: bool) -> str:
-    """Resolve `uri` to a local path; return path string for the staged TOML.
+    """Resolve `uri` to an absolute local path string for the staged TOML.
 
-    - If `uri` is already an absolute local path, return it unchanged (no copy).
+    - If `uri` is already an absolute local path, return it unchanged.
     - If `uri` is `s3://...`, download to `dst` (skip if exists, unless `force`).
     """
     if not uri.startswith("s3://"):
-        return uri  # already local; reference as-is
-    if dst.exists() and not force:
+        return uri  # already absolute (schema validator enforces this)
+    if not (dst.exists() and not force):
+        s3_download_file(uri, str(dst))
+    else:
         logger.info("stage: cached {} (skip)", dst)
-        return str(dst)
-    s3_download_file(uri, str(dst))
-    return str(dst)
+    return str(dst.resolve())
 
 
 def _stage_one_dir(uri: str, dst: Path, force: bool) -> str:  # noqa: ARG001
-    """Sync `uri` (s3 prefix) into `dst`. Returns the path string."""
+    """Sync `uri` (s3 prefix) into `dst`. Returns the absolute path string."""
     if not uri.startswith("s3://"):
         return uri
     # `aws s3 sync` is itself idempotent; --force just forces a re-sync
     # which has the same observable result, so we always call it.
     s3_sync_dir(uri, str(dst))
-    return str(dst)
+    return str(dst.resolve())
 
 
 def stage(
@@ -95,9 +95,11 @@ def stage(
     cache_root = cache_dir / name
     cache_root.mkdir(parents=True, exist_ok=True)
 
-    target_pep_local = _stage_one_file(
-        fx.inputs.target_peptides, cache_root / "target.peptides.txt", force
-    )
+    target_pep_local: str | None = None
+    if fx.inputs.target_peptides is not None:
+        target_pep_local = _stage_one_file(
+            fx.inputs.target_peptides, cache_root / "target.peptides.txt", force
+        )
     speclib_local = _stage_one_file(
         fx.inputs.speclib, cache_root / "lib.msgpack.zst", force
     )
@@ -148,7 +150,7 @@ def _build_staged_toml(
     name: str,
     description: str,
     config: dict,
-    target_peptides_uri: str,
+    target_peptides_uri: str | None,
     speclib_uri: str,
     raw_uri: str,
     entrapment_peptides_uri: str | None,
@@ -166,7 +168,8 @@ def _build_staged_toml(
     lines.append(f'description = "{desc}"')
     lines.append("")
     lines.append("[inputs]")
-    lines.append(f'target_peptides = "{target_peptides_uri}"')
+    if target_peptides_uri is not None:
+        lines.append(f'target_peptides = "{target_peptides_uri}"')
     lines.append(f'speclib = "{speclib_uri}"')
     lines.append(f'raw = "{raw_uri}"')
     if entrapment_peptides_uri is not None:
