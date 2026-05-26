@@ -1,0 +1,20 @@
+name = "hela_smoke_shuffled"
+description = ""
+
+[inputs]
+target_peptides = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_smoke_shuffled/target.peptides.txt"
+speclib = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_smoke_shuffled/lib.msgpack.zst"
+raw = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_smoke_shuffled/sample.d"
+entrapment_peptides = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_smoke_shuffled/entrap.peptides.txt"
+entrapment_ratio = 1.0
+entrapment_mode = "shuffled"
+pairing = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_smoke_shuffled/pairing.tsv"
+
+# === embedded timsseek config ===
+[config.analysis]
+chunk_size = 20000
+
+[config.analysis.tolerance]
+ms       = { ppm      = [15.0, 15.0] }
+mobility = { percent  = [10.0, 10.0] }
+quad     = { absolute = [0.1,  0.1]  }

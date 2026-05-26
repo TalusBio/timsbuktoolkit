@@ -1,5 +1,6 @@
 name = "hela_iccoff_gt20peps"
 description = ""
+tags = ["canonical"]
 
 [inputs]
 speclib = "s3://terraform-workstations-bucket/jspaezp/timsseek_fixtures/hela_iccoff_gt20peps/lib.msgpack.zst"

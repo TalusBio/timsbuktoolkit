@@ -92,6 +92,7 @@ class Fixture(BaseModel):
 
     name: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     inputs: FixtureInputs
     config: dict[str, Any] = Field(default_factory=dict)
 

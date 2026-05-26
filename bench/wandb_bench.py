@@ -41,9 +41,10 @@ def select_fixtures(
     names: list[str],
     all_: bool,
     match: str | None,
+    tag: str | None = None,
     fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
 ) -> list[Fixture]:
-    selectors = sum([bool(names), all_, match is not None])
+    selectors = sum([bool(names), all_, match is not None, tag is not None])
     if selectors == 0:
         avail = _list_fixtures(fixtures_dir)
         sys.stderr.write(
@@ -52,9 +53,19 @@ def select_fixtures(
         raise SystemExit(2)
     if selectors > 1:
         sys.stderr.write(
-            "--all, --match, and positional names are mutually exclusive\n"
+            "--all, --match, --tag, and positional names are mutually exclusive\n"
         )
         raise SystemExit(2)
+
+    if tag is not None:
+        out: list[Fixture] = []
+        for n in _list_fixtures(fixtures_dir):
+            fx = load_fixture(fixtures_dir / f"{n}.toml")
+            if tag in fx.tags:
+                out.append(fx)
+        if not out:
+            raise SystemExit(f"no fixtures matched tag {tag!r}")
+        return out
 
     if all_:
         chosen = _list_fixtures(fixtures_dir)
@@ -63,7 +74,7 @@ def select_fixtures(
     else:
         chosen = list(names)
 
-    out: list[Fixture] = []
+    out = []
     avail = set(_list_fixtures(fixtures_dir))
     for n in chosen:
         if n not in avail:
@@ -113,6 +124,7 @@ def run_one(
     out_root: Path = DEFAULT_OUT_ROOT,
     notes: str | None = None,
     dry_run: bool = False,
+    group: str | None = None,
 ) -> None:
     """Execute one fixture: timsseek + wandb logging + optional entrapment."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -138,7 +150,7 @@ def run_one(
 
     sha = _git_short_sha()
     branch = _git_branch()
-    tags = [fx.name, branch]
+    tags = [fx.name, branch, *fx.tags]
     if fx.has_entrapment():
         tags.append("entrapment")
 
@@ -159,6 +171,7 @@ def run_one(
         tags=tags,
         notes=notes,
         config=wandb_config,
+        group=group,
     )
     try:
         cmd = [
@@ -246,7 +259,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("fixtures", nargs="*", help="Fixture names to run")
     p.add_argument("--all", dest="all_", action="store_true")
     p.add_argument("--match", help="Glob pattern over fixture names")
+    p.add_argument("--tag", help="Run all fixtures carrying this tag (from TOML)")
     p.add_argument("--notes", help="Free-form note added to wandb run")
+    p.add_argument(
+        "--group",
+        help="wandb run group; defaults to '<tag>-<ts>' when --tag is set",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
         "--fixtures-dir",
@@ -259,9 +277,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    fixtures = select_fixtures(args.fixtures, args.all_, args.match, args.fixtures_dir)
+    fixtures = select_fixtures(
+        args.fixtures, args.all_, args.match, args.tag, args.fixtures_dir
+    )
+    group = args.group
+    if group is None and args.tag is not None:
+        group = f"{args.tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     for fx in fixtures:
-        run_one(fx, notes=args.notes, dry_run=args.dry_run)
+        run_one(fx, notes=args.notes, dry_run=args.dry_run, group=group)
     return 0
 
 
