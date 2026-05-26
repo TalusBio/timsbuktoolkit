@@ -481,7 +481,11 @@ impl StorageProvider {
         let full = self.qualified_path(path);
         let store = self.store.clone();
         block_on_or_in_place(async move {
-            let mut w = BufWriter::new(store, full);
+            // 16 MiB parts at concurrency=2 keep the pipe full without 8-way
+            // bandwidth contention. Default 10 MiB / 8 starves each part on
+            // residential uplinks and trips the per-request HTTP timeout.
+            let mut w = BufWriter::with_capacity(store, full, 16 * 1024 * 1024)
+                .with_max_concurrency(2);
             w.write_all(&data).await.map_err(|e| {
                 SerializationError::Io(std::io::Error::other(format!("buffered write failed: {e}")))
             })?;
@@ -639,7 +643,20 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
                 .await
                 .map_err(|e| SerializationError::Io(std::io::Error::other(e)))?;
 
-            // 3. Initialize the builder using the resolved credentials
+            // 3. Initialize the builder using the resolved credentials.
+            //    Defaults assume fast network: 30s per-request timeout + 8-way
+            //    parallel 10MiB BufWriter parts saturate residential uplinks
+            //    and snowball into transport timeouts. Bump the per-request
+            //    HTTP timeout so a single multipart PUT has a realistic
+            //    envelope; retry_timeout is the across-retries total budget.
+            let client_options = object_store::ClientOptions::new()
+                .with_timeout(std::time::Duration::from_secs(300))
+                .with_connect_timeout(std::time::Duration::from_secs(30));
+            let retry = object_store::RetryConfig {
+                max_retries: 10,
+                retry_timeout: std::time::Duration::from_secs(900),
+                ..Default::default()
+            };
             let mut builder = AmazonS3Builder::new()
                 .with_bucket_name(bucket)
                 .with_region(
@@ -649,7 +666,9 @@ async fn parse_url(url: &url::Url) -> Result<Arc<dyn ObjectStore>, Serialization
                         .unwrap_or("us-west-2"),
                 )
                 .with_access_key_id(credentials.access_key_id())
-                .with_secret_access_key(credentials.secret_access_key());
+                .with_secret_access_key(credentials.secret_access_key())
+                .with_client_options(client_options)
+                .with_retry(retry);
 
             // 4. Important: Attach the session token if it exists (Critical for MFA/SSO)
             if let Some(token) = credentials.session_token() {
