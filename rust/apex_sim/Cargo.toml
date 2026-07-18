@@ -1,0 +1,33 @@
+[package]
+name = "apex_sim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "apex_sim"
+path = "src/main.rs"
+# The interactive app needs the GUI stack; skipped under --no-default-features.
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+# GUI feature: pulls the egui/eframe stack. Disable (--no-default-features) to
+# build just the simulation + scoring + bench, e.g. in CI, without egui/winit.
+gui = ["dep:egui", "dep:eframe", "dep:egui_plot"]
+
+[dependencies]
+timsseek = { path = "../timsseek" }
+timsquery = { path = "../timsquery" }
+
+# GUI (optional, gated behind the `gui` feature)
+egui = { version = "0.33", features = ["rayon"], optional = true }
+eframe = { version = "0.33", default-features = true, features = [
+  "default_fonts",
+], optional = true }
+egui_plot = { version = "0.34", optional = true }
+
+# Deterministic synthetic-data RNG
+rand = "0.9"
+rand_chacha = "0.9"

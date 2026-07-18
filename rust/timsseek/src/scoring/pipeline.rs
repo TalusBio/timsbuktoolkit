@@ -229,7 +229,7 @@ impl Default for CalibrationConfig {
 }
 
 /// Number of top fragments to retain for scoring (by predicted intensity).
-const TOP_N_FRAGMENTS: usize = 8;
+pub const TOP_N_FRAGMENTS: usize = 8;
 
 /// Speclib-only pre-gate: reject peptides whose library entry carries no
 /// predicted fragments before doing any extraction work. Shared by the
@@ -247,7 +247,7 @@ fn gate_expected_fragments(item: &QueryItemToScore) -> Result<(), SkipReason> {
 ///
 /// Removes lower-ranked fragments from the chromatogram collector (fragments array + eg)
 /// and from expected intensities, maintaining the invariant that all three agree on count.
-pub(crate) fn select_top_n_fragments<T: KeyLike + Default>(
+pub fn select_top_n_fragments<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
     n: usize,
@@ -299,7 +299,7 @@ pub(crate) fn select_top_n_fragments<T: KeyLike + Default>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub(crate) fn filter_zero_intensity_ions<T: KeyLike + Default>(
+pub fn filter_zero_intensity_ions<T: KeyLike + Default>(
     agg: &mut ChromatogramCollector<T, f32>,
     expected: &mut crate::ExpectedIntensities<T>,
 ) {

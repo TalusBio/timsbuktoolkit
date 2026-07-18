@@ -11,6 +11,7 @@ members = [
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
+    "rust/apex_sim",
     "rust/speclib_build_cli",
     "rust/tims_stage",
     "python/timsquery_pyo3"
@@ -26,6 +27,7 @@ default-members = [
     "rust/timsquery",
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
+    "rust/apex_sim",
     "rust/speclib_build_cli",
     "rust/tims_stage"
 ]
