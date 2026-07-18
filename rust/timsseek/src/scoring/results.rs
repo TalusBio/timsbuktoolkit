@@ -299,11 +299,11 @@ impl ScoredCandidateBuilder {
         self.ms2_mz_errors = SetField::Some(offsets.ms2_mz_errors());
         self.ms2_mobility_errors = SetField::Some(offsets.ms2_mobility_errors());
 
-        let mob_errors = offsets.avg_delta_mobs();
-        let cum_err = mob_errors.0 + mob_errors.1;
+        let (ms1_err, ms2_err) = offsets.avg_delta_mobs();
+        let cum_err = ms1_err + ms2_err;
         let obs_mob = (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
-        let d_err = match (mob_errors.0.mean_mobility(), mob_errors.1.mean_mobility()) {
-            (Ok(mz), Ok(mob)) => mz - mob,
+        let d_err = match (ms1_err.mean_mobility(), ms2_err.mean_mobility()) {
+            (Ok(ms1_mob), Ok(ms2_mob)) => ms1_mob - ms2_mob,
             _ => f64::NAN,
         };
         self.delta_ms1_ms2_mobility = SetField::Some(d_err as f32);
@@ -404,8 +404,8 @@ impl ScoredCandidateBuilder {
         let sq_delta_ms1_ms2_mobility = delta_ms1_ms2_mobility * delta_ms1_ms2_mobility;
 
         let relints = expect_some!(relative_intensities);
-        let ms1_intensity_ratios = relints.ms1.get_values();
-        let ms2_intensity_ratios = relints.ms2.get_values();
+        let ms1_intensity_ratios = relints.ms1.get_values_sorted();
+        let ms2_intensity_ratios = relints.ms2.get_values_sorted();
 
         let scoring = ScoringFields {
             // Identity

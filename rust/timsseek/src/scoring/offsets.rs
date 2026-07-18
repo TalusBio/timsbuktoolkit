@@ -14,6 +14,10 @@ const PRECURSOR_TOP_N: usize = 3;
 /// Balances statistical power with outlier resistance.
 const FRAGMENT_TOP_N: usize = 7;
 
+/// Number of top fragments contributing to the obs-mobility estimate.
+/// Subset of FRAGMENT_TOP_N to bias toward the highest-confidence ions.
+const FRAGMENT_OBS_MOB_TOP_N: usize = 3;
+
 /// Container for measured m/z and mobility offsets from top ions.
 ///
 /// Tracks the highest-intensity precursors and fragments to calculate
@@ -118,17 +122,23 @@ impl MzMobilityOffsets {
     /// Used by Phase-2 calibration to estimate population-level offsets;
     /// rescoring uses the per-ion arrays directly.
     pub fn weighted_ms1(&self) -> Option<(f32, f32)> {
-        let (mut w, mut mz, mut mob) = (0.0f64, 0.0f64, 0.0f64);
-        for v in self.ms1.get_values() {
-            if v.intensity <= 0.0 || v.mz_error_ppm.is_nan() {
+        let (mut w_mz, mut mz) = (0.0f64, 0.0f64);
+        let (mut w_mob, mut mob) = (0.0f64, 0.0f64);
+        for v in self.ms1.get_values_sorted() {
+            if v.intensity <= 0.0 {
                 continue;
             }
-            w += v.intensity;
-            mz += v.intensity * v.mz_error_ppm as f64;
-            mob += v.intensity * v.mobility_error_pct as f64;
+            if !v.mz_error_ppm.is_nan() {
+                w_mz += v.intensity;
+                mz += v.intensity * v.mz_error_ppm as f64;
+            }
+            if !v.mobility_error_pct.is_nan() {
+                w_mob += v.intensity;
+                mob += v.intensity * v.mobility_error_pct as f64;
+            }
         }
-        if w > 0.0 {
-            Some(((mz / w) as f32, (mob / w) as f32))
+        if w_mz > 0.0 && w_mob > 0.0 {
+            Some(((mz / w_mz) as f32, (mob / w_mob) as f32))
         } else {
             None
         }
@@ -136,7 +146,7 @@ impl MzMobilityOffsets {
 
     pub fn ms1_mz_errors(&self) -> [f32; PRECURSOR_TOP_N] {
         let mut out = [0.0; PRECURSOR_TOP_N];
-        let vals = self.ms1.get_values();
+        let vals = self.ms1.get_values_sorted();
         for i in 0..PRECURSOR_TOP_N {
             out[i] = vals[i].mz_error_ppm;
         }
@@ -145,7 +155,7 @@ impl MzMobilityOffsets {
 
     pub fn ms2_mz_errors(&self) -> [f32; FRAGMENT_TOP_N] {
         let mut out = [0.0; FRAGMENT_TOP_N];
-        let vals = self.ms2.get_values();
+        let vals = self.ms2.get_values_sorted();
         for i in 0..FRAGMENT_TOP_N {
             out[i] = vals[i].mz_error_ppm;
         }
@@ -154,7 +164,7 @@ impl MzMobilityOffsets {
 
     pub fn ms1_mobility_errors(&self) -> [f32; PRECURSOR_TOP_N] {
         let mut out = [0.0; PRECURSOR_TOP_N];
-        let vals = self.ms1.get_values();
+        let vals = self.ms1.get_values_sorted();
         for i in 0..PRECURSOR_TOP_N {
             out[i] = vals[i].mobility_error_pct;
         }
@@ -163,37 +173,41 @@ impl MzMobilityOffsets {
 
     pub fn ms2_mobility_errors(&self) -> [f32; FRAGMENT_TOP_N] {
         let mut out = [0.0; FRAGMENT_TOP_N];
-        let vals = self.ms2.get_values();
+        let vals = self.ms2.get_values_sorted();
         for i in 0..FRAGMENT_TOP_N {
             out[i] = vals[i].mobility_error_pct;
         }
         out
     }
 
+    /// Intensity-weighted absolute mobility deltas (1/k0 units) for MS1 and MS2.
+    /// Converts the stored percent error back to absolute via `ref_mobility`.
+    /// The collector's "mz" slot carries the ppm error (unused by current
+    /// consumers); only `mean_mobility()` is meaningful here.
     pub fn avg_delta_mobs(&self) -> (MzMobilityStatsCollector, MzMobilityStatsCollector) {
-        let mut ms2 = MzMobilityStatsCollector::default();
         let mut ms1 = MzMobilityStatsCollector::default();
-        let vals = self.ms2.get_values();
-        for v in vals.iter().take(3) {
+        let mut ms2 = MzMobilityStatsCollector::default();
+        let pct_to_abs = self.ref_mobility / 100.0;
+
+        for v in self.ms2.get_values_sorted().iter().take(FRAGMENT_OBS_MOB_TOP_N) {
             if v.mobility_error_pct.is_nan() {
                 continue;
             }
             ms2.add(
                 v.intensity,
                 v.mz_error_ppm as f64,
-                v.mobility_error_pct as f64,
+                v.mobility_error_pct as f64 * pct_to_abs,
             );
         }
 
-        let vals = self.ms1.get_values();
-        for v in vals.iter() {
+        for v in self.ms1.get_values_sorted().iter() {
             if v.mobility_error_pct.is_nan() {
                 continue;
             }
             ms1.add(
                 v.intensity,
                 v.mz_error_ppm as f64,
-                v.mobility_error_pct as f64,
+                v.mobility_error_pct as f64 * pct_to_abs,
             );
         }
 
