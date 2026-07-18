@@ -124,7 +124,7 @@ impl MzMobilityOffsets {
     pub fn weighted_ms1(&self) -> Option<(f32, f32)> {
         let (mut w_mz, mut mz) = (0.0f64, 0.0f64);
         let (mut w_mob, mut mob) = (0.0f64, 0.0f64);
-        for v in self.ms1.get_values() {
+        for v in self.ms1.get_values_sorted() {
             if v.intensity <= 0.0 {
                 continue;
             }
@@ -146,7 +146,7 @@ impl MzMobilityOffsets {
 
     pub fn ms1_mz_errors(&self) -> [f32; PRECURSOR_TOP_N] {
         let mut out = [0.0; PRECURSOR_TOP_N];
-        let vals = self.ms1.get_values();
+        let vals = self.ms1.get_values_sorted();
         for i in 0..PRECURSOR_TOP_N {
             out[i] = vals[i].mz_error_ppm;
         }
@@ -155,7 +155,7 @@ impl MzMobilityOffsets {
 
     pub fn ms2_mz_errors(&self) -> [f32; FRAGMENT_TOP_N] {
         let mut out = [0.0; FRAGMENT_TOP_N];
-        let vals = self.ms2.get_values();
+        let vals = self.ms2.get_values_sorted();
         for i in 0..FRAGMENT_TOP_N {
             out[i] = vals[i].mz_error_ppm;
         }
@@ -164,7 +164,7 @@ impl MzMobilityOffsets {
 
     pub fn ms1_mobility_errors(&self) -> [f32; PRECURSOR_TOP_N] {
         let mut out = [0.0; PRECURSOR_TOP_N];
-        let vals = self.ms1.get_values();
+        let vals = self.ms1.get_values_sorted();
         for i in 0..PRECURSOR_TOP_N {
             out[i] = vals[i].mobility_error_pct;
         }
@@ -173,7 +173,7 @@ impl MzMobilityOffsets {
 
     pub fn ms2_mobility_errors(&self) -> [f32; FRAGMENT_TOP_N] {
         let mut out = [0.0; FRAGMENT_TOP_N];
-        let vals = self.ms2.get_values();
+        let vals = self.ms2.get_values_sorted();
         for i in 0..FRAGMENT_TOP_N {
             out[i] = vals[i].mobility_error_pct;
         }
@@ -189,7 +189,7 @@ impl MzMobilityOffsets {
         let mut ms2 = MzMobilityStatsCollector::default();
         let pct_to_abs = self.ref_mobility / 100.0;
 
-        for v in self.ms2.get_values().iter().take(FRAGMENT_OBS_MOB_TOP_N) {
+        for v in self.ms2.get_values_sorted().iter().take(FRAGMENT_OBS_MOB_TOP_N) {
             if v.mobility_error_pct.is_nan() {
                 continue;
             }
@@ -200,7 +200,7 @@ impl MzMobilityOffsets {
             );
         }
 
-        for v in self.ms1.get_values().iter() {
+        for v in self.ms1.get_values_sorted().iter() {
             if v.mobility_error_pct.is_nan() {
                 continue;
             }

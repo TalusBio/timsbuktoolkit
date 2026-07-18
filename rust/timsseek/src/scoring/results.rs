@@ -404,8 +404,8 @@ impl ScoredCandidateBuilder {
         let sq_delta_ms1_ms2_mobility = delta_ms1_ms2_mobility * delta_ms1_ms2_mobility;
 
         let relints = expect_some!(relative_intensities);
-        let ms1_intensity_ratios = relints.ms1.get_values();
-        let ms2_intensity_ratios = relints.ms2.get_values();
+        let ms1_intensity_ratios = relints.ms1.get_values_sorted();
+        let ms2_intensity_ratios = relints.ms2.get_values_sorted();
 
         let scoring = ScoringFields {
             // Identity

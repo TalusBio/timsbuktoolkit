@@ -16,7 +16,7 @@
 /// top_3.push(3.0);
 /// top_3.push(12.0);
 ///
-/// assert_eq!(top_3.get_values(), [12.0, 3.0, 3.0]);
+/// assert_eq!(top_3.get_values_sorted(), [12.0, 3.0, 3.0]);
 /// assert_eq!(top_3.max_val(), 12.0);
 /// assert_eq!(top_3.min_val(), 3.0);
 /// ```
@@ -60,7 +60,7 @@ impl<const N: usize, T: Clone + Copy + PartialOrd + Default> TopNArray<N, T> {
         self.len == 0
     }
 
-    pub fn get_values(&self) -> [T; N] {
+    pub fn get_values_sorted(&self) -> [T; N] {
         self.array
     }
 
