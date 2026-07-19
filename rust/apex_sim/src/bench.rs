@@ -112,6 +112,100 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
     ]
 }
 
+/// Production-realistic BROAD apex-finding suite (Phase-1 window ~1695 cycles,
+/// RT-unrestricted). Interferents are DENSITY-scaled (fixed per-cycle rate) and
+/// the apex is jittered per seed with a sub-cycle offset, so widening the window
+/// does not make the task artificially easy and the finder faces a moving,
+/// off-grid target. Each scenario is its own line so it can be commented out.
+pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
+    let base = || {
+        let mut p = SimParams::default();
+        p.n_cycles = 1695;
+        p.apex_cycle = 847.0;
+        p.apex_jitter = Some(800.0);
+        p.width_sigma = 1.0;
+        p.seed = 680;
+        p.random_peaks.count = 0;
+        p.random_peaks.density_per_cycle = 2.5; // ~ current 100/40 density
+        p
+    };
+
+    let mut clean = base();
+    clean.noise_floor = 0.02;
+    clean.random_peaks.enabled = false;
+
+    let mut moderate = base();
+    moderate.noise_floor = 0.2;
+
+    let mut stress = base();
+    stress.noise_floor = 0.5;
+
+    let mut hard = base();
+    hard.noise_floor = 0.5;
+    hard.random_peaks.hardness = 3.0; // 3x interferent density
+
+    let mut mismatched = base();
+    mismatched.noise_floor = 0.5;
+    for f in &mut mismatched.real_fragments {
+        f.obs_scale = f.theo_intensity;
+        f.theo_intensity = 1.0;
+    }
+
+    vec![
+        ("broad_clean", clean),
+        ("broad_moderate_noise", moderate),
+        ("broad_high_noise+interf", stress),
+        ("broad_hard_3x_density", hard),
+        ("broad_mismatched_library", mismatched),
+    ]
+}
+
+/// Production-realistic NARROW scoring suite (Phase-3 calibrated window ~150
+/// cycles). Same density-scaled interferents + jittered sub-cycle apex; used
+/// for BOTH apex recovery and score discrimination (`run_discrimination`).
+pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
+    let base = || {
+        let mut p = SimParams::default();
+        p.n_cycles = 150;
+        p.apex_cycle = 75.0;
+        p.apex_jitter = Some(60.0);
+        p.width_sigma = 1.0;
+        p.seed = 680;
+        p.random_peaks.count = 0;
+        p.random_peaks.density_per_cycle = 2.5;
+        p
+    };
+
+    let mut clean = base();
+    clean.noise_floor = 0.02;
+    clean.random_peaks.enabled = false;
+
+    let mut moderate = base();
+    moderate.noise_floor = 0.2;
+
+    let mut stress = base();
+    stress.noise_floor = 0.5;
+
+    let mut hard = base();
+    hard.noise_floor = 0.5;
+    hard.random_peaks.hardness = 3.0;
+
+    let mut mismatched = base();
+    mismatched.noise_floor = 0.5;
+    for f in &mut mismatched.real_fragments {
+        f.obs_scale = f.theo_intensity;
+        f.theo_intensity = 1.0;
+    }
+
+    vec![
+        ("narrow_clean", clean),
+        ("narrow_moderate_noise", moderate),
+        ("narrow_high_noise+interf", stress),
+        ("narrow_hard_3x_density", hard),
+        ("narrow_mismatched_library", mismatched),
+    ]
+}
+
 /// Run `n_runs` scored simulations of `base` (varying only the seed) and
 /// collect apex-recovery + timing stats. A hit = pass-2 apex within `tol`
 /// cycles of the configured `apex_cycle`.
