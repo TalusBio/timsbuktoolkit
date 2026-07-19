@@ -67,3 +67,5 @@ reading.md
 # A/B benchmark scratch (score-blocks)
 scratchpad_ab/
 ab_bench.out
+# Local bench outputs, logs, feature dumps (repo-local, never tracked)
+bench_out/
