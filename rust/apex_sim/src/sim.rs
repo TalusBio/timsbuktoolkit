@@ -67,6 +67,14 @@ pub struct RandomPeaks {
     pub height_frac_max: f32,
     /// If true, precursor rows are also eligible targets.
     pub hit_precursors: bool,
+    /// Interferents per cycle; when > 0 this overrides `count` as
+    /// `round(density_per_cycle * n_cycles * hardness)`, so interferent DENSITY
+    /// (not absolute count) stays fixed as the window widens — a fixed count in
+    /// a wide window is an artificially easy task.
+    pub density_per_cycle: f32,
+    /// Multiplier (>=1) to deliberately over-load interferents above realistic
+    /// density for stress-testing.
+    pub hardness: f32,
 }
 
 impl Default for RandomPeaks {
@@ -77,7 +85,19 @@ impl Default for RandomPeaks {
             height_frac_min: 0.1,
             height_frac_max: 10.0,
             hit_precursors: true,
+            density_per_cycle: 0.0,
+            hardness: 1.0,
         }
+    }
+}
+
+/// Effective interferent count for a window of `n_cycles`: density-scaled when
+/// `density_per_cycle > 0`, else the absolute `count`.
+pub fn effective_random_count(rp: &RandomPeaks, n_cycles: usize) -> usize {
+    if rp.density_per_cycle > 0.0 {
+        (rp.density_per_cycle * n_cycles as f32 * rp.hardness.max(1.0)).round() as usize
+    } else {
+        rp.count
     }
 }
 
@@ -323,10 +343,11 @@ fn inject_random_peaks(
     params: &SimParams,
 ) {
     let rp = &params.random_peaks;
-    if !rp.enabled || rp.count == 0 {
+    let n = params.n_cycles;
+    let count = effective_random_count(rp, n);
+    if !rp.enabled || count == 0 {
         return;
     }
-    let n = params.n_cycles;
     let n_frag = frag_rows.len();
     let n_targets = n_frag
         + if rp.hit_precursors {
@@ -338,7 +359,7 @@ fn inject_random_peaks(
         return;
     }
 
-    for _ in 0..rp.count {
+    for _ in 0..count {
         let target = rng.random_range(0..n_targets);
         let row = if target < n_frag {
             &mut frag_rows[target]
@@ -381,6 +402,23 @@ fn fill_array<K: timsquery::KeyLike>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_scales_interferent_count_with_window() {
+        let mut p = SimParams::default();
+        p.random_peaks.count = 0;
+        p.random_peaks.density_per_cycle = 2.0;
+        p.random_peaks.hardness = 1.0;
+        assert_eq!(effective_random_count(&p.random_peaks, 100), 200);
+        assert_eq!(effective_random_count(&p.random_peaks, 1000), 2000);
+        p.random_peaks.hardness = 3.0;
+        assert_eq!(effective_random_count(&p.random_peaks, 100), 600);
+        // count path preserved when density is 0
+        let mut q = RandomPeaks::default();
+        q.density_per_cycle = 0.0;
+        q.count = 77;
+        assert_eq!(effective_random_count(&q, 5000), 77);
+    }
 
     #[test]
     fn clean_peak_apex_lands_at_configured_cycle() {
