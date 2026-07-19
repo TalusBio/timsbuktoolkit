@@ -26,11 +26,7 @@
 
 use std::fmt::Display;
 
-use super::apex::{
-    ApexConfig,
-    ApexScratch,
-    weight_profile,
-};
+use super::apex::ApexConfig;
 use super::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
@@ -292,7 +288,6 @@ pub struct TraceScorer {
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
     cfg: ApexConfig,
-    apex_scratch: ApexScratch,
 }
 
 #[derive(Debug)]
@@ -349,7 +344,6 @@ impl TraceScorer {
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
             cfg: ApexConfig::default(),
-            apex_scratch: ApexScratch::default(),
         }
     }
 
@@ -389,12 +383,6 @@ impl TraceScorer {
 
         self.compute_pass_1(scoring_ctx)?;
         self.compute_main_score_trace();
-        weight_profile(
-            &mut self.traces.apex_profile,
-            scoring_ctx,
-            &self.cfg,
-            &mut self.apex_scratch,
-        );
         self.build_profiles_cached();
 
         Ok(())
@@ -721,8 +709,7 @@ impl TraceScorer {
 
     /// Compute the apex profile from cosine and scribe traces.
     ///
-    /// apex_profile(t) = C(t) * (s_ratio + S_norm(t)), then coelution/vote
-    /// weighting (see the `apex` module) and optional gaussian blur.
+    /// apex_profile(t) = C(t) * (s_ratio + S_norm(t)), then optional gaussian blur.
     /// where C(t) = cosine(t)^cos_pow * I(t)^i_exp   (see ApexConfig)
     ///       S(t) = scribe(t) * I(t)
     ///       S_norm = (S - min(S)) / (max(S) - min(S))
