@@ -280,10 +280,9 @@ impl ElutionTraces {
     }
 }
 
-/// Tunable apex-profile knobs. `Default` reproduces the historical `main`
-/// behavior exactly (cos^3 * I^1 base, additive scribe floor 0.5, no blur,
-/// joint-apex snap window 3, all optional weight terms disabled). Ablation
-/// flips individual fields; shipped values live in `Default`.
+/// Tunable apex-profile knobs. `Default` holds the bench-validated shipping
+/// values (see the apex_sim canonical suite). Ablation flips individual fields;
+/// shipped values live in `Default`.
 #[derive(Debug, Clone)]
 pub struct ApexConfig {
     /// Cosine exponent in the base profile: `cos^cos_pow`.
@@ -300,6 +299,12 @@ pub struct ApexConfig {
     pub coel_k: f32,
     /// Coelution correlation half-window (cycles).
     pub coel_w: f32,
+    /// Cross-row coincidence-vote weight strength (0 = disabled).
+    pub vote_k: f32,
+    /// Vote sigmoid threshold (z-score units).
+    pub vote_tau: f32,
+    /// Vote sigmoid softness (z-score units).
+    pub vote_s: f32,
 }
 
 impl Default for ApexConfig {
@@ -312,6 +317,9 @@ impl Default for ApexConfig {
             joint_snap: 1,
             coel_k: 1.04,
             coel_w: 2.0,
+            vote_k: 14.43,
+            vote_tau: 1.28,
+            vote_s: 0.42,
         }
     }
 }
@@ -421,6 +429,7 @@ impl TraceScorer {
         self.compute_pass_1(scoring_ctx)?;
         self.compute_main_score_trace();
         self.apply_coelution_weighting(scoring_ctx);
+        self.apply_vote_weighting(scoring_ctx);
         self.build_profiles_cached();
 
         Ok(())
@@ -883,6 +892,98 @@ impl TraceScorer {
             }
             let coel = if den > 0.0 { num / den } else { 0.0 };
             self.traces.apex_profile[t] *= 1.0 + k * coel.max(0.0);
+        }
+    }
+
+    /// Cross-row coincidence-voting weighting of the apex profile.
+    ///
+    /// Per fragment row: subtract the row's global median (baseline), clip to
+    /// >=0, matched-filter with the known gaussian (sigma~1), then convert to a
+    /// robust soft vote v = sigmoid((z - tau)/s) where z = (m - median(m))/MAD.
+    /// Votes are summed across rows (expected-intensity weighted) into a support
+    /// trace; `apex_profile[t] *= 1 + K * support_norm(t)`. Because interferents
+    /// are independent across rows, only a genuine apex gets many concurrent
+    /// votes; a vote saturates so a 10x-tall interferent counts the same as a
+    /// real peak. Disabled when K<=0.
+    fn apply_vote_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
+        let vk = self.cfg.vote_k;
+        if vk <= 0.0 {
+            return;
+        }
+        let tau = self.cfg.vote_tau;
+        let soft = self.cfg.vote_s.max(1e-3);
+        let n = self.traces.apex_profile.len();
+        if n == 0 {
+            return;
+        }
+        let collector = &scoring_ctx.chromatograms;
+
+        // Gaussian matched-filter kernel (sigma~1), 5-tap.
+        const G: [f32; 5] = [0.13534, 0.60653, 1.0, 0.60653, 0.13534];
+        let gsum: f32 = G.iter().sum();
+
+        let mut support = vec![0.0f32; n];
+        let mut wsum = 0.0f32;
+        let mut r = vec![0.0f32; n];
+        let mut m = vec![0.0f32; n];
+        let mut tmp = vec![0.0f32; n];
+
+        for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
+            let w = scoring_ctx
+                .expected_intensities
+                .get_fragment(key)
+                .unwrap_or(0.0);
+            if w <= 0.0 {
+                continue;
+            }
+
+            // Baseline = global median of the row.
+            tmp.clear();
+            tmp.extend_from_slice(chrom);
+            tmp.sort_unstable_by(f32::total_cmp);
+            let med = tmp[n / 2];
+            for t in 0..n {
+                r[t] = (chrom[t] - med).max(0.0);
+            }
+
+            // Matched filter (edge-clamped convolution with G).
+            for t in 0..n {
+                let mut acc = 0.0f32;
+                for (di, &g) in G.iter().enumerate() {
+                    let idx = t as isize + di as isize - 2;
+                    if idx >= 0 && (idx as usize) < n {
+                        acc += g * r[idx as usize];
+                    }
+                }
+                m[t] = acc / gsum;
+            }
+
+            // Robust scale: MAD of m.
+            tmp.clear();
+            tmp.extend_from_slice(&m);
+            tmp.sort_unstable_by(f32::total_cmp);
+            let mmed = tmp[n / 2];
+            for t in 0..n {
+                tmp[t] = (m[t] - mmed).abs();
+            }
+            tmp.sort_unstable_by(f32::total_cmp);
+            let mad = tmp[n / 2].max(1e-6);
+
+            // Soft vote per cycle.
+            for t in 0..n {
+                let z = (m[t] - mmed) / mad;
+                let v = 1.0 / (1.0 + (-(z - tau) / soft).exp());
+                support[t] += w * v;
+            }
+            wsum += w;
+        }
+
+        if wsum <= 0.0 {
+            return;
+        }
+        for t in 0..n {
+            let s = support[t] / wsum;
+            self.traces.apex_profile[t] *= 1.0 + vk * s;
         }
     }
 
