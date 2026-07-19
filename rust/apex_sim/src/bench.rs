@@ -94,6 +94,13 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
     absent.random_peaks.count = 100;
     absent.real_fragments[0].obs_scale = 0.0;
 
+    // Absent precursor at stress level: MS1 precursor undetected (intensity 0),
+    // fragments intact. Guards against over-reliance on precursor signal.
+    let mut absent_prec = base();
+    absent_prec.noise_floor = 0.5;
+    absent_prec.random_peaks.count = 100;
+    absent_prec.precursor_intensity = 0.0;
+
     vec![
         ("clean", clean),
         ("moderate_noise", moderate),
@@ -101,6 +108,7 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
         ("heavy_interference", heavy),
         ("mismatched_library", mismatched),
         ("absent_top_fragment", absent),
+        ("absent_precursor", absent_prec),
     ]
 }
 
