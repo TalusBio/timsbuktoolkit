@@ -107,6 +107,11 @@ pub struct SimParams {
     pub n_cycles: usize,
     /// Shared apex position (cycle index) for all real fragments + precursor.
     pub apex_cycle: f32,
+    /// When `Some(range)`, each run draws the realized apex from the seeded rng
+    /// as `apex_cycle + U(-range, range) + U(-0.5, 0.5)` (position varies per
+    /// seed AND lands off-grid). `None` pins it exactly to `apex_cycle` (the
+    /// historical, unrealistically-easy on-grid, fixed-position behavior).
+    pub apex_jitter: Option<f32>,
     /// Elution peak width (gaussian sigma, in cycles).
     pub width_sigma: f32,
     /// Global height scale applied on top of each fragment's rel_intensity.
@@ -154,6 +159,7 @@ impl Default for SimParams {
         Self {
             n_cycles: 60,
             apex_cycle: 30.0,
+            apex_jitter: None,
             width_sigma: 1.0,
             height: 1000.0,
             real_fragments,
@@ -192,6 +198,9 @@ pub struct SimData {
     pub extraction: Extraction<String>,
     pub fragment_rows: Vec<TransitionRow>,
     pub precursor_rows: Vec<TransitionRow>,
+    /// The apex cycle actually used to generate this realization (equals
+    /// `apex_cycle` when `apex_jitter` is `None`, else the jittered value).
+    pub realized_apex_cycle: f32,
 }
 
 /// Gaussian elution value at `cycle` for a peak centered at `center`.
@@ -205,6 +214,19 @@ pub fn build(params: &SimParams) -> SimData {
     let mut rng = ChaCha8Rng::seed_from_u64(params.seed);
     let n = params.n_cycles;
     let dummy_mz = 500.0_f64;
+
+    // Realized apex: jittered per-seed + sub-cycle when enabled, else pinned.
+    // Drawn BEFORE any signal/noise sampling; the `None` branch consumes no rng
+    // so historical scenarios stay byte-identical.
+    let realized_apex = match params.apex_jitter {
+        Some(range) => {
+            let lo = 3.0f32;
+            let hi = (n as f32 - 4.0).max(lo);
+            (params.apex_cycle + rng.random_range(-range..=range) + rng.random_range(-0.5..=0.5))
+                .clamp(lo, hi)
+        }
+        None => params.apex_cycle,
+    };
 
     // --- Expected intensities: THEORETICAL (library) ratios. ---
     // These drive cosine/scribe. Observed peaks below may deviate (obs_scale).
@@ -231,7 +253,7 @@ pub fn build(params: &SimParams) -> SimData {
         let noise = params.noise_floor * params.height * f.noise_mult;
         let intensities = (0..n)
             .map(|c| {
-                let signal = gaussian(c as f32, params.apex_cycle, params.width_sigma, peak);
+                let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
                 sample_cell(&mut rng, signal, noise)
             })
             .collect();
@@ -251,7 +273,7 @@ pub fn build(params: &SimParams) -> SimData {
         let noise = params.noise_floor * params.height;
         let intensities = (0..n)
             .map(|c| {
-                let signal = gaussian(c as f32, params.apex_cycle, params.width_sigma, peak);
+                let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
                 sample_cell(&mut rng, signal, noise)
             })
             .collect();
@@ -291,7 +313,7 @@ pub fn build(params: &SimParams) -> SimData {
     let chromatograms = ChromatogramCollector::<String, f32> {
         id: 0,
         mobility_ook0: 1.0,
-        rt_seconds: (map((params.apex_cycle as usize).min(n - 1)) as f32) / 1000.0,
+        rt_seconds: (map((realized_apex as usize).min(n - 1)) as f32) / 1000.0,
         precursor_mono_mz: dummy_mz,
         precursor_charge: 2,
         precursor_mz_limits: (dummy_mz - 1.0, dummy_mz + 1.0),
@@ -330,6 +352,7 @@ pub fn build(params: &SimParams) -> SimData {
         extraction,
         fragment_rows: frag_rows,
         precursor_rows: prec_rows,
+        realized_apex_cycle: realized_apex,
     }
 }
 
@@ -418,6 +441,27 @@ mod tests {
         q.density_per_cycle = 0.0;
         q.count = 77;
         assert_eq!(effective_random_count(&q, 5000), 77);
+    }
+
+    #[test]
+    fn apex_jitter_is_deterministic_and_subcycle() {
+        let mut p = SimParams::default();
+        p.n_cycles = 200;
+        p.apex_cycle = 100.0;
+        p.apex_jitter = Some(20.0);
+        let a = build(&p).realized_apex_cycle;
+        let b = build(&p).realized_apex_cycle; // same seed => identical
+        assert_eq!(a, b);
+        assert!((a - 100.0).abs() <= 20.5 + 1e-3);
+        // vary seed => different position
+        let mut q = p.clone();
+        q.seed = p.seed.wrapping_add(1);
+        let c = build(&q).realized_apex_cycle;
+        assert!((a - c).abs() > 1e-6);
+        // no jitter => exact
+        let mut r = p.clone();
+        r.apex_jitter = None;
+        assert_eq!(build(&r).realized_apex_cycle, 100.0);
     }
 
     #[test]

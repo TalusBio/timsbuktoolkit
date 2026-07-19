@@ -116,7 +116,9 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
 /// collect apex-recovery + timing stats. A hit = pass-2 apex within `tol`
 /// cycles of the configured `apex_cycle`.
 pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> SensitivityReport {
-    let true_apex = base.apex_cycle.round() as i64;
+    // Echoed in the report header; each run is scored against its OWN realized
+    // apex (jitter varies it per seed), not this nominal value.
+    let nominal_apex = base.apex_cycle.round() as i64;
     // rt mapping is seed-independent, so one mapper serves every run.
     let map = base.rt_mapper();
 
@@ -139,6 +141,7 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
     let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));
     let t_score = Instant::now();
     for data in &sims {
+        let true_apex = data.realized_apex_cycle.round() as i64;
         match scorer::run_with(&mut scorer, &data.extraction, &map) {
             Ok((pass1, pass2)) => {
                 if (pass1.apex_cycle as i64 - true_apex).abs() <= tol {
@@ -159,7 +162,7 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
     SensitivityReport {
         n: n_runs,
         tol,
-        true_apex,
+        true_apex: nominal_apex,
         build_ms,
         score_ms,
         errors,
