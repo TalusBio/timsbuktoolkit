@@ -1,8 +1,7 @@
 //! Logic for finding the apex of a peptide elution profile.
 //!
-//! This module replaces the old `LocalizationBuffer` and `calculate_scores.rs`.
-//! It implements an efficient, accumulator-based scoring engine that avoids
-//! intermediate data transposition.
+//! An efficient, accumulator-based scoring engine that avoids intermediate
+//! data transposition.
 //!
 //! # Usage
 //!
@@ -545,7 +544,7 @@ impl TraceScorer {
         })
     }
 
-    /// Convenience: compute_traces + suggest_apex. Migration aid.
+    /// Phase-1 entry: compute_traces + suggest_apex (apex location only).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -560,7 +559,7 @@ impl TraceScorer {
         self.suggest_apex(rt_mapper, cycle_offset)
     }
 
-    /// Convenience: compute_traces + suggest_apex + score_at. Migration aid.
+    /// Phase-3 entry: compute_traces + suggest_apex + score_at (full score).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -727,8 +726,9 @@ impl TraceScorer {
 
     /// Compute the apex profile from cosine and scribe traces.
     ///
-    /// apex_profile(t) = C(t) * (0.5 + S_norm(t))
-    /// where C(t) = cosine(t)^3 * I(t)
+    /// apex_profile(t) = C(t) * (s_ratio + S_norm(t)), then coelution/vote
+    /// weighting (see the `apex` module) and optional gaussian blur.
+    /// where C(t) = cosine(t)^cos_pow * I(t)^i_exp   (see ApexConfig)
     ///       S(t) = scribe(t) * I(t)
     ///       S_norm = (S - min(S)) / (max(S) - min(S))
     #[cfg_attr(
