@@ -257,3 +257,118 @@ impl SensitivityReport {
         println!();
     }
 }
+
+/// Present-vs-absent score-discrimination result for one scenario.
+pub struct DiscriminationReport {
+    pub n_pairs: usize,
+    /// ROC-AUC = P(score_present > score_absent), 0.5 tie credit. 1.0 = perfect
+    /// signal/noise separation, 0.5 = useless.
+    pub auc: f64,
+    pub median_present: f32,
+    pub median_absent: f32,
+}
+
+/// ROC-AUC of `present` vs `absent` score populations via the average-rank
+/// Mann-Whitney statistic: `P(present > absent)` with 0.5 credit for ties.
+pub fn roc_auc(present: &[f32], absent: &[f32]) -> f64 {
+    let (np, na) = (present.len(), absent.len());
+    if np == 0 || na == 0 {
+        return f64::NAN;
+    }
+    // Combined values tagged present(true)/absent(false), sorted ascending.
+    let mut all: Vec<(f32, bool)> = present
+        .iter()
+        .map(|&v| (v, true))
+        .chain(absent.iter().map(|&v| (v, false)))
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Sum of average ranks (1-based) assigned to present values.
+    let mut rank_sum_present = 0.0f64;
+    let mut i = 0usize;
+    while i < all.len() {
+        let mut j = i + 1;
+        while j < all.len() && all[j].0 == all[i].0 {
+            j += 1;
+        }
+        // Mean rank of the tie block covering positions (i+1..=j).
+        let avg_rank = ((i + 1 + j) as f64) / 2.0;
+        for entry in &all[i..j] {
+            if entry.1 {
+                rank_sum_present += avg_rank;
+            }
+        }
+        i = j;
+    }
+    let u = rank_sum_present - (np * (np + 1)) as f64 / 2.0;
+    u / (np as f64 * na as f64)
+}
+
+/// Score `n_pairs` matched present/absent realizations and report how well the
+/// production Pass-2 score separates real signal from pure noise. Each pair
+/// shares a seed, so the "absent" twin (all real fragments `obs_scale = 0`) has
+/// IDENTICAL noise + interferents — only the real peak differs.
+pub fn run_discrimination(base: &SimParams, n_pairs: usize) -> DiscriminationReport {
+    let map = base.rt_mapper();
+    let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));
+    let mut present: Vec<f32> = Vec::with_capacity(n_pairs);
+    let mut absent: Vec<f32> = Vec::with_capacity(n_pairs);
+    for i in 0..n_pairs {
+        let mut pp = base.clone();
+        pp.seed = base.seed.wrapping_add(i as u64);
+        // Pure-noise twin: NO real signal at all (fragments AND precursor
+        // zeroed), identical seed => identical noise + interferents. Zeroing
+        // only fragments would leave the precursor isotope peaks in place and
+        // the score would still see real signal.
+        let mut ap = pp.clone();
+        for f in &mut ap.real_fragments {
+            f.obs_scale = 0.0;
+        }
+        ap.precursor_intensity = 0.0;
+        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&pp).extraction, &map) {
+            present.push(s.score);
+        }
+        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&ap).extraction, &map) {
+            absent.push(s.score);
+        }
+    }
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
+    };
+    let auc = roc_auc(&present, &absent);
+    DiscriminationReport {
+        n_pairs,
+        auc,
+        median_present: median(present),
+        median_absent: median(absent),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roc_auc_basic() {
+        assert!((roc_auc(&[3.0, 4.0, 5.0], &[0.0, 1.0, 2.0]) - 1.0).abs() < 1e-9);
+        assert!((roc_auc(&[0.0, 1.0], &[2.0, 3.0]) - 0.0).abs() < 1e-9);
+        assert!((roc_auc(&[1.0, 1.0], &[1.0, 1.0]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn discrimination_high_when_signal_present() {
+        // Genuinely clean: low noise, no injected interferents. A real peptide
+        // vs pure noise must separate near-perfectly.
+        let mut base = SimParams::default();
+        base.n_cycles = 150;
+        base.noise_floor = 0.05;
+        base.random_peaks.enabled = false;
+        let rep = run_discrimination(&base, 200);
+        assert!(
+            rep.auc > 0.9,
+            "clean signal should separate: auc={}",
+            rep.auc
+        );
+        assert!(rep.median_present > rep.median_absent);
+    }
+}
