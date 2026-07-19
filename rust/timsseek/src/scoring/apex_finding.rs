@@ -280,6 +280,36 @@ impl ElutionTraces {
     }
 }
 
+/// Tunable apex-profile knobs. `Default` reproduces the historical `main`
+/// behavior exactly (cos^3 * I^1 base, additive scribe floor 0.5, no blur,
+/// joint-apex snap window 3, all optional weight terms disabled). Ablation
+/// flips individual fields; shipped values live in `Default`.
+#[derive(Debug, Clone)]
+pub struct ApexConfig {
+    /// Cosine exponent in the base profile: `cos^cos_pow`.
+    pub cos_pow: f32,
+    /// Log-intensity exponent in the base profile: `I^i_exp`.
+    pub i_exp: f32,
+    /// Additive scribe floor: `apex = C * (s_ratio + s_norm)`.
+    pub s_ratio: f32,
+    /// Gaussian-blur passes applied to the base profile (0 = none).
+    pub blur_passes: usize,
+    /// Joint-apex snap window: use joint apex if within this many cycles.
+    pub joint_snap: usize,
+}
+
+impl Default for ApexConfig {
+    fn default() -> Self {
+        Self {
+            cos_pow: 3.0,
+            i_exp: 1.0,
+            s_ratio: 0.5,
+            blur_passes: 0,
+            joint_snap: 3,
+        }
+    }
+}
+
 /// The core engine for finding peptide apexes.
 #[derive(Debug)]
 pub struct TraceScorer {
@@ -288,6 +318,7 @@ pub struct TraceScorer {
     coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
+    cfg: ApexConfig,
 }
 
 #[derive(Debug)]
@@ -343,6 +374,7 @@ impl TraceScorer {
                 ),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
+            cfg: ApexConfig::default(),
         }
     }
 
@@ -467,7 +499,9 @@ impl TraceScorer {
 
         // Joint apex: find precursor-fragment agreement, but use clicked cycle if far from it
         let joint_apex = find_joint_apex(&self.cosine_profile, &self.traces.ms1_precursor_trace);
-        let effective_apex = if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize <= 3 {
+        let effective_apex = if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize
+            <= self.cfg.joint_snap
+        {
             joint_apex
         } else {
             cycle
@@ -740,7 +774,7 @@ impl TraceScorer {
         for i in 0..len {
             let cos = self.traces.cosine_trace[i];
             let intensity = self.traces.ms2_log_intensity[i];
-            let c = cos * cos * cos * intensity; // cos^3 * I
+            let c = cos.powf(self.cfg.cos_pow) * intensity.powf(self.cfg.i_exp);
 
             let s = self.traces.ms2_scribe[i] * intensity;
             let s_norm = if s_range > 0.0 {
@@ -749,7 +783,11 @@ impl TraceScorer {
                 0.5 // Degrade to cosine-only when scribe is constant
             };
 
-            self.traces.apex_profile.push(c * (0.5 + s_norm));
+            self.traces.apex_profile.push(c * (self.cfg.s_ratio + s_norm));
+        }
+
+        for _ in 0..self.cfg.blur_passes {
+            gaussblur_in_place(&mut self.traces.apex_profile);
         }
     }
 
