@@ -324,6 +324,26 @@ impl Default for ApexConfig {
     }
 }
 
+/// Reusable per-worker scratch for the apex-profile weight passes. Owned by
+/// `TraceScorer` and reused across candidates so the hot loop never allocates.
+#[derive(Debug, Default)]
+struct ApexScratch {
+    /// Coelution: centered+normalized windows, row-major `[frag * win + j]`.
+    cn: Vec<f32>,
+    /// Coelution: indices of fragments with non-degenerate windows this cycle.
+    active: Vec<usize>,
+    /// Coelution: weighted sum of active unit-window vectors.
+    wacc: Vec<f32>,
+    /// Vote: per-cycle accumulated support across rows.
+    support: Vec<f32>,
+    /// Vote: baseline-subtracted, clipped row.
+    r: Vec<f32>,
+    /// Vote: matched-filtered row.
+    m: Vec<f32>,
+    /// Vote: selection buffer for median/MAD.
+    tmp: Vec<f32>,
+}
+
 /// The core engine for finding peptide apexes.
 #[derive(Debug)]
 pub struct TraceScorer {
@@ -333,6 +353,7 @@ pub struct TraceScorer {
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
     cfg: ApexConfig,
+    apex_scratch: ApexScratch,
 }
 
 #[derive(Debug)]
@@ -389,6 +410,7 @@ impl TraceScorer {
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
             cfg: ApexConfig::default(),
+            apex_scratch: ApexScratch::default(),
         }
     }
 
@@ -816,13 +838,19 @@ impl TraceScorer {
     /// peaks and suppresses uncorrelated random-interferent pileups.
     /// `apex_profile[t] *= 1 + K * max(coel, 0)`. Disabled when K<=0.
     fn apply_coelution_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
-        let k = self.cfg.coel_k;
+        let Self {
+            traces,
+            apex_scratch,
+            cfg,
+            ..
+        } = self;
+        let k = cfg.coel_k;
         if k <= 0.0 {
             return;
         }
-        let w = self.cfg.coel_w.max(1.0) as usize;
+        let w = cfg.coel_w.max(1.0) as usize;
         let collector = &scoring_ctx.chromatograms;
-        let n = self.traces.apex_profile.len();
+        let n = traces.apex_profile.len();
         if n == 0 {
             return;
         }
@@ -843,16 +871,20 @@ impl TraceScorer {
         }
 
         let win = 2 * w + 1;
-        // Centered+normalized window per fragment, row-major [frag * win + j].
-        let mut cn: Vec<f32> = vec![0.0; rows.len() * win];
-        let mut active: Vec<usize> = Vec::with_capacity(rows.len());
-        // Weighted sum of active unit-window vectors (reused per cycle).
-        let mut wacc: Vec<f32> = vec![0.0; win];
+        // Reused scratch: centered+normalized windows [frag * win + j], the
+        // active-fragment index list, and the weighted window-sum vector.
+        let ApexScratch {
+            cn, active, wacc, ..
+        } = apex_scratch;
+        cn.clear();
+        cn.resize(rows.len() * win, 0.0);
+        wacc.clear();
+        wacc.resize(win, 0.0);
 
         for t in 0..n {
             // The weight only ever multiplies apex_profile[t]; a zero cycle
             // stays zero for any coel, so skip its O(rows*win) window work.
-            if self.traces.apex_profile[t] == 0.0 {
+            if traces.apex_profile[t] == 0.0 {
                 continue;
             }
 
@@ -888,7 +920,7 @@ impl TraceScorer {
             wacc[..wl].fill(0.0);
             let mut sw = 0.0f32;
             let mut sw2 = 0.0f32;
-            for &fi in &active {
+            for &fi in active.iter() {
                 let base = fi * win;
                 let wa = rows[fi].1;
                 sw += wa;
@@ -907,7 +939,7 @@ impl TraceScorer {
             } else {
                 0.0
             };
-            self.traces.apex_profile[t] *= 1.0 + k * coel;
+            traces.apex_profile[t] *= 1.0 + k * coel;
         }
     }
 
@@ -922,13 +954,19 @@ impl TraceScorer {
     /// votes; a vote saturates so a 10x-tall interferent counts the same as a
     /// real peak. Disabled when K<=0.
     fn apply_vote_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
-        let vk = self.cfg.vote_k;
+        let Self {
+            traces,
+            apex_scratch,
+            cfg,
+            ..
+        } = self;
+        let vk = cfg.vote_k;
         if vk <= 0.0 {
             return;
         }
-        let tau = self.cfg.vote_tau;
-        let soft = self.cfg.vote_s.max(1e-3);
-        let n = self.traces.apex_profile.len();
+        let tau = cfg.vote_tau;
+        let soft = cfg.vote_s.max(1e-3);
+        let n = traces.apex_profile.len();
         if n == 0 {
             return;
         }
@@ -938,11 +976,17 @@ impl TraceScorer {
         const G: [f32; 5] = [0.13534, 0.60653, 1.0, 0.60653, 0.13534];
         let gsum: f32 = G.iter().sum();
 
-        let mut support = vec![0.0f32; n];
+        // Reused scratch: `support` must start zeroed (accumulated across rows);
+        // r/m/tmp are fully overwritten per row.
+        let ApexScratch {
+            support, r, m, tmp, ..
+        } = apex_scratch;
+        support.clear();
+        support.resize(n, 0.0);
+        r.resize(n, 0.0);
+        m.resize(n, 0.0);
+        tmp.clear();
         let mut wsum = 0.0f32;
-        let mut r = vec![0.0f32; n];
-        let mut m = vec![0.0f32; n];
-        let mut tmp = vec![0.0f32; n];
 
         for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
             let w = scoring_ctx
@@ -977,7 +1021,7 @@ impl TraceScorer {
 
             // Robust scale: MAD of m (both medians via O(n) selection).
             tmp.clear();
-            tmp.extend_from_slice(&m);
+            tmp.extend_from_slice(m.as_slice());
             let mmed = *tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1;
             for t in 0..n {
                 tmp[t] = (m[t] - mmed).abs();
@@ -998,7 +1042,7 @@ impl TraceScorer {
         }
         for t in 0..n {
             let s = support[t] / wsum;
-            self.traces.apex_profile[t] *= 1.0 + vk * s;
+            traces.apex_profile[t] *= 1.0 + vk * s;
         }
     }
 
