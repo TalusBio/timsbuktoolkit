@@ -846,8 +846,16 @@ impl TraceScorer {
         // Centered+normalized window per fragment, row-major [frag * win + j].
         let mut cn: Vec<f32> = vec![0.0; rows.len() * win];
         let mut active: Vec<usize> = Vec::with_capacity(rows.len());
+        // Weighted sum of active unit-window vectors (reused per cycle).
+        let mut wacc: Vec<f32> = vec![0.0; win];
 
         for t in 0..n {
+            // The weight only ever multiplies apex_profile[t]; a zero cycle
+            // stays zero for any coel, so skip its O(rows*win) window work.
+            if self.traces.apex_profile[t] == 0.0 {
+                continue;
+            }
+
             let lo = t.saturating_sub(w);
             let hi = (t + w + 1).min(n);
             let wl = hi - lo;
@@ -872,26 +880,34 @@ impl TraceScorer {
                 }
             }
 
-            let mut num = 0.0f32;
-            let mut den = 0.0f32;
-            for a in 0..active.len() {
-                let ia = active[a];
-                let ba = ia * win;
-                let wa = rows[ia].1;
-                for b in (a + 1)..active.len() {
-                    let ib = active[b];
-                    let bb = ib * win;
-                    let ww = wa * rows[ib].1;
-                    let mut corr = 0.0f32;
-                    for j in 0..wl {
-                        corr += cn[ba + j] * cn[bb + j];
-                    }
-                    num += ww * corr;
-                    den += ww;
+            // Expected-intensity-weighted mean pairwise correlation, computed
+            // in O(active) rather than O(active^2): for unit vectors u_a,
+            //   sum_{a<b} w_a w_b <u_a,u_b> = (||W||^2 - sum w_a^2) / 2,
+            //   sum_{a<b} w_a w_b          = ((sum w_a)^2 - sum w_a^2) / 2,
+            // where W = sum_a w_a u_a. The /2 cancels in the ratio.
+            wacc[..wl].fill(0.0);
+            let mut sw = 0.0f32;
+            let mut sw2 = 0.0f32;
+            for &fi in &active {
+                let base = fi * win;
+                let wa = rows[fi].1;
+                sw += wa;
+                sw2 += wa * wa;
+                for j in 0..wl {
+                    wacc[j] += wa * cn[base + j];
                 }
             }
-            let coel = if den > 0.0 { num / den } else { 0.0 };
-            self.traces.apex_profile[t] *= 1.0 + k * coel.max(0.0);
+            let mut wnorm2 = 0.0f32;
+            for &x in &wacc[..wl] {
+                wnorm2 += x * x;
+            }
+            let den = sw * sw - sw2;
+            let coel = if den > 0.0 {
+                ((wnorm2 - sw2) / den).max(0.0)
+            } else {
+                0.0
+            };
+            self.traces.apex_profile[t] *= 1.0 + k * coel;
         }
     }
 
