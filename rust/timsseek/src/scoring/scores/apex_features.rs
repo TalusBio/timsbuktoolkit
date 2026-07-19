@@ -447,39 +447,13 @@ pub fn compute_split_product<T: KeyLike>(
     }
 }
 
-/// Find the joint precursor-fragment apex (METHODS.md Section 3.3).
-///
-/// joint(t) = C(t) * (0.5 + P(t) / max(P))
-/// If max(P) == 0, degrades to joint(t) = C(t) * 0.5 (pure fragment apex).
-pub fn find_joint_apex(cosine_profile: &[f32], precursor_trace: &[f32]) -> usize {
-    let max_p = precursor_trace.iter().copied().fold(0.0f32, f32::max);
-
-    let mut best_val = f32::NEG_INFINITY;
-    let mut best_idx = 0usize;
-
-    let n = cosine_profile.len().min(precursor_trace.len());
-    for t in 0..n {
-        let p_factor = if max_p > 0.0 {
-            0.5 + precursor_trace[t] / max_p
-        } else {
-            0.5
-        };
-        let joint = cosine_profile[t] * p_factor;
-        if joint > best_val {
-            best_val = joint;
-            best_idx = t;
-        }
-    }
-    best_idx
-}
-
-/// Compute all 11 apex-local features at the joint apex (METHODS.md Section 3.4).
+/// Compute all 11 apex-local features at the apex (METHODS.md Section 3.4).
 ///
 /// `fragments` and `precursors` are the raw chromatogram data.
 /// `expected` contains both fragment and precursor predicted intensities.
 /// `cosine_profile` is C(t) = cos(t)^3 * I(t).
 /// `precursor_trace` is the summed precursor intensity trace.
-/// `joint_apex` is the cycle index from `find_joint_apex`.
+/// `joint_apex` is the apex cycle index (Pass 1's weighted-apex_profile pick).
 /// `n_cycles` is the total number of cycles in the extraction window.
 pub fn compute_apex_features<T: KeyLike + Default>(
     fragments: &MzMajorIntensityArray<T, f32>,
@@ -1153,47 +1127,6 @@ mod tests {
         assert!(result.base_score > 0.0);
         assert!(result.cosine_au > 0.0);
         assert!(result.scribe_au > 0.0);
-    }
-
-    // --- Test 6: joint apex ---
-
-    #[test]
-    fn test_joint_apex_with_precursor() {
-        let n = 30;
-        // Fragment profile peaks at 15
-        let cosine_profile: Vec<f32> = (0..n)
-            .map(|i| {
-                let x = (i as f32 - 15.0) / 3.0;
-                (-x * x / 2.0).exp() * 10.0
-            })
-            .collect();
-        // Precursor trace also peaks at 15
-        let precursor_trace: Vec<f32> = (0..n)
-            .map(|i| {
-                let x = (i as f32 - 15.0) / 4.0;
-                (-x * x / 2.0).exp() * 5.0
-            })
-            .collect();
-
-        let apex = find_joint_apex(&cosine_profile, &precursor_trace);
-        assert_eq!(apex, 15);
-    }
-
-    #[test]
-    fn test_joint_apex_without_precursor() {
-        let n = 30;
-        let cosine_profile: Vec<f32> = (0..n)
-            .map(|i| {
-                let x = (i as f32 - 15.0) / 3.0;
-                (-x * x / 2.0).exp() * 10.0
-            })
-            .collect();
-        // Zero precursor
-        let precursor_trace = vec![0.0f32; n];
-
-        let apex = find_joint_apex(&cosine_profile, &precursor_trace);
-        // Should still find the cosine peak at 15
-        assert_eq!(apex, 15);
     }
 
     // --- Test 7: individual feature tests ---

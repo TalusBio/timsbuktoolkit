@@ -46,7 +46,6 @@ use crate::scoring::scores::apex_features::{
     compute_apex_features,
     compute_split_product,
     compute_weighted_score,
-    find_joint_apex,
 };
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
@@ -479,14 +478,10 @@ impl TraceScorer {
         let delta_next = cycle_val - next_val;
         let delta_second_next = cycle_val - second_next_val;
 
-        // Joint apex: find precursor-fragment agreement, but use clicked cycle if far from it
-        let joint_apex = find_joint_apex(&self.cosine_profile, &self.traces.ms1_precursor_trace);
-        let effective_apex =
-            if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize <= self.cfg.joint_snap {
-                joint_apex
-            } else {
-                cycle
-            };
+        // Unified apex source: Pass 2 scores at Pass 1's weighted-apex_profile
+        // location. `cycle` is `suggested.apex_cycle` (the weighted argmax) — the
+        // single, best-validated apex finder. No re-location on a weaker profile.
+        let effective_apex = cycle;
 
         // 11 features at effective apex
         let n_cycles = self.cosine_profile.len();

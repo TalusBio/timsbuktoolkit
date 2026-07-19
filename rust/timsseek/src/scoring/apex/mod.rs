@@ -26,8 +26,6 @@ pub struct ApexConfig {
     pub s_ratio: f32,
     /// Gaussian-blur passes applied to the base profile (0 = none).
     pub blur_passes: usize,
-    /// Joint-apex snap window: use joint apex if within this many cycles.
-    pub joint_snap: usize,
     /// Ratio-free coelution weight strength (0 = disabled).
     pub coel_k: f32,
     /// Coelution correlation half-window (cycles).
@@ -47,7 +45,6 @@ impl Default for ApexConfig {
             i_exp: 0.75,
             s_ratio: 1.75,
             blur_passes: 1,
-            joint_snap: 1,
             coel_k: 1.0,
             coel_w: 2.0,
             vote_k: 14.0,
