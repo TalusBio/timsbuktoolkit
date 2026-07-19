@@ -48,11 +48,11 @@ impl Default for ApexConfig {
             s_ratio: 1.75,
             blur_passes: 1,
             joint_snap: 1,
-            coel_k: 1.04,
+            coel_k: 1.0,
             coel_w: 2.0,
-            vote_k: 14.43,
-            vote_tau: 1.28,
-            vote_s: 0.42,
+            vote_k: 14.0,
+            vote_tau: 1.3,
+            vote_s: 0.4,
         }
     }
 }
