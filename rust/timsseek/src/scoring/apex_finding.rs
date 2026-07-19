@@ -1,8 +1,7 @@
 //! Logic for finding the apex of a peptide elution profile.
 //!
-//! This module replaces the old `LocalizationBuffer` and `calculate_scores.rs`.
-//! It implements an efficient, accumulator-based scoring engine that avoids
-//! intermediate data transposition.
+//! An efficient, accumulator-based scoring engine that avoids intermediate
+//! data transposition.
 //!
 //! # Usage
 //!
@@ -27,6 +26,7 @@
 
 use std::fmt::Display;
 
+use super::apex::ApexConfig;
 use super::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
@@ -42,7 +42,6 @@ use crate::scoring::scores::apex_features::{
     compute_apex_features,
     compute_split_product,
     compute_weighted_score,
-    find_joint_apex,
 };
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
@@ -288,6 +287,7 @@ pub struct TraceScorer {
     coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
+    cfg: ApexConfig,
 }
 
 #[derive(Debug)]
@@ -343,6 +343,7 @@ impl TraceScorer {
                 ),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
+            cfg: ApexConfig::default(),
         }
     }
 
@@ -465,13 +466,10 @@ impl TraceScorer {
         let delta_next = cycle_val - next_val;
         let delta_second_next = cycle_val - second_next_val;
 
-        // Joint apex: find precursor-fragment agreement, but use clicked cycle if far from it
-        let joint_apex = find_joint_apex(&self.cosine_profile, &self.traces.ms1_precursor_trace);
-        let effective_apex = if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize <= 3 {
-            joint_apex
-        } else {
-            cycle
-        };
+        // Unified apex source: Pass 2 scores at Pass 1's weighted-apex_profile
+        // location. `cycle` is `suggested.apex_cycle` (the weighted argmax) — the
+        // single, best-validated apex finder. No re-location on a weaker profile.
+        let effective_apex = cycle;
 
         // 11 features at effective apex
         let n_cycles = self.cosine_profile.len();
@@ -529,7 +527,7 @@ impl TraceScorer {
         })
     }
 
-    /// Convenience: compute_traces + suggest_apex. Migration aid.
+    /// Phase-1 entry: compute_traces + suggest_apex (apex location only).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -544,7 +542,7 @@ impl TraceScorer {
         self.suggest_apex(rt_mapper, cycle_offset)
     }
 
-    /// Convenience: compute_traces + suggest_apex + score_at. Migration aid.
+    /// Phase-3 entry: compute_traces + suggest_apex + score_at (full score).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -711,8 +709,8 @@ impl TraceScorer {
 
     /// Compute the apex profile from cosine and scribe traces.
     ///
-    /// apex_profile(t) = C(t) * (0.5 + S_norm(t))
-    /// where C(t) = cosine(t)^3 * I(t)
+    /// apex_profile(t) = C(t) * (s_ratio + S_norm(t)), then optional gaussian blur.
+    /// where C(t) = cosine(t)^cos_pow * I(t)^i_exp   (see ApexConfig)
     ///       S(t) = scribe(t) * I(t)
     ///       S_norm = (S - min(S)) / (max(S) - min(S))
     #[cfg_attr(
@@ -740,7 +738,7 @@ impl TraceScorer {
         for i in 0..len {
             let cos = self.traces.cosine_trace[i];
             let intensity = self.traces.ms2_log_intensity[i];
-            let c = cos * cos * cos * intensity; // cos^3 * I
+            let c = cos.powf(self.cfg.cos_pow) * intensity.powf(self.cfg.i_exp);
 
             let s = self.traces.ms2_scribe[i] * intensity;
             let s_norm = if s_range > 0.0 {
@@ -749,7 +747,13 @@ impl TraceScorer {
                 0.5 // Degrade to cosine-only when scribe is constant
             };
 
-            self.traces.apex_profile.push(c * (0.5 + s_norm));
+            self.traces
+                .apex_profile
+                .push(c * (self.cfg.s_ratio + s_norm));
+        }
+
+        for _ in 0..self.cfg.blur_passes {
+            gaussblur_in_place(&mut self.traces.apex_profile);
         }
     }
 

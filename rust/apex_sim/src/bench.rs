@@ -94,6 +94,13 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
     absent.random_peaks.count = 100;
     absent.real_fragments[0].obs_scale = 0.0;
 
+    // Absent precursor at stress level: MS1 precursor undetected (intensity 0),
+    // fragments intact. Guards against over-reliance on precursor signal.
+    let mut absent_prec = base();
+    absent_prec.noise_floor = 0.5;
+    absent_prec.random_peaks.count = 100;
+    absent_prec.precursor_intensity = 0.0;
+
     vec![
         ("clean", clean),
         ("moderate_noise", moderate),
@@ -101,6 +108,101 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
         ("heavy_interference", heavy),
         ("mismatched_library", mismatched),
         ("absent_top_fragment", absent),
+        ("absent_precursor", absent_prec),
+    ]
+}
+
+/// Production-realistic BROAD apex-finding suite (Phase-1 window ~1695 cycles,
+/// RT-unrestricted). Interferents are DENSITY-scaled (fixed per-cycle rate) and
+/// the apex is jittered per seed with a sub-cycle offset, so widening the window
+/// does not make the task artificially easy and the finder faces a moving,
+/// off-grid target. Each scenario is its own line so it can be commented out.
+pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
+    let base = || {
+        let mut p = SimParams::default();
+        p.n_cycles = 1695;
+        p.apex_cycle = 847.0;
+        p.apex_jitter = Some(800.0);
+        p.width_sigma = 1.0;
+        p.seed = 680;
+        p.random_peaks.count = 0;
+        p.random_peaks.density_per_cycle = 0.41; // matches canonical 100/245
+        p
+    };
+
+    let mut clean = base();
+    clean.noise_floor = 0.02;
+    clean.random_peaks.enabled = false;
+
+    let mut moderate = base();
+    moderate.noise_floor = 0.2;
+
+    let mut stress = base();
+    stress.noise_floor = 0.5;
+
+    let mut hard = base();
+    hard.noise_floor = 0.5;
+    hard.random_peaks.hardness = 3.0; // 3x interferent density
+
+    let mut mismatched = base();
+    mismatched.noise_floor = 0.5;
+    for f in &mut mismatched.real_fragments {
+        f.obs_scale = f.theo_intensity;
+        f.theo_intensity = 1.0;
+    }
+
+    vec![
+        ("broad_clean", clean),
+        ("broad_moderate_noise", moderate),
+        ("broad_high_noise+interf", stress),
+        ("broad_hard_3x_density", hard),
+        ("broad_mismatched_library", mismatched),
+    ]
+}
+
+/// Production-realistic NARROW scoring suite (Phase-3 calibrated window ~150
+/// cycles). Same density-scaled interferents + jittered sub-cycle apex; used
+/// for BOTH apex recovery and score discrimination (`run_discrimination`).
+pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
+    let base = || {
+        let mut p = SimParams::default();
+        p.n_cycles = 150;
+        p.apex_cycle = 75.0;
+        p.apex_jitter = Some(60.0);
+        p.width_sigma = 1.0;
+        p.seed = 680;
+        p.random_peaks.count = 0;
+        p.random_peaks.density_per_cycle = 0.41;
+        p
+    };
+
+    let mut clean = base();
+    clean.noise_floor = 0.02;
+    clean.random_peaks.enabled = false;
+
+    let mut moderate = base();
+    moderate.noise_floor = 0.2;
+
+    let mut stress = base();
+    stress.noise_floor = 0.5;
+
+    let mut hard = base();
+    hard.noise_floor = 0.5;
+    hard.random_peaks.hardness = 3.0;
+
+    let mut mismatched = base();
+    mismatched.noise_floor = 0.5;
+    for f in &mut mismatched.real_fragments {
+        f.obs_scale = f.theo_intensity;
+        f.theo_intensity = 1.0;
+    }
+
+    vec![
+        ("narrow_clean", clean),
+        ("narrow_moderate_noise", moderate),
+        ("narrow_high_noise+interf", stress),
+        ("narrow_hard_3x_density", hard),
+        ("narrow_mismatched_library", mismatched),
     ]
 }
 
@@ -108,7 +210,9 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
 /// collect apex-recovery + timing stats. A hit = pass-2 apex within `tol`
 /// cycles of the configured `apex_cycle`.
 pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> SensitivityReport {
-    let true_apex = base.apex_cycle.round() as i64;
+    // Echoed in the report header; each run is scored against its OWN realized
+    // apex (jitter varies it per seed), not this nominal value.
+    let nominal_apex = base.apex_cycle.round() as i64;
     // rt mapping is seed-independent, so one mapper serves every run.
     let map = base.rt_mapper();
 
@@ -131,6 +235,7 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
     let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));
     let t_score = Instant::now();
     for data in &sims {
+        let true_apex = data.realized_apex_cycle.round() as i64;
         match scorer::run_with(&mut scorer, &data.extraction, &map) {
             Ok((pass1, pass2)) => {
                 if (pass1.apex_cycle as i64 - true_apex).abs() <= tol {
@@ -151,7 +256,7 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
     SensitivityReport {
         n: n_runs,
         tol,
-        true_apex,
+        true_apex: nominal_apex,
         build_ms,
         score_ms,
         errors,
@@ -244,5 +349,120 @@ impl SensitivityReport {
             print!("{label}:{c} ");
         }
         println!();
+    }
+}
+
+/// Present-vs-absent score-discrimination result for one scenario.
+pub struct DiscriminationReport {
+    pub n_pairs: usize,
+    /// ROC-AUC = P(score_present > score_absent), 0.5 tie credit. 1.0 = perfect
+    /// signal/noise separation, 0.5 = useless.
+    pub auc: f64,
+    pub median_present: f32,
+    pub median_absent: f32,
+}
+
+/// ROC-AUC of `present` vs `absent` score populations via the average-rank
+/// Mann-Whitney statistic: `P(present > absent)` with 0.5 credit for ties.
+pub fn roc_auc(present: &[f32], absent: &[f32]) -> f64 {
+    let (np, na) = (present.len(), absent.len());
+    if np == 0 || na == 0 {
+        return f64::NAN;
+    }
+    // Combined values tagged present(true)/absent(false), sorted ascending.
+    let mut all: Vec<(f32, bool)> = present
+        .iter()
+        .map(|&v| (v, true))
+        .chain(absent.iter().map(|&v| (v, false)))
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Sum of average ranks (1-based) assigned to present values.
+    let mut rank_sum_present = 0.0f64;
+    let mut i = 0usize;
+    while i < all.len() {
+        let mut j = i + 1;
+        while j < all.len() && all[j].0 == all[i].0 {
+            j += 1;
+        }
+        // Mean rank of the tie block covering positions (i+1..=j).
+        let avg_rank = ((i + 1 + j) as f64) / 2.0;
+        for entry in &all[i..j] {
+            if entry.1 {
+                rank_sum_present += avg_rank;
+            }
+        }
+        i = j;
+    }
+    let u = rank_sum_present - (np * (np + 1)) as f64 / 2.0;
+    u / (np as f64 * na as f64)
+}
+
+/// Score `n_pairs` matched present/absent realizations and report how well the
+/// production Pass-2 score separates real signal from pure noise. Each pair
+/// shares a seed, so the "absent" twin (all real fragments `obs_scale = 0`) has
+/// IDENTICAL noise + interferents — only the real peak differs.
+pub fn run_discrimination(base: &SimParams, n_pairs: usize) -> DiscriminationReport {
+    let map = base.rt_mapper();
+    let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));
+    let mut present: Vec<f32> = Vec::with_capacity(n_pairs);
+    let mut absent: Vec<f32> = Vec::with_capacity(n_pairs);
+    for i in 0..n_pairs {
+        let mut pp = base.clone();
+        pp.seed = base.seed.wrapping_add(i as u64);
+        // Pure-noise twin: NO real signal at all (fragments AND precursor
+        // zeroed), identical seed => identical noise + interferents. Zeroing
+        // only fragments would leave the precursor isotope peaks in place and
+        // the score would still see real signal.
+        let mut ap = pp.clone();
+        for f in &mut ap.real_fragments {
+            f.obs_scale = 0.0;
+        }
+        ap.precursor_intensity = 0.0;
+        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&pp).extraction, &map) {
+            present.push(s.score);
+        }
+        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&ap).extraction, &map) {
+            absent.push(s.score);
+        }
+    }
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
+    };
+    let auc = roc_auc(&present, &absent);
+    DiscriminationReport {
+        n_pairs,
+        auc,
+        median_present: median(present),
+        median_absent: median(absent),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roc_auc_basic() {
+        assert!((roc_auc(&[3.0, 4.0, 5.0], &[0.0, 1.0, 2.0]) - 1.0).abs() < 1e-9);
+        assert!((roc_auc(&[0.0, 1.0], &[2.0, 3.0]) - 0.0).abs() < 1e-9);
+        assert!((roc_auc(&[1.0, 1.0], &[1.0, 1.0]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn discrimination_high_when_signal_present() {
+        // Genuinely clean: low noise, no injected interferents. A real peptide
+        // vs pure noise must separate near-perfectly.
+        let mut base = SimParams::default();
+        base.n_cycles = 150;
+        base.noise_floor = 0.05;
+        base.random_peaks.enabled = false;
+        let rep = run_discrimination(&base, 200);
+        assert!(
+            rep.auc > 0.9,
+            "clean signal should separate: auc={}",
+            rep.auc
+        );
+        assert!(rep.median_present > rep.median_absent);
     }
 }

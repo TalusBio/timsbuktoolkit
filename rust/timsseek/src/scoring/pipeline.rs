@@ -51,7 +51,6 @@ use super::apex_finding::{
     RelativeIntensities,
     TraceScorer,
 };
-use super::full_results::ViewerResult;
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
 use super::results::{
@@ -367,42 +366,6 @@ pub struct Scorer<I: ScorerQueriable> {
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip_all, level = "trace")
-    )]
-    fn build_broad_extraction(
-        &self,
-        item: &QueryItemToScore,
-    ) -> Result<
-        (
-            super::apex_finding::PeptideMetadata,
-            super::apex_finding::Extraction<IonAnnot>,
-        ),
-        SkipReason,
-    > {
-        let extraction = super::extraction::build_extraction(
-            &item.query,
-            item.expected_intensity.clone(),
-            &self.index,
-            &self.broad_tolerance,
-            Some(TOP_N_FRAGMENTS),
-        )?;
-
-        let library_rt = item.query.rt_seconds();
-        let metadata = super::apex_finding::PeptideMetadata {
-            digest: item.digest.clone(),
-            charge: item.query.precursor_charge(),
-            library_id: extraction.chromatograms.id as u32,
-            library_rt,
-            calibrated_rt_seconds: library_rt, // no calibration in broad path
-            ref_mobility_ook0: item.query.mobility_ook0(),
-            ref_precursor_mz: item.query.mono_precursor_mz(),
-        };
-
-        Ok((metadata, extraction))
-    }
-
     /// Calculates the weighted mean ion mobility across fragments and precursors.
     fn get_mobility(item: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> f64 {
         // Calculate weighted mean mobility from fragments
@@ -525,50 +488,6 @@ impl<I: ScorerQueriable> Scorer<I> {
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
-    pub fn score_for_viewer(
-        &self,
-        item: QueryItemToScore,
-        calibration: &CalibrationResult,
-    ) -> Result<ViewerResult, DataProcessingError> {
-        // One-shot worker for the viewer path (not hot).
-        let mut worker =
-            ScoringWorker::new(self.num_cycles(), item.expected_intensity.fragment_len());
-
-        let (metadata, scoring_ctx) = self.build_broad_extraction(&item).map_err(|_| {
-            DataProcessingError::ExpectedNonEmptyData {
-                context: Some("RT out of bounds".into()),
-            }
-        })?;
-
-        let apex_score = worker
-            .scorer
-            .find_apex(&scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))?;
-        let spectral_tol = calibration.get_spectral_tolerance();
-        let isotope_tol = calibration.get_isotope_tolerance();
-        self.execute_secondary_query(&item, &apex_score, &spectral_tol, &isotope_tol, &mut worker);
-        let inner_collector = worker.inner_collector.as_ref().expect("set by secondary");
-        let isotope_collector = worker.isotope_collector.as_ref().expect("set by secondary");
-
-        let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
-        let scored = self.finalize_results(
-            &metadata,
-            nqueries,
-            &apex_score,
-            inner_collector,
-            isotope_collector,
-        )?;
-
-        // Extract chromatograms before it's consumed
-        let chromatograms = scoring_ctx.chromatograms;
-
-        Ok(ViewerResult {
-            traces: worker.scorer.traces.clone(),
-            longitudinal_apex_profile: worker.scorer.traces.apex_profile.clone(),
-            chromatograms,
-            scored,
-        })
-    }
-
     /// Build a chromatogram extraction using calibrated RT and per-query tolerance.
     /// The speclib is NOT mutated — CalibrationResult provides the RT conversion.
     #[cfg_attr(
