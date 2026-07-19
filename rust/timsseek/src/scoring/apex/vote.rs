@@ -75,7 +75,7 @@ fn kernel(
         }
 
         // Matched filter (edge-clamped convolution with G).
-        for t in 0..n {
+        for (t, mt) in m.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (di, &g) in G.iter().enumerate() {
                 let idx = t as isize + di as isize - 2;
@@ -83,7 +83,7 @@ fn kernel(
                     acc += g * r[idx as usize];
                 }
             }
-            m[t] = acc / gsum;
+            *mt = acc / gsum;
         }
 
         // Robust scale: MAD of m (both medians via O(n) selection).

@@ -42,10 +42,10 @@ fn kernel(profile: &mut [f32], rows: &Rows<'_>, w: usize, k: f32, scratch: &mut 
     wacc.clear();
     wacc.resize(win, 0.0);
 
-    for t in 0..n {
+    for (t, p) in profile.iter_mut().enumerate() {
         // The weight only ever multiplies profile[t]; a zero cycle stays zero
         // for any coel, so skip its O(rows*win) window work.
-        if profile[t] == 0.0 {
+        if *p == 0.0 {
             continue;
         }
 
@@ -100,7 +100,7 @@ fn kernel(profile: &mut [f32], rows: &Rows<'_>, w: usize, k: f32, scratch: &mut 
         } else {
             0.0
         };
-        profile[t] *= 1.0 + k * coel;
+        *p *= 1.0 + k * coel;
     }
 }
 
