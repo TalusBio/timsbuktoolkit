@@ -27,6 +27,11 @@
 
 use std::fmt::Display;
 
+use super::apex::{
+    ApexConfig,
+    ApexScratch,
+    weight_profile,
+};
 use super::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
@@ -280,70 +285,6 @@ impl ElutionTraces {
     }
 }
 
-/// Tunable apex-profile knobs. `Default` holds the bench-validated shipping
-/// values (see the apex_sim canonical suite). Ablation flips individual fields;
-/// shipped values live in `Default`.
-#[derive(Debug, Clone)]
-pub struct ApexConfig {
-    /// Cosine exponent in the base profile: `cos^cos_pow`.
-    pub cos_pow: f32,
-    /// Log-intensity exponent in the base profile: `I^i_exp`.
-    pub i_exp: f32,
-    /// Additive scribe floor: `apex = C * (s_ratio + s_norm)`.
-    pub s_ratio: f32,
-    /// Gaussian-blur passes applied to the base profile (0 = none).
-    pub blur_passes: usize,
-    /// Joint-apex snap window: use joint apex if within this many cycles.
-    pub joint_snap: usize,
-    /// Ratio-free coelution weight strength (0 = disabled).
-    pub coel_k: f32,
-    /// Coelution correlation half-window (cycles).
-    pub coel_w: f32,
-    /// Cross-row coincidence-vote weight strength (0 = disabled).
-    pub vote_k: f32,
-    /// Vote sigmoid threshold (z-score units).
-    pub vote_tau: f32,
-    /// Vote sigmoid softness (z-score units).
-    pub vote_s: f32,
-}
-
-impl Default for ApexConfig {
-    fn default() -> Self {
-        Self {
-            cos_pow: 0.5,
-            i_exp: 0.75,
-            s_ratio: 1.75,
-            blur_passes: 1,
-            joint_snap: 1,
-            coel_k: 1.04,
-            coel_w: 2.0,
-            vote_k: 14.43,
-            vote_tau: 1.28,
-            vote_s: 0.42,
-        }
-    }
-}
-
-/// Reusable per-worker scratch for the apex-profile weight passes. Owned by
-/// `TraceScorer` and reused across candidates so the hot loop never allocates.
-#[derive(Debug, Default)]
-struct ApexScratch {
-    /// Coelution: centered+normalized windows, row-major `[frag * win + j]`.
-    cn: Vec<f32>,
-    /// Coelution: indices of fragments with non-degenerate windows this cycle.
-    active: Vec<usize>,
-    /// Coelution: weighted sum of active unit-window vectors.
-    wacc: Vec<f32>,
-    /// Vote: per-cycle accumulated support across rows.
-    support: Vec<f32>,
-    /// Vote: baseline-subtracted, clipped row.
-    r: Vec<f32>,
-    /// Vote: matched-filtered row.
-    m: Vec<f32>,
-    /// Vote: selection buffer for median/MAD.
-    tmp: Vec<f32>,
-}
-
 /// The core engine for finding peptide apexes.
 #[derive(Debug)]
 pub struct TraceScorer {
@@ -450,8 +391,12 @@ impl TraceScorer {
 
         self.compute_pass_1(scoring_ctx)?;
         self.compute_main_score_trace();
-        self.apply_coelution_weighting(scoring_ctx);
-        self.apply_vote_weighting(scoring_ctx);
+        weight_profile(
+            &mut self.traces.apex_profile,
+            scoring_ctx,
+            &self.cfg,
+            &mut self.apex_scratch,
+        );
         self.build_profiles_cached();
 
         Ok(())
@@ -537,13 +482,12 @@ impl TraceScorer {
 
         // Joint apex: find precursor-fragment agreement, but use clicked cycle if far from it
         let joint_apex = find_joint_apex(&self.cosine_profile, &self.traces.ms1_precursor_trace);
-        let effective_apex = if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize
-            <= self.cfg.joint_snap
-        {
-            joint_apex
-        } else {
-            cycle
-        };
+        let effective_apex =
+            if (joint_apex as i64 - cycle as i64).unsigned_abs() as usize <= self.cfg.joint_snap {
+                joint_apex
+            } else {
+                cycle
+            };
 
         // 11 features at effective apex
         let n_cycles = self.cosine_profile.len();
@@ -821,228 +765,13 @@ impl TraceScorer {
                 0.5 // Degrade to cosine-only when scribe is constant
             };
 
-            self.traces.apex_profile.push(c * (self.cfg.s_ratio + s_norm));
+            self.traces
+                .apex_profile
+                .push(c * (self.cfg.s_ratio + s_norm));
         }
 
         for _ in 0..self.cfg.blur_passes {
             gaussblur_in_place(&mut self.traces.apex_profile);
-        }
-    }
-
-    /// Per-cycle ratio-free coelution weighting of the apex profile.
-    ///
-    /// For each cycle, over a +/-W window, center-normalizes each active
-    /// fragment's XIC slice and takes the expected-intensity-weighted mean
-    /// pairwise correlation. Because slices are centered+normalized, this is
-    /// independent of absolute fragment ratios: it rewards genuine co-eluting
-    /// peaks and suppresses uncorrelated random-interferent pileups.
-    /// `apex_profile[t] *= 1 + K * max(coel, 0)`. Disabled when K<=0.
-    fn apply_coelution_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
-        let Self {
-            traces,
-            apex_scratch,
-            cfg,
-            ..
-        } = self;
-        let k = cfg.coel_k;
-        if k <= 0.0 {
-            return;
-        }
-        let w = cfg.coel_w.max(1.0) as usize;
-        let collector = &scoring_ctx.chromatograms;
-        let n = traces.apex_profile.len();
-        if n == 0 {
-            return;
-        }
-
-        // Active fragments: (per-cycle slice, expected-intensity weight).
-        let mut rows: Vec<(&[f32], f32)> = Vec::new();
-        for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
-            let exp = scoring_ctx
-                .expected_intensities
-                .get_fragment(key)
-                .unwrap_or(0.0);
-            if exp > 0.0 {
-                rows.push((chrom, exp));
-            }
-        }
-        if rows.len() < 2 {
-            return;
-        }
-
-        let win = 2 * w + 1;
-        // Reused scratch: centered+normalized windows [frag * win + j], the
-        // active-fragment index list, and the weighted window-sum vector.
-        let ApexScratch {
-            cn, active, wacc, ..
-        } = apex_scratch;
-        cn.clear();
-        cn.resize(rows.len() * win, 0.0);
-        wacc.clear();
-        wacc.resize(win, 0.0);
-
-        for t in 0..n {
-            // The weight only ever multiplies apex_profile[t]; a zero cycle
-            // stays zero for any coel, so skip its O(rows*win) window work.
-            if traces.apex_profile[t] == 0.0 {
-                continue;
-            }
-
-            let lo = t.saturating_sub(w);
-            let hi = (t + w + 1).min(n);
-            let wl = hi - lo;
-            active.clear();
-
-            for (fi, (chrom, _wt)) in rows.iter().enumerate() {
-                let slice = &chrom[lo..hi];
-                let mean: f32 = slice.iter().sum::<f32>() / wl as f32;
-                let base = fi * win;
-                let mut nsq = 0.0f32;
-                for j in 0..wl {
-                    let v = slice[j] - mean;
-                    cn[base + j] = v;
-                    nsq += v * v;
-                }
-                let norm = nsq.sqrt();
-                if norm > 1e-12 {
-                    for j in 0..wl {
-                        cn[base + j] /= norm;
-                    }
-                    active.push(fi);
-                }
-            }
-
-            // Expected-intensity-weighted mean pairwise correlation, computed
-            // in O(active) rather than O(active^2): for unit vectors u_a,
-            //   sum_{a<b} w_a w_b <u_a,u_b> = (||W||^2 - sum w_a^2) / 2,
-            //   sum_{a<b} w_a w_b          = ((sum w_a)^2 - sum w_a^2) / 2,
-            // where W = sum_a w_a u_a. The /2 cancels in the ratio.
-            wacc[..wl].fill(0.0);
-            let mut sw = 0.0f32;
-            let mut sw2 = 0.0f32;
-            for &fi in active.iter() {
-                let base = fi * win;
-                let wa = rows[fi].1;
-                sw += wa;
-                sw2 += wa * wa;
-                for j in 0..wl {
-                    wacc[j] += wa * cn[base + j];
-                }
-            }
-            let mut wnorm2 = 0.0f32;
-            for &x in &wacc[..wl] {
-                wnorm2 += x * x;
-            }
-            let den = sw * sw - sw2;
-            let coel = if den > 0.0 {
-                ((wnorm2 - sw2) / den).max(0.0)
-            } else {
-                0.0
-            };
-            traces.apex_profile[t] *= 1.0 + k * coel;
-        }
-    }
-
-    /// Cross-row coincidence-voting weighting of the apex profile.
-    ///
-    /// Per fragment row: subtract the row's global median (baseline), clip to
-    /// >=0, matched-filter with the known gaussian (sigma~1), then convert to a
-    /// robust soft vote v = sigmoid((z - tau)/s) where z = (m - median(m))/MAD.
-    /// Votes are summed across rows (expected-intensity weighted) into a support
-    /// trace; `apex_profile[t] *= 1 + K * support_norm(t)`. Because interferents
-    /// are independent across rows, only a genuine apex gets many concurrent
-    /// votes; a vote saturates so a 10x-tall interferent counts the same as a
-    /// real peak. Disabled when K<=0.
-    fn apply_vote_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
-        let Self {
-            traces,
-            apex_scratch,
-            cfg,
-            ..
-        } = self;
-        let vk = cfg.vote_k;
-        if vk <= 0.0 {
-            return;
-        }
-        let tau = cfg.vote_tau;
-        let soft = cfg.vote_s.max(1e-3);
-        let n = traces.apex_profile.len();
-        if n == 0 {
-            return;
-        }
-        let collector = &scoring_ctx.chromatograms;
-
-        // Gaussian matched-filter kernel (sigma~1), 5-tap.
-        const G: [f32; 5] = [0.13534, 0.60653, 1.0, 0.60653, 0.13534];
-        let gsum: f32 = G.iter().sum();
-
-        // Reused scratch: `support` must start zeroed (accumulated across rows);
-        // r/m/tmp are fully overwritten per row.
-        let ApexScratch {
-            support, r, m, tmp, ..
-        } = apex_scratch;
-        support.clear();
-        support.resize(n, 0.0);
-        r.resize(n, 0.0);
-        m.resize(n, 0.0);
-        tmp.clear();
-        let mut wsum = 0.0f32;
-
-        for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
-            let w = scoring_ctx
-                .expected_intensities
-                .get_fragment(key)
-                .unwrap_or(0.0);
-            if w <= 0.0 {
-                continue;
-            }
-
-            // Baseline = global median of the row. select_nth is O(n) vs
-            // O(n log n) for a full sort; only the k-th order statistic is
-            // needed, so partial selection is exact and cheaper.
-            tmp.clear();
-            tmp.extend_from_slice(chrom);
-            let med = *tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1;
-            for t in 0..n {
-                r[t] = (chrom[t] - med).max(0.0);
-            }
-
-            // Matched filter (edge-clamped convolution with G).
-            for t in 0..n {
-                let mut acc = 0.0f32;
-                for (di, &g) in G.iter().enumerate() {
-                    let idx = t as isize + di as isize - 2;
-                    if idx >= 0 && (idx as usize) < n {
-                        acc += g * r[idx as usize];
-                    }
-                }
-                m[t] = acc / gsum;
-            }
-
-            // Robust scale: MAD of m (both medians via O(n) selection).
-            tmp.clear();
-            tmp.extend_from_slice(m.as_slice());
-            let mmed = *tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1;
-            for t in 0..n {
-                tmp[t] = (m[t] - mmed).abs();
-            }
-            let mad = (*tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1).max(1e-6);
-
-            // Soft vote per cycle.
-            for t in 0..n {
-                let z = (m[t] - mmed) / mad;
-                let v = 1.0 / (1.0 + (-(z - tau) / soft).exp());
-                support[t] += w * v;
-            }
-            wsum += w;
-        }
-
-        if wsum <= 0.0 {
-            return;
-        }
-        for t in 0..n {
-            let s = support[t] / wsum;
-            traces.apex_profile[t] *= 1.0 + vk * s;
         }
     }
 

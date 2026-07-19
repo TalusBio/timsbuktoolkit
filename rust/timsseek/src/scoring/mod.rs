@@ -1,4 +1,5 @@
 mod accumulator;
+pub mod apex;
 pub mod apex_finding;
 pub mod extraction;
 pub mod full_results;
