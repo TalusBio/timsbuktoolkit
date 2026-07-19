@@ -126,7 +126,7 @@ pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
         p.width_sigma = 1.0;
         p.seed = 680;
         p.random_peaks.count = 0;
-        p.random_peaks.density_per_cycle = 2.5; // ~ current 100/40 density
+        p.random_peaks.density_per_cycle = 0.41; // matches canonical 100/245
         p
     };
 
@@ -172,7 +172,7 @@ pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
         p.width_sigma = 1.0;
         p.seed = 680;
         p.random_peaks.count = 0;
-        p.random_peaks.density_per_cycle = 2.5;
+        p.random_peaks.density_per_cycle = 0.41;
         p
     };
 
