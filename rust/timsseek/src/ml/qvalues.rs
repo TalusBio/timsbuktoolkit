@@ -2,8 +2,15 @@ use super::cv::{
     CrossValidatedScorer,
     DataBuffer,
     FeatureLike,
+    FeatureStat,
+    FoldStats,
     GBMConfig,
     RescoreFeatureStats,
+};
+use super::lda::{
+    DEFAULT_LDA_SHRINKAGE,
+    LdaModel,
+    inverse_normal_transform_columns,
 };
 use super::{
     LabelledScore,
@@ -92,7 +99,7 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
 const RESCORE_SHUFFLE_SEED: u64 = 42;
 
 pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
-    let config = GBMConfig::default();
+    let config = GBMConfig::from_env();
 
     // Canonicalize input order before the seeded shuffle. Upstream
     // stages can emit candidates in an order that drifts with
@@ -132,6 +139,294 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     debug!("Worst:\n{:#?}", scored.last());
 
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+}
+
+/// Sage-style shrinkage-LDA rescorer. Single closed-form linear fit over all
+/// candidates (no CV, no boosting): ~100x cheaper than the GBM path. The FDR
+/// machinery (`assign_qval`, target-decoy competition) is untouched — only the
+/// discriminant score source changes.
+///
+/// Selected at runtime via `TIMSSEEK_RESCORE_MODEL=lda`; the GBM `rescore`
+/// remains the default. See `ml::lda` for the fit details.
+pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
+    use std::time::Instant;
+
+    // Same canonical ordering as the GBM path for run-to-run determinism.
+    data.sort_unstable_by_key(|c| (c.scoring.library_id, c.scoring.precursor_charge));
+
+    let base_names: Vec<&'static str> = data.first().map(|c| c.feature_names()).unwrap_or_default();
+    let base_ncols = base_names.len();
+    let nrows = data.len();
+
+    // Materialize the base feature matrix once as a single flat row-major buffer
+    // (`feat[i*ncols + j]`) — a `Vec<Vec<f64>>` here means one heap allocation
+    // per candidate, which dominates at tens of millions of rows. Track finite
+    // counts per column so we can encode informative missingness below.
+    let t = Instant::now();
+    let mut base: Vec<f64> = Vec::with_capacity(nrows * base_ncols);
+    for c in data.iter() {
+        base.extend(c.as_feature());
+    }
+    debug_assert_eq!(base.len(), nrows * base_ncols);
+    let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
+
+    // Optional raw-matrix dump for offline feature-engineering iteration.
+    // `TIMSSEEK_LDA_DUMP=/prefix` writes `<prefix>.f64` (row-major matrix),
+    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. Pre-transform.
+    if let Ok(prefix) = std::env::var("TIMSSEEK_LDA_DUMP") {
+        dump_feature_matrix(&prefix, &base, nrows, &base_names, &is_decoy);
+    }
+
+    // Center-is-better -> monotone-is-better. Signed mass/mobility/RT errors are
+    // best near zero and bad in *either* tail. A linear discriminant assigns one
+    // sign per feature, so it cannot express "close to zero is good" and drives
+    // these ~22 high-value features to ~0 weight (GBM splits on |err| instead).
+    // Fold each to its magnitude so small error becomes a monotone extreme.
+    // Default on; `TIMSSEEK_LDA_ABS=none` disables.
+    let use_abs = std::env::var("TIMSSEEK_LDA_ABS")
+        .map(|v| !v.eq_ignore_ascii_case("none"))
+        .unwrap_or(true);
+    if use_abs {
+        absolutize_center_better(&mut base, base_ncols, &base_names);
+    }
+
+    // Missingness indicators. GBM handles NaN natively (a missing branch), and
+    // absence of higher-index fragment ions correlates with target/decoy. LDA
+    // imputes NaN -> mean, discarding that signal, so we hand it back as binary
+    // `<feat>_isna` columns for every feature whose missing rate is informative
+    // (neither ~always-present nor ~always-absent). Default on;
+    // `TIMSSEEK_LDA_INDICATORS=none` disables.
+    let use_indicators = std::env::var("TIMSSEEK_LDA_INDICATORS")
+        .map(|v| !v.eq_ignore_ascii_case("none"))
+        .unwrap_or(true);
+    let (feat, names, ncols) = if use_indicators {
+        let (feat, names) = augment_with_missingness(&base, nrows, &base_names);
+        let ncols = names.len();
+        (feat, names, ncols)
+    } else {
+        (base, base_names, base_ncols)
+    };
+    eprintln!(
+        "  LDA: extracted {nrows} x {ncols} feature matrix ({} missingness cols) in {:.2?}",
+        ncols - base_ncols,
+        t.elapsed()
+    );
+    let mut feat = feat;
+
+    // Gaussianize each feature toward the LDA normality assumption. Default on;
+    // `TIMSSEEK_LDA_TRANSFORM=none` disables for A/B comparison.
+    let use_int = std::env::var("TIMSSEEK_LDA_TRANSFORM")
+        .map(|v| !v.eq_ignore_ascii_case("none"))
+        .unwrap_or(true);
+    if use_int {
+        let t = Instant::now();
+        inverse_normal_transform_columns(&mut feat, nrows, ncols);
+        eprintln!(
+            "  LDA: inverse-normal transform ({ncols} cols) in {:.2?}",
+            t.elapsed()
+        );
+    }
+
+    let stats = match LdaModel::fit(&feat, nrows, ncols, &is_decoy, DEFAULT_LDA_SHRINKAGE) {
+        Some(model) => {
+            let t = Instant::now();
+            let mut scores = vec![0.0f64; nrows];
+            model.score_all(&feat, nrows, &mut scores);
+            for (cand, &s) in data.iter_mut().zip(scores.iter()) {
+                cand.assign_score(s);
+            }
+            eprintln!("  LDA: scored {nrows} candidates in {:.2?}", t.elapsed());
+            lda_feature_stats(&names, &feat, nrows, model.coef())
+        }
+        None => {
+            tracing::error!("LDA fit failed (singular or empty class); scores left at zero");
+            vec![FoldStats {
+                fold: 0,
+                feature_stats: Vec::new(),
+                feature_importance: Vec::new(),
+            }]
+        }
+    };
+
+    let mut scored = data;
+    #[cfg(feature = "rayon")]
+    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    #[cfg(not(feature = "rayon"))]
+    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
+
+    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+}
+
+/// Dump the raw feature matrix + labels for offline analysis. Best-effort:
+/// logs and returns on any I/O error rather than aborting the run.
+fn dump_feature_matrix(
+    prefix: &str,
+    base: &[f64],
+    nrows: usize,
+    names: &[&'static str],
+    is_decoy: &[bool],
+) {
+    use std::io::Write;
+    let write = || -> std::io::Result<()> {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{prefix}.f64"))?);
+        // Header: nrows, ncols as u64 little-endian, then row-major f64.
+        f.write_all(&(nrows as u64).to_le_bytes())?;
+        f.write_all(&(names.len() as u64).to_le_bytes())?;
+        // SAFETY: transmuting &[f64] to &[u8] for a bulk write.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(base.as_ptr() as *const u8, base.len() * 8) };
+        f.write_all(bytes)?;
+        f.flush()?;
+
+        let labels: Vec<u8> = is_decoy.iter().map(|&d| u8::from(!d)).collect();
+        std::fs::write(format!("{prefix}.labels"), &labels)?;
+        std::fs::write(format!("{prefix}.names.txt"), names.join("\n"))?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => eprintln!("  LDA: dumped feature matrix to {prefix}.{{f64,labels,names.txt}}"),
+        Err(e) => tracing::error!("feature dump failed: {e}"),
+    }
+}
+
+/// Predicate: does this feature's discriminative structure put the *best*
+/// value at zero, with both tails bad? Such signed features are useless to a
+/// single-sign linear discriminant until folded to their magnitude.
+fn is_center_better(name: &str) -> bool {
+    // Signed per-ion / precursor mass + mobility errors, RT residual, and the
+    // MS1-vs-MS2 mobility offset. Excludes already-magnitude features
+    // (`*_sq_*`, `*_mean_abs_error`, `calibrated_sq_delta_rt`).
+    name == "rt_err"
+        || name == "delta_ms1_ms2_mobility"
+        || name.starts_with("ms2_mz_err_")
+        || name.starts_with("ms2_mob_err_")
+        || name.starts_with("ms1_mz_err_")
+        || name.starts_with("ms1_mob_err_")
+}
+
+/// Replace each center-is-better column with its magnitude (`|x|`, NaN
+/// preserved) so a linear model can weight it monotonically.
+fn absolutize_center_better(base: &mut [f64], base_ncols: usize, base_names: &[&'static str]) {
+    let abs_cols: Vec<usize> = (0..base_ncols)
+        .filter(|&j| is_center_better(base_names[j]))
+        .collect();
+    if abs_cols.is_empty() {
+        return;
+    }
+    for row in base.chunks_exact_mut(base_ncols) {
+        for &j in &abs_cols {
+            row[j] = row[j].abs();
+        }
+    }
+}
+
+/// Fraction of rows that must be missing (and present) for a feature's
+/// missingness to earn its own indicator column. Below this it carries no
+/// signal; above `1 - this` it is ~always absent (equally useless).
+const MISSINGNESS_MIN_RATE: f64 = 0.01;
+
+/// Append a binary `<name>_isna` column (1.0 = the source value was non-finite)
+/// for every base feature whose missing rate lies in
+/// `[MISSINGNESS_MIN_RATE, 1 - MISSINGNESS_MIN_RATE]`. Returns the augmented
+/// row-major matrix and the extended name list.
+///
+/// Indicator names are interned via `Box::leak` (a handful of small strings,
+/// once per run) to satisfy the `&'static str` name contract shared with the
+/// GBM feature-stats path.
+fn augment_with_missingness(
+    base: &[f64],
+    nrows: usize,
+    base_names: &[&'static str],
+) -> (Vec<f64>, Vec<&'static str>) {
+    let base_ncols = base_names.len();
+    // Per-column NaN counts.
+    let mut nan = vec![0u64; base_ncols];
+    for row in base.chunks_exact(base_ncols) {
+        for (j, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                nan[j] += 1;
+            }
+        }
+    }
+    let n = nrows.max(1) as f64;
+    let sel: Vec<usize> = (0..base_ncols)
+        .filter(|&j| {
+            let r = nan[j] as f64 / n;
+            r >= MISSINGNESS_MIN_RATE && r <= 1.0 - MISSINGNESS_MIN_RATE
+        })
+        .collect();
+    if sel.is_empty() {
+        return (base.to_vec(), base_names.to_vec());
+    }
+
+    let ncols = base_ncols + sel.len();
+    let mut names: Vec<&'static str> = base_names.to_vec();
+    for &j in &sel {
+        let nm: &'static str = Box::leak(format!("{}_isna", base_names[j]).into_boxed_str());
+        names.push(nm);
+    }
+
+    let mut out = vec![0.0f64; nrows * ncols];
+    for (i, row) in base.chunks_exact(base_ncols).enumerate() {
+        let obase = i * ncols;
+        out[obase..obase + base_ncols].copy_from_slice(row);
+        for (t, &j) in sel.iter().enumerate() {
+            out[obase + base_ncols + t] = if row[j].is_finite() { 0.0 } else { 1.0 };
+        }
+    }
+    (out, names)
+}
+
+/// Single-"fold" feature stats for the LDA path: per-feature finite means +
+/// NaN ratios, plus `|coef|` as the importance ranking (LDA weights in
+/// standardized space are directly interpretable as importance).
+fn lda_feature_stats(
+    names: &[&'static str],
+    feat: &[f64],
+    nrows: usize,
+    coef: &[f64],
+) -> RescoreFeatureStats {
+    let ncols = names.len();
+    let mut sums = vec![0.0f64; ncols];
+    let mut finite = vec![0u32; ncols];
+    let mut nan = vec![0u32; ncols];
+    for row in feat.chunks_exact(ncols) {
+        for j in 0..ncols {
+            let v = row[j];
+            if v.is_finite() {
+                sums[j] += v;
+                finite[j] += 1;
+            } else {
+                nan[j] += 1;
+            }
+        }
+    }
+    let n = nrows.max(1) as f32;
+    let feature_stats: Vec<FeatureStat> = (0..ncols)
+        .map(|j| FeatureStat {
+            name: names[j],
+            mean: if finite[j] > 0 {
+                (sums[j] / finite[j] as f64) as f32
+            } else {
+                f32::NAN
+            },
+            nan_ratio: nan[j] as f32 / n,
+        })
+        .collect();
+
+    let mut feature_importance: Vec<(&'static str, f32)> = names
+        .iter()
+        .zip(coef.iter())
+        .map(|(nm, c)| (*nm, c.abs() as f32))
+        .collect();
+    feature_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    vec![FoldStats {
+        fold: 0,
+        feature_stats,
+        feature_importance,
+    }]
 }
 
 use crate::models::AA_COUNT_NAMES;
