@@ -63,3 +63,6 @@ plot_calib.py
 LEARNINGS.md
 research.md
 reading.md
+
+# Local bench outputs, logs, feature dumps (repo-local, never tracked)
+bench_out/

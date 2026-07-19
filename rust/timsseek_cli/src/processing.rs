@@ -24,6 +24,7 @@ use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::{
     RescoreFeatureStats,
     rescore,
+    rescore_lda,
 };
 use timsseek::rt_calibration::{
     CalibRtError,
@@ -384,7 +385,17 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    let (data, feature_stats) = rescore(competed);
+    // Model selectable at runtime; GBM is the default. `lda` = Sage-style
+    // shrinkage LDA (see timsseek::ml::lda), ~100x cheaper.
+    let use_lda = std::env::var("TIMSSEEK_RESCORE_MODEL")
+        .map(|v| v.eq_ignore_ascii_case("lda"))
+        .unwrap_or(false);
+    let (data, feature_stats) = if use_lda {
+        eprintln!("  (rescore model: LDA)");
+        rescore_lda(competed)
+    } else {
+        rescore(competed)
+    };
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 

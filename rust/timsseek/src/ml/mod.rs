@@ -1,7 +1,11 @@
 pub mod cv;
+pub mod lda;
 pub mod qvalues;
 pub use cv::RescoreFeatureStats;
-pub use qvalues::rescore;
+pub use qvalues::{
+    rescore,
+    rescore_lda,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetDecoy {
