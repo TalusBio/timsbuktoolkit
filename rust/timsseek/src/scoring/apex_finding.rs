@@ -296,6 +296,10 @@ pub struct ApexConfig {
     pub blur_passes: usize,
     /// Joint-apex snap window: use joint apex if within this many cycles.
     pub joint_snap: usize,
+    /// Ratio-free coelution weight strength (0 = disabled).
+    pub coel_k: f32,
+    /// Coelution correlation half-window (cycles).
+    pub coel_w: f32,
 }
 
 impl Default for ApexConfig {
@@ -306,6 +310,8 @@ impl Default for ApexConfig {
             s_ratio: 1.75,
             blur_passes: 1,
             joint_snap: 1,
+            coel_k: 1.04,
+            coel_w: 2.0,
         }
     }
 }
@@ -414,6 +420,7 @@ impl TraceScorer {
 
         self.compute_pass_1(scoring_ctx)?;
         self.compute_main_score_trace();
+        self.apply_coelution_weighting(scoring_ctx);
         self.build_profiles_cached();
 
         Ok(())
@@ -788,6 +795,94 @@ impl TraceScorer {
 
         for _ in 0..self.cfg.blur_passes {
             gaussblur_in_place(&mut self.traces.apex_profile);
+        }
+    }
+
+    /// Per-cycle ratio-free coelution weighting of the apex profile.
+    ///
+    /// For each cycle, over a +/-W window, center-normalizes each active
+    /// fragment's XIC slice and takes the expected-intensity-weighted mean
+    /// pairwise correlation. Because slices are centered+normalized, this is
+    /// independent of absolute fragment ratios: it rewards genuine co-eluting
+    /// peaks and suppresses uncorrelated random-interferent pileups.
+    /// `apex_profile[t] *= 1 + K * max(coel, 0)`. Disabled when K<=0.
+    fn apply_coelution_weighting<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) {
+        let k = self.cfg.coel_k;
+        if k <= 0.0 {
+            return;
+        }
+        let w = self.cfg.coel_w.max(1.0) as usize;
+        let collector = &scoring_ctx.chromatograms;
+        let n = self.traces.apex_profile.len();
+        if n == 0 {
+            return;
+        }
+
+        // Active fragments: (per-cycle slice, expected-intensity weight).
+        let mut rows: Vec<(&[f32], f32)> = Vec::new();
+        for ((key, _mz), chrom) in collector.fragments.iter_mzs() {
+            let exp = scoring_ctx
+                .expected_intensities
+                .get_fragment(key)
+                .unwrap_or(0.0);
+            if exp > 0.0 {
+                rows.push((chrom, exp));
+            }
+        }
+        if rows.len() < 2 {
+            return;
+        }
+
+        let win = 2 * w + 1;
+        // Centered+normalized window per fragment, row-major [frag * win + j].
+        let mut cn: Vec<f32> = vec![0.0; rows.len() * win];
+        let mut active: Vec<usize> = Vec::with_capacity(rows.len());
+
+        for t in 0..n {
+            let lo = t.saturating_sub(w);
+            let hi = (t + w + 1).min(n);
+            let wl = hi - lo;
+            active.clear();
+
+            for (fi, (chrom, _wt)) in rows.iter().enumerate() {
+                let slice = &chrom[lo..hi];
+                let mean: f32 = slice.iter().sum::<f32>() / wl as f32;
+                let base = fi * win;
+                let mut nsq = 0.0f32;
+                for j in 0..wl {
+                    let v = slice[j] - mean;
+                    cn[base + j] = v;
+                    nsq += v * v;
+                }
+                let norm = nsq.sqrt();
+                if norm > 1e-12 {
+                    for j in 0..wl {
+                        cn[base + j] /= norm;
+                    }
+                    active.push(fi);
+                }
+            }
+
+            let mut num = 0.0f32;
+            let mut den = 0.0f32;
+            for a in 0..active.len() {
+                let ia = active[a];
+                let ba = ia * win;
+                let wa = rows[ia].1;
+                for b in (a + 1)..active.len() {
+                    let ib = active[b];
+                    let bb = ib * win;
+                    let ww = wa * rows[ib].1;
+                    let mut corr = 0.0f32;
+                    for j in 0..wl {
+                        corr += cn[ba + j] * cn[bb + j];
+                    }
+                    num += ww * corr;
+                    den += ww;
+                }
+            }
+            let coel = if den > 0.0 { num / den } else { 0.0 };
+            self.traces.apex_profile[t] *= 1.0 + k * coel.max(0.0);
         }
     }
 
