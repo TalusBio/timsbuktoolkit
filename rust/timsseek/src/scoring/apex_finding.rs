@@ -301,11 +301,11 @@ pub struct ApexConfig {
 impl Default for ApexConfig {
     fn default() -> Self {
         Self {
-            cos_pow: 3.0,
-            i_exp: 1.0,
-            s_ratio: 0.5,
-            blur_passes: 0,
-            joint_snap: 3,
+            cos_pow: 0.5,
+            i_exp: 0.75,
+            s_ratio: 1.75,
+            blur_passes: 1,
+            joint_snap: 1,
         }
     }
 }
