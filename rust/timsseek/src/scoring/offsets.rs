@@ -189,7 +189,12 @@ impl MzMobilityOffsets {
         let mut ms2 = MzMobilityStatsCollector::default();
         let pct_to_abs = self.ref_mobility / 100.0;
 
-        for v in self.ms2.get_values_sorted().iter().take(FRAGMENT_OBS_MOB_TOP_N) {
+        for v in self
+            .ms2
+            .get_values_sorted()
+            .iter()
+            .take(FRAGMENT_OBS_MOB_TOP_N)
+        {
             if v.mobility_error_pct.is_nan() {
                 continue;
             }

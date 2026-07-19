@@ -66,7 +66,7 @@ class TimsseekRunner:
             self.config_dict = self.default_timsseek_config()
 
         logger.info("Building release versions")
-        subprocess.run(["cargo", "b", "--release"], check=True)
+        subprocess.run(["cargo", "b", "--release", "--bin", "timsseek"], check=True)
 
     def loggable_config_dict(self) -> dict[str, Any]:
         out = {}
