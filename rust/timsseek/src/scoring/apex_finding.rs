@@ -937,11 +937,12 @@ impl TraceScorer {
                 continue;
             }
 
-            // Baseline = global median of the row.
+            // Baseline = global median of the row. select_nth is O(n) vs
+            // O(n log n) for a full sort; only the k-th order statistic is
+            // needed, so partial selection is exact and cheaper.
             tmp.clear();
             tmp.extend_from_slice(chrom);
-            tmp.sort_unstable_by(f32::total_cmp);
-            let med = tmp[n / 2];
+            let med = *tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1;
             for t in 0..n {
                 r[t] = (chrom[t] - med).max(0.0);
             }
@@ -958,16 +959,14 @@ impl TraceScorer {
                 m[t] = acc / gsum;
             }
 
-            // Robust scale: MAD of m.
+            // Robust scale: MAD of m (both medians via O(n) selection).
             tmp.clear();
             tmp.extend_from_slice(&m);
-            tmp.sort_unstable_by(f32::total_cmp);
-            let mmed = tmp[n / 2];
+            let mmed = *tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1;
             for t in 0..n {
                 tmp[t] = (m[t] - mmed).abs();
             }
-            tmp.sort_unstable_by(f32::total_cmp);
-            let mad = tmp[n / 2].max(1e-6);
+            let mad = (*tmp.select_nth_unstable_by(n / 2, f32::total_cmp).1).max(1e-6);
 
             // Soft vote per cycle.
             for t in 0..n {
