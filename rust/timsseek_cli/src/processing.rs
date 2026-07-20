@@ -600,12 +600,33 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         .collect();
 
     if main_lookup.is_some() {
-        info!(
-            "Calibration: {} of {} calibrants matched in main speclib (>={} shared fragments)",
-            points.len(),
-            candidates.len(),
-            MIN_SHARED_FRAGMENTS,
-        );
+        let matched = points.len();
+        let total = candidates.len();
+        let rate = if total > 0 {
+            matched as f64 / total as f64
+        } else {
+            0.0
+        };
+        // Surface a collapsing cross-library match loudly — otherwise it silently
+        // becomes a ZeroRange grid -> identity fallback -> ~0 IDs, with no hint why.
+        if matched < 2 || rate < 0.10 {
+            warn!(
+                "Calibration: only {}/{} calibrants ({:.1}%) matched the main speclib (>= {} shared fragments). \
+                 Calibration will fail or degrade (likely ZeroRange -> fallback). Common causes: main speclib \
+                 entries carry < {} usable fragments (e.g. over-aggressive fragment filtering on load), or the \
+                 calib lib and main speclib m/z scales don't align.",
+                matched,
+                total,
+                rate * 100.0,
+                MIN_SHARED_FRAGMENTS,
+                MIN_SHARED_FRAGMENTS,
+            );
+        } else {
+            info!(
+                "Calibration: {} of {} calibrants matched in main speclib (>={} shared fragments)",
+                matched, total, MIN_SHARED_FRAGMENTS,
+            );
+        }
     }
 
     let (min_x, max_x, min_y, max_y) = points.iter().fold(

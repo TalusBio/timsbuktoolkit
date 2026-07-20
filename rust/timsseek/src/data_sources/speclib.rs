@@ -494,45 +494,28 @@ pub enum SpeclibFormat {
 }
 
 impl SpeclibFormat {
-    pub fn detect_from_path(path: &Path) -> Result<Self, LibraryReadingError> {
+    /// Detect a native timsseek format by EXTENSION ONLY. Returns `None` for
+    /// anything else (including `.speclib`), which routes to the timsquery
+    /// bridge.
+    ///
+    /// Extension-only is deliberate: msgpack has no reliable magic byte, so a
+    /// content sniff would misclaim raw binaries like `.speclib` as msgpack (as
+    /// the removed `detect_from_content` did). Convention is to use the native
+    /// extensions.
+    pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
-        if path_str.ends_with(".msgpack.zst") {
-            Ok(SpeclibFormat::MessagePackZstd)
+        // Accept both `.zst` and `.zstd` — DIA-NN/user pipelines use either.
+        if path_str.ends_with(".msgpack.zst") || path_str.ends_with(".msgpack.zstd") {
+            Some(SpeclibFormat::MessagePackZstd)
         } else if path_str.ends_with(".msgpack") {
-            Ok(SpeclibFormat::MessagePack)
-        } else if path_str.ends_with(".ndjson.zst") {
-            Ok(SpeclibFormat::NdJsonZstd)
+            Some(SpeclibFormat::MessagePack)
+        } else if path_str.ends_with(".ndjson.zst") || path_str.ends_with(".ndjson.zstd") {
+            Some(SpeclibFormat::NdJsonZstd)
         } else if path_str.ends_with(".ndjson") {
-            Ok(SpeclibFormat::NdJson)
+            Some(SpeclibFormat::NdJson)
         } else {
-            // Try to detect by reading first few bytes
-            Self::detect_from_content(path)
-        }
-    }
-
-    fn detect_from_content(path: &Path) -> Result<Self, LibraryReadingError> {
-        let file =
-            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
-                source: e,
-                context: "Error opening file for format detection",
-                path: PathBuf::from(path),
-            })?;
-
-        let mut reader = BufReader::new(file);
-        let mut buffer = [0u8; 8];
-
-        match reader.read(&mut buffer) {
-            Ok(bytes_read) if bytes_read >= 4 => {
-                if buffer[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
-                    Ok(SpeclibFormat::MessagePackZstd)
-                } else if buffer[0] == b'{' {
-                    Ok(SpeclibFormat::NdJson)
-                } else {
-                    Ok(SpeclibFormat::MessagePack)
-                }
-            }
-            _ => Ok(SpeclibFormat::NdJson),
+            None
         }
     }
 }
@@ -716,31 +699,41 @@ impl Speclib {
         self.elems.len()
     }
 
+    /// Mean number of fragments per entry (0.0 for an empty library).
+    pub fn avg_fragments(&self) -> f64 {
+        if self.elems.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self
+            .elems
+            .iter()
+            .map(|e| e.expected_intensity.fragment_len())
+            .sum();
+        total as f64 / self.elems.len() as f64
+    }
+
     pub fn from_file(
         path: &Path,
         decoy_strategy: crate::models::DecoyStrategy,
     ) -> Result<Self, LibraryReadingError> {
-        // First try to detect if it's one of our native formats (msgpack/ndjson)
-        match SpeclibFormat::detect_from_path(path) {
-            Ok(format) => {
-                // Try to load with native format
-                match Self::from_file_with_format(path, format, decoy_strategy) {
-                    Ok(speclib) => return Ok(speclib),
-                    Err(e) => {
-                        tracing::debug!(
-                            "Failed to load as native format, trying timsquery fallback: {:?}",
-                            e
-                        );
-                    }
-                }
-            }
-            Err(_) => {
-                tracing::debug!("Could not detect native format, trying timsquery fallback");
-            }
+        // Native timsseek formats are matched by EXTENSION ONLY. A native
+        // extension commits to the native reader and surfaces its error, rather
+        // than silently swallowing it and mis-routing to the bridge (the old
+        // behavior). A `.speclib` matches no native extension -> falls through
+        // to the bridge -> timsquery registry -> binary reader.
+        if let Some(format) = SpeclibFormat::detect_from_extension(path) {
+            tracing::info!(
+                "Loading native speclib format ({:?}) from {}",
+                format,
+                path.display()
+            );
+            return Self::from_file_with_format(path, format, decoy_strategy);
         }
 
+        // Terminal source: bridge to the timsquery reader registry (DIA-NN
+        // TSV/parquet/.speclib, Spectronaut, Skyline, JSON), then convert.
         tracing::info!(
-            "Attempting to load library using timsquery format detection: {}",
+            "Loading library via timsquery format detection: {}",
             path.display()
         );
         let collection = read_timsquery_library(path)?;
@@ -1059,6 +1052,35 @@ mod tests {
                 meta: SpeclibMeta::default(),
             })
         }
+    }
+
+    #[test]
+    fn test_detect_native_format_by_extension() {
+        use std::path::Path;
+        // Both .zst and .zstd must map to the native zstd readers.
+        for ext in ["lib.msgpack.zst", "lib.msgpack.zstd"] {
+            assert!(matches!(
+                SpeclibFormat::detect_from_extension(Path::new(ext)),
+                Some(SpeclibFormat::MessagePackZstd)
+            ));
+        }
+        for ext in ["lib.ndjson.zst", "lib.ndjson.zstd"] {
+            assert!(matches!(
+                SpeclibFormat::detect_from_extension(Path::new(ext)),
+                Some(SpeclibFormat::NdJsonZstd)
+            ));
+        }
+        assert!(matches!(
+            SpeclibFormat::detect_from_extension(Path::new("lib.msgpack")),
+            Some(SpeclibFormat::MessagePack)
+        ));
+        assert!(matches!(
+            SpeclibFormat::detect_from_extension(Path::new("lib.ndjson")),
+            Some(SpeclibFormat::NdJson)
+        ));
+        // A .speclib must NOT be claimed as native -> routes to the bridge.
+        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.speclib")).is_none());
+        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.tsv")).is_none());
     }
 
     #[test]

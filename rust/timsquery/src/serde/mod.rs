@@ -1,5 +1,6 @@
 pub mod chromatogram_output;
 mod diann_io;
+pub mod diann_speclib_io;
 mod elution_group_inputs;
 pub mod index_serde;
 mod library_file;

@@ -243,21 +243,72 @@ fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
     }
 }
 
+/// Replace every occurrence of `needle` in `haystack`, matching ignoring ASCII
+/// case, with `replacement`. `needle` must be ASCII (UNIMOD tags are). ASCII-only
+/// lowercasing preserves byte length, so match indices stay aligned with the
+/// original (UTF-8-safe) string.
+fn replace_ascii_ci(haystack: &str, needle: &str, replacement: &str) -> String {
+    debug_assert!(needle.is_ascii());
+    let hay_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if hay_lower[i..].starts_with(&needle_lower) {
+            out.push_str(replacement);
+            i += needle.len();
+        } else {
+            let ch = haystack[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 /// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
-/// ProForma. Strips `_..._` wrapping used by DIA-NN and normalizes UNIMOD tag
-/// casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`). Pass-through otherwise.
+/// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
+/// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
+/// normalizes UNIMOD tag casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`).
+/// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
+/// requires. Pass-through for plain sequences.
+///
 /// Off the hot path — allocates on every replacement, which is fine at load.
 pub fn normalize_to_proforma(raw: &str) -> String {
     let trimmed = raw.trim_matches('_');
-    // Fast path: plain-AA sequences (no mod tags) skip the replace chain.
-    if !trimmed.contains('[') {
+    // Fast path: plain-AA sequences (no mod tags) skip the rewrite chain.
+    if !trimmed.contains('[') && !trimmed.contains('(') {
         return trimmed.to_owned();
     }
-    // Longer prefixes first so `[Uni...` doesn't partially-rewrite over `[U:`.
-    trimmed
-        .replace("[UniMod:", "[UNIMOD:")
-        .replace("[Unimod:", "[UNIMOD:")
-        .replace("[U:", "[UNIMOD:")
+
+    // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
+    // brackets, e.g. `C[UNIMOD:4]`. Convert the openers (case-insensitively —
+    // `UniMod`/`unimod`/`UNIMOD` all appear in the wild), then the matching
+    // closers. Longer token first so `(unimod:` isn't shadowed by `(u:`.
+    //
+    // Only rewrite `)` -> `]` when we actually opened a paren-form UNIMOD tag.
+    // Spectronaut writes bracket mods with parens *inside* the name, e.g.
+    // `C[Carbamidomethyl (C)]`; a blanket `)` -> `]` would corrupt those.
+    let lower = trimmed.to_ascii_lowercase();
+    let has_paren_unimod = lower.contains("(unimod:") || lower.contains("(u:");
+    let mut s = replace_ascii_ci(trimmed, "(unimod:", "[UNIMOD:");
+    s = replace_ascii_ci(&s, "(u:", "[UNIMOD:");
+    if has_paren_unimod {
+        s = s.replace(')', "]");
+    }
+
+    // Normalize any pre-existing bracket casing likewise.
+    let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
+    s = replace_ascii_ci(&s, "[u:", "[UNIMOD:");
+
+    // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
+    if s.starts_with('[')
+        && let Some(close) = s.find(']')
+        && s[close + 1..].chars().next().is_some_and(|c| c != '-')
+    {
+        s.insert(close + 1, '-');
+    }
+    s
 }
 
 #[cfg(test)]
@@ -329,6 +380,65 @@ mod tests {
             normalize_to_proforma("PEPTC[U:4]IDEK"),
             "PEPTC[UNIMOD:4]IDEK"
         );
+    }
+
+    #[test]
+    fn normalize_diann_paren_unimod() {
+        // DIA-NN parenthesised mods -> ProForma brackets (internal residue mod).
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Case-insensitive on the tag.
+        assert_eq!(
+            normalize_to_proforma("AAC(unimod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("AAC(UNIMOD:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Multiple mods in one peptide.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M(UniMod:35)K"),
+            "AAC[UNIMOD:4]M[UNIMOD:35]K"
+        );
+    }
+
+    #[test]
+    fn normalize_diann_paren_nterm_gets_dash() {
+        // A leading (N-terminal) mod must become `[UNIMOD:n]-SEQ`.
+        assert_eq!(
+            normalize_to_proforma("(UniMod:1)AACDEK"),
+            "[UNIMOD:1]-AACDEK"
+        );
+    }
+
+    #[test]
+    fn parse_diann_paren_unimod_roundtrips() {
+        // The end-to-end path the load uses: normalize then parse. Parenthesised
+        // DIA-NN mods must parse (else the parse gate disables sequence features).
+        let norm = normalize_to_proforma("AAC(UniMod:4)DEK");
+        let p = parse_sequence(&norm).expect("paren UniMod must parse");
+        assert_eq!(p.residues.len(), 6);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn normalize_spectronaut_parens_in_brackets_untouched() {
+        // Spectronaut writes mod names with parens INSIDE brackets. The DIA-NN
+        // paren->bracket conversion must not touch these (no `(unimod:` opener).
+        assert_eq!(
+            normalize_to_proforma("_C[Carbamidomethyl (C)]PEPK_"),
+            "C[Carbamidomethyl (C)]PEPK"
+        );
+    }
+
+    #[test]
+    fn normalize_skyline_nterm_mass_gets_dash() {
+        // Skyline N-terminal mass mod -> ProForma `[+42]-SEQ`.
+        assert_eq!(normalize_to_proforma("[+42]AACDEK"), "[+42]-AACDEK");
     }
 
     #[test]
