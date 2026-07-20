@@ -365,6 +365,51 @@ fn replace_ascii_ci(haystack: &str, needle: &str, replacement: &str) -> String {
     out
 }
 
+/// Convert DIA-NN parenthesised UNIMOD mods to ProForma brackets: each
+/// case-insensitive `(unimod:` / `(u:` opener becomes `[UNIMOD:` and the single
+/// `)` that closes it becomes `]`. Any other paren — notably `)` inside a bracket
+/// mod name like `[Carbamidomethyl (C)]` — is left untouched.
+fn convert_paren_unimod(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let opener_len = if lower[i..].starts_with("(unimod:") {
+            Some("(unimod:".len())
+        } else if lower[i..].starts_with("(u:") {
+            Some("(u:".len())
+        } else {
+            None
+        };
+        match opener_len {
+            Some(len) => {
+                out.push_str("[UNIMOD:");
+                i += len;
+                let rest = &s[i..];
+                match rest.find(')') {
+                    // The id (ASCII digits) up to the matching close paren.
+                    Some(rel) => {
+                        out.push_str(&rest[..rel]);
+                        out.push(']');
+                        i += rel + 1; // consume ')'
+                    }
+                    // Malformed (no closer) — copy the remainder verbatim.
+                    None => {
+                        out.push_str(rest);
+                        i = s.len();
+                    }
+                }
+            }
+            None => {
+                let ch = s[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
 /// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
 /// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
@@ -381,20 +426,10 @@ pub fn normalize_to_proforma(raw: &str) -> String {
     }
 
     // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
-    // brackets, e.g. `C[UNIMOD:4]`. Convert the openers (case-insensitively —
-    // `UniMod`/`unimod`/`UNIMOD` all appear in the wild), then the matching
-    // closers. Longer token first so `(unimod:` isn't shadowed by `(u:`.
-    //
-    // Only rewrite `)` -> `]` when we actually opened a paren-form UNIMOD tag.
-    // Spectronaut writes bracket mods with parens *inside* the name, e.g.
-    // `C[Carbamidomethyl (C)]`; a blanket `)` -> `]` would corrupt those.
-    let lower = trimmed.to_ascii_lowercase();
-    let has_paren_unimod = lower.contains("(unimod:") || lower.contains("(u:");
-    let mut s = replace_ascii_ci(trimmed, "(unimod:", "[UNIMOD:");
-    s = replace_ascii_ci(&s, "(u:", "[UNIMOD:");
-    if has_paren_unimod {
-        s = s.replace(')', "]");
-    }
+    // brackets, e.g. `C[UNIMOD:4]`. Convert each opener and ONLY its matching
+    // `)` (see `convert_paren_unimod`) — never a blanket `)` replace, which would
+    // corrupt parens inside a bracket mod name, e.g. `C[Carbamidomethyl (C)]`.
+    let s = convert_paren_unimod(trimmed);
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
@@ -522,6 +557,16 @@ mod tests {
         assert_eq!(p.residues.len(), 6);
         assert_eq!(p.mods.len(), 1);
         assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn normalize_mixed_paren_unimod_and_bracket_paren_untouched() {
+        // A paren UNIMOD tag AND a bracket mod whose name contains `)`: only the
+        // UNIMOD `)` converts; the `(M)` inside the bracket name stays intact.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M[Oxidation (M)]K"),
+            "AAC[UNIMOD:4]M[Oxidation (M)]K"
+        );
     }
 
     #[test]
