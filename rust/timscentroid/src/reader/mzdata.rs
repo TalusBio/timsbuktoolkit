@@ -87,6 +87,10 @@ impl RawReader for MzdataReader {
         false
     }
 
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["mzML", "mzml"]
+    }
+
     fn read(
         &self,
         src: &ResolvedSource,

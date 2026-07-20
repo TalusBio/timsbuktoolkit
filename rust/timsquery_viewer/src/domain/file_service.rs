@@ -71,8 +71,10 @@ impl FileService {
             ..Default::default()
         };
 
-        let index = load_index_auto(location, Some(config))
+        let (index, index_source) = load_index_auto(location, Some(config))
             .map_err(|e| ViewerError::General(format!("Failed to load index: {:?}", e)))?;
+        // Surface the load mechanism (cache reuse vs raw build + reader).
+        tracing::info!("Index source: {index_source}");
 
         Ok(Arc::new(index))
     }

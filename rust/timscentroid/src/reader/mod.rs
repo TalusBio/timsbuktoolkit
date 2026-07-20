@@ -151,6 +151,13 @@ pub trait RawReader: Send + Sync {
         true
     }
 
+    /// Extensions this reader claims for single-FILE inputs, for building
+    /// file-dialog / help filters (no leading dot, e.g. `["mzML", "mzml"]`).
+    /// Directory formats (`.d`) return `&[]` — they are picked as folders.
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Build the index. `src` is one local dir holding the staged manifest;
     /// open `src.entry_path()`.
     fn read(
@@ -172,6 +179,16 @@ impl ReaderRegistry {
         #[cfg(feature = "mzdata")]
         v.push(Box::new(crate::reader::mzdata::MzdataReader));
         Self(v)
+    }
+
+    /// The union of single-file extensions claimed by all registered readers —
+    /// the single source of truth for "what raw files can we open" (dialog
+    /// filters, help text). Directory formats (`.d`) are excluded.
+    pub fn file_extensions(&self) -> Vec<&'static str> {
+        self.0
+            .iter()
+            .flat_map(|r| r.file_extensions().iter().copied())
+            .collect()
     }
 
     /// Select the backend for `uri`. First `Yes` wins; `Maybe`s are
@@ -221,6 +238,34 @@ fn path_ends_with(uri: &Uri, suffix_lower: &str) -> bool {
         .trim_end_matches('/')
         .to_ascii_lowercase()
         .ends_with(suffix_lower)
+}
+
+/// Build an eager index from a LOCAL raw artifact by dispatching through the
+/// registry. Single source of truth for raw index construction — both the CLI
+/// (`load_index`) and the viewer (`TimsIndexReader::read_index`) route through
+/// here, so format support and dispatch live in exactly one place.
+///
+/// Returns the index plus which reader built it and whether that reader caches
+/// to `.idx` — so the caller can report provenance and decide whether to persist
+/// a sidecar (TDF yes, mzdata no).
+pub struct RawRead {
+    pub index: IndexedTimstofPeaks,
+    /// The reader that claimed the URI (e.g. `"bruker-tdf"`, `"mzdata"`).
+    pub reader_name: &'static str,
+    pub caches_to_idx: bool,
+}
+
+pub fn read_local_raw(path: &Path, cfg: &CentroidingConfig) -> Result<RawRead, ReadError> {
+    let registry = ReaderRegistry::with_builtins();
+    let uri = local_uri(path)?;
+    let reader = registry.pick(&uri, || None)?;
+    let src = ResolvedSource::local_in_place(path)?;
+    let index = reader.read(&src, cfg)?;
+    Ok(RawRead {
+        index,
+        reader_name: reader.name(),
+        caches_to_idx: reader.caches_to_idx(),
+    })
 }
 
 /// Build a `file://` URI from an absolute local path, percent-encoding as
@@ -314,6 +359,19 @@ mod tests {
                 "/data/sample.d/analysis.tdf_bin"
             ]
         );
+    }
+
+    #[test]
+    fn bruker_declares_no_file_extensions() {
+        // `.d` is a directory format — picked as a folder, not a file.
+        assert!(BrukerTdfReader.file_extensions().is_empty());
+    }
+
+    #[cfg(feature = "mzdata")]
+    #[test]
+    fn registry_file_extensions_include_mzml_with_feature() {
+        let exts = ReaderRegistry::with_builtins().file_extensions();
+        assert!(exts.contains(&"mzML"), "expected mzML in {exts:?}");
     }
 
     #[test]

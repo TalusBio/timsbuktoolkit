@@ -83,7 +83,7 @@ fn main() {
 
     eprintln!("Loading index from {dotd}...");
     let t0 = Instant::now();
-    let handle = load_index_auto(&dotd, None).expect("load index");
+    let (handle, _source) = load_index_auto(&dotd, None).expect("load index");
     let index = match handle {
         IndexedPeaksHandle::Eager(eager) => eager,
         IndexedPeaksHandle::Lazy(_) => panic!("lazy index not supported by this bench"),

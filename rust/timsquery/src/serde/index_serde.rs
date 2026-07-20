@@ -11,10 +11,10 @@
 //! use timsquery::serde::load_index_auto;
 //!
 //! // Works with any input - auto-detects format and location
-//! let index = load_index_auto("data.d", None).unwrap().into_eager().unwrap();              // Local raw
-//! let index = load_index_auto("data.d.idx", None).unwrap().into_eager().unwrap();          // Local cached
-//! let index = load_index_auto("s3://bucket/exp.d", None).unwrap().into_eager().unwrap();   // Cloud raw
-//! let index = load_index_auto("s3://bucket/exp.idx", None).unwrap().into_eager().unwrap(); // Cloud cached
+//! let index = load_index_auto("data.d", None).unwrap().0.into_eager().unwrap();              // Local raw
+//! let index = load_index_auto("data.d.idx", None).unwrap().0.into_eager().unwrap();          // Local cached
+//! let index = load_index_auto("s3://bucket/exp.d", None).unwrap().0.into_eager().unwrap();   // Cloud raw
+//! let index = load_index_auto("s3://bucket/exp.idx", None).unwrap().0.into_eager().unwrap(); // Cloud cached
 //! ```
 //!
 //! ## Lazy Loading (For Large Datasets)
@@ -29,7 +29,7 @@
 //!     ..Default::default()
 //! };
 //!
-//! let handle = load_index_auto("experiment.d.idx", Some(config)).unwrap();
+//! let (handle, _source) = load_index_auto("experiment.d.idx", Some(config)).unwrap();
 //!
 //! // Query directly on lazy handle (loads data on-demand)
 //! if let IndexedPeaksHandle::Lazy(lazy) = handle {
@@ -53,7 +53,7 @@
 //! };
 //!
 //! // Process raw data and cache to S3
-//! let index = load_index_auto("data.d", Some(config)).unwrap().into_eager().unwrap();
+//! let index = load_index_auto("data.d", Some(config)).unwrap().0.into_eager().unwrap();
 //! ```
 //!
 //! # Cache Workflow
@@ -115,7 +115,6 @@
 use crate::{
     CentroidingConfig,
     IndexedTimstofPeaks,
-    TimsTofPath,
 };
 use std::path::{
     Path,
@@ -186,7 +185,7 @@ impl IndexedPeaksHandle {
     /// use timsquery::serde::{load_index_auto, CacheLocation};
     /// use timscentroid::serialization::SerializationConfig;
     ///
-    /// let handle = load_index_auto("data.d", None).unwrap();
+    /// let (handle, _source) = load_index_auto("data.d", None).unwrap();
     /// let lazy = handle.try_into_lazy(
     ///     CacheLocation::Local("/tmp/cache".into()),
     ///     SerializationConfig::default()
@@ -519,20 +518,14 @@ impl TimsIndexReader {
     pub fn read_index(
         &self,
         file_location: impl AsRef<Path>,
-    ) -> Result<IndexedTimstofPeaks, crate::errors::DataReadingError> {
+    ) -> Result<(IndexedTimstofPeaks, IndexSource), crate::errors::DataReadingError> {
         let st = std::time::Instant::now();
-
-        let timstofpath = match TimsTofPath::new(file_location.as_ref()) {
-            Ok(x) => x,
-            Err(e) => {
-                return Err(crate::errors::DataReadingError::TimsTofPathError(e));
-            }
-        };
+        let path = file_location.as_ref();
 
         // Determine cache location and handle errors early
         let cache_storage_location: Option<StorageLocation> = match &self.cache_location {
             CacheLocation::Auto => {
-                let path = CacheLocation::derive_auto_location(file_location.as_ref());
+                let path = CacheLocation::derive_auto_location(path);
                 Some(StorageLocation::from_path(path))
             }
             other => match other.to_storage_location() {
@@ -545,26 +538,47 @@ impl TimsIndexReader {
             },
         };
 
-        // Try to load from cache
-        let out = if let Some(storage_loc) = &cache_storage_location {
-            match self.try_load_from_cache(storage_loc) {
-                Some(idx) => Ok(idx),
-                None => {
-                    let cache_loc = if self.write_missing_cache {
-                        cache_storage_location
-                    } else {
-                        None
-                    };
-                    Ok(self.uncached_load_index(&timstofpath, cache_loc))
+        // Fast path: a prebuilt `.idx` sidecar.
+        if let Some(storage_loc) = &cache_storage_location {
+            if let Some(idx) = self.try_load_from_cache(storage_loc) {
+                info!("Loading index took: {:#?}", st.elapsed());
+                return Ok((idx, IndexSource::CachedIdx));
+            }
+        }
+
+        // Build via the shared registry core (sniff-first; TDF, mzML, ...).
+        let centroiding_config = self.centroiding_config.unwrap_or(CentroidingConfig {
+            max_peaks: 50_000,
+            mz_ppm_tol: 10.0,
+            im_pct_tol: 5.0,
+            early_stop_iterations: 200,
+        });
+        info!("Starting centroiding + load of the raw data (might take a min)");
+        let RawRead {
+            index,
+            reader_name,
+            caches_to_idx,
+        } = read_local_raw(path, &centroiding_config)
+            .map_err(crate::errors::DataReadingError::RawReadError)?;
+
+        // Persist a sidecar only for cache-capable formats (TDF yes, mzdata no).
+        if caches_to_idx && self.write_missing_cache {
+            if let Some(storage_loc) = cache_storage_location {
+                info!("Saving index to cache");
+                match index.save_to_storage(storage_loc, self.serialization_config) {
+                    Ok(_) => info!("Saved index to cache"),
+                    Err(e) => error!("Failed to save index to cache: {:?}", e),
                 }
             }
-        } else {
-            Ok(self.uncached_load_index(&timstofpath, None))
-        };
+        }
 
-        let et = st.elapsed();
-        info!("Loading index took: {:#?}", et);
-        out
+        info!("Loading index took: {:#?}", st.elapsed());
+        Ok((
+            index,
+            IndexSource::BuiltFromRaw {
+                reader: reader_name,
+            },
+        ))
     }
 
     fn try_load_from_cache(
@@ -588,44 +602,6 @@ impl TimsIndexReader {
                 None
             }
         }
-    }
-
-    fn uncached_load_index(
-        &self,
-        timstofpath: &TimsTofPath,
-        cache_loc: Option<StorageLocation>,
-    ) -> IndexedTimstofPeaks {
-        let centroiding_config = self.centroiding_config.unwrap_or(CentroidingConfig {
-            max_peaks: 50_000,
-            mz_ppm_tol: 10.0,
-            im_pct_tol: 5.0,
-            early_stop_iterations: 200,
-        });
-
-        info!("Using centroiding config: {:#?}", centroiding_config);
-        info!("Starting centroiding + load of the raw data (might take a min)");
-
-        let (index, build_stats) =
-            IndexedTimstofPeaks::from_timstof_file(timstofpath, centroiding_config);
-
-        info!("Index built with stats: {}", build_stats);
-
-        // Save to cache
-        if let Some(storage_loc) = cache_loc {
-            let location_desc = match &storage_loc {
-                StorageLocation::Local(p) => format!("{:?}", p),
-                StorageLocation::Url(u) => u.to_string(),
-            };
-
-            info!("Saving index to cache at {}", location_desc);
-
-            match index.save_to_storage(storage_loc, self.serialization_config) {
-                Ok(_) => info!("Saved index to cache"),
-                Err(e) => error!("Failed to save index to cache: {:?}", e),
-            }
-        }
-
-        index
     }
 }
 
@@ -726,20 +702,20 @@ fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReading
 /// use timsquery::serde::load_index_auto;
 ///
 /// // Simple usage - auto-detects everything
-/// let index = load_index_auto("data.d", None).unwrap().into_eager().unwrap();
+/// let index = load_index_auto("data.d", None).unwrap().0.into_eager().unwrap();
 ///
 /// // Load from cloud (works without .idx extension if metadata.json exists)
-/// let index = load_index_auto("s3://bucket/my_experiment", None).unwrap().into_eager().unwrap();
+/// let index = load_index_auto("s3://bucket/my_experiment", None).unwrap().0.into_eager().unwrap();
 ///
 /// // Prefer lazy loading
 /// use timsquery::serde::IndexLoadConfig;
 /// let config = IndexLoadConfig { prefer_lazy: true, ..Default::default() };
-/// let handle = load_index_auto("data.d.idx", Some(config)).unwrap();
+/// let (handle, _source) = load_index_auto("data.d.idx", Some(config)).unwrap();
 /// ```
 pub fn load_index_auto(
     path_or_url: impl AsRef<str>,
     config: Option<IndexLoadConfig>,
-) -> Result<IndexedPeaksHandle, crate::errors::DataReadingError> {
+) -> Result<(IndexedPeaksHandle, IndexSource), crate::errors::DataReadingError> {
     let input = path_or_url.as_ref();
     let config = config.unwrap_or_default();
 
@@ -806,7 +782,7 @@ pub fn load_index_auto(
             };
             let lazy = LazyIndexedTimstofPeaks::load_from_storage(location)
                 .map_err(crate::errors::DataReadingError::SerializationError)?;
-            Ok(IndexedPeaksHandle::Lazy(lazy))
+            Ok((IndexedPeaksHandle::Lazy(lazy), IndexSource::CachedIdx))
         }
         (true, false) => {
             // Cached index + prefer eager = load eager
@@ -816,11 +792,11 @@ pub fn load_index_auto(
             } else {
                 TimsIndexReader::from_cache_path(input)?
             };
-            Ok(IndexedPeaksHandle::Eager(eager))
+            Ok((IndexedPeaksHandle::Eager(eager), IndexSource::CachedIdx))
         }
         (false, _) => {
-            // Raw .d file - need to centroid/index (always eager)
-            info!("Loading as eager (raw .d file - requires centroiding)");
+            // Raw file/dir - need to centroid/index (always eager)
+            info!("Loading as eager (raw input - requires centroiding)");
 
             let mut reader = TimsIndexReader::new()
                 .with_cache_location(config.cache_location)
@@ -831,11 +807,9 @@ pub fn load_index_auto(
                 reader = reader.with_centroiding_config(centroid_cfg);
             }
 
-            let eager = reader.read_index(input)?;
-
-            // Note: Raw .d files always return eager, even if prefer_lazy is true
-            // (can't lazy-load raw data - it needs to be centroided first)
-            Ok(IndexedPeaksHandle::Eager(eager))
+            // Raw always returns eager (can't lazy-load raw — needs centroiding).
+            let (eager, source) = reader.read_index(input)?;
+            Ok((IndexedPeaksHandle::Eager(eager), source))
         }
     }
 }
@@ -853,11 +827,30 @@ use tims_stage::{
     sidecar_of,
 };
 use timscentroid::reader::{
+    RawRead,
     ReadError,
-    ReaderRegistry,
-    ResolvedSource,
-    local_uri,
+    read_local_raw,
 };
+
+/// How an index was obtained — surfaced so callers (CLI, viewer) can tell the
+/// user whether a prebuilt cache was reused or the raw data was rebuilt, and by
+/// which reader. Loading is otherwise transparent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSource {
+    /// Deserialized a prebuilt `.idx` (cached; fast path).
+    CachedIdx,
+    /// Built fresh from raw data via the named reader (e.g. "bruker-tdf", "mzdata").
+    BuiltFromRaw { reader: &'static str },
+}
+
+impl std::fmt::Display for IndexSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexSource::CachedIdx => write!(f, "cached .idx (reused)"),
+            IndexSource::BuiltFromRaw { reader } => write!(f, "built from raw via {reader}"),
+        }
+    }
+}
 use timscentroid::serialization::SerializationError;
 
 /// Load an eagerly-materialized index from a URI.
@@ -876,37 +869,49 @@ pub fn load_index(
     backend: &dyn StagingBackend,
     save_sidecar: bool,
     centroid_cfg: CentroidingConfig,
-) -> Result<IndexedTimstofPeaks, LoadIndexError> {
+) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
     let canon = canonical_uri(uri);
     match resolve(&canon)? {
         Resolved::LocalIdx { loc } | Resolved::RemoteIdx { loc } => {
-            IndexedTimstofPeaks::load_from_storage(loc).map_err(LoadIndexError::Load)
+            let idx = IndexedTimstofPeaks::load_from_storage(loc).map_err(LoadIndexError::Load)?;
+            Ok((idx, IndexSource::CachedIdx))
         }
         Resolved::LocalRaw { path } => {
-            // Sniff-first: the registry picks the backend by inspecting the URI
-            // (vendor suffix/scheme lives ONLY in each reader). Local artifacts
-            // are borrowed in place — no staging.
-            let registry = ReaderRegistry::with_builtins();
-            let uri = local_uri(&path).map_err(LoadIndexError::Read)?;
-            let reader = registry.pick(&uri, || None).map_err(LoadIndexError::Read)?;
-            let src = ResolvedSource::local_in_place(&path).map_err(LoadIndexError::Read)?;
-            let idx = reader
-                .read(&src, &centroid_cfg)
-                .map_err(LoadIndexError::Read)?;
+            // Sniff-first raw dispatch through the shared registry core.
+            let RawRead {
+                index,
+                reader_name,
+                caches_to_idx,
+            } = read_local_raw(&path, &centroid_cfg).map_err(LoadIndexError::Read)?;
             // Only formats that cache to `.idx` write a sidecar; mzdata builds
             // fresh each run.
-            if save_sidecar && reader.caches_to_idx() {
-                write_sidecar(&canon, &idx)?;
+            if save_sidecar && caches_to_idx {
+                write_sidecar(&canon, &index)?;
             }
-            Ok(idx)
+            Ok((
+                index,
+                IndexSource::BuiltFromRaw {
+                    reader: reader_name,
+                },
+            ))
         }
         Resolved::Stageable { spec } => {
             let staged = backend.stage(&spec).map_err(LoadIndexError::Stage)?;
-            let idx = build_index(staged.as_ref(), centroid_cfg)?;
-            if save_sidecar {
-                write_sidecar(&canon, &idx)?;
+            // Staged bundle is a local dir (a `.d`) — same registry core.
+            let RawRead {
+                index,
+                reader_name,
+                caches_to_idx,
+            } = read_local_raw(staged.as_ref(), &centroid_cfg).map_err(LoadIndexError::Read)?;
+            if save_sidecar && caches_to_idx {
+                write_sidecar(&canon, &index)?;
             }
-            Ok(idx)
+            Ok((
+                index,
+                IndexSource::BuiltFromRaw {
+                    reader: reader_name,
+                },
+            ))
             // staged drops here (RAII) — tempdir removed.
         }
     }
@@ -924,19 +929,6 @@ pub enum LoadIndexError {
     SidecarWrite(SerializationError),
     #[error("raw reader failed: {0}")]
     Read(#[from] ReadError),
-}
-
-fn build_index(
-    dotd: &Path,
-    centroid_cfg: CentroidingConfig,
-) -> Result<IndexedTimstofPeaks, LoadIndexError> {
-    let path_str = dotd
-        .to_str()
-        .ok_or_else(|| LoadIndexError::Build(format!("path is not valid UTF-8: {:?}", dotd)))?;
-    let tt = TimsTofPath::new(path_str)
-        .map_err(|e| LoadIndexError::Build(format!("failed to open {:?}: {:?}", dotd, e)))?;
-    let (idx, _stats) = IndexedTimstofPeaks::from_timstof_file(&tt, centroid_cfg);
-    Ok(idx)
 }
 
 fn write_sidecar(orig_uri: &str, idx: &IndexedTimstofPeaks) -> Result<(), LoadIndexError> {

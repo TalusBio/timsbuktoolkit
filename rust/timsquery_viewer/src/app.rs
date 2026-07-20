@@ -796,12 +796,16 @@ impl ViewerApp {
 
                 match ui_state.raw_data_input_mode {
                     RawDataInputMode::Local => {
-                        // Existing folder picker button
-                        if ui.button("Browse for Raw Data...").clicked() {
+                        // Folder picker for .d / .idx directories.
+                        if ui.button("Browse for Raw Folder (.d/.idx)...").clicked() {
                             file_loader.open_raw_data_dialog();
                         }
+                        // File picker for single-file formats (.mzML / .raw).
+                        if ui.button("Browse for Raw File (.mzML)...").clicked() {
+                            file_loader.open_raw_data_file_dialog();
+                        }
                         ui.label(
-                            egui::RichText::new("Select a .d folder or .idx cache")
+                            egui::RichText::new("Select a .d/.idx folder, or an .mzML file")
                                 .small()
                                 .weak(),
                         );

@@ -54,15 +54,17 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     let elution_groups: ElutionGroupCollection = read_query_elution_groups(&elution_groups_path)?;
     info!("Loaded {} elution groups", elution_groups.len());
 
-    let index = load_index_auto(
+    let (handle, index_source) = load_index_auto(
         raw_file_path
             .to_str()
             .ok_or_else(|| CliError::DataReading("Invalid path encoding".to_string()))?,
         None, // Use default config
     )
-    .map_err(|e| CliError::DataReading(format!("{:?}", e)))?
-    .into_eager()
     .map_err(|e| CliError::DataReading(format!("{:?}", e)))?;
+    info!("Index source: {index_source}");
+    let index = handle
+        .into_eager()
+        .map_err(|e| CliError::DataReading(format!("{:?}", e)))?;
 
     let output_path = args.output_path;
     let serialization_format = args.format;
