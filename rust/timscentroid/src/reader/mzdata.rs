@@ -200,6 +200,9 @@ pub fn from_mzml_file(
                 }
                 continue;
             };
+            // Dedup windows by their bounds at millidalton (1e-3 m/z) precision —
+            // fine enough to keep genuinely distinct DIA windows apart, coarse
+            // enough that float jitter maps a recurring window to one bin.
             let key = (
                 (mz_start as f64 * 1000.0).round() as i64,
                 (mz_end as f64 * 1000.0).round() as i64,
@@ -266,6 +269,13 @@ pub fn from_mzml_file(
             BUCKET_SIZE,
         );
         ms2_window_groups.push((scheme, group));
+    }
+
+    if ms2_window_groups.is_empty() {
+        warn!(
+            "mzML {path:?} produced no MS2 window groups; only MS1 will be queryable \
+             (is this a DIA file?)"
+        );
     }
 
     Ok(IndexedTimstofPeaks {

@@ -630,10 +630,11 @@ mod feature_tests {
 
         let feats = cand.named_features();
         let mob: Vec<_> = feats.iter().filter(|(_, n)| n.contains("mob")).collect();
-        assert!(
-            mob.len() >= 14,
-            "expected the ~16 mobility features, got {}",
-            mob.len()
+        assert_eq!(
+            mob.len(),
+            16,
+            "mobility feature count changed: {:?}",
+            mob.iter().map(|(_, n)| *n).collect::<Vec<_>>()
         );
         for (v, n) in &mob {
             assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");

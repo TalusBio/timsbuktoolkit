@@ -10,6 +10,12 @@ use http::uri::PathAndQuery;
 
 /// Rebuild `base` with its path replaced by `new_path`, preserving scheme +
 /// authority. `new_path` must be a valid URI path (percent-encoded, no spaces).
+///
+/// The `parse`/`from_parts` panics are effectively unreachable: `base` already
+/// parsed as a `Uri`, and callers only ever append literal path segments
+/// (`analysis.tdf`, `.scan`) to an already-valid, already-encoded path — so the
+/// result is always a valid URI path. A panic here means a caller passed an
+/// unencoded segment, which is a bug, not runtime input.
 fn with_path(base: &Uri, new_path: &str) -> Uri {
     let mut parts = base.clone().into_parts();
     parts.path_and_query = Some(

@@ -63,21 +63,36 @@ pub fn load_raw(
     backend: &dyn StagingBackend,
     cfg: &CentroidingConfig,
 ) -> Result<RawRead, LoadRawError> {
-    let parsed = parse_uri(uri)?;
     let registry = ReaderRegistry::with_builtins();
-    // No reader returns `Maybe` yet, so the magic-byte peek is never needed;
-    // remote byte-sniffing (a range-GET here) is future work.
-    let reader = registry.pick(&parsed, || None)?;
 
-    // `_staged` owns the tempdir (if any) and must outlive the read.
-    let (src, _staged) = if is_remote_uri(uri) {
+    if is_remote_uri(uri) {
+        let parsed = uri.parse::<Uri>().map_err(|source| ReadError::UriParse {
+            uri: uri.to_string(),
+            source,
+        })?;
+        // No reader returns `Maybe` yet, so the magic-byte peek is never needed;
+        // remote byte-sniffing (a range-GET here) is future work.
+        let reader = registry.pick(&parsed, || None)?;
         let manifest = reader.manifest(&parsed);
+        // `staged` owns the tempdir and must outlive the read below.
         let staged = stage_manifest(backend, &manifest)?;
-        (staged.source().clone(), Some(staged))
-    } else {
-        (ResolvedSource::local_in_place(Path::new(uri))?, None)
-    };
+        let index = reader.read(staged.source(), cfg)?;
+        return Ok(RawRead {
+            index,
+            reader_name: reader.name(),
+            caches_to_idx: reader.caches_to_idx(),
+        });
+    }
 
+    // Local: canonicalize first so RELATIVE paths resolve — `local_uri`
+    // (sniff) and `local_in_place` (read) both require an absolute path. This
+    // is the single place all entry points funnel through, so relative inputs
+    // work uniformly (`read_index`, `load_index_auto`, the pyo3 binding, …).
+    let abs = std::fs::canonicalize(uri)
+        .map_err(|e| ReadError::Build(format!("cannot resolve local raw path {uri:?}: {e}")))?;
+    let parsed = local_uri(&abs)?;
+    let reader = registry.pick(&parsed, || None)?;
+    let src = ResolvedSource::local_in_place(&abs)?;
     let index = reader.read(&src, cfg)?;
     Ok(RawRead {
         index,
@@ -86,18 +101,8 @@ pub fn load_raw(
     })
 }
 
-fn parse_uri(uri: &str) -> Result<Uri, ReadError> {
-    if is_remote_uri(uri) {
-        uri.parse::<Uri>().map_err(|source| ReadError::UriParse {
-            uri: uri.to_string(),
-            source,
-        })
-    } else {
-        local_uri(Path::new(uri))
-    }
-}
-
 /// A staged remote bundle: a tempdir holding the materialized manifest.
+#[derive(Debug)]
 pub struct StagedBundle {
     _tempdir: tempfile::TempDir,
     src: ResolvedSource,
@@ -118,27 +123,30 @@ pub fn stage_manifest(
     manifest: &Manifest,
 ) -> Result<StagedBundle, StageError> {
     let step = timscentroid::TimedStep::begin("Staging manifest");
-    let entry_uri = manifest.entry.to_string();
-    let (loc, entry_key) = split_uri(&entry_uri)?;
-    let provider = StorageProvider::open(loc).map_err(transport_err(&entry_uri))?;
 
-    // Path of everything is expressed relative to the entry's parent, so a `.d`
-    // reconstructs as `<tempdir>/sample.d/analysis.tdf` and a single file as
-    // `<tempdir>/foo.mzML`.
-    let parent_prefix = match entry_key.rsplit_once('/') {
-        Some((p, _)) => format!("{p}/"),
-        None => String::new(),
+    // Layout is derived from URI PATHS (transport-agnostic), independent of how
+    // `split_uri` factors local vs remote into (location, key). The entry's
+    // parent is the layout root: a `.d` reconstructs as
+    // `<tempdir>/sample.d/analysis.tdf`, a single file as `<tempdir>/foo.mzML`.
+    let entry_path = manifest.entry.path();
+    let (parent_path, entry_name) = match entry_path.rsplit_once('/') {
+        Some((p, name)) => (p, name),
+        None => ("", entry_path),
     };
-    let entry_name = entry_key[parent_prefix.len()..].to_string();
+    if entry_name.is_empty() {
+        return Err(StageError::ShapeMismatch(format!(
+            "manifest entry has no file name: {entry_path:?}"
+        )));
+    }
 
     let tempdir = backend.new_run_tempdir()?;
     std::fs::File::create(tempdir.path().join(".lock")).map_err(StageError::Io)?;
 
     for member in &manifest.required {
-        fetch_member(&provider, member, &parent_prefix, tempdir.path(), true)?;
+        fetch_member(member, parent_path, tempdir.path(), true)?;
     }
     for member in &manifest.optional {
-        fetch_member(&provider, member, &parent_prefix, tempdir.path(), false)?;
+        fetch_member(member, parent_path, tempdir.path(), false)?;
     }
 
     step.finish();
@@ -150,23 +158,39 @@ pub fn stage_manifest(
 }
 
 fn fetch_member(
-    provider: &StorageProvider,
     member: &Uri,
-    parent_prefix: &str,
+    parent_path: &str,
     tempdir: &Path,
     required: bool,
 ) -> Result<(), StageError> {
-    let member_uri = member.to_string();
-    let (_loc, key) = split_uri(&member_uri)?;
-    let rel = key.strip_prefix(parent_prefix).unwrap_or(&key);
+    // Destination = member path relative to the entry's parent. The member must
+    // live under that parent and must not escape the tempdir (cheap
+    // defense-in-depth; manifests are reader-built/trusted).
+    let rel = member
+        .path()
+        .strip_prefix(parent_path)
+        .map(|s| s.trim_start_matches('/'))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            StageError::ShapeMismatch(format!(
+                "manifest member {:?} is not under the entry parent {parent_path:?}",
+                member.path()
+            ))
+        })?;
+    if rel.split('/').any(|c| c == "..") {
+        return Err(StageError::ShapeMismatch(format!(
+            "unsafe manifest member path: {rel:?}"
+        )));
+    }
     let dest = tempdir.join(rel);
 
-    if !required {
-        // Best-effort: skip a missing optional member without erroring.
-        match provider.exists(&key) {
-            Ok(true) => {}
-            _ => return Ok(()),
-        }
+    // Fetch from the member's own store + key (`split_uri` factors transport).
+    let member_uri = member.to_string();
+    let (loc, key) = split_uri(&member_uri)?;
+    let provider = StorageProvider::open(loc).map_err(transport_err(&member_uri))?;
+
+    if !required && !matches!(provider.exists(&key), Ok(true)) {
+        return Ok(()); // best-effort optional: skip if absent
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(StageError::Io)?;
@@ -177,4 +201,67 @@ fn fetch_member(
         .map_err(transport_err(&member_uri))?;
     bar.finish_and_clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{
+        PerRunTempdir,
+        StagingConfig,
+    };
+    use timscentroid::reader::Manifest;
+
+    fn u(p: &std::path::Path) -> Uri {
+        // Raw path URI (tempdir paths are space-free, so no percent-encoding).
+        p.to_str().unwrap().parse::<Uri>().unwrap()
+    }
+
+    fn dotd_manifest(dotd: &std::path::Path) -> Manifest {
+        Manifest {
+            entry: u(dotd),
+            required: vec![
+                u(&dotd.join("analysis.tdf")),
+                u(&dotd.join("analysis.tdf_bin")),
+            ],
+            optional: vec![],
+        }
+    }
+
+    #[test]
+    fn stage_manifest_materializes_required_by_layout() {
+        let src = tempfile::tempdir().unwrap();
+        let dotd = src.path().join("sample.d");
+        std::fs::create_dir(&dotd).unwrap();
+        std::fs::write(dotd.join("analysis.tdf"), b"tdf").unwrap();
+        std::fs::write(dotd.join("analysis.tdf_bin"), b"bin").unwrap();
+
+        let backend = PerRunTempdir::new(StagingConfig::default()).unwrap();
+        let staged = stage_manifest(&backend, &dotd_manifest(&dotd)).unwrap();
+        let entry = staged.source().entry_path();
+
+        // Reconstructed as `<tempdir>/sample.d/{analysis.tdf,analysis.tdf_bin}`.
+        assert_eq!(entry.file_name().unwrap(), "sample.d");
+        assert_eq!(std::fs::read(entry.join("analysis.tdf")).unwrap(), b"tdf");
+        assert_eq!(
+            std::fs::read(entry.join("analysis.tdf_bin")).unwrap(),
+            b"bin"
+        );
+    }
+
+    #[test]
+    fn stage_manifest_errors_on_missing_required() {
+        let src = tempfile::tempdir().unwrap();
+        let dotd = src.path().join("sample.d");
+        std::fs::create_dir(&dotd).unwrap();
+        std::fs::write(dotd.join("analysis.tdf"), b"tdf").unwrap();
+        // analysis.tdf_bin intentionally absent — must error, not silently skip.
+
+        let backend = PerRunTempdir::new(StagingConfig::default()).unwrap();
+        let err = stage_manifest(&backend, &dotd_manifest(&dotd)).unwrap_err();
+        assert!(
+            matches!(err, StageError::Transport { .. } | StageError::Io(_)),
+            "expected a fetch error for the missing required member, got {err:?}"
+        );
+    }
 }

@@ -861,15 +861,14 @@ use timscentroid::serialization::SerializationError;
 
 /// Load an eagerly-materialized index from a URI.
 ///
-/// - `uri` — local path or `s3://` URL. May point at a `.idx` directory, a
-///   `.d` directory, a `.tar`, or an S3 `.d` prefix.
-/// - `backend` — the staging backend to use when the URI resolves to
-///   `Stageable`. Typically `&tims_stage::PerRunTempdir::new(cfg)?`.
-/// - `save_sidecar` — when true, and we built an index from a `.d`/tar/prefix
+/// - `uri` — local path or `s3://` URL. May point at a prebuilt `.idx`, a raw
+///   artifact (`.d`, `.mzML`, …), or a `.tar` container.
+/// - `backend` — the staging backend used when a raw input must be fetched to
+///   a local tempdir. Typically `&tims_stage::PerRunTempdir::new(cfg)?`.
+/// - `save_sidecar` — when true, and we built an index from a cache-capable raw
 ///   input, write a `.idx` sidecar to `sidecar_of(uri)` so the next run
 ///   short-circuits on the sidecar fast-path.
-/// - `centroid_cfg` — centroiding configuration threaded through
-///   `from_timstof_file` on the build paths.
+/// - `centroid_cfg` — centroiding configuration threaded through the reader.
 pub fn load_index(
     uri: &str,
     backend: &dyn StagingBackend,
