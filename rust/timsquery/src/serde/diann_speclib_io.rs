@@ -303,11 +303,30 @@ fn read_entry<'a>(
     })
 }
 
+/// Advance `c` past exactly one entry without allocating. Mirrors [`read_entry`]'s
+/// cursor walk (skipping the name rather than decoding it) so the serial offset
+/// scan stays cheap before the parallel map re-parses each entry from its offset.
+fn skip_entry(c: &mut Cursor, version: i32) -> Result<(), LibraryReadingError> {
+    let _ = read_peptide(c, version)?; // target peptide
+    if c.read_i32()? != 0 {
+        let _ = read_peptide(c, version)?; // embedded decoy, kept only to stay synced
+    }
+    let _entry_flags = c.read_i32()?;
+    let _proteotypic = c.read_i32()?;
+    let _pid_index = c.read_i32()?;
+    let name_len = c.read_count()?;
+    c.skip_bytes(name_len)?; // name bytes — skipped, decoded later in parallel
+    if version <= -3 {
+        c.skip_bytes(12)?; // pg_qvalue, ptm_qvalue, site_conf
+    }
+    Ok(())
+}
+
 // --- Layer 2: emit --------------------------------------------------------
 
 /// A parsed `.speclib` held in memory. The header and PG `ids` are parsed
-/// eagerly on [`SpecLib::open`]; entries are yielded lazily by [`SpecLib::entries`]
-/// so a caller can stream them without materializing every decoded entry at once.
+/// eagerly on [`SpecLib::open`]; entries are parsed and mapped by
+/// [`SpecLib::parse_parallel`] (serial offset scan, then parallel per-entry map).
 pub(crate) struct SpecLib {
     data: Vec<u8>,
     version: i32,
@@ -389,71 +408,65 @@ impl SpecLib {
         )
     }
 
-    /// Lazily yield one [`EntryView`] per precursor. Iterating to exhaustion also
-    /// walks the trailing `elution_groups` section and records whether parsing
-    /// landed exactly on EOF ([`EntryIter::at_eof`]).
-    pub(crate) fn entries(&self) -> EntryIter<'_> {
-        let mut cur = Cursor::new(&self.data);
-        cur.pos = self.entries_start;
-        EntryIter {
-            cur,
-            version: self.version,
-            pg_ids: &self.pg_ids,
-            left: self.n_entries,
-            at_eof: false,
-            tail_done: false,
+    /// Parse and map every entry, doing the per-entry work in parallel.
+    ///
+    /// Phase A (serial, allocation-free): walk the variable-length envelope
+    /// recording each entry's start offset. Boundary finding is inherently
+    /// sequential — an entry's position depends on all prior entries' lengths.
+    /// This is the ~1 core the format forces; it does no allocation or mapping.
+    ///
+    /// Phase B (parallel): each entry is re-parsed and mapped independently from
+    /// its offset. All per-entry work (`read_entry`, `map_entry`) is pure and
+    /// only shares immutable borrows of the buffer + PG ids, so it fans across
+    /// cores with no synchronization. Order and drop stats are preserved via an
+    /// ordered fold/reduce.
+    ///
+    /// Returns the mapped entries in file order, merged drop stats, and whether
+    /// parsing landed exactly on EOF (a `false` signals a structural desync).
+    pub(crate) fn parse_parallel(&self) -> Result<ParsedSpeclib, LibraryReadingError> {
+        use rayon::prelude::*;
+
+        // Phase A: serial offset scan, then the trailing section 8 / EOF check.
+        let mut c = Cursor::new(&self.data);
+        c.pos = self.entries_start;
+        let mut offsets = Vec::with_capacity(self.capacity_hint());
+        for _ in 0..self.n_entries {
+            offsets.push(c.mark());
+            skip_entry(&mut c, self.version)?;
         }
-    }
-}
-
-/// Lazy iterator over `.speclib` entries. See [`SpecLib::entries`].
-pub(crate) struct EntryIter<'a> {
-    cur: Cursor<'a>,
-    version: i32,
-    pg_ids: &'a [String],
-    left: usize,
-    at_eof: bool,
-    tail_done: bool,
-}
-
-impl<'a> EntryIter<'a> {
-    /// Whether parsing landed exactly on EOF. Only meaningful once the iterator
-    /// is exhausted; a `false` after exhaustion signals a structural desync.
-    pub(crate) fn at_eof(&self) -> bool {
-        self.at_eof
-    }
-
-    /// After the last entry: walk the optional `elution_groups` section
-    /// (v <= -1, only if bytes remain) and snapshot EOF.
-    fn finish_tail(&mut self) {
-        if self.version <= -1 && !self.cur.at_eof() {
-            let _ = self.cur.skip_vec_i32();
+        if self.version <= -1 && !c.at_eof() {
+            c.skip_vec_i32()?; // section 8: elution_groups (discard)
         }
-        self.at_eof = self.cur.at_eof();
-        self.tail_done = true;
-    }
-}
+        let at_eof = c.at_eof();
 
-impl<'a> Iterator for EntryIter<'a> {
-    type Item = Result<EntryView<'a>, LibraryReadingError>;
+        // Phase B: parallel parse + map. `try_fold`/`try_reduce` short-circuit on
+        // the first error and, on an indexed iterator, preserve file order.
+        // The 3rd accumulator slot is a per-worker dedup scratch buffer reused
+        // across every entry that worker maps (see `map_entry`), so the hot loop
+        // allocates only the persistent output, not a fresh dedup Vec per entry.
+        let (entries, stats, _scratch) = offsets
+            .par_iter()
+            .try_fold(
+                || (Vec::new(), SpeclibDecodeStats::default(), Vec::new()),
+                |(mut acc, mut stats, mut scratch), &off| -> Result<_, LibraryReadingError> {
+                    let mut cur = Cursor::new(&self.data);
+                    cur.pos = off;
+                    let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
+                    acc.push(map_entry(view, &mut stats, &mut scratch)?);
+                    Ok((acc, stats, scratch))
+                },
+            )
+            .try_reduce(
+                || (Vec::new(), SpeclibDecodeStats::default(), Vec::new()),
+                |(mut a, sa, scratch), (b, sb, _)| {
+                    a.extend(b);
+                    let mut merged = sa;
+                    merged.merge(&sb);
+                    Ok((a, merged, scratch))
+                },
+            )?;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.left == 0 {
-            if !self.tail_done {
-                self.finish_tail();
-            }
-            return None;
-        }
-        self.left -= 1;
-        match read_entry(&mut self.cur, self.version, self.pg_ids) {
-            Ok(entry) => Some(Ok(entry)),
-            Err(e) => {
-                // Stop cleanly on the first desync rather than reporting a bogus
-                // EOF later.
-                self.left = 0;
-                Some(Err(e))
-            }
-        }
+        Ok((entries, stats, at_eof))
     }
 }
 
@@ -518,6 +531,15 @@ pub struct SpeclibDecodeStats {
 }
 
 impl SpeclibDecodeStats {
+    /// Accumulate another partial count set (per-worker merge in the parallel map).
+    fn merge(&mut self, o: &SpeclibDecodeStats) {
+        self.exclude_flagged += o.exclude_flagged;
+        self.loss_dropped += o.loss_dropped;
+        self.unknown_ion_dropped += o.unknown_ion_dropped;
+        self.dedup_dropped += o.dedup_dropped;
+        self.decoys_dropped += o.decoys_dropped;
+    }
+
     fn any_dropped(&self) -> bool {
         self.loss_dropped > 0
             || self.unknown_ion_dropped > 0
@@ -549,9 +571,13 @@ fn residue_count(stripped: &str) -> usize {
 
 /// Map a decoded target `EntryView` onto the pipeline shape, folding drop
 /// counters into `stats`.
+///
+/// `scratch` is a caller-owned dedup buffer reused across entries (one per rayon
+/// worker) so the per-entry dedup pass allocates nothing; it is cleared on entry.
 fn map_entry(
     entry: EntryView,
     stats: &mut SpeclibDecodeStats,
+    scratch: &mut Vec<(IonAnnot, f64, f32)>,
 ) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), LibraryReadingError> {
     let pep = &entry.peptide;
     let name = entry.name;
@@ -586,8 +612,9 @@ fn map_entry(
 
     // (IonAnnot, fragment mz as f64, height). Dedup by IonAnnot keeping max
     // height so a duplicate label can't fail the whole load via
-    // `ExpectedIntensities::try_from_pairs`.
-    let mut kept: Vec<(IonAnnot, f64, f32)> = Vec::new();
+    // `ExpectedIntensities::try_from_pairs`. Reuses the caller's scratch buffer.
+    scratch.clear();
+    let kept = scratch;
 
     for f in pep.fragments() {
         // `type & 0x80` => ExcludeFromAssay: DIA-NN's non-quantifier transitions.
@@ -666,7 +693,7 @@ fn map_entry(
     let mut fragment_labels = Vec::with_capacity(kept.len());
     let mut fragment_mzs = Vec::with_capacity(kept.len());
     let mut relative_intensities = Vec::with_capacity(kept.len());
-    for (ion, mz, height) in kept {
+    for &(ion, mz, height) in kept.iter() {
         fragment_labels.push(ion);
         fragment_mzs.push(mz);
         relative_intensities.push((ion, height));
@@ -714,17 +741,10 @@ type ParsedSpeclib = (
 /// Parse a whole `.speclib`. A `false` in the returned EOF flag signals a
 /// structural desync.
 ///
-/// This is the eager convenience wrapper over [`SpecLib::open`] +
-/// [`SpecLib::entries`] + [`map_entry`]; drive those directly to stream.
+/// Reads the file, parses the header, then parses+maps entries in parallel
+/// ([`SpecLib::open`] + [`SpecLib::parse_parallel`]).
 pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, LibraryReadingError> {
-    let lib = SpecLib::open(reader)?;
-    let mut stats = SpeclibDecodeStats::default();
-    let mut entries = Vec::with_capacity(lib.capacity_hint());
-    let mut iter = lib.entries();
-    for entry in iter.by_ref() {
-        entries.push(map_entry(entry?, &mut stats)?);
-    }
-    Ok((entries, stats, iter.at_eof()))
+    SpecLib::open(reader)?.parse_parallel()
 }
 
 /// Cheap sniff: extension is `.speclib` and the first 4 bytes are not the
