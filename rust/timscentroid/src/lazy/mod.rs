@@ -72,6 +72,9 @@ pub struct LazyIndexedTimstofPeaks {
     // This eliminates the need to create new queriers (and fetch metadata) on every query
     ms1_querier: Arc<ParquetQuerier>,
     ms2_queriers: Vec<Arc<ParquetQuerier>>,
+    /// See [`crate::indexing::IndexedTimstofPeaks::mobility_kind`]. Restored from
+    /// the serialized metadata (defaults to `Ook0` for pre-field indices).
+    mobility_kind: crate::dimension::MobilityKind,
 }
 
 impl Debug for LazyIndexedTimstofPeaks {
@@ -259,11 +262,17 @@ impl LazyIndexedTimstofPeaks {
 
         Ok(Self {
             storage,
+            mobility_kind: meta.mobility_kind.clone(),
             ms1_metadata: meta.ms1_peaks,
             ms2_metadata,
             ms1_querier,
             ms2_queriers,
         })
+    }
+
+    /// The kind of mobility axis this run carries (see [`crate::MobilityKind`]).
+    pub fn mobility_kind(&self) -> &crate::dimension::MobilityKind {
+        &self.mobility_kind
     }
 
     /// Load from any storage location (blocking version)

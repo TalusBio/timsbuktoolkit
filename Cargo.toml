@@ -73,19 +73,6 @@ csv = "1.3"
 
 tempfile = "3.23.0"
 
-# Patch rustyms to drop gnome.dat (60MB glycan ontology, unused here) and
-# panic with a clear message if anything reaches the GNOME code path.
-# Saves ~60MB in release binaries. The actual edits live in
-# patches/rustyms+0.11.0.patch and are applied to target/patch/rustyms-0.11.0
-# by the `patch-crate` build-dep + build.rs in the crates below.
-# Patch rustyms to drop gnome.dat (60MB glycan ontology) + panic-with-link on
-# access. Diff lives in patches/rustyms+0.11.0.patch; `patch-crate` extracts
-# rustyms into target/patch/ via timsseek_cli's build.rs. On a clean checkout
-# run `cargo patch-crate` once to populate target/patch/ before building, or
-# trigger a first build of timsseek_cli to let its build.rs handle it.
-[patch.crates-io]
-rustyms = { path = "./target/patch/rustyms-0.11.0" }
-
 [workspace.lints.clippy]
 len_without_is_empty = "allow"
 

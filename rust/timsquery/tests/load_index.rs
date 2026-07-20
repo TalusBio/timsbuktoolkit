@@ -18,7 +18,7 @@ fn fixture_dotd() -> PathBuf {
 fn load_index_from_local_dotd() {
     let backend = PerRunTempdir::new(StagingConfig::default()).unwrap();
     let uri = fixture_dotd().to_string_lossy().to_string();
-    let _idx = load_index(&uri, &backend, false, CentroidingConfig::default())
+    let (_idx, _) = load_index(&uri, &backend, false, CentroidingConfig::default())
         .expect("load_index should succeed");
 }
 
@@ -31,12 +31,12 @@ fn sidecar_roundtrip() {
     let dotd_copy = work.path().join("sample.d");
     copy_dir_recursive(&dotd, &dotd_copy).unwrap();
     let uri = dotd_copy.to_string_lossy().to_string();
-    let _idx1 = load_index(&uri, &backend, true, CentroidingConfig::default()).unwrap();
+    let (_idx1, _) = load_index(&uri, &backend, true, CentroidingConfig::default()).unwrap();
     assert!(
         work.path().join("sample.d.idx/metadata.json").is_file(),
         "sidecar .idx should contain metadata.json after build"
     );
-    let _idx2 = load_index(&uri, &backend, false, CentroidingConfig::default()).unwrap();
+    let (_idx2, _) = load_index(&uri, &backend, false, CentroidingConfig::default()).unwrap();
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {

@@ -621,6 +621,34 @@ mod feature_tests {
     }
 
     #[test]
+    fn neutralize_mobility_nans_every_mobility_feature() {
+        // For a run with no searchable mobility axis (mzML/FAIMS), all
+        // mobility-derived GBM features must become NaN (forust missing), so
+        // they cannot bias the score with sentinel-derived constants.
+        let mut cand = sample_competed_candidate_parsed();
+        cand.scoring.neutralize_mobility();
+
+        let feats = cand.named_features();
+        let mob: Vec<_> = feats.iter().filter(|(_, n)| n.contains("mob")).collect();
+        assert_eq!(
+            mob.len(),
+            16,
+            "mobility feature count changed: {:?}",
+            mob.iter().map(|(_, n)| *n).collect::<Vec<_>>()
+        );
+        for (v, n) in &mob {
+            assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");
+        }
+        // Non-mobility features are untouched (at least one stays finite).
+        assert!(
+            feats
+                .iter()
+                .any(|(v, n)| !n.contains("mob") && v.is_finite()),
+            "non-mobility features must remain finite"
+        );
+    }
+
+    #[test]
     fn sequence_block_present_when_gate_on() {
         let cand = sample_competed_candidate_parsed();
         let names = cand.feature_names();

@@ -21,29 +21,21 @@ use timscentroid::{
 
 #[derive(Debug)]
 pub enum Resolved {
-    /// An `.idx` directory on the local filesystem.
-    LocalIdx { loc: StorageLocation },
-    /// An `.idx` directory in remote object storage.
-    RemoteIdx { loc: StorageLocation },
-    /// A `.d` directory on the local filesystem.
-    LocalDotD { path: PathBuf },
-    /// Requires materialization to a local tempdir before indexing.
-    Stageable { spec: SourceSpec },
+    /// A prebuilt `.idx` (local or remote) — load directly, no reader dispatch.
+    Idx { loc: StorageLocation },
+    /// A raw vendor artifact (local path or `s3://…`). Handed to
+    /// [`crate::load::load_raw`], which sniffs the reader and manifest-stages
+    /// remote inputs. Carries the canonical URI verbatim.
+    Raw { uri: String },
+    /// A tarred `.d` container — extracted to a tempdir first, then read as a
+    /// local `.d`. (Bruker-specific transport.)
+    Tar { spec: SourceSpec },
 }
 
 #[derive(Debug, Clone)]
 pub enum SourceSpec {
-    S3Tar {
-        loc: StorageLocation,
-        key: String,
-    },
-    S3Prefix {
-        loc: StorageLocation,
-        prefix: String,
-    },
-    LocalTar {
-        path: PathBuf,
-    },
+    S3Tar { loc: StorageLocation, key: String },
+    LocalTar { path: PathBuf },
 }
 
 /// Resolve a URI to a concrete Resolved variant. May perform at most one
@@ -54,10 +46,8 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
 
     // If user already pointed at an .idx, no sidecar hunt.
     if shape.name == NameKind::Idx {
-        let loc = idx_location_for(uri)?;
-        return Ok(match shape.loc {
-            LocKind::Local => Resolved::LocalIdx { loc },
-            LocKind::Remote => Resolved::RemoteIdx { loc },
+        return Ok(Resolved::Idx {
+            loc: idx_location_for(uri)?,
         });
     }
 
@@ -66,32 +56,26 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
     // file inside the directory.
     let sidecar = sidecar_of(uri);
     if sidecar_ready(&sidecar)? {
-        let loc = idx_location_for(&sidecar)?;
-        return Ok(match shape.loc {
-            LocKind::Local => Resolved::LocalIdx { loc },
-            LocKind::Remote => Resolved::RemoteIdx { loc },
+        return Ok(Resolved::Idx {
+            loc: idx_location_for(&sidecar)?,
         });
     }
 
-    // No sidecar. Dispatch by raw-data shape.
+    // No sidecar. `.tar` is a container (extract first); everything else is a
+    // raw artifact handed to the reader registry via `load_raw` — no vendor
+    // shape decided here.
     match (shape.loc, shape.name) {
-        (LocKind::Local, NameKind::DotD) => Ok(Resolved::LocalDotD {
-            path: PathBuf::from(uri.trim_end_matches('/')),
+        (_, NameKind::Raw) => Ok(Resolved::Raw {
+            uri: uri.trim_end_matches('/').to_string(),
         }),
-        (LocKind::Local, NameKind::Tar) => Ok(Resolved::Stageable {
+        (LocKind::Local, NameKind::Tar) => Ok(Resolved::Tar {
             spec: SourceSpec::LocalTar {
                 path: PathBuf::from(uri),
             },
         }),
-        (LocKind::Remote, NameKind::DotD) => {
-            let (loc, prefix) = crate::uri::split_uri(uri)?;
-            Ok(Resolved::Stageable {
-                spec: SourceSpec::S3Prefix { loc, prefix },
-            })
-        }
         (LocKind::Remote, NameKind::Tar) => {
             let (loc, key) = crate::uri::split_uri(uri)?;
-            Ok(Resolved::Stageable {
+            Ok(Resolved::Tar {
                 spec: SourceSpec::S3Tar { loc, key },
             })
         }
@@ -151,37 +135,37 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let idx = fake_idx_dir(dir.path(), "sample.d.idx");
         let r = resolve(idx.to_str().unwrap()).unwrap();
-        assert!(matches!(r, Resolved::LocalIdx { .. }));
+        assert!(matches!(r, Resolved::Idx { .. }));
     }
 
     #[test]
-    fn local_dotd_with_sidecar_becomes_local_idx() {
+    fn local_raw_with_sidecar_becomes_idx() {
         let dir = TempDir::new().unwrap();
         let dotd = dir.path().join("sample.d");
         std::fs::create_dir(&dotd).unwrap();
         fake_idx_dir(dir.path(), "sample.d.idx");
         let r = resolve(dotd.to_str().unwrap()).unwrap();
-        assert!(matches!(r, Resolved::LocalIdx { .. }));
+        assert!(matches!(r, Resolved::Idx { .. }));
     }
 
     #[test]
-    fn local_dotd_without_sidecar_becomes_local_dotd() {
+    fn local_raw_without_sidecar_becomes_raw() {
         let dir = TempDir::new().unwrap();
         let dotd = dir.path().join("sample.d");
         std::fs::create_dir(&dotd).unwrap();
         let r = resolve(dotd.to_str().unwrap()).unwrap();
-        assert!(matches!(r, Resolved::LocalDotD { .. }));
+        assert!(matches!(r, Resolved::Raw { .. }));
     }
 
     #[test]
-    fn local_tar_without_sidecar_becomes_stageable_localtar() {
+    fn local_tar_without_sidecar_becomes_tar() {
         let dir = TempDir::new().unwrap();
         let tar = dir.path().join("sample.d.tar");
         std::fs::write(&tar, b"fake").unwrap();
         let r = resolve(tar.to_str().unwrap()).unwrap();
         assert!(matches!(
             r,
-            Resolved::Stageable {
+            Resolved::Tar {
                 spec: SourceSpec::LocalTar { .. }
             }
         ));
@@ -196,7 +180,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("sample.d.idx")).unwrap();
         let r = resolve(dotd.to_str().unwrap()).unwrap();
         assert!(
-            matches!(r, Resolved::LocalDotD { .. }),
+            matches!(r, Resolved::Raw { .. }),
             "empty .idx dir should not shortcut; got {:?}",
             r
         );

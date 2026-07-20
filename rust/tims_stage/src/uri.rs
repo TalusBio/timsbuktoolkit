@@ -12,19 +12,23 @@ pub(crate) enum LocKind {
 }
 
 /// What kind of artifact the URI names, by suffix.
+///
+/// Only two categories matter to staging/resolution: a prebuilt `.idx`, a
+/// `.tar` container, or `Raw` — any vendor artifact. Vendor SHAPE (`.d`,
+/// `.mzML`, `.wiff`) is NOT classified here; that lives in each reader's
+/// `sniff`. `Raw` never errors on an unfamiliar suffix — the reader registry
+/// rejects genuinely-unknown formats at dispatch time (loudly), not the parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NameKind {
     Idx,
-    DotD,
+    Raw,
     Tar,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct UriShape {
     pub loc: LocKind,
     pub name: NameKind,
-    #[allow(dead_code)]
-    pub raw: String,
 }
 
 /// Classify a URI string by scheme + suffix. Pure logic, no I/O.
@@ -39,16 +43,12 @@ pub(crate) fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
         NameKind::Idx
     } else if trimmed.ends_with(".tar") {
         NameKind::Tar
-    } else if trimmed.ends_with(".d") {
-        NameKind::DotD
     } else {
-        return Err(StageError::UnknownSuffix(uri.to_string()));
+        // Any other suffix is a raw vendor artifact; the reader registry
+        // decides which backend claims it (or rejects it) at dispatch time.
+        NameKind::Raw
     };
-    Ok(UriShape {
-        loc,
-        name,
-        raw: uri.to_string(),
-    })
+    Ok(UriShape { loc, name })
 }
 
 /// Cheap test for a supported remote URI scheme.
@@ -148,13 +148,20 @@ mod tests {
     fn recognizes_local_dotd() {
         let s = parse_uri_shape("/tmp/sample.d").unwrap();
         assert_eq!(s.loc, LocKind::Local);
-        assert_eq!(s.name, NameKind::DotD);
+        assert_eq!(s.name, NameKind::Raw);
     }
 
     #[test]
     fn recognizes_local_dotd_with_trailing_slash() {
         let s = parse_uri_shape("/tmp/sample.d/").unwrap();
-        assert_eq!(s.name, NameKind::DotD);
+        assert_eq!(s.name, NameKind::Raw);
+    }
+
+    #[test]
+    fn mzml_is_raw_not_an_error() {
+        let s = parse_uri_shape("/data/foo.mzML").unwrap();
+        assert_eq!(s.loc, LocKind::Local);
+        assert_eq!(s.name, NameKind::Raw);
     }
 
     #[test]
@@ -171,9 +178,11 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_unknown_suffix() {
-        let err = parse_uri_shape("/tmp/some.txt").unwrap_err();
-        assert!(matches!(err, StageError::UnknownSuffix(_)));
+    fn unknown_suffix_is_raw_deferred_to_registry() {
+        // Vendor-suffix classification is the reader registry's job now; the
+        // parser no longer rejects unfamiliar suffixes.
+        let s = parse_uri_shape("/tmp/some.txt").unwrap();
+        assert_eq!(s.name, NameKind::Raw);
     }
 
     #[test]

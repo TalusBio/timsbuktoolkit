@@ -16,7 +16,9 @@ use common::minio;
 /// when the test runs — silent passes would mask CI misconfiguration.
 #[test]
 #[ignore = "requires MinIO endpoint + aws feature; run explicitly with --ignored"]
-fn stage_s3_prefix_against_minio() {
+fn stage_manifest_against_minio() {
+    use timscentroid::reader::Manifest;
+
     let endpoint = minio::minio_endpoint()
         .expect("MINIO_TEST_ENDPOINT must be set when running this ignored test");
     unsafe {
@@ -30,7 +32,7 @@ fn stage_s3_prefix_against_minio() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let uri_prefix = format!("s3://{bucket}/smoke/{run_id}/sample.d/");
+    let entry = format!("s3://{bucket}/smoke/{run_id}/sample.d");
 
     let tmp = tempfile::TempDir::new().unwrap();
     let tdf = tmp.path().join("analysis.tdf");
@@ -38,20 +40,26 @@ fn stage_s3_prefix_against_minio() {
     std::fs::write(&tdf, b"fake-tdf-payload").unwrap();
     std::fs::write(&tdf_bin, b"fake-tdf-bin-payload").unwrap();
 
-    tims_stage::upload_file(&tdf, &format!("{uri_prefix}analysis.tdf")).unwrap();
-    tims_stage::upload_file(&tdf_bin, &format!("{uri_prefix}analysis.tdf_bin")).unwrap();
+    tims_stage::upload_file(&tdf, &format!("{entry}/analysis.tdf")).unwrap();
+    tims_stage::upload_file(&tdf_bin, &format!("{entry}/analysis.tdf_bin")).unwrap();
+
+    // Manifest-driven staging fetches exactly the declared members, by real
+    // name, into `<tempdir>/sample.d/`.
+    let manifest = Manifest {
+        entry: entry.parse().unwrap(),
+        required: vec![
+            format!("{entry}/analysis.tdf").parse().unwrap(),
+            format!("{entry}/analysis.tdf_bin").parse().unwrap(),
+        ],
+        optional: vec![],
+    };
 
     let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig::default()).unwrap();
-    let resolved = tims_stage::resolve(&uri_prefix).unwrap();
-    let spec = match resolved {
-        tims_stage::Resolved::Stageable { spec } => spec,
-        other => panic!("expected Stageable, got {other:?}"),
-    };
-    let staged =
-        <tims_stage::PerRunTempdir as tims_stage::StagingBackend>::stage(&backend, &spec).unwrap();
+    let staged = tims_stage::stage_manifest(&backend, &manifest).unwrap();
+    let entry_dir = staged.source().entry_path();
 
-    let got_tdf = std::fs::read(staged.as_ref().join("analysis.tdf")).unwrap();
-    let got_bin = std::fs::read(staged.as_ref().join("analysis.tdf_bin")).unwrap();
+    let got_tdf = std::fs::read(entry_dir.join("analysis.tdf")).unwrap();
+    let got_bin = std::fs::read(entry_dir.join("analysis.tdf_bin")).unwrap();
     assert_eq!(got_tdf, b"fake-tdf-payload");
     assert_eq!(got_bin, b"fake-tdf-bin-payload");
 }

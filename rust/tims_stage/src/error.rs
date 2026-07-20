@@ -4,9 +4,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StageError {
-    #[error("unknown URI suffix: {0} (expected .idx, .d, .d/, or .tar)")]
-    UnknownSuffix(String),
-
     #[error("URI malformed: {0}")]
     InvalidUri(String),
 
@@ -68,7 +65,7 @@ mod tests {
 
     #[test]
     fn stage_error_display_has_context() {
-        let e = StageError::UnknownSuffix("/foo.txt".into());
+        let e = StageError::InvalidUri("/foo.txt".into());
         let s = format!("{e}");
         assert!(s.contains("/foo.txt"));
     }

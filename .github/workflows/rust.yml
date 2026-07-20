@@ -21,11 +21,15 @@ jobs:
           - "--no-default-features"  # serial
     steps:
       - uses: actions/checkout@v6
-      - name: Apply crate patches (rustyms gnome.dat stub)
-        run: |
-          cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
-          cargo patch-crate
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests
         run: cargo test --verbose -p timsseek ${{ matrix.features }}
+      # Raw-reader / staging / mzML-ingest coverage. Run once (default matrix
+      # leg): timsseek alone doesn't exercise timscentroid's mzdata ingest,
+      # tims_stage manifest staging, or the timsquery mobility gate.
+      - name: Run reader + staging tests (mzdata)
+        if: matrix.features == ''
+        run: |
+          cargo test -p timscentroid --features mzdata
+          cargo test -p tims_stage -p timsquery

@@ -113,7 +113,7 @@ impl PyTimsIndex {
             prefer_lazy,
             ..Default::default()
         };
-        let handle = timsquery::serde::load_index_auto(path, Some(config))
+        let (handle, _source) = timsquery::serde::load_index_auto(path, Some(config))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{:?}", e)))?;
         Ok(Self {
             handle: Arc::new(handle),

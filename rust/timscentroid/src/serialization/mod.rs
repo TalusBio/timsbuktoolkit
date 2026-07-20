@@ -238,6 +238,12 @@ pub struct TimscentroidMetadata {
     pub created_at: String,
     pub ms1_peaks: PeakGroupMetadata<MS1CycleIndex>,
     pub ms2_window_groups: Vec<Ms2GroupMetadata>,
+    /// The run's mobility axis kind. `#[serde(default)]` → indices serialized
+    /// before this field existed load as `Ook0` (the historical TDF behavior).
+    /// Persisting it means a non-`Ook0` (mzML) index survives a save/reload
+    /// round-trip instead of silently reverting to a searchable TIMS axis.
+    #[serde(default)]
+    pub mobility_kind: crate::dimension::MobilityKind,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -475,6 +481,7 @@ impl IndexedTimstofPeaks {
             created_at: chrono::Utc::now().to_rfc3339(),
             ms1_peaks: ms1_meta,
             ms2_window_groups: ms2_metas,
+            mobility_kind: self.mobility_kind.clone(),
         };
 
         let metadata_json = serde_json::to_string_pretty(&meta)?;
@@ -584,6 +591,9 @@ impl IndexedTimstofPeaks {
         Ok(Self {
             ms1_peaks,
             ms2_window_groups,
+            // Restored from metadata (defaults to `Ook0` for pre-field indices),
+            // so a persisted non-`Ook0` run survives the round-trip.
+            mobility_kind: meta.mobility_kind,
         })
     }
 }

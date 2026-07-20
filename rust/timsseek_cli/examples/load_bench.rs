@@ -32,7 +32,6 @@ use timscentroid::{
     IndexedTimstofPeaks,
     StorageLocation,
 };
-use timsrust::TimsTofPath;
 use tracing::info;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,9 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "resolve done"
     );
 
-    // Phase 2 + 3: stage (if Stageable) + load/build.
+    // Phase 2 + 3: load directly (idx) or build via the unified raw core.
+    let cfg = CentroidingConfig::default();
     match resolved {
-        Resolved::LocalIdx { loc } | Resolved::RemoteIdx { loc } => {
+        Resolved::Idx { loc } => {
             let t = Instant::now();
             let _idx = IndexedTimstofPeaks::load_from_storage(loc)?;
             info!(
@@ -69,36 +69,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "load_from_storage done"
             );
         }
-        Resolved::LocalDotD { path } => {
+        Resolved::Raw { uri } => {
+            let backend = PerRunTempdir::new(StagingConfig::default())?;
             let t = Instant::now();
-            let tt = TimsTofPath::new(path.to_str().unwrap())
-                .map_err(|e| format!("TimsTofPath::new: {e:?}"))?;
-            let (_idx, stats) =
-                IndexedTimstofPeaks::from_timstof_file(&tt, CentroidingConfig::default());
+            let raw = tims_stage::load_raw(&uri, &backend, &cfg)?;
             info!(
                 elapsed_ms = t.elapsed().as_millis(),
-                ms1_time_ms = stats.ms1_total_time.as_millis(),
-                ms2_time_ms = stats.ms2_total_time.as_millis(),
-                "from_timstof_file (local .d) done"
+                reader = raw.reader_name,
+                "load_raw done"
             );
         }
-        Resolved::Stageable { spec } => {
+        Resolved::Tar { spec } => {
             let backend = PerRunTempdir::new(StagingConfig::default())?;
             let t = Instant::now();
             let staged = backend.stage(&spec)?;
-            let stage_ms = t.elapsed().as_millis();
-            info!(elapsed_ms = stage_ms, dotd = ?staged.as_ref(), "stage done");
+            info!(elapsed_ms = t.elapsed().as_millis(), dotd = ?staged.as_ref(), "stage (tar) done");
 
             let t = Instant::now();
-            let tt = TimsTofPath::new(staged.as_ref().to_str().unwrap())
-                .map_err(|e| format!("TimsTofPath::new: {e:?}"))?;
-            let (_idx, stats) =
-                IndexedTimstofPeaks::from_timstof_file(&tt, CentroidingConfig::default());
+            let raw = tims_stage::load_raw(staged.as_ref().to_str().unwrap(), &backend, &cfg)?;
             info!(
                 elapsed_ms = t.elapsed().as_millis(),
-                ms1_time_ms = stats.ms1_total_time.as_millis(),
-                ms2_time_ms = stats.ms2_total_time.as_millis(),
-                "from_timstof_file (staged) done"
+                reader = raw.reader_name,
+                "load_raw (staged) done"
             );
         }
     };
@@ -109,13 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn kind_of(r: &Resolved) -> &'static str {
     match r {
-        Resolved::LocalIdx { .. } => "LocalIdx",
-        Resolved::RemoteIdx { .. } => "RemoteIdx",
-        Resolved::LocalDotD { .. } => "LocalDotD",
-        Resolved::Stageable { spec } => match spec {
-            tims_stage::SourceSpec::S3Tar { .. } => "Stageable(S3Tar)",
-            tims_stage::SourceSpec::S3Prefix { .. } => "Stageable(S3Prefix)",
-            tims_stage::SourceSpec::LocalTar { .. } => "Stageable(LocalTar)",
+        Resolved::Idx { .. } => "Idx",
+        Resolved::Raw { .. } => "Raw",
+        Resolved::Tar { spec } => match spec {
+            tims_stage::SourceSpec::S3Tar { .. } => "Tar(S3)",
+            tims_stage::SourceSpec::LocalTar { .. } => "Tar(Local)",
         },
     }
 }

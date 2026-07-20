@@ -75,9 +75,23 @@ impl FileLoader {
         }
     }
 
-    /// Open a file dialog for raw data .d directory
+    /// Open a folder dialog for a raw data `.d` directory (or `.idx` cache).
     pub fn open_raw_data_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            self.set_raw_data_path(path);
+        }
+    }
+
+    /// Open a file dialog for a single raw data FILE (mzML / Thermo raw).
+    /// `.d`/`.idx` are directories and need `open_raw_data_dialog`. The accepted
+    /// extensions come from the reader registry — the single source of truth for
+    /// which raw file formats are compiled in.
+    pub fn open_raw_data_file_dialog(&mut self) {
+        let extensions = timscentroid::reader::ReaderRegistry::with_builtins().file_extensions();
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Raw MS file", &extensions)
+            .pick_file()
+        {
             self.set_raw_data_path(path);
         }
     }

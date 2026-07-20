@@ -36,6 +36,10 @@ thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 
 [features]
+default = ["mzdata"]
+# mzML ingest (open-format raw input), on by default; drop with
+# `--no-default-features`.
+mzdata = ["timsquery/mzdata"]
 instrumentation = ["timsseek/instrumentation"]
 
 [target.'cfg(windows)'.dependencies]

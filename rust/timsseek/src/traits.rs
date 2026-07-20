@@ -77,6 +77,10 @@ pub trait MappableRTCycles {
     fn ms1_cycle_mapping(
         &self,
     ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>;
+
+    /// The run's mobility-axis kind. Gates the mobility score features: a
+    /// non-`Ook0` run neutralizes them (see `ScoringFields::neutralize_mobility`).
+    fn mobility_kind(&self) -> &timscentroid::MobilityKind;
 }
 
 impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
@@ -85,6 +89,10 @@ impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
     ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex> {
         self.ms1_cycle_mapping()
     }
+
+    fn mobility_kind(&self) -> &timscentroid::MobilityKind {
+        self.mobility_kind()
+    }
 }
 
 impl MappableRTCycles for timsquery::serde::IndexedPeaksHandle {
@@ -92,5 +100,9 @@ impl MappableRTCycles for timsquery::serde::IndexedPeaksHandle {
         &self,
     ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex> {
         self.ms1_cycle_mapping()
+    }
+
+    fn mobility_kind(&self) -> &timscentroid::MobilityKind {
+        self.mobility_kind()
     }
 }

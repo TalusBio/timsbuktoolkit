@@ -9,7 +9,12 @@ use std::path::{
 };
 
 pub trait StagingBackend {
+    /// Stage a tar container to a local `.d` tempdir.
     fn stage(&self, spec: &SourceSpec) -> Result<StagedDotD, StageError>;
+
+    /// A fresh namespaced tempdir for manifest-driven staging (see
+    /// [`crate::load::stage_manifest`]).
+    fn new_run_tempdir(&self) -> Result<tempfile::TempDir, StageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -99,9 +104,12 @@ impl StagingBackend for PerRunTempdir {
     fn stage(&self, spec: &SourceSpec) -> Result<StagedDotD, StageError> {
         match spec {
             SourceSpec::S3Tar { .. } => crate::tar::stage_s3_tar(self, spec),
-            SourceSpec::S3Prefix { .. } => crate::prefix::stage_s3_prefix(self, spec),
             SourceSpec::LocalTar { .. } => crate::tar::stage_local_tar(self, spec),
         }
+    }
+
+    fn new_run_tempdir(&self) -> Result<tempfile::TempDir, StageError> {
+        self.new_tempdir()
     }
 }
 

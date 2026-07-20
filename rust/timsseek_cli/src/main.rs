@@ -362,14 +362,25 @@ fn process_single_file(
     info!("Processing raw input: {}", raw_uri);
 
     let step = TimedStep::begin("Loading index");
-    let index =
+    let (index, index_source) =
         load_index(raw_uri, backend, save_sidecar, CentroidingConfig::default()).map_err(|e| {
             errors::CliError::Io {
                 source: format!("load_index({raw_uri}): {e}"),
                 path: Some(raw_uri.to_string()),
             }
         })?;
-    let load_index_ms = step.finish().as_millis() as u64;
+    // Surface the load mechanism (cache reuse vs raw build + which reader) on the
+    // user-facing progress line — otherwise it's invisible.
+    let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
+    match index.mobility_kind() {
+        timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
+        timscentroid::MobilityKind::Absent => {
+            info!("Mobility axis: none — mobility filter + score features disabled")
+        }
+        timscentroid::MobilityKind::Unsupported(label) => info!(
+            "Mobility axis: unsupported [{label}] — mobility filter + score features disabled"
+        ),
+    }
     alloc_track::snap!("Loading index");
 
     // Rebucket to the scoring-optimal size. Existing on-disk caches

@@ -77,6 +77,13 @@ impl MzMobilityOffsets {
         let mut ms1 = TopNArray::new();
         let mut ms2 = TopNArray::new();
 
+        // Guard the percent-error divide: a zero/absent reference mobility
+        // (no-IM library, or an mzML sentinel) would yield `inf`, which slips
+        // past the `is_nan()`-only accumulator guards in `weighted_ms1/ms2`
+        // (Phase-2 calibration). NaN is the correct "no information" sentinel.
+        let ref_mob_f32 = ref_mobility as f32;
+        let ref_mob_valid = ref_mob_f32.is_finite() && ref_mob_f32 != 0.0;
+
         for ((key, ref_mz), val) in item.iter_precursors() {
             if key < 0i8 {
                 continue;
@@ -88,7 +95,11 @@ impl MzMobilityOffsets {
             let mobility_error_pct =
                 (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
             // Convert to percentage
-            let mobility_error_pct = mobility_error_pct / (ref_mobility as f32) * 1e2;
+            let mobility_error_pct = if ref_mob_valid {
+                mobility_error_pct / ref_mob_f32 * 1e2
+            } else {
+                f32::NAN
+            };
             ms1.push(ObsIonWithError {
                 intensity,
                 mz_error_ppm,
@@ -102,7 +113,11 @@ impl MzMobilityOffsets {
             let mz_error_ppm = mz_error_ppm / (*ref_mz as f32) * 1e6;
             let mobility_error_pct =
                 (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
-            let mobility_error_pct = mobility_error_pct / (ref_mobility as f32) * 1e2;
+            let mobility_error_pct = if ref_mob_valid {
+                mobility_error_pct / ref_mob_f32 * 1e2
+            } else {
+                f32::NAN
+            };
             ms2.push(ObsIonWithError {
                 intensity,
                 mz_error_ppm,
@@ -137,8 +152,18 @@ impl MzMobilityOffsets {
                 mob += v.intensity * v.mobility_error_pct as f64;
             }
         }
-        if w_mz > 0.0 && w_mob > 0.0 {
-            Some(((mz / w_mz) as f32, (mob / w_mob) as f32))
+        // m/z and mobility are INDEPENDENT: a run with no searchable mobility
+        // (mzML against a no-IM library) has all-NaN mobility errors, but its m/z
+        // errors are perfectly good and MUST still calibrate. Gate each on its
+        // own weight; return NaN mobility rather than dropping the whole calibrant.
+        if w_mz > 0.0 {
+            let mz_avg = (mz / w_mz) as f32;
+            let mob_avg = if w_mob > 0.0 {
+                (mob / w_mob) as f32
+            } else {
+                f32::NAN
+            };
+            Some((mz_avg, mob_avg))
         } else {
             None
         }
@@ -217,5 +242,48 @@ impl MzMobilityOffsets {
         }
 
         (ms1, ms2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ion(intensity: f64, mz_err: f32, mob_err: f32) -> ObsIonWithError {
+        ObsIonWithError {
+            intensity,
+            mz_error_ppm: mz_err,
+            mobility_error_pct: mob_err,
+        }
+    }
+
+    #[test]
+    fn weighted_ms1_calibrates_mz_when_mobility_absent() {
+        // mzML vs no-IM library: finite m/z error, NaN mobility error. m/z MUST
+        // still calibrate — the calibrant must not be dropped just because
+        // mobility is absent (regression guard for the `w_mz && w_mob` gate).
+        let mut ms1 = TopNArray::new();
+        ms1.push(ion(10.0, 5.0, f32::NAN));
+        ms1.push(ion(20.0, 7.0, f32::NAN));
+        let offsets = MzMobilityOffsets {
+            ms1,
+            ms2: TopNArray::new(),
+            ref_mobility: 0.0,
+        };
+        let (mz, mob) = offsets
+            .weighted_ms1()
+            .expect("m/z must calibrate even when mobility is absent");
+        assert!(mz.is_finite() && mz > 0.0, "mz avg should be finite: {mz}");
+        assert!(mob.is_nan(), "mobility must stay NaN, not fabricated: {mob}");
+    }
+
+    #[test]
+    fn weighted_ms1_none_without_mz_signal() {
+        let offsets = MzMobilityOffsets {
+            ms1: TopNArray::new(),
+            ms2: TopNArray::new(),
+            ref_mobility: 0.9,
+        };
+        assert!(offsets.weighted_ms1().is_none());
     }
 }

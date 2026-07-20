@@ -98,6 +98,22 @@ pub struct ScoringFields {
     pub ms1_intensity_ratios: [f32; NUM_MS1_IONS],
 }
 
+impl ScoringFields {
+    /// Zero out (as NaN) every mobility-derived feature. Used when the run's
+    /// mobility axis is not a searchable TIMS 1/K0 (mzML/FAIMS): the observed
+    /// mobility is a sentinel, so these features would otherwise feed the GBM
+    /// sentinel-derived constants (or `inf` from a divide-by-`ref_mobility==0`).
+    /// forust treats NaN as missing (`missing_node_treatment = AssignToParent`).
+    pub fn neutralize_mobility(&mut self) {
+        self.precursor_mobility = f32::NAN;
+        self.obs_mobility = f32::NAN;
+        self.delta_ms1_ms2_mobility = f32::NAN;
+        self.sq_delta_ms1_ms2_mobility = f32::NAN;
+        self.ms1_mobility_errors.fill(f32::NAN);
+        self.ms2_mobility_errors.fill(f32::NAN);
+    }
+}
+
 /// Phase 3 output. All scoring fields guaranteed populated.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoredCandidate {

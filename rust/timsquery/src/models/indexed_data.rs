@@ -81,7 +81,6 @@ use crate::{
     Tolerance,
 };
 use half::f16;
-use timscentroid::IndexedTimstofPeaks;
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -92,6 +91,10 @@ use timscentroid::utils::OptionallyRestricted::{
     Unrestricted,
 };
 use timscentroid::utils::TupleRange;
+use timscentroid::{
+    IndexedTimstofPeaks,
+    MobilityKind,
+};
 
 /// Encapsulates the query ranges computed from an elution group and tolerance.
 ///
@@ -104,17 +107,50 @@ struct QueryRanges {
     ms2_cycle_range: OptionallyRestricted<TupleRange<WindowCycleIndex>>,
 }
 
+/// Whether the mobility axis may be used to filter peaks for this query.
+///
+/// The combined gate: mobility is only searchable when BOTH the run index and
+/// the library carry a TIMS 1/K0 axis. If either side is `Absent`/`Unsupported`
+/// the axis is unrestricted — this is what prevents the H2 trap where a TIMS run
+/// against a no-IM library would filter the 1/K0 window around a library sentinel
+/// and silently return zero IDs.
+///
+/// The asymmetric case (exactly one side `Ook0`) is the dangerous one, so it
+/// fires a loud one-time warning; two non-`Ook0` sides is the expected mzML path
+/// and stays quiet.
+fn im_axis_filterable(run: &MobilityKind, lib: &MobilityKind) -> bool {
+    match (run.is_filterable(), lib.is_filterable()) {
+        (true, true) => true,
+        (true, false) | (false, true) => {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                eprintln!(
+                    "WARNING: mobility-axis mismatch between run ({run:?}) and library ({lib:?}); \
+                     unrestricting the mobility filter for all such queries."
+                );
+            });
+            false
+        }
+        (false, false) => false,
+    }
+}
+
 impl QueryRanges {
     /// Compute query ranges from query data + tolerance.
     fn from_query_data<FH: KeyLike>(
         query: &impl crate::traits::queriable_data::HasQueryData<FH>,
         tolerance: &Tolerance,
+        run_mobility: &MobilityKind,
         rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
     ) -> Self {
         let prec_mz_limits = query.precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(query.mobility_ook0());
+        let im_range = if im_axis_filterable(run_mobility, &query.mobility_kind()) {
+            tolerance.mobility_range_f16(query.mobility_ook0())
+        } else {
+            Unrestricted
+        };
         let rt_range_milliseconds = tolerance.rt_range_as_milis(query.rt_seconds());
         let ms1_cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
@@ -138,13 +174,18 @@ impl QueryRanges {
     fn from_query_data_with_rt_intersection<FH: KeyLike>(
         query: &impl crate::traits::queriable_data::HasQueryData<FH>,
         tolerance: &Tolerance,
+        run_mobility: &MobilityKind,
         rt_limits_milis: TupleRange<u32>,
         rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
     ) -> Option<Self> {
         let prec_mz_limits = query.precursor_mz_limits();
         let quad_range =
             tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = tolerance.mobility_range_f16(query.mobility_ook0());
+        let im_range = if im_axis_filterable(run_mobility, &query.mobility_kind()) {
+            tolerance.mobility_range_f16(query.mobility_ook0())
+        } else {
+            Unrestricted
+        };
 
         let rt_range_milliseconds = match tolerance
             .rt_range_as_milis(query.rt_seconds())
@@ -197,7 +238,9 @@ impl QueryRanges {
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstofPeaks {
     fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
         let ranges =
-            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
+            QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
+                self.rt_ms_to_cycle_index(rt)
+            });
 
         // Copy iterators to stack before the closures — can't borrow aggregator
         // immutably (for the iterator) and mutably (for `.intensity +=`) at once.
@@ -230,6 +273,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
         let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
             aggregator,
             tolerance,
+            self.mobility_kind(),
             aggregator.rt_range_milis(),
             |rt| self.rt_ms_to_cycle_index(rt),
         ) else {
@@ -292,7 +336,9 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
 impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPeaks {
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
         let ranges =
-            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
+            QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
+                self.rt_ms_to_cycle_index(rt)
+            });
 
         aggregator
             .iter_mut_precursors()
@@ -331,7 +377,9 @@ impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
 {
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
         let ranges =
-            QueryRanges::from_query_data(aggregator, tolerance, |rt| self.rt_ms_to_cycle_index(rt));
+            QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
+                self.rt_ms_to_cycle_index(rt)
+            });
 
         aggregator
             .iter_mut_precursors()
@@ -395,6 +443,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                 let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
                     aggregator,
                     tolerance,
+                    lazy.mobility_kind(),
                     aggregator.rt_range_milis(),
                     |rt| lazy.rt_ms_to_cycle_index(rt),
                 ) else {
@@ -474,9 +523,12 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedPeaksHand
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
             IndexedPeaksHandle::Lazy(lazy) => {
-                let ranges = QueryRanges::from_query_data(aggregator, tolerance, |rt| {
-                    lazy.rt_ms_to_cycle_index(rt)
-                });
+                let ranges = QueryRanges::from_query_data(
+                    aggregator,
+                    tolerance,
+                    lazy.mobility_kind(),
+                    |rt| lazy.rt_ms_to_cycle_index(rt),
+                );
 
                 let cycle_range_u32 = match ranges.ms1_cycle_range {
                     Restricted(x) => Restricted(
@@ -527,9 +579,12 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
             IndexedPeaksHandle::Lazy(lazy) => {
-                let ranges = QueryRanges::from_query_data(aggregator, tolerance, |rt| {
-                    lazy.rt_ms_to_cycle_index(rt)
-                });
+                let ranges = QueryRanges::from_query_data(
+                    aggregator,
+                    tolerance,
+                    lazy.mobility_kind(),
+                    |rt| lazy.rt_ms_to_cycle_index(rt),
+                );
 
                 let cycle_range_u32 = match ranges.ms1_cycle_range {
                     Restricted(x) => Restricted(
@@ -566,5 +621,88 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
                     });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mobility_gate_tests {
+    use super::im_axis_filterable;
+    use timscentroid::MobilityKind;
+
+    #[test]
+    fn both_ook0_is_filterable() {
+        assert!(im_axis_filterable(&MobilityKind::Ook0, &MobilityKind::Ook0));
+    }
+
+    #[test]
+    fn absent_run_unrestricts() {
+        assert!(!im_axis_filterable(
+            &MobilityKind::Absent,
+            &MobilityKind::Ook0
+        ));
+    }
+
+    #[test]
+    fn absent_lib_unrestricts() {
+        // The H2 trap: a TIMS run against a no-IM library must NOT filter.
+        assert!(!im_axis_filterable(
+            &MobilityKind::Ook0,
+            &MobilityKind::Absent
+        ));
+    }
+
+    #[test]
+    fn both_absent_unrestricts() {
+        assert!(!im_axis_filterable(
+            &MobilityKind::Absent,
+            &MobilityKind::Absent
+        ));
+    }
+
+    #[test]
+    fn unsupported_run_unrestricts() {
+        assert!(!im_axis_filterable(
+            &MobilityKind::Unsupported("FAIMS".into()),
+            &MobilityKind::Ook0
+        ));
+    }
+
+    #[test]
+    fn ctor_unrestricts_im_range_for_non_ook0_run() {
+        use crate::Tolerance;
+        use crate::models::aggregators::PointIntensityAggregator;
+        use crate::models::elution_group::TimsElutionGroup;
+        use crate::models::indexed_data::QueryRanges;
+        use timscentroid::rt_mapping::{
+            MS1CycleIndex,
+            RTIndex,
+        };
+        use timscentroid::utils::OptionallyRestricted;
+        use tinyvec::tiny_vec;
+
+        let eg = TimsElutionGroup::<usize>::builder()
+            .id(1)
+            .mobility_ook0(0.8)
+            .rt_seconds(100.0)
+            .precursor(400.0, 1u8)
+            .precursor_labels(tiny_vec!(0))
+            .fragment_mzs(vec![600.0])
+            .fragment_labels(tiny_vec!(0usize))
+            .try_build()
+            .unwrap();
+        let agg = PointIntensityAggregator::new(&eg);
+        let tol = Tolerance::default(); // mobility = Pct((3,3)) => Restricted for a finite value
+
+        // Ook0 run against the default Ook0 library => mobility filter is applied.
+        let r = QueryRanges::from_query_data(&agg, &tol, &MobilityKind::Ook0, |_| {
+            MS1CycleIndex::new(0)
+        });
+        assert!(matches!(r.im_range, OptionallyRestricted::Restricted(_)));
+
+        // Absent run => the combined gate unrestricts the mobility filter.
+        let r = QueryRanges::from_query_data(&agg, &tol, &MobilityKind::Absent, |_| {
+            MS1CycleIndex::new(0)
+        });
+        assert!(matches!(r.im_range, OptionallyRestricted::Unrestricted));
     }
 }

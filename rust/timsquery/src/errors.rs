@@ -31,6 +31,9 @@ pub enum DataReadingError {
     TimsTofPathError(TimsTofPathError),
     TimsRustError(TimsRustError), // Why doesnt timsrust error derive clone?
     SerializationError(SerializationError),
+    /// Failure dispatching to / building from a raw-format reader (the registry
+    /// + staging). Stringified to stay decoupled from the staging error type.
+    RawReadError(String),
 }
 
 impl From<UnsupportedDataError> for DataReadingError {
@@ -38,6 +41,8 @@ impl From<UnsupportedDataError> for DataReadingError {
         DataReadingError::UnsupportedDataError(e)
     }
 }
+// No `From<ReadError>` impl: the blanket `From<T: Into<TimsRustError>>` below
+// would conflict. Map explicitly with `DataReadingError::RawReadError` instead.
 
 // Note: Can't implement From<SerializationError> due to blanket impl conflict
 // Use DataReadingError::SerializationError(e) directly instead

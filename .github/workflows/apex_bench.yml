@@ -24,11 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Apply crate patches (rustyms gnome.dat stub)
-        run: |
-          cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
-          cargo patch-crate
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
