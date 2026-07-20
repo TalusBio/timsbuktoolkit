@@ -60,12 +60,6 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Apply crate patches (rustyms gnome.dat stub)
-        shell: bash
-        run: |
-          cargo install --git https://github.com/jspaezp/cargo-patch-crate patch-crate --locked
-          cargo patch-crate
-
       - name: Build Binaries
         shell: bash
         run: |

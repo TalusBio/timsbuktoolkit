@@ -2,19 +2,6 @@
 
 Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flags. Environment variables are NOT listed by `--help`; see the Env vars table below.
 
-## First-time setup
-
-`rustyms`'s 60 MB `gnome.dat` glycan database is stripped from the build via
-`[patch.crates-io]` in the workspace `Cargo.toml`, pointing at
-`target/patch/rustyms-0.11.0/` which must be populated before cargo runs. On a
-fresh clone:
-
-```bash
-task setup    # installs jspaezp/cargo-patch-crate fork + applies patches/
-```
-
-Then `cargo build` normally. CI runs the same step. Details in `patches/rustyms+0.11.0.patch`.
-
 ## Binaries
 
 | Binary | Crate | Purpose |

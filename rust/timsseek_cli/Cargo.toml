@@ -4,16 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# rustyms is patched (see workspace Cargo.toml `[patch.crates-io]` + patches/)
-# to drop the 60MB gnome.dat glycan database we don't use. Fresh-clone setup:
-#     task setup  (or: cargo install --git <fork> patch-crate --locked && cargo patch-crate)
-# The [patch.crates-io] path in the workspace Cargo.toml requires target/patch/
-# to exist before any cargo resolution — build.rs automation isn't possible
-# because cargo reads [patch] before any build script runs, even with the
-# jspaezp fork that fixed the tool's own bootstrap paradox.
-[package.metadata.patch]
-crates = ["rustyms"]
-
 [dependencies]
 timsseek = { path = "../timsseek", default-features = false }
 timsquery = { path = "../timsquery" }
