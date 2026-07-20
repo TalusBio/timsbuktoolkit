@@ -274,7 +274,10 @@ mod tests {
             .weighted_ms1()
             .expect("m/z must calibrate even when mobility is absent");
         assert!(mz.is_finite() && mz > 0.0, "mz avg should be finite: {mz}");
-        assert!(mob.is_nan(), "mobility must stay NaN, not fabricated: {mob}");
+        assert!(
+            mob.is_nan(),
+            "mobility must stay NaN, not fabricated: {mob}"
+        );
     }
 
     #[test]

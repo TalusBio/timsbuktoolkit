@@ -5,6 +5,10 @@ use super::diann_io::{
     sniff_diann_library_file,
     sniff_diann_parquet_library_file,
 };
+use super::diann_speclib_io::{
+    read_diann_speclib_library_file,
+    sniff_diann_speclib_library_file,
+};
 use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
@@ -34,6 +38,12 @@ pub enum LibraryReadingError {
     SerdeJsonError(serde_json::Error),
     ElutionGroupInputError(ElutionGroupInputError),
     UnableToParseElutionGroups,
+    /// A `.speclib` whose version is newer (more negative) than this reader
+    /// supports.
+    UnsupportedSpeclibVersion(i32),
+    /// A `.speclib` structural desync / bad byte count / unexpected value, with
+    /// context.
+    SpeclibParse(String),
 }
 
 impl From<serde_json::Error> for LibraryReadingError {
@@ -157,121 +167,180 @@ impl ElutionGroupCollection {
         }
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
+}
 
-    fn try_read_diann(path: &Path) -> Result<Self, LibraryReadingError> {
-        // First check if it's a parquet file
-        let is_diann_parquet = sniff_diann_parquet_library_file(path);
-        if is_diann_parquet {
-            info!("Detected DIA-NN parquet library file (DiaNN 2.2+)");
-            let egs = match read_diann_parquet(path) {
-                Ok(egs) => egs,
-                Err(e) => {
-                    warn!("Failed to read DIA-NN parquet library file: {:?}", e);
-                    return Err(LibraryReadingError::UnableToParseElutionGroups);
-                }
-            };
-            let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-            info!("Successfully read DIA-NN parquet library file");
-            return Ok(ElutionGroupCollection::MzpafLabels(
-                egs,
-                Some(FileReadingExtras::Diann(extras)),
-            ));
-        }
+/// A single spectral-library format reader. Adding a format = one struct + one
+/// line in [`registry`], instead of editing an enum, a method, and an ordered
+/// try-chain.
+pub trait LibraryReader: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// Cheap probe: header bytes / extension / first data row. Must not read the
+    /// whole file.
+    fn sniff(&self, path: &Path) -> bool;
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError>;
+}
 
-        // Then check if it's a TSV file
-        let is_diann_tsv = sniff_diann_library_file(path);
-        if is_diann_tsv {
-            info!("Detected DIA-NN TSV library file");
-            let egs = match read_diann_tsv(path) {
-                Ok(egs) => egs,
-                Err(e) => {
-                    warn!("Failed to read DIA-NN TSV library file: {:?}", e);
-                    return Err(LibraryReadingError::UnableToParseElutionGroups);
-                }
-            };
-            let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-            info!("Successfully read DIA-NN TSV library file");
-            return Ok(ElutionGroupCollection::MzpafLabels(
-                egs,
-                Some(FileReadingExtras::Diann(extras)),
-            ));
-        }
+struct DiannParquetReader;
+struct DiannSpeclibReader;
+struct DiannTsvReader;
+struct SpectronautReader;
+struct SkylineReader;
+struct JsonReader;
 
-        Err(LibraryReadingError::UnableToParseElutionGroups)
+impl LibraryReader for DiannParquetReader {
+    fn name(&self) -> &'static str {
+        "diann-parquet"
     }
 
-    fn try_read_skyline(path: &Path) -> Result<Self, LibraryReadingError> {
-        match sniff_skyline_library_file(path) {
-            Ok(()) => {
-                info!("Detected Skyline transition list CSV");
-                let egs = match read_skyline_csv(path) {
-                    Ok(egs) => egs,
-                    Err(e) => {
-                        warn!("Failed to read Skyline transition list: {:?}", e);
-                        return Err(LibraryReadingError::UnableToParseElutionGroups);
-                    }
-                };
-                let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-                info!("Successfully read Skyline transition list");
-                Ok(ElutionGroupCollection::MzpafLabels(
-                    egs,
-                    Some(FileReadingExtras::Skyline(extras)),
-                ))
-            }
-            Err(e) => {
-                debug!("File is not Skyline format: {:?}", e);
-                Err(LibraryReadingError::UnableToParseElutionGroups)
-            }
-        }
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_parquet_library_file(path)
     }
 
-    fn try_read_spectronaut(path: &Path) -> Result<Self, LibraryReadingError> {
-        match sniff_spectronaut_library_file(path) {
-            Ok(()) => {
-                info!("Detected Spectronaut TSV library file");
-                let egs = match read_spectronaut_tsv(path) {
-                    Ok(egs) => egs,
-                    Err(e) => {
-                        warn!("Failed to read Spectronaut TSV library file: {:?}", e);
-                        return Err(LibraryReadingError::UnableToParseElutionGroups);
-                    }
-                };
-                let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-                info!("Successfully read Spectronaut TSV library file");
-                Ok(ElutionGroupCollection::MzpafLabels(
-                    egs,
-                    Some(FileReadingExtras::Spectronaut(extras)),
-                ))
-            }
-            Err(e) => {
-                debug!("File is not Spectronaut format: {:?}", e);
-                Err(LibraryReadingError::UnableToParseElutionGroups)
-            }
-        }
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        let egs = read_diann_parquet(path).map_err(|e| {
+            warn!("Failed to read DIA-NN parquet library file: {:?}", e);
+            LibraryReadingError::UnableToParseElutionGroups
+        })?;
+        let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+        Ok(ElutionGroupCollection::MzpafLabels(
+            egs,
+            Some(FileReadingExtras::Diann(extras)),
+        ))
     }
+}
+
+impl LibraryReader for DiannSpeclibReader {
+    fn name(&self) -> &'static str {
+        "diann-speclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_speclib_library_file(path)
+    }
+
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        read_diann_speclib_library_file(path)
+    }
+}
+
+impl LibraryReader for DiannTsvReader {
+    fn name(&self) -> &'static str {
+        "diann-tsv"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_library_file(path)
+    }
+
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        let egs = read_diann_tsv(path).map_err(|e| {
+            warn!("Failed to read DIA-NN TSV library file: {:?}", e);
+            LibraryReadingError::UnableToParseElutionGroups
+        })?;
+        let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+        Ok(ElutionGroupCollection::MzpafLabels(
+            egs,
+            Some(FileReadingExtras::Diann(extras)),
+        ))
+    }
+}
+
+impl LibraryReader for SpectronautReader {
+    fn name(&self) -> &'static str {
+        "spectronaut-tsv"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_spectronaut_library_file(path).is_ok()
+    }
+
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        let egs = read_spectronaut_tsv(path).map_err(|e| {
+            warn!("Failed to read Spectronaut TSV library file: {:?}", e);
+            LibraryReadingError::UnableToParseElutionGroups
+        })?;
+        let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+        Ok(ElutionGroupCollection::MzpafLabels(
+            egs,
+            Some(FileReadingExtras::Spectronaut(extras)),
+        ))
+    }
+}
+
+impl LibraryReader for SkylineReader {
+    fn name(&self) -> &'static str {
+        "skyline-csv"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_skyline_library_file(path).is_ok()
+    }
+
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        let egs = read_skyline_csv(path).map_err(|e| {
+            warn!("Failed to read Skyline transition list: {:?}", e);
+            LibraryReadingError::UnableToParseElutionGroups
+        })?;
+        let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
+        Ok(ElutionGroupCollection::MzpafLabels(
+            egs,
+            Some(FileReadingExtras::Skyline(extras)),
+        ))
+    }
+}
+
+impl LibraryReader for JsonReader {
+    fn name(&self) -> &'static str {
+        "json"
+    }
+
+    /// Terminal fallback: always sniffs true so JSON is tried when nothing else
+    /// matched. Must be last in the registry.
+    fn sniff(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        ElutionGroupCollection::try_read_json(path)
+    }
+}
+
+fn registry() -> &'static [&'static dyn LibraryReader] {
+    &[
+        &DiannParquetReader,
+        &DiannSpeclibReader,
+        &DiannTsvReader,
+        &SpectronautReader,
+        &SkylineReader,
+        &JsonReader,
+    ]
 }
 
 pub fn read_library_file<T: AsRef<Path>>(
     path: T,
 ) -> Result<ElutionGroupCollection, LibraryReadingError> {
-    // Try DIA-NN first
-    let diann_attempt = ElutionGroupCollection::try_read_diann(path.as_ref());
-    if let Ok(egs) = diann_attempt {
-        return Ok(egs);
+    let path = path.as_ref();
+    let mut last_err = None;
+    for reader in registry() {
+        if reader.sniff(path) {
+            info!("Dispatching library read to {}", reader.name());
+            match reader.read(path) {
+                Ok(egs) => return Ok(egs),
+                // A sniff can fire on a file the reader then fails to parse
+                // (overlapping sniffs). Fall through to the next candidate
+                // instead of committing to the first sniff. Keep the FIRST
+                // error: readers run specific -> generic, so the earliest
+                // sniff-and-fail carries the most useful diagnostic (e.g. a
+                // `.speclib` desync), which the always-true JSON fallback's
+                // generic error would otherwise clobber.
+                Err(e) => {
+                    warn!("{} sniffed but failed to read: {:?}", reader.name(), e);
+                    last_err.get_or_insert(e);
+                }
+            }
+        }
     }
-
-    // Try Spectronaut next
-    let spectronaut_attempt = ElutionGroupCollection::try_read_spectronaut(path.as_ref());
-    if let Ok(egs) = spectronaut_attempt {
-        return Ok(egs);
-    }
-
-    // Try Skyline transition list (CSV)
-    let skyline_attempt = ElutionGroupCollection::try_read_skyline(path.as_ref());
-    if let Ok(egs) = skyline_attempt {
-        return Ok(egs);
-    }
-
-    // Fall back to JSON
-    ElutionGroupCollection::try_read_json(path.as_ref())
+    // Dead default in practice (JsonReader always sniffs true) — a harmless
+    // defensive fallback.
+    Err(last_err.unwrap_or(LibraryReadingError::UnableToParseElutionGroups))
 }

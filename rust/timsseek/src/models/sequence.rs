@@ -178,8 +178,107 @@ impl Default for SpeclibMeta {
 
 /// Parse a ProForma-normalized peptide string into our thin representation.
 /// Returns `None` on parse error, non-linear peptides, or mods outside the
-/// `Unimod`/`Mass` subset. Off the hot path — runs once per speclib load.
+/// `Unimod`/`Mass` subset.
+///
+/// A hand-rolled byte walk handles the grammar `normalize_to_proforma` actually
+/// emits (bare residues, `[UNIMOD:n]`, `[+/-mass]`, N-/C-terminal forms). It
+/// returns `Some` ONLY for inputs it fully recognizes; anything else — named
+/// mods, cross-links, unexpected bytes — yields `None` and defers to the rustyms
+/// parser, which stays the authority for what is valid. So the fast path can
+/// never accept something rustyms would reject, with one deliberate exception:
+/// it does not check that a `UNIMOD:n` id exists in the ontology (a
+/// syntactically valid id is accepted). Real DIA-NN output only carries real
+/// ids, so this never triggers in practice.
 pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
+    if let Some(parsed) = parse_sequence_fast(normalized) {
+        return Some(parsed);
+    }
+    parse_sequence_rustyms(normalized)
+}
+
+/// Classify one bracket body (`UNIMOD:n` or a signed mass like `+15.995`) into a
+/// [`Mod`]. `None` for anything else — a named mod, an unsigned number, empty —
+/// which forces the rustyms fallback in [`parse_sequence`].
+fn classify_mod(body: &str) -> Option<Mod> {
+    let body = body.trim();
+    if body.len() >= 7 && body[..7].eq_ignore_ascii_case("UNIMOD:") {
+        return body[7..].trim().parse::<u16>().ok().map(Mod::Unimod);
+    }
+    match body.as_bytes().first() {
+        Some(b'+') | Some(b'-') => body.parse::<f32>().ok().map(Mod::Mass),
+        _ => None,
+    }
+}
+
+/// Byte-walk parser for the `normalize_to_proforma` output grammar. `None` means
+/// "not recognized — defer to rustyms", never "definitively invalid" (that
+/// verdict is the fallback's). See [`parse_sequence`] for the contract.
+fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
+    let b = s.as_bytes();
+    let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
+    let mut mods: SmallVec<[ModEntry; 2]> = SmallVec::new();
+    let mut i = 0usize;
+
+    // Optional leading N-terminal mod: `[..]-SEQ`.
+    if b.first() == Some(&b'[') {
+        let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+        // A leading bracket not of the `[..]-` shape is something we do not
+        // model; let rustyms decide.
+        if b.get(close + 1) != Some(&b'-') {
+            return None;
+        }
+        mods.push(ModEntry {
+            pos: POS_N_TERM,
+            kind: classify_mod(&s[i + 1..close])?,
+        });
+        i = close + 2;
+    }
+
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_uppercase() => {
+                // A residue index must fit u8 for `ModEntry::pos` (0..=253).
+                if residues.len() > 253 {
+                    return None;
+                }
+                residues.push(AminoAcid::from_ascii(c));
+                i += 1;
+            }
+            b'[' => {
+                // Residue mod attaches to the residue just pushed.
+                if residues.is_empty() {
+                    return None;
+                }
+                let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: (residues.len() - 1) as u8,
+                    kind: classify_mod(&s[i + 1..close])?,
+                });
+                i = close + 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'[') => {
+                // Trailing C-terminal mod: `SEQ-[..]`.
+                let close = i + 2 + b[i + 2..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: POS_C_TERM,
+                    kind: classify_mod(&s[i + 2..close])?,
+                });
+                i = close + 1;
+            }
+            _ => return None, // anything unexpected -> rustyms fallback
+        }
+    }
+
+    if residues.is_empty() {
+        return None;
+    }
+    Some(ParsedSequence { residues, mods })
+}
+
+/// The rustyms-backed parser. Authoritative fallback for [`parse_sequence`]:
+/// validates against the ontology, handles named mods, and rejects non-linear
+/// peptides. Off the hot path once the fast path covers the common grammar.
+fn parse_sequence_rustyms(normalized: &str) -> Option<ParsedSequence> {
     use rustyms::prelude::IsAminoAcid;
     use rustyms::sequence::Peptidoform;
 
@@ -243,21 +342,107 @@ fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
     }
 }
 
+/// Replace every occurrence of `needle` in `haystack`, matching ignoring ASCII
+/// case, with `replacement`. `needle` must be ASCII (UNIMOD tags are). ASCII-only
+/// lowercasing preserves byte length, so match indices stay aligned with the
+/// original (UTF-8-safe) string.
+fn replace_ascii_ci(haystack: &str, needle: &str, replacement: &str) -> String {
+    debug_assert!(needle.is_ascii());
+    let hay_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if hay_lower[i..].starts_with(&needle_lower) {
+            out.push_str(replacement);
+            i += needle.len();
+        } else {
+            let ch = haystack[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Convert DIA-NN parenthesised UNIMOD mods to ProForma brackets: each
+/// case-insensitive `(unimod:` / `(u:` opener becomes `[UNIMOD:` and the single
+/// `)` that closes it becomes `]`. Any other paren — notably `)` inside a bracket
+/// mod name like `[Carbamidomethyl (C)]` — is left untouched.
+fn convert_paren_unimod(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let opener_len = if lower[i..].starts_with("(unimod:") {
+            Some("(unimod:".len())
+        } else if lower[i..].starts_with("(u:") {
+            Some("(u:".len())
+        } else {
+            None
+        };
+        match opener_len {
+            Some(len) => {
+                out.push_str("[UNIMOD:");
+                i += len;
+                let rest = &s[i..];
+                match rest.find(')') {
+                    // The id (ASCII digits) up to the matching close paren.
+                    Some(rel) => {
+                        out.push_str(&rest[..rel]);
+                        out.push(']');
+                        i += rel + 1; // consume ')'
+                    }
+                    // Malformed (no closer) — copy the remainder verbatim.
+                    None => {
+                        out.push_str(rest);
+                        i = s.len();
+                    }
+                }
+            }
+            None => {
+                let ch = s[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
-/// ProForma. Strips `_..._` wrapping used by DIA-NN and normalizes UNIMOD tag
-/// casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`). Pass-through otherwise.
+/// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
+/// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
+/// normalizes UNIMOD tag casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`).
+/// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
+/// requires. Pass-through for plain sequences.
+///
 /// Off the hot path — allocates on every replacement, which is fine at load.
 pub fn normalize_to_proforma(raw: &str) -> String {
     let trimmed = raw.trim_matches('_');
-    // Fast path: plain-AA sequences (no mod tags) skip the replace chain.
-    if !trimmed.contains('[') {
+    // Fast path: plain-AA sequences (no mod tags) skip the rewrite chain.
+    if !trimmed.contains('[') && !trimmed.contains('(') {
         return trimmed.to_owned();
     }
-    // Longer prefixes first so `[Uni...` doesn't partially-rewrite over `[U:`.
-    trimmed
-        .replace("[UniMod:", "[UNIMOD:")
-        .replace("[Unimod:", "[UNIMOD:")
-        .replace("[U:", "[UNIMOD:")
+
+    // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
+    // brackets, e.g. `C[UNIMOD:4]`. Convert each opener and ONLY its matching
+    // `)` (see `convert_paren_unimod`) — never a blanket `)` replace, which would
+    // corrupt parens inside a bracket mod name, e.g. `C[Carbamidomethyl (C)]`.
+    let s = convert_paren_unimod(trimmed);
+
+    // Normalize any pre-existing bracket casing likewise.
+    let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
+    s = replace_ascii_ci(&s, "[u:", "[UNIMOD:");
+
+    // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
+    if s.starts_with('[')
+        && let Some(close) = s.find(']')
+        && s[close + 1..].chars().next().is_some_and(|c| c != '-')
+    {
+        s.insert(close + 1, '-');
+    }
+    s
 }
 
 #[cfg(test)]
@@ -332,6 +517,75 @@ mod tests {
     }
 
     #[test]
+    fn normalize_diann_paren_unimod() {
+        // DIA-NN parenthesised mods -> ProForma brackets (internal residue mod).
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Case-insensitive on the tag.
+        assert_eq!(
+            normalize_to_proforma("AAC(unimod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("AAC(UNIMOD:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Multiple mods in one peptide.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M(UniMod:35)K"),
+            "AAC[UNIMOD:4]M[UNIMOD:35]K"
+        );
+    }
+
+    #[test]
+    fn normalize_diann_paren_nterm_gets_dash() {
+        // A leading (N-terminal) mod must become `[UNIMOD:n]-SEQ`.
+        assert_eq!(
+            normalize_to_proforma("(UniMod:1)AACDEK"),
+            "[UNIMOD:1]-AACDEK"
+        );
+    }
+
+    #[test]
+    fn parse_diann_paren_unimod_roundtrips() {
+        // The end-to-end path the load uses: normalize then parse. Parenthesised
+        // DIA-NN mods must parse (else the parse gate disables sequence features).
+        let norm = normalize_to_proforma("AAC(UniMod:4)DEK");
+        let p = parse_sequence(&norm).expect("paren UniMod must parse");
+        assert_eq!(p.residues.len(), 6);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn normalize_mixed_paren_unimod_and_bracket_paren_untouched() {
+        // A paren UNIMOD tag AND a bracket mod whose name contains `)`: only the
+        // UNIMOD `)` converts; the `(M)` inside the bracket name stays intact.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M[Oxidation (M)]K"),
+            "AAC[UNIMOD:4]M[Oxidation (M)]K"
+        );
+    }
+
+    #[test]
+    fn normalize_spectronaut_parens_in_brackets_untouched() {
+        // Spectronaut writes mod names with parens INSIDE brackets. The DIA-NN
+        // paren->bracket conversion must not touch these (no `(unimod:` opener).
+        assert_eq!(
+            normalize_to_proforma("_C[Carbamidomethyl (C)]PEPK_"),
+            "C[Carbamidomethyl (C)]PEPK"
+        );
+    }
+
+    #[test]
+    fn normalize_skyline_nterm_mass_gets_dash() {
+        // Skyline N-terminal mass mod -> ProForma `[+42]-SEQ`.
+        assert_eq!(normalize_to_proforma("[+42]AACDEK"), "[+42]-AACDEK");
+    }
+
+    #[test]
     fn normalize_mass_shift_unchanged() {
         assert_eq!(
             normalize_to_proforma("PEPTM[+15.995]IDEK"),
@@ -389,5 +643,73 @@ mod tests {
         assert_eq!(p.mods.len(), 1);
         assert_eq!(p.mods[0].pos, POS_N_TERM);
         assert_eq!(p.mods[0].kind, Mod::Unimod(1));
+    }
+
+    #[test]
+    fn fast_path_takes_recognized_grammar() {
+        // Bare and numeric-UNIMOD/mass inputs must be served by the fast path
+        // (never reach rustyms), else there's no speedup.
+        for s in [
+            "PEPTIDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-PEPTIDEK",
+            "M[+15.995]PEPTIDEK",
+            "[+42]-PEPTIDEK",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_some(),
+                "fast path must accept {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_path_defers_named_and_garbage() {
+        // Named mods and unexpected bytes must defer (fast returns None) so the
+        // rustyms authority decides validity + resolves the name.
+        for s in [
+            "[Acetyl]-PEPTIDEK",
+            "C[Carbamidomethyl (C)]PEPK",
+            "not a pep!",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_none(),
+                "fast path must defer {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_matches_rustyms_on_recognized_grammar() {
+        // Differential test: wherever the fast path claims an input, it must
+        // produce the exact same ParsedSequence rustyms would. Guards against
+        // the fast path silently diverging on residue counts or mod mapping.
+        let corpus = [
+            "PEPTIDEK",
+            "AACDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-AACDEK",
+            "M[UNIMOD:35]LEGNSPQGSNQGVK",
+            "AAAGAAATHLEVAR",
+        ];
+        for s in corpus {
+            if let Some(fast) = parse_sequence_fast(s) {
+                let slow = parse_sequence_rustyms(s)
+                    .unwrap_or_else(|| panic!("rustyms must also parse {s:?}"));
+                assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
+                assert_eq!(
+                    fast.mods.len(),
+                    slow.mods.len(),
+                    "n_mods mismatch for {s:?}"
+                );
+                assert_eq!(
+                    fast.aa_counts(),
+                    slow.aa_counts(),
+                    "aa_counts mismatch for {s:?}"
+                );
+            }
+        }
     }
 }

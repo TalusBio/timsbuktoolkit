@@ -37,14 +37,15 @@ fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
     let mut ncarbon = 0;
     let mut nsulphur = 0;
 
-    for (elem, count, _extras) in form.elements() {
-        match (elem, count) {
-            (&Element::C, Some(cnt)) => {
-                ncarbon += cnt.get();
-            }
-            (&Element::S, Some(cnt)) => {
-                nsulphur += cnt.get();
-            }
+    // `elements()` yields (element, isotope, count). The middle field is the
+    // isotope (nucleon number, `None` for the natural/unspecified isotope), NOT
+    // the atom count — the count is the third field. `count` is i32 and can be
+    // negative for a loss; clamp before the u16 cast.
+    for (elem, _isotope, count) in form.elements() {
+        let n = (*count).max(0) as u16;
+        match elem {
+            Element::C => ncarbon += n,
+            Element::S => nsulphur += n,
             _ => {}
         }
     }
@@ -52,7 +53,71 @@ fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
     (ncarbon, nsulphur)
 }
 
+/// In-chain (C, S) atom counts per standard residue, indexed by `byte - b'A'`.
+/// `None` = a non-standard code (B/J/O/U/X/Z) — defer to the rustyms path.
+///
+/// A residue contributes the same carbon/sulfur as its free amino acid: forming
+/// a peptide bond removes one water per bond and the terminal water carries
+/// neither C nor S, so a bare-sequence sum equals rustyms' formula exactly.
+const RESIDUE_CS: [Option<(u16, u16)>; 26] = {
+    // Alphabet offset of an uppercase residue byte (as a fn so `b'A'` maps to 0
+    // without a literal `b'A' - b'A'`, which clippy's eq_op denies).
+    const fn ri(c: u8) -> usize {
+        (c - b'A') as usize
+    }
+    let mut t = [None; 26];
+    t[ri(b'A')] = Some((3, 0));
+    t[ri(b'C')] = Some((3, 1));
+    t[ri(b'D')] = Some((4, 0));
+    t[ri(b'E')] = Some((5, 0));
+    t[ri(b'F')] = Some((9, 0));
+    t[ri(b'G')] = Some((2, 0));
+    t[ri(b'H')] = Some((6, 0));
+    t[ri(b'I')] = Some((6, 0));
+    t[ri(b'K')] = Some((6, 0));
+    t[ri(b'L')] = Some((6, 0));
+    t[ri(b'M')] = Some((5, 1));
+    t[ri(b'N')] = Some((4, 0));
+    t[ri(b'P')] = Some((5, 0));
+    t[ri(b'Q')] = Some((5, 0));
+    t[ri(b'R')] = Some((6, 0));
+    t[ri(b'S')] = Some((3, 0));
+    t[ri(b'T')] = Some((4, 0));
+    t[ri(b'V')] = Some((5, 0));
+    t[ri(b'W')] = Some((11, 0));
+    t[ri(b'Y')] = Some((9, 0));
+    t
+};
+
+/// Fast (C, S) tally over a bare amino-acid sequence via [`RESIDUE_CS`].
+/// `None` on an empty string or any non-standard residue, forcing the rustyms
+/// fallback so behavior (including the error path) is preserved.
+fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
+    if sequence.is_empty() {
+        return None;
+    }
+    let mut ncarbon = 0u16;
+    let mut nsulphur = 0u16;
+    for &b in sequence.as_bytes() {
+        let idx = b.wrapping_sub(b'A') as usize;
+        let (c, s) = RESIDUE_CS.get(idx).copied().flatten()?;
+        ncarbon += c;
+        nsulphur += s;
+    }
+    Some((ncarbon, nsulphur))
+}
+
+/// (C, S) counts for `sequence` (a bare, mod-stripped peptide on the hot path).
+/// Tries the allocation-free table first; defers to the rustyms formula path for
+/// empty / non-standard input, which stays the authority.
 pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), String> {
+    if let Some(cs) = count_cs_fast(sequence) {
+        return Ok(cs);
+    }
+    count_carbon_sulphur_in_sequence_rustyms(sequence)
+}
+
+fn count_carbon_sulphur_in_sequence_rustyms(sequence: &str) -> Result<(u16, u16), String> {
     let peptide = match Peptidoform::pro_forma(sequence, None) {
         Ok(pep) => pep,
         Err(e) => {
@@ -79,4 +144,37 @@ pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), St
 pub fn isotope_dist_from_seq(sequence: &str) -> Result<[f32; 3], String> {
     let (ncarbon, nsulphur) = count_carbon_sulphur_in_sequence(sequence)?;
     Ok(peptide_isotopes(ncarbon, nsulphur))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cs_table_matches_rustyms_per_residue() {
+        // Every standard residue: the table must equal rustyms' formula count.
+        for &aa in b"ACDEFGHIKLMNPQRSTVWY" {
+            let seq = String::from_utf8(vec![aa, aa, aa]).unwrap(); // e.g. "AAA"
+            let fast = count_cs_fast(&seq).expect("standard residue in table");
+            let slow = count_carbon_sulphur_in_sequence_rustyms(&seq)
+                .unwrap_or_else(|e| panic!("rustyms failed on {seq}: {e}"));
+            assert_eq!(fast, slow, "C/S mismatch for {seq}");
+        }
+    }
+
+    #[test]
+    fn cs_table_matches_rustyms_on_peptides() {
+        for seq in ["AAAGAAATHLEVAR", "LEGNSPQGSNQGVK", "MCMCMCK", "PEPTIDEK"] {
+            let fast = count_cs_fast(seq).expect("standard peptide");
+            let slow = count_carbon_sulphur_in_sequence_rustyms(seq).unwrap();
+            assert_eq!(fast, slow, "C/S mismatch for {seq}");
+        }
+    }
+
+    #[test]
+    fn cs_fast_defers_on_nonstandard_and_empty() {
+        assert!(count_cs_fast("").is_none(), "empty must defer");
+        assert!(count_cs_fast("PEPXK").is_none(), "X must defer");
+        assert!(count_cs_fast("pepk").is_none(), "lowercase must defer");
+    }
 }

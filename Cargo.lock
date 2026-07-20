@@ -6094,6 +6094,7 @@ dependencies = [
  "bon",
  "csv",
  "half",
+ "memmap2",
  "micromzpaf",
  "mimalloc",
  "parquet",

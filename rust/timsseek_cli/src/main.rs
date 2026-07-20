@@ -926,7 +926,11 @@ fn run() -> std::result::Result<(), errors::CliError> {
     let (speclib, _speclib_td) =
         speclib_from_uri(&validated.speclib_uri, config.analysis.decoy_strategy)?;
     let load_speclib_ms = step
-        .finish_with(format_args!("{} entries", speclib.len()))
+        .finish_with(format_args!(
+            "{} entries, {:.1} frags/entry",
+            speclib.len(),
+            speclib.avg_fragments()
+        ))
         .as_millis() as u64;
     alloc_track::snap!("Loading speclib");
 
@@ -937,7 +941,11 @@ fn run() -> std::result::Result<(), errors::CliError> {
             info!("Loading calibration library from {}", uri);
             let (lib, td) = speclib_from_uri(uri, config.analysis.decoy_strategy)?;
             let ms = step
-                .finish_with(format_args!("{} entries", lib.len()))
+                .finish_with(format_args!(
+                    "{} entries, {:.1} frags/entry",
+                    lib.len(),
+                    lib.avg_fragments()
+                ))
                 .as_millis() as u64;
             alloc_track::snap!("Loading calib lib");
             (Some(lib), td, ms)
