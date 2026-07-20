@@ -371,6 +371,43 @@ fn skyline_to_diann_extras(sky: SkylinePrecursorExtras) -> DiannPrecursorExtras 
     }
 }
 
+/// Map library rows to `elems`, in parallel when the `rayon` feature is on.
+///
+/// `f` maps `(row_index, eg, extra) -> Result<QueryItemToScore>`. Order and the
+/// row index are preserved in both builds (indexed par-iter + order-preserving
+/// `Result` collect), so `decoy_group = idx` and every downstream flat-index
+/// assumption match the serial result exactly. The per-row work (`parse_sequence`
+/// + `isotope_dist_from_seq`) is pure, so parallelizing is safe.
+fn convert_rows<E, F>(
+    egs: Vec<TimsElutionGroup<IonAnnot>>,
+    extras: Vec<E>,
+    f: F,
+) -> Result<Vec<QueryItemToScore>, LibraryReadingError>
+where
+    E: Send,
+    F: Fn(usize, TimsElutionGroup<IonAnnot>, E) -> Result<QueryItemToScore, LibraryReadingError>
+        + Sync
+        + Send,
+{
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        egs.into_par_iter()
+            .zip(extras)
+            .enumerate()
+            .map(|(idx, (eg, extra))| f(idx, eg, extra))
+            .collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        egs.into_iter()
+            .zip(extras)
+            .enumerate()
+            .map(|(idx, (eg, extra))| f(idx, eg, extra))
+            .collect()
+    }
+}
+
 /// Convert an ElutionGroupCollection from timsquery to a Speclib (without applying strategy)
 fn convert_elution_group_collection(
     collection: ElutionGroupCollection,
@@ -393,15 +430,9 @@ fn convert_elution_group_collection(
             );
 
             // Convert everything as-is, preserving existing decoy groups
-            let elems: Vec<_> = egs
-                .into_iter()
-                .zip(extras)
-                .enumerate()
-                .map(|(idx, (eg, extra))| {
-                    let decoy_group = idx as u32;
-                    convert_diann_to_query_item(eg, extra, decoy_group)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let elems = convert_rows(egs, extras, |idx, eg, extra| {
+                convert_diann_to_query_item(eg, extra, idx as u32)
+            })?;
 
             Ok(Speclib {
                 elems,
@@ -424,16 +455,9 @@ fn convert_elution_group_collection(
                 egs.len()
             );
 
-            let elems: Vec<_> = egs
-                .into_iter()
-                .zip(extras)
-                .enumerate()
-                .map(|(idx, (eg, sky_extra))| {
-                    let decoy_group = idx as u32;
-                    let diann_extra = skyline_to_diann_extras(sky_extra);
-                    convert_diann_to_query_item(eg, diann_extra, decoy_group)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let elems = convert_rows(egs, extras, |idx, eg, sky_extra| {
+                convert_diann_to_query_item(eg, skyline_to_diann_extras(sky_extra), idx as u32)
+            })?;
 
             Ok(Speclib {
                 elems,
@@ -659,16 +683,26 @@ impl<R: Read> Iterator for MessagePackReader<R> {
 /// MUST run AFTER all decoy generation (including `create_mass_shifted_decoy`
 /// and DIA-NN target-decoy pairing). Otherwise decoys generated post-gate
 /// inherit `parsed: Some(...)` from their target while the gate said off.
-fn apply_parse_gate(items: &mut [QueryItemToScore], expected_format: SeqFormat) -> SpeclibMeta {
+/// Whether every entry parsed. Cheap to compute on TARGETS before decoy
+/// expansion (decoys clone their target's `parsed`, so the verdict is identical)
+/// — doing it there avoids re-walking the 3x-larger, peak-RSS `elems`.
+fn all_sequences_parsed(items: &[QueryItemToScore]) -> bool {
+    !items.is_empty() && items.iter().all(|q| q.digest.parsed.is_some())
+}
+
+/// Apply the all-or-nothing parse gate given a precomputed `parsable` verdict
+/// (see [`all_sequences_parsed`]). When parsable, this is O(1) — no full walk.
+/// When not, it must still zero every entry's `parsed` (the degraded path).
+fn apply_parse_gate(
+    items: &mut [QueryItemToScore],
+    expected_format: SeqFormat,
+    parsable: bool,
+) -> SpeclibMeta {
     let total = items.len();
-    let parsed = items.iter().filter(|q| q.digest.parsed.is_some()).count();
-    let parsable = parsed == total && total > 0;
     if !parsable {
         tracing::warn!(
-            "speclib load: n_total={}, n_parsed={}, n_unparsed={}; sequence features disabled",
+            "speclib load: n_total={}; not all sequences parsable, sequence features disabled",
             total,
-            parsed,
-            total.saturating_sub(parsed)
         );
         for q in items.iter_mut() {
             q.digest.parsed = None;
@@ -685,6 +719,11 @@ fn apply_parse_gate(items: &mut [QueryItemToScore], expected_format: SeqFormat) 
     }
 }
 
+/// Target number of entries to sample for diagnostic stats. A full walk of a
+/// 26M-entry library at peak RSS costs tens of seconds (paging) for numbers that
+/// are only logged; a strided sample of this many is statistically equivalent.
+const STATS_SAMPLE_TARGET: usize = 100_000;
+
 impl Speclib {
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = QueryItemToScore> + 'a {
         SpeclibIterator {
@@ -698,16 +737,24 @@ impl Speclib {
     }
 
     /// Mean number of fragments per entry (0.0 for an empty library).
+    ///
+    /// Estimated from a strided sample: a full walk of a multi-million-entry
+    /// library touches gigabytes at peak RSS (seconds under paging) for a number
+    /// that is only reported. The sample mean is statistically identical.
     pub fn avg_fragments(&self) -> f64 {
-        if self.elems.is_empty() {
+        let n = self.elems.len();
+        if n == 0 {
             return 0.0;
         }
-        let total: usize = self
-            .elems
-            .iter()
-            .map(|e| e.expected_intensity.fragment_len())
-            .sum();
-        total as f64 / self.elems.len() as f64
+        let stride = (n / STATS_SAMPLE_TARGET).max(1);
+        let (mut sum, mut cnt) = (0usize, 0usize);
+        let mut i = 0;
+        while i < n {
+            sum += self.elems[i].expected_intensity.fragment_len();
+            cnt += 1;
+            i += stride;
+        }
+        sum as f64 / cnt as f64
     }
 
     pub fn from_file(
@@ -736,9 +783,12 @@ impl Speclib {
         let collection = read_timsquery_library(path)?;
         let speclib = convert_elution_group_collection(collection)?;
 
-        // Apply decoy strategy to the loaded speclib
+        // Decide the parse gate on targets, BEFORE the 3x decoy expansion and
+        // peak RSS — decoys inherit their target's `parsed`, so the verdict is
+        // identical but the walk is 3x smaller and not under memory pressure.
+        let parsable = all_sequences_parsed(&speclib.elems);
         let mut speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
-        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified);
+        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified, parsable);
         speclib.meta = meta;
         speclib.log_entry_stats();
         Ok(speclib)
@@ -899,9 +949,10 @@ impl Speclib {
             meta: SpeclibMeta::default(),
         };
 
-        // Apply decoy strategy to the loaded speclib
+        // Gate verdict on targets before the decoy expansion (see from_file).
+        let parsable = all_sequences_parsed(&speclib.elems);
         let mut speclib = Self::apply_decoy_strategy(speclib, decoy_strategy)?;
-        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified);
+        let meta = apply_parse_gate(&mut speclib.elems, SeqFormat::Modified, parsable);
         speclib.meta = meta;
         speclib.log_entry_stats();
         Ok(speclib)
@@ -941,7 +992,13 @@ impl Speclib {
         let mut frag_spill = 0usize;
         let mut prec_spill = 0usize;
 
-        for item in &self.elems {
+        // Strided sample — a full walk is a multi-GB, seconds-long pass at peak
+        // RSS for numbers that are only logged (see `avg_fragments`).
+        let stride = (n / STATS_SAMPLE_TARGET).max(1);
+        let mut sampled = 0usize;
+        let mut i = 0;
+        while i < n {
+            let item = &self.elems[i];
             let nf = item.expected_intensity.fragment_len();
             let np = item.expected_intensity.precursor_len();
             frag_sum += nf;
@@ -953,9 +1010,14 @@ impl Speclib {
             if np > INLINE_PREC_CAPACITY {
                 prec_spill += 1;
             }
+            sampled += 1;
+            i += stride;
         }
 
-        let frag_mean = frag_sum as f64 / n as f64;
+        // Scale sampled spill counts back to the full library for reporting.
+        let frag_spill = frag_spill * stride;
+        let prec_spill = prec_spill * stride;
+        let frag_mean = frag_sum as f64 / sampled as f64;
 
         tracing::info!(
             "Speclib stats: {} entries; fragments per entry: mean={:.1} max={} (inline cap={}, spillover entries={}); precursors per entry: max={} (inline cap={}, spillover entries={})",
@@ -1653,7 +1715,8 @@ mod tests {
             ),
             fixture_query_item("GARBAGE!!!", None),
         ];
-        let meta = apply_parse_gate(&mut items, SeqFormat::Modified);
+        let parsable = all_sequences_parsed(&items);
+        let meta = apply_parse_gate(&mut items, SeqFormat::Modified, parsable);
         assert!(!meta.parsable_sequences);
         assert!(items.iter().all(|q| q.digest.parsed.is_none()));
     }
@@ -1682,7 +1745,8 @@ mod tests {
                 }),
             ),
         ];
-        let meta = apply_parse_gate(&mut items, SeqFormat::Modified);
+        let parsable = all_sequences_parsed(&items);
+        let meta = apply_parse_gate(&mut items, SeqFormat::Modified, parsable);
         assert!(meta.parsable_sequences);
         assert!(items.iter().all(|q| q.digest.parsed.is_some()));
     }
