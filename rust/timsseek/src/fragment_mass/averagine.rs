@@ -20,22 +20,15 @@ pub fn averagine_cs_from_mass(neutral_mass: f64) -> (u16, u16) {
     (c, s)
 }
 
-/// Averagine isotope envelope, renormalized to sum to 1.0.
+/// Averagine isotope envelope: relative intensity, tallest peak == 1.0.
 ///
-/// `peptide_isotopes` itself normalizes to its tallest peak (relative
-/// intensity, `M0 == 1.0`), matching its other call site
-/// (`isotope_dist_from_seq`). The averagine estimate has no composition to
-/// anchor a relative-intensity reading against, so it is rescaled here into a
-/// genuine probability distribution over the reported isotopologues.
+/// Matches `peptide_isotopes`'s own normalization (max peak, not sum), which
+/// is what the `Composition` branch of `isotope_dist_or_averagine` returns
+/// verbatim. Both isotope sources must share this scale so they're
+/// interchangeable at scoring time.
 pub fn isotope_dist_from_mass(neutral_mass: f64) -> [f32; 3] {
     let (c, s) = averagine_cs_from_mass(neutral_mass);
-    let raw = peptide_isotopes(c, s);
-    let sum: f32 = raw.iter().sum();
-    if sum > 0.0 {
-        [raw[0] / sum, raw[1] / sum, raw[2] / sum]
-    } else {
-        raw
-    }
+    peptide_isotopes(c, s)
 }
 
 /// Composition envelope when the sequence is countable, else averagine from mass.
@@ -63,10 +56,14 @@ mod tests {
     }
 
     #[test]
-    fn averagine_envelope_sums_to_one() {
+    fn averagine_envelope_is_max_normalized() {
         let env = isotope_dist_from_mass(1500.0);
-        let sum: f32 = env.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-3, "env {env:?} sums to {sum}");
+        let max = env.iter().copied().fold(f32::MIN, f32::max);
+        assert!((max - 1.0).abs() < 1e-4, "env {env:?} max is {max}");
+        assert!(
+            env.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "env {env:?} has a value outside [0, 1]"
+        );
     }
 
     #[test]
@@ -84,6 +81,7 @@ mod tests {
         // erroring, so it does not exercise the fallback.)
         let (src, env) = isotope_dist_or_averagine("PEPBK", 600.0);
         assert_eq!(src, IsotopeSource::Averagine);
-        assert!((env.iter().sum::<f32>() - 1.0).abs() < 1e-3);
+        let max = env.iter().copied().fold(f32::MIN, f32::max);
+        assert!((max - 1.0).abs() < 1e-4, "env {env:?} max is {max}");
     }
 }
