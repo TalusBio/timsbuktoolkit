@@ -21,11 +21,7 @@ use super::library_file::{
 use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
 use std::fs::File;
-use std::io::{
-    BufRead,
-    BufReader,
-    Read,
-};
+use std::io::Read;
 use std::path::Path;
 use tinyvec::tiny_vec;
 use tracing::{
@@ -37,46 +33,49 @@ use tracing::{
 /// a version below this were written by a newer DIA-NN than was reverse-engineered.
 const LATEST_SUPPORTED_VERSION: i32 = -3;
 
-/// Little-endian sequential byte reader mirroring the format's `read_*` calls.
-struct ByteReader<R: BufRead> {
-    inner: R,
+/// Bytes of one `Product`/fragment record.
+const PRODUCT_SIZE: usize = 12;
+
+/// Little-endian cursor over the whole file in memory. Each accessor advances the
+/// position and bounds-checks against the buffer end (a short read is a truncated
+/// library, reported as [`LibraryReadingError::SpeclibParse`]).
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
 }
 
-impl<R: BufRead> ByteReader<R> {
-    fn new(inner: R) -> Self {
-        Self { inner }
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
     }
 
-    fn read_u8(&mut self) -> Result<u8, LibraryReadingError> {
-        let mut b = [0u8; 1];
-        self.inner
-            .read_exact(&mut b)
-            .map_err(LibraryReadingError::IoError)?;
-        Ok(b[0])
+    /// Borrow the next `n` bytes and advance.
+    fn take(&mut self, n: usize) -> Result<&'a [u8], LibraryReadingError> {
+        let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len());
+        match end {
+            Some(end) => {
+                let slice = &self.data[self.pos..end];
+                self.pos = end;
+                Ok(slice)
+            }
+            None => Err(LibraryReadingError::SpeclibParse(format!(
+                "unexpected end of file: wanted {n} bytes at offset {} of {}",
+                self.pos,
+                self.data.len()
+            ))),
+        }
     }
 
     fn read_i32(&mut self) -> Result<i32, LibraryReadingError> {
-        let mut b = [0u8; 4];
-        self.inner
-            .read_exact(&mut b)
-            .map_err(LibraryReadingError::IoError)?;
-        Ok(i32::from_le_bytes(b))
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
     fn read_f32(&mut self) -> Result<f32, LibraryReadingError> {
-        let mut b = [0u8; 4];
-        self.inner
-            .read_exact(&mut b)
-            .map_err(LibraryReadingError::IoError)?;
-        Ok(f32::from_le_bytes(b))
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
     fn read_f64(&mut self) -> Result<f64, LibraryReadingError> {
-        let mut b = [0u8; 8];
-        self.inner
-            .read_exact(&mut b)
-            .map_err(LibraryReadingError::IoError)?;
-        Ok(f64::from_le_bytes(b))
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     /// `i32 count` that must be non-negative (a length/count prefix).
@@ -90,46 +89,27 @@ impl<R: BufRead> ByteReader<R> {
         Ok(n as usize)
     }
 
-    /// `i32 length` + `length` raw bytes decoded as latin-1 (1 byte per char),
-    /// no terminator. Latin-1 (not UTF-8) because high bytes appear in Windows
-    /// paths and accented protein names.
+    /// `i32 length` + `length` raw bytes decoded as latin-1 (1 byte per char), no
+    /// terminator. Latin-1 (not UTF-8) because high bytes appear in Windows paths
+    /// and accented protein names.
     fn read_str(&mut self) -> Result<String, LibraryReadingError> {
         let n = self.read_count()?;
-        let mut buf = vec![0u8; n];
-        self.inner
-            .read_exact(&mut buf)
-            .map_err(LibraryReadingError::IoError)?;
-        Ok(buf.iter().map(|&b| b as char).collect())
+        Ok(self.take(n)?.iter().map(|&b| b as char).collect())
     }
 
-    /// Read and discard `n` bytes.
+    /// Skip `n` bytes.
     fn skip_bytes(&mut self, n: usize) -> Result<(), LibraryReadingError> {
-        let mut remaining = n;
-        let mut scratch = [0u8; 8192];
-        while remaining > 0 {
-            let take = remaining.min(scratch.len());
-            self.inner
-                .read_exact(&mut scratch[..take])
-                .map_err(LibraryReadingError::IoError)?;
-            remaining -= take;
-        }
-        Ok(())
+        self.take(n).map(|_| ())
     }
 
-    /// `vec<i32>`: `i32 count` + `count` contiguous i32 — read and discard.
+    /// `vec<i32>`: `i32 count` + `count` contiguous i32 — skip.
     fn skip_vec_i32(&mut self) -> Result<(), LibraryReadingError> {
         let n = self.read_count()?;
         self.skip_bytes(n * 4)
     }
 
-    /// True when no bytes remain (used to gate the optional trailing section and
-    /// to detect structural desync).
-    fn at_eof(&mut self) -> Result<bool, LibraryReadingError> {
-        Ok(self
-            .inner
-            .fill_buf()
-            .map_err(LibraryReadingError::IoError)?
-            .is_empty())
+    fn at_eof(&self) -> bool {
+        self.pos >= self.data.len()
     }
 }
 
@@ -204,42 +184,36 @@ fn residue_count(stripped: &str) -> usize {
 
 /// `Peptide::read` — the shared layout used by both the target and (when
 /// `dc != 0`) the embedded decoy peptide.
-fn read_peptide<R: BufRead>(
-    r: &mut ByteReader<R>,
-    version: i32,
-) -> Result<PeptideRecord, LibraryReadingError> {
-    let index = r.read_i32()?;
-    let charge = r.read_i32()?;
-    let length = r.read_i32()?;
-    let mz = r.read_f32()?;
-    let i_rt = r.read_f32()?;
-    let _s_rt = r.read_f32()?;
+fn read_peptide(c: &mut Cursor, version: i32) -> Result<PeptideRecord, LibraryReadingError> {
+    let index = c.read_i32()?;
+    let charge = c.read_i32()?;
+    let length = c.read_i32()?;
+    let mz = c.read_f32()?;
+    let i_rt = c.read_f32()?;
+    let _s_rt = c.read_f32()?;
 
     let mut i_im = 0.0f32;
     if version <= -2 {
-        let _lib_qvalue = r.read_f32()?;
-        i_im = r.read_f32()?;
-        let _s_im = r.read_f32()?;
+        let _lib_qvalue = c.read_f32()?;
+        i_im = c.read_f32()?;
+        let _s_im = c.read_f32()?;
     }
 
-    let nfrag = r.read_count()?;
-    let mut frags = Vec::with_capacity(nfrag);
-    for _ in 0..nfrag {
-        let mz = r.read_f32()?;
-        let height = r.read_f32()?;
-        let charge = r.read_u8()?;
-        let typ = r.read_u8()?;
-        let index = r.read_u8()?;
-        let loss = r.read_u8()?;
-        frags.push(RawFragment {
-            mz,
-            height,
-            charge,
-            typ,
-            index,
-            loss,
-        });
-    }
+    // The fragment block is `nfrag` fixed 12-byte records — read it in one go
+    // and split into records, rather than per-field.
+    let nfrag = c.read_count()?;
+    let block = c.take(nfrag * PRODUCT_SIZE)?;
+    let frags = block
+        .chunks_exact(PRODUCT_SIZE)
+        .map(|p| RawFragment {
+            mz: f32::from_le_bytes(p[0..4].try_into().unwrap()),
+            height: f32::from_le_bytes(p[4..8].try_into().unwrap()),
+            charge: p[8],
+            typ: p[9],
+            index: p[10],
+            loss: p[11],
+        })
+        .collect();
 
     Ok(PeptideRecord {
         index,
@@ -254,32 +228,32 @@ fn read_peptide<R: BufRead>(
 
 /// `Entry::read` — a target `Peptide`, an optional embedded decoy, then the
 /// Entry-level fields. Returns the mapped `(eg, extras)` pair for the target.
-fn read_entry<R: BufRead>(
-    r: &mut ByteReader<R>,
+fn read_entry(
+    c: &mut Cursor,
     version: i32,
     pg_ids: &[String],
     stats: &mut SpeclibDecodeStats,
 ) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), LibraryReadingError> {
-    let pep = read_peptide(r, version)?;
+    let pep = read_peptide(c, version)?;
 
-    let dc = r.read_i32()?;
+    let dc = c.read_i32()?;
     if dc != 0 {
         // A whole second Peptide is embedded between `dc` and `entry_flags`.
         // Read it (mandatory to stay byte-synced) then discard: a lone file
         // decoy would land in its own singleton FDR group and always "win",
         // silently breaking FDR. Mass-shift decoys are generated downstream.
-        let _decoy = read_peptide(r, version)?;
+        let _decoy = read_peptide(c, version)?;
         stats.decoys_dropped += 1;
     }
 
-    let _entry_flags = r.read_i32()?;
-    let _proteotypic = r.read_i32()?;
-    let pid_index = r.read_i32()?;
-    let name = r.read_str()?;
+    let _entry_flags = c.read_i32()?;
+    let _proteotypic = c.read_i32()?;
+    let pid_index = c.read_i32()?;
+    let name = c.read_str()?;
     if version <= -3 {
-        let _pg_qvalue = r.read_f32()?;
-        let _ptm_qvalue = r.read_f32()?;
-        let _site_conf = r.read_f32()?;
+        let _pg_qvalue = c.read_f32()?;
+        let _ptm_qvalue = c.read_f32()?;
+        let _site_conf = c.read_f32()?;
     }
 
     let protein_id = if pid_index >= 0 {
@@ -437,13 +411,13 @@ fn build_entry(
     Ok((eg, extras))
 }
 
-/// Parse a whole `.speclib` from a `BufRead`. Returns the mapped entries, drop
-/// statistics, and whether the stream landed exactly on EOF (a `false` here
-/// signals a structural desync).
+/// Parse a whole `.speclib`. Returns the mapped entries, drop statistics, and
+/// whether parsing landed exactly on EOF (a `false` here signals a structural
+/// desync).
 ///
 /// Public so the `probe_speclib` example can drive it over a synthetic buffer.
-pub fn parse_speclib_reader<R: BufRead>(
-    reader: R,
+pub fn parse_speclib_reader<R: Read>(
+    mut reader: R,
 ) -> Result<
     (
         Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>,
@@ -452,95 +426,98 @@ pub fn parse_speclib_reader<R: BufRead>(
     ),
     LibraryReadingError,
 > {
-    let mut r = ByteReader::new(reader);
+    let mut data = Vec::new();
+    reader
+        .read_to_end(&mut data)
+        .map_err(LibraryReadingError::IoError)?;
+    let mut c = Cursor::new(&data);
 
     // --- Section 0: header ---
     // A leading i32 >= 0 means v0 with no version word (the value is already
     // gen_decoys); a negative leading word is the version.
-    let first = r.read_i32()?;
+    let first = c.read_i32()?;
     let version = if first >= 0 {
         0
     } else {
-        let _gen_decoys = r.read_i32()?;
+        let _gen_decoys = c.read_i32()?;
         first
     };
     if version < LATEST_SUPPORTED_VERSION {
         return Err(LibraryReadingError::UnsupportedSpeclibVersion(version));
     }
-    let _gen_charges = r.read_i32()?;
-    let _infer_proteotypicity = r.read_i32()?;
-    let _name = r.read_str()?;
-    let _fasta_names = r.read_str()?;
+    let _gen_charges = c.read_i32()?;
+    let _infer_proteotypicity = c.read_i32()?;
+    let _name = c.read_str()?;
+    let _fasta_names = c.read_str()?;
 
     // --- Section 1: proteins (Isoform[]) — walk & discard ---
-    let n_isoforms = r.read_count()?;
+    let n_isoforms = c.read_count()?;
     for _ in 0..n_isoforms {
-        skip_isoform(&mut r)?;
+        skip_isoform(&mut c)?;
     }
 
     // --- Section 2: protein_ids (PG[]) — keep only `ids` per group ---
-    let n_pg = r.read_count()?;
+    let n_pg = c.read_count()?;
     let mut pg_ids = Vec::with_capacity(n_pg);
     for _ in 0..n_pg {
-        pg_ids.push(read_pg_keep_ids(&mut r)?);
+        pg_ids.push(read_pg_keep_ids(&mut c)?);
     }
 
     // --- Sections 3-5: precursor / name / gene string dictionaries — discard ---
     for _ in 0..3 {
-        skip_strings(&mut r)?;
+        skip_strings(&mut c)?;
     }
 
     // --- Section 6: iRT range (2x f64) — discard (per-entry iRT present) ---
-    let _irt_min = r.read_f64()?;
-    let _irt_max = r.read_f64()?;
+    let _irt_min = c.read_f64()?;
+    let _irt_max = c.read_f64()?;
 
     // --- Section 7: entries — KEEP ---
-    let n_entries = r.read_count()?;
+    let n_entries = c.read_count()?;
     let mut stats = SpeclibDecodeStats::default();
     let mut entries = Vec::with_capacity(n_entries);
     for _ in 0..n_entries {
-        entries.push(read_entry(&mut r, version, &pg_ids, &mut stats)?);
+        entries.push(read_entry(&mut c, version, &pg_ids, &mut stats)?);
     }
 
     // --- Section 8: elution_groups (v <= -1, only if bytes remain) — discard ---
-    if version <= -1 && !r.at_eof()? {
-        r.skip_vec_i32()?;
+    if version <= -1 && !c.at_eof() {
+        c.skip_vec_i32()?;
     }
 
-    let at_eof = r.at_eof()?;
-    Ok((entries, stats, at_eof))
+    Ok((entries, stats, c.at_eof()))
 }
 
 /// `Isoform::read` — read & discard.
-fn skip_isoform<R: BufRead>(r: &mut ByteReader<R>) -> Result<(), LibraryReadingError> {
-    let _sp = r.read_i32()?;
-    let size = r.read_count()?;
-    let _id = r.read_str()?;
-    let _name = r.read_str()?;
-    let _gene = r.read_str()?;
-    let _name_index = r.read_i32()?;
-    let _gene_index = r.read_i32()?;
-    r.skip_bytes(size * 4) // prec[size]
+fn skip_isoform(c: &mut Cursor) -> Result<(), LibraryReadingError> {
+    let _sp = c.read_i32()?;
+    let size = c.read_count()?;
+    let _id = c.read_str()?;
+    let _name = c.read_str()?;
+    let _gene = c.read_str()?;
+    let _name_index = c.read_i32()?;
+    let _gene_index = c.read_i32()?;
+    c.skip_bytes(size * 4) // prec[size]
 }
 
 /// `PG::read` — keep only the `;`-joined `ids` string.
-fn read_pg_keep_ids<R: BufRead>(r: &mut ByteReader<R>) -> Result<String, LibraryReadingError> {
-    let size_p = r.read_count()?;
-    let ids = r.read_str()?;
-    let _names = r.read_str()?;
-    let _genes = r.read_str()?;
-    r.skip_vec_i32()?; // name_indices
-    r.skip_vec_i32()?; // gene_indices
-    r.skip_vec_i32()?; // precursors
-    r.skip_bytes(size_p * 4)?; // proteins[size_p]
+fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, LibraryReadingError> {
+    let size_p = c.read_count()?;
+    let ids = c.read_str()?;
+    let _names = c.read_str()?;
+    let _genes = c.read_str()?;
+    c.skip_vec_i32()?; // name_indices
+    c.skip_vec_i32()?; // gene_indices
+    c.skip_vec_i32()?; // precursors
+    c.skip_bytes(size_p * 4)?; // proteins[size_p]
     Ok(ids)
 }
 
 /// `read_strings` — read & discard.
-fn skip_strings<R: BufRead>(r: &mut ByteReader<R>) -> Result<(), LibraryReadingError> {
-    let n = r.read_count()?;
+fn skip_strings(c: &mut Cursor) -> Result<(), LibraryReadingError> {
+    let n = c.read_count()?;
     for _ in 0..n {
-        let _ = r.read_str()?;
+        let _ = c.read_str()?;
     }
     Ok(())
 }
@@ -581,7 +558,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     let file = File::open(path).map_err(LibraryReadingError::IoError)?;
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
-    let (entries, stats, at_eof) = parse_speclib_reader(BufReader::new(file))?;
+    let (entries, stats, at_eof) = parse_speclib_reader(file)?;
 
     if !at_eof {
         warn!(
