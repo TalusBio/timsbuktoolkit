@@ -12,7 +12,12 @@ pub mod traits;
 pub mod utils;
 pub use micromzpaf;
 
-pub use data_sources::Speclib;
+pub use data_sources::{
+    ExpectedIntensity,
+    RefQuery,
+    ReferenceLibrary,
+    Speclib,
+};
 pub use models::{
     DecoyStrategy,
     ExpectedIntensities,
