@@ -169,6 +169,8 @@ fn fetch_member(
     let rel = member
         .path()
         .strip_prefix(parent_path)
+        // Require a component boundary so `/data/run` doesn't match `/data/run123`.
+        .filter(|r| parent_path.is_empty() || r.starts_with('/'))
         .map(|s| s.trim_start_matches('/'))
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {

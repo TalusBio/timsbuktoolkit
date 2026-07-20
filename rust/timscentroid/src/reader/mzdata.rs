@@ -121,13 +121,19 @@ fn detect_mobility_kind(spec: &impl SpectrumLike) -> Option<MobilityKind> {
 /// if the window is unusable (skip + warn at the call site).
 fn window_bounds(win: &mzdata::spectrum::IsolationWindow) -> Option<(f32, f32)> {
     use mzdata::spectrum::IsolationWindowState as S;
-    match win.flags {
+    let (lo, hi) = match win.flags {
         // Complete/Explicit → lower/upper are ABSOLUTE m/z (do NOT do target±).
-        S::Complete | S::Explicit => Some((win.lower_bound, win.upper_bound)),
+        S::Complete | S::Explicit => (win.lower_bound, win.upper_bound),
         // Offset → bounds are relative to target.
-        S::Offset => Some((win.target - win.lower_bound, win.target + win.upper_bound)),
-        S::Unknown => None,
+        S::Offset => (win.target - win.lower_bound, win.target + win.upper_bound),
+        S::Unknown => return None,
+    };
+    // Guard non-finite bounds: `(NaN * 1000).round() as i64 == 0` would collapse
+    // every malformed window onto the key `(0, 0)` and merge unrelated peaks.
+    if !lo.is_finite() || !hi.is_finite() {
+        return None;
     }
+    Some((lo, hi))
 }
 
 /// Accumulates the peaks of one distinct isolation window across all cycles.

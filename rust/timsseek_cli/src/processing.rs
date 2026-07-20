@@ -718,7 +718,11 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         };
 
         mz_errors_ppm.push(mz_err_ppm);
-        mobility_errors_pct.push(mob_err_pct);
+        // Mobility is NaN for a non-searchable-axis run (mzML/no-IM lib); don't
+        // let it poison the MAD-based mobility tolerance (unused there anyway).
+        if mob_err_pct.is_finite() {
+            mobility_errors_pct.push(mob_err_pct);
+        }
         rt_residuals_seconds.push(rt_residual_signed as f32);
     }
 
