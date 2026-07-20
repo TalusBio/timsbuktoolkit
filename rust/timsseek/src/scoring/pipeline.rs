@@ -476,14 +476,21 @@ impl<I: ScorerQueriable> Scorer<I> {
         let rel_inten = RelativeIntensities::new(inner_collector);
         let lazyscores = compute_secondary_lazyscores(inner_collector, isotope_collector);
 
-        ScoredCandidateBuilder::default()
+        let mut candidate = ScoredCandidateBuilder::default()
             .with_metadata(metadata)
             .with_nqueries(nqueries)
             .with_sorted_offsets(&offsets)
             .with_relative_intensities(rel_inten)
             .with_secondary_lazyscores(lazyscores)
             .with_apex_score(main_score)
-            .finalize()
+            .finalize()?;
+
+        // No searchable mobility axis (mzML/FAIMS) → the observed mobility is a
+        // sentinel, so drop every mobility feature to NaN (forust-missing).
+        if !self.index.mobility_kind().is_scoreable() {
+            candidate.scoring.neutralize_mobility();
+        }
+        Ok(candidate)
     }
 }
 

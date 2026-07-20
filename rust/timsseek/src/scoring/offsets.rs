@@ -77,6 +77,13 @@ impl MzMobilityOffsets {
         let mut ms1 = TopNArray::new();
         let mut ms2 = TopNArray::new();
 
+        // Guard the percent-error divide: a zero/absent reference mobility
+        // (no-IM library, or an mzML sentinel) would yield `inf`, which slips
+        // past the `is_nan()`-only accumulator guards in `weighted_ms1/ms2`
+        // (Phase-2 calibration). NaN is the correct "no information" sentinel.
+        let ref_mob_f32 = ref_mobility as f32;
+        let ref_mob_valid = ref_mob_f32.is_finite() && ref_mob_f32 != 0.0;
+
         for ((key, ref_mz), val) in item.iter_precursors() {
             if key < 0i8 {
                 continue;
@@ -88,7 +95,11 @@ impl MzMobilityOffsets {
             let mobility_error_pct =
                 (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
             // Convert to percentage
-            let mobility_error_pct = mobility_error_pct / (ref_mobility as f32) * 1e2;
+            let mobility_error_pct = if ref_mob_valid {
+                mobility_error_pct / ref_mob_f32 * 1e2
+            } else {
+                f32::NAN
+            };
             ms1.push(ObsIonWithError {
                 intensity,
                 mz_error_ppm,
@@ -102,7 +113,11 @@ impl MzMobilityOffsets {
             let mz_error_ppm = mz_error_ppm / (*ref_mz as f32) * 1e6;
             let mobility_error_pct =
                 (val.mean_mobility().unwrap_or(f64::NAN) - ref_mobility) as f32;
-            let mobility_error_pct = mobility_error_pct / (ref_mobility as f32) * 1e2;
+            let mobility_error_pct = if ref_mob_valid {
+                mobility_error_pct / ref_mob_f32 * 1e2
+            } else {
+                f32::NAN
+            };
             ms2.push(ObsIonWithError {
                 intensity,
                 mz_error_ppm,

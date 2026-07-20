@@ -25,8 +25,9 @@ pub enum Resolved {
     LocalIdx { loc: StorageLocation },
     /// An `.idx` directory in remote object storage.
     RemoteIdx { loc: StorageLocation },
-    /// A `.d` directory on the local filesystem.
-    LocalDotD { path: PathBuf },
+    /// A raw vendor artifact on the local filesystem (a `.d` dir, an `.mzML`
+    /// file, …). The reader registry picks the backend by sniffing the path.
+    LocalRaw { path: PathBuf },
     /// Requires materialization to a local tempdir before indexing.
     Stageable { spec: SourceSpec },
 }
@@ -73,9 +74,9 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
         });
     }
 
-    // No sidecar. Dispatch by raw-data shape.
+    // No sidecar. Dispatch by transport; vendor shape is the registry's job.
     match (shape.loc, shape.name) {
-        (LocKind::Local, NameKind::DotD) => Ok(Resolved::LocalDotD {
+        (LocKind::Local, NameKind::Raw) => Ok(Resolved::LocalRaw {
             path: PathBuf::from(uri.trim_end_matches('/')),
         }),
         (LocKind::Local, NameKind::Tar) => Ok(Resolved::Stageable {
@@ -83,7 +84,7 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
                 path: PathBuf::from(uri),
             },
         }),
-        (LocKind::Remote, NameKind::DotD) => {
+        (LocKind::Remote, NameKind::Raw) => {
             let (loc, prefix) = crate::uri::split_uri(uri)?;
             Ok(Resolved::Stageable {
                 spec: SourceSpec::S3Prefix { loc, prefix },
@@ -155,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn local_dotd_with_sidecar_becomes_local_idx() {
+    fn local_raw_with_sidecar_becomes_local_idx() {
         let dir = TempDir::new().unwrap();
         let dotd = dir.path().join("sample.d");
         std::fs::create_dir(&dotd).unwrap();
@@ -165,12 +166,12 @@ mod tests {
     }
 
     #[test]
-    fn local_dotd_without_sidecar_becomes_local_dotd() {
+    fn local_raw_without_sidecar_becomes_local_raw() {
         let dir = TempDir::new().unwrap();
         let dotd = dir.path().join("sample.d");
         std::fs::create_dir(&dotd).unwrap();
         let r = resolve(dotd.to_str().unwrap()).unwrap();
-        assert!(matches!(r, Resolved::LocalDotD { .. }));
+        assert!(matches!(r, Resolved::LocalRaw { .. }));
     }
 
     #[test]
@@ -196,7 +197,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("sample.d.idx")).unwrap();
         let r = resolve(dotd.to_str().unwrap()).unwrap();
         assert!(
-            matches!(r, Resolved::LocalDotD { .. }),
+            matches!(r, Resolved::LocalRaw { .. }),
             "empty .idx dir should not shortcut; got {:?}",
             r
         );

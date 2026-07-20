@@ -26,6 +26,12 @@ pub trait HasQueryData<FH: KeyLike> {
     fn id(&self) -> u64;
     fn precursor_mz_limits(&self) -> (f64, f64);
     fn mobility_ook0(&self) -> f32;
+    /// The kind of mobility axis the LIBRARY entry carries. Defaults to `Ook0`
+    /// (current behavior); the speclib layer overrides this once absent-vs-zero
+    /// detection lands, feeding the combined run&&library mobility gate.
+    fn mobility_kind(&self) -> timscentroid::MobilityKind {
+        timscentroid::MobilityKind::Ook0
+    }
     fn rt_seconds(&self) -> f32;
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_;
     /// Borrowed label + copied mz. Named `iter_fragments` (not `_refs`)

@@ -370,6 +370,15 @@ fn process_single_file(
             }
         })?;
     let load_index_ms = step.finish().as_millis() as u64;
+    match index.mobility_kind() {
+        timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
+        timscentroid::MobilityKind::Absent => {
+            info!("Mobility axis: none — mobility filter + score features disabled")
+        }
+        timscentroid::MobilityKind::Unsupported(label) => info!(
+            "Mobility axis: unsupported [{label}] — mobility filter + score features disabled"
+        ),
+    }
     alloc_track::snap!("Loading index");
 
     // Rebucket to the scoring-optimal size. Existing on-disk caches

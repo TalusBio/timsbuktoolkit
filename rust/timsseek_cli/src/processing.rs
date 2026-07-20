@@ -316,13 +316,25 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             summary.in_ridge_ratio * 100.0,
         );
     }
-    println!(
-        "  m/z: ({:.1}, {:.1}) ppm   mobility: ({:.1}, {:.1}) %",
-        calibration.mz_tolerance().0,
-        calibration.mz_tolerance().1,
-        calibration.mobility_tolerance().0,
-        calibration.mobility_tolerance().1,
-    );
+    // The mobility tolerance is only meaningful for a searchable TIMS 1/K0 run;
+    // for mzML/FAIMS it is fit from sentinel mobilities and never used (the
+    // query gate unrestricts mobility), so report it as disabled rather than
+    // print a misleading number.
+    if pipeline.index.mobility_kind().is_scoreable() {
+        println!(
+            "  m/z: ({:.1}, {:.1}) ppm   mobility: ({:.1}, {:.1}) %",
+            calibration.mz_tolerance().0,
+            calibration.mz_tolerance().1,
+            calibration.mobility_tolerance().0,
+            calibration.mobility_tolerance().1,
+        );
+    } else {
+        println!(
+            "  m/z: ({:.1}, {:.1}) ppm   mobility: disabled (no searchable axis)",
+            calibration.mz_tolerance().0,
+            calibration.mz_tolerance().1,
+        );
+    }
 
     // Save calibration as JSON v1 (compatible with viewer load)
     if !calibrant_points.is_empty() {

@@ -1,8 +1,10 @@
 pub mod centroiding;
+pub mod dimension;
 pub mod geometry;
 pub mod indexing;
 pub mod instrumentation;
 pub mod lazy;
+pub mod reader;
 pub mod rt_mapping;
 pub mod serialization;
 pub mod storage;
@@ -24,6 +26,9 @@ pub use indexing::{
 
 #[doc(inline)]
 pub use centroiding::CentroidingConfig;
+
+#[doc(inline)]
+pub use dimension::MobilityKind;
 
 #[doc(inline)]
 pub use storage::{

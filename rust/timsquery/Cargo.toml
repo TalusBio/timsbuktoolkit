@@ -26,6 +26,11 @@ parquet = { workspace = true }
 arrow = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Forward mzML/mzdata ingest support down to timscentroid, where the reader lives.
+# Not defaulted here (see timsseek_cli) so `--no-default-features` stays lean.
+mzdata = ["timscentroid/mzdata"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

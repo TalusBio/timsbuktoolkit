@@ -19,6 +19,7 @@ use tracing::{
     warn,
 };
 
+use crate::dimension::MobilityKind;
 use crate::rt_mapping::{
     CycleToRTMapping,
     MS1CycleIndex,
@@ -76,6 +77,12 @@ pub struct IndexedTimstofPeaks {
         IndexedPeakGroup<WindowCycleIndex>,
     )>,
     pub(crate) ms1_peaks: IndexedPeakGroup<MS1CycleIndex>,
+    /// The kind of mobility axis this run carries. `Ook0` for TIMS (the only
+    /// searchable kind); `Absent`/`Unsupported` for non-TIMS sources (mzML,
+    /// FAIMS) which take the mobility-less path. Defaults to `Ook0` so indices
+    /// serialized before this field existed deserialize to current behavior.
+    #[serde(default)]
+    pub(crate) mobility_kind: MobilityKind,
 }
 
 /// Statistics about the indexing process.
@@ -128,7 +135,26 @@ impl IndexedTimstofPeaks {
         Self {
             ms1_peaks,
             ms2_window_groups,
+            mobility_kind: MobilityKind::Ook0,
         }
+    }
+
+    /// The kind of mobility axis this run carries (see [`MobilityKind`]).
+    pub fn mobility_kind(&self) -> &MobilityKind {
+        &self.mobility_kind
+    }
+
+    /// Number of distinct MS2 isolation-window groups.
+    pub fn n_ms2_window_groups(&self) -> usize {
+        self.ms2_window_groups.len()
+    }
+
+    /// Set the mobility-axis kind (builder style). Used by non-TDF readers
+    /// (e.g. mzdata) that construct via `from_parts` but carry a non-`Ook0`
+    /// axis.
+    pub fn with_mobility_kind(mut self, mobility_kind: MobilityKind) -> Self {
+        self.mobility_kind = mobility_kind;
+        self
     }
 
     pub fn from_timstof_file(
@@ -152,6 +178,7 @@ impl IndexedTimstofPeaks {
         let out = Self {
             ms2_window_groups,
             ms1_peaks,
+            mobility_kind: MobilityKind::Ook0,
         };
         // out.print_glimpse();
         (
@@ -177,6 +204,7 @@ impl IndexedTimstofPeaks {
         Self {
             ms1_peaks,
             ms2_window_groups,
+            mobility_kind: self.mobility_kind,
         }
     }
 
@@ -1705,6 +1733,16 @@ mod tests {
                 cycle_index: T::new(cycle_index),
             })
             .collect()
+    }
+
+    #[test]
+    fn from_parts_defaults_to_ook0() {
+        use crate::dimension::MobilityKind;
+        use crate::rt_mapping::CycleToRTMapping;
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&[(100.0, 200.0, 1.0, 0u32)]);
+        let (ms1_group, _) = IndexedPeakGroup::new(peaks, CycleToRTMapping::new(vec![0]), 4);
+        let index = IndexedTimstofPeaks::from_parts(ms1_group, vec![]);
+        assert_eq!(index.mobility_kind(), &MobilityKind::Ook0);
     }
 
     #[test]

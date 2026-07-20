@@ -29,6 +29,7 @@ pub use crate::traits::{
     KeyLike,
     ValueLike,
 };
+pub use timscentroid::dimension::MobilityKind;
 pub use timscentroid::utils::OptionallyRestricted;
 pub use timscentroid::{
     CentroidingConfig,

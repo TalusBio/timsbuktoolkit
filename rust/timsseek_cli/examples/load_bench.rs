@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "load_from_storage done"
             );
         }
-        Resolved::LocalDotD { path } => {
+        Resolved::LocalRaw { path } => {
             let t = Instant::now();
             let tt = TimsTofPath::new(path.to_str().unwrap())
                 .map_err(|e| format!("TimsTofPath::new: {e:?}"))?;
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed_ms = t.elapsed().as_millis(),
                 ms1_time_ms = stats.ms1_total_time.as_millis(),
                 ms2_time_ms = stats.ms2_total_time.as_millis(),
-                "from_timstof_file (local .d) done"
+                "from_timstof_file (local raw) done"
             );
         }
         Resolved::Stageable { spec } => {
@@ -111,7 +111,7 @@ fn kind_of(r: &Resolved) -> &'static str {
     match r {
         Resolved::LocalIdx { .. } => "LocalIdx",
         Resolved::RemoteIdx { .. } => "RemoteIdx",
-        Resolved::LocalDotD { .. } => "LocalDotD",
+        Resolved::LocalRaw { .. } => "LocalRaw",
         Resolved::Stageable { spec } => match spec {
             tims_stage::SourceSpec::S3Tar { .. } => "Stageable(S3Tar)",
             tims_stage::SourceSpec::S3Prefix { .. } => "Stageable(S3Prefix)",

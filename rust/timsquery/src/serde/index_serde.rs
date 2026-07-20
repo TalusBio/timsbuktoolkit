@@ -144,6 +144,14 @@ pub enum IndexedPeaksHandle {
 }
 
 impl IndexedPeaksHandle {
+    /// The run's mobility-axis kind, delegating to the wrapped index.
+    pub fn mobility_kind(&self) -> &timscentroid::MobilityKind {
+        match self {
+            Self::Eager(e) => e.mobility_kind(),
+            Self::Lazy(l) => l.mobility_kind(),
+        }
+    }
+
     /// Materialize to eager if needed (no-op if already eager)
     ///
     /// This loads all parquet data into memory if the handle is lazy.
@@ -844,6 +852,12 @@ use tims_stage::{
     resolve,
     sidecar_of,
 };
+use timscentroid::reader::{
+    ReadError,
+    ReaderRegistry,
+    ResolvedSource,
+    local_uri,
+};
 use timscentroid::serialization::SerializationError;
 
 /// Load an eagerly-materialized index from a URI.
@@ -868,9 +882,20 @@ pub fn load_index(
         Resolved::LocalIdx { loc } | Resolved::RemoteIdx { loc } => {
             IndexedTimstofPeaks::load_from_storage(loc).map_err(LoadIndexError::Load)
         }
-        Resolved::LocalDotD { path } => {
-            let idx = build_index(&path, centroid_cfg)?;
-            if save_sidecar {
+        Resolved::LocalRaw { path } => {
+            // Sniff-first: the registry picks the backend by inspecting the URI
+            // (vendor suffix/scheme lives ONLY in each reader). Local artifacts
+            // are borrowed in place — no staging.
+            let registry = ReaderRegistry::with_builtins();
+            let uri = local_uri(&path).map_err(LoadIndexError::Read)?;
+            let reader = registry.pick(&uri, || None).map_err(LoadIndexError::Read)?;
+            let src = ResolvedSource::local_in_place(&path).map_err(LoadIndexError::Read)?;
+            let idx = reader
+                .read(&src, &centroid_cfg)
+                .map_err(LoadIndexError::Read)?;
+            // Only formats that cache to `.idx` write a sidecar; mzdata builds
+            // fresh each run.
+            if save_sidecar && reader.caches_to_idx() {
                 write_sidecar(&canon, &idx)?;
             }
             Ok(idx)
@@ -897,6 +922,8 @@ pub enum LoadIndexError {
     Load(SerializationError),
     #[error("sidecar save failed: {0:?}")]
     SidecarWrite(SerializationError),
+    #[error("raw reader failed: {0}")]
+    Read(#[from] ReadError),
 }
 
 fn build_index(

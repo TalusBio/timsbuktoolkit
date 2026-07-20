@@ -69,6 +69,16 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
     let location = StorageLocation::from_path(&temp_dir);
     let lazy_index = LazyIndexedTimstofPeaks::load_from_storage(location).unwrap();
 
+    // A serialized (TDF-origin) index always deserializes to TIMS mobility.
+    assert_eq!(
+        eager_index.mobility_kind(),
+        &timscentroid::MobilityKind::Ook0
+    );
+    assert_eq!(
+        lazy_index.mobility_kind(),
+        &timscentroid::MobilityKind::Ook0
+    );
+
     // Query both with same parameters
     let mz_range = TupleRange::try_new(420.0, 460.0).unwrap(); // Should match peaks at 420, 430, 440, 450, 460
 
@@ -176,6 +186,41 @@ fn test_bucket_boundary_case() {
         "Test passed: {} peaks organized into {} buckets",
         stats.num_peaks, stats.num_buckets
     );
+}
+
+#[test]
+fn mobility_kind_survives_serialization_roundtrip() {
+    // A non-Ook0 (e.g. mzML) index must NOT silently revert to a searchable
+    // TIMS axis when saved + reloaded (eager or lazy).
+    let peaks: Vec<_> = (0..4)
+        .map(|i| IndexedPeak {
+            mz: 400.0 + (i as f32) * 10.0,
+            intensity: 100.0,
+            mobility_ook0: f16::from_f32(1.0),
+            cycle_index: MS1CycleIndex::new(i % 2),
+        })
+        .collect();
+    let (ms1_group, _) =
+        IndexedPeakGroup::testing_new(peaks, CycleToRTMapping::new(vec![0, 100]), 4);
+    let index = IndexedTimstofPeaks::from_parts(ms1_group, vec![])
+        .with_mobility_kind(timscentroid::MobilityKind::Absent);
+
+    let temp_dir = std::env::temp_dir().join("timscentroid_test_mobility_roundtrip");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+    index
+        .save_to_directory_with_config(&temp_dir, Default::default())
+        .unwrap();
+
+    let eager =
+        IndexedTimstofPeaks::load_from_storage(StorageLocation::from_path(&temp_dir)).unwrap();
+    assert_eq!(eager.mobility_kind(), &timscentroid::MobilityKind::Absent);
+    let lazy =
+        LazyIndexedTimstofPeaks::load_from_storage(StorageLocation::from_path(&temp_dir)).unwrap();
+    assert_eq!(lazy.mobility_kind(), &timscentroid::MobilityKind::Absent);
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
 }
 
 #[test]
