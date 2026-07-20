@@ -324,11 +324,28 @@ fn skip_entry(c: &mut Cursor, version: i32) -> Result<(), LibraryReadingError> {
 
 // --- Layer 2: emit --------------------------------------------------------
 
+/// Backing storage for the file bytes: an owned buffer (from a `Read` stream) or
+/// a memory map (from a path). Decode views borrow `&[u8]` from either, so the
+/// rest of the reader is agnostic to which.
+enum Backing {
+    Owned(Vec<u8>),
+    Mapped(memmap2::Mmap),
+}
+
+impl Backing {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Backing::Owned(v) => v,
+            Backing::Mapped(m) => m,
+        }
+    }
+}
+
 /// A parsed `.speclib` held in memory. The header and PG `ids` are parsed
-/// eagerly on [`SpecLib::open`]; entries are parsed and mapped by
-/// [`SpecLib::parse_parallel`] (serial offset scan, then parallel per-entry map).
+/// eagerly on open; entries are parsed and mapped by [`SpecLib::parse_parallel`]
+/// (serial offset scan, then parallel per-entry map).
 pub(crate) struct SpecLib {
-    data: Vec<u8>,
+    data: Backing,
     version: i32,
     pg_ids: Vec<String>,
     /// Byte offset of the entries count prefix (section 7).
@@ -337,14 +354,29 @@ pub(crate) struct SpecLib {
 }
 
 impl SpecLib {
-    /// Read the whole file and parse everything up to (not including) the
-    /// entries section.
+    /// Read a whole stream into an owned buffer, then parse the header. Kept for
+    /// streams and tests; the path-based file reader prefers [`SpecLib::open_mmap`].
     pub(crate) fn open<R: Read>(mut reader: R) -> Result<Self, LibraryReadingError> {
         let mut data = Vec::new();
         reader
             .read_to_end(&mut data)
             .map_err(LibraryReadingError::IoError)?;
-        let mut c = Cursor::new(&data);
+        Self::from_backing(Backing::Owned(data))
+    }
+
+    /// Memory-map a `.speclib` file, then parse the header. Avoids a ~file-sized
+    /// resident buffer — pages fault in on demand and are OS-reclaimable.
+    pub(crate) fn open_mmap(path: &Path) -> Result<Self, LibraryReadingError> {
+        let file = File::open(path).map_err(LibraryReadingError::IoError)?;
+        // SAFETY: read-only ingest. The library file is not written during load;
+        // an mmap of a file mutated/truncated concurrently would be UB.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(LibraryReadingError::IoError)?;
+        Self::from_backing(Backing::Mapped(mmap))
+    }
+
+    /// Parse everything up to (not including) the entries section from `data`.
+    fn from_backing(data: Backing) -> Result<Self, LibraryReadingError> {
+        let mut c = Cursor::new(data.bytes());
 
         // --- Section 0: header ---
         // A leading i32 >= 0 means v0 with no version word (the value is already
@@ -403,7 +435,7 @@ impl SpecLib {
     fn capacity_hint(&self) -> usize {
         bounded_capacity(
             self.n_entries,
-            self.data.len().saturating_sub(self.entries_start),
+            self.data.bytes().len().saturating_sub(self.entries_start),
             MIN_ENTRY_BYTES,
         )
     }
@@ -427,7 +459,7 @@ impl SpecLib {
         use rayon::prelude::*;
 
         // Phase A: serial offset scan, then the trailing section 8 / EOF check.
-        let mut c = Cursor::new(&self.data);
+        let mut c = Cursor::new(self.data.bytes());
         c.pos = self.entries_start;
         let mut offsets = Vec::with_capacity(self.capacity_hint());
         for _ in 0..self.n_entries {
@@ -449,7 +481,7 @@ impl SpecLib {
             .try_fold(
                 || (Vec::new(), SpeclibDecodeStats::default(), Vec::new()),
                 |(mut acc, mut stats, mut scratch), &off| -> Result<_, LibraryReadingError> {
-                    let mut cur = Cursor::new(&self.data);
+                    let mut cur = Cursor::new(self.data.bytes());
                     cur.pos = off;
                     let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
                     acc.push(map_entry(view, &mut stats, &mut scratch)?);
@@ -589,6 +621,11 @@ fn map_entry(
     // exact known-charge decimal suffix — not "trailing digits" — so a
     // C-terminal mod ending in a digit is left intact.
     let charge = pep.charge();
+    if charge < 1 || charge > u8::MAX as i32 {
+        return Err(LibraryReadingError::SpeclibParse(format!(
+            "entry {name:?}: precursor charge {charge} out of range 1..=255 (corrupt record?)"
+        )));
+    }
     let charge_suffix = charge.to_string();
     let modified_peptide = match name.strip_suffix(&charge_suffix) {
         Some(prefix) => prefix.to_string(),
@@ -780,16 +817,20 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
 ) -> Result<ElutionGroupCollection, LibraryReadingError> {
     let path = path.as_ref();
-    let file = File::open(path).map_err(LibraryReadingError::IoError)?;
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
-    let (entries, stats, at_eof) = parse_speclib_reader(file)?;
+    // mmap the file (not an owned read) — pages fault in on demand, no
+    // file-sized resident buffer.
+    let (entries, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
-        warn!(
-            "DIA-NN .speclib parse did not land on EOF for {} — possible structural desync",
+        // A parse that doesn't land on EOF means the entries were misaligned
+        // (wrong field sizes / version gating) — the decoded library would be
+        // silently corrupt. Fail loudly rather than return garbage.
+        return Err(LibraryReadingError::SpeclibParse(format!(
+            "parse did not land on EOF for {} — structural desync",
             path.display()
-        );
+        )));
     }
     if stats.any_dropped() {
         warn!(

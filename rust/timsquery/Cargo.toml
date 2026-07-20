@@ -19,6 +19,7 @@ serde_json = { workspace = true }
 tinyvec = { workspace = true, features = ["alloc", "serde"] }
 tracing = { workspace = true }
 rayon = { workspace = true }
+memmap2 = { workspace = true }
 half = { workspace = true }
 bon = { workspace = true }
 csv = { workspace = true }
