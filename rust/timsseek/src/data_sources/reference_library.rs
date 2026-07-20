@@ -30,6 +30,38 @@ pub struct RefQuery<'a> {
     geom: Query<&'a QueryCollection>,
 }
 
+impl ReferenceLibrary {
+    fn variants_per_target(&self) -> usize {
+        match self.geom.caps.decoys {
+            timsquery::models::capabilities::DecoyStrategy::LazyMassShift { n_decoys, .. } => {
+                n_decoys as usize + 1
+            }
+            other => panic!("ReferenceLibrary is lazy-only; got {other:?}"),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.geom.n_targets() * self.variants_per_target()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Maps a flat `0..len()` index to a `(target, variant)` `RefQuery`, in
+    /// `t,+,-` order (variant 0,1,2 within each target).
+    pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
+        let vpt = self.variants_per_target();
+        let tgt = (flat_idx / vpt) as u32;
+        let variant = (flat_idx % vpt) as u8;
+        RefQuery::new(self, tgt, variant)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
+        (0..self.len()).map(move |i| self.item_at(i))
+    }
+}
+
 impl<'a> RefQuery<'a> {
     pub fn new(lib: &'a ReferenceLibrary, tgt: u32, variant: u8) -> Self {
         Self {
@@ -177,5 +209,17 @@ mod tests {
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");
+    }
+
+    #[test]
+    fn flat_index_maps_to_target_and_variant_in_tpm_order() {
+        let lib = tiny_ref_lib(); // 1 target, n_decoys=2 -> len 3
+        assert_eq!(lib.len(), 3);
+        assert_eq!(lib.item_at(0).geom().variant(), 0);
+        assert_eq!(lib.item_at(1).geom().variant(), 1);
+        assert_eq!(lib.item_at(2).geom().variant(), 2);
+        assert_eq!(lib.item_at(1).geom().target_idx(), 0);
+        let all: Vec<_> = lib.iter().map(|q| q.geom().variant()).collect();
+        assert_eq!(all, vec![0, 1, 2]);
     }
 }
