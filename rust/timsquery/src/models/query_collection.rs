@@ -74,13 +74,25 @@ impl QueryCollection {
             self.frag_labels.push(*lab);
             self.frag_mzs.push(*mz);
         }
-        self.frag_off.push(self.frag_labels.len() as u32);
+        // CSR offsets are u32 (documented ~40x headroom over real arena sizes).
+        // If a monster library ever exceeds that, fail loud instead of wrapping
+        // an offset and silently corrupting every range past the overflow.
+        self.frag_off.push(
+            u32::try_from(self.frag_labels.len()).expect("fragment arena exceeds u32 offset range"),
+        );
         self.seq_strip_blob.push_str(seq_strip);
-        self.seq_strip_off.push(self.seq_strip_blob.len() as u32);
+        self.seq_strip_off.push(
+            u32::try_from(self.seq_strip_blob.len())
+                .expect("stripped-seq blob exceeds u32 offset range"),
+        );
         self.seq_mod_blob.push_str(seq_mod);
-        self.seq_mod_off.push(self.seq_mod_blob.len() as u32);
+        self.seq_mod_off.push(
+            u32::try_from(self.seq_mod_blob.len())
+                .expect("modified-seq blob exceeds u32 offset range"),
+        );
         self.mods.extend_from_slice(mods);
-        self.mod_off.push(self.mods.len() as u32);
+        self.mod_off
+            .push(u32::try_from(self.mods.len()).expect("mods arena exceeds u32 offset range"));
     }
 
     pub fn n_targets(&self) -> usize {

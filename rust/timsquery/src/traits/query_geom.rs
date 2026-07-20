@@ -27,7 +27,10 @@ impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
     type Label = T;
 
     fn id(&self) -> u32 {
-        self.id() as u32
+        // Fail loud rather than silently truncate: the library_id column and the
+        // q-value determinism anchor are u32; an id beyond u32::MAX is a bug we
+        // want surfaced, not wrapped.
+        u32::try_from(self.id()).expect("TimsElutionGroup id exceeds u32::MAX")
     }
 
     fn mono_precursor_mz(&self) -> f64 {
