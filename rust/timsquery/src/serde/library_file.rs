@@ -328,10 +328,14 @@ pub fn read_library_file<T: AsRef<Path>>(
                 Ok(egs) => return Ok(egs),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
-                // instead of committing to the first sniff.
+                // instead of committing to the first sniff. Keep the FIRST
+                // error: readers run specific -> generic, so the earliest
+                // sniff-and-fail carries the most useful diagnostic (e.g. a
+                // `.speclib` desync), which the always-true JSON fallback's
+                // generic error would otherwise clobber.
                 Err(e) => {
                     warn!("{} sniffed but failed to read: {:?}", reader.name(), e);
-                    last_err = Some(e);
+                    last_err.get_or_insert(e);
                 }
             }
         }
