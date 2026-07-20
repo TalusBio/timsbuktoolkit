@@ -361,17 +361,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bruker_declares_no_file_extensions() {
-        // `.d` is a directory format — picked as a folder, not a file.
-        assert!(BrukerTdfReader.file_extensions().is_empty());
-    }
-
     #[cfg(feature = "mzdata")]
     #[test]
-    fn registry_file_extensions_include_mzml_with_feature() {
+    fn registry_file_extensions_include_mzml_but_not_dotd() {
+        // Real invariant: single-file formats surface in the file-dialog filter;
+        // directory formats (.d) never do.
         let exts = ReaderRegistry::with_builtins().file_extensions();
         assert!(exts.contains(&"mzML"), "expected mzML in {exts:?}");
+        assert!(!exts.iter().any(|e| e.eq_ignore_ascii_case("d")));
     }
 
     #[test]
