@@ -5,7 +5,10 @@ pub mod query_item;
 pub mod sequence;
 
 pub use decoy::DecoyMarking;
-pub use decoy_strategy::DecoyStrategy;
+pub use decoy_strategy::{
+    DecoyStrategy,
+    map_decoy_strategy,
+};
 pub use digest::{
     ProteinSlice,
     deduplicate_digests,

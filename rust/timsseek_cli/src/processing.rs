@@ -426,7 +426,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
         20_000,
-        speclib.meta.parsable_sequences,
+        speclib.parsable_sequences(),
     )
     .map_err(|e| TimsSeekError::Io {
         path: out_path_pq.clone().into(),
