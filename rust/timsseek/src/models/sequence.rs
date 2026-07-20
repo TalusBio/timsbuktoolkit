@@ -127,10 +127,7 @@ impl Peptide {
 
     /// `true` when this entry is a decoy (reversed or mass-shifted).
     pub fn is_decoy(&self) -> bool {
-        matches!(
-            self.decoy,
-            crate::models::decoy::DecoyMarking::ReversedDecoy
-        )
+        self.decoy.is_decoy()
     }
 
     pub fn length(&self) -> Option<u8> {

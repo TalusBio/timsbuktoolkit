@@ -304,7 +304,7 @@ fn create_mass_shifted_decoy(
     let decoy_digest = Peptide {
         raw: target.digest.raw.clone(),
         parsed: target.digest.parsed.clone(),
-        decoy: DecoyMarking::ReversedDecoy,
+        decoy: DecoyMarking::MassShiftedDecoy,
         decoy_group: decoy_group_id,
     };
 

@@ -66,7 +66,7 @@ impl ProteinSlice {
     }
 
     pub fn is_decoy(&self) -> bool {
-        matches!(self.decoy, DecoyMarking::ReversedDecoy)
+        self.decoy.is_decoy()
     }
 }
 
