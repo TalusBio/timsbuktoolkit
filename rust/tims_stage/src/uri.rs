@@ -25,12 +25,10 @@ pub(crate) enum NameKind {
     Tar,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct UriShape {
     pub loc: LocKind,
     pub name: NameKind,
-    #[allow(dead_code)]
-    pub raw: String,
 }
 
 /// Classify a URI string by scheme + suffix. Pure logic, no I/O.
@@ -50,11 +48,7 @@ pub(crate) fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
         // decides which backend claims it (or rejects it) at dispatch time.
         NameKind::Raw
     };
-    Ok(UriShape {
-        loc,
-        name,
-        raw: uri.to_string(),
-    })
+    Ok(UriShape { loc, name })
 }
 
 /// Cheap test for a supported remote URI scheme.
