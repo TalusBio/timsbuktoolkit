@@ -9,8 +9,8 @@ pub mod backend;
 pub(crate) mod common;
 pub mod download;
 pub mod error;
+pub mod load;
 pub mod open;
-pub mod prefix;
 pub mod resolve;
 pub mod tar;
 pub mod upload;
@@ -24,6 +24,12 @@ pub use backend::{
 };
 pub use download::download_to_file;
 pub use error::StageError;
+pub use load::{
+    LoadRawError,
+    RawRead,
+    load_raw,
+    stage_manifest,
+};
 pub use open::{
     DEFAULT_IN_MEMORY_CAP,
     open_reader,

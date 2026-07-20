@@ -47,25 +47,22 @@ pub struct Manifest {
     pub optional: Vec<Uri>,
 }
 
-/// One local dir holding the (possibly single-member) staged manifest.
+/// One local dir holding the artifact + its co-located members.
 ///
 /// `entry` is always a NAME within `dir` (never the dir itself), so
 /// `entry_path()` is unambiguous for single-file AND directory-entry shapes.
+/// For local inputs `dir` is the artifact's real parent; for staged remote
+/// inputs it is a tempdir holding the materialized manifest.
 #[derive(Debug, Clone)]
 pub struct ResolvedSource {
     dir: PathBuf,
     entry: OsString,
-    members: Vec<OsString>,
 }
 
 impl ResolvedSource {
-    /// Construct from a local directory + entry name + co-located member names.
-    pub fn new(dir: PathBuf, entry: OsString, members: Vec<OsString>) -> Self {
-        Self {
-            dir,
-            entry,
-            members,
-        }
+    /// Construct from a local directory + entry name.
+    pub fn new(dir: PathBuf, entry: OsString) -> Self {
+        Self { dir, entry }
     }
 
     /// Borrow a local artifact in place — no staging. `dir` is the artifact's
@@ -79,7 +76,7 @@ impl ResolvedSource {
             .file_name()
             .ok_or_else(|| ReadError::Build(format!("path has no file name: {path:?}")))?
             .to_os_string();
-        Ok(Self::new(dir, entry.clone(), vec![entry]))
+        Ok(Self::new(dir, entry))
     }
 
     /// The artifact the reader opens (e.g. `foo.mzML`, or the `sample.d` dir).
@@ -87,13 +84,12 @@ impl ResolvedSource {
         self.dir.join(&self.entry)
     }
 
-    /// Resolve a staged member (a sidecar like `foo.wiff.scan`) to its
-    /// co-located local path, if present.
+    /// Resolve a co-located member (a sidecar like `foo.wiff.scan`) to its local
+    /// path, if it exists next to the entry. Works for both in-place local
+    /// inputs and staged tempdirs.
     pub fn path_of(&self, name: &str) -> Option<PathBuf> {
-        self.members
-            .iter()
-            .find(|m| m.as_os_str() == std::ffi::OsStr::new(name))
-            .map(|m| self.dir.join(m))
+        let p = self.dir.join(name);
+        p.exists().then_some(p)
     }
 }
 
@@ -136,14 +132,9 @@ pub trait RawReader: Send + Sync {
     }
 
     /// The exact artifact set (entry + required + optional). Vendor "which
-    /// files belong together" knowledge lives here, nowhere else.
+    /// files belong together" knowledge lives here, nowhere else — the staging
+    /// layer fetches exactly these, by name, so transport never guesses shape.
     fn manifest(&self, uri: &Uri) -> Manifest;
-
-    /// Can this reader consume an object_store (S3) URI directly, or must the
-    /// manifest be staged local first?
-    fn supports_object_store(&self) -> bool {
-        false
-    }
 
     /// Whether a built index should be persisted as an `.idx` sidecar for reuse.
     /// TDF caches; mzdata builds in memory each run (no sidecar).
@@ -238,34 +229,6 @@ fn path_ends_with(uri: &Uri, suffix_lower: &str) -> bool {
         .trim_end_matches('/')
         .to_ascii_lowercase()
         .ends_with(suffix_lower)
-}
-
-/// Build an eager index from a LOCAL raw artifact by dispatching through the
-/// registry. Single source of truth for raw index construction — both the CLI
-/// (`load_index`) and the viewer (`TimsIndexReader::read_index`) route through
-/// here, so format support and dispatch live in exactly one place.
-///
-/// Returns the index plus which reader built it and whether that reader caches
-/// to `.idx` — so the caller can report provenance and decide whether to persist
-/// a sidecar (TDF yes, mzdata no).
-pub struct RawRead {
-    pub index: IndexedTimstofPeaks,
-    /// The reader that claimed the URI (e.g. `"bruker-tdf"`, `"mzdata"`).
-    pub reader_name: &'static str,
-    pub caches_to_idx: bool,
-}
-
-pub fn read_local_raw(path: &Path, cfg: &CentroidingConfig) -> Result<RawRead, ReadError> {
-    let registry = ReaderRegistry::with_builtins();
-    let uri = local_uri(path)?;
-    let reader = registry.pick(&uri, || None)?;
-    let src = ResolvedSource::local_in_place(path)?;
-    let index = reader.read(&src, cfg)?;
-    Ok(RawRead {
-        index,
-        reader_name: reader.name(),
-        caches_to_idx: reader.caches_to_idx(),
-    })
 }
 
 /// Build a `file://` URI from an absolute local path, percent-encoding as
@@ -411,16 +374,16 @@ mod tests {
     }
 
     #[test]
-    fn resolved_source_entry_and_members() {
-        let src = ResolvedSource::new(
-            PathBuf::from("/tmp/stage"),
-            OsString::from("run.wiff"),
-            vec![OsString::from("run.wiff"), OsString::from("run.wiff.scan")],
-        );
-        assert_eq!(src.entry_path(), PathBuf::from("/tmp/stage/run.wiff"));
+    fn resolved_source_entry_and_path_of() {
+        // path_of checks the real filesystem (works for staged + in-place).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("run.wiff"), b"x").unwrap();
+        std::fs::write(dir.path().join("run.wiff.scan"), b"y").unwrap();
+        let src = ResolvedSource::new(dir.path().to_path_buf(), OsString::from("run.wiff"));
+        assert_eq!(src.entry_path(), dir.path().join("run.wiff"));
         assert_eq!(
             src.path_of("run.wiff.scan"),
-            Some(PathBuf::from("/tmp/stage/run.wiff.scan"))
+            Some(dir.path().join("run.wiff.scan"))
         );
         assert_eq!(src.path_of("missing.bin"), None);
     }

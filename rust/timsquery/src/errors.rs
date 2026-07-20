@@ -31,8 +31,9 @@ pub enum DataReadingError {
     TimsTofPathError(TimsTofPathError),
     TimsRustError(TimsRustError), // Why doesnt timsrust error derive clone?
     SerializationError(SerializationError),
-    /// Failure dispatching to / building from a raw-format reader (the registry).
-    RawReadError(timscentroid::reader::ReadError),
+    /// Failure dispatching to / building from a raw-format reader (the registry
+    /// + staging). Stringified to stay decoupled from the staging error type.
+    RawReadError(String),
 }
 
 impl From<UnsupportedDataError> for DataReadingError {

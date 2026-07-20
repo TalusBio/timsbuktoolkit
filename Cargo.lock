@@ -6039,6 +6039,7 @@ version = "0.31.0"
 dependencies = [
  "bytes",
  "filetime",
+ "http 1.4.0",
  "indicatif",
  "serde",
  "tempfile",

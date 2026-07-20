@@ -554,12 +554,19 @@ impl TimsIndexReader {
             early_stop_iterations: 200,
         });
         info!("Starting centroiding + load of the raw data (might take a min)");
+        let path_str = path.to_str().ok_or_else(|| {
+            crate::errors::DataReadingError::RawReadError(format!("non-UTF-8 path: {path:?}"))
+        })?;
+        // Local raw: `load_raw` reads in place (the backend is only used for
+        // remote staging, which this entry point doesn't reach).
+        let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig::default())
+            .map_err(|e| crate::errors::DataReadingError::RawReadError(format!("{e}")))?;
         let RawRead {
             index,
             reader_name,
             caches_to_idx,
-        } = read_local_raw(path, &centroiding_config)
-            .map_err(crate::errors::DataReadingError::RawReadError)?;
+        } = load_raw(path_str, &backend, &centroiding_config)
+            .map_err(|e| crate::errors::DataReadingError::RawReadError(format!("{e}")))?;
 
         // Persist a sidecar only for cache-capable formats (TDF yes, mzdata no).
         if caches_to_idx
@@ -820,17 +827,15 @@ pub fn load_index_auto(
 // ---------------------------------------------------------------------------
 
 use tims_stage::{
+    LoadRawError,
+    RawRead,
     Resolved,
     StageError,
     StagingBackend,
     canonical_uri,
+    load_raw,
     resolve,
     sidecar_of,
-};
-use timscentroid::reader::{
-    RawRead,
-    ReadError,
-    read_local_raw,
 };
 
 /// How an index was obtained — surfaced so callers (CLI, viewer) can tell the
@@ -873,19 +878,18 @@ pub fn load_index(
 ) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
     let canon = canonical_uri(uri);
     match resolve(&canon)? {
-        Resolved::LocalIdx { loc } | Resolved::RemoteIdx { loc } => {
+        Resolved::Idx { loc } => {
             let idx = IndexedTimstofPeaks::load_from_storage(loc).map_err(LoadIndexError::Load)?;
             Ok((idx, IndexSource::CachedIdx))
         }
-        Resolved::LocalRaw { path } => {
-            // Sniff-first raw dispatch through the shared registry core.
+        Resolved::Raw { uri } => {
+            // The one raw path: sniff → manifest → (remote: stage declared
+            // files | local: in place) → read.
             let RawRead {
                 index,
                 reader_name,
                 caches_to_idx,
-            } = read_local_raw(&path, &centroid_cfg).map_err(LoadIndexError::Read)?;
-            // Only formats that cache to `.idx` write a sidecar; mzdata builds
-            // fresh each run.
+            } = load_raw(&uri, backend, &centroid_cfg)?;
             if save_sidecar && caches_to_idx {
                 write_sidecar(&canon, &index)?;
             }
@@ -896,14 +900,18 @@ pub fn load_index(
                 },
             ))
         }
-        Resolved::Stageable { spec } => {
+        Resolved::Tar { spec } => {
+            // Extract the tar container to a local `.d`, then read it via the
+            // same raw core.
             let staged = backend.stage(&spec).map_err(LoadIndexError::Stage)?;
-            // Staged bundle is a local dir (a `.d`) — same registry core.
+            let staged_path = staged.as_ref().to_str().ok_or_else(|| {
+                LoadIndexError::Build(format!("non-UTF-8 staged path: {:?}", staged.as_ref()))
+            })?;
             let RawRead {
                 index,
                 reader_name,
                 caches_to_idx,
-            } = read_local_raw(staged.as_ref(), &centroid_cfg).map_err(LoadIndexError::Read)?;
+            } = load_raw(staged_path, backend, &centroid_cfg)?;
             if save_sidecar && caches_to_idx {
                 write_sidecar(&canon, &index)?;
             }
@@ -928,8 +936,8 @@ pub enum LoadIndexError {
     Load(SerializationError),
     #[error("sidecar save failed: {0:?}")]
     SidecarWrite(SerializationError),
-    #[error("raw reader failed: {0}")]
-    Read(#[from] ReadError),
+    #[error(transparent)]
+    LoadRaw(#[from] LoadRawError),
 }
 
 fn write_sidecar(orig_uri: &str, idx: &IndexedTimstofPeaks) -> Result<(), LoadIndexError> {

@@ -13,6 +13,8 @@ tempfile = { workspace = true }
 indicatif = { workspace = true }
 bytes = "1"
 url = "2"
+# RFC-3986 URIs — matches the reader manifest's `http::Uri` members.
+http = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
