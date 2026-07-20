@@ -499,9 +499,7 @@ impl SpeclibFormat {
     /// bridge.
     ///
     /// Extension-only is deliberate: msgpack has no reliable magic byte, so a
-    /// content sniff would misclaim raw binaries like `.speclib` as msgpack (as
-    /// the removed `detect_from_content` did). Convention is to use the native
-    /// extensions.
+    /// content sniff would misclaim raw binaries like `.speclib` as msgpack.
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
@@ -716,11 +714,10 @@ impl Speclib {
         path: &Path,
         decoy_strategy: crate::models::DecoyStrategy,
     ) -> Result<Self, LibraryReadingError> {
-        // Native timsseek formats are matched by EXTENSION ONLY. A native
-        // extension commits to the native reader and surfaces its error, rather
-        // than silently swallowing it and mis-routing to the bridge (the old
-        // behavior). A `.speclib` matches no native extension -> falls through
-        // to the bridge -> timsquery registry -> binary reader.
+        // Native timsseek formats are matched by EXTENSION ONLY: a native
+        // extension commits to the native reader and surfaces its error. A
+        // `.speclib` matches no native extension and falls through to the
+        // bridge -> timsquery registry -> binary reader.
         if let Some(format) = SpeclibFormat::detect_from_extension(path) {
             tracing::info!(
                 "Loading native speclib format ({:?}) from {}",

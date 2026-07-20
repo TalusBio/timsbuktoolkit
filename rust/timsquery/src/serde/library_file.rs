@@ -295,7 +295,7 @@ impl LibraryReader for JsonReader {
     }
 
     /// Terminal fallback: always sniffs true so JSON is tried when nothing else
-    /// matched (matches the previous try-chain's final arm).
+    /// matched. Must be last in the registry.
     fn sniff(&self, _path: &Path) -> bool {
         true
     }

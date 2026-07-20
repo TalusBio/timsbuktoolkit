@@ -8,9 +8,9 @@
 //! (little-endian, no padding, no section table); it must be parsed strictly in
 //! order. This reader walks all nine top-level sections but keeps only the
 //! per-precursor `Entry` payload (section 7) plus the PG `ids` strings needed to
-//! resolve `protein_id`. The kept payload maps onto the existing
-//! [`DiannPrecursorExtras`] + [`TimsElutionGroup<IonAnnot>`] shape, so the
-//! timsseek DIA-NN converter is reused untouched.
+//! resolve `protein_id`, mapping them onto the
+//! [`DiannPrecursorExtras`] + [`TimsElutionGroup<IonAnnot>`] shape shared by the
+//! DIA-NN TSV/parquet paths.
 
 use super::diann_io::DiannPrecursorExtras;
 use super::library_file::{
@@ -137,9 +137,8 @@ impl<R: BufRead> ByteReader<R> {
 /// and returned for the probe example to assert on.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpeclibDecodeStats {
-    /// Fragments with the `ExcludeFromAssay` high bit (`type & 0x80`) set. These
-    /// are KEPT (for parity with the TSV/parquet readers); counted for
-    /// reporting only.
+    /// Fragments flagged `ExcludeFromAssay` (`type & 0x80`). Kept (see
+    /// `build_entry`); counted for reporting only.
     pub exclude_flagged: usize,
     /// Fragments with a neutral loss (`loss != 0`) — `IonAnnot` cannot hold loss.
     pub loss_dropped: usize,
@@ -329,12 +328,10 @@ fn build_entry(
     let mut kept: Vec<(IonAnnot, f64, f32)> = Vec::with_capacity(pep.frags.len());
 
     for f in &pep.frags {
-        // `type & 0x80` => ExcludeFromAssay. DIA-NN marks these as
-        // non-quantifier transitions, but they carry valid m/z + intensity and
-        // the TSV/parquet readers (and BiblioSpec) keep them. Keep them here too
-        // — dropping them leaves ~3 fragments/precursor on real libraries, which
-        // starves cross-library calibration matching (needs >=5 shared). Just
-        // count them for reporting.
+        // `type & 0x80` => ExcludeFromAssay: DIA-NN's non-quantifier transitions.
+        // They carry valid m/z + intensity and are kept — dropping them leaves
+        // ~3 fragments/precursor on real libraries, which starves cross-library
+        // calibration matching (needs >=5 shared fragments). Counted only.
         if f.typ & 0x80 != 0 {
             stats.exclude_flagged += 1;
         }
@@ -604,7 +601,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     }
     if stats.exclude_flagged > 0 {
         info!(
-            "DIA-NN .speclib {}: kept {} ExcludeFromAssay-flagged fragments (parity with TSV/parquet)",
+            "DIA-NN .speclib {}: kept {} ExcludeFromAssay-flagged fragments",
             path.display(),
             stats.exclude_flagged,
         );
@@ -672,8 +669,8 @@ mod tests {
         assert!((eg.mobility_ook0() - 1.0254545).abs() < 1e-4);
 
         // The fixture has Peptide.length == 0, so y-series is recovered from the
-        // sequence length (14). ExcludeFromAssay fragments are KEPT (parity with
-        // TSV/parquet); only neutral-loss/dup drop, so all 12 remain.
+        // sequence length (14). ExcludeFromAssay fragments are kept; only
+        // neutral-loss/dup drop, so all 12 remain.
         assert_eq!(eg.fragment_count(), 12, "all non-loss fragments kept");
 
         // First few fragments in file order, sourced independently. y9 carries
@@ -734,8 +731,8 @@ mod tests {
     fn test_exclude_flagged_kept_and_loss_dropped() {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (entries, stats, _eof) = parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
-        // Reference parser: 8384 ExcludeFromAssay-flagged (now KEPT, only
-        // counted), 152 neutral-loss dropped, no dc != 0 entries.
+        // Reference parser: 8384 ExcludeFromAssay-flagged (kept, counted only),
+        // 152 neutral-loss dropped, no dc != 0 entries.
         assert_eq!(stats.exclude_flagged, 8384);
         assert_eq!(stats.loss_dropped, 152);
         assert_eq!(stats.decoys_dropped, 0);
