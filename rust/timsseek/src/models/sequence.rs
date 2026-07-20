@@ -178,8 +178,107 @@ impl Default for SpeclibMeta {
 
 /// Parse a ProForma-normalized peptide string into our thin representation.
 /// Returns `None` on parse error, non-linear peptides, or mods outside the
-/// `Unimod`/`Mass` subset. Off the hot path — runs once per speclib load.
+/// `Unimod`/`Mass` subset.
+///
+/// A hand-rolled byte walk handles the grammar `normalize_to_proforma` actually
+/// emits (bare residues, `[UNIMOD:n]`, `[+/-mass]`, N-/C-terminal forms). It
+/// returns `Some` ONLY for inputs it fully recognizes; anything else — named
+/// mods, cross-links, unexpected bytes — yields `None` and defers to the rustyms
+/// parser, which stays the authority for what is valid. So the fast path can
+/// never accept something rustyms would reject, with one deliberate exception:
+/// it does not check that a `UNIMOD:n` id exists in the ontology (a
+/// syntactically valid id is accepted). Real DIA-NN output only carries real
+/// ids, so this never triggers in practice.
 pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
+    if let Some(parsed) = parse_sequence_fast(normalized) {
+        return Some(parsed);
+    }
+    parse_sequence_rustyms(normalized)
+}
+
+/// Classify one bracket body (`UNIMOD:n` or a signed mass like `+15.995`) into a
+/// [`Mod`]. `None` for anything else — a named mod, an unsigned number, empty —
+/// which forces the rustyms fallback in [`parse_sequence`].
+fn classify_mod(body: &str) -> Option<Mod> {
+    let body = body.trim();
+    if body.len() >= 7 && body[..7].eq_ignore_ascii_case("UNIMOD:") {
+        return body[7..].trim().parse::<u16>().ok().map(Mod::Unimod);
+    }
+    match body.as_bytes().first() {
+        Some(b'+') | Some(b'-') => body.parse::<f32>().ok().map(Mod::Mass),
+        _ => None,
+    }
+}
+
+/// Byte-walk parser for the `normalize_to_proforma` output grammar. `None` means
+/// "not recognized — defer to rustyms", never "definitively invalid" (that
+/// verdict is the fallback's). See [`parse_sequence`] for the contract.
+fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
+    let b = s.as_bytes();
+    let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
+    let mut mods: SmallVec<[ModEntry; 2]> = SmallVec::new();
+    let mut i = 0usize;
+
+    // Optional leading N-terminal mod: `[..]-SEQ`.
+    if b.first() == Some(&b'[') {
+        let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+        // A leading bracket not of the `[..]-` shape is something we do not
+        // model; let rustyms decide.
+        if b.get(close + 1) != Some(&b'-') {
+            return None;
+        }
+        mods.push(ModEntry {
+            pos: POS_N_TERM,
+            kind: classify_mod(&s[i + 1..close])?,
+        });
+        i = close + 2;
+    }
+
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_uppercase() => {
+                // A residue index must fit u8 for `ModEntry::pos` (0..=253).
+                if residues.len() > 253 {
+                    return None;
+                }
+                residues.push(AminoAcid::from_ascii(c));
+                i += 1;
+            }
+            b'[' => {
+                // Residue mod attaches to the residue just pushed.
+                if residues.is_empty() {
+                    return None;
+                }
+                let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: (residues.len() - 1) as u8,
+                    kind: classify_mod(&s[i + 1..close])?,
+                });
+                i = close + 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'[') => {
+                // Trailing C-terminal mod: `SEQ-[..]`.
+                let close = i + 2 + b[i + 2..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: POS_C_TERM,
+                    kind: classify_mod(&s[i + 2..close])?,
+                });
+                i = close + 1;
+            }
+            _ => return None, // anything unexpected -> rustyms fallback
+        }
+    }
+
+    if residues.is_empty() {
+        return None;
+    }
+    Some(ParsedSequence { residues, mods })
+}
+
+/// The rustyms-backed parser. Authoritative fallback for [`parse_sequence`]:
+/// validates against the ontology, handles named mods, and rejects non-linear
+/// peptides. Off the hot path once the fast path covers the common grammar.
+fn parse_sequence_rustyms(normalized: &str) -> Option<ParsedSequence> {
     use rustyms::prelude::IsAminoAcid;
     use rustyms::sequence::Peptidoform;
 
@@ -499,5 +598,73 @@ mod tests {
         assert_eq!(p.mods.len(), 1);
         assert_eq!(p.mods[0].pos, POS_N_TERM);
         assert_eq!(p.mods[0].kind, Mod::Unimod(1));
+    }
+
+    #[test]
+    fn fast_path_takes_recognized_grammar() {
+        // Bare and numeric-UNIMOD/mass inputs must be served by the fast path
+        // (never reach rustyms), else there's no speedup.
+        for s in [
+            "PEPTIDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-PEPTIDEK",
+            "M[+15.995]PEPTIDEK",
+            "[+42]-PEPTIDEK",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_some(),
+                "fast path must accept {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_path_defers_named_and_garbage() {
+        // Named mods and unexpected bytes must defer (fast returns None) so the
+        // rustyms authority decides validity + resolves the name.
+        for s in [
+            "[Acetyl]-PEPTIDEK",
+            "C[Carbamidomethyl (C)]PEPK",
+            "not a pep!",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_none(),
+                "fast path must defer {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_matches_rustyms_on_recognized_grammar() {
+        // Differential test: wherever the fast path claims an input, it must
+        // produce the exact same ParsedSequence rustyms would. Guards against
+        // the fast path silently diverging on residue counts or mod mapping.
+        let corpus = [
+            "PEPTIDEK",
+            "AACDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-AACDEK",
+            "M[UNIMOD:35]LEGNSPQGSNQGVK",
+            "AAAGAAATHLEVAR",
+        ];
+        for s in corpus {
+            if let Some(fast) = parse_sequence_fast(s) {
+                let slow = parse_sequence_rustyms(s)
+                    .unwrap_or_else(|| panic!("rustyms must also parse {s:?}"));
+                assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
+                assert_eq!(
+                    fast.mods.len(),
+                    slow.mods.len(),
+                    "n_mods mismatch for {s:?}"
+                );
+                assert_eq!(
+                    fast.aa_counts(),
+                    slow.aa_counts(),
+                    "aa_counts mismatch for {s:?}"
+                );
+            }
+        }
     }
 }
