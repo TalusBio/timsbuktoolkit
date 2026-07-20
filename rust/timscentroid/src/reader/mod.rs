@@ -219,12 +219,12 @@ impl ReaderRegistry {
         if let Some(w) = winner {
             return Ok(w);
         }
-        if !maybes.is_empty() {
-            if let Some(bytes) = head() {
-                for r in maybes {
-                    if r.sniff_bytes(&bytes) {
-                        return Ok(r);
-                    }
+        if !maybes.is_empty()
+            && let Some(bytes) = head()
+        {
+            for r in maybes {
+                if r.sniff_bytes(&bytes) {
+                    return Ok(r);
                 }
             }
         }

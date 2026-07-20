@@ -539,11 +539,11 @@ impl TimsIndexReader {
         };
 
         // Fast path: a prebuilt `.idx` sidecar.
-        if let Some(storage_loc) = &cache_storage_location {
-            if let Some(idx) = self.try_load_from_cache(storage_loc) {
-                info!("Loading index took: {:#?}", st.elapsed());
-                return Ok((idx, IndexSource::CachedIdx));
-            }
+        if let Some(storage_loc) = &cache_storage_location
+            && let Some(idx) = self.try_load_from_cache(storage_loc)
+        {
+            info!("Loading index took: {:#?}", st.elapsed());
+            return Ok((idx, IndexSource::CachedIdx));
         }
 
         // Build via the shared registry core (sniff-first; TDF, mzML, ...).
@@ -562,13 +562,14 @@ impl TimsIndexReader {
             .map_err(crate::errors::DataReadingError::RawReadError)?;
 
         // Persist a sidecar only for cache-capable formats (TDF yes, mzdata no).
-        if caches_to_idx && self.write_missing_cache {
-            if let Some(storage_loc) = cache_storage_location {
-                info!("Saving index to cache");
-                match index.save_to_storage(storage_loc, self.serialization_config) {
-                    Ok(_) => info!("Saved index to cache"),
-                    Err(e) => error!("Failed to save index to cache: {:?}", e),
-                }
+        if caches_to_idx
+            && self.write_missing_cache
+            && let Some(storage_loc) = cache_storage_location
+        {
+            info!("Saving index to cache");
+            match index.save_to_storage(storage_loc, self.serialization_config) {
+                Ok(_) => info!("Saved index to cache"),
+                Err(e) => error!("Failed to save index to cache: {:?}", e),
             }
         }
 
