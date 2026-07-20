@@ -120,22 +120,35 @@ impl<T: KeyLike> TimsElutionGroup<T> {
         self.rt_seconds = rt_seconds;
     }
 
-    /// In-place copy reusing Vec/TinyVec capacity. `Vec::clone_from` preserves
-    /// the destination's heap buffer if `src.len() <= self.capacity()` — after
-    /// warm-up, zero alloc. Used by the isotope-offset scratch in timsseek.
-    pub fn reset_from(&mut self, src: &Self) {
-        self.id = src.id;
-        self.mobility_ook0 = src.mobility_ook0;
-        self.rt_seconds = src.rt_seconds;
-        self.precursor_mono_mz = src.precursor_mono_mz;
-        self.precursor_charge = src.precursor_charge;
-        self.fragment_mzs.clone_from(&src.fragment_mzs);
+    /// In-place copy reusing Vec/TinyVec capacity. The `clear()` + `push`
+    /// pattern preserves the destination's heap buffer capacity across
+    /// resets — after warm-up, zero alloc. Used by the isotope-offset
+    /// scratch in timsseek. `G` is any `QueryGeom` (e.g. the columnar
+    /// flyweight), not necessarily `Self` — the body reads `src` only
+    /// through trait methods.
+    pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
+        self.set_id_internal(src.id() as u64);
+        self.mobility_ook0 = src.mobility_ook0();
+        self.rt_seconds = src.rt_seconds();
+        self.precursor_mono_mz = src.mono_precursor_mz();
+        self.precursor_charge = src.precursor_charge();
+        self.fragment_mzs.clear();
         self.fragment_labels.clear();
-        self.fragment_labels
-            .extend(src.fragment_labels.iter().cloned());
+        for (lab, mz) in src.iter_fragments_refs() {
+            // mz owned + shifted for decoy flyweights
+            self.fragment_labels.push(lab.clone());
+            self.fragment_mzs.push(mz);
+        }
         self.precursor_labels.clear();
         self.precursor_labels
-            .extend(src.precursor_labels.iter().cloned());
+            .extend(src.iter_precursors().map(|(iso, _mz)| iso));
+    }
+
+    /// Private setter for the otherwise-read-only `id` field — used by
+    /// `reset_from` since a generic `G: QueryGeom` source only exposes `id()`
+    /// through the trait, not direct field access.
+    fn set_id_internal(&mut self, id: u64) {
+        self.id = id;
     }
 
     pub fn mobility_ook0(&self) -> f32 {

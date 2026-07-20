@@ -6,10 +6,10 @@ use crate::models::base::{
     Chromatogram,
     MzMajorIntensityArray,
 };
+use crate::traits::QueryGeom;
 use crate::traits::queriable_data::HasQueryData;
 use crate::{
     KeyLike,
-    TimsElutionGroup,
     ValueLike,
 };
 use timscentroid::rt_mapping::{
@@ -64,7 +64,7 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
-        eg: &TimsElutionGroup<T>,
+        eg: &impl QueryGeom<Label = T>,
         rt_range_ms: TupleRange<u32>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, DataProcessingError> {
@@ -75,7 +75,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let precursor_order: Vec<_> = eg.iter_precursors().collect();
         let fragment_order: Vec<_> = eg
             .iter_fragments_refs()
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| (k.clone(), v))
             .collect();
         if precursor_order.is_empty() && fragment_order.is_empty() {
             return Err(DataProcessingError::ExpectedNonEmptyData);
@@ -90,7 +90,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let fragments =
             MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
-            id: eg.id(),
+            id: eg.id() as u64,
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
@@ -107,7 +107,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 
     pub fn try_reset_with(
         &mut self,
-        eg: &TimsElutionGroup<T>,
+        eg: &impl QueryGeom<Label = T>,
         rt_range_ms: TupleRange<u32>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<(), DataProcessingError> {
@@ -119,7 +119,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     /// and `eg.clone().with_mobility(..)` clone-then-mutate pattern.
     pub fn try_reset_with_overrides(
         &mut self,
-        eg: &TimsElutionGroup<T>,
+        eg: &impl QueryGeom<Label = T>,
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
         rt_range_ms: TupleRange<u32>,
@@ -136,7 +136,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        self.id = eg.id();
+        self.id = eg.id() as u64;
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
@@ -149,7 +149,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.precursors
             .clear_with_order(eg.iter_precursors(), num_cycles, start.index());
         self.fragments.clear_with_order(
-            eg.iter_fragments_refs().map(|(k, v)| (k.clone(), *v)),
+            eg.iter_fragments_refs().map(|(k, v)| (k.clone(), v)),
             num_cycles,
             start.index(),
         );
@@ -250,6 +250,7 @@ impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TimsElutionGroup;
     use tinyvec::tiny_vec;
 
     #[test]

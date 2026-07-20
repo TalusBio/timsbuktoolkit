@@ -1,5 +1,6 @@
 use crate::KeyLike;
 use crate::models::elution_group::TimsElutionGroup;
+use crate::traits::QueryGeom;
 use crate::traits::queriable_data::HasQueryData;
 use serde::Serialize;
 use std::sync::Arc;
@@ -24,10 +25,10 @@ pub struct PointIntensityAggregator<T: KeyLike> {
 
 impl<T: KeyLike> PointIntensityAggregator<T> {
     pub fn new_with_elution_group(elution_group: Arc<TimsElutionGroup<T>>) -> Self {
-        Self::new(&elution_group)
+        Self::new(elution_group.as_ref())
     }
 
-    pub fn new(eg: &TimsElutionGroup<T>) -> Self {
+    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
         let mut precursor_labels = TinyVec::new();
         let mut precursor_mzs = TinyVec::new();
         for (lbl, mz) in eg.iter_precursors() {
@@ -38,10 +39,10 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
         let mut fragment_mzs = TinyVec::new();
         for (lbl, mz) in eg.iter_fragments_refs() {
             fragment_labels.push(lbl.clone());
-            fragment_mzs.push(*mz);
+            fragment_mzs.push(mz);
         }
         Self {
-            id: eg.id(),
+            id: eg.id() as u64,
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),

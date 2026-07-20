@@ -4,6 +4,7 @@ use timscentroid::indexing::IndexedPeak;
 use timscentroid::rt_mapping::RTIndex;
 use tinyvec::TinyVec;
 
+use crate::traits::QueryGeom;
 use crate::traits::queriable_data::{
     HasQueryData,
     PeakAddable,
@@ -14,7 +15,6 @@ use crate::utils::streaming_calculators::{
 };
 use crate::{
     KeyLike,
-    TimsElutionGroup,
     ValueLike,
 };
 use std::ops::{
@@ -51,7 +51,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
 }
 
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
-    pub fn new(eg: &TimsElutionGroup<T>) -> Self {
+    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
         let mut out = Self {
             id: 0,
             mobility_ook0: 0.0,
@@ -70,7 +70,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         out
     }
 
-    pub fn reset_with(&mut self, eg: &TimsElutionGroup<T>) {
+    pub fn reset_with(&mut self, eg: &impl QueryGeom<Label = T>) {
         self.reset_with_overrides(eg, None, None);
     }
 
@@ -78,11 +78,11 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
     /// `item.query.clone().with_rt_seconds(r).with_mobility(m)` at callers.
     pub fn reset_with_overrides(
         &mut self,
-        eg: &TimsElutionGroup<T>,
+        eg: &impl QueryGeom<Label = T>,
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
     ) {
-        self.id = eg.id();
+        self.id = eg.id() as u64;
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
@@ -100,7 +100,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         self.fragment_mzs.clear();
         for (lbl, mz) in eg.iter_fragments_refs() {
             self.fragment_labels.push(lbl.clone());
-            self.fragment_mzs.push(*mz);
+            self.fragment_mzs.push(mz);
         }
 
         // Intensity buffers reuse capacity via resize.

@@ -92,4 +92,27 @@ mod tests {
             .unwrap();
         assert_eq!(geom_id(&eg), 7u32);
     }
+
+    #[test]
+    fn reset_from_accepts_generic_geom() {
+        fn reset_via_trait<G: QueryGeom<Label = crate::IonAnnot>>(
+            dst: &mut TimsElutionGroup<crate::IonAnnot>,
+            src: &G,
+        ) {
+            dst.reset_from(src);
+        }
+        let src: TimsElutionGroup<crate::IonAnnot> = TimsElutionGroup::builder()
+            .id(3)
+            .mobility_ook0(0.5)
+            .rt_seconds(2.0)
+            .fragment_labels([crate::IonAnnot::try_from("y2").unwrap()].as_slice().into())
+            .fragment_mzs(vec![250.0])
+            .precursor_labels(tinyvec::tiny_vec!(0))
+            .precursor(400.0, 2)
+            .try_build()
+            .unwrap();
+        let mut dst = src.clone();
+        reset_via_trait(&mut dst, &src);
+        assert_eq!(dst.id(), 3);
+    }
 }
