@@ -40,10 +40,7 @@ use std::path::{
 };
 use std::sync::Arc;
 use timsquery::models::QueryCollection;
-use timsquery::models::capabilities::{
-    LibCapabilities,
-    SeqFeatureState,
-};
+use timsquery::models::capabilities::SeqFeatureState;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::serde::{
     DiannPrecursorExtras,
@@ -505,7 +502,7 @@ fn convert_elution_group_collection(
     }
 }
 
-/// Summary of a [`build_reference_library`] call, for load-time logging.
+/// Summary of a [`finalize_reference_library`] call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
     pub n_targets: usize,
@@ -513,104 +510,47 @@ pub struct LoadReport {
     pub sequence_features: SeqFeatureState,
 }
 
-/// Build the lazy, columnar `ReferenceLibrary` arena directly from the
-/// timsquery bridge output, without ever materializing a `QueryItemToScore`
-/// per row. This is the memory-optimized path for the DEFAULT `.speclib`
-/// load (see `speclib_data_flow.md`): it is what avoids the 9 GB peak RSS of
-/// the fully-materialized target+2-decoy expansion.
+/// Finalize a freshly-narrowed lazy `ReferenceLibrary` arena: apply the decoy
+/// strategy, seal, run the whole-library parse gate + averagine tally, and set
+/// `caps.sequence_features`. This is the single shared tail of the DEFAULT
+/// `.speclib` load (see `speclib_data_flow.md`) — the memory-optimized path
+/// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
+/// expansion.
 ///
-/// Only the DIA-NN `MzpafLabels` + `FileReadingExtras::Diann` shape is
-/// supported today (mirrors `convert_elution_group_collection`'s DIA-NN
-/// branch); everything else stays on the materialized path in `from_file`.
-pub fn build_reference_library(
-    collection: ElutionGroupCollection,
-    caps: LibCapabilities,
-) -> Result<(ReferenceLibrary, LoadReport), LibraryReadingError> {
-    let (egs, extras) = match collection {
-        ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))) => {
-            (egs, extras)
-        }
-        _ => {
-            return Err(LibraryReadingError::UnsupportedFormat {
-                message:
-                    "build_reference_library only supports DIA-NN MzpafLabels collections (with extras)"
-                        .to_string(),
-            });
-        }
-    };
+/// `decoys` is the already-mapped timsquery decoy strategy (see
+/// `map_decoy_strategy`); it is stamped onto `caps.decoys` BEFORE `seal()`, so
+/// the seal's `LazyMassShift -> Passthrough` downgrade (the Task-4 gate) sees
+/// it. The parse gate walks the MODIFIED sequence blob (the form
+/// `RefQuery::materialize_peptide` parses) and, if any row fails, disables
+/// sequence-derived features library-wide. The same pass counts averagine
+/// isotope fallbacks for the returned `LoadReport`.
+fn finalize_reference_library(
+    mut geom: QueryCollection<IonAnnot>,
+    frag_intens: Vec<f32>,
+    decoys: timsquery::models::capabilities::DecoyStrategy,
+) -> (ReferenceLibrary, LoadReport) {
+    geom.caps.decoys = decoys;
+    geom.seal();
 
-    if egs.len() != extras.len() {
-        return Err(LibraryReadingError::UnsupportedFormat {
-            message: format!(
-                "Mismatch between elution groups ({}) and extras ({})",
-                egs.len(),
-                extras.len()
-            ),
-        });
-    }
-
-    let n_targets = egs.len();
-    tracing::info!(
-        "Building lazy ReferenceLibrary arena from {} DIA-NN library entries",
-        n_targets
-    );
-
-    let mut geom = QueryCollection::with_capabilities(caps);
-    let mut frag_intens: Vec<f32> = Vec::with_capacity(n_targets * 8);
-    let mut n_averagine_fallback = 0usize;
+    let n_targets = geom.n_targets();
     let mut all_parsable = true;
-
-    for (eg, extra) in egs.into_iter().zip(extras.into_iter()) {
-        let frags: Vec<(IonAnnot, f64)> = eg.iter_fragments().map(|(lab, mz)| (*lab, mz)).collect();
-
-        // Ingest assertion: `frag_intens` is co-built with `frag_labels` from
-        // the same source pair, in the same order. If DIA-NN ever reorders
-        // one relative to the other, `RefQuery::iter_expected_fragments`
-        // would silently zip mismatched (label, intensity) pairs downstream.
-        debug_assert!(
-            frags
-                .iter()
-                .map(|(l, _)| *l)
-                .eq(extra.relative_intensities.iter().map(|(l, _)| *l)),
-            "frag label order must match intensity key order at ingest"
-        );
-
-        let stripped = extra.stripped_peptide.as_str();
-        let modified = if extra.modified_peptide.is_empty() {
-            extra.stripped_peptide.as_str()
-        } else {
-            extra.modified_peptide.as_str()
-        };
-
+    let mut n_averagine_fallback = 0usize;
+    for tgt in 0..n_targets {
         if all_parsable {
+            let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
             let normalized = normalize_to_proforma(modified);
             if parse_sequence(&normalized).is_none() {
                 all_parsable = false;
             }
         }
-
-        let charge = eg.precursor_charge();
-        let neutral_mass = eg.precursor_mz() * charge as f64 - charge as f64 * PROTON_MASS;
+        let stripped = &geom.seq_strip_blob[geom.seq_strip_range(tgt)];
+        let charge = geom.charge[tgt] as f64;
+        let neutral_mass = geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
         let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
         if isotope_src == IsotopeSource::Averagine {
             n_averagine_fallback += 1;
         }
-
-        geom.push_target(
-            eg.precursor_mz(),
-            charge,
-            eg.rt_seconds(),
-            eg.mobility_ook0(),
-            &frags,
-            stripped,
-            modified,
-            &[],
-        );
-
-        frag_intens.extend(extra.relative_intensities.iter().map(|(_, i)| *i));
     }
-
-    geom.seal();
 
     let sequence_features = if all_parsable {
         SeqFeatureState::Available
@@ -621,13 +561,13 @@ pub fn build_reference_library(
 
     if n_averagine_fallback > 0 {
         tracing::warn!(
-            "{}/{} library entries fell back to averagine isotope envelopes",
+            "{}/{} library entries used averagine isotope fallback",
             n_averagine_fallback,
             n_targets
         );
     }
     tracing::info!(
-        "Lazy ReferenceLibrary arena built: {} targets, sequence_features={:?}",
+        "Lazy ReferenceLibrary arena ready: {} targets, sequence_features={:?}",
         n_targets,
         sequence_features
     );
@@ -638,7 +578,7 @@ pub fn build_reference_library(
         sequence_features,
     };
 
-    Ok((ReferenceLibrary { geom, frag_intens }, report))
+    (ReferenceLibrary { geom, frag_intens }, report)
 }
 
 #[derive(Debug, Clone)]
@@ -1018,65 +958,21 @@ impl Speclib {
             path.display()
         );
         let arena = read_timsquery_library(path)?;
-        let mut lib = ReferenceLibrary::try_from(arena)?;
+        let ReferenceLibrary { geom, frag_intens } = ReferenceLibrary::try_from(arena)?;
 
         // Map the CLI decoy strategy onto the arena BEFORE sealing. The arena's
         // own decoy flags decide whether `IfMissing` generates lazy mass-shift
-        // decoys or defers to the file's rows; `seal()` then re-checks and
-        // downgrades `LazyMassShift -> Passthrough` if any stored decoy is
-        // present (the Task-4 gate), so the mapping and the seal agree.
-        let has_file_decoys = lib.geom.is_decoy.iter().any(|&d| d);
-        lib.geom.caps.decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
-        lib.geom.seal();
+        // decoys or defers to the file's rows; `seal()` (inside
+        // `finalize_reference_library`) then re-checks and downgrades
+        // `LazyMassShift -> Passthrough` if any stored decoy is present (the
+        // Task-4 gate), so the mapping and the seal agree.
+        let has_file_decoys = geom.is_decoy.iter().any(|&d| d);
+        let decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
 
-        // Parse gate + averagine tally in one pass over targets. Parse the
-        // MODIFIED sequence (the form `RefQuery::materialize_peptide` parses)
-        // via ProForma; if any row fails, sequence-derived features are
-        // disabled library-wide. Same pass counts averagine isotope fallbacks
-        // for the `LoadReport`.
-        let n_targets = lib.geom.n_targets();
-        let mut all_parsable = true;
-        let mut n_averagine_fallback = 0usize;
-        for tgt in 0..n_targets {
-            if all_parsable {
-                let modified = &lib.geom.seq_mod_blob[lib.geom.seq_mod_range(tgt)];
-                let normalized = normalize_to_proforma(modified);
-                if parse_sequence(&normalized).is_none() {
-                    all_parsable = false;
-                }
-            }
-            let stripped = &lib.geom.seq_strip_blob[lib.geom.seq_strip_range(tgt)];
-            let charge = lib.geom.charge[tgt] as f64;
-            let neutral_mass = lib.geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
-            let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
-            if isotope_src == IsotopeSource::Averagine {
-                n_averagine_fallback += 1;
-            }
-        }
-        let sequence_features = if all_parsable {
-            SeqFeatureState::Available
-        } else {
-            SeqFeatureState::Unavailable
-        };
-        lib.geom.caps.sequence_features = sequence_features;
-
-        let report = LoadReport {
-            n_targets,
-            n_averagine_fallback,
-            sequence_features,
-        };
-        tracing::info!(
-            "Lazy speclib arena ready: {} targets, sequence_features={:?}",
-            report.n_targets,
-            report.sequence_features
-        );
-        if report.n_averagine_fallback > 0 {
-            tracing::warn!(
-                "{}/{} library entries used averagine isotope fallback",
-                report.n_averagine_fallback,
-                report.n_targets
-            );
-        }
+        // Seal + parse gate + averagine tally + `LoadReport` all live in the
+        // one shared finalize path (see `finalize_reference_library`); the
+        // report is logged there, so we drop it here.
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
 
         let speclib = Speclib::Lazy(lib);
         speclib.log_entry_stats();
@@ -2049,73 +1945,63 @@ mod tests {
         assert!(items.iter().all(|q| q.digest.parsed.is_some()));
     }
 
-    /// One target, one DIA-NN extras row -> the arena should have exactly
-    /// one target (3 flat entries: target + 2 lazy decoys), fragment m/z
-    /// should round-trip through the CSR arena, and `frag_intens` should be
-    /// parallel to `frag_labels` in the same order.
+    /// End-to-end `Speclib::from_file` over the real DIA-NN HeLa `.speclib`
+    /// fixture (the actual workload path). Proves: the arena narrows to a lazy
+    /// library with targets, variant-0 is a target, and the intensity sidecar
+    /// threaded through (`iter_expected_fragments` yields at least one pair).
     #[test]
-    fn build_reference_library_from_diann_collection() {
-        use timsquery::traits::QueryGeom;
+    fn from_file_loads_lazy_library_from_speclib_fixture() {
+        use crate::data_sources::reference_library::ScoredIdentity;
 
-        let eg = TimsElutionGroup::<IonAnnot>::builder()
-            .id(0)
-            .mobility_ook0(1.0)
-            .rt_seconds(100.0)
-            .precursor(500.25, 2)
-            .precursor_labels([0i8].as_slice().into())
-            .fragment_labels(
-                [
-                    IonAnnot::try_from("y3").unwrap(),
-                    IonAnnot::try_from("y5").unwrap(),
-                ]
-                .as_slice()
-                .into(),
-            )
-            .fragment_mzs(vec![300.1, 500.2])
-            .try_build()
-            .expect("build fixture elution group");
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../timsquery/tests/speclib_io_files/diann-hela-diapasef-lib.speclib"
+        ));
+        assert!(path.exists(), "fixture should exist at {:?}", path);
 
-        let extra = DiannPrecursorExtras {
-            modified_peptide: "PEPTIDEK".to_string(),
-            stripped_peptide: "PEPTIDEK".to_string(),
-            protein_id: "PROT1".to_string(),
-            is_decoy: false,
-            relative_intensities: vec![
-                (IonAnnot::try_from("y3").unwrap(), 1.0),
-                (IonAnnot::try_from("y5").unwrap(), 0.5),
-            ],
-        };
+        let speclib = Speclib::from_file(path, crate::models::DecoyStrategy::default())
+            .expect("from_file should load the .speclib fixture");
 
-        let collection = ElutionGroupCollection::MzpafLabels(
-            vec![eg],
-            Some(FileReadingExtras::Diann(vec![extra])),
+        let lib = expect_lazy(&speclib);
+        assert!(lib.len() > 0, "library should have entries");
+
+        let first = lib.item_at(0);
+        assert!(first.is_target(), "flat index 0 must be a target variant");
+
+        let frags: Vec<_> = first.iter_expected_fragments().collect();
+        assert!(
+            !frags.is_empty(),
+            "target 0 must expose at least one (label, intensity) pair \
+             (proves the intensity sidecar threaded through)"
         );
+    }
 
-        let (lib, report) =
-            build_reference_library(collection, LibCapabilities::default_diann()).expect("build");
+    /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
+    /// the TSV/parquet/Skyline bridge shape — scoring is intensity-driven, so
+    /// narrowing it to a `ReferenceLibrary` must be an `Err` (the branch that
+    /// causes the disclosed DIA-NN/Skyline regression).
+    #[test]
+    fn reference_library_rejects_mzpaf_without_intensities() {
+        use timsquery::models::QueryCollection;
+        use timsquery::models::capabilities::LibCapabilities;
+        use timsquery::serde::LibraryArena;
 
-        assert_eq!(lib.geom.n_targets(), 1);
-        assert_eq!(lib.len(), 3, "1 target x (1 target + 2 decoys) variants");
-        assert_eq!(lib.frag_intens.len(), lib.geom.frag_labels.len());
-        assert_eq!(report.n_targets, 1);
-        assert_eq!(report.n_averagine_fallback, 0);
-        assert_eq!(report.sequence_features, SeqFeatureState::Available);
-
-        // Fragment m/z round-trips through the arena for the target variant
-        // (variant 0 is unshifted).
-        let target = lib.item_at(0);
-        let frags: Vec<_> = target
-            .iter_fragments_refs()
-            .map(|(l, mz)| (*l, mz))
-            .collect();
-        assert_eq!(frags.len(), 2);
-        assert_eq!(frags[0].0, IonAnnot::try_from("y3").unwrap());
-        assert!((frags[0].1 - 300.1).abs() < 1e-9);
-        assert_eq!(frags[1].0, IonAnnot::try_from("y5").unwrap());
-        assert!((frags[1].1 - 500.2).abs() < 1e-9);
-
-        // frag_intens is parallel to frag_labels, same order as extras.
-        assert!((lib.frag_intens[0] - 1.0).abs() < 1e-6);
-        assert!((lib.frag_intens[1] - 0.5).abs() < 1e-6);
+        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        geom.push_target(
+            900.4,
+            2,
+            1.0,
+            1.0,
+            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+        );
+        geom.seal();
+        let arena = LibraryArena::Mzpaf {
+            geom,
+            frag_intens: None,
+        };
+        assert!(ReferenceLibrary::try_from(arena).is_err());
     }
 }
