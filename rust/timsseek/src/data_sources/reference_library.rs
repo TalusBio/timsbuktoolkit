@@ -1,6 +1,9 @@
 use smallvec::SmallVec;
 use std::sync::Arc;
 use timsquery::IonAnnot;
+use timsquery::serde::LibraryArena;
+
+use crate::errors::LibraryReadingError;
 use timsquery::models::capabilities::{
     IsotopeStrategy,
     SeqFeatureState,
@@ -61,6 +64,40 @@ impl ReferenceLibrary {
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
         (0..self.len()).map(move |i| self.item_at(i))
+    }
+
+    /// Narrow a label-generic [`LibraryArena`] (timsquery's one library funnel)
+    /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
+    ///
+    /// Only the `Mzpaf` arena carries the ion chemistry (`IonAnnot`) AND the
+    /// reference-intensity sidecar timsseek needs. Two rejections:
+    /// - `Str` (string labels): no ion chemistry, no intensities.
+    /// - `Mzpaf` without the sidecar (`frag_intens: None`): the current
+    ///   TSV/parquet bridge output. Scoring is intensity-driven, so a lib with
+    ///   no reference intensities is unusable; the `.speclib` reader (the
+    ///   workload) always populates `Some`.
+    pub fn from_arena(arena: LibraryArena) -> Result<Self, LibraryReadingError> {
+        match arena {
+            LibraryArena::Mzpaf { geom, frag_intens } => {
+                let frag_intens =
+                    frag_intens.ok_or_else(|| LibraryReadingError::UnsupportedFormat {
+                        message: "DIA-NN library has no fragment intensities".to_string(),
+                    })?;
+                Ok(ReferenceLibrary { geom, frag_intens })
+            }
+            LibraryArena::Str { .. } => Err(LibraryReadingError::UnsupportedFormat {
+                message: "timsseek requires ion-annotated fragments (mzpaf); got string labels"
+                    .to_string(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<LibraryArena> for ReferenceLibrary {
+    type Error = LibraryReadingError;
+
+    fn try_from(arena: LibraryArena) -> Result<Self, Self::Error> {
+        Self::from_arena(arena)
     }
 }
 
@@ -499,6 +536,37 @@ mod tests {
             geom,
             frag_intens: vec![1.0, 0.5],
         }
+    }
+
+    #[test]
+    fn library_arena_narrows_to_reference_library() {
+        use timsquery::models::QueryCollection;
+        use timsquery::models::capabilities::LibCapabilities;
+        use timsquery::serde::LibraryArena;
+        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        geom.push_target(
+            900.4,
+            2,
+            1.0,
+            1.0,
+            &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+        );
+        geom.seal();
+        let arena = LibraryArena::Mzpaf {
+            geom,
+            frag_intens: Some(vec![1.0]),
+        };
+        let lib: ReferenceLibrary = arena.try_into().unwrap();
+        assert_eq!(lib.frag_intens.len(), 1);
+
+        let mut sgeom: QueryCollection<std::sync::Arc<str>> =
+            QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        sgeom.seal();
+        let s = LibraryArena::Str { geom: sgeom };
+        assert!(ReferenceLibrary::try_from(s).is_err());
     }
 
     #[test]
