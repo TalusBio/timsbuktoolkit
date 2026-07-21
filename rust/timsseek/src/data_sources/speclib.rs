@@ -487,7 +487,7 @@ impl Speclib {
 
     pub fn from_file(
         path: &Path,
-        decoy_strategy: crate::models::DecoyPolicy,
+        decoy_policy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
         // Native timsseek formats are matched by EXTENSION ONLY: a native
         // extension commits to the native reader and surfaces its error. A
@@ -499,7 +499,7 @@ impl Speclib {
                 format,
                 path.display()
             );
-            return Self::from_file_with_format(path, format, decoy_strategy);
+            return Self::from_file_with_format(path, format, decoy_policy);
         }
 
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
@@ -518,7 +518,7 @@ impl Speclib {
         // all live in the one shared finalize path (see
         // `finalize_reference_library`); the report is logged there, so we drop
         // it here.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_strategy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -526,7 +526,7 @@ impl Speclib {
     pub fn from_file_with_format(
         path: &Path,
         format: SpeclibFormat,
-        decoy_strategy: crate::models::DecoyPolicy,
+        decoy_policy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
@@ -590,7 +590,7 @@ impl Speclib {
 
         // Decoy resolution + seal happen inside the one shared finalize path,
         // exactly as the `.speclib` bridge above.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_strategy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -1001,7 +1001,7 @@ mod tests {
 
         // Unified CH2 offset (see `map_decoy_strategy`), replacing the old
         // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
-        const CH2_MASS: f64 = 14.0;
+        use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
         for tgt in 0..lib.geom.n_rows() as u32 {
             let target = RefQuery::new(lib, tgt, 0);
@@ -1010,7 +1010,7 @@ mod tests {
 
             let target_mz = target.mono_precursor_mz();
             let charge = target.precursor_charge();
-            let mz_shift = CH2_MASS / charge as f64;
+            let mz_shift = DECOY_CH2_OFFSET_DA / charge as f64;
 
             assert!(
                 (plus.mono_precursor_mz() - (target_mz + mz_shift)).abs() < 0.001,

@@ -6,10 +6,7 @@ use std::io::{
     BufWriter,
     Write,
 };
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::Path;
 use std::time::{
     Duration,
     Instant,
@@ -107,7 +104,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 
 /// Reads a spectral library from a given path, funnelling every supported
 /// format into the label-typed columnar [`LibraryArena`].
-pub fn read_query_elution_groups(path: &PathBuf) -> Result<LibraryArena, CliError> {
+pub fn read_query_elution_groups(path: &Path) -> Result<LibraryArena, CliError> {
     match timsquery::serde::read_library_file(path) {
         Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
@@ -373,6 +370,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use timsquery::models::elution_group::TimsElutionGroup;
     use timsquery::models::tolerance::{
         MobilityTolerance,

@@ -35,6 +35,13 @@ pub enum DecoyStrategy {
     None,
 }
 
+/// The unified ±CH2 mass-shift offset (Da) and variant count for lazily-generated
+/// decoys. Single source of truth: `LibCapabilities::default_diann` and
+/// timsseek's `map_decoy_strategy` both reference these, so an offset change
+/// cannot drift between the reader default and the consumer mapping.
+pub const DECOY_CH2_OFFSET_DA: f64 = 14.0;
+pub const DECOY_N_DECOYS: u8 = 2;
+
 impl LibCapabilities {
     /// The default DIA-NN `.speclib` profile: sequence features assumed
     /// available (re-gated at load), 3-isotope composition envelopes, and
@@ -45,9 +52,20 @@ impl LibCapabilities {
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::LazyMassShift {
-                offset: 14.0,
-                n_decoys: 2,
+                offset: DECOY_CH2_OFFSET_DA,
+                n_decoys: DECOY_N_DECOYS,
             },
+        }
+    }
+
+    /// Profile for string-labelled (unannotated) arenas: no ion chemistry, so
+    /// sequence/fragment features are unavailable and no decoys are generated.
+    /// Same isotope model as [`default_diann`](Self::default_diann).
+    pub fn default_unlabeled() -> Self {
+        Self {
+            sequence_features: SeqFeatureState::Unavailable,
+            fragment_features: FragmentFeatureState::Unavailable,
+            ..Self::default_diann_no_decoys()
         }
     }
 

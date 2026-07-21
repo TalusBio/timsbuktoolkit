@@ -157,13 +157,6 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                         match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
-                                // if !matches!(e, CliError::EmptyChromatogram(_)) {
-                                //     warn!(
-                                //         "Skipping chromatogram for elution group id {}: {}",
-                                //         agg_id, e
-                                //     );
-                                // }
-                                // None
                                 match e {
                                     timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
                                         warn!(

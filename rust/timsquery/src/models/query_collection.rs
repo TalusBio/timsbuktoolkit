@@ -172,12 +172,9 @@ impl<L: KeyLike> QueryCollection<L> {
         }
         // The flyweight packs the decoy variant into `VARIANT_BITS` bits. Fail
         // loud here (where the invariant is established) rather than silently
-        // corrupting the packed handle in a release build. `variants_per_row`
-        // is inlined because `seal` is not bounded on `DecoyShift`.
-        let vpr = match self.caps.decoys {
-            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
-            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
-        };
+        // corrupting the packed handle in a release build. The free fn is used
+        // because `seal` is not bounded on `DecoyShift`.
+        let vpr = variants_per_row_for(self.caps.decoys);
         assert!(
             vpr <= (1usize << QueryRef::<'_, L>::VARIANT_BITS),
             "variants_per_row {vpr} exceeds the {}-bit decoy-variant packing budget",
@@ -205,14 +202,21 @@ impl<L: KeyLike> QueryCollection<L> {
 /// `LazyMassShift`), and expanded/flat indices fan each row out into its
 /// target + decoy variants. Bounded on `DecoyShift` so `item_at` can hand out a
 /// `QueryRef` (the flyweight that computes decoy geometry on the fly).
+/// Variants each stored row expands into, from the decoy strategy alone:
+/// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the target);
+/// `Passthrough`/`None` are 1:1. Free fn (no `DecoyShift` bound) so both the
+/// bounded `variants_per_row` and the unbounded `seal` share one definition.
+pub fn variants_per_row_for(decoys: DecoyStrategy) -> usize {
+    match decoys {
+        DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
+        DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+    }
+}
+
 impl<L: KeyLike + DecoyShift> QueryCollection<L> {
-    /// Variants each stored row expands into: `LazyMassShift` adds `n_decoys`
-    /// mass-shifted variants (+1 for the target); `Passthrough`/`None` are 1:1.
+    /// Variants each stored row expands into (see [`variants_per_row_for`]).
     pub fn variants_per_row(&self) -> usize {
-        match self.caps.decoys {
-            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
-            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
-        }
+        variants_per_row_for(self.caps.decoys)
     }
 
     /// Logical count after decoy expansion: the flat iterator length, i.e. how

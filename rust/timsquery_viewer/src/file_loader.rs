@@ -181,14 +181,10 @@ impl ElutionGroupData {
         Self { inner }
     }
 
+    // No public `is_empty`: callers only ever ask for the row count.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.inner.len()
-    }
-
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// The `RefQuery` flyweight at flat index `idx` (target/decoy expanded).

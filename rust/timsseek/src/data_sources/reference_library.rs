@@ -148,6 +148,11 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
         let r = self.lib.geom.frag_range(tgt);
         let labels = &self.lib.geom.frag_labels[r.clone()];
         let intens = &self.lib.frag_intens[r];
+        debug_assert_eq!(
+            labels.len(),
+            intens.len(),
+            "reference-intensity sidecar desynced from fragment-label arena"
+        );
         labels.iter().zip(intens.iter()).map(|(&lab, &i)| (lab, i))
     }
 

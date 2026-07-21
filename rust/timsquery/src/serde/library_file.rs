@@ -26,12 +26,8 @@ use super::spectronaut_io::{
 use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
 use crate::models::{
-    DecoyStrategy,
-    FragmentFeatureState,
-    IsotopeStrategy,
     LibCapabilities,
     QueryCollection,
-    SeqFeatureState,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -187,8 +183,10 @@ impl ElutionGroupCollection {
 /// `frag_intens` is the reference-intensity sidecar, parallel to
 /// `geom.frag_labels`/`geom.frag_mzs` (same length). The columnar store itself
 /// stays intensity-free (extraction does not need intensities); the DIA-NN
-/// `.speclib` reader populates the sidecar (`Some`) so the timsseek bridge can
-/// zip in reference intensities. Extraction (cli) ignores it.
+/// family readers (`.speclib`/TSV/parquet) populate the sidecar (`Some`) so the
+/// timsseek bridge can zip in reference intensities, while the intensity-free
+/// mzpaf path and string-labelled JSON leave it `None`. Extraction (cli)
+/// ignores it.
 pub enum LibraryArena {
     Mzpaf {
         geom: QueryCollection<IonAnnot>,
@@ -365,13 +363,8 @@ impl LibraryArena {
             ElutionGroupCollection::StringLabels(egs, _) => {
                 // String-labelled arenas carry no ion chemistry and ship no
                 // decoys: sequence/fragment features unavailable, decoys off.
-                let caps = LibCapabilities {
-                    sequence_features: SeqFeatureState::Unavailable,
-                    fragment_features: FragmentFeatureState::Unavailable,
-                    isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-                    decoys: DecoyStrategy::None,
-                };
-                let mut geom = QueryCollection::with_capabilities(caps);
+                let mut geom =
+                    QueryCollection::with_capabilities(LibCapabilities::default_unlabeled());
                 for eg in &egs {
                     let frags: Vec<(Arc<str>, f64)> = eg
                         .iter_fragments()

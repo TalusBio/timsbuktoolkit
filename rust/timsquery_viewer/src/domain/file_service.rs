@@ -13,10 +13,8 @@ use tracing::info;
 use crate::error::ViewerError;
 use crate::file_loader::ElutionGroupData;
 
-/// Service for loading files
-///
-/// JSPP: NGL ... this file is stupid ... should refactor to just have free functions
-/// instead of a struct with no state
+/// Stateless namespace for file-loading entry points. Could be free functions;
+/// kept as a unit struct so call sites read `FileService::load_*`.
 pub struct FileService;
 
 impl FileService {
