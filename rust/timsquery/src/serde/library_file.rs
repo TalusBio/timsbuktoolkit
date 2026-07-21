@@ -199,16 +199,144 @@ pub enum LibraryArena {
     },
 }
 
+/// The reader-extras fields the arena consumes, flattened out of the
+/// otherwise-identical DIA-NN/Skyline/Spectronaut `*PrecursorExtras` structs.
+struct PrecursorExtrasRow {
+    modified: String,
+    stripped: String,
+    is_decoy: bool,
+    relative_intensities: Vec<(IonAnnot, f32)>,
+}
+
+impl From<DiannPrecursorExtras> for PrecursorExtrasRow {
+    fn from(e: DiannPrecursorExtras) -> Self {
+        Self {
+            modified: e.modified_peptide,
+            stripped: e.stripped_peptide,
+            is_decoy: e.is_decoy,
+            relative_intensities: e.relative_intensities,
+        }
+    }
+}
+
+impl From<SkylinePrecursorExtras> for PrecursorExtrasRow {
+    fn from(e: SkylinePrecursorExtras) -> Self {
+        Self {
+            modified: e.modified_peptide,
+            stripped: e.stripped_peptide,
+            is_decoy: e.is_decoy,
+            relative_intensities: e.relative_intensities,
+        }
+    }
+}
+
+impl From<SpectronautPrecursorExtras> for PrecursorExtrasRow {
+    fn from(e: SpectronautPrecursorExtras) -> Self {
+        Self {
+            modified: e.modified_peptide,
+            stripped: e.stripped_peptide,
+            is_decoy: e.is_decoy,
+            relative_intensities: e.relative_intensities,
+        }
+    }
+}
+
 impl LibraryArena {
+    /// Build an `Mzpaf` arena WITH the reference-intensity sidecar from
+    /// `IonAnnot`-labelled groups plus their reader extras.
+    ///
+    /// Reference intensities are matched BY LABEL: the extras carry
+    /// `(IonAnnot, intensity)` pairs, and for every fragment pushed into the
+    /// arena (in `iter_fragments` order, which is the order that lands in
+    /// `geom.frag_labels`) the intensity is looked up by that fragment's label.
+    /// A fragment with no matching reference intensity fails the whole load
+    /// loudly (never a silent zero). The resulting `frag_intens` is parallel to
+    /// `geom.frag_labels`. Sequences and the per-row decoy flag are threaded in
+    /// too, so `seal()` sees shipped decoys and the timsseek parse gate sees the
+    /// modified sequence.
+    fn mzpaf_with_intensities(
+        egs: Vec<TimsElutionGroup<IonAnnot>>,
+        extras: FileReadingExtras,
+    ) -> Result<Self, LibraryReadingError> {
+        let rows: Vec<PrecursorExtrasRow> = match extras {
+            FileReadingExtras::Diann(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
+            FileReadingExtras::Skyline(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
+            FileReadingExtras::Spectronaut(v) => {
+                v.into_iter().map(PrecursorExtrasRow::from).collect()
+            }
+        };
+
+        if egs.len() != rows.len() {
+            return Err(LibraryReadingError::SpeclibParse(format!(
+                "elution groups ({}) and reader extras ({}) length mismatch",
+                egs.len(),
+                rows.len()
+            )));
+        }
+
+        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut frag_intens: Vec<f32> = Vec::new();
+
+        for (eg, row) in egs.iter().zip(rows) {
+            // Reference intensities keyed by fragment label (see fn docs).
+            let lookup: std::collections::HashMap<IonAnnot, f32> =
+                row.relative_intensities.into_iter().collect();
+            let frags: Vec<(IonAnnot, f64)> = eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
+            for (label, _) in &frags {
+                let intensity = lookup.get(label).ok_or_else(|| {
+                    LibraryReadingError::SpeclibParse(format!(
+                        "fragment {label:?} of precursor {:?} has no reference intensity",
+                        row.modified
+                    ))
+                })?;
+                frag_intens.push(*intensity);
+            }
+            geom.push_row(
+                eg.precursor_mz(),
+                eg.precursor_charge(),
+                eg.rt_seconds(),
+                eg.mobility_ook0(),
+                &frags,
+                &row.stripped,
+                &row.modified,
+                &[],
+                row.is_decoy,
+            );
+        }
+
+        assert_eq!(
+            frag_intens.len(),
+            geom.frag_labels.len(),
+            "reference-intensity sidecar must stay parallel to the fragment-label arena"
+        );
+
+        geom.seal();
+        Ok(LibraryArena::Mzpaf {
+            geom,
+            frag_intens: Some(frag_intens),
+        })
+    }
+
     /// Adapt the legacy [`ElutionGroupCollection`] (produced by the non-speclib
     /// readers) into the arena. `IonAnnot`-labelled groups become
-    /// [`LibraryArena::Mzpaf`] (no reference intensities are threaded through
-    /// these paths yet, so `frag_intens` is `None`); string-labelled groups
-    /// become [`LibraryArena::Str`]. Integer-labelled groups have no arena
-    /// variant (no live consumer) and are rejected.
+    /// [`LibraryArena::Mzpaf`]; string-labelled groups become
+    /// [`LibraryArena::Str`]. Integer-labelled groups have no arena variant (no
+    /// live consumer) and are rejected.
+    ///
+    /// When the reader supplied per-precursor extras (DIA-NN/Skyline/
+    /// Spectronaut all carry `relative_intensities`, `modified`/`stripped`
+    /// sequences and an `is_decoy` flag), the reference intensities are threaded
+    /// into the `frag_intens` sidecar so the timsseek bridge can score against
+    /// them; sequences and the decoy flag are threaded into the arena too. When
+    /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
+    /// the extraction/geometry path), `frag_intens` stays `None` — matching the
+    /// historical behavior where timsseek rejected that shape.
     fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, LibraryReadingError> {
         match egc {
-            ElutionGroupCollection::MzpafLabels(egs, _) => {
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)) => {
+                Self::mzpaf_with_intensities(egs, extras)
+            }
+            ElutionGroupCollection::MzpafLabels(egs, None) => {
                 let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =

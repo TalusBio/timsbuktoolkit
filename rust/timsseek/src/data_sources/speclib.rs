@@ -311,10 +311,29 @@ fn convert_diann_to_query_item(
     })
 }
 
+/// Strip mod annotations — anything inside `(...)` or `[...]` — from a
+/// sequence, leaving the bare residue string. The native format ships one
+/// (modified) sequence per precursor; the arena's composition-isotope path
+/// needs the stripped residues.
+fn strip_mods(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Generate a mass-shifted decoy from a target QueryItemToScore
 ///
 /// Creates a decoy by shifting the precursor m/z by a fixed mass difference.
 /// All other properties (RT, mobility, fragments, intensities) remain the same.
+#[allow(dead_code)] // Orphaned by the native-path arena cutover; removed in Task 9.
 fn create_mass_shifted_decoy(
     target: &QueryItemToScore,
     decoy_group_id: u32,
@@ -674,8 +693,14 @@ impl SpeclibFormat {
     }
 }
 
+/// Streams raw `SerSpeclibElement`s out of a native timsseek library file.
+///
+/// The native path builds the columnar arena directly from these elements (see
+/// `Speclib::from_file_with_format`), so the reader stays at the serializable
+/// element and does NOT eagerly materialize `QueryItemToScore` (the old AOS
+/// path, removed in Task 9).
 pub struct SpeclibReader<'a> {
-    inner: Box<dyn Iterator<Item = Result<QueryItemToScore, LibraryReadingError>> + Send + 'a>,
+    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send + 'a>,
 }
 
 impl<'a> SpeclibReader<'a> {
@@ -683,7 +708,7 @@ impl<'a> SpeclibReader<'a> {
         reader: R,
         format: SpeclibFormat,
     ) -> Result<Self, LibraryReadingError> {
-        let inner: Box<dyn Iterator<Item = Result<QueryItemToScore, LibraryReadingError>> + Send> =
+        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send> =
             match format {
                 SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
                 SpeclibFormat::NdJsonZstd => {
@@ -718,7 +743,7 @@ impl<'a> SpeclibReader<'a> {
 }
 
 impl Iterator for SpeclibReader<'_> {
-    type Item = Result<QueryItemToScore, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, LibraryReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -736,7 +761,7 @@ impl<R: BufRead> NdJsonReader<R> {
 }
 
 impl<R: BufRead> Iterator for NdJsonReader<R> {
-    type Item = Result<QueryItemToScore, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, LibraryReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
@@ -757,7 +782,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                     }
                 };
 
-                Some(elem.try_into())
+                Some(Ok(elem))
             }
             Err(e) => Some(Err(LibraryReadingError::FileReadingError {
                 source: e,
@@ -781,13 +806,13 @@ impl<R: Read> MessagePackReader<R> {
 }
 
 impl<R: Read> Iterator for MessagePackReader<R> {
-    type Item = Result<QueryItemToScore, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, LibraryReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use serde::Deserialize;
 
         match SerSpeclibElement::deserialize(&mut self.deserializer) {
-            Ok(elem) => Some(elem.try_into()),
+            Ok(elem) => Some(Ok(elem)),
             Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
                 if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
@@ -818,6 +843,7 @@ impl<R: Read> Iterator for MessagePackReader<R> {
 /// Whether every entry parsed. Cheap to compute on TARGETS before decoy
 /// expansion (decoys clone their target's `parsed`, so the verdict is identical)
 /// — doing it there avoids re-walking the 3x-larger, peak-RSS `elems`.
+#[allow(dead_code)] // Materialized parse gate; only tests exercise it post-cutover (Task 9 removes it).
 fn all_sequences_parsed(items: &[QueryItemToScore]) -> bool {
     !items.is_empty() && items.iter().all(|q| q.digest.parsed.is_some())
 }
@@ -825,6 +851,7 @@ fn all_sequences_parsed(items: &[QueryItemToScore]) -> bool {
 /// Apply the all-or-nothing parse gate given a precomputed `parsable` verdict
 /// (see [`all_sequences_parsed`]). When parsable, this is O(1) — no full walk.
 /// When not, it must still zero every entry's `parsed` (the degraded path).
+#[allow(dead_code)] // Materialized parse gate; only tests exercise it post-cutover (Task 9 removes it).
 fn apply_parse_gate(
     items: &mut [QueryItemToScore],
     expected_format: SeqFormat,
@@ -981,10 +1008,10 @@ impl Speclib {
 
     /// Apply decoy strategy to an already-loaded, materialized speclib.
     ///
-    /// Only ever called from the `Passthrough`/`None` branch of `from_file`
-    /// (and from `from_file_with_format`'s native-format path, which is
-    /// entirely untouched by the lazy-arena cutover) — both of which produce
-    /// `Speclib::Materialized`. The `Lazy` arm never reaches here.
+    /// Legacy materialized decoy expansion. Orphaned now that both `from_file`
+    /// and `from_file_with_format` build the lazy arena; kept (dead) until
+    /// Task 9 removes the materialized path wholesale.
+    #[allow(dead_code)]
     fn apply_decoy_strategy(
         speclib: Speclib,
         strategy: crate::models::DecoyStrategy,
@@ -1135,23 +1162,66 @@ impl Speclib {
             })?;
 
         let reader = SpeclibReader::new(file, format)?;
-        let elements: Result<Vec<_>, _> = reader.collect();
-        let elems = elements?;
 
-        // Gate verdict on targets before the decoy expansion (see from_file).
-        let parsable = all_sequences_parsed(&elems);
-        let speclib = Self::apply_decoy_strategy(
-            Speclib::Materialized {
-                elems,
-                meta: SpeclibMeta::default(),
-            },
-            decoy_strategy,
-        )?;
-        let Speclib::Materialized { mut elems, .. } = speclib else {
-            unreachable!("apply_decoy_strategy always returns Materialized")
-        };
-        let meta = apply_parse_gate(&mut elems, SeqFormat::Modified, parsable);
-        let speclib = Speclib::Materialized { elems, meta };
+        // Build the columnar arena directly from the streamed elements (same
+        // lazy shape as the `.speclib` path), instead of the old AOS collect
+        // into `Vec<QueryItemToScore>`. Each element's fragment labels/mzs/
+        // intensities are parallel vectors in the native format, so the
+        // reference-intensity sidecar is filled in fragment-push order.
+        let mut geom =
+            QueryCollection::with_capabilities(timsquery::models::LibCapabilities::default_diann());
+        let mut frag_intens: Vec<f32> = Vec::new();
+
+        for elem in reader {
+            let elem = elem?;
+            let eg = &elem.elution_group;
+            if eg.fragment_labels.len() != eg.fragment_mzs.len()
+                || eg.fragment_labels.len() != eg.fragment_intensities.len()
+            {
+                return Err(LibraryReadingError::UnsupportedFormat {
+                    message: format!(
+                        "speclib element {:?}: fragment labels ({}), mzs ({}) and intensities ({}) must be parallel",
+                        elem.precursor.sequence,
+                        eg.fragment_labels.len(),
+                        eg.fragment_mzs.len(),
+                        eg.fragment_intensities.len(),
+                    ),
+                });
+            }
+
+            let frags: Vec<(IonAnnot, f64)> = eg
+                .fragment_labels
+                .iter()
+                .cloned()
+                .zip(eg.fragment_mzs.iter().cloned())
+                .collect();
+            frag_intens.extend_from_slice(&eg.fragment_intensities);
+
+            // The native format ships a single (modified) sequence; strip mod
+            // annotations for the composition-isotope path.
+            let modified = &elem.precursor.sequence;
+            let stripped = strip_mods(modified);
+            geom.push_row(
+                eg.precursor_mz,
+                elem.precursor.charge,
+                eg.rt_seconds,
+                eg.mobility_ook0,
+                &frags,
+                &stripped,
+                modified,
+                &[],
+                elem.precursor.decoy,
+            );
+        }
+
+        // Map the CLI decoy strategy onto the arena BEFORE sealing, exactly as
+        // the `.speclib` bridge does: a shipped decoy downgrades LazyMassShift
+        // -> Passthrough inside `finalize_reference_library`'s `seal()`.
+        let has_file_decoys = geom.is_decoy.iter().any(|&d| d);
+        let decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
+
+        let speclib = Speclib::Lazy(lib);
         speclib.log_entry_stats();
         Ok(speclib)
     }
@@ -1429,7 +1499,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_load_diann_tsv_library() {
         use timsquery::traits::QueryGeom;
 
@@ -1487,7 +1556,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_diann_tsv_parsable_gate() {
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1507,8 +1575,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_load_skyline_csv_library() {
+        use timsquery::traits::QueryGeom;
+
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -1526,10 +1595,10 @@ mod tests {
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
             .expect("Failed to load Skyline CSV library");
 
-        // Skyline is not the DIA-NN collection shape `build_reference_library`
-        // ingests (see the `is_diann_shape` gate in `Speclib::from_file`), so
-        // it stays on the materialized path even though the resolved decoy
-        // strategy is `LazyMassShift` (no shipped decoys, default IfMissing).
+        // Skyline routes through the timsquery bridge (`from_elution_groups`),
+        // which now threads the reference intensities through, so it narrows to
+        // a `Speclib::Lazy` arena like the DIA-NN formats. No shipped decoys +
+        // default IfMissing -> `LazyMassShift`.
         // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
         assert_eq!(
             speclib.len(),
@@ -1537,35 +1606,27 @@ mod tests {
             "Expected 42 entries (14 targets + 28 decoys)"
         );
 
-        let n_targets = speclib
-            .as_slice()
-            .iter()
-            .filter(|e| !e.digest.is_decoy())
-            .count();
-        let n_decoys = speclib
-            .as_slice()
-            .iter()
-            .filter(|e| e.digest.is_decoy())
-            .count();
+        let lib = expect_lazy(&speclib);
+        let n_targets = lib.iter().filter(|q| q.geom().variant() == 0).count();
+        let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
         assert_eq!(n_targets, 14, "Should have 14 targets");
         assert_eq!(n_decoys, 28, "Should have 28 decoys");
 
         // Isotope envelope should have been attached (3 isotopes) for every target
-        for entry in speclib.as_slice().iter().filter(|e| !e.digest.is_decoy()) {
+        for q in lib.iter().filter(|q| q.geom().variant() == 0) {
             assert_eq!(
-                entry.query.iter_precursors().count(),
+                q.expected_precursor_envelope().len(),
                 3,
                 "Each target should have 3 isotopes in precursor envelope"
             );
             assert!(
-                entry.query.fragment_count() > 0,
+                q.fragment_count() > 0,
                 "Each target should have at least one fragment"
             );
         }
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_load_diann_txt_library() {
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1601,7 +1662,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_load_diann_parquet_library() {
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1646,7 +1706,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_isotope_envelope_calculation() {
         // Use the DIA-NN TSV test file
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1685,7 +1744,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_decoy_generation_for_library_without_decoys() {
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1732,7 +1790,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_mass_shift_decoys() {
         use timsquery::traits::QueryGeom;
 
@@ -1793,7 +1850,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TSV/parquet/Skyline bridge arena carries no intensity sidecar yet (frag_intens: None); from_file rejects it. Re-enable when reference intensities thread through the non-.speclib arena path."]
     fn test_fragment_intensities_preserved() {
         use timsquery::traits::QueryGeom;
 
@@ -1974,6 +2030,82 @@ mod tests {
             "target 0 must expose at least one (label, intensity) pair \
              (proves the intensity sidecar threaded through)"
         );
+    }
+
+    /// Native `SerSpeclibElement` reader (ndjson) builds the lazy arena
+    /// directly. The fixture ships one target + one stored decoy, so the
+    /// Task-4 seal gate downgrades `LazyMassShift -> Passthrough`: the arena is
+    /// 1:1 with the stored rows (no synthetic mass-shift expansion). Proves the
+    /// native path produces a `Speclib::Lazy` with the right length, target/
+    /// decoy flags, and per-fragment reference intensities.
+    #[test]
+    fn from_file_with_format_native_ndjson_builds_lazy_arena() {
+        use crate::data_sources::reference_library::ScoredIdentity;
+
+        let target = SerSpeclibElement::new(
+            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
+            ReferenceEG::new(
+                0,
+                500.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.8, 0.3],
+                0.75,
+                120.0,
+            ),
+        );
+        let decoy = SerSpeclibElement::new(
+            PrecursorEntry::new("KEDITPEP".to_string(), 2, true, 0),
+            ReferenceEG::new(
+                1,
+                500.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.6, 0.4],
+                0.75,
+                120.0,
+            ),
+        );
+
+        let mut ndjson = String::new();
+        ndjson.push_str(&serde_json::to_string(&target).unwrap());
+        ndjson.push('\n');
+        ndjson.push_str(&serde_json::to_string(&decoy).unwrap());
+        ndjson.push('\n');
+
+        let path = std::env::temp_dir().join(format!(
+            "timsseek_native_fixture_{}.ndjson",
+            std::process::id()
+        ));
+        std::fs::write(&path, ndjson).unwrap();
+
+        let speclib = Speclib::from_file(&path, crate::models::DecoyStrategy::default())
+            .expect("native ndjson should load");
+        std::fs::remove_file(&path).ok();
+
+        let lib = expect_lazy(&speclib);
+        // Ships a decoy -> Passthrough -> 1 variant/row -> flat len == n_rows.
+        assert_eq!(lib.geom.variants_per_row(), 1, "downgraded to Passthrough");
+        assert_eq!(lib.len(), 2, "one target + one stored decoy, 1:1");
+
+        assert!(lib.item_at(0).is_target(), "row 0 is the target");
+        assert!(!lib.item_at(1).is_target(), "row 1 is the stored decoy");
+
+        let frags: Vec<_> = lib.item_at(0).iter_expected_fragments().collect();
+        assert_eq!(frags.len(), 2, "target ships two reference fragments");
+        for (_label, intensity) in frags {
+            assert!(intensity > 0.0, "reference intensities are positive");
+        }
     }
 
     /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
