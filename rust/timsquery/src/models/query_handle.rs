@@ -1,12 +1,16 @@
+use std::marker::PhantomData;
 use std::ops::Deref;
 
-use crate::IonAnnot;
 use crate::models::QueryCollection;
 use crate::models::capabilities::{
     DecoyStrategy,
     IsotopeStrategy,
 };
-use crate::traits::QueryGeom;
+use crate::traits::{
+    DecoyShift,
+    KeyLike,
+    QueryGeom,
+};
 use crate::utils::constants::NEUTRON_MASS;
 
 /// Flyweight handle over a `QueryCollection` arena: `lib` borrows (or owns via
@@ -14,23 +18,25 @@ use crate::utils::constants::NEUTRON_MASS;
 /// decoy geometry is stored anywhere; variants 1/2 compute a ±CH2 mass shift
 /// on the fly from `LibCapabilities::decoys`.
 #[derive(Debug, Clone, Copy)]
-pub struct Query<L> {
-    lib: L,
+pub struct Query<Lib, L> {
+    lib: Lib,
     handle: u64,
+    _label: PhantomData<L>,
 }
 
-pub type QueryRef<'a> = Query<&'a QueryCollection<IonAnnot>>;
-pub type QueryOwned = Query<std::sync::Arc<QueryCollection<IonAnnot>>>;
+pub type QueryRef<'a, L> = Query<&'a QueryCollection<L>, L>;
+pub type QueryOwned<L> = Query<std::sync::Arc<QueryCollection<L>>, L>;
 
-impl<L> Query<L> {
+impl<Lib, L> Query<Lib, L> {
     pub const VARIANT_BITS: u32 = 2;
     const VARIANT_MASK: u64 = 0b11;
 
-    pub fn new(lib: L, tgt: u32, variant: u8) -> Self {
+    pub fn new(lib: Lib, tgt: u32, variant: u8) -> Self {
         debug_assert!(u64::from(variant) <= Self::VARIANT_MASK);
         Self {
             lib,
             handle: (u64::from(tgt) << Self::VARIANT_BITS) | u64::from(variant),
+            _label: PhantomData,
         }
     }
 
@@ -43,8 +49,8 @@ impl<L> Query<L> {
     }
 }
 
-impl<L: Deref<Target = QueryCollection<IonAnnot>>> Query<L> {
-    pub fn geom(&self) -> &QueryCollection<IonAnnot> {
+impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> Query<Lib, L> {
+    pub fn geom(&self) -> &QueryCollection<L> {
         &self.lib
     }
 
@@ -77,8 +83,8 @@ impl<L: Deref<Target = QueryCollection<IonAnnot>>> Query<L> {
     }
 }
 
-impl<L: Deref<Target = QueryCollection<IonAnnot>>> QueryGeom for Query<L> {
-    type Label = IonAnnot;
+impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
+    type Label = L;
 
     fn id(&self) -> u32 {
         self.target_idx() as u32 // positional library_id
@@ -129,20 +135,15 @@ impl<L: Deref<Target = QueryCollection<IonAnnot>>> QueryGeom for Query<L> {
     /// (variant 0) returns the stored m/z; a decoy applies `shift/charge` to
     /// ordinal>2 fragments only, reproducing `create_mass_shifted_decoy`.
     /// Returned BY VALUE, so the computed shift needs no backing storage.
-    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
+    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&L, f64)> {
         let shift = self.variant_shift();
         let r = self.geom().frag_range(self.target_idx());
         let labels = &self.geom().frag_labels[r.clone()];
         let mzs = &self.geom().frag_mzs[r];
-        labels.iter().zip(mzs.iter()).map(move |(lab, &mz)| {
-            let do_shift = lab.try_get_ordinal().map_or(true, |o| o > 2);
-            let out = if do_shift {
-                mz + shift / lab.get_charge() as f64
-            } else {
-                mz
-            };
-            (lab, out)
-        })
+        labels
+            .iter()
+            .zip(mzs.iter())
+            .map(move |(lab, &mz)| (lab, lab.decoy_shift_mz(mz, shift)))
     }
 }
 
@@ -228,6 +229,32 @@ mod tests {
         assert_eq!(precs[0].0, 0i8);
         assert!((precs[0].1 - 654.855).abs() < 1e-9);
         assert!((precs[2].1 - (654.855 + 2.0 * step)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn string_flyweight_never_shifts() {
+        use std::sync::Arc;
+        let mut c: QueryCollection<Arc<str>> =
+            QueryCollection::with_capabilities(LibCapabilities {
+                sequence_features: SeqFeatureState::Available,
+                isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
+                decoys: DecoyStrategy::None,
+            });
+        c.push_row(
+            500.0,
+            2,
+            1.0,
+            1.0,
+            &[(Arc::<str>::from("f"), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+            false,
+        );
+        c.seal();
+        let q = Query::new(&c, 0, 0);
+        let frags: Vec<_> = q.iter_fragments_refs().collect();
+        assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }
 
     #[test]

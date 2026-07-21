@@ -38,7 +38,7 @@ pub trait ExpectedIntensity {
 #[derive(Clone, Copy)]
 pub struct RefQuery<'a> {
     lib: &'a ReferenceLibrary,
-    geom: Query<&'a QueryCollection<IonAnnot>>,
+    geom: Query<&'a QueryCollection<IonAnnot>, IonAnnot>,
 }
 
 impl ReferenceLibrary {
@@ -81,7 +81,7 @@ impl<'a> RefQuery<'a> {
         }
     }
 
-    pub fn geom(&self) -> &Query<&'a QueryCollection<IonAnnot>> {
+    pub fn geom(&self) -> &Query<&'a QueryCollection<IonAnnot>, IonAnnot> {
         &self.geom
     }
 
