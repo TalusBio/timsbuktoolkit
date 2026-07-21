@@ -9,7 +9,7 @@ use timsquery::models::tolerance::{
     QuadTolerance,
     RtTolerance,
 };
-use timsseek::DecoyStrategy;
+use timsseek::DecoyPolicy;
 use timsseek::scoring::CalibrationConfig;
 
 /// Hand-authored default configuration template. Kept in sync with
@@ -79,7 +79,7 @@ pub struct AnalysisConfig {
     pub tolerance: Tolerance,
 
     #[serde(default)]
-    pub decoy_strategy: DecoyStrategy,
+    pub decoy_strategy: DecoyPolicy,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -109,7 +109,7 @@ impl Config {
                     quad: QuadTolerance::Absolute((0.1, 0.1)),
                     rt: RtTolerance::Unrestricted,
                 },
-                decoy_strategy: DecoyStrategy::default(),
+                decoy_strategy: DecoyPolicy::default(),
             },
             calibration: CalibrationConfig::default(),
             output: None,

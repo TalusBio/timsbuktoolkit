@@ -27,7 +27,6 @@ pub use query_collection::{
 };
 pub use query_handle::{
     Query,
-    QueryOwned,
     QueryRef,
 };
 pub use tolerance::Tolerance;

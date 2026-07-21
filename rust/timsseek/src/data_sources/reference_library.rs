@@ -120,7 +120,7 @@ impl<'a> RefQuery<'a> {
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
     /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide(&self, decoy_group: u32) -> Peptide {
+    pub fn materialize_peptide_in_group(&self, decoy_group: u32) -> Peptide {
         let tgt = self.geom.target_idx();
         let coll = &self.lib.geom;
         let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
@@ -245,8 +245,7 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 
     fn materialize_peptide(&self) -> Peptide {
         let dg = self.decoy_group();
-        // Inherent `RefQuery::materialize_peptide(&self, u32)` (arity picks it).
-        RefQuery::materialize_peptide(self, dg)
+        RefQuery::materialize_peptide_in_group(self, dg)
     }
 }
 

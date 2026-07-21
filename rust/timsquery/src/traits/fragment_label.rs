@@ -14,12 +14,15 @@ pub trait DecoyShift {
 
 /// Marker for labels that carry ion chemistry (series / ordinal / charge).
 ///
-/// This is the bound for decoy *construction* and future
-/// annotation-dependent scores. Implemented only by ion-annotated labels
+/// Reserved as the bound for future annotation-dependent scores (e.g. a
+/// "b-ion count" feature). Implemented only by ion-annotated labels
 /// (`IonAnnot`); arbitrary string labels are `DecoyShift` but not
-/// `FragmentLabel`.
+/// `FragmentLabel`. NOTE: decoy m/z shifting is gated on `DecoyShift`, not this
+/// trait — a decoy variant computes its shift through `DecoyShift::decoy_shift_mz`,
+/// which every label implements.
 // TODO(fragment-features): add series() accessor once a standalone series
-// enum exists (today series and ordinal are fused in `IonSeriesOrdinal`).
+// enum exists (today series and ordinal are fused in `IonSeriesOrdinal`), and
+// wire this bound into the score that consumes it.
 pub trait FragmentLabel: KeyLike + DecoyShift {
     fn try_get_ordinal(&self) -> Option<u8>;
     fn get_charge(&self) -> i8;
@@ -47,10 +50,10 @@ impl FragmentLabel for IonAnnot {
     }
 }
 
-/// Arbitrary string labels carry no ion chemistry: decoy shift is identity.
-/// Justified because `LazyMassShift` is gated on `FragmentLabel` (Task 4), so a
-/// string arena never produces a nonzero shift; this impl only lets the generic
-/// flyweight (Task 3) compile.
+/// Arbitrary string labels carry no ion chemistry: the fragment decoy m/z shift
+/// is identity. This impl exists so the generic flyweight `Query<_, Arc<str>>`
+/// compiles; the readers only ever build string arenas with `None`/`Passthrough`
+/// decoy strategies, so an ordinal-based fragment shift is never requested here.
 impl DecoyShift for Arc<str> {
     fn decoy_shift_mz(&self, mz: f64, _shift: f64) -> f64 {
         mz

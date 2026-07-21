@@ -19,7 +19,7 @@ pub use data_sources::{
     Speclib,
 };
 pub use models::{
-    DecoyStrategy,
+    DecoyPolicy,
     ExpectedIntensities,
     ProteinSlice,
 };

@@ -5,7 +5,6 @@ use crate::fragment_mass::{
     IsotopeSource,
     isotope_dist_or_averagine,
 };
-use crate::models::map_decoy_strategy;
 use crate::models::sequence::{
     normalize_to_proforma,
     parse_sequence,
@@ -176,7 +175,8 @@ fn strip_mods(s: &str) -> String {
 /// Summary of a [`finalize_reference_library`] call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
-    pub n_targets: usize,
+    /// Physical stored rows (pre decoy expansion), i.e. `QueryCollection::n_rows`.
+    pub n_rows: usize,
     pub n_averagine_fallback: usize,
     pub sequence_features: SeqFeatureState,
 }
@@ -188,23 +188,24 @@ pub struct LoadReport {
 /// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
 /// expansion.
 ///
-/// `decoys` is the already-mapped timsquery decoy strategy (see
-/// `map_decoy_strategy`); it is stamped onto `caps.decoys` BEFORE `seal()`, so
-/// the seal's `LazyMassShift -> Passthrough` downgrade (the Task-4 gate) sees
-/// it. The parse gate walks the MODIFIED sequence blob (the form
-/// `RefQuery::materialize_peptide` parses) and, if any row fails, disables
-/// sequence-derived features library-wide. The same pass counts averagine
-/// isotope fallbacks for the returned `LoadReport`.
+/// `policy` is the raw CLI decoy policy: this is the single place it is resolved
+/// (via `map_decoy_strategy`, keyed on whether the arena already ships decoys)
+/// and stamped onto `caps.decoys` BEFORE `seal()`, so the seal's
+/// `LazyMassShift -> Passthrough` downgrade (the Task-4 gate) sees it. The parse
+/// gate walks the MODIFIED sequence blob (the form
+/// `RefQuery::materialize_peptide_in_group` parses) and, if any row fails,
+/// disables sequence-derived features library-wide. The same pass counts
+/// averagine isotope fallbacks for the returned `LoadReport`.
 fn finalize_reference_library(
     mut geom: QueryCollection<IonAnnot>,
     frag_intens: Vec<f32>,
-    decoys: timsquery::models::capabilities::DecoyStrategy,
+    policy: crate::models::DecoyPolicy,
 ) -> (ReferenceLibrary, LoadReport) {
     let n_stored_decoys = geom.is_decoy.iter().filter(|&&d| d).count();
-    geom.caps.decoys = decoys;
+    geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
     geom.seal();
 
-    let n_targets = geom.n_targets();
+    let n_rows = geom.n_rows();
 
     // Report the effective decoy strategy (post-seal: `seal()` downgrades
     // LazyMassShift -> Passthrough if the library ships its own decoys). This
@@ -218,7 +219,7 @@ fn finalize_reference_library(
                     "Library contains no decoys. Generating synthetic ±CH2 mass-shift \
                      decoys: {}x search space ({} targets -> {} scored entries)",
                     n_decoys as usize + 1,
-                    n_targets,
+                    n_rows,
                     geom.expanded_len(),
                 );
             }
@@ -232,14 +233,14 @@ fn finalize_reference_library(
             DecoyStrategy::None => {
                 tracing::info!(
                     "Decoy strategy None; scoring {} target entries only",
-                    n_targets
+                    n_rows
                 );
             }
         }
     }
     let mut all_parsable = true;
     let mut n_averagine_fallback = 0usize;
-    for tgt in 0..n_targets {
+    for tgt in 0..n_rows {
         if all_parsable {
             let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
             let normalized = normalize_to_proforma(modified);
@@ -267,17 +268,17 @@ fn finalize_reference_library(
         tracing::warn!(
             "{}/{} library entries used averagine isotope fallback",
             n_averagine_fallback,
-            n_targets
+            n_rows
         );
     }
     tracing::info!(
         "Lazy ReferenceLibrary arena ready: {} targets, sequence_features={:?}",
-        n_targets,
+        n_rows,
         sequence_features
     );
 
     let report = LoadReport {
-        n_targets,
+        n_rows,
         n_averagine_fallback,
         sequence_features,
     };
@@ -476,16 +477,16 @@ impl Speclib {
     /// Every variant of a target shares the same fragment set, so the
     /// per-target arena length is exact, not a sample.
     pub fn avg_fragments(&self) -> f64 {
-        let n_targets = self.geom.n_targets();
-        if n_targets == 0 {
+        let n_rows = self.geom.n_rows();
+        if n_rows == 0 {
             return 0.0;
         }
-        self.geom.frag_labels.len() as f64 / n_targets as f64
+        self.geom.frag_labels.len() as f64 / n_rows as f64
     }
 
     pub fn from_file(
         path: &Path,
-        decoy_strategy: crate::models::DecoyStrategy,
+        decoy_strategy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
         // Native timsseek formats are matched by EXTENSION ONLY: a native
         // extension commits to the native reader and surfaces its error. A
@@ -512,19 +513,11 @@ impl Speclib {
         let arena = read_timsquery_library(path)?;
         let ReferenceLibrary { geom, frag_intens } = ReferenceLibrary::try_from(arena)?;
 
-        // Map the CLI decoy strategy onto the arena BEFORE sealing. The arena's
-        // own decoy flags decide whether `IfMissing` generates lazy mass-shift
-        // decoys or defers to the file's rows; `seal()` (inside
-        // `finalize_reference_library`) then re-checks and downgrades
-        // `LazyMassShift -> Passthrough` if any stored decoy is present (the
-        // Task-4 gate), so the mapping and the seal agree.
-        let has_file_decoys = geom.is_decoy.iter().any(|&d| d);
-        let decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
-
-        // Seal + parse gate + averagine tally + `LoadReport` all live in the
-        // one shared finalize path (see `finalize_reference_library`); the
-        // report is logged there, so we drop it here.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
+        // Decoy resolution + seal + parse gate + averagine tally + `LoadReport`
+        // all live in the one shared finalize path (see
+        // `finalize_reference_library`); the report is logged there, so we drop
+        // it here.
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_strategy);
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -532,7 +525,7 @@ impl Speclib {
     pub fn from_file_with_format(
         path: &Path,
         format: SpeclibFormat,
-        decoy_strategy: crate::models::DecoyStrategy,
+        decoy_strategy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
@@ -594,12 +587,9 @@ impl Speclib {
             );
         }
 
-        // Map the CLI decoy strategy onto the arena BEFORE sealing, exactly as
-        // the `.speclib` bridge does: a shipped decoy downgrades LazyMassShift
-        // -> Passthrough inside `finalize_reference_library`'s `seal()`.
-        let has_file_decoys = geom.is_decoy.iter().any(|&d| d);
-        let decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
+        // Decoy resolution + seal happen inside the one shared finalize path,
+        // exactly as the `.speclib` bridge above.
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_strategy);
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -608,7 +598,7 @@ impl Speclib {
     fn log_entry_stats(&self) {
         tracing::info!(
             "Speclib stats: lazy arena, {} targets ({} flat scoring entries, {} total fragment slots)",
-            self.geom.n_targets(),
+            self.geom.n_rows(),
             self.len(),
             self.geom.frag_labels.len(),
         );
@@ -721,7 +711,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         // The sample file has 2 unique precursors with no decoys
@@ -767,7 +757,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         assert!(
@@ -794,7 +784,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load Skyline CSV library");
 
         // Skyline routes through the timsquery bridge (`from_elution_groups`),
@@ -809,9 +799,9 @@ mod tests {
         );
 
         let lib = expect_lazy(&speclib);
-        let n_targets = lib.iter().filter(|q| q.geom().variant() == 0).count();
+        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
-        assert_eq!(n_targets, 14, "Should have 14 targets");
+        assert_eq!(n_rows, 14, "Should have 14 targets");
         assert_eq!(n_decoys, 28, "Should have 28 decoys");
 
         // Isotope envelope should have been attached (3 isotopes) for every target
@@ -844,7 +834,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load TXT library");
 
         // The sample file has 2 unique precursors with no decoys
@@ -856,10 +846,10 @@ mod tests {
         );
 
         let lib = expect_lazy(&speclib);
-        let n_targets = lib.iter().filter(|q| q.geom().variant() == 0).count();
+        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
-        assert_eq!(n_targets, 2, "Should have 2 targets");
+        assert_eq!(n_rows, 2, "Should have 2 targets");
         assert_eq!(n_decoys, 4, "Should have 4 decoys");
     }
 
@@ -879,7 +869,7 @@ mod tests {
             test_file
         );
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load Parquet library");
 
         // The sample parquet file has 3 unique precursors with no decoys
@@ -891,10 +881,10 @@ mod tests {
         );
 
         let lib = expect_lazy(&speclib);
-        let n_targets = lib.iter().filter(|q| q.geom().variant() == 0).count();
+        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
-        assert_eq!(n_targets, 3, "Should have 3 targets");
+        assert_eq!(n_rows, 3, "Should have 3 targets");
         assert_eq!(n_decoys, 6, "Should have 6 decoys");
 
         // Verify isotope envelope for targets
@@ -918,7 +908,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         let lib = expect_lazy(&speclib);
@@ -955,7 +945,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         // Test file has 2 targets with no decoys
@@ -967,17 +957,17 @@ mod tests {
         );
 
         let lib = expect_lazy(&speclib);
-        let n_targets = lib.iter().filter(|q| q.geom().variant() == 0).count();
+        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
-        assert_eq!(n_targets, 2, "Should have 2 target entries");
+        assert_eq!(n_rows, 2, "Should have 2 target entries");
         assert_eq!(n_decoys, 4, "Should have 4 decoy entries (2 per target)");
 
         // Each target index (== decoy_group in the old materialized scheme)
         // should have exactly 3 flat variants (1 target + 2 decoys) — this is
         // guaranteed structurally by `ReferenceLibrary::item_at`'s `t,+,-`
         // packing, so assert it directly rather than re-deriving groups.
-        let n_target_indices = lib.geom.n_targets();
+        let n_target_indices = lib.geom.n_rows();
         assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
         for tgt in 0..n_target_indices as u32 {
             let variants: Vec<u8> = (0..3)
@@ -1003,7 +993,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         let lib = expect_lazy(&speclib);
@@ -1012,7 +1002,7 @@ mod tests {
         // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
         const CH2_MASS: f64 = 14.0;
 
-        for tgt in 0..lib.geom.n_targets() as u32 {
+        for tgt in 0..lib.geom.n_rows() as u32 {
             let target = RefQuery::new(lib, tgt, 0);
             let plus = RefQuery::new(lib, tgt, 1);
             let minus = RefQuery::new(lib, tgt, 2);
@@ -1063,7 +1053,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib = Speclib::from_file(&test_file, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
         let lib = expect_lazy(&speclib);
@@ -1110,7 +1100,7 @@ mod tests {
         ));
         assert!(path.exists(), "fixture should exist at {:?}", path);
 
-        let speclib = Speclib::from_file(path, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(path, crate::models::DecoyPolicy::default())
             .expect("from_file should load the .speclib fixture");
 
         let lib = expect_lazy(&speclib);
@@ -1184,7 +1174,7 @@ mod tests {
         ));
         std::fs::write(&path, ndjson).unwrap();
 
-        let speclib = Speclib::from_file(&path, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
             .expect("native ndjson should load");
         std::fs::remove_file(&path).ok();
 
@@ -1263,7 +1253,7 @@ mod tests {
         ));
         std::fs::write(&path, ndjson).unwrap();
 
-        let speclib = Speclib::from_file(&path, crate::models::DecoyStrategy::default())
+        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
             .expect("native ndjson should load even with an unparseable sequence");
         std::fs::remove_file(&path).ok();
 

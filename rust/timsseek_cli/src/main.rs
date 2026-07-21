@@ -580,7 +580,7 @@ impl OutputSink {
 /// be multi-GB parquet files.
 fn speclib_from_uri(
     uri: &str,
-    decoy_strategy: timsseek::DecoyStrategy,
+    decoy_strategy: timsseek::DecoyPolicy,
 ) -> Result<
     (
         timsseek::data_sources::speclib::Speclib,

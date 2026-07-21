@@ -2,11 +2,15 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use timsquery::models::capabilities::DecoyStrategy;
 
+/// CLI-facing decoy *policy*: what the user asks for, independent of how the
+/// arena realizes it. Resolved by [`map_decoy_strategy`] into timsquery's
+/// arena-side [`DecoyStrategy`] mechanism (LazyMassShift / Passthrough / None).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum DecoyStrategy {
+pub enum DecoyPolicy {
     /// Generate mass-shift decoys only if library has none (default)
     #[default]
     IfMissing,
@@ -18,24 +22,24 @@ pub enum DecoyStrategy {
     Never,
 }
 
-impl std::fmt::Display for DecoyStrategy {
+impl std::fmt::Display for DecoyPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DecoyStrategy::IfMissing => write!(f, "if-missing"),
-            DecoyStrategy::Force => write!(f, "force"),
-            DecoyStrategy::Never => write!(f, "never"),
+            DecoyPolicy::IfMissing => write!(f, "if-missing"),
+            DecoyPolicy::Force => write!(f, "force"),
+            DecoyPolicy::Never => write!(f, "never"),
         }
     }
 }
 
-impl std::str::FromStr for DecoyStrategy {
+impl std::str::FromStr for DecoyPolicy {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "if-missing" | "ifmissing" | "if_missing" => Ok(DecoyStrategy::IfMissing),
-            "force" => Ok(DecoyStrategy::Force),
-            "never" | "none" => Ok(DecoyStrategy::Never),
+            "if-missing" | "ifmissing" | "if_missing" => Ok(DecoyPolicy::IfMissing),
+            "force" => Ok(DecoyPolicy::Force),
+            "never" | "none" => Ok(DecoyPolicy::Never),
             _ => Err(format!(
                 "Invalid decoy strategy: '{}'. Valid options: if-missing, force, never",
                 s
@@ -52,7 +56,7 @@ impl std::str::FromStr for DecoyStrategy {
 const UNIFIED_CH2_OFFSET_DA: f64 = 14.0;
 const UNIFIED_N_DECOYS: u8 = 2;
 
-/// Map the CLI-facing decoy strategy to the timsquery arena's lazy decoy
+/// Map the CLI-facing decoy policy to the timsquery arena's lazy decoy
 /// strategy, given whether the source library already ships its own decoys.
 ///
 /// - `Force`: always (re)generate lazy mass-shift decoys, ignoring any
@@ -61,36 +65,31 @@ const UNIFIED_N_DECOYS: u8 = 2;
 /// - `IfMissing` + file already has decoys: `Passthrough` — use the file's
 ///   own decoy rows as-is (no arena-side generation).
 /// - `Never`: no decoy generation; library rows are used as-is.
-pub fn map_decoy_strategy(
-    cli: DecoyStrategy,
-    has_file_decoys: bool,
-) -> timsquery::models::capabilities::DecoyStrategy {
-    use timsquery::models::capabilities::DecoyStrategy as TqDecoyStrategy;
-    match cli {
-        DecoyStrategy::Force => TqDecoyStrategy::LazyMassShift {
+pub fn map_decoy_strategy(policy: DecoyPolicy, has_file_decoys: bool) -> DecoyStrategy {
+    match policy {
+        DecoyPolicy::Force => DecoyStrategy::LazyMassShift {
             offset: UNIFIED_CH2_OFFSET_DA,
             n_decoys: UNIFIED_N_DECOYS,
         },
-        DecoyStrategy::IfMissing if !has_file_decoys => TqDecoyStrategy::LazyMassShift {
+        DecoyPolicy::IfMissing if !has_file_decoys => DecoyStrategy::LazyMassShift {
             offset: UNIFIED_CH2_OFFSET_DA,
             n_decoys: UNIFIED_N_DECOYS,
         },
-        DecoyStrategy::IfMissing => TqDecoyStrategy::Passthrough,
-        DecoyStrategy::Never => TqDecoyStrategy::None,
+        DecoyPolicy::IfMissing => DecoyStrategy::Passthrough,
+        DecoyPolicy::Never => DecoyStrategy::None,
     }
 }
 
 #[cfg(test)]
 mod map_decoy_strategy_tests {
     use super::*;
-    use timsquery::models::capabilities::DecoyStrategy as TqDecoyStrategy;
 
     #[test]
     fn force_always_lazy_mass_shift_regardless_of_file_decoys() {
         for has_file_decoys in [false, true] {
             assert_eq!(
-                map_decoy_strategy(DecoyStrategy::Force, has_file_decoys),
-                TqDecoyStrategy::LazyMassShift {
+                map_decoy_strategy(DecoyPolicy::Force, has_file_decoys),
+                DecoyStrategy::LazyMassShift {
                     offset: UNIFIED_CH2_OFFSET_DA,
                     n_decoys: UNIFIED_N_DECOYS,
                 }
@@ -101,8 +100,8 @@ mod map_decoy_strategy_tests {
     #[test]
     fn if_missing_without_file_decoys_is_lazy_mass_shift() {
         assert_eq!(
-            map_decoy_strategy(DecoyStrategy::IfMissing, false),
-            TqDecoyStrategy::LazyMassShift {
+            map_decoy_strategy(DecoyPolicy::IfMissing, false),
+            DecoyStrategy::LazyMassShift {
                 offset: UNIFIED_CH2_OFFSET_DA,
                 n_decoys: UNIFIED_N_DECOYS,
             }
@@ -112,20 +111,20 @@ mod map_decoy_strategy_tests {
     #[test]
     fn if_missing_with_file_decoys_is_passthrough() {
         assert_eq!(
-            map_decoy_strategy(DecoyStrategy::IfMissing, true),
-            TqDecoyStrategy::Passthrough
+            map_decoy_strategy(DecoyPolicy::IfMissing, true),
+            DecoyStrategy::Passthrough
         );
     }
 
     #[test]
     fn never_is_none() {
         assert_eq!(
-            map_decoy_strategy(DecoyStrategy::Never, false),
-            TqDecoyStrategy::None
+            map_decoy_strategy(DecoyPolicy::Never, false),
+            DecoyStrategy::None
         );
         assert_eq!(
-            map_decoy_strategy(DecoyStrategy::Never, true),
-            TqDecoyStrategy::None
+            map_decoy_strategy(DecoyPolicy::Never, true),
+            DecoyStrategy::None
         );
     }
 }

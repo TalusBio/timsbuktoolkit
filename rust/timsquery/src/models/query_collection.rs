@@ -132,12 +132,11 @@ impl<L: KeyLike> QueryCollection<L> {
         );
     }
 
-    /// Number of stored rows (targets + any materialized decoys).
+    /// Number of *physical stored rows*, i.e. how many analytes are held in
+    /// memory before decoy expansion. Under `LazyMassShift` every row is a
+    /// target; under `Passthrough` the count includes any stored decoy rows.
+    /// This is the base for `expanded_len` (the logical, iterator-length count).
     pub fn n_rows(&self) -> usize {
-        self.charge.len()
-    }
-
-    pub fn n_targets(&self) -> usize {
         self.charge.len()
     }
 
@@ -171,6 +170,19 @@ impl<L: KeyLike> QueryCollection<L> {
             tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
             self.caps.decoys = DecoyStrategy::Passthrough;
         }
+        // The flyweight packs the decoy variant into `VARIANT_BITS` bits. Fail
+        // loud here (where the invariant is established) rather than silently
+        // corrupting the packed handle in a release build. `variants_per_row`
+        // is inlined because `seal` is not bounded on `DecoyShift`.
+        let vpr = match self.caps.decoys {
+            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
+            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+        };
+        assert!(
+            vpr <= (1usize << QueryRef::<'_, L>::VARIANT_BITS),
+            "variants_per_row {vpr} exceeds the {}-bit decoy-variant packing budget",
+            QueryRef::<'_, L>::VARIANT_BITS,
+        );
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
@@ -203,7 +215,9 @@ impl<L: KeyLike + DecoyShift> QueryCollection<L> {
         }
     }
 
-    /// Total flat length after decoy expansion.
+    /// Logical count after decoy expansion: the flat iterator length, i.e. how
+    /// many analytes are *scored* (`n_rows` * `variants_per_row`). Distinct from
+    /// `n_rows`, which is the physical in-memory row count.
     pub fn expanded_len(&self) -> usize {
         self.n_rows() * self.variants_per_row()
     }
@@ -332,7 +346,7 @@ mod tests {
             &[],
         );
         c.seal();
-        assert_eq!(c.n_targets(), 2);
+        assert_eq!(c.n_rows(), 2);
         assert_eq!(c.frag_range(0), 0..2);
         assert_eq!(c.frag_range(1), 2..5);
         assert_eq!(c.frag_mzs[c.frag_range(1)][2], 600.0);

@@ -25,7 +25,6 @@ pub struct Query<Lib, L> {
 }
 
 pub type QueryRef<'a, L> = Query<&'a QueryCollection<L>, L>;
-pub type QueryOwned<L> = Query<std::sync::Arc<QueryCollection<L>>, L>;
 
 impl<Lib, L> Query<Lib, L> {
     pub const VARIANT_BITS: u32 = 2;

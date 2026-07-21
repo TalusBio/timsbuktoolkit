@@ -305,11 +305,13 @@ impl LibraryArena {
             );
         }
 
-        assert_eq!(
-            frag_intens.len(),
-            geom.frag_labels.len(),
-            "reference-intensity sidecar must stay parallel to the fragment-label arena"
-        );
+        if frag_intens.len() != geom.frag_labels.len() {
+            return Err(LibraryReadingError::SpeclibParse(format!(
+                "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
+                frag_intens.len(),
+                geom.frag_labels.len(),
+            )));
+        }
 
         geom.seal();
         Ok(LibraryArena::Mzpaf {

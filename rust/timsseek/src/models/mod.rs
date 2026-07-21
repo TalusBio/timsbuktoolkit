@@ -1,12 +1,12 @@
 mod decoy;
-mod decoy_strategy;
+mod decoy_policy;
 mod digest;
 pub mod query_item;
 pub mod sequence;
 
 pub use decoy::DecoyMarking;
-pub use decoy_strategy::{
-    DecoyStrategy,
+pub use decoy_policy::{
+    DecoyPolicy,
     map_decoy_strategy,
 };
 pub use digest::{

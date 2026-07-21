@@ -34,7 +34,7 @@ impl FileService {
         // load here: scoring requires ion-annotated fragments + reference
         // intensities, which only the DIA-NN family (.speclib/TSV/parquet)
         // carry.
-        let lib = timsseek::Speclib::from_file(path, timsseek::DecoyStrategy::default())
+        let lib = timsseek::Speclib::from_file(path, timsseek::DecoyPolicy::default())
             .map_err(|e| ViewerError::General(format!("Failed to load library: {e:?}")))?;
         info!(
             "Loaded {} library entries from {}",
