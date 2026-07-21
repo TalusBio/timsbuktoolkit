@@ -253,15 +253,14 @@ fn gate_expected_fragments(expected: &ExpectedIntensities<IonAnnot>) -> Result<(
 /// Fill the per-worker scratch elution group in place from a `RefQuery`
 /// flyweight (Task 9). `reset_from` copies the per-variant geometry — for a
 /// decoy the fragment m/z values are ALREADY shifted by value, so no extra
-/// work is needed. The precursor labels are then set to the isotope-envelope
-/// indices used for scoring (the flyweight's own `iter_precursors` yields only
-/// the mono peak).
-pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(
+/// work is needed. It also sets the precursor labels to the isotope-envelope
+/// indices via the flyweight's `iter_precursors` (`0..n_isotopes`), which match
+/// `expected_precursor_envelope`'s indices, so no separate label pass is needed.
+pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(
     dst: &mut TimsElutionGroup<IonAnnot>,
     q: &Q,
 ) {
     dst.reset_from(q);
-    dst.set_precursor_labels(q.expected_precursor_envelope().iter().map(|(i, _)| *i));
 }
 
 /// Per-worker scratch buffers for the lazy scoring path: one reusable elution
