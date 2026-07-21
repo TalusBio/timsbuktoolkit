@@ -1,4 +1,4 @@
-use crate::IonAnnot;
+use crate::KeyLike;
 use crate::models::capabilities::LibCapabilities;
 
 #[derive(Debug, Clone)]
@@ -9,20 +9,22 @@ pub struct ModDefinition {
 }
 
 #[derive(Debug, Clone)]
-pub struct QueryCollection {
+pub struct QueryCollection<L: KeyLike> {
     pub caps: LibCapabilities,
-    // per-target scalars, len = n_targets (no `id` column - library_id = target index)
+    // per-target scalars, len = n_rows (no `id` column - library_id = target index)
     pub precursor_mz: Vec<f64>,
     pub charge: Vec<u8>,
     pub rt_seconds: Vec<f32>,
     pub mobility: Vec<f32>,
+    // per-row decoy flag (len = n_rows)
+    pub is_decoy: Vec<bool>,
     // CSR prefix offsets (n+1)
     pub frag_off: Vec<u32>,
     pub seq_strip_off: Vec<u32>,
     pub seq_mod_off: Vec<u32>,
     pub mod_off: Vec<u32>,
     // fragment arenas (len = total fragments)
-    pub frag_labels: Vec<IonAnnot>,
+    pub frag_labels: Vec<L>,
     pub frag_mzs: Vec<f64>,
     // sequences
     pub seq_strip_blob: String,
@@ -32,7 +34,7 @@ pub struct QueryCollection {
     pub mod_registry: Vec<ModDefinition>,
 }
 
-impl QueryCollection {
+impl<L: KeyLike> QueryCollection<L> {
     pub fn with_capabilities(caps: LibCapabilities) -> Self {
         Self {
             caps,
@@ -40,6 +42,7 @@ impl QueryCollection {
             charge: Vec::new(),
             rt_seconds: Vec::new(),
             mobility: Vec::new(),
+            is_decoy: Vec::new(),
             frag_off: vec![0],
             seq_strip_off: vec![0],
             seq_mod_off: vec![0],
@@ -53,25 +56,27 @@ impl QueryCollection {
         }
     }
 
-    /// Append one target. `mods` are (position, registry_idx) pairs; the caller
+    /// Append one row. `mods` are (position, registry_idx) pairs; the caller
     /// is responsible for having registered the mod tokens in `mod_registry`.
-    pub fn push_target(
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_row(
         &mut self,
         precursor_mz: f64,
         charge: u8,
         rt_seconds: f32,
         mobility: f32,
-        frags: &[(IonAnnot, f64)],
+        frags: &[(L, f64)],
         seq_strip: &str,
         seq_mod: &str,
         mods: &[(u8, u16)],
+        is_decoy: bool,
     ) {
         self.precursor_mz.push(precursor_mz);
         self.charge.push(charge);
         self.rt_seconds.push(rt_seconds);
         self.mobility.push(mobility);
         for (lab, mz) in frags {
-            self.frag_labels.push(*lab);
+            self.frag_labels.push(lab.clone());
             self.frag_mzs.push(*mz);
         }
         // CSR offsets are u32 (documented ~40x headroom over real arena sizes).
@@ -93,6 +98,38 @@ impl QueryCollection {
         self.mods.extend_from_slice(mods);
         self.mod_off
             .push(u32::try_from(self.mods.len()).expect("mods arena exceeds u32 offset range"));
+        self.is_decoy.push(is_decoy);
+    }
+
+    /// Append one target (defaults `is_decoy = false`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_target(
+        &mut self,
+        precursor_mz: f64,
+        charge: u8,
+        rt_seconds: f32,
+        mobility: f32,
+        frags: &[(L, f64)],
+        seq_strip: &str,
+        seq_mod: &str,
+        mods: &[(u8, u16)],
+    ) {
+        self.push_row(
+            precursor_mz,
+            charge,
+            rt_seconds,
+            mobility,
+            frags,
+            seq_strip,
+            seq_mod,
+            mods,
+            false,
+        );
+    }
+
+    /// Number of stored rows (targets + any materialized decoys).
+    pub fn n_rows(&self) -> usize {
+        self.charge.len()
     }
 
     pub fn n_targets(&self) -> usize {
@@ -121,6 +158,7 @@ impl QueryCollection {
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
         self.mobility.shrink_to_fit();
+        self.is_decoy.shrink_to_fit();
         self.frag_off.shrink_to_fit();
         self.seq_strip_off.shrink_to_fit();
         self.seq_mod_off.shrink_to_fit();
@@ -185,5 +223,43 @@ mod tests {
         assert_eq!(c.frag_mzs[c.frag_range(1)][2], 600.0);
         assert_eq!(&c.seq_strip_blob[c.seq_strip_range(0)], "PEPTIDEK");
         assert_eq!(&c.seq_strip_blob[c.seq_strip_range(1)], "SAMPLERK");
+    }
+
+    #[test]
+    fn string_labeled_collection_and_is_decoy() {
+        use std::sync::Arc;
+        let mut c: QueryCollection<Arc<str>> =
+            QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        c.push_row(
+            500.0,
+            2,
+            1.0,
+            0.8,
+            &[(Arc::<str>::from("frag_a"), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+            // is_decoy
+            false,
+        );
+        c.push_row(
+            600.0,
+            2,
+            1.0,
+            0.8,
+            &[(Arc::<str>::from("frag_b"), 400.0)],
+            "TIDE",
+            "TIDE",
+            &[],
+            // is_decoy
+            true,
+        );
+        c.seal();
+        assert_eq!(c.n_rows(), 2);
+        assert_eq!(c.is_decoy, vec![false, true]);
+        assert_eq!(
+            c.frag_labels[c.frag_range(1)][0],
+            Arc::<str>::from("frag_b")
+        );
     }
 }

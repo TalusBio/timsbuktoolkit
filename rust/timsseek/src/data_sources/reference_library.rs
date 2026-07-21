@@ -23,7 +23,7 @@ use crate::models::sequence::{
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
-    pub geom: QueryCollection,
+    pub geom: QueryCollection<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     pub frag_intens: Vec<f32>,
 }
@@ -38,7 +38,7 @@ pub trait ExpectedIntensity {
 #[derive(Clone, Copy)]
 pub struct RefQuery<'a> {
     lib: &'a ReferenceLibrary,
-    geom: Query<&'a QueryCollection>,
+    geom: Query<&'a QueryCollection<IonAnnot>>,
 }
 
 impl ReferenceLibrary {
@@ -81,7 +81,7 @@ impl<'a> RefQuery<'a> {
         }
     }
 
-    pub fn geom(&self) -> &Query<&'a QueryCollection> {
+    pub fn geom(&self) -> &Query<&'a QueryCollection<IonAnnot>> {
         &self.geom
     }
 

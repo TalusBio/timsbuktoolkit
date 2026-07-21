@@ -19,8 +19,8 @@ pub struct Query<L> {
     handle: u64,
 }
 
-pub type QueryRef<'a> = Query<&'a QueryCollection>;
-pub type QueryOwned = Query<std::sync::Arc<QueryCollection>>;
+pub type QueryRef<'a> = Query<&'a QueryCollection<IonAnnot>>;
+pub type QueryOwned = Query<std::sync::Arc<QueryCollection<IonAnnot>>>;
 
 impl<L> Query<L> {
     pub const VARIANT_BITS: u32 = 2;
@@ -43,8 +43,8 @@ impl<L> Query<L> {
     }
 }
 
-impl<L: Deref<Target = QueryCollection>> Query<L> {
-    pub fn geom(&self) -> &QueryCollection {
+impl<L: Deref<Target = QueryCollection<IonAnnot>>> Query<L> {
+    pub fn geom(&self) -> &QueryCollection<IonAnnot> {
         &self.lib
     }
 
@@ -77,7 +77,7 @@ impl<L: Deref<Target = QueryCollection>> Query<L> {
     }
 }
 
-impl<L: Deref<Target = QueryCollection>> QueryGeom for Query<L> {
+impl<L: Deref<Target = QueryCollection<IonAnnot>>> QueryGeom for Query<L> {
     type Label = IonAnnot;
 
     fn id(&self) -> u32 {
@@ -154,7 +154,7 @@ mod tests {
     use crate::models::capabilities::*;
     use crate::traits::QueryGeom;
 
-    fn one_target_lib() -> QueryCollection {
+    fn one_target_lib() -> QueryCollection<IonAnnot> {
         let mut c = QueryCollection::with_capabilities(LibCapabilities {
             sequence_features: SeqFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
