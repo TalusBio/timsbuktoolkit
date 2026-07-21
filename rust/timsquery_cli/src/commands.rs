@@ -78,8 +78,10 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
-    // columnar flyweights (`QueryGeom`). The cli never scores or shifts decoys,
-    // so a `QueryRef` (geometry only) is all the collectors need.
+    // columnar flyweights (`QueryGeom`). The readers hand back target geometry
+    // only (`caps.decoys == DecoyStrategy::None`, so `expanded_len() ==
+    // n_rows()`): decoy generation is a scoring decision the cli never makes, so
+    // a `QueryRef` (geometry only) is all the collectors need.
     match arena {
         LibraryArena::Mzpaf { geom, .. } => stream_process_batches(
             &geom,
@@ -392,6 +394,34 @@ mod tests {
         // IF you do want to change it contact the Carafe developers first.
         match arena {
             LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
+            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+        }
+    }
+
+    /// Regression: extraction readers must NOT expand decoys. An `IonAnnot`/
+    /// mzpaf-labelled library is loaded through the same `read_library_file`
+    /// path the cli uses, and its flat extraction length must equal the number
+    /// of stored rows (targets only). Before the reader default was changed to
+    /// `DecoyStrategy::None`, the arena carried `LazyMassShift { n_decoys: 2 }`,
+    /// so `expanded_len()` was `3 * n_rows()` and the cli serialized two
+    /// mass-shifted decoy variants per elution group, corrupting the
+    /// Carafe-compatible data-contract output.
+    #[test]
+    fn test_extraction_does_not_expand_decoys() {
+        let manifest_path = env!("CARGO_MANIFEST_DIR");
+        let elution_groups_path =
+            PathBuf::from(manifest_path).join("data_contracts/single_elution_group.json");
+
+        let arena = read_query_elution_groups(&elution_groups_path).unwrap();
+        match arena {
+            LibraryArena::Mzpaf { geom, .. } => {
+                assert_eq!(
+                    geom.expanded_len(),
+                    geom.n_rows(),
+                    "extraction must emit targets only (no decoy expansion)"
+                );
+                assert_eq!(geom.variants_per_row(), 1, "reader default is decoys=None");
+            }
             LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
         }
     }

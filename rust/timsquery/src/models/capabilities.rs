@@ -50,6 +50,23 @@ impl LibCapabilities {
             },
         }
     }
+
+    /// The DIA-NN profile for EXTRACTION readers: identical to
+    /// [`default_diann`](Self::default_diann) (3-isotope composition envelopes,
+    /// sequence/fragment features available) but with `decoys =
+    /// DecoyStrategy::None`.
+    ///
+    /// Decoy generation is a SCORING concern, decided by the consumer, not an
+    /// assertion an extraction reader should bake into its output. timsseek
+    /// stamps `caps.decoys` (via `map_decoy_strategy`) before sealing, so it is
+    /// unaffected by this reader default; timsquery_cli does not override, so it
+    /// correctly extracts target geometry only (no mass-shifted decoy variants).
+    pub fn default_diann_no_decoys() -> Self {
+        Self {
+            decoys: DecoyStrategy::None,
+            ..Self::default_diann()
+        }
+    }
 }
 
 #[cfg(test)]

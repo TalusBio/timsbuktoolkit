@@ -481,7 +481,9 @@ impl SpecLib {
             .try_fold(
                 || {
                     (
-                        QueryCollection::with_capabilities(LibCapabilities::default_diann()),
+                        QueryCollection::with_capabilities(
+                            LibCapabilities::default_diann_no_decoys(),
+                        ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
@@ -500,7 +502,9 @@ impl SpecLib {
             .try_reduce(
                 || {
                     (
-                        QueryCollection::with_capabilities(LibCapabilities::default_diann()),
+                        QueryCollection::with_capabilities(
+                            LibCapabilities::default_diann_no_decoys(),
+                        ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
@@ -623,7 +627,7 @@ fn residue_count(stripped: &str) -> usize {
 /// registry length. The empty arena is the identity, so this is the associative
 /// reduce operator that merges the per-worker shards back into file order.
 ///
-/// `dst.caps` is preserved (all shards share `default_diann`), so merging an
+/// `dst.caps` is preserved (all shards share `default_diann_no_decoys`), so merging an
 /// empty identity in either position is a no-op on capabilities.
 fn append_arena(dst: &mut QueryCollection<IonAnnot>, mut src: QueryCollection<IonAnnot>) {
     // Bases captured BEFORE the backing arenas are appended.
