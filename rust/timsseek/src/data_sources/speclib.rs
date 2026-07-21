@@ -1,29 +1,14 @@
-use crate::data_sources::reference_library::{
-    MatQuery,
-    ReferenceLibrary,
-    ScoredItem,
-};
+use crate::IonAnnot;
+use crate::data_sources::reference_library::ReferenceLibrary;
 use crate::errors::LibraryReadingError;
-use crate::fragment_mass::elution_group_converter::isotope_dist_from_seq;
 use crate::fragment_mass::{
     IsotopeSource,
     isotope_dist_or_averagine,
 };
+use crate::models::map_decoy_strategy;
 use crate::models::sequence::{
-    Peptide,
-    SeqFormat,
-    SpeclibMeta,
     normalize_to_proforma,
     parse_sequence,
-};
-use crate::models::{
-    DecoyMarking,
-    QueryItemToScore,
-    map_decoy_strategy,
-};
-use crate::{
-    ExpectedIntensities,
-    IonAnnot,
 };
 use serde::{
     Deserialize,
@@ -38,17 +23,9 @@ use std::path::{
     Path,
     PathBuf,
 };
-use std::sync::Arc;
 use timsquery::models::QueryCollection;
 use timsquery::models::capabilities::SeqFeatureState;
-use timsquery::models::elution_group::TimsElutionGroup;
-use timsquery::serde::{
-    DiannPrecursorExtras,
-    ElutionGroupCollection,
-    FileReadingExtras,
-    SkylinePrecursorExtras,
-    read_library_file as read_timsquery_library,
-};
+use timsquery::serde::read_library_file as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
 /// This is meant to the be the serializable version of the speclib element
@@ -135,57 +112,6 @@ impl PrecursorEntry {
     }
 }
 
-impl TryFrom<SerSpeclibElement> for QueryItemToScore {
-    type Error = LibraryReadingError;
-
-    fn try_from(x: SerSpeclibElement) -> Result<Self, Self::Error> {
-        let charge = x.precursor.charge;
-        let raw: Arc<str> = x.precursor.sequence.clone().into();
-        let normalized = normalize_to_proforma(&raw);
-        let parsed = parse_sequence(&normalized);
-        let precursor = Peptide {
-            raw,
-            parsed,
-            decoy: if x.precursor.decoy {
-                DecoyMarking::ReversedDecoy
-            } else {
-                DecoyMarking::Target
-            },
-            decoy_group: x.precursor.decoy_group,
-        };
-        let ref_eg = x.elution_group;
-        let expected_intensity = ExpectedIntensities::try_from_pairs(
-            ref_eg
-                .fragment_labels
-                .iter()
-                .cloned()
-                .zip(ref_eg.fragment_intensities.iter().cloned()),
-            ref_eg
-                .precursor_labels
-                .iter()
-                .cloned()
-                .zip(ref_eg.precursor_intensities.iter().cloned()),
-        )
-        .map_err(|e| LibraryReadingError::UnsupportedFormat {
-            message: format!("speclib entry has {}", e),
-        })?;
-        Ok(QueryItemToScore {
-            expected_intensity,
-            query: TimsElutionGroup::builder()
-                .id(ref_eg.id as u64)
-                .mobility_ook0(ref_eg.mobility_ook0)
-                .rt_seconds(ref_eg.rt_seconds)
-                .precursor_labels(ref_eg.precursor_labels.as_slice().into())
-                .precursor(ref_eg.precursor_mz, charge)
-                .fragment_labels(ref_eg.fragment_labels.as_slice().into())
-                .fragment_mzs(ref_eg.fragment_mzs)
-                .try_build()
-                .unwrap(),
-            digest: precursor,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
     id: u32,
@@ -228,89 +154,6 @@ impl ReferenceEG {
     }
 }
 
-/// Convert a DIA-NN library entry to a QueryItemToScore
-///
-/// This handles conversion from TimsElutionGroup + DiannPrecursorExtras
-/// to the format expected by the timsseek scoring pipeline.
-// Orphaned by the `from_file` arena cutover: the DIA-NN/Skyline bridge no
-// longer materializes per-row `QueryItemToScore`. Kept until Task 9 removes the
-// materialized bridge path wholesale.
-#[allow(dead_code)]
-fn convert_diann_to_query_item(
-    eg: TimsElutionGroup<IonAnnot>,
-    extra: DiannPrecursorExtras,
-    decoy_group_id: u32,
-) -> Result<QueryItemToScore, LibraryReadingError> {
-    // Prefer modified form for raw; fall back to stripped if empty.
-    let raw_src = if extra.modified_peptide.is_empty() {
-        extra.stripped_peptide.clone()
-    } else {
-        extra.modified_peptide.clone()
-    };
-    let raw: Arc<str> = raw_src.into();
-    let normalized = normalize_to_proforma(&raw);
-    let parsed = parse_sequence(&normalized);
-    let digest = Peptide {
-        raw,
-        parsed,
-        decoy: if extra.is_decoy {
-            DecoyMarking::ReversedDecoy
-        } else {
-            DecoyMarking::Target
-        },
-        decoy_group: decoy_group_id,
-    };
-
-    let (rebuilt_eg, precursor_pairs) = match isotope_dist_from_seq(&extra.stripped_peptide) {
-        Ok(isotope_ratios) => {
-            let fragment_labels: Vec<IonAnnot> =
-                eg.iter_fragments().map(|(label, _mz)| *label).collect();
-            let fragment_mzs: Vec<f64> = eg.iter_fragments().map(|(_label, mz)| mz).collect();
-
-            let rebuilt = TimsElutionGroup::builder()
-                .id(eg.id())
-                .mobility_ook0(eg.mobility_ook0())
-                .rt_seconds(eg.rt_seconds())
-                .precursor(eg.precursor_mz(), eg.precursor_charge())
-                .precursor_labels([0i8, 1i8, 2i8].as_slice().into())
-                .fragment_labels(fragment_labels.as_slice().into())
-                .fragment_mzs(fragment_mzs)
-                .try_build()
-                .map_err(|e| LibraryReadingError::UnsupportedFormat {
-                    message: format!("Failed to rebuild elution group: {:?}", e),
-                })?;
-
-            let pairs: Vec<(i8, f32)> = vec![
-                (0i8, isotope_ratios[0]),
-                (1i8, isotope_ratios[1]),
-                (2i8, isotope_ratios[2]),
-            ];
-            (rebuilt, pairs)
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Failed to calculate isotope distribution for {}: {}. Using monoisotope only.",
-                extra.stripped_peptide,
-                e
-            );
-            (eg, vec![(0i8, 1.0)])
-        }
-    };
-
-    let expected_intensity =
-        ExpectedIntensities::try_from_pairs(extra.relative_intensities, precursor_pairs).map_err(
-            |e| LibraryReadingError::UnsupportedFormat {
-                message: format!("DIA-NN entry {}: {}", extra.stripped_peptide, e),
-            },
-        )?;
-
-    Ok(QueryItemToScore {
-        digest,
-        query: rebuilt_eg,
-        expected_intensity,
-    })
-}
-
 /// Strip mod annotations — anything inside `(...)` or `[...]` — from a
 /// sequence, leaving the bare residue string. The native format ships one
 /// (modified) sequence per precursor; the arena's composition-isotope path
@@ -327,198 +170,6 @@ fn strip_mods(s: &str) -> String {
         }
     }
     out
-}
-
-/// Generate a mass-shifted decoy from a target QueryItemToScore
-///
-/// Creates a decoy by shifting the precursor m/z by a fixed mass difference.
-/// All other properties (RT, mobility, fragments, intensities) remain the same.
-#[allow(dead_code)] // Orphaned by the native-path arena cutover; removed in Task 9.
-fn create_mass_shifted_decoy(
-    target: &QueryItemToScore,
-    decoy_group_id: u32,
-    mass_shift_da: f64,
-) -> Result<QueryItemToScore, LibraryReadingError> {
-    let decoy_digest = Peptide {
-        raw: target.digest.raw.clone(),
-        parsed: target.digest.parsed.clone(),
-        decoy: DecoyMarking::MassShiftedDecoy,
-        decoy_group: decoy_group_id,
-    };
-
-    let charge = target.query.precursor_charge();
-    let mz_shift = mass_shift_da / charge as f64;
-    let shifted_precursor_mz = target.query.precursor_mz() + mz_shift;
-
-    let fragment_labels: Vec<IonAnnot> = target
-        .query
-        .iter_fragments()
-        .map(|(label, _)| *label)
-        .collect();
-    let fragment_mzs: Vec<f64> = target
-        .query
-        .iter_fragments()
-        .map(|(lab, mz)| {
-            if let Some(ord) = lab.try_get_ordinal() {
-                // Only shift masses if the ordinal is more than position
-                // 2
-                if ord <= 2 {
-                    return mz;
-                }
-            }
-            mz + (mass_shift_da / lab.get_charge() as f64)
-        })
-        .collect();
-
-    let precursor_labels: Vec<i8> = target
-        .query
-        .iter_precursors()
-        .map(|(label, _)| label)
-        .collect();
-
-    let shifted_eg = TimsElutionGroup::builder()
-        .id(target.query.id())
-        .mobility_ook0(target.query.mobility_ook0())
-        .rt_seconds(target.query.rt_seconds())
-        .precursor(shifted_precursor_mz, charge)
-        .precursor_labels(precursor_labels.as_slice().into())
-        .fragment_labels(fragment_labels.as_slice().into())
-        .fragment_mzs(fragment_mzs)
-        .try_build()
-        .map_err(|e| LibraryReadingError::UnsupportedFormat {
-            message: format!("Failed to build mass-shifted decoy elution group: {:?}", e),
-        })?;
-
-    Ok(QueryItemToScore {
-        digest: decoy_digest,
-        query: shifted_eg,
-        expected_intensity: target.expected_intensity.clone(),
-    })
-}
-
-/// `SkylinePrecursorExtras` is structurally identical to `DiannPrecursorExtras`
-/// (peptide + protein + decoy flag + fragment intensity pairs), so we adapt it
-/// into the DIA-NN shape and reuse `convert_diann_to_query_item`.
-#[allow(dead_code)] // Orphaned by the arena cutover; removed in Task 9.
-fn skyline_to_diann_extras(sky: SkylinePrecursorExtras) -> DiannPrecursorExtras {
-    DiannPrecursorExtras {
-        modified_peptide: sky.modified_peptide,
-        stripped_peptide: sky.stripped_peptide,
-        protein_id: sky.protein_id,
-        is_decoy: sky.is_decoy,
-        relative_intensities: sky.relative_intensities,
-    }
-}
-
-/// Map library rows to `elems`, in parallel when the `rayon` feature is on.
-///
-/// `f` maps `(row_index, eg, extra) -> Result<QueryItemToScore>`. Order and the
-/// row index are preserved in both builds (indexed par-iter + order-preserving
-/// `Result` collect), so `decoy_group = idx` and every downstream flat-index
-/// assumption match the serial result exactly. The per-row work (`parse_sequence`
-/// + `isotope_dist_from_seq`) is pure, so parallelizing is safe.
-#[allow(dead_code)] // Orphaned by the arena cutover; removed in Task 9.
-fn convert_rows<E, F>(
-    egs: Vec<TimsElutionGroup<IonAnnot>>,
-    extras: Vec<E>,
-    f: F,
-) -> Result<Vec<QueryItemToScore>, LibraryReadingError>
-where
-    E: Send,
-    F: Fn(usize, TimsElutionGroup<IonAnnot>, E) -> Result<QueryItemToScore, LibraryReadingError>
-        + Sync
-        + Send,
-{
-    #[cfg(feature = "rayon")]
-    {
-        use rayon::prelude::*;
-        egs.into_par_iter()
-            .zip(extras)
-            .enumerate()
-            .map(|(idx, (eg, extra))| f(idx, eg, extra))
-            .collect()
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        egs.into_iter()
-            .zip(extras)
-            .enumerate()
-            .map(|(idx, (eg, extra))| f(idx, eg, extra))
-            .collect()
-    }
-}
-
-/// Convert an ElutionGroupCollection from timsquery to a Speclib (without applying strategy)
-#[allow(dead_code)] // Orphaned by the arena cutover; removed in Task 9.
-fn convert_elution_group_collection(
-    collection: ElutionGroupCollection,
-) -> Result<Speclib, LibraryReadingError> {
-    match collection {
-        ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))) => {
-            if egs.len() != extras.len() {
-                return Err(LibraryReadingError::UnsupportedFormat {
-                    message: format!(
-                        "Mismatch between elution groups ({}) and extras ({})",
-                        egs.len(),
-                        extras.len()
-                    ),
-                });
-            }
-
-            tracing::info!(
-                "Converting {} DIA-NN library entries to Speclib format",
-                egs.len()
-            );
-
-            // Convert everything as-is, preserving existing decoy groups
-            let elems = convert_rows(egs, extras, |idx, eg, extra| {
-                convert_diann_to_query_item(eg, extra, idx as u32)
-            })?;
-
-            Ok(Speclib::Materialized {
-                elems,
-                meta: SpeclibMeta::default(),
-            })
-        }
-        ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Skyline(extras))) => {
-            if egs.len() != extras.len() {
-                return Err(LibraryReadingError::UnsupportedFormat {
-                    message: format!(
-                        "Mismatch between Skyline elution groups ({}) and extras ({})",
-                        egs.len(),
-                        extras.len()
-                    ),
-                });
-            }
-
-            tracing::info!(
-                "Converting {} Skyline transition-list entries to Speclib format",
-                egs.len()
-            );
-
-            let elems = convert_rows(egs, extras, |idx, eg, sky_extra| {
-                convert_diann_to_query_item(eg, skyline_to_diann_extras(sky_extra), idx as u32)
-            })?;
-
-            Ok(Speclib::Materialized {
-                elems,
-                meta: SpeclibMeta::default(),
-            })
-        }
-        ElutionGroupCollection::MzpafLabels(_, None) => {
-            Err(LibraryReadingError::UnsupportedFormat {
-                message: "MzpafLabels variant without DiannPrecursorExtras is not supported"
-                    .to_string(),
-            })
-        }
-        _ => {
-            tracing::warn!("Unsupported ElutionGroupCollection variant for timsseek");
-            Err(LibraryReadingError::UnsupportedFormat {
-                message: "Only DIA-NN TSV/Parquet and Skyline CSV libraries are currently supported via timsquery"
-                    .to_string(),
-            })
-        }
-    }
 }
 
 /// Summary of a [`finalize_reference_library`] call, for load-time logging.
@@ -600,65 +251,11 @@ fn finalize_reference_library(
     (ReferenceLibrary { geom, frag_intens }, report)
 }
 
-#[derive(Debug, Clone)]
-pub enum Speclib {
-    /// Columnar arena path (see `speclib_data_flow.md`): default route for a
-    /// `.speclib` load whose decoy strategy resolves to `LazyMassShift`.
-    /// Scoring against this arm is wired up in Task 9/10 — for now several
-    /// `Speclib` methods panic on this arm; see their docs.
-    Lazy(ReferenceLibrary),
-    /// Legacy fully-materialized path: one `QueryItemToScore` per row
-    /// (target + every decoy variant). Kept for `Passthrough`/`None` decoy
-    /// strategies and the native `SerSpeclibElement` formats until Task 11
-    /// deletes it.
-    Materialized {
-        elems: Vec<QueryItemToScore>,
-        meta: SpeclibMeta,
-    },
-}
-
-struct SpeclibIterator<'a> {
-    speclib: &'a Speclib,
-    idx: usize,
-}
-
-impl SpeclibIterator<'_> {
-    /// Both call sites need the materialized slice; this is the one place
-    /// that panics on the `Lazy` arm today.
-    ///
-    /// `Speclib::iter()` yields owned `QueryItemToScore`, which the `Lazy`
-    /// arm has none of (it hands out `RefQuery` flyweights instead via
-    /// `Speclib::item_at`/`ReferenceLibrary::iter`). No current caller
-    /// exercises `Speclib::iter()` on a `Lazy` lib; unifying the two
-    /// iteration shapes is Task 9/10's job.
-    fn elems(&self) -> &[QueryItemToScore] {
-        match self.speclib {
-            Speclib::Materialized { elems, .. } => elems,
-            Speclib::Lazy(_) => unimplemented!(
-                "Speclib::iter() over the Lazy arm is not supported; use ReferenceLibrary::iter (Task 9/10)"
-            ),
-        }
-    }
-}
-
-impl Iterator for SpeclibIterator<'_> {
-    type Item = QueryItemToScore;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let elems = self.elems();
-        if self.idx >= elems.len() {
-            return None;
-        }
-        let elem = elems[self.idx].clone();
-        self.idx += 1;
-        Some(elem)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.elems().len() - self.idx;
-        (remaining, Some(remaining))
-    }
-}
+/// The spectral library store. Collapsed to the single columnar
+/// `ReferenceLibrary` arena representation (the materialized AOS path was
+/// deleted in Task 9): both load paths produce a lazy arena, and scoring
+/// iterates `RefQuery` flyweights via [`ReferenceLibrary::item_at`].
+pub type Speclib = ReferenceLibrary;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SpeclibFormat {
@@ -834,128 +431,23 @@ impl<R: Read> Iterator for MessagePackReader<R> {
     }
 }
 
-/// Inspect every `Peptide.parsed`. If any is `None`, zero them all, flip
-/// `parsable_sequences` off, log counts. Returns the finalized meta.
-///
-/// MUST run AFTER all decoy generation (including `create_mass_shifted_decoy`
-/// and DIA-NN target-decoy pairing). Otherwise decoys generated post-gate
-/// inherit `parsed: Some(...)` from their target while the gate said off.
-/// Whether every entry parsed. Cheap to compute on TARGETS before decoy
-/// expansion (decoys clone their target's `parsed`, so the verdict is identical)
-/// — doing it there avoids re-walking the 3x-larger, peak-RSS `elems`.
-#[allow(dead_code)] // Materialized parse gate; only tests exercise it post-cutover (Task 9 removes it).
-fn all_sequences_parsed(items: &[QueryItemToScore]) -> bool {
-    !items.is_empty() && items.iter().all(|q| q.digest.parsed.is_some())
-}
-
-/// Apply the all-or-nothing parse gate given a precomputed `parsable` verdict
-/// (see [`all_sequences_parsed`]). When parsable, this is O(1) — no full walk.
-/// When not, it must still zero every entry's `parsed` (the degraded path).
-#[allow(dead_code)] // Materialized parse gate; only tests exercise it post-cutover (Task 9 removes it).
-fn apply_parse_gate(
-    items: &mut [QueryItemToScore],
-    expected_format: SeqFormat,
-    parsable: bool,
-) -> SpeclibMeta {
-    let total = items.len();
-    if !parsable {
-        tracing::warn!(
-            "speclib load: n_total={}; not all sequences parsable, sequence features disabled",
-            total,
-        );
-        for q in items.iter_mut() {
-            q.digest.parsed = None;
-        }
-    } else {
-        tracing::info!(
-            "speclib load: n_total={}, all parsed; sequence features enabled",
-            total
-        );
-    }
-    SpeclibMeta {
-        parsable_sequences: parsable,
-        sequence_format: expected_format,
-    }
-}
-
-/// Target number of entries to sample for diagnostic stats. A full walk of a
-/// 26M-entry library at peak RSS costs tens of seconds (paging) for numbers that
-/// are only logged; a strided sample of this many is statistically equivalent.
-const STATS_SAMPLE_TARGET: usize = 100_000;
-
 impl Speclib {
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = QueryItemToScore> + 'a {
-        SpeclibIterator {
-            speclib: self,
-            idx: 0,
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Speclib::Materialized { elems, .. } => elems.len(),
-            Speclib::Lazy(lib) => lib.len(),
-        }
-    }
-
     /// Whether every sequence in the library parsed (gates sequence-derived
-    /// scoring features). The single call site that used to read
-    /// `speclib.meta.parsable_sequences` directly now goes through this
-    /// accessor so it works for both arms.
+    /// scoring features). Reads the sealed arena's `sequence_features` state.
     pub fn parsable_sequences(&self) -> bool {
-        match self {
-            Speclib::Materialized { meta, .. } => meta.parsable_sequences,
-            Speclib::Lazy(lib) => lib.geom.caps.sequence_features == SeqFeatureState::Available,
-        }
-    }
-
-    /// Flat-index accessor yielding an arm-neutral `ScoredItem` for BOTH arms.
-    /// Lazy indexes the columnar arena in `target, +, -` variant order (see
-    /// `ReferenceLibrary::item_at`); Materialized indexes `elems[flat_idx]`
-    /// directly. Both expose one `QueryGeom` + `ExpectedIntensity` surface so
-    /// scoring/calibration never branches on the storage layout.
-    pub fn item_at(&self, flat_idx: usize) -> ScoredItem<'_> {
-        match self {
-            Speclib::Lazy(lib) => ScoredItem::Lazy(lib.item_at(flat_idx)),
-            Speclib::Materialized { elems, .. } => {
-                ScoredItem::Materialized(MatQuery(&elems[flat_idx]))
-            }
-        }
+        self.geom.caps.sequence_features == SeqFeatureState::Available
     }
 
     /// Mean number of fragments per entry (0.0 for an empty library).
     ///
-    /// Estimated from a strided sample: a full walk of a multi-million-entry
-    /// library touches gigabytes at peak RSS (seconds under paging) for a number
-    /// that is only reported. The sample mean is statistically identical.
+    /// Every variant of a target shares the same fragment set, so the
+    /// per-target arena length is exact, not a sample.
     pub fn avg_fragments(&self) -> f64 {
-        match self {
-            Speclib::Materialized { elems, .. } => {
-                let n = elems.len();
-                if n == 0 {
-                    return 0.0;
-                }
-                let stride = (n / STATS_SAMPLE_TARGET).max(1);
-                let (mut sum, mut cnt) = (0usize, 0usize);
-                let mut i = 0;
-                while i < n {
-                    sum += elems[i].expected_intensity.fragment_len();
-                    cnt += 1;
-                    i += stride;
-                }
-                sum as f64 / cnt as f64
-            }
-            // Every variant of a target shares the same fragment set, so the
-            // per-target arena length is exact, not a sample — cheaper than
-            // the materialized path's stride, not an approximation of it.
-            Speclib::Lazy(lib) => {
-                let n_targets = lib.geom.n_targets();
-                if n_targets == 0 {
-                    return 0.0;
-                }
-                lib.geom.frag_labels.len() as f64 / n_targets as f64
-            }
+        let n_targets = self.geom.n_targets();
+        if n_targets == 0 {
+            return 0.0;
         }
+        self.geom.frag_labels.len() as f64 / n_targets as f64
     }
 
     pub fn from_file(
@@ -1000,153 +492,8 @@ impl Speclib {
         // one shared finalize path (see `finalize_reference_library`); the
         // report is logged there, so we drop it here.
         let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
-
-        let speclib = Speclib::Lazy(lib);
-        speclib.log_entry_stats();
-        Ok(speclib)
-    }
-
-    /// Apply decoy strategy to an already-loaded, materialized speclib.
-    ///
-    /// Legacy materialized decoy expansion. Orphaned now that both `from_file`
-    /// and `from_file_with_format` build the lazy arena; kept (dead) until
-    /// Task 9 removes the materialized path wholesale.
-    #[allow(dead_code)]
-    fn apply_decoy_strategy(
-        speclib: Speclib,
-        strategy: crate::models::DecoyStrategy,
-    ) -> Result<Speclib, LibraryReadingError> {
-        use crate::models::{
-            DecoyMarking,
-            DecoyStrategy,
-        };
-
-        let elems = match speclib {
-            Speclib::Materialized { elems, .. } => elems,
-            Speclib::Lazy(_) => {
-                unreachable!("apply_decoy_strategy is only ever called on a Materialized speclib")
-            }
-        };
-
-        // Separate targets from decoys
-        let (targets, decoys): (Vec<_>, Vec<_>) = elems
-            .into_iter()
-            .partition(|item| item.digest.decoy == DecoyMarking::Target);
-
-        let has_decoys = !decoys.is_empty();
-
-        match strategy {
-            DecoyStrategy::Never => {
-                // Return as-is (targets + existing decoys)
-                tracing::info!(
-                    "Decoy strategy: Never - using library as-is ({} targets, {} decoys)",
-                    targets.len(),
-                    decoys.len()
-                );
-                Ok(Speclib::Materialized {
-                    elems: targets.into_iter().chain(decoys).collect(),
-                    meta: SpeclibMeta::default(),
-                })
-            }
-
-            DecoyStrategy::Force => {
-                // Drop existing decoys and generate new mass-shift decoys
-                if has_decoys {
-                    tracing::warn!(
-                        "Decoy strategy: Force - dropping {} existing decoys and regenerating mass-shift decoys",
-                        decoys.len()
-                    );
-                } else {
-                    tracing::info!("Decoy strategy: Force - generating mass-shift decoys");
-                }
-
-                const CH2_MASS: f64 = 14.0;
-                let mut all_entries = Vec::with_capacity(targets.len() * 3);
-
-                for (idx, target) in targets.into_iter().enumerate() {
-                    let decoy_group_id = idx as u32;
-
-                    // Update target's decoy_group
-                    let mut target = target;
-                    target.digest.decoy_group = decoy_group_id;
-
-                    all_entries.push(target.clone());
-
-                    let plus_decoy = create_mass_shifted_decoy(&target, decoy_group_id, CH2_MASS)?;
-                    all_entries.push(plus_decoy);
-
-                    let minus_decoy =
-                        create_mass_shifted_decoy(&target, decoy_group_id, -CH2_MASS)?;
-                    all_entries.push(minus_decoy);
-                }
-
-                tracing::info!(
-                    "Generated {} total entries ({} targets + {} decoys)",
-                    all_entries.len(),
-                    all_entries.len() / 3,
-                    all_entries.len() * 2 / 3
-                );
-
-                Ok(Speclib::Materialized {
-                    elems: all_entries,
-                    meta: SpeclibMeta::default(),
-                })
-            }
-
-            DecoyStrategy::IfMissing => {
-                if has_decoys {
-                    tracing::info!(
-                        "Library contains {} targets and {} decoys. Using existing decoys.",
-                        targets.len(),
-                        decoys.len()
-                    );
-                    Ok(Speclib::Materialized {
-                        elems: targets.into_iter().chain(decoys).collect(),
-                        meta: SpeclibMeta::default(),
-                    })
-                } else {
-                    tracing::warn!(
-                        "Library contains NO decoys. Will generate synthetic mass-shift decoys:\n\
-                         - Creating 2 decoys per target (±14.0 Da / CH2 mass)\n\
-                         - Total library size will be 3x original (1 target + 2 decoys)\n\
-                         - Each target-decoy triplet will share a decoy_group for FDR estimation"
-                    );
-
-                    const CH2_MASS: f64 = 14.0;
-                    let mut all_entries = Vec::with_capacity(targets.len() * 3);
-
-                    for (idx, target) in targets.into_iter().enumerate() {
-                        let decoy_group_id = idx as u32;
-
-                        // Update target's decoy_group
-                        let mut target = target;
-                        target.digest.decoy_group = decoy_group_id;
-
-                        all_entries.push(target.clone());
-
-                        let plus_decoy =
-                            create_mass_shifted_decoy(&target, decoy_group_id, CH2_MASS)?;
-                        all_entries.push(plus_decoy);
-
-                        let minus_decoy =
-                            create_mass_shifted_decoy(&target, decoy_group_id, -CH2_MASS)?;
-                        all_entries.push(minus_decoy);
-                    }
-
-                    tracing::info!(
-                        "Generated {} total entries ({} targets + {} decoys)",
-                        all_entries.len(),
-                        all_entries.len() / 3,
-                        all_entries.len() * 2 / 3
-                    );
-
-                    Ok(Speclib::Materialized {
-                        elems: all_entries,
-                        meta: SpeclibMeta::default(),
-                    })
-                }
-            }
-        }
+        lib.log_entry_stats();
+        Ok(lib)
     }
 
     pub fn from_file_with_format(
@@ -1220,120 +567,18 @@ impl Speclib {
         let has_file_decoys = geom.is_decoy.iter().any(|&d| d);
         let decoys = map_decoy_strategy(decoy_strategy, has_file_decoys);
         let (lib, _report) = finalize_reference_library(geom, frag_intens, decoys);
-
-        let speclib = Speclib::Lazy(lib);
-        speclib.log_entry_stats();
-        Ok(speclib)
+        lib.log_entry_stats();
+        Ok(lib)
     }
 
-    pub fn sample() -> Self {
-        Speclib::Materialized {
-            elems: vec![QueryItemToScore::sample()],
-            meta: SpeclibMeta::default(),
-        }
-    }
-
-    /// Materialized-arm-only accessor. The `Lazy` arm has no materialized
-    /// slice by design (that is the memory optimization) — callers on that
-    /// path must move to `item_at`/`iter` (Task 9/10 wires up the CLI/scoring
-    /// call sites that still call `as_slice()` on a lazily-loaded lib).
-    pub fn as_slice(&self) -> &[QueryItemToScore] {
-        match self {
-            Speclib::Materialized { elems, .. } => elems,
-            Speclib::Lazy(_) => unimplemented!(
-                "lazy speclib has no materialized slice; use item_at/iter (Task 9/10)"
-            ),
-        }
-    }
-
-    /// Log a summary of per-entry fragment and precursor counts.
-    ///
-    /// Entries whose fragment count exceeds [`INLINE_FRAG_CAPACITY`] spill out
-    /// of the inline storage for `ExpectedIntensities` and incur a heap
-    /// allocation per clone, so the spillover count is worth surfacing.
-    pub fn log_entry_stats(&self) {
-        use crate::models::query_item::{
-            INLINE_FRAG_CAPACITY,
-            INLINE_PREC_CAPACITY,
-        };
-
-        let elems = match self {
-            Speclib::Materialized { elems, .. } => elems,
-            Speclib::Lazy(lib) => {
-                // The arena has no per-entry `ExpectedIntensities` to sample
-                // (that inline-capacity/spillover concept is specific to the
-                // materialized layout) — report the shape we do have.
-                tracing::info!(
-                    "Speclib stats: lazy arena, {} targets ({} flat scoring entries, {} total fragment slots)",
-                    lib.geom.n_targets(),
-                    lib.len(),
-                    lib.geom.frag_labels.len(),
-                );
-                return;
-            }
-        };
-
-        let n = elems.len();
-        if n == 0 {
-            tracing::info!("Speclib stats: empty library");
-            return;
-        }
-
-        let mut frag_max = 0usize;
-        let mut prec_max = 0usize;
-        let mut frag_sum = 0usize;
-        let mut frag_spill = 0usize;
-        let mut prec_spill = 0usize;
-
-        // Strided sample — a full walk is a multi-GB, seconds-long pass at peak
-        // RSS for numbers that are only logged (see `avg_fragments`).
-        let stride = (n / STATS_SAMPLE_TARGET).max(1);
-        let mut sampled = 0usize;
-        let mut i = 0;
-        while i < n {
-            let item = &elems[i];
-            let nf = item.expected_intensity.fragment_len();
-            let np = item.expected_intensity.precursor_len();
-            frag_sum += nf;
-            frag_max = frag_max.max(nf);
-            prec_max = prec_max.max(np);
-            if nf > INLINE_FRAG_CAPACITY {
-                frag_spill += 1;
-            }
-            if np > INLINE_PREC_CAPACITY {
-                prec_spill += 1;
-            }
-            sampled += 1;
-            i += stride;
-        }
-
-        // Scale sampled spill counts back to the full library for reporting.
-        let frag_spill = frag_spill * stride;
-        let prec_spill = prec_spill * stride;
-        let frag_mean = frag_sum as f64 / sampled as f64;
-
+    /// Log a one-line summary of the lazy arena's shape at load time.
+    fn log_entry_stats(&self) {
         tracing::info!(
-            "Speclib stats: {} entries; fragments per entry: mean={:.1} max={} (inline cap={}, spillover entries={}); precursors per entry: max={} (inline cap={}, spillover entries={})",
-            n,
-            frag_mean,
-            frag_max,
-            INLINE_FRAG_CAPACITY,
-            frag_spill,
-            prec_max,
-            INLINE_PREC_CAPACITY,
-            prec_spill,
+            "Speclib stats: lazy arena, {} targets ({} flat scoring entries, {} total fragment slots)",
+            self.geom.n_targets(),
+            self.len(),
+            self.geom.frag_labels.len(),
         );
-
-        if frag_spill > 0 {
-            let pct = (frag_spill as f64 / n as f64) * 100.0;
-            tracing::warn!(
-                "{}/{} speclib entries ({:.2}%) exceed INLINE_FRAG_CAPACITY={} — those entries will heap-allocate on every clone. Consider raising the inline cap in `models::query_item` if this is a large fraction.",
-                frag_spill,
-                n,
-                pct,
-                INLINE_FRAG_CAPACITY,
-            );
-        }
     }
 }
 
@@ -1385,31 +630,6 @@ mod tests {
         RefQuery,
     };
 
-    impl Speclib {
-        // Technically its used in testing ...
-        fn from_json(json: &str) -> Result<Self, LibraryReadingError> {
-            let speclib_ser: Vec<SerSpeclibElement> = match serde_json::from_str(json) {
-                Ok(x) => x,
-                Err(e) => {
-                    return Err(LibraryReadingError::SpeclibParsingError {
-                        source: e,
-                        context: "Error parsing JSON",
-                    });
-                }
-            };
-
-            let speclib: Vec<QueryItemToScore> = speclib_ser
-                .into_iter()
-                .map(QueryItemToScore::try_from)
-                .collect::<Result<_, _>>()?;
-
-            Ok(Self::Materialized {
-                elems: speclib,
-                meta: SpeclibMeta::default(),
-            })
-        }
-    }
-
     #[test]
     fn test_detect_native_format_by_extension() {
         use std::path::Path;
@@ -1439,63 +659,12 @@ mod tests {
         assert!(SpeclibFormat::detect_from_extension(Path::new("lib.tsv")).is_none());
     }
 
-    #[test]
-    fn test_speclib() {
-        let json = r#"[
-            {
-                "precursor": {
-                    "sequence": "PEPTIDEPINK",
-                    "charge": 2,
-                    "decoy": false,
-                    "decoy_group": 0
-                },
-                "elution_group": {
-                    "id": 0,
-                    "precursor_mz": 876.5432,
-                    "precursor_labels": [ 0, 1 ],
-                    "fragment_mzs": [ 123.0, 123.0, 123.0 ],
-                    "fragment_labels": ["a1", "b1", "c1^2"],
-                    "precursor_intensities": [1.0, 1.0],
-                    "fragment_intensities": [1.0, 1.0, 1.0],
-                    "precursor_charge": 2,
-                    "mobility_ook0": 0.8,
-                    "rt_seconds": 0.0
-                }
-            }
-        ]"#;
-        let speclib = Speclib::from_json(json).unwrap();
-        assert_eq!(speclib.as_slice().len(), 1);
-        println!("{:?}", speclib);
-
-        assert_eq!(speclib.as_slice()[0].digest.decoy, DecoyMarking::Target);
-        assert_eq!(speclib.as_slice()[0].digest.len(), "PEPTIDEPINK".len());
-        assert_eq!(speclib.as_slice()[0].query.fragment_count(), 3);
-    }
-
-    #[test]
-    fn test_sample_elution_group_deserialization() {
-        let json = SerSpeclibElement::sample_json();
-        let elem: SerSpeclibElement = serde_json::from_str(json).unwrap();
-        let query_item: QueryItemToScore = elem.try_into().unwrap();
-
-        assert_eq!(query_item.digest.len(), "PEPTIDEPINK".len());
-        assert_eq!(query_item.query.fragment_count(), 3);
-    }
-
-    /// Every fixture below has no shipped decoys, so under the default CLI
-    /// `DecoyStrategy::IfMissing` they all now resolve to `LazyMassShift`
-    /// (see `map_decoy_strategy`) and load as `Speclib::Lazy`, not the old
-    /// materialized target+2-decoy `Vec<QueryItemToScore>`. That routing is
-    /// the whole point of the cutover, so these tests assert against the
-    /// `ReferenceLibrary` arena (`RefQuery`/`QueryGeom`) instead of
-    /// `Speclib::as_slice()`.
+    /// `Speclib` is now a type alias for `ReferenceLibrary` (Task 9 collapsed
+    /// the enum), so a loaded library is already the lazy arena. This identity
+    /// helper is kept so the fixture assertions below read as
+    /// "get the arena" without churning every call site.
     fn expect_lazy(speclib: &Speclib) -> &ReferenceLibrary {
-        match speclib {
-            Speclib::Lazy(lib) => lib,
-            Speclib::Materialized { .. } => {
-                panic!("expected a Lazy speclib: fixture has no shipped decoys under IfMissing")
-            }
-        }
+        speclib
     }
 
     #[test]
@@ -1879,32 +1048,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ser_speclib_element_roundtrip() {
-        let elem = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
-        let bytes = rmp_serde::to_vec(&elem).unwrap();
-        let decoded: SerSpeclibElement = rmp_serde::from_slice(&bytes).unwrap();
-        let qi: QueryItemToScore = decoded.try_into().unwrap();
-        assert_eq!(qi.digest.len(), "PEPTIDEK".len());
-        assert_eq!(qi.query.fragment_count(), 2);
-    }
-
-    #[test]
     fn test_speclib_writer_roundtrip() {
         let elem = SerSpeclibElement::sample();
         let mut buf = Vec::new();
@@ -1918,87 +1061,6 @@ mod tests {
             SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd).unwrap();
         let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(items.len(), 2);
-    }
-
-    #[cfg(test)]
-    fn fixture_query_item(
-        raw_seq: &str,
-        parsed: Option<crate::models::sequence::ParsedSequence>,
-    ) -> QueryItemToScore {
-        let elem = SerSpeclibElement::new(
-            PrecursorEntry::new(raw_seq.to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
-        let mut q: QueryItemToScore = elem.try_into().expect("fixture convert");
-        q.digest.parsed = parsed;
-        q
-    }
-
-    #[test]
-    fn test_parse_gate_off_on_poisoned_row() {
-        use crate::models::sequence::{
-            ParsedSequence,
-            SeqFormat,
-        };
-        use smallvec::SmallVec;
-
-        let mut items = vec![
-            fixture_query_item(
-                "PEPTIDEK",
-                Some(ParsedSequence {
-                    residues: SmallVec::new(),
-                    mods: SmallVec::new(),
-                }),
-            ),
-            fixture_query_item("GARBAGE!!!", None),
-        ];
-        let parsable = all_sequences_parsed(&items);
-        let meta = apply_parse_gate(&mut items, SeqFormat::Modified, parsable);
-        assert!(!meta.parsable_sequences);
-        assert!(items.iter().all(|q| q.digest.parsed.is_none()));
-    }
-
-    #[test]
-    fn test_parse_gate_on_when_all_parsed() {
-        use crate::models::sequence::{
-            ParsedSequence,
-            SeqFormat,
-        };
-        use smallvec::SmallVec;
-
-        let mut items = vec![
-            fixture_query_item(
-                "PEPTIDEK",
-                Some(ParsedSequence {
-                    residues: SmallVec::new(),
-                    mods: SmallVec::new(),
-                }),
-            ),
-            fixture_query_item(
-                "ABCDEK",
-                Some(ParsedSequence {
-                    residues: SmallVec::new(),
-                    mods: SmallVec::new(),
-                }),
-            ),
-        ];
-        let parsable = all_sequences_parsed(&items);
-        let meta = apply_parse_gate(&mut items, SeqFormat::Modified, parsable);
-        assert!(meta.parsable_sequences);
-        assert!(items.iter().all(|q| q.digest.parsed.is_some()));
     }
 
     /// End-to-end `Speclib::from_file` over the real DIA-NN HeLa `.speclib`

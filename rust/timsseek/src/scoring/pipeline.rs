@@ -25,7 +25,6 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
-    MatQuery,
     ScoredIdentity,
 };
 use crate::data_sources::speclib::Speclib;
@@ -688,19 +687,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         flat_range: std::ops::Range<usize>,
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        // Match the storage arm ONCE, then run a fully monomorphized loop over
-        // the concrete flyweight (`RefQuery` / `MatQuery`). Each arm's
-        // `get_item` closure returns its own concrete type, so the iterators
-        // used inside are statically dispatched — no boxed `ScoredItem`, no
+        // Single columnar store (Task 9 deleted the materialized arm): the
+        // flyweight is always a `RefQuery` from the arena, so the loop is
+        // monomorphized over one concrete type — statically dispatched, no
         // per-item heap allocation on the scoring hot path.
-        match lib {
-            Speclib::Lazy(rl) => {
-                self.score_calibrated_batch_impl(|f| rl.item_at(f), flat_range, calibration)
-            }
-            Speclib::Materialized { elems, .. } => {
-                self.score_calibrated_batch_impl(|f| MatQuery(&elems[f]), flat_range, calibration)
-            }
-        }
+        self.score_calibrated_batch_impl(|f| lib.item_at(f), flat_range, calibration)
     }
 
     fn score_calibrated_batch_impl<Q>(
@@ -842,17 +833,10 @@ impl<I: ScorerQueriable> Scorer<I> {
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
-        // Match the storage arm ONCE, then run a fully monomorphized loop over
-        // the concrete flyweight — no boxed `ScoredItem`, no per-item heap
-        // alloc on the prescore hot path (see `score_calibrated_batch`).
-        match lib {
-            Speclib::Lazy(rl) => {
-                self.prescore_batch_impl(|f| rl.item_at(f), flat_range, config, timings)
-            }
-            Speclib::Materialized { elems, .. } => {
-                self.prescore_batch_impl(|f| MatQuery(&elems[f]), flat_range, config, timings)
-            }
-        }
+        // Single columnar store (Task 9): iterate `RefQuery` flyweights from
+        // the arena directly — monomorphized, no per-item heap alloc on the
+        // prescore hot path (see `score_calibrated_batch`).
+        self.prescore_batch_impl(|f| lib.item_at(f), flat_range, config, timings)
     }
 
     fn prescore_batch_impl<Q>(

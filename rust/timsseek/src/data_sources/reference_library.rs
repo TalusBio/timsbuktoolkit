@@ -17,7 +17,6 @@ use timsquery::utils::constants::PROTON_MASS;
 
 use crate::fragment_mass::isotope_dist_or_averagine;
 use crate::models::DecoyMarking;
-use crate::models::query_item::QueryItemToScore;
 use crate::models::sequence::{
     Peptide,
     normalize_to_proforma,
@@ -212,44 +211,11 @@ impl<'a> QueryGeom for RefQuery<'a> {
     }
 }
 
-/// Zero-cost two-arm iterator: unifies the distinct concrete iterator types of
-/// the `Lazy` / `Materialized` arms behind one `impl Iterator` with NO heap
-/// allocation and NO dyn dispatch. Replaces the `Box<dyn Iterator>` that the
-/// `ScoredItem` enum used to return (a per-item alloc storm on the scoring
-/// path). Cost is one branch per `next()`.
-pub enum EitherIter<L, R> {
-    Left(L),
-    Right(R),
-}
-
-impl<T, L, R> Iterator for EitherIter<L, R>
-where
-    L: Iterator<Item = T>,
-    R: Iterator<Item = T>,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        match self {
-            EitherIter::Left(l) => l.next(),
-            EitherIter::Right(r) => r.next(),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            EitherIter::Left(l) => l.size_hint(),
-            EitherIter::Right(r) => r.size_hint(),
-        }
-    }
-}
-
 /// Arm-neutral identity accessors the scoring loop needs but that are NOT part
-/// of `QueryGeom` / `ExpectedIntensity`. Implemented by BOTH concrete
-/// flyweights (`RefQuery`, `MatQuery`) so the batch scoring loop can be generic
-/// (monomorphized, zero-heap) over the concrete type — see
-/// `Scorer::{prescore,score_calibrated}_batch`, which match the `Speclib` arm
-/// ONCE and then run a fully static-dispatched loop.
+/// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
+/// flyweight so the batch scoring loop stays generic (monomorphized,
+/// zero-heap) over the concrete type — see
+/// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
     /// Positional library id: lazy target index, or the materialized eg's id.
     fn library_id(&self) -> u32;
@@ -282,230 +248,6 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         let dg = self.decoy_group();
         // Inherent `RefQuery::materialize_peptide(&self, u32)` (arity picks it).
         RefQuery::materialize_peptide(self, dg)
-    }
-}
-
-/// Flyweight over one materialized `QueryItemToScore`. Mirrors `RefQuery` but
-/// reads the stored geometry / expected intensities directly instead of
-/// deriving them from the columnar arena.
-#[derive(Clone, Copy)]
-pub struct MatQuery<'a>(pub &'a QueryItemToScore);
-
-impl<'a> ScoredIdentity for MatQuery<'a> {
-    fn library_id(&self) -> u32 {
-        // QueryGeom::id performs the checked u64 -> u32 conversion.
-        self.id()
-    }
-
-    fn is_target(&self) -> bool {
-        self.0.digest.decoy.is_target()
-    }
-
-    fn decoy_group(&self) -> u32 {
-        self.0.digest.decoy_group
-    }
-
-    fn materialize_peptide(&self) -> Peptide {
-        self.0.digest.clone()
-    }
-}
-
-impl<'a> QueryGeom for MatQuery<'a> {
-    type Label = IonAnnot;
-
-    fn id(&self) -> u32 {
-        // Delegate to the stored eg's `QueryGeom` impl, which performs the
-        // checked u64 -> u32 conversion (fail-loud, no silent truncation).
-        QueryGeom::id(&self.0.query)
-    }
-
-    fn mono_precursor_mz(&self) -> f64 {
-        self.0.query.mono_precursor_mz()
-    }
-
-    fn precursor_charge(&self) -> u8 {
-        self.0.query.precursor_charge()
-    }
-
-    fn rt_seconds(&self) -> f32 {
-        self.0.query.rt_seconds()
-    }
-
-    fn mobility_ook0(&self) -> f32 {
-        self.0.query.mobility_ook0()
-    }
-
-    fn get_precursor_mz_limits(&self) -> (f64, f64) {
-        self.0.query.get_precursor_mz_limits()
-    }
-
-    fn precursor_count(&self) -> usize {
-        self.0.query.precursor_count()
-    }
-
-    fn fragment_count(&self) -> usize {
-        self.0.query.fragment_count()
-    }
-
-    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
-        QueryGeom::iter_precursors(&self.0.query)
-    }
-
-    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
-        QueryGeom::iter_fragments_refs(&self.0.query)
-    }
-}
-
-impl<'a> ExpectedIntensity for MatQuery<'a> {
-    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        self.0
-            .expected_intensity
-            .fragment_intensities
-            .iter()
-            .map(|&(lab, i)| (lab, i))
-    }
-
-    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
-        // Materialized arm keeps the STORED envelope verbatim — do NOT recompute
-        // averagine here (the lazy arm derives it, this arm already has it).
-        self.0
-            .expected_intensity
-            .precursor_intensities
-            .iter()
-            .copied()
-            .collect()
-    }
-}
-
-/// Arm-neutral scoring flyweight: one accessor surface over both the lazy
-/// columnar arena (`RefQuery`) and a materialized `QueryItemToScore`
-/// (`MatQuery`). `Speclib::item_at` hands this out for BOTH arms so the batch
-/// scoring / calibration loops never branch on the storage layout.
-#[derive(Clone, Copy)]
-pub enum ScoredItem<'a> {
-    Lazy(RefQuery<'a>),
-    Materialized(MatQuery<'a>),
-}
-
-impl<'a> ScoredIdentity for ScoredItem<'a> {
-    fn library_id(&self) -> u32 {
-        match self {
-            ScoredItem::Lazy(q) => q.library_id(),
-            ScoredItem::Materialized(m) => m.library_id(),
-        }
-    }
-
-    fn is_target(&self) -> bool {
-        match self {
-            ScoredItem::Lazy(q) => q.is_target(),
-            ScoredItem::Materialized(m) => m.is_target(),
-        }
-    }
-
-    fn decoy_group(&self) -> u32 {
-        match self {
-            ScoredItem::Lazy(q) => q.decoy_group(),
-            ScoredItem::Materialized(m) => m.decoy_group(),
-        }
-    }
-
-    fn materialize_peptide(&self) -> Peptide {
-        match self {
-            ScoredItem::Lazy(q) => ScoredIdentity::materialize_peptide(q),
-            ScoredItem::Materialized(m) => ScoredIdentity::materialize_peptide(m),
-        }
-    }
-}
-
-impl<'a> QueryGeom for ScoredItem<'a> {
-    type Label = IonAnnot;
-
-    fn id(&self) -> u32 {
-        match self {
-            ScoredItem::Lazy(q) => q.id(),
-            ScoredItem::Materialized(m) => m.id(),
-        }
-    }
-
-    fn mono_precursor_mz(&self) -> f64 {
-        match self {
-            ScoredItem::Lazy(q) => q.mono_precursor_mz(),
-            ScoredItem::Materialized(m) => m.mono_precursor_mz(),
-        }
-    }
-
-    fn precursor_charge(&self) -> u8 {
-        match self {
-            ScoredItem::Lazy(q) => q.precursor_charge(),
-            ScoredItem::Materialized(m) => m.precursor_charge(),
-        }
-    }
-
-    fn rt_seconds(&self) -> f32 {
-        match self {
-            ScoredItem::Lazy(q) => q.rt_seconds(),
-            ScoredItem::Materialized(m) => m.rt_seconds(),
-        }
-    }
-
-    fn mobility_ook0(&self) -> f32 {
-        match self {
-            ScoredItem::Lazy(q) => q.mobility_ook0(),
-            ScoredItem::Materialized(m) => m.mobility_ook0(),
-        }
-    }
-
-    fn get_precursor_mz_limits(&self) -> (f64, f64) {
-        match self {
-            ScoredItem::Lazy(q) => q.get_precursor_mz_limits(),
-            ScoredItem::Materialized(m) => m.get_precursor_mz_limits(),
-        }
-    }
-
-    fn precursor_count(&self) -> usize {
-        match self {
-            ScoredItem::Lazy(q) => q.precursor_count(),
-            ScoredItem::Materialized(m) => m.precursor_count(),
-        }
-    }
-
-    fn fragment_count(&self) -> usize {
-        match self {
-            ScoredItem::Lazy(q) => q.fragment_count(),
-            ScoredItem::Materialized(m) => m.fragment_count(),
-        }
-    }
-
-    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
-        // EitherIter unifies the two arms' distinct iterator types with no heap
-        // alloc / no dyn dispatch (was `Box<dyn Iterator>`).
-        match self {
-            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_precursors()),
-            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_precursors()),
-        }
-    }
-
-    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
-        match self {
-            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_fragments_refs()),
-            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_fragments_refs()),
-        }
-    }
-}
-
-impl<'a> ExpectedIntensity for ScoredItem<'a> {
-    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        match self {
-            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_expected_fragments()),
-            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_expected_fragments()),
-        }
-    }
-
-    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
-        match self {
-            ScoredItem::Lazy(q) => q.expected_precursor_envelope(),
-            ScoredItem::Materialized(m) => m.expected_precursor_envelope(),
-        }
     }
 }
 
@@ -611,34 +353,19 @@ mod tests {
     }
 
     #[test]
-    fn materialized_item_scores() {
-        use crate::data_sources::speclib::Speclib;
-        use crate::models::query_item::QueryItemToScore;
-        use crate::models::sequence::SpeclibMeta;
-
-        let item = QueryItemToScore::sample();
-        let expected_mono = item.query.mono_precursor_mz();
-        let expected_is_target = item.digest.decoy.is_target();
-        let expected_lib_id = QueryGeom::id(&item.query);
-        let expected_frags: Vec<(IonAnnot, f32)> = item
-            .expected_intensity
-            .fragment_intensities
-            .iter()
-            .copied()
-            .collect();
-
-        let lib = Speclib::Materialized {
-            elems: vec![item],
-            meta: SpeclibMeta::default(),
-        };
-
-        // Previously panicked (`unimplemented!`); must now score via item_at.
+    fn item_at_scores_reference_library() {
+        // Task 9 collapsed `Speclib` to the single `ReferenceLibrary` arena;
+        // scoring reads `RefQuery` flyweights via `item_at` (no materialized
+        // arm). Variant 0 is the target.
+        let lib = tiny_ref_lib();
         let scored = lib.item_at(0);
-        assert!((scored.mono_precursor_mz() - expected_mono).abs() < 1e-9);
-        assert_eq!(scored.is_target(), expected_is_target);
-        assert_eq!(scored.library_id(), expected_lib_id);
+        assert!(scored.is_target());
+        assert_eq!(scored.library_id(), QueryGeom::id(&scored));
+        assert_eq!(scored.decoy_group(), 0);
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
-        assert_eq!(got_frags, expected_frags);
+        assert_eq!(got_frags.len(), 2);
+        assert!((got_frags[0].1 - 1.0).abs() < 1e-6);
+        assert!((got_frags[1].1 - 0.5).abs() < 1e-6);
     }
 
     #[test]

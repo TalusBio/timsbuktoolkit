@@ -1,17 +1,9 @@
-use crate::models::sequence::Peptide;
-use micromzpaf::IonAnnot;
 use serde::{
     Deserialize,
     Serialize,
 };
-use timsquery::tinyvec::{
-    TinyVec,
-    tiny_vec,
-};
-use timsquery::{
-    KeyLike,
-    TimsElutionGroup,
-};
+use timsquery::KeyLike;
+use timsquery::tinyvec::TinyVec;
 
 /// Inline capacity for fragment and precursor intensity pairs. Mirrors the
 /// `fragment_labels`/`precursor_labels` capacity used by `TimsElutionGroup`
@@ -179,72 +171,10 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct QueryItemToScore {
-    // Kinda hate this
-    pub digest: Peptide,
-    pub query: TimsElutionGroup<IonAnnot>,
-    pub expected_intensity: ExpectedIntensities<IonAnnot>,
-}
-
-impl QueryItemToScore {
-    pub fn sample() -> Self {
-        let eg = TimsElutionGroup::builder()
-            .id(42)
-            .mobility_ook0(0.75)
-            .rt_seconds(123.4)
-            .fragment_labels(
-                [
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                    IonAnnot::try_from("y3").unwrap(),
-                    IonAnnot::try_from("y4").unwrap(),
-                ]
-                .as_slice()
-                .into(),
-            )
-            .fragment_mzs(vec![450.0, 650.5, 751.0, 751.5])
-            .precursor_labels(tiny_vec!(-1, 0, 1, 2))
-            .precursor(450.5, 2)
-            .try_build()
-            .unwrap();
-
-        let ei = ExpectedIntensities {
-            fragment_intensities: tiny_vec!(
-                [(IonAnnot, f32); INLINE_FRAG_CAPACITY] =>
-                (IonAnnot::try_from("y1").unwrap(), 1.0),
-                (IonAnnot::try_from("y2").unwrap(), 1.0),
-                (IonAnnot::try_from("y3").unwrap(), 1.0),
-                (IonAnnot::try_from("y4").unwrap(), 1.0),
-            ),
-            precursor_intensities: tiny_vec!(
-                [(i8, f32); INLINE_PREC_CAPACITY] =>
-                (-1, 0.5),
-                (0, 1.0),
-                (1, 0.8),
-                (2, 0.3),
-            ),
-        };
-        let raw: std::sync::Arc<str> = "PEPTIDEPINKPEPTIDE".into();
-        let digest = Peptide {
-            raw,
-            parsed: None,
-            decoy: crate::models::decoy::DecoyMarking::Target,
-            decoy_group: 1,
-        };
-        let query = eg;
-        let expected_intensity = ei;
-        QueryItemToScore {
-            digest,
-            query,
-            expected_intensity,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use micromzpaf::IonAnnot;
 
     fn yi(s: &str) -> IonAnnot {
         IonAnnot::try_from(s).unwrap()

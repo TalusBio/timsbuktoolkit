@@ -13,10 +13,7 @@ pub use digest::{
     ProteinSlice,
     deduplicate_digests,
 };
-pub use query_item::{
-    ExpectedIntensities,
-    QueryItemToScore,
-};
+pub use query_item::ExpectedIntensities;
 pub use sequence::{
     AA_COUNT_NAMES,
     AminoAcid,
