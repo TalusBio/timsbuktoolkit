@@ -103,6 +103,10 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     // q-values -> drifting target counts across equivalent configs.
     // (library_id, precursor_charge) is a non-FP composite key that
     // should be unique per candidate after target-decoy competition.
+    // NOTE: `library_id` is now the POSITIONAL target index (lazy arena) /
+    // materialized eg id — a target and its ±decoy variants share it, but
+    // target-decoy competition leaves exactly ONE candidate per
+    // (target, charge), so the key stays unique among survivors here.
     data.sort_unstable_by_key(|c| (c.scoring.library_id, c.scoring.precursor_charge));
 
     use rand::SeedableRng;

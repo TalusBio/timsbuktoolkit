@@ -47,7 +47,7 @@ impl<FH: KeyLike> HasQueryData<FH> for TimsElutionGroup<FH> {
     }
 
     fn precursor_mz_limits(&self) -> (f64, f64) {
-        self.get_precursor_mz_limits()
+        self.precursor_mz_limits()
     }
 
     fn mobility_ook0(&self) -> f32 {

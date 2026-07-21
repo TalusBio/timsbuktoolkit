@@ -6,6 +6,7 @@ use egui_plot::{
     PlotPoints,
     Text,
 };
+use timsquery::ion::IonAnnot;
 use timsseek::ExpectedIntensities;
 
 use crate::plot_renderer::MS2Spectrum;
@@ -26,7 +27,7 @@ impl SpectrumPanel {
         &mut self,
         ui: &mut egui::Ui,
         ms2_spectrum: Option<&MS2Spectrum>,
-        expected_intensities: Option<&ExpectedIntensities<String>>,
+        expected_intensities: Option<&ExpectedIntensities<IonAnnot>>,
     ) {
         if let Some(spec) = ms2_spectrum {
             let expected_intensities = expected_intensities
@@ -77,8 +78,12 @@ impl SpectrumPanel {
                         plot_ui.text(label);
 
                         // If expected intensities are provided, draw them as dashed lines
-                        // in the negative direction
-                        let ei = expected_intensities.get_fragment(label_str);
+                        // in the negative direction. The display label is the
+                        // ion's mzPAF string; parse it back to the `IonAnnot`
+                        // key the expected-intensity store is keyed by.
+                        let ei = IonAnnot::try_from(label_str.as_str())
+                            .ok()
+                            .and_then(|key| expected_intensities.get_fragment(&key));
                         if let Some(expected_intensity) = ei {
                             let y_ref_value = (expected_intensity / expected_norm_factor) as f64;
                             let expected_points =

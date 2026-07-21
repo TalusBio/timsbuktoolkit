@@ -46,7 +46,7 @@ use timsquery::traits::queriable_data::{
 use timsquery::utils::TupleRange;
 use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
-use timsseek::models::DecoyStrategy;
+use timsseek::models::DecoyPolicy;
 
 /// Counting peak sink — single u32 increment per peak. One dependent
 /// scalar store (no fadd, no scatter, no memory fence) → cleanest
@@ -103,8 +103,8 @@ fn main() {
 
     eprintln!("Loading speclib from {speclib_path}...");
     let t0 = Instant::now();
-    let speclib = Speclib::from_file(Path::new(&speclib_path), DecoyStrategy::default())
-        .expect("load speclib");
+    let speclib =
+        Speclib::from_file(Path::new(&speclib_path), DecoyPolicy::default()).expect("load speclib");
     eprintln!(
         "  speclib ready in {:?} ({} entries)",
         t0.elapsed(),
@@ -120,7 +120,7 @@ fn main() {
     let (min_rt, max_rt) = cycle_mapping.range_milis();
     let rt_range = TupleRange::try_new(min_rt, max_rt).expect("rt range valid");
 
-    let items: Vec<_> = speclib.as_slice().iter().take(n).collect();
+    let items: Vec<_> = speclib.iter().take(n).collect();
     eprintln!("Benching {} items × {} iters each", items.len(), iters);
 
     // ---- Counting sink (pure iteration cost via SpectralCollector + blanket impl) ----
@@ -129,7 +129,7 @@ fn main() {
         let mut total_peaks = 0u64;
         for _ in 0..iters {
             for item in &items {
-                let mut agg = SpectralCollector::<IonAnnot, NoOpSink>::new(&item.query);
+                let mut agg = SpectralCollector::<IonAnnot, NoOpSink>::new(item);
                 index.add_query(&mut agg, &tolerance);
                 for (_, s) in agg.iter_precursors() {
                     total_peaks += s.0 as u64;
@@ -156,7 +156,7 @@ fn main() {
         let mut total_intensity = 0.0f64;
         for _ in 0..iters {
             for item in &items {
-                let mut agg = PointIntensityAggregator::<IonAnnot>::new(&item.query);
+                let mut agg = PointIntensityAggregator::<IonAnnot>::new(item);
                 index.add_query(&mut agg, &tolerance);
                 total_intensity += agg.intensity;
             }
@@ -177,11 +177,9 @@ fn main() {
         let mut total_frag_peaks = 0u64;
         for _ in 0..iters {
             for item in &items {
-                let Ok(mut agg) = ChromatogramCollector::<IonAnnot, f32>::new(
-                    &item.query,
-                    rt_range,
-                    cycle_mapping,
-                ) else {
+                let Ok(mut agg) =
+                    ChromatogramCollector::<IonAnnot, f32>::new(item, rt_range, cycle_mapping)
+                else {
                     continue;
                 };
                 index.add_query(&mut agg, &tolerance);

@@ -112,6 +112,69 @@ impl ScoringFields {
         self.ms1_mobility_errors.fill(f32::NAN);
         self.ms2_mobility_errors.fill(f32::NAN);
     }
+
+    /// Baseline test fixture with every field populated. Callers (including
+    /// other crates' tests) tweak the identity/score fields they care about.
+    /// Plain `pub fn` (not `#[cfg(test)]`) so it is reachable cross-crate.
+    pub fn sample(peptide: Peptide) -> Self {
+        Self {
+            peptide,
+            library_id: 0,
+            decoy_group_id: 0,
+            precursor_mz: 500.0,
+            precursor_charge: 2,
+            precursor_mobility: 0.9,
+            is_target: true,
+            library_rt: 60.0,
+            calibrated_rt_seconds: 3600.0,
+            obs_rt_seconds: 3601.0,
+            calibrated_sq_delta_rt: 1.0,
+            obs_mobility: 0.91,
+            delta_ms1_ms2_mobility: 0.01,
+            sq_delta_ms1_ms2_mobility: 0.0001,
+            main_score: 10.0,
+            delta_next: 2.0,
+            delta_second_next: 1.0,
+            apex_lazyscore: 5.0,
+            ms2_lazyscore: 4.0,
+            ms2_isotope_lazyscore: 3.0,
+            ms2_isotope_lazyscore_ratio: 0.5,
+            lazyscore_z: 2.0,
+            lazyscore_vs_baseline: 1.5,
+            split_product_score: 0.8,
+            cosine_au: 0.7,
+            scribe_au: 0.6,
+            cosine_cg: 0.5,
+            scribe_cg: 0.4,
+            cosine_weighted_coelution: 0.9,
+            cosine_gradient_consistency: 0.85,
+            scribe_weighted_coelution: 0.88,
+            scribe_gradient_consistency: 0.82,
+            peak_shape: 0.95,
+            ratio_cv: 0.1,
+            centered_apex: 0.5,
+            precursor_coelution: 0.9,
+            fragment_coverage: 0.8,
+            precursor_apex_match: 0.7,
+            xic_quality: 0.75,
+            fragment_apex_agreement: 0.85,
+            isotope_correlation: 0.9,
+            gaussian_correlation: 0.88,
+            per_frag_gaussian_corr: 0.87,
+            rising_cycles: 3,
+            falling_cycles: 2,
+            npeaks: 5,
+            n_scored_fragments: 6,
+            ms2_summed_intensity: 1000.0,
+            ms1_summed_intensity: 500.0,
+            ms2_mz_errors: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+            ms2_mobility_errors: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
+            ms1_mz_errors: [0.1, 0.2, 0.3],
+            ms1_mobility_errors: [0.01, 0.02, 0.03],
+            ms2_intensity_ratios: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
+            ms1_intensity_ratios: [0.9, 0.8, 0.7],
+        }
+    }
 }
 
 /// Phase 3 output. All scoring fields guaranteed populated.

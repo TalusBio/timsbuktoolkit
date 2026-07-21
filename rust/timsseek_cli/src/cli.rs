@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use timsseek::DecoyStrategy;
+use timsseek::DecoyPolicy;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -56,7 +56,7 @@ pub struct Cli {
     /// - force: Drop library decoys and regenerate mass-shift decoys
     /// - never: Use library as-is without decoy generation
     #[arg(long, value_name = "STRATEGY")]
-    pub decoy_strategy: Option<DecoyStrategy>,
+    pub decoy_strategy: Option<DecoyPolicy>,
 
     /// Print the default TOML configuration to stdout and exit.
     #[arg(long, conflicts_with = "write_default_config")]

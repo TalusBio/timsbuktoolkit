@@ -11,7 +11,7 @@ use crate::IonAnnot;
 /// is `apply_isotope_offset_fragments_into(&mut worker.isotope_scratch_eg, &item.query, 1)`.
 pub fn apply_isotope_offset_fragments_into(
     dst: &mut TimsElutionGroup<IonAnnot>,
-    src: &TimsElutionGroup<IonAnnot>,
+    src: &impl timsquery::traits::QueryGeom<Label = IonAnnot>,
     offset: i8,
 ) {
     dst.reset_from(src);
