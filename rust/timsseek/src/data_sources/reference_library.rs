@@ -114,9 +114,8 @@ impl<'a> RefQuery<'a> {
 
     /// Materialize the output identity `Peptide` for this flyweight.
     ///
-    /// `raw` is the modified-sequence blob slice. `parsed` mirrors the
-    /// materialized load path (`convert_diann_to_query_item`): normalize the
-    /// modified sequence to ProForma and parse it — but ONLY when sequence
+    /// `raw` is the modified-sequence blob slice. `parsed` is filled by
+    /// normalizing the modified sequence to ProForma and parsing it — but ONLY when sequence
     /// features are `Available` (the whole-library parse gate passed at build
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift

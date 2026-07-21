@@ -28,8 +28,9 @@ use timsquery::models::capabilities::SeqFeatureState;
 use timsquery::serde::read_library_file as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
-/// This is meant to the be the serializable version of the speclib element
-/// so ... in general should be backwards compatible and implement `Into<QueryItemToScore>`
+/// The serializable, on-disk form of a native speclib element. Kept backwards
+/// compatible; the load path builds the columnar `ReferenceLibrary` arena
+/// directly from these elements (see `Speclib::from_file_with_format`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerSpeclibElement {
     precursor: PrecursorEntry,
@@ -294,8 +295,7 @@ impl SpeclibFormat {
 ///
 /// The native path builds the columnar arena directly from these elements (see
 /// `Speclib::from_file_with_format`), so the reader stays at the serializable
-/// element and does NOT eagerly materialize `QueryItemToScore` (the old AOS
-/// path, removed in Task 9).
+/// element and does not eagerly build per-row scoring items.
 pub struct SpeclibReader<'a> {
     inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send + 'a>,
 }
@@ -471,7 +471,7 @@ impl Speclib {
         // `.speclib`/TSV/parquet, Spectronaut, Skyline, JSON), which returns a
         // label-generic `LibraryArena`. One path from here: narrow the arena
         // to the ion-annotated `ReferenceLibrary`, apply the decoy strategy,
-        // seal, gate sequence features, and hand back a `Speclib::Lazy`.
+        // seal, gate sequence features, and hand back the lazy arena.
         tracing::info!(
             "Loading library via timsquery format detection: {}",
             path.display()
@@ -511,8 +511,8 @@ impl Speclib {
         let reader = SpeclibReader::new(file, format)?;
 
         // Build the columnar arena directly from the streamed elements (same
-        // lazy shape as the `.speclib` path), instead of the old AOS collect
-        // into `Vec<QueryItemToScore>`. Each element's fragment labels/mzs/
+        // lazy shape as the `.speclib` path), instead of collecting per-row
+        // scoring items into an intermediate Vec. Each element's fragment labels/mzs/
         // intensities are parallel vectors in the native format, so the
         // reference-intensity sidecar is filled in fragment-push order.
         let mut geom =
@@ -766,7 +766,7 @@ mod tests {
 
         // Skyline routes through the timsquery bridge (`from_elution_groups`),
         // which now threads the reference intensities through, so it narrows to
-        // a `Speclib::Lazy` arena like the DIA-NN formats. No shipped decoys +
+        // a lazy `ReferenceLibrary` arena like the DIA-NN formats. No shipped decoys +
         // default IfMissing -> `LazyMassShift`.
         // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
         assert_eq!(
@@ -1098,7 +1098,7 @@ mod tests {
     /// directly. The fixture ships one target + one stored decoy, so the
     /// Task-4 seal gate downgrades `LazyMassShift -> Passthrough`: the arena is
     /// 1:1 with the stored rows (no synthetic mass-shift expansion). Proves the
-    /// native path produces a `Speclib::Lazy` with the right length, target/
+    /// native path produces a lazy `ReferenceLibrary` with the right length, target/
     /// decoy flags, and per-fragment reference intensities.
     #[test]
     fn from_file_with_format_native_ndjson_builds_lazy_arena() {
@@ -1168,6 +1168,77 @@ mod tests {
         for (_label, intensity) in frags {
             assert!(intensity > 0.0, "reference intensities are positive");
         }
+    }
+
+    /// Negative parse-gate coverage on the arena path. `finalize_reference_library`
+    /// walks every target's MODIFIED sequence blob; if ANY row fails
+    /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
+    /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
+    /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`: the `!` bytes are
+    /// rejected by both the fast byte-walk parser and the rustyms fallback), so
+    /// the gate must report `!parsable_sequences()`. This is the inverse of
+    /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
+    /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
+    #[test]
+    fn from_file_native_ndjson_poisoned_row_disables_sequence_features() {
+        let good = SerSpeclibElement::new(
+            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
+            ReferenceEG::new(
+                0,
+                500.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.8, 0.3],
+                0.75,
+                120.0,
+            ),
+        );
+        // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
+        // (`_ => return None`) and by the rustyms pro_forma fallback.
+        let poisoned = SerSpeclibElement::new(
+            PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
+            ReferenceEG::new(
+                1,
+                600.0,
+                vec![0, 1, 2],
+                vec![300.0, 400.0],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("y2").unwrap(),
+                ],
+                vec![1.0, 0.5, 0.2],
+                vec![0.7, 0.4],
+                0.75,
+                120.0,
+            ),
+        );
+
+        let mut ndjson = String::new();
+        ndjson.push_str(&serde_json::to_string(&good).unwrap());
+        ndjson.push('\n');
+        ndjson.push_str(&serde_json::to_string(&poisoned).unwrap());
+        ndjson.push('\n');
+
+        let path = std::env::temp_dir().join(format!(
+            "timsseek_poisoned_fixture_{}.ndjson",
+            std::process::id()
+        ));
+        std::fs::write(&path, ndjson).unwrap();
+
+        let speclib = Speclib::from_file(&path, crate::models::DecoyStrategy::default())
+            .expect("native ndjson should load even with an unparseable sequence");
+        std::fs::remove_file(&path).ok();
+
+        // The poisoned row flips the whole-library gate OFF.
+        assert!(
+            !speclib.parsable_sequences(),
+            "an unparseable modified sequence must disable sequence features library-wide"
+        );
     }
 
     /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
