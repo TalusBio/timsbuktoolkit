@@ -18,12 +18,12 @@ use crate::models::sequence::{
 };
 use crate::models::{
     DecoyMarking,
+    QueryItemToScore,
     map_decoy_strategy,
 };
 use crate::{
     ExpectedIntensities,
     IonAnnot,
-    QueryItemToScore,
 };
 use serde::{
     Deserialize,
@@ -1140,8 +1140,6 @@ impl Speclib {
                     tracing::info!("Decoy strategy: Force - generating mass-shift decoys");
                 }
 
-                // const CARBON_MASS: f64 = 12.0;
-                // This seems to leak data.
                 const CH2_MASS: f64 = 14.0;
                 let mut all_entries = Vec::with_capacity(targets.len() * 3);
 
@@ -1189,12 +1187,12 @@ impl Speclib {
                 } else {
                     tracing::warn!(
                         "Library contains NO decoys. Will generate synthetic mass-shift decoys:\n\
-                         - Creating 2 decoys per target (±12.0 Da / C12 mass)\n\
+                         - Creating 2 decoys per target (±14.0 Da / CH2 mass)\n\
                          - Total library size will be 3x original (1 target + 2 decoys)\n\
                          - Each target-decoy triplet will share a decoy_group for FDR estimation"
                     );
 
-                    const CARBON_MASS: f64 = 12.0;
+                    const CH2_MASS: f64 = 14.0;
                     let mut all_entries = Vec::with_capacity(targets.len() * 3);
 
                     for (idx, target) in targets.into_iter().enumerate() {
@@ -1207,11 +1205,11 @@ impl Speclib {
                         all_entries.push(target.clone());
 
                         let plus_decoy =
-                            create_mass_shifted_decoy(&target, decoy_group_id, CARBON_MASS)?;
+                            create_mass_shifted_decoy(&target, decoy_group_id, CH2_MASS)?;
                         all_entries.push(plus_decoy);
 
                         let minus_decoy =
-                            create_mass_shifted_decoy(&target, decoy_group_id, -CARBON_MASS)?;
+                            create_mass_shifted_decoy(&target, decoy_group_id, -CH2_MASS)?;
                         all_entries.push(minus_decoy);
                     }
 

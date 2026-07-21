@@ -22,7 +22,6 @@ pub use models::{
     DecoyStrategy,
     ExpectedIntensities,
     ProteinSlice,
-    QueryItemToScore,
 };
 pub use scoring::{
     CompetedCandidate,
