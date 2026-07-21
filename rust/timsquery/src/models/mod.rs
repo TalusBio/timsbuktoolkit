@@ -16,6 +16,7 @@ pub use base::{
 };
 pub use capabilities::{
     DecoyStrategy,
+    FragmentFeatureState,
     IsotopeStrategy,
     LibCapabilities,
     SeqFeatureState,

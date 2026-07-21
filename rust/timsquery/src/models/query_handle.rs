@@ -158,6 +158,7 @@ mod tests {
     fn one_target_lib() -> QueryCollection<IonAnnot> {
         let mut c = QueryCollection::with_capabilities(LibCapabilities {
             sequence_features: SeqFeatureState::Available,
+            fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::LazyMassShift {
                 offset: 14.0,
@@ -237,6 +238,7 @@ mod tests {
         let mut c: QueryCollection<Arc<str>> =
             QueryCollection::with_capabilities(LibCapabilities {
                 sequence_features: SeqFeatureState::Available,
+                fragment_features: FragmentFeatureState::Available,
                 isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
                 decoys: DecoyStrategy::None,
             });
