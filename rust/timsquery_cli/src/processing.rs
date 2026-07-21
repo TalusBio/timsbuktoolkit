@@ -16,14 +16,18 @@ use timscentroid::rt_mapping::{
     CycleToRTMapping,
     MS1CycleIndex,
 };
+use timsquery::models::QueryRef;
 use timsquery::models::aggregators::{
     ChromatogramCollector,
     PointIntensityAggregator,
     SpectralCollector,
 };
-use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::ChromatogramOutput;
+use timsquery::traits::{
+    DecoyShift,
+    QueryGeom,
+};
 use timsquery::{
     KeyLike,
     QueriableData,
@@ -81,23 +85,23 @@ pub enum AggregatorContainer<T: KeyLike + Display> {
 
 impl<T: KeyLike + Display> AggregatorContainer<T> {
     pub fn new(
-        queries: Vec<TimsElutionGroup<T>>,
+        queries: &[QueryRef<'_, T>],
         aggregator: PossibleAggregator,
         ref_rts: &CycleToRTMapping<MS1CycleIndex>,
         tolerance: &Tolerance,
-    ) -> Result<Self, CliError> {
+    ) -> Result<Self, CliError>
+    where
+        T: DecoyShift,
+    {
         Ok(match aggregator {
             PossibleAggregator::PointIntensityAggregator => AggregatorContainer::Point(
-                queries
-                    .into_iter()
-                    .map(|x| PointIntensityAggregator::new_with_elution_group(x.into()))
-                    .collect(),
+                queries.iter().map(PointIntensityAggregator::new).collect(),
             ),
             PossibleAggregator::ChromatogramAggregator => {
                 let collectors = queries
-                    .into_iter()
-                    .map(|x| {
-                        let rt_range = match tolerance.rt_range_as_milis(x.rt_seconds()) {
+                    .iter()
+                    .map(|q| {
+                        let rt_range = match tolerance.rt_range_as_milis(q.rt_seconds()) {
                             timsquery::OptionallyRestricted::Unrestricted => {
                                 let range = ref_rts.range_milis();
                                 timsquery::TupleRange::try_new(range.0, range.1)
@@ -105,7 +109,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                             }
                             timsquery::OptionallyRestricted::Restricted(r) => r,
                         };
-                        ChromatogramCollector::new(&x, rt_range, ref_rts)
+                        ChromatogramCollector::new(q, rt_range, ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;

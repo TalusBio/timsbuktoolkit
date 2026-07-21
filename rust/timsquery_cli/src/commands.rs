@@ -17,9 +17,13 @@ use std::time::{
 
 use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
-use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::Tolerance;
+use timsquery::models::{
+    QueryCollection,
+    QueryRef,
+};
 use timsquery::serde::load_index_auto;
+use timsquery::traits::DecoyShift;
 use tracing::{
     info,
     instrument,
@@ -34,7 +38,7 @@ use crate::cli::{
 };
 use crate::error::CliError;
 use crate::processing::AggregatorContainer;
-use timsquery::serde::ElutionGroupCollection;
+use timsquery::serde::LibraryArena;
 
 /// Main function for the 'query-index' subcommand.
 #[instrument]
@@ -51,8 +55,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let elution_groups: ElutionGroupCollection = read_query_elution_groups(&elution_groups_path)?;
-    info!("Loaded {} elution groups", elution_groups.len());
+    let arena: LibraryArena = read_query_elution_groups(&elution_groups_path)?;
 
     let (handle, index_source) = load_index_auto(
         raw_file_path
@@ -73,9 +76,13 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&output_path)?;
     let put_path = output_path.join("results.json");
 
-    match elution_groups {
-        ElutionGroupCollection::StringLabels(egs, _) => stream_process_batches(
-            egs,
+    // Every format funnels into one of the two label-typed arenas; extraction
+    // is generic over the label, so both arms call the same driver over the
+    // columnar flyweights (`QueryGeom`). The cli never scores or shifts decoys,
+    // so a `QueryRef` (geometry only) is all the collectors need.
+    match arena {
+        LibraryArena::Mzpaf { geom, .. } => stream_process_batches(
+            &geom,
             aggregator_use,
             &index,
             &tolerance_settings,
@@ -83,26 +90,8 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
             &put_path,
             batch_size,
         ),
-        ElutionGroupCollection::MzpafLabels(egs, _) => stream_process_batches(
-            egs,
-            aggregator_use,
-            &index,
-            &tolerance_settings,
-            serialization_format,
-            &put_path,
-            batch_size,
-        ),
-        ElutionGroupCollection::TinyIntLabels(egs, _) => stream_process_batches(
-            egs,
-            aggregator_use,
-            &index,
-            &tolerance_settings,
-            serialization_format,
-            &put_path,
-            batch_size,
-        ),
-        ElutionGroupCollection::IntLabels(egs, _) => stream_process_batches(
-            egs,
+        LibraryArena::Str { geom } => stream_process_batches(
+            &geom,
             aggregator_use,
             &index,
             &tolerance_settings,
@@ -114,8 +103,9 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Reads elution groups from a given path, attempting to parse them in several formats.
-pub fn read_query_elution_groups(path: &PathBuf) -> Result<ElutionGroupCollection, CliError> {
+/// Reads a spectral library from a given path, funnelling every supported
+/// format into the label-typed columnar [`LibraryArena`].
+pub fn read_query_elution_groups(path: &PathBuf) -> Result<LibraryArena, CliError> {
     match timsquery::serde::read_library_file(path) {
         Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
@@ -246,10 +236,12 @@ impl<W: Write> JsonStreamSerializer<W> {
     }
 }
 
-/// Streams and processes elution groups in batches, then serializes the results.
+/// Streams and processes a columnar library arena in batches, then serializes
+/// the results. Generic over the label so both arena arms (`IonAnnot` / string)
+/// share one path.
 #[instrument(skip_all)]
-pub fn stream_process_batches<T: KeyLike + Display>(
-    elution_groups: Vec<TimsElutionGroup<T>>,
+pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
+    geom: &QueryCollection<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
@@ -257,7 +249,7 @@ pub fn stream_process_batches<T: KeyLike + Display>(
     output_path: &Path,
     batch_size: usize,
 ) -> Result<(), CliError> {
-    let total_groups = elution_groups.len();
+    let total_groups = geom.expanded_len();
     let total_batches = total_groups.div_ceil(batch_size);
 
     info!(
@@ -273,7 +265,7 @@ pub fn stream_process_batches<T: KeyLike + Display>(
         SerializationFormat::PrettyJson => {
             let ser = JsonStreamSerializer::new(writer, SerializationFormat::PrettyJson);
             process_and_serialize(
-                elution_groups,
+                geom,
                 aggregator_use,
                 index,
                 tolerance,
@@ -287,7 +279,7 @@ pub fn stream_process_batches<T: KeyLike + Display>(
         SerializationFormat::Json => {
             let ser = JsonStreamSerializer::new(writer, SerializationFormat::Json);
             process_and_serialize(
-                elution_groups,
+                geom,
                 aggregator_use,
                 index,
                 tolerance,
@@ -301,7 +293,7 @@ pub fn stream_process_batches<T: KeyLike + Display>(
         SerializationFormat::Ndjson => {
             let ser = JsonStreamSerializer::new(writer, SerializationFormat::Ndjson);
             process_and_serialize(
-                elution_groups,
+                geom,
                 aggregator_use,
                 index,
                 tolerance,
@@ -316,10 +308,12 @@ pub fn stream_process_batches<T: KeyLike + Display>(
     Ok(())
 }
 
-/// Processes batches of elution groups and serializes the aggregated results.
+/// Processes batches of arena flyweights and serializes the aggregated results.
+/// Each batch materializes `QueryRef` flyweights over the shared arena (no row
+/// data is copied) and feeds them to the extraction collectors.
 #[instrument(skip_all)]
-pub fn process_and_serialize<T: KeyLike + Display>(
-    elution_groups: Vec<TimsElutionGroup<T>>,
+pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
+    geom: &QueryCollection<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
@@ -332,19 +326,26 @@ pub fn process_and_serialize<T: KeyLike + Display>(
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
-    for (batch_idx, chunk) in elution_groups.chunks(batch_size).enumerate() {
+    let total = geom.expanded_len();
+    let mut batch_start = 0;
+    let mut batch_idx = 0;
+    while batch_start < total {
+        let batch_end = (batch_start + batch_size).min(total);
         if last_progress.elapsed() >= progress_interval {
             info!(
                 "Processing batch {}/{} ({} groups)",
                 batch_idx + 1,
                 total_batches,
-                chunk.len(),
+                batch_end - batch_start,
             );
             last_progress = Instant::now();
         }
 
+        let queries: Vec<QueryRef<'_, L>> =
+            (batch_start..batch_end).map(|f| geom.item_at(f)).collect();
+
         let mut container = AggregatorContainer::new(
-            chunk.to_vec(),
+            &queries,
             aggregator_use,
             index.ms1_cycle_mapping(),
             tolerance,
@@ -352,6 +353,9 @@ pub fn process_and_serialize<T: KeyLike + Display>(
 
         container.add_query(index, tolerance);
         container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping())?;
+
+        batch_start = batch_end;
+        batch_idx += 1;
     }
 
     ser.finish()?;
@@ -367,6 +371,7 @@ pub fn process_and_serialize<T: KeyLike + Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use timsquery::models::elution_group::TimsElutionGroup;
     use timsquery::models::tolerance::{
         MobilityTolerance,
         MzTolerance,
@@ -381,11 +386,14 @@ mod tests {
         let elution_groups_path =
             PathBuf::from(manifest_path).join("data_contracts/single_elution_group.json");
 
-        let elution_groups = read_query_elution_groups(&elution_groups_path).unwrap();
+        let arena = read_query_elution_groups(&elution_groups_path).unwrap();
         // Do not change that file, it means its a data contract test
         // AKA, we promised we would be compatible with that file.
         // IF you do want to change it contact the Carafe developers first.
-        assert!(elution_groups.len() == 1);
+        match arena {
+            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
+            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+        }
     }
 
     #[test]
@@ -414,7 +422,69 @@ mod tests {
         // Write to a temp file ... while I implement direct reading api
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp_file.path(), ELUTION_GROUP_TEMPLATE).unwrap();
-        let elution_groups = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
-        assert!(elution_groups.len() == 2);
+        let arena = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
+        // mzpaf-parseable labels land in the Mzpaf arena (two template rows).
+        match arena {
+            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
+            LibraryArena::Str { .. } => panic!("mzpaf labels must not land in the Str arena"),
+        }
+    }
+
+    /// A string-labelled JSON library (labels that do NOT parse as mzpaf ion
+    /// annotations) must land in [`LibraryArena::Str`], and each flyweight the
+    /// arena yields must feed the extraction collectors without error.
+    const STRING_LABEL_TEMPLATE: &str = r#"[
+        {
+            "fragment_labels":[ "frag_alpha", "frag_beta", "frag_gamma" ],
+            "fragments":[ 147.1128, 248.1604, 347.22889 ],
+            "id":0,
+            "mobility":0.9851410984992981,
+            "precursor_mz":723.844601280237,
+            "precursor_charge":2,
+            "precursor_isotopes":[0,1,2],
+            "rt_seconds":302.2712
+        },
+        {
+            "fragment_labels":[ "frag_alpha", "frag_beta" ],
+            "fragments":[ 147.1128, 248.1604 ],
+            "id":1,
+            "mobility":0.9851410984992981,
+            "precursor_mz":523.11,
+            "precursor_charge":1,
+            "precursor_isotopes":[0],
+            "rt_seconds":354.2712
+        }
+    ]"#;
+
+    #[test]
+    fn test_string_label_json_lands_in_str_arena_and_extracts() {
+        use timsquery::models::aggregators::{
+            PointIntensityAggregator,
+            SpectralCollector,
+        };
+        use timsquery::traits::QueryGeom;
+
+        let tmp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp_file.path(), STRING_LABEL_TEMPLATE).unwrap();
+        let arena = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
+
+        let geom = match arena {
+            LibraryArena::Str { geom } => geom,
+            LibraryArena::Mzpaf { .. } => {
+                panic!("string labels must land in the Str arena, not Mzpaf")
+            }
+        };
+
+        // decoys off -> one flat variant per stored row.
+        assert_eq!(geom.n_rows(), 2);
+        assert_eq!(geom.expanded_len(), 2);
+
+        // The read -> item_at -> collector path builds without error for every row.
+        for flat in 0..geom.expanded_len() {
+            let q = geom.item_at(flat);
+            let point = PointIntensityAggregator::new(&q);
+            assert_eq!(point.fragment_mzs.len(), q.fragment_count());
+            let _spectrum: SpectralCollector<_, f32> = SpectralCollector::new(&q);
+        }
     }
 }
