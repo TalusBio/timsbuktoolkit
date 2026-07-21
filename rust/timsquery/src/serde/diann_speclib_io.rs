@@ -13,9 +13,9 @@
 //!      over byte ranges of the in-memory file. No domain knowledge.
 //!   2. Emit ([`SpecLib`] + [`EntryIter`]): a pull parser that walks the
 //!      variable-length envelope and yields one [`EntryView`] per precursor.
-//!   3. Map ([`map_entry`]): [`EntryView`] -> the [`DiannPrecursorExtras`] +
-//!      [`TimsElutionGroup<IonAnnot>`] shape shared by the DIA-NN TSV/parquet
-//!      paths. This is where the ion-type table, dedup, and drop stats live.
+//!   3. Map ([`map_entry`]): [`EntryView`] -> rows pushed directly into a
+//!      columnar `QueryCollection<IonAnnot>` (plus a parallel reference-intensity
+//!      sidecar). This is where the ion-type table, dedup, and drop stats live.
 //!
 //! The `Fragment`/`Peptide` split falls out of the layout: a `Product` is a
 //! fixed 12-byte record (cheap fixed-offset view), and a `Peptide`'s only
@@ -25,18 +25,18 @@
 //! length-prefixed name) and so is consumed sequentially by the iterator rather
 //! than exposed as a random-access view.
 
-use super::diann_io::DiannPrecursorExtras;
 use super::library_file::{
-    ElutionGroupCollection,
-    FileReadingExtras,
+    LibraryArena,
     LibraryReadingError,
 };
-use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
+use crate::models::{
+    LibCapabilities,
+    QueryCollection,
+};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use tinyvec::tiny_vec;
 use tracing::{
     info,
     warn,
@@ -199,10 +199,6 @@ impl<'a> Peptide<'a> {
         // index, charge, length, mz, i_rt, s_rt (6 * 4 = 24); v <= -2 adds
         // lib_qvalue, i_im, s_im (3 * 4 = 12).
         if version <= -2 { 36 } else { 24 }
-    }
-
-    fn index(&self) -> i32 {
-        le_i32(self.buf, 0)
     }
 
     fn charge(&self) -> i32 {
@@ -471,34 +467,55 @@ impl SpecLib {
         }
         let at_eof = c.at_eof();
 
-        // Phase B: parallel parse + map. `try_fold`/`try_reduce` short-circuit on
-        // the first error and, on an indexed iterator, preserve file order.
-        // The 3rd accumulator slot is a per-worker dedup scratch buffer reused
-        // across every entry that worker maps (see `map_entry`), so the hot loop
-        // allocates only the persistent output, not a fresh dedup Vec per entry.
-        let (entries, stats, _scratch) = offsets
+        // Phase B: parallel parse + map straight into per-worker arena shards,
+        // concatenated back into file order. `try_fold`/`try_reduce`
+        // short-circuit on the first error and, on an indexed iterator, preserve
+        // file order. Each worker owns a `(QueryCollection, frag_intens)` shard
+        // it pushes rows into; the reduce step concatenates shards with
+        // `append_arena` (which rebases every CSR offset). The 4th accumulator
+        // slot is a per-worker dedup scratch buffer reused across every entry
+        // that worker maps (see `map_entry`), so the hot loop allocates only the
+        // persistent output, not a fresh dedup Vec per entry.
+        let (geom, frag_intens, stats, _scratch) = offsets
             .par_iter()
             .try_fold(
-                || (Vec::new(), SpeclibDecodeStats::default(), Vec::new()),
-                |(mut acc, mut stats, mut scratch), &off| -> Result<_, LibraryReadingError> {
+                || {
+                    (
+                        QueryCollection::with_capabilities(LibCapabilities::default_diann()),
+                        Vec::<f32>::new(),
+                        SpeclibDecodeStats::default(),
+                        Vec::new(),
+                    )
+                },
+                |(mut geom, mut frag_intens, mut stats, mut scratch),
+                 &off|
+                 -> Result<_, LibraryReadingError> {
                     let mut cur = Cursor::new(self.data.bytes());
                     cur.pos = off;
                     let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
-                    acc.push(map_entry(view, &mut stats, &mut scratch)?);
-                    Ok((acc, stats, scratch))
+                    map_entry(view, &mut geom, &mut frag_intens, &mut stats, &mut scratch)?;
+                    Ok((geom, frag_intens, stats, scratch))
                 },
             )
             .try_reduce(
-                || (Vec::new(), SpeclibDecodeStats::default(), Vec::new()),
-                |(mut a, sa, scratch), (b, sb, _)| {
-                    a.extend(b);
+                || {
+                    (
+                        QueryCollection::with_capabilities(LibCapabilities::default_diann()),
+                        Vec::<f32>::new(),
+                        SpeclibDecodeStats::default(),
+                        Vec::new(),
+                    )
+                },
+                |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
+                    append_arena(&mut a_geom, b_geom);
+                    a_int.extend(b_int);
                     let mut merged = sa;
                     merged.merge(&sb);
-                    Ok((a, merged, scratch))
+                    Ok((a_geom, a_int, merged, scratch))
                 },
             )?;
 
-        Ok((entries, stats, at_eof))
+        Ok((geom, frag_intens, stats, at_eof))
     }
 }
 
@@ -601,16 +618,73 @@ fn residue_count(stripped: &str) -> usize {
     stripped.chars().filter(|c| c.is_ascii_alphabetic()).count()
 }
 
-/// Map a decoded target `EntryView` onto the pipeline shape, folding drop
-/// counters into `stats`.
+/// Concatenate `src` onto `dst` in place, rebasing every CSR offset by `dst`'s
+/// current arena lengths and each structured-mod registry index by `dst`'s mod
+/// registry length. The empty arena is the identity, so this is the associative
+/// reduce operator that merges the per-worker shards back into file order.
+///
+/// `dst.caps` is preserved (all shards share `default_diann`), so merging an
+/// empty identity in either position is a no-op on capabilities.
+fn append_arena(dst: &mut QueryCollection<IonAnnot>, mut src: QueryCollection<IonAnnot>) {
+    // Bases captured BEFORE the backing arenas are appended.
+    let frag_base = dst.frag_labels.len();
+    let strip_base = dst.seq_strip_blob.len();
+    let mod_seq_base = dst.seq_mod_blob.len();
+    let mods_base = dst.mods.len();
+    let reg_base = dst.mod_registry.len();
+
+    dst.precursor_mz.append(&mut src.precursor_mz);
+    dst.charge.append(&mut src.charge);
+    dst.rt_seconds.append(&mut src.rt_seconds);
+    dst.mobility.append(&mut src.mobility);
+    dst.is_decoy.append(&mut src.is_decoy);
+    dst.frag_labels.append(&mut src.frag_labels);
+    dst.frag_mzs.append(&mut src.frag_mzs);
+    dst.seq_strip_blob.push_str(&src.seq_strip_blob);
+    dst.seq_mod_blob.push_str(&src.seq_mod_blob);
+
+    for &(pos, reg) in &src.mods {
+        let rebased =
+            u16::try_from(reg as usize + reg_base).expect("mod registry index exceeds u16 range");
+        dst.mods.push((pos, rebased));
+    }
+    dst.mod_registry.append(&mut src.mod_registry);
+
+    // CSR offset arrays carry a leading 0; skip it and rebase the remainder onto
+    // the running arena length. `try_from` mirrors the checked pushes in
+    // `QueryCollection` — an overflow fails loud rather than wrapping an offset.
+    dst.frag_off.extend(src.frag_off[1..].iter().map(|&o| {
+        u32::try_from(o as usize + frag_base).expect("fragment arena exceeds u32 offset range")
+    }));
+    dst.seq_strip_off
+        .extend(src.seq_strip_off[1..].iter().map(|&o| {
+            u32::try_from(o as usize + strip_base)
+                .expect("stripped-seq blob exceeds u32 offset range")
+        }));
+    dst.seq_mod_off
+        .extend(src.seq_mod_off[1..].iter().map(|&o| {
+            u32::try_from(o as usize + mod_seq_base)
+                .expect("modified-seq blob exceeds u32 offset range")
+        }));
+    dst.mod_off.extend(src.mod_off[1..].iter().map(|&o| {
+        u32::try_from(o as usize + mods_base).expect("mods arena exceeds u32 offset range")
+    }));
+}
+
+/// Map a decoded target `EntryView` directly into the columnar arena, folding
+/// drop counters into `stats` and appending each kept fragment's reference
+/// intensity to `frag_intens` IN THE SAME ORDER as the pushed fragment labels
+/// (so the sidecar stays parallel to `geom.frag_labels`).
 ///
 /// `scratch` is a caller-owned dedup buffer reused across entries (one per rayon
 /// worker) so the per-entry dedup pass allocates nothing; it is cleared on entry.
 fn map_entry(
     entry: EntryView,
+    geom: &mut QueryCollection<IonAnnot>,
+    frag_intens: &mut Vec<f32>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
-) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), LibraryReadingError> {
+) -> Result<(), LibraryReadingError> {
     let pep = &entry.peptide;
     let name = entry.name;
     if entry.had_file_decoy {
@@ -727,50 +801,42 @@ fn map_entry(
         }
     }
 
-    let mut fragment_labels = Vec::with_capacity(kept.len());
-    let mut fragment_mzs = Vec::with_capacity(kept.len());
-    let mut relative_intensities = Vec::with_capacity(kept.len());
+    // (label, mz) pairs for the arena, with the parallel reference-intensity
+    // sidecar filled in the same order — dedup already collapsed duplicate
+    // labels, so this order is what lands in `geom.frag_labels`.
+    let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(kept.len());
     for &(ion, mz, height) in kept.iter() {
-        fragment_labels.push(ion);
-        fragment_mzs.push(mz);
-        relative_intensities.push((ion, height));
+        frags.push((ion, mz));
+        frag_intens.push(height);
     }
 
-    let eg = TimsElutionGroup::builder()
-        .id(pep.index() as u64)
-        .mobility_ook0(pep.i_im())
+    // Record charge is i32; `push_target` wants u8. Charge was range-checked to
+    // 1..=255 above, so the cast is safe.
+    geom.push_target(
+        pep.mz() as f64,
+        charge as u8,
         // Library iRT is dimensionless here; keep it raw (no minute->second
         // scaling) — Phase 1 RT tolerance is unrestricted.
-        .rt_seconds(pep.i_rt())
-        .fragment_labels(fragment_labels.as_slice().into())
-        .fragment_mzs(fragment_mzs)
-        .precursor_labels(tiny_vec![0])
-        // Record charge is i32; `precursor` wants u8. Charge is realistically
-        // 1-10, so the cast is safe.
-        .precursor(pep.mz() as f64, charge as u8)
-        .try_build()
-        .map_err(|e| {
-            LibraryReadingError::SpeclibParse(format!(
-                "failed to build elution group for {name:?}: {e:?}"
-            ))
-        })?;
-
-    let extras = DiannPrecursorExtras {
-        modified_peptide,
-        stripped_peptide,
-        protein_id: entry.protein_id,
-        is_decoy: false,
-        relative_intensities,
-    };
-
-    Ok((eg, extras))
+        pep.i_rt(),
+        pep.i_im(),
+        &frags,
+        &stripped_peptide,
+        &modified_peptide,
+        &[],
+    );
+    // `entry.protein_id` is intentionally dropped: the columnar arena has no
+    // protein column.
+    let _ = &entry.protein_id;
+    Ok(())
 }
 
 // --- Public entry points --------------------------------------------------
 
-/// Mapped entries, drop statistics, and whether parsing landed exactly on EOF.
+/// The built arena, its parallel reference-intensity sidecar, drop statistics,
+/// and whether parsing landed exactly on EOF.
 type ParsedSpeclib = (
-    Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>,
+    QueryCollection<IonAnnot>,
+    Vec<f32>,
     SpeclibDecodeStats,
     bool,
 );
@@ -811,17 +877,17 @@ pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
     }
 }
 
-/// Read a DIA-NN `.speclib` binary library into the shared collection type,
-/// emitting `FileReadingExtras::Diann` so the DIA-NN converter is reused.
+/// Read a DIA-NN `.speclib` binary library directly into the columnar arena,
+/// returning [`LibraryArena::Mzpaf`] with the reference-intensity sidecar.
 pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
-) -> Result<ElutionGroupCollection, LibraryReadingError> {
+) -> Result<LibraryArena, LibraryReadingError> {
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
     // mmap the file (not an owned read) — pages fault in on demand, no
     // file-sized resident buffer.
-    let (entries, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
+    let (mut geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
         // A parse that doesn't land on EOF means the entries were misaligned
@@ -851,15 +917,20 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     }
     info!(
         "Parsed {} precursors from DIA-NN .speclib {}",
-        entries.len(),
+        geom.n_rows(),
         path.display()
     );
 
-    let (egs, extras): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-    Ok(ElutionGroupCollection::MzpafLabels(
-        egs,
-        Some(FileReadingExtras::Diann(extras)),
-    ))
+    assert_eq!(
+        frag_intens.len(),
+        geom.frag_labels.len(),
+        "reference-intensity sidecar must stay parallel to the fragment-label arena"
+    );
+    geom.seal();
+    Ok(LibraryArena::Mzpaf {
+        geom,
+        frag_intens: Some(frag_intens),
+    })
 }
 
 #[cfg(test)]
@@ -891,33 +962,43 @@ mod tests {
     #[test]
     fn test_read_fixture_lands_on_eof_with_expected_count() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (entries, _stats, at_eof) =
+        let (geom, frag_intens, _stats, at_eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
         assert!(at_eof, "parse must land exactly on EOF");
-        assert_eq!(entries.len(), 1064, "precursor count from reference parser");
+        assert_eq!(geom.n_rows(), 1064, "precursor count from reference parser");
+        assert_eq!(
+            frag_intens.len(),
+            geom.frag_labels.len(),
+            "intensity sidecar stays parallel to the fragment arena"
+        );
     }
 
     #[test]
     fn test_first_entry_fields_and_fragments() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (entries, _stats, _eof) = parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let (geom, frag_intens, _stats, _eof) =
+            parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
 
-        let (eg, extras) = &entries[0];
-        assert_eq!(extras.modified_peptide, "AAAGAAATHLEVAR");
-        assert_eq!(extras.stripped_peptide, "AAAGAAATHLEVAR");
-        assert_eq!(eg.precursor_charge(), 2);
-        assert!((eg.precursor_mz() - 654.85541).abs() < 1e-3);
+        assert_eq!(&geom.seq_mod_blob[geom.seq_mod_range(0)], "AAAGAAATHLEVAR");
+        assert_eq!(
+            &geom.seq_strip_blob[geom.seq_strip_range(0)],
+            "AAAGAAATHLEVAR"
+        );
+        assert_eq!(geom.charge[0], 2);
+        assert!((geom.precursor_mz[0] - 654.85541).abs() < 1e-3);
         // Library iRT kept raw (dimensionless), not scaled to seconds.
-        assert!((eg.rt_seconds() - (-3.8674114)).abs() < 1e-3);
-        assert!((eg.mobility_ook0() - 1.0254545).abs() < 1e-4);
+        assert!((geom.rt_seconds[0] - (-3.8674114)).abs() < 1e-3);
+        assert!((geom.mobility[0] - 1.0254545).abs() < 1e-4);
 
         // The fixture has Peptide.length == 0, so y-series is recovered from the
         // sequence length (14). ExcludeFromAssay fragments are kept; only
         // neutral-loss/dup drop, so all 12 remain.
-        assert_eq!(eg.fragment_count(), 12, "all non-loss fragments kept");
+        let range = geom.frag_range(0);
+        assert_eq!(range.len(), 12, "all non-loss fragments kept");
 
         // First few fragments in file order, sourced independently. y9 carries
-        // the ExcludeFromAssay flag but is kept.
+        // the ExcludeFromAssay flag but is kept. `frag_intens` is aligned by
+        // index with `frag_labels`/`frag_mzs`.
         let expected = [
             (
                 IonAnnot::try_new('y', Some(8), 1, 0).unwrap(),
@@ -935,45 +1016,64 @@ mod tests {
                 0.8792037_f32,
             ),
         ];
-        let got: Vec<(IonAnnot, f64)> = eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
-        for (exp, act) in expected.iter().zip(got.iter()) {
-            assert_eq!(exp.0, act.0, "ion label");
+        let labels = &geom.frag_labels[range.clone()];
+        let mzs = &geom.frag_mzs[range.clone()];
+        let intens = &frag_intens[range];
+        for (i, (exp_ion, exp_mz, exp_int)) in expected.iter().enumerate() {
+            assert_eq!(labels[i], *exp_ion, "ion label");
             assert!(
-                (exp.1 - act.1).abs() < 1e-2,
+                (mzs[i] - exp_mz).abs() < 1e-2,
                 "frag mz {} vs {}",
-                exp.1,
-                act.1
+                exp_mz,
+                mzs[i]
             );
-        }
-        // Intensities are keyed by label in relative_intensities.
-        for (exp_ion, _mz, exp_int) in expected.iter() {
-            let found = extras
-                .relative_intensities
-                .iter()
-                .find(|(ion, _)| ion == exp_ion)
-                .expect("fragment present in relative_intensities");
-            assert!((found.1 - exp_int).abs() < 1e-4);
+            assert!((intens[i] - exp_int).abs() < 1e-4, "frag intensity");
         }
     }
 
     #[test]
     fn test_mid_entry_fields() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (entries, _stats, _eof) = parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let (geom, _intens, _stats, _eof) =
+            parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
 
-        let (eg, extras) = &entries[532];
-        assert_eq!(extras.modified_peptide, "LEGNSPQGSNQGVK");
-        assert_eq!(eg.precursor_charge(), 2);
-        assert!((eg.precursor_mz() - 707.85052).abs() < 1e-3);
-        assert!((eg.rt_seconds() - (-31.935_83)).abs() < 1e-3);
-        assert!((eg.mobility_ook0() - 0.9704546).abs() < 1e-4);
-        assert_eq!(eg.fragment_count(), 6);
+        assert_eq!(
+            &geom.seq_mod_blob[geom.seq_mod_range(532)],
+            "LEGNSPQGSNQGVK"
+        );
+        assert_eq!(geom.charge[532], 2);
+        assert!((geom.precursor_mz[532] - 707.85052).abs() < 1e-3);
+        assert!((geom.rt_seconds[532] - (-31.935_83)).abs() < 1e-3);
+        assert!((geom.mobility[532] - 0.9704546).abs() < 1e-4);
+        assert_eq!(geom.frag_range(532).len(), 6);
+    }
+
+    #[test]
+    fn test_read_library_file_yields_mzpaf_arena_with_parallel_intensities() {
+        use crate::serde::read_library_file;
+        let arena = read_library_file(fixture_path()).expect("read .speclib as a LibraryArena");
+        match arena {
+            LibraryArena::Mzpaf { geom, frag_intens } => {
+                assert!(geom.n_rows() > 0, "arena must hold precursors");
+                assert_eq!(
+                    frag_intens.as_ref().unwrap().len(),
+                    geom.frag_labels.len(),
+                    "frag_intens must stay parallel to the fragment-label arena"
+                );
+                assert!(
+                    !geom.is_decoy.iter().any(|&d| d),
+                    "the reader stores targets only"
+                );
+            }
+            LibraryArena::Str { .. } => panic!("DIA-NN .speclib must map to LibraryArena::Mzpaf"),
+        }
     }
 
     #[test]
     fn test_exclude_flagged_kept_and_loss_dropped() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (entries, stats, _eof) = parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let (geom, _intens, stats, _eof) =
+            parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
         // Reference parser: 8384 ExcludeFromAssay-flagged (kept, counted only),
         // 152 neutral-loss dropped, no dc != 0 entries.
         assert_eq!(stats.exclude_flagged, 8384);
@@ -981,10 +1081,10 @@ mod tests {
         assert_eq!(stats.decoys_dropped, 0);
         // Exclude-flagged fragments are present in the output, not dropped:
         // entry[0] keeps its flagged y9.
-        let (eg0, _) = &entries[0];
         assert!(
-            eg0.iter_fragments()
-                .any(|(l, _)| *l == IonAnnot::try_new('y', Some(9), 1, 0).unwrap()),
+            geom.frag_labels[geom.frag_range(0)]
+                .iter()
+                .any(|l| *l == IonAnnot::try_new('y', Some(9), 1, 0).unwrap()),
             "flagged y9 must be kept"
         );
     }

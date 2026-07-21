@@ -25,7 +25,16 @@ use super::spectronaut_io::{
 };
 use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
+use crate::models::{
+    DecoyStrategy,
+    FragmentFeatureState,
+    IsotopeStrategy,
+    LibCapabilities,
+    QueryCollection,
+    SeqFeatureState,
+};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{
     debug,
     info,
@@ -169,6 +178,95 @@ impl ElutionGroupCollection {
     }
 }
 
+/// The label-typed columnar library store returned by [`read_library_file`].
+///
+/// One funnel: every format lands in exactly one variant. DIA-NN family formats
+/// (`.speclib`/TSV/parquet) carry ion-chemistry (`IonAnnot`) labels and land in
+/// [`LibraryArena::Mzpaf`]; string-labelled JSON lands in [`LibraryArena::Str`].
+///
+/// `frag_intens` is the reference-intensity sidecar, parallel to
+/// `geom.frag_labels`/`geom.frag_mzs` (same length). The columnar store itself
+/// stays intensity-free (extraction does not need intensities); the DIA-NN
+/// `.speclib` reader populates the sidecar (`Some`) so the timsseek bridge can
+/// zip in reference intensities. Extraction (cli) ignores it.
+pub enum LibraryArena {
+    Mzpaf {
+        geom: QueryCollection<IonAnnot>,
+        frag_intens: Option<Vec<f32>>,
+    },
+    Str {
+        geom: QueryCollection<Arc<str>>,
+    },
+}
+
+impl LibraryArena {
+    /// Adapt the legacy [`ElutionGroupCollection`] (produced by the non-speclib
+    /// readers) into the arena. `IonAnnot`-labelled groups become
+    /// [`LibraryArena::Mzpaf`] (no reference intensities are threaded through
+    /// these paths yet, so `frag_intens` is `None`); string-labelled groups
+    /// become [`LibraryArena::Str`]. Integer-labelled groups have no arena
+    /// variant (no live consumer) and are rejected.
+    fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, LibraryReadingError> {
+        match egc {
+            ElutionGroupCollection::MzpafLabels(egs, _) => {
+                let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+                for eg in &egs {
+                    let frags: Vec<(IonAnnot, f64)> =
+                        eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
+                    geom.push_target(
+                        eg.precursor_mz(),
+                        eg.precursor_charge(),
+                        eg.rt_seconds(),
+                        eg.mobility_ook0(),
+                        &frags,
+                        "",
+                        "",
+                        &[],
+                    );
+                }
+                geom.seal();
+                Ok(LibraryArena::Mzpaf {
+                    geom,
+                    frag_intens: None,
+                })
+            }
+            ElutionGroupCollection::StringLabels(egs, _) => {
+                // String-labelled arenas carry no ion chemistry and ship no
+                // decoys: sequence/fragment features unavailable, decoys off.
+                let caps = LibCapabilities {
+                    sequence_features: SeqFeatureState::Unavailable,
+                    fragment_features: FragmentFeatureState::Unavailable,
+                    isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
+                    decoys: DecoyStrategy::None,
+                };
+                let mut geom = QueryCollection::with_capabilities(caps);
+                for eg in &egs {
+                    let frags: Vec<(Arc<str>, f64)> = eg
+                        .iter_fragments()
+                        .map(|(l, mz)| (Arc::<str>::from(l.as_str()), mz))
+                        .collect();
+                    geom.push_target(
+                        eg.precursor_mz(),
+                        eg.precursor_charge(),
+                        eg.rt_seconds(),
+                        eg.mobility_ook0(),
+                        &frags,
+                        "",
+                        "",
+                        &[],
+                    );
+                }
+                geom.seal();
+                Ok(LibraryArena::Str { geom })
+            }
+            ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
+                warn!("integer-labelled libraries have no LibraryArena variant; rejecting");
+                Err(LibraryReadingError::UnableToParseElutionGroups)
+            }
+        }
+    }
+}
+
 /// A single spectral-library format reader. Adding a format = one struct + one
 /// line in [`registry`], instead of editing an enum, a method, and an ordered
 /// try-chain.
@@ -181,7 +279,6 @@ pub trait LibraryReader: Send + Sync {
 }
 
 struct DiannParquetReader;
-struct DiannSpeclibReader;
 struct DiannTsvReader;
 struct SpectronautReader;
 struct SkylineReader;
@@ -206,20 +303,6 @@ impl LibraryReader for DiannParquetReader {
             egs,
             Some(FileReadingExtras::Diann(extras)),
         ))
-    }
-}
-
-impl LibraryReader for DiannSpeclibReader {
-    fn name(&self) -> &'static str {
-        "diann-speclib"
-    }
-
-    fn sniff(&self, path: &Path) -> bool {
-        sniff_diann_speclib_library_file(path)
-    }
-
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
-        read_diann_speclib_library_file(path)
     }
 }
 
@@ -308,7 +391,6 @@ impl LibraryReader for JsonReader {
 fn registry() -> &'static [&'static dyn LibraryReader] {
     &[
         &DiannParquetReader,
-        &DiannSpeclibReader,
         &DiannTsvReader,
         &SpectronautReader,
         &SkylineReader,
@@ -316,16 +398,23 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
     ]
 }
 
-pub fn read_library_file<T: AsRef<Path>>(
-    path: T,
-) -> Result<ElutionGroupCollection, LibraryReadingError> {
+pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, LibraryReadingError> {
     let path = path.as_ref();
+    // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
+    // reference-intensity sidecar); every other format still produces the legacy
+    // `ElutionGroupCollection`, adapted into the arena here. `.speclib` is
+    // sniffed first because its `read` path is the only one that can surface an
+    // `UnsupportedSpeclibVersion` diagnostic (the sniff has no version gate).
+    if sniff_diann_speclib_library_file(path) {
+        info!("Dispatching library read to diann-speclib (direct arena build)");
+        return read_diann_speclib_library_file(path);
+    }
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
             match reader.read(path) {
-                Ok(egs) => return Ok(egs),
+                Ok(egs) => return LibraryArena::from_elution_groups(egs),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST

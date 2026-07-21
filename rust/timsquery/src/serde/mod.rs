@@ -13,6 +13,7 @@ pub use library_file::{
     DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
+    LibraryArena,
     LibraryReadingError,
     SkylinePrecursorExtras,
     SpectronautPrecursorExtras,
