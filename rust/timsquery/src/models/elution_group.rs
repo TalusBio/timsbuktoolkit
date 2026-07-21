@@ -85,6 +85,26 @@ impl<T: KeyLike + Default, S: tims_elution_group_builder::State> TimsElutionGrou
     }
 }
 
+impl<T: KeyLike + Default> TimsElutionGroup<T> {
+    /// Build an empty scratch group DIRECTLY (bypassing the `bon` builder,
+    /// which rejects empty fragment/precursor label sets). All scalars are
+    /// zeroed and all vecs empty; the intended use is a reuse-in-place scratch
+    /// buffer that gets refilled via [`TimsElutionGroup::reset_from`] before
+    /// every query, so the zeroed initial state is never observed.
+    pub fn empty_like() -> Self {
+        Self {
+            id: 0,
+            mobility_ook0: 0.0,
+            rt_seconds: 0.0,
+            precursor_mono_mz: 0.0,
+            precursor_charge: 0,
+            fragment_mzs: Vec::new(),
+            fragment_labels: TinyVec::new(),
+            precursor_labels: TinyVec::new(),
+        }
+    }
+}
+
 impl<T: KeyLike> TimsElutionGroup<T> {
     pub fn id(&self) -> u64 {
         self.id

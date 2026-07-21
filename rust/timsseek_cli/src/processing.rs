@@ -492,17 +492,19 @@ fn phase1_prescore<I: ScorerQueriable>(
     chunk_size: usize,
     config: &CalibrationConfig,
 ) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
-    let n_chunks = speclib.as_slice().len().div_ceil(chunk_size);
+    let total = speclib.len();
+    let n_chunks = total.div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 1");
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
     let mut timings = timsseek::scoring::PrescoreTimings::default();
-    let mut offset = 0usize;
 
-    for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
-        let chunk_heap = pipeline.prescore_batch(chunk, offset, config, &mut timings);
+    // Chunk the flat index space `0..len` (no materialized slice on the lazy
+    // arm); each flat index is also the global speclib index.
+    for chunk_start in (0..total).step_by(chunk_size).progress_with(pb) {
+        let end = (chunk_start + chunk_size).min(total);
+        let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
-        offset += chunk.len();
     }
 
     (global_heap.into_vec(), timings)
@@ -818,16 +820,19 @@ fn phase3_score<I: ScorerQueriable>(
     chunk_size: usize,
     timings: &mut ScoreTimings,
 ) -> (Vec<ScoredCandidate>, SkipCounts) {
-    let total_peptides = speclib.as_slice().len();
+    let total_peptides = speclib.len();
     let n_chunks = total_peptides.div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 3");
 
     let mut results = Vec::new();
     let mut skips = SkipCounts::default();
 
-    for chunk in speclib.as_slice().chunks(chunk_size).progress_with(pb) {
+    // Chunk the flat index space `0..len` and hand each range to the batch
+    // scorer, which drives the lazy flyweight by index.
+    for chunk_start in (0..total_peptides).step_by(chunk_size).progress_with(pb) {
+        let end = (chunk_start + chunk_size).min(total_peptides);
         let (batch_results, batch_timings, batch_skips) =
-            pipeline.score_calibrated_batch(chunk, calibration);
+            pipeline.score_calibrated_batch(speclib, chunk_start..end, calibration);
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);

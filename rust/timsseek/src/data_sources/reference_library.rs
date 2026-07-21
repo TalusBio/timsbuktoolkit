@@ -1,6 +1,10 @@
 use smallvec::SmallVec;
+use std::sync::Arc;
 use timsquery::IonAnnot;
-use timsquery::models::capabilities::IsotopeStrategy;
+use timsquery::models::capabilities::{
+    IsotopeStrategy,
+    SeqFeatureState,
+};
 use timsquery::models::{
     Query,
     QueryCollection,
@@ -9,6 +13,12 @@ use timsquery::traits::QueryGeom;
 use timsquery::utils::constants::PROTON_MASS;
 
 use crate::fragment_mass::isotope_dist_or_averagine;
+use crate::models::DecoyMarking;
+use crate::models::sequence::{
+    Peptide,
+    normalize_to_proforma,
+    parse_sequence,
+};
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
@@ -72,6 +82,38 @@ impl<'a> RefQuery<'a> {
 
     pub fn geom(&self) -> &Query<&'a QueryCollection> {
         &self.geom
+    }
+
+    /// Materialize the output identity `Peptide` for this flyweight.
+    ///
+    /// `raw` is the modified-sequence blob slice. `parsed` mirrors the
+    /// materialized load path (`convert_diann_to_query_item`): normalize the
+    /// modified sequence to ProForma and parse it — but ONLY when sequence
+    /// features are `Available` (the whole-library parse gate passed at build
+    /// time), else `None`. Parsing the modified (not stripped) form preserves
+    /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
+    /// decoys, so any non-target variant is `MassShiftedDecoy`.
+    pub fn materialize_peptide(&self, decoy_group: u32) -> Peptide {
+        let tgt = self.geom.target_idx();
+        let coll = &self.lib.geom;
+        let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
+        let parsed = if coll.caps.sequence_features == SeqFeatureState::Available {
+            let normalized = normalize_to_proforma(&raw);
+            parse_sequence(&normalized)
+        } else {
+            None
+        };
+        let decoy = if self.geom.variant() == 0 {
+            DecoyMarking::Target
+        } else {
+            DecoyMarking::MassShiftedDecoy
+        };
+        Peptide {
+            raw,
+            parsed,
+            decoy,
+            decoy_group,
+        }
     }
 }
 
