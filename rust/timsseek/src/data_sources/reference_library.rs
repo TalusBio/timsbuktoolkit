@@ -184,11 +184,100 @@ impl<'a> QueryGeom for RefQuery<'a> {
     }
 }
 
+/// Zero-cost two-arm iterator: unifies the distinct concrete iterator types of
+/// the `Lazy` / `Materialized` arms behind one `impl Iterator` with NO heap
+/// allocation and NO dyn dispatch. Replaces the `Box<dyn Iterator>` that the
+/// `ScoredItem` enum used to return (a per-item alloc storm on the scoring
+/// path). Cost is one branch per `next()`.
+pub enum EitherIter<L, R> {
+    Left(L),
+    Right(R),
+}
+
+impl<T, L, R> Iterator for EitherIter<L, R>
+where
+    L: Iterator<Item = T>,
+    R: Iterator<Item = T>,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        match self {
+            EitherIter::Left(l) => l.next(),
+            EitherIter::Right(r) => r.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            EitherIter::Left(l) => l.size_hint(),
+            EitherIter::Right(r) => r.size_hint(),
+        }
+    }
+}
+
+/// Arm-neutral identity accessors the scoring loop needs but that are NOT part
+/// of `QueryGeom` / `ExpectedIntensity`. Implemented by BOTH concrete
+/// flyweights (`RefQuery`, `MatQuery`) so the batch scoring loop can be generic
+/// (monomorphized, zero-heap) over the concrete type — see
+/// `Scorer::{prescore,score_calibrated}_batch`, which match the `Speclib` arm
+/// ONCE and then run a fully static-dispatched loop.
+pub trait ScoredIdentity {
+    /// Positional library id: lazy target index, or the materialized eg's id.
+    fn library_id(&self) -> u32;
+    /// Whether this item is a target (vs a decoy variant).
+    fn is_target(&self) -> bool;
+    /// Target-decoy competition group id.
+    fn decoy_group(&self) -> u32;
+    /// Materialize the output identity `Peptide`.
+    fn materialize_peptide(&self) -> Peptide;
+}
+
+impl<'a> ScoredIdentity for RefQuery<'a> {
+    fn library_id(&self) -> u32 {
+        self.geom().id()
+    }
+
+    fn is_target(&self) -> bool {
+        self.geom().variant() == 0
+    }
+
+    fn decoy_group(&self) -> u32 {
+        u32::try_from(self.geom().target_idx())
+            .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)")
+    }
+
+    fn materialize_peptide(&self) -> Peptide {
+        let dg = self.decoy_group();
+        // Inherent `RefQuery::materialize_peptide(&self, u32)` (arity picks it).
+        RefQuery::materialize_peptide(self, dg)
+    }
+}
+
 /// Flyweight over one materialized `QueryItemToScore`. Mirrors `RefQuery` but
 /// reads the stored geometry / expected intensities directly instead of
 /// deriving them from the columnar arena.
 #[derive(Clone, Copy)]
 pub struct MatQuery<'a>(pub &'a QueryItemToScore);
+
+impl<'a> ScoredIdentity for MatQuery<'a> {
+    fn library_id(&self) -> u32 {
+        // QueryGeom::id performs the checked u64 -> u32 conversion.
+        self.id()
+    }
+
+    fn is_target(&self) -> bool {
+        self.0.digest.decoy.is_target()
+    }
+
+    fn decoy_group(&self) -> u32 {
+        self.0.digest.decoy_group
+    }
+
+    fn materialize_peptide(&self) -> Peptide {
+        self.0.digest.clone()
+    }
+}
 
 impl<'a> QueryGeom for MatQuery<'a> {
     type Label = IonAnnot;
@@ -267,37 +356,32 @@ pub enum ScoredItem<'a> {
     Materialized(MatQuery<'a>),
 }
 
-impl<'a> ScoredItem<'a> {
-    /// Positional library id: lazy target index, or the materialized eg's id.
-    pub fn library_id(&self) -> u32 {
+impl<'a> ScoredIdentity for ScoredItem<'a> {
+    fn library_id(&self) -> u32 {
         match self {
-            ScoredItem::Lazy(q) => q.geom().id(),
-            ScoredItem::Materialized(m) => m.id(),
+            ScoredItem::Lazy(q) => q.library_id(),
+            ScoredItem::Materialized(m) => m.library_id(),
         }
     }
 
-    /// Whether this item is a target (vs a decoy variant).
-    pub fn is_target(&self) -> bool {
+    fn is_target(&self) -> bool {
         match self {
-            ScoredItem::Lazy(q) => q.geom().variant() == 0,
-            ScoredItem::Materialized(m) => m.0.digest.decoy.is_target(),
+            ScoredItem::Lazy(q) => q.is_target(),
+            ScoredItem::Materialized(m) => m.is_target(),
         }
     }
 
-    /// Target-decoy competition group id.
-    pub fn decoy_group(&self) -> u32 {
+    fn decoy_group(&self) -> u32 {
         match self {
-            ScoredItem::Lazy(q) => u32::try_from(q.geom().target_idx())
-                .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)"),
-            ScoredItem::Materialized(m) => m.0.digest.decoy_group,
+            ScoredItem::Lazy(q) => q.decoy_group(),
+            ScoredItem::Materialized(m) => m.decoy_group(),
         }
     }
 
-    /// Materialize the output identity `Peptide`.
-    pub fn materialize_peptide(&self) -> Peptide {
+    fn materialize_peptide(&self) -> Peptide {
         match self {
-            ScoredItem::Lazy(q) => q.materialize_peptide(self.decoy_group()),
-            ScoredItem::Materialized(m) => m.0.digest.clone(),
+            ScoredItem::Lazy(q) => ScoredIdentity::materialize_peptide(q),
+            ScoredItem::Materialized(m) => ScoredIdentity::materialize_peptide(m),
         }
     }
 }
@@ -362,30 +446,28 @@ impl<'a> QueryGeom for ScoredItem<'a> {
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
-        // Box to unify the two arms' distinct iterator types behind one return.
-        let it: Box<dyn Iterator<Item = (i8, f64)>> = match self {
-            ScoredItem::Lazy(q) => Box::new(q.iter_precursors()),
-            ScoredItem::Materialized(m) => Box::new(m.iter_precursors()),
-        };
-        it
+        // EitherIter unifies the two arms' distinct iterator types with no heap
+        // alloc / no dyn dispatch (was `Box<dyn Iterator>`).
+        match self {
+            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_precursors()),
+            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_precursors()),
+        }
     }
 
     fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
-        let it: Box<dyn Iterator<Item = (&IonAnnot, f64)> + '_> = match self {
-            ScoredItem::Lazy(q) => Box::new(q.iter_fragments_refs()),
-            ScoredItem::Materialized(m) => Box::new(m.iter_fragments_refs()),
-        };
-        it
+        match self {
+            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_fragments_refs()),
+            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_fragments_refs()),
+        }
     }
 }
 
 impl<'a> ExpectedIntensity for ScoredItem<'a> {
     fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        let it: Box<dyn Iterator<Item = (IonAnnot, f32)> + '_> = match self {
-            ScoredItem::Lazy(q) => Box::new(q.iter_expected_fragments()),
-            ScoredItem::Materialized(m) => Box::new(m.iter_expected_fragments()),
-        };
-        it
+        match self {
+            ScoredItem::Lazy(q) => EitherIter::Left(q.iter_expected_fragments()),
+            ScoredItem::Materialized(m) => EitherIter::Right(m.iter_expected_fragments()),
+        }
     }
 
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {

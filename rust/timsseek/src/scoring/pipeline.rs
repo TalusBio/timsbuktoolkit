@@ -25,7 +25,8 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
-    ScoredItem,
+    MatQuery,
+    ScoredIdentity,
 };
 use crate::data_sources::speclib::Speclib;
 use crate::errors::DataProcessingError;
@@ -687,13 +688,37 @@ impl<I: ScorerQueriable> Scorer<I> {
         flat_range: std::ops::Range<usize>,
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        // Match the storage arm ONCE, then run a fully monomorphized loop over
+        // the concrete flyweight (`RefQuery` / `MatQuery`). Each arm's
+        // `get_item` closure returns its own concrete type, so the iterators
+        // used inside are statically dispatched — no boxed `ScoredItem`, no
+        // per-item heap allocation on the scoring hot path.
+        match lib {
+            Speclib::Lazy(rl) => {
+                self.score_calibrated_batch_impl(|f| rl.item_at(f), flat_range, calibration)
+            }
+            Speclib::Materialized { elems, .. } => {
+                self.score_calibrated_batch_impl(|f| MatQuery(&elems[f]), flat_range, calibration)
+            }
+        }
+    }
+
+    fn score_calibrated_batch_impl<Q>(
+        &self,
+        get_item: impl Fn(usize) -> Q + Sync,
+        flat_range: std::ops::Range<usize>,
+        calibration: &CalibrationResult,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts)
+    where
+        Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
+    {
         let num_cycles = self.num_cycles();
         // Materialize the flat index list so `fold_reduce` (which parallelizes
-        // over a slice) can drive the lazy flyweight by index. Each item is a
+        // over a slice) can drive the flyweight by index. Each item is a
         // `usize`; the flyweight itself is never stored.
         let flats: Vec<usize> = flat_range.collect();
         // Precursor-range gate over the flyweight geometry.
-        let filter_fn = |q: &ScoredItem| {
+        let filter_fn = |q: &Q| {
             let tmp = q.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
@@ -701,16 +726,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         // Pre-scan so scratch capacity holds every peptide — no realloc in hot path.
         let max_frags = flats
             .iter()
-            .map(|&f| lib.item_at(f).fragment_count())
+            .map(|&f| get_item(f).fragment_count())
             .max()
             .unwrap_or(0);
 
         // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
         // a second pass keeps the rayon hot loop free of synchronised counters.
-        let precursor_oofr_count = flats
-            .iter()
-            .filter(|&&f| !filter_fn(&lib.item_at(f)))
-            .count() as u32;
+        let precursor_oofr_count =
+            flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
 
         let (_worker, _scratch, mut results): (ScoringWorker, ScratchBufs, IonSearchAccumulator) =
             super::maybe_par::fold_reduce(
@@ -730,7 +753,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     )
                 },
                 |(mut worker, mut scratch, acc), (_idx, &flat)| {
-                    let q = lib.item_at(flat);
+                    let q = get_item(flat);
                     if !filter_fn(&q) {
                         return (worker, scratch, acc);
                     }
@@ -819,28 +842,49 @@ impl<I: ScorerQueriable> Scorer<I> {
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
+        // Match the storage arm ONCE, then run a fully monomorphized loop over
+        // the concrete flyweight — no boxed `ScoredItem`, no per-item heap
+        // alloc on the prescore hot path (see `score_calibrated_batch`).
+        match lib {
+            Speclib::Lazy(rl) => {
+                self.prescore_batch_impl(|f| rl.item_at(f), flat_range, config, timings)
+            }
+            Speclib::Materialized { elems, .. } => {
+                self.prescore_batch_impl(|f| MatQuery(&elems[f]), flat_range, config, timings)
+            }
+        }
+    }
+
+    fn prescore_batch_impl<Q>(
+        &self,
+        get_item: impl Fn(usize) -> Q + Sync,
+        flat_range: std::ops::Range<usize>,
+        config: &CalibrationConfig,
+        timings: &mut PrescoreTimings,
+    ) -> CalibrantHeap
+    where
+        Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
+    {
         // The flat index IS the global speclib index (see `Speclib::item_at`),
         // so it doubles as `CalibrantCandidate::speclib_index` — no separate
         // chunk offset needed.
         let flats: Vec<usize> = flat_range.collect();
-        let filter_fn = |q: &ScoredItem| {
+        let filter_fn = |q: &Q| {
             let tmp = q.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
 
         // Count pre-filter rejects once; keeps the rayon loop counter-free.
-        let precursor_oofr_count = flats
-            .iter()
-            .filter(|&&f| !filter_fn(&lib.item_at(f)))
-            .count() as u32;
+        let precursor_oofr_count =
+            flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         let num_cycles = self.num_cycles();
         let n_calibrants = config.n_calibrants;
         let max_frags = flats
             .iter()
-            .map(|&f| lib.item_at(f).fragment_count())
+            .map(|&f| get_item(f).fragment_count())
             .max()
             .unwrap_or(0);
 
@@ -863,7 +907,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 )
             },
             |(mut worker, mut scratch, mut heap, mut t), (_idx, &flat)| {
-                let q = lib.item_at(flat);
+                let q = get_item(flat);
                 if !filter_fn(&q) {
                     return (worker, scratch, heap, t);
                 }
