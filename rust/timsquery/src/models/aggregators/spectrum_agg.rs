@@ -38,7 +38,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `TimsElutionGroup::get_precursor_mz_limits()` — skips
+    /// Cached from `TimsElutionGroup::precursor_mz_limits()` — skips
     /// negative-isotope labels, do NOT recompute from mono_mz + charge.
     pub precursor_mz_limits: (f64, f64),
     // Labels + mzs: arrays carry only intensities, so we need separate storage.
@@ -87,7 +87,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
-        self.precursor_mz_limits = eg.get_precursor_mz_limits();
+        self.precursor_mz_limits = eg.precursor_mz_limits();
 
         self.precursor_labels.clear();
         self.precursor_mzs.clear();

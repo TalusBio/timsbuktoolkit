@@ -192,8 +192,8 @@ impl<'a> QueryGeom for RefQuery<'a> {
         self.geom.mobility_ook0()
     }
 
-    fn get_precursor_mz_limits(&self) -> (f64, f64) {
-        self.geom.get_precursor_mz_limits()
+    fn precursor_mz_limits(&self) -> (f64, f64) {
+        self.geom.precursor_mz_limits()
     }
 
     fn precursor_count(&self) -> usize {

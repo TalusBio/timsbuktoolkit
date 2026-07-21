@@ -183,7 +183,7 @@ impl<T: KeyLike> TimsElutionGroup<T> {
         })
     }
 
-    pub fn get_precursor_mz_limits(&self) -> (f64, f64) {
+    pub fn precursor_mz_limits(&self) -> (f64, f64) {
         let mut min_precursor_mz = f64::MAX;
         let mut max_precursor_mz = f64::MIN;
         for (isotope_index, precursor_mz) in

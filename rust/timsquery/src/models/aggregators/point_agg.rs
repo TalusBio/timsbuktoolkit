@@ -47,7 +47,7 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
-            precursor_mz_limits: eg.get_precursor_mz_limits(),
+            precursor_mz_limits: eg.precursor_mz_limits(),
             precursor_labels,
             precursor_mzs,
             fragment_labels,

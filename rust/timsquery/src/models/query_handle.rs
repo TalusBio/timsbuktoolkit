@@ -107,9 +107,9 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom
         self.geom().mobility[self.target_idx()]
     }
 
-    fn get_precursor_mz_limits(&self) -> (f64, f64) {
+    fn precursor_mz_limits(&self) -> (f64, f64) {
         // Span the isotope envelope the item is actually scored with, mirroring
-        // `TimsElutionGroup::get_precursor_mz_limits`: isotopes are `0..n`, all
+        // `TimsElutionGroup::precursor_mz_limits`: isotopes are `0..n`, all
         // non-negative, so the min is the mono and the max is the top isotope.
         let mono = self.mono_precursor_mz();
         let top = self.n_isotopes().saturating_sub(1) as f64;
@@ -218,7 +218,7 @@ mod tests {
         let lib = one_target_lib();
         let q = Query::new(&lib, 0, 0);
         let step = NEUTRON_MASS / 2.0;
-        let (lo, hi) = q.get_precursor_mz_limits();
+        let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - 654.855).abs() < 1e-9);
         assert!((hi - (654.855 + 2.0 * step)).abs() < 1e-9);
 
@@ -266,7 +266,7 @@ mod tests {
         let q = Query::new(&lib, 0, 1);
         let step = NEUTRON_MASS / 2.0;
         let mono = 654.855 + 14.0 / 2.0;
-        let (lo, hi) = q.get_precursor_mz_limits();
+        let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - mono).abs() < 1e-9);
         assert!((hi - (mono + 2.0 * step)).abs() < 1e-9);
     }

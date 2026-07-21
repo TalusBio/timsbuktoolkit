@@ -31,7 +31,7 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `TimsElutionGroup::get_precursor_mz_limits()` at reset
+    /// Cached from `TimsElutionGroup::precursor_mz_limits()` at reset
     /// (skips negative-isotope labels — do not derive from mono_mz + charge alone).
     pub precursor_mz_limits: (f64, f64),
 
@@ -95,7 +95,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
-            precursor_mz_limits: eg.get_precursor_mz_limits(),
+            precursor_mz_limits: eg.precursor_mz_limits(),
             precursors,
             fragments,
             rt_range_ms,
@@ -141,7 +141,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
-        self.precursor_mz_limits = eg.get_precursor_mz_limits();
+        self.precursor_mz_limits = eg.precursor_mz_limits();
         self.rt_range_ms = rt_range_ms;
         self.n_precursor_peaks_added = 0;
         self.n_fragment_peaks_added = 0;

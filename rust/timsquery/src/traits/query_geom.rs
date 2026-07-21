@@ -14,7 +14,7 @@ pub trait QueryGeom {
     fn precursor_charge(&self) -> u8;
     fn rt_seconds(&self) -> f32;
     fn mobility_ook0(&self) -> f32;
-    fn get_precursor_mz_limits(&self) -> (f64, f64);
+    fn precursor_mz_limits(&self) -> (f64, f64);
     fn precursor_count(&self) -> usize;
     fn fragment_count(&self) -> usize;
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)>;
@@ -49,8 +49,8 @@ impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
         self.mobility_ook0()
     }
 
-    fn get_precursor_mz_limits(&self) -> (f64, f64) {
-        self.get_precursor_mz_limits()
+    fn precursor_mz_limits(&self) -> (f64, f64) {
+        self.precursor_mz_limits()
     }
 
     fn precursor_count(&self) -> usize {

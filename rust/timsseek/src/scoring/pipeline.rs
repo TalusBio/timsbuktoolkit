@@ -709,7 +709,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let flats: Vec<usize> = flat_range.collect();
         // Precursor-range gate over the flyweight geometry.
         let filter_fn = |q: &Q| {
-            let tmp = q.get_precursor_mz_limits();
+            let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
@@ -853,7 +853,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         // chunk offset needed.
         let flats: Vec<usize> = flat_range.collect();
         let filter_fn = |q: &Q| {
-            let tmp = q.get_precursor_mz_limits();
+            let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
