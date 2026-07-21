@@ -232,7 +232,8 @@ fn finalize_reference_library(
             }
             DecoyStrategy::None => {
                 tracing::info!(
-                    "Decoy strategy None; scoring {} target entries only",
+                    "Decoy strategy None; scoring {} stored rows as-is (targets + any \
+                     shipped decoys)",
                     n_rows
                 );
             }
@@ -272,7 +273,7 @@ fn finalize_reference_library(
         );
     }
     tracing::info!(
-        "Lazy ReferenceLibrary arena ready: {} targets, sequence_features={:?}",
+        "Lazy ReferenceLibrary arena ready: {} stored rows, sequence_features={:?}",
         n_rows,
         sequence_features
     );

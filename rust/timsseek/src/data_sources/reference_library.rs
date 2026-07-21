@@ -53,12 +53,10 @@ impl ReferenceLibrary {
     }
 
     /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
-    /// the flat->(row,variant) math to the arena's decoy index transform.
+    /// the flat->(row,variant) math to the arena's `split_flat` transform.
     pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
-        let vpr = self.geom.variants_per_row();
-        let tgt = (flat_idx / vpr) as u32;
-        let variant = (flat_idx % vpr) as u8;
-        RefQuery::new(self, tgt, variant)
+        let (row, variant) = self.geom.split_flat(flat_idx);
+        RefQuery::new(self, row, variant)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {

@@ -222,25 +222,34 @@ impl<L: KeyLike + DecoyShift> QueryCollection<L> {
         self.n_rows() * self.variants_per_row()
     }
 
+    /// Decompose a flat `0..expanded_len()` index into its stored `(row,
+    /// variant)`. The single authority for the decoy index-transform encoding;
+    /// every flat-indexed accessor (here and `ReferenceLibrary::item_at`) goes
+    /// through it. `row` is fail-loud on `u32` overflow because `library_id` /
+    /// `decoy_group` are `u32`.
+    pub fn split_flat(&self, flat: usize) -> (u32, u8) {
+        let vpr = self.variants_per_row();
+        let row = u32::try_from(flat / vpr)
+            .expect("row index exceeds u32::MAX (library_id/decoy_group are u32)");
+        (row, (flat % vpr) as u8)
+    }
+
     /// Flat `0..expanded_len()` index -> `(row, variant)` flyweight.
     pub fn item_at(&self, flat: usize) -> QueryRef<'_, L> {
-        let vpr = self.variants_per_row();
-        QueryRef::new(self, (flat / vpr) as u32, (flat % vpr) as u8)
+        let (row, variant) = self.split_flat(flat);
+        QueryRef::new(self, row, variant)
     }
 
     /// A flat index is a target iff its stored row is a target AND it is the
     /// variant-0 (unshifted) slot.
     pub fn is_target(&self, flat: usize) -> bool {
-        let vpr = self.variants_per_row();
-        let row = flat / vpr;
-        let variant = flat % vpr;
-        !self.is_decoy[row] && variant == 0
+        let (row, variant) = self.split_flat(flat);
+        !self.is_decoy[row as usize] && variant == 0
     }
 
     /// Target-decoy competition group id: the stored row index.
     pub fn decoy_group(&self, flat: usize) -> u32 {
-        let row = flat / self.variants_per_row();
-        u32::try_from(row).expect("row index exceeds u32::MAX (library_id/decoy_group are u32)")
+        self.split_flat(flat).0
     }
 }
 
