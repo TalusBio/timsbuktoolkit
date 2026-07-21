@@ -200,10 +200,43 @@ fn finalize_reference_library(
     frag_intens: Vec<f32>,
     decoys: timsquery::models::capabilities::DecoyStrategy,
 ) -> (ReferenceLibrary, LoadReport) {
+    let n_stored_decoys = geom.is_decoy.iter().filter(|&&d| d).count();
     geom.caps.decoys = decoys;
     geom.seal();
 
     let n_targets = geom.n_targets();
+
+    // Report the effective decoy strategy (post-seal: `seal()` downgrades
+    // LazyMassShift -> Passthrough if the library ships its own decoys). This
+    // restores the load-time notice that the search space is expanded by
+    // synthetic mass-shift decoys.
+    {
+        use timsquery::models::capabilities::DecoyStrategy;
+        match geom.caps.decoys {
+            DecoyStrategy::LazyMassShift { n_decoys, .. } => {
+                tracing::warn!(
+                    "Library contains no decoys. Generating synthetic ±CH2 mass-shift \
+                     decoys: {}x search space ({} targets -> {} scored entries)",
+                    n_decoys as usize + 1,
+                    n_targets,
+                    geom.expanded_len(),
+                );
+            }
+            DecoyStrategy::Passthrough => {
+                tracing::info!(
+                    "Library ships {} decoys; using them as-is (Passthrough, no synthetic \
+                     decoys generated)",
+                    n_stored_decoys,
+                );
+            }
+            DecoyStrategy::None => {
+                tracing::info!(
+                    "Decoy strategy None; scoring {} target entries only",
+                    n_targets
+                );
+            }
+        }
+    }
     let mut all_parsable = true;
     let mut n_averagine_fallback = 0usize;
     for tgt in 0..n_targets {
