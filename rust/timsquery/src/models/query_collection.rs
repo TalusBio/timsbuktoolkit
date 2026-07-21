@@ -1,5 +1,10 @@
 use crate::KeyLike;
-use crate::models::capabilities::LibCapabilities;
+use crate::models::capabilities::{
+    DecoyStrategy,
+    LibCapabilities,
+};
+use crate::models::query_handle::QueryRef;
+use crate::traits::DecoyShift;
 
 #[derive(Debug, Clone)]
 pub struct ModDefinition {
@@ -152,8 +157,20 @@ impl<L: KeyLike> QueryCollection<L> {
         self.mod_off[tgt] as usize..self.mod_off[tgt + 1] as usize
     }
 
-    /// Seal after build: release excess capacity on every arena.
+    /// Seal after build: enforce the decoy-strategy invariant, then release
+    /// excess capacity on every arena.
+    ///
+    /// `LazyMassShift` requires an all-targets arena (decoys are expressed as an
+    /// on-the-fly ±CH2 index transform, never stored). If the library shipped
+    /// materialized decoys, downgrade to `Passthrough` so the stored rows are
+    /// honored 1:1 instead of being silently re-decoyed.
     pub fn seal(&mut self) {
+        if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
+            && self.is_decoy.iter().any(|&d| d)
+        {
+            tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
+            self.caps.decoys = DecoyStrategy::Passthrough;
+        }
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
@@ -172,10 +189,108 @@ impl<L: KeyLike> QueryCollection<L> {
     }
 }
 
+/// Decoys as an index transform: the arena stores only targets (under
+/// `LazyMassShift`), and expanded/flat indices fan each row out into its
+/// target + decoy variants. Bounded on `DecoyShift` so `item_at` can hand out a
+/// `QueryRef` (the flyweight that computes decoy geometry on the fly).
+impl<L: KeyLike + DecoyShift> QueryCollection<L> {
+    /// Variants each stored row expands into: `LazyMassShift` adds `n_decoys`
+    /// mass-shifted variants (+1 for the target); `Passthrough`/`None` are 1:1.
+    pub fn variants_per_row(&self) -> usize {
+        match self.caps.decoys {
+            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
+            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+        }
+    }
+
+    /// Total flat length after decoy expansion.
+    pub fn expanded_len(&self) -> usize {
+        self.n_rows() * self.variants_per_row()
+    }
+
+    /// Flat `0..expanded_len()` index -> `(row, variant)` flyweight.
+    pub fn item_at(&self, flat: usize) -> QueryRef<'_, L> {
+        let vpr = self.variants_per_row();
+        QueryRef::new(self, (flat / vpr) as u32, (flat % vpr) as u8)
+    }
+
+    /// A flat index is a target iff its stored row is a target AND it is the
+    /// variant-0 (unshifted) slot.
+    pub fn is_target(&self, flat: usize) -> bool {
+        let vpr = self.variants_per_row();
+        let row = flat / vpr;
+        let variant = flat % vpr;
+        !self.is_decoy[row] && variant == 0
+    }
+
+    /// Target-decoy competition group id: the stored row index.
+    pub fn decoy_group(&self, flat: usize) -> u32 {
+        let row = flat / self.variants_per_row();
+        u32::try_from(row).expect("row index exceeds u32::MAX (library_id/decoy_group are u32)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::IonAnnot;
+    use crate::models::capabilities::DecoyStrategy;
+
+    #[test]
+    fn lazy_massshift_expands_len_and_flags_targets() {
+        let mut c = QueryCollection::with_capabilities(LibCapabilities::default_diann()); // LazyMassShift n=2
+        c.push_target(
+            500.0,
+            2,
+            1.0,
+            0.8,
+            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+        );
+        c.seal();
+        assert_eq!(c.variants_per_row(), 3);
+        assert_eq!(c.expanded_len(), 3);
+        assert!(c.is_target(0)); // variant 0
+        assert!(!c.is_target(1)); // +decoy
+        assert!(!c.is_target(2)); // -decoy
+        assert_eq!(c.decoy_group(1), 0);
+    }
+
+    #[test]
+    fn passthrough_is_one_variant_per_row_honoring_is_decoy() {
+        let mut caps = LibCapabilities::default_diann();
+        caps.decoys = DecoyStrategy::Passthrough;
+        let mut c = QueryCollection::with_capabilities(caps);
+        c.push_row(
+            500.0,
+            2,
+            1.0,
+            0.8,
+            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+            false,
+        );
+        c.push_row(
+            510.0,
+            2,
+            1.0,
+            0.8,
+            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEP",
+            "PEP",
+            &[],
+            true,
+        );
+        c.seal();
+        assert_eq!(c.variants_per_row(), 1);
+        assert_eq!(c.expanded_len(), 2);
+        assert!(c.is_target(0));
+        assert!(!c.is_target(1)); // stored decoy row
+    }
 
     #[test]
     fn csr_ranges_recover_per_target_fragments() {

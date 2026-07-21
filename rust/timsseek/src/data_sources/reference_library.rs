@@ -42,29 +42,20 @@ pub struct RefQuery<'a> {
 }
 
 impl ReferenceLibrary {
-    fn variants_per_target(&self) -> usize {
-        match self.geom.caps.decoys {
-            timsquery::models::capabilities::DecoyStrategy::LazyMassShift { n_decoys, .. } => {
-                n_decoys as usize + 1
-            }
-            other => panic!("ReferenceLibrary is lazy-only; got {other:?}"),
-        }
-    }
-
     pub fn len(&self) -> usize {
-        self.geom.n_targets() * self.variants_per_target()
+        self.geom.expanded_len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Maps a flat `0..len()` index to a `(target, variant)` `RefQuery`, in
-    /// `t,+,-` order (variant 0,1,2 within each target).
+    /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
+    /// the flat->(row,variant) math to the arena's decoy index transform.
     pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
-        let vpt = self.variants_per_target();
-        let tgt = (flat_idx / vpt) as u32;
-        let variant = (flat_idx % vpt) as u8;
+        let vpr = self.geom.variants_per_row();
+        let tgt = (flat_idx / vpr) as u32;
+        let variant = (flat_idx % vpr) as u8;
         RefQuery::new(self, tgt, variant)
     }
 
@@ -239,7 +230,10 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
     }
 
     fn is_target(&self) -> bool {
-        self.geom().variant() == 0
+        // Honor stored decoys uniformly (correct under Passthrough): a row is a
+        // target only when it is not a stored decoy AND is the variant-0 slot.
+        let tgt = self.geom().target_idx();
+        !self.lib.geom.is_decoy[tgt] && self.geom().variant() == 0
     }
 
     fn decoy_group(&self) -> u32 {
