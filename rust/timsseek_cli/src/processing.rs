@@ -12,6 +12,7 @@ use timsquery::models::tolerance::{
     QuadTolerance,
     RtTolerance,
 };
+use timsquery::traits::QueryGeom;
 use timsquery::{
     IndexedTimstofPeaks,
     MzMobilityStatsCollector,
@@ -82,8 +83,8 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     fn rt_range(lib: &Speclib) -> (f32, f32) {
         let mut min_rt = f32::INFINITY;
         let mut max_rt = f32::NEG_INFINITY;
-        for item in lib.as_slice() {
-            let rt = item.query.rt_seconds();
+        for flat in 0..lib.len() {
+            let rt = lib.item_at(flat).rt_seconds();
             min_rt = min_rt.min(rt);
             max_rt = max_rt.max(rt);
         }
@@ -251,18 +252,18 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         if calib_lib.is_some() {
             let mut map: std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>> =
                 std::collections::HashMap::new();
-            for item in speclib.as_slice() {
-                let mz_key = (item.query.mono_precursor_mz() * 100.0).round() as i64;
-                let charge = item.query.precursor_charge();
+            for flat in 0..speclib.len() {
+                let item = speclib.item_at(flat);
+                let mz_key = (item.mono_precursor_mz() * 100.0).round() as i64;
+                let charge = item.precursor_charge();
                 let mut frag_mzs: Vec<i64> = item
-                    .query
-                    .iter_fragments()
+                    .iter_fragments_refs()
                     .map(|(_, mz)| (mz * 100.0).round() as i64)
                     .collect();
                 frag_mzs.sort_unstable();
                 map.entry((mz_key, charge))
                     .or_default()
-                    .push((item.query.rt_seconds(), frag_mzs));
+                    .push((item.rt_seconds(), frag_mzs));
             }
             info!(
                 "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
@@ -550,21 +551,20 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     let library_rt_for_candidate: Vec<Option<f64>> = candidates
         .iter()
         .map(|c| {
-            let calib_item = &phase1_lib.as_slice()[c.speclib_index];
+            let calib_item = phase1_lib.item_at(c.speclib_index);
             match main_lookup {
                 Some(lookup) => {
-                    let mz_key = (calib_item.query.mono_precursor_mz() * 100.0).round() as i64;
-                    let charge = calib_item.query.precursor_charge();
+                    let mz_key = (calib_item.mono_precursor_mz() * 100.0).round() as i64;
+                    let charge = calib_item.precursor_charge();
                     let bucket = lookup.get(&(mz_key, charge))?;
 
                     let mut calib_frags: Vec<i64> = calib_item
-                        .query
-                        .iter_fragments()
+                        .iter_fragments_refs()
                         .map(|(_, mz)| (mz * 100.0).round() as i64)
                         .collect();
                     calib_frags.sort_unstable();
 
-                    let calib_rt = calib_item.query.rt_seconds();
+                    let calib_rt = calib_item.rt_seconds();
                     bucket
                         .iter()
                         .filter_map(|(main_rt, main_frags)| {
@@ -583,7 +583,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
                         })
                         .map(|(_, _, rt)| rt as f64)
                 }
-                None => Some(calib_item.query.rt_seconds() as f64),
+                None => Some(calib_item.rt_seconds() as f64),
             }
         })
         .collect();
@@ -706,7 +706,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
 
     let mut n_off_ridge = 0usize;
     for (candidate, library_rt_opt) in candidates.iter().zip(library_rt_for_candidate.iter()) {
-        let item = &phase1_lib.as_slice()[candidate.speclib_index];
+        let item = phase1_lib.item_at(candidate.speclib_index);
 
         // Skip calibrants that never matched in the main speclib.
         let Some(library_rt_s) = *library_rt_opt else {
@@ -728,13 +728,13 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             continue;
         }
 
-        // No clone: build collector from &item.query with an rt override.
+        // No clone: build collector from the flyweight (QueryGeom) + rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&item.query);
-        agg.reset_with_overrides(&item.query, Some(candidate.apex_rt.0), None);
+            SpectralCollector::new(&item);
+        agg.reset_with_overrides(&item, Some(candidate.apex_rt.0), None);
         pipeline.index.add_query(&mut agg, &query_tolerance);
 
-        let expected_mob = item.query.mobility_ook0() as f64;
+        let expected_mob = item.mobility_ook0() as f64;
         let offsets = MzMobilityOffsets::new(&agg, expected_mob);
         let Some((mz_err_ppm, mob_err_pct)) = offsets.weighted_ms1() else {
             continue;
@@ -870,6 +870,47 @@ fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32,
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+/// Sort by `(sequence, main_score desc, target-first, precursor_mz)` then
+/// collapse exact `(sequence, charge, precursor_mz)` duplicates, keeping the
+/// first. The trailing `precursor_mz` tiebreak makes the sort a TOTAL order:
+/// within a shared sequence the target and its ±decoys have distinct precursor
+/// m/z, so the survivor is deterministic regardless of the input vec's order
+/// (an unstable sort would otherwise leave a `(seq, score, is_target)` tie in
+/// arbitrary relative order).
+fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
+    results.sort_unstable_by(|x, y| {
+        let seq_ord = x.scoring.peptide.as_str().cmp(y.scoring.peptide.as_str());
+        // Then sort descending by main_score
+        // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
+        // to some of them to make a "decoy"
+        let score_ord = y
+            .scoring
+            .main_score
+            .partial_cmp(&x.scoring.main_score)
+            .expect("NaN main_score should have been filtered during Phase 3 scoring");
+        let ord = seq_ord.then(score_ord);
+
+        if ord == std::cmp::Ordering::Equal {
+            // Move to the first position the target
+            match (x.scoring.is_target, y.scoring.is_target) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                // Total order: within a shared sequence the target and its
+                // ±decoys have distinct precursor m/z (mono / mono±shift/z),
+                // so this pins the previously order-dependent tie.
+                _ => x.scoring.precursor_mz.total_cmp(&y.scoring.precursor_mz),
+            }
+        } else {
+            ord
+        }
+    });
+    results.dedup_by(|x, y| {
+        (x.scoring.peptide.as_str() == y.scoring.peptide.as_str())
+            && (x.scoring.precursor_charge == y.scoring.precursor_charge)
+            && (x.scoring.precursor_mz == y.scoring.precursor_mz)
+    });
+}
+
 fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -890,39 +931,11 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     }
     // Deduplicate by sequence, keeping the best scoring target
     // This is meant to remove instances where reversing a target creates another target.
-    results.sort_unstable_by(|x, y| {
-        let seq_ord = x.scoring.peptide.as_str().cmp(y.scoring.peptide.as_str());
-        // Then sort descending by main_score
-        // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
-        // to some of them to make a "decoy"
-        let score_ord = y
-            .scoring
-            .main_score
-            .partial_cmp(&x.scoring.main_score)
-            .expect("NaN main_score should have been filtered during Phase 3 scoring");
-        let ord = seq_ord.then(score_ord);
-
-        if ord == std::cmp::Ordering::Equal {
-            // Move to the first position the target
-            match (x.scoring.is_target, y.scoring.is_target) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
-        } else {
-            ord
-        }
-    });
-    // As debug lets print the first and last results after deduplication
     debug!(
         "First 10 result before deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
     );
-    results.dedup_by(|x, y| {
-        (x.scoring.peptide.as_str() == y.scoring.peptide.as_str())
-            && (x.scoring.precursor_charge == y.scoring.precursor_charge)
-            && (x.scoring.precursor_mz == y.scoring.precursor_mz)
-    });
+    dedup_by_sequence(&mut results);
     debug!(
         "First 10 result after deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
@@ -1060,4 +1073,79 @@ pub fn run_pipeline(
         source: e,
     })?;
     Ok(timings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use timsseek::models::DecoyMarking;
+    use timsseek::models::sequence::Peptide;
+    use timsseek::scoring::results::ScoringFields;
+
+    fn candidate(seq: &str, mz: f64, is_target: bool, decoy_group: u32) -> ScoredCandidate {
+        let decoy = if is_target {
+            DecoyMarking::Target
+        } else {
+            DecoyMarking::MassShiftedDecoy
+        };
+        let peptide = Peptide {
+            raw: Arc::from(seq),
+            parsed: None,
+            decoy,
+            decoy_group,
+        };
+        let mut scoring = ScoringFields::sample(peptide);
+        scoring.precursor_mz = mz;
+        scoring.is_target = is_target;
+        scoring.decoy_group_id = decoy_group;
+        // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
+        // is what orders them.
+        scoring.main_score = 5.0;
+        ScoredCandidate { scoring }
+    }
+
+    fn survivors(mut results: Vec<ScoredCandidate>) -> Vec<(String, u64, bool)> {
+        dedup_by_sequence(&mut results);
+        results
+            .iter()
+            .map(|c| {
+                (
+                    c.scoring.peptide.as_str().to_string(),
+                    c.scoring.precursor_mz.to_bits(),
+                    c.scoring.is_target,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dedup_total_order() {
+        // One shared sequence: a target and its ±decoys, all tied on main_score
+        // and charge, distinct precursor m/z. Two input orderings differing ONLY
+        // in the tie order must produce identical (ordered) survivors.
+        let order_a = vec![
+            candidate("PEPTIDEK", 501.0, true, 0),
+            candidate("PEPTIDEK", 500.0, false, 0),
+            candidate("PEPTIDEK", 502.0, false, 0),
+        ];
+        let order_b = vec![
+            candidate("PEPTIDEK", 502.0, false, 0),
+            candidate("PEPTIDEK", 500.0, false, 0),
+            candidate("PEPTIDEK", 501.0, true, 0),
+        ];
+
+        let sa = survivors(order_a);
+        let sb = survivors(order_b);
+        assert_eq!(sa, sb, "dedup survivors must be order-independent");
+        // Target first (target-first arm), then decoys ascending by m/z.
+        assert_eq!(
+            sa,
+            vec![
+                ("PEPTIDEK".to_string(), 501.0f64.to_bits(), true),
+                ("PEPTIDEK".to_string(), 500.0f64.to_bits(), false),
+                ("PEPTIDEK".to_string(), 502.0f64.to_bits(), false),
+            ]
+        );
+    }
 }

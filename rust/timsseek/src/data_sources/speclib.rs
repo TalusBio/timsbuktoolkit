@@ -1,6 +1,7 @@
 use crate::data_sources::reference_library::{
-    RefQuery,
+    MatQuery,
     ReferenceLibrary,
+    ScoredItem,
 };
 use crate::errors::LibraryReadingError;
 use crate::fragment_mass::elution_group_converter::isotope_dist_from_seq;
@@ -953,16 +954,17 @@ impl Speclib {
         }
     }
 
-    /// Flat-index accessor into the `Lazy` arena, in `target, +, -` variant
-    /// order (see `ReferenceLibrary::item_at`). The `Materialized` arm has no
-    /// `RefQuery` flyweight to hand out yet — unifying both arms behind one
-    /// scoring-facing accessor is Task 9/10's job.
-    pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
+    /// Flat-index accessor yielding an arm-neutral `ScoredItem` for BOTH arms.
+    /// Lazy indexes the columnar arena in `target, +, -` variant order (see
+    /// `ReferenceLibrary::item_at`); Materialized indexes `elems[flat_idx]`
+    /// directly. Both expose one `QueryGeom` + `ExpectedIntensity` surface so
+    /// scoring/calibration never branches on the storage layout.
+    pub fn item_at(&self, flat_idx: usize) -> ScoredItem<'_> {
         match self {
-            Speclib::Lazy(lib) => lib.item_at(flat_idx),
-            Speclib::Materialized { .. } => unimplemented!(
-                "Speclib::item_at on the Materialized arm; scoring unification lands in Task 9/10"
-            ),
+            Speclib::Lazy(lib) => ScoredItem::Lazy(lib.item_at(flat_idx)),
+            Speclib::Materialized { elems, .. } => {
+                ScoredItem::Materialized(MatQuery(&elems[flat_idx]))
+            }
         }
     }
 
@@ -1417,7 +1419,10 @@ impl<W: std::io::Write> SpeclibWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_sources::reference_library::ExpectedIntensity;
+    use crate::data_sources::reference_library::{
+        ExpectedIntensity,
+        RefQuery,
+    };
 
     impl Speclib {
         // Technically its used in testing ...

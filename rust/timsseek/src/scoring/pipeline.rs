@@ -25,7 +25,7 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
-    RefQuery,
+    ScoredItem,
 };
 use crate::data_sources::speclib::Speclib;
 use crate::errors::DataProcessingError;
@@ -256,8 +256,11 @@ fn gate_expected_fragments(expected: &ExpectedIntensities<IonAnnot>) -> Result<(
 /// work is needed. The precursor labels are then set to the isotope-envelope
 /// indices used for scoring (the flyweight's own `iter_precursors` yields only
 /// the mono peak).
-pub fn fill_scratch_from(dst: &mut TimsElutionGroup<IonAnnot>, q: &RefQuery) {
-    dst.reset_from(q.geom());
+pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(
+    dst: &mut TimsElutionGroup<IonAnnot>,
+    q: &Q,
+) {
+    dst.reset_from(q);
     dst.set_precursor_labels(q.expected_precursor_envelope().iter().map(|(i, _)| *i));
 }
 
@@ -282,7 +285,7 @@ impl ScratchBufs {
     /// Refill both buffers from the flyweight: geometry into `eg`, and the
     /// expected fragment/precursor intensities into `expected` (deduped by
     /// key via `try_from_pairs` — library keys are unique by construction).
-    fn fill_from(&mut self, q: &RefQuery) {
+    fn fill_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(&mut self, q: &Q) {
         fill_scratch_from(&mut self.eg, q);
         self.expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
@@ -690,7 +693,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         // `usize`; the flyweight itself is never stored.
         let flats: Vec<usize> = flat_range.collect();
         // Precursor-range gate over the flyweight geometry.
-        let filter_fn = |q: &RefQuery| {
+        let filter_fn = |q: &ScoredItem| {
             let tmp = q.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
@@ -735,7 +738,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     scratch.fill_from(&q);
-                    let digest = q.materialize_peptide(q.geom().target_idx() as u32);
+                    let digest = q.materialize_peptide();
                     let result = self.score_calibrated_extraction(
                         &scratch.eg,
                         &scratch.expected,
@@ -820,7 +823,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         // so it doubles as `CalibrantCandidate::speclib_index` — no separate
         // chunk offset needed.
         let flats: Vec<usize> = flat_range.collect();
-        let filter_fn = |q: &RefQuery| {
+        let filter_fn = |q: &ScoredItem| {
             let tmp = q.get_precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)

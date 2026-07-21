@@ -14,6 +14,7 @@ use timsquery::utils::constants::PROTON_MASS;
 
 use crate::fragment_mass::isotope_dist_or_averagine;
 use crate::models::DecoyMarking;
+use crate::models::query_item::QueryItemToScore;
 use crate::models::sequence::{
     Peptide,
     normalize_to_proforma,
@@ -183,6 +184,218 @@ impl<'a> QueryGeom for RefQuery<'a> {
     }
 }
 
+/// Flyweight over one materialized `QueryItemToScore`. Mirrors `RefQuery` but
+/// reads the stored geometry / expected intensities directly instead of
+/// deriving them from the columnar arena.
+#[derive(Clone, Copy)]
+pub struct MatQuery<'a>(pub &'a QueryItemToScore);
+
+impl<'a> QueryGeom for MatQuery<'a> {
+    type Label = IonAnnot;
+
+    fn id(&self) -> u32 {
+        // Delegate to the stored eg's `QueryGeom` impl, which performs the
+        // checked u64 -> u32 conversion (fail-loud, no silent truncation).
+        QueryGeom::id(&self.0.query)
+    }
+
+    fn mono_precursor_mz(&self) -> f64 {
+        self.0.query.mono_precursor_mz()
+    }
+
+    fn precursor_charge(&self) -> u8 {
+        self.0.query.precursor_charge()
+    }
+
+    fn rt_seconds(&self) -> f32 {
+        self.0.query.rt_seconds()
+    }
+
+    fn mobility_ook0(&self) -> f32 {
+        self.0.query.mobility_ook0()
+    }
+
+    fn get_precursor_mz_limits(&self) -> (f64, f64) {
+        self.0.query.get_precursor_mz_limits()
+    }
+
+    fn precursor_count(&self) -> usize {
+        self.0.query.precursor_count()
+    }
+
+    fn fragment_count(&self) -> usize {
+        self.0.query.fragment_count()
+    }
+
+    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
+        QueryGeom::iter_precursors(&self.0.query)
+    }
+
+    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
+        QueryGeom::iter_fragments_refs(&self.0.query)
+    }
+}
+
+impl<'a> ExpectedIntensity for MatQuery<'a> {
+    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
+        self.0
+            .expected_intensity
+            .fragment_intensities
+            .iter()
+            .map(|&(lab, i)| (lab, i))
+    }
+
+    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
+        // Materialized arm keeps the STORED envelope verbatim — do NOT recompute
+        // averagine here (the lazy arm derives it, this arm already has it).
+        self.0
+            .expected_intensity
+            .precursor_intensities
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
+/// Arm-neutral scoring flyweight: one accessor surface over both the lazy
+/// columnar arena (`RefQuery`) and a materialized `QueryItemToScore`
+/// (`MatQuery`). `Speclib::item_at` hands this out for BOTH arms so the batch
+/// scoring / calibration loops never branch on the storage layout.
+#[derive(Clone, Copy)]
+pub enum ScoredItem<'a> {
+    Lazy(RefQuery<'a>),
+    Materialized(MatQuery<'a>),
+}
+
+impl<'a> ScoredItem<'a> {
+    /// Positional library id: lazy target index, or the materialized eg's id.
+    pub fn library_id(&self) -> u32 {
+        match self {
+            ScoredItem::Lazy(q) => q.geom().id(),
+            ScoredItem::Materialized(m) => m.id(),
+        }
+    }
+
+    /// Whether this item is a target (vs a decoy variant).
+    pub fn is_target(&self) -> bool {
+        match self {
+            ScoredItem::Lazy(q) => q.geom().variant() == 0,
+            ScoredItem::Materialized(m) => m.0.digest.decoy.is_target(),
+        }
+    }
+
+    /// Target-decoy competition group id.
+    pub fn decoy_group(&self) -> u32 {
+        match self {
+            ScoredItem::Lazy(q) => u32::try_from(q.geom().target_idx())
+                .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)"),
+            ScoredItem::Materialized(m) => m.0.digest.decoy_group,
+        }
+    }
+
+    /// Materialize the output identity `Peptide`.
+    pub fn materialize_peptide(&self) -> Peptide {
+        match self {
+            ScoredItem::Lazy(q) => q.materialize_peptide(self.decoy_group()),
+            ScoredItem::Materialized(m) => m.0.digest.clone(),
+        }
+    }
+}
+
+impl<'a> QueryGeom for ScoredItem<'a> {
+    type Label = IonAnnot;
+
+    fn id(&self) -> u32 {
+        match self {
+            ScoredItem::Lazy(q) => q.id(),
+            ScoredItem::Materialized(m) => m.id(),
+        }
+    }
+
+    fn mono_precursor_mz(&self) -> f64 {
+        match self {
+            ScoredItem::Lazy(q) => q.mono_precursor_mz(),
+            ScoredItem::Materialized(m) => m.mono_precursor_mz(),
+        }
+    }
+
+    fn precursor_charge(&self) -> u8 {
+        match self {
+            ScoredItem::Lazy(q) => q.precursor_charge(),
+            ScoredItem::Materialized(m) => m.precursor_charge(),
+        }
+    }
+
+    fn rt_seconds(&self) -> f32 {
+        match self {
+            ScoredItem::Lazy(q) => q.rt_seconds(),
+            ScoredItem::Materialized(m) => m.rt_seconds(),
+        }
+    }
+
+    fn mobility_ook0(&self) -> f32 {
+        match self {
+            ScoredItem::Lazy(q) => q.mobility_ook0(),
+            ScoredItem::Materialized(m) => m.mobility_ook0(),
+        }
+    }
+
+    fn get_precursor_mz_limits(&self) -> (f64, f64) {
+        match self {
+            ScoredItem::Lazy(q) => q.get_precursor_mz_limits(),
+            ScoredItem::Materialized(m) => m.get_precursor_mz_limits(),
+        }
+    }
+
+    fn precursor_count(&self) -> usize {
+        match self {
+            ScoredItem::Lazy(q) => q.precursor_count(),
+            ScoredItem::Materialized(m) => m.precursor_count(),
+        }
+    }
+
+    fn fragment_count(&self) -> usize {
+        match self {
+            ScoredItem::Lazy(q) => q.fragment_count(),
+            ScoredItem::Materialized(m) => m.fragment_count(),
+        }
+    }
+
+    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
+        // Box to unify the two arms' distinct iterator types behind one return.
+        let it: Box<dyn Iterator<Item = (i8, f64)>> = match self {
+            ScoredItem::Lazy(q) => Box::new(q.iter_precursors()),
+            ScoredItem::Materialized(m) => Box::new(m.iter_precursors()),
+        };
+        it
+    }
+
+    fn iter_fragments_refs(&self) -> impl Iterator<Item = (&IonAnnot, f64)> {
+        let it: Box<dyn Iterator<Item = (&IonAnnot, f64)> + '_> = match self {
+            ScoredItem::Lazy(q) => Box::new(q.iter_fragments_refs()),
+            ScoredItem::Materialized(m) => Box::new(m.iter_fragments_refs()),
+        };
+        it
+    }
+}
+
+impl<'a> ExpectedIntensity for ScoredItem<'a> {
+    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
+        let it: Box<dyn Iterator<Item = (IonAnnot, f32)> + '_> = match self {
+            ScoredItem::Lazy(q) => Box::new(q.iter_expected_fragments()),
+            ScoredItem::Materialized(m) => Box::new(m.iter_expected_fragments()),
+        };
+        it
+    }
+
+    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
+        match self {
+            ScoredItem::Lazy(q) => q.expected_precursor_envelope(),
+            ScoredItem::Materialized(m) => m.expected_precursor_envelope(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +464,37 @@ mod tests {
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");
+    }
+
+    #[test]
+    fn materialized_item_scores() {
+        use crate::data_sources::speclib::Speclib;
+        use crate::models::query_item::QueryItemToScore;
+        use crate::models::sequence::SpeclibMeta;
+
+        let item = QueryItemToScore::sample();
+        let expected_mono = item.query.mono_precursor_mz();
+        let expected_is_target = item.digest.decoy.is_target();
+        let expected_lib_id = QueryGeom::id(&item.query);
+        let expected_frags: Vec<(IonAnnot, f32)> = item
+            .expected_intensity
+            .fragment_intensities
+            .iter()
+            .copied()
+            .collect();
+
+        let lib = Speclib::Materialized {
+            elems: vec![item],
+            meta: SpeclibMeta::default(),
+        };
+
+        // Previously panicked (`unimplemented!`); must now score via item_at.
+        let scored = lib.item_at(0);
+        assert!((scored.mono_precursor_mz() - expected_mono).abs() < 1e-9);
+        assert_eq!(scored.is_target(), expected_is_target);
+        assert_eq!(scored.library_id(), expected_lib_id);
+        let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
+        assert_eq!(got_frags, expected_frags);
     }
 
     #[test]
