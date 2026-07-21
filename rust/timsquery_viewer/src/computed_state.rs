@@ -1,5 +1,6 @@
 use egui::Color32;
 use std::collections::HashMap;
+use timsquery::ion::IonAnnot;
 use timsquery::models::elution_group::TimsElutionGroup;
 use timsquery::models::tolerance::{
     RtTolerance,
@@ -44,9 +45,9 @@ use timsseek::scoring::apex_finding::{
 pub(crate) struct ChromatogramComputationResult {
     pub selected_idx: u64,
     pub output: ChromatogramOutput,
-    pub collector: ChromatogramCollector<String, f32>,
-    pub expected_intensities: ExpectedIntensities<String>,
-    pub elution_group: TimsElutionGroup<String>,
+    pub collector: ChromatogramCollector<IonAnnot, f32>,
+    pub expected_intensities: ExpectedIntensities<IonAnnot>,
+    pub elution_group: TimsElutionGroup<IonAnnot>,
 }
 
 #[derive(Debug)]
@@ -63,8 +64,8 @@ struct ChromatogramResult {
     lines: ChromatogramLines,
     output: ChromatogramOutput,
     scoring: Option<ScoringResult>,
-    expected_intensities: ExpectedIntensities<String>,
-    elution_group: TimsElutionGroup<String>,
+    expected_intensities: ExpectedIntensities<IonAnnot>,
+    elution_group: TimsElutionGroup<IonAnnot>,
 }
 
 #[derive(Debug, Default)]
@@ -155,7 +156,7 @@ impl ComputedState {
         self.mobility.data.as_ref()
     }
 
-    pub fn expected_intensities(&self) -> Option<&ExpectedIntensities<String>> {
+    pub fn expected_intensities(&self) -> Option<&ExpectedIntensities<IonAnnot>> {
         self.result.as_ref().map(|r| &r.expected_intensities)
     }
 
@@ -269,8 +270,8 @@ impl ComputedState {
 
     pub(crate) fn build_collector(
         index: &IndexedPeaksHandle,
-        elution_group: TimsElutionGroup<String>,
-    ) -> Result<ChromatogramCollector<String, f32>, ViewerError> {
+        elution_group: TimsElutionGroup<IonAnnot>,
+    ) -> Result<ChromatogramCollector<IonAnnot, f32>, ViewerError> {
         let max_range = index.ms1_cycle_mapping().range_milis();
         let collector = ChromatogramCollector::new(
             &elution_group,
@@ -284,8 +285,8 @@ impl ComputedState {
 
     #[instrument(skip_all, fields(eg_id = %elution_group.id()))]
     pub(crate) fn generate_chromatogram(
-        collector: &mut ChromatogramCollector<String, f32>,
-        elution_group: &TimsElutionGroup<String>,
+        collector: &mut ChromatogramCollector<IonAnnot, f32>,
+        elution_group: &TimsElutionGroup<IonAnnot>,
         index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
@@ -321,7 +322,7 @@ impl ComputedState {
     #[instrument(skip_all, fields(eg_id = %context.chromatograms.id))]
     fn find_apex(
         trace_scorer: &mut TraceScorer,
-        context: &Extraction<String>,
+        context: &Extraction<IonAnnot>,
         index: &IndexedPeaksHandle,
     ) -> Result<ApexScore, ViewerError> {
         trace_scorer.find_apex(context, &|idx| {
@@ -411,8 +412,8 @@ impl ComputedState {
         scratch: &mut ScratchBuffers,
         index: &IndexedPeaksHandle,
         output: &ChromatogramOutput,
-        expected_intensities: &ExpectedIntensities<String>,
-        collector: &ChromatogramCollector<String, f32>,
+        expected_intensities: &ExpectedIntensities<IonAnnot>,
+        collector: &ChromatogramCollector<IonAnnot, f32>,
     ) -> Option<ScoringResult> {
         let num_cycles = output.retention_time_results_seconds.len();
         tracing::debug!(
@@ -564,7 +565,7 @@ impl ComputedState {
             .with_rt_tolerance(RtTolerance::Minutes((5.0 / 60.0, 5.0 / 60.0)))
             .with_wider_mobility(2.0);
 
-        let mut collector: SpectralCollector<String, MzMobilityStatsCollector> =
+        let mut collector: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
             SpectralCollector::new(&eg);
         collector.reset_with_overrides(&eg, Some(rt_override), None);
         index.add_query(&mut collector, &wide_tolerance);
@@ -600,7 +601,7 @@ impl ComputedState {
         for ((label, _mz), stats) in collector.iter_fragments() {
             if let (Ok(mean_mz), Ok(mean_mobility)) = (stats.mean_mz(), stats.mean_mobility()) {
                 ions.push(IonMobilityStats {
-                    label: label.clone(),
+                    label: label.to_string(),
                     mean_mz,
                     mean_mobility,
                     total_intensity: stats.weight(),

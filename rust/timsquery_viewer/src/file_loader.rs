@@ -9,23 +9,22 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
+use timsquery::TimsElutionGroup;
 use timsquery::ion::IonAnnot;
 use timsquery::models::tolerance::Tolerance;
-use timsquery::serde::{
-    ElutionGroupCollection,
-    FileReadingExtras,
-    IndexedPeaksHandle,
+use timsquery::serde::IndexedPeaksHandle;
+use timsquery::traits::QueryGeom;
+use timsseek::data_sources::reference_library::ScoredIdentity;
+use timsseek::scoring::pipeline::fill_scratch_from;
+use timsseek::{
+    ExpectedIntensities,
+    ExpectedIntensity,
+    RefQuery,
+    ReferenceLibrary,
 };
-use timsquery::{
-    KeyLike,
-    TimsElutionGroup,
-};
-use timsseek::ExpectedIntensities;
-use timsseek::fragment_mass::elution_group_converter::isotope_dist_from_seq;
 use tracing::{
     info,
     instrument,
-    warn,
 };
 
 /// Handles file dialogs and file loading operations
@@ -66,8 +65,8 @@ impl FileLoader {
     pub fn open_elution_groups_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
-                "Elution Groups File (json/diann txt/tsv)",
-                &["json", "txt", "tsv", "parquet"],
+                "Spectral library (speclib/diann txt/tsv/parquet)",
+                &["speclib", "txt", "tsv", "parquet", "json"],
             )
             .pick_file()
         {
@@ -106,7 +105,7 @@ impl FileLoader {
         }
     }
 
-    /// Load elution groups from a JSON file
+    /// Load elution groups from a spectral library file
     pub fn load_elution_groups(&self, path: &Path) -> Result<ElutionGroupData, ViewerError> {
         FileService::load_elution_groups(path)
     }
@@ -152,12 +151,24 @@ impl FileLoader {
     }
 }
 
+/// The library the viewer displays and scores against.
+///
+/// This is the SAME columnar `ReferenceLibrary` arena the timsseek CLI scores
+/// (loaded via `Speclib::from_file`). Iteration is via `item_at(flat)`
+/// `RefQuery` flyweights: the geometry feeds `build_extraction` + `TraceScorer`
+/// and the reference intensities + isotope envelope come from the flyweight's
+/// `ExpectedIntensity` impl, which routes the envelope through
+/// `isotope_dist_or_averagine` (averagine fallback). There is no private
+/// isotope model here — the viewer shows exactly what the CLI scores.
 #[derive(Debug)]
 pub struct ElutionGroupData {
-    inner: ElutionGroupCollection,
+    inner: ReferenceLibrary,
 }
-const BASE_LABELS: [&str; 6] = [
+
+const BASE_LABELS: [&str; 8] = [
     "ID",
+    "Sequence",
+    "Decoy",
     "RT (s)",
     "Mobility",
     "Precursor m/z",
@@ -165,18 +176,8 @@ const BASE_LABELS: [&str; 6] = [
     "Fragments",
 ];
 
-/// Labels for library-specific extra columns (DIA-NN and Spectronaut share the same structure)
-const LIBRARY_EXTRA_LABELS: [&str; 3] = ["Modified Peptide", "Protein ID(s)", "Is Decoy"];
-
-/// Common view structure for library extras that both DIA-NN and Spectronaut can map to
-struct LibraryExtrasView {
-    modified_peptide: String,
-    protein_id: String,
-    is_decoy: bool,
-}
-
 impl ElutionGroupData {
-    pub fn new(inner: ElutionGroupCollection) -> Self {
+    pub fn new(inner: ReferenceLibrary) -> Self {
         Self { inner }
     }
 
@@ -188,6 +189,11 @@ impl ElutionGroupData {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The `RefQuery` flyweight at flat index `idx` (target/decoy expanded).
+    fn item_at(&self, idx: usize) -> RefQuery<'_> {
+        self.inner.item_at(idx)
     }
 
     /// Returns indices of all elution groups matching the ID filter.
@@ -208,189 +214,46 @@ impl ElutionGroupData {
         let filter_lower = filter.to_lowercase();
         let mut str_buffer = String::new();
         for i in 0..self.len() {
-            if self.key_onto(i, &mut str_buffer).is_ok()
-                && str_buffer.to_lowercase().contains(&filter_lower)
-            {
+            self.key_onto(i, &mut str_buffer);
+            if str_buffer.to_lowercase().contains(&filter_lower) {
                 buffer.push(i);
             }
         }
     }
 
-    /// Adds the key contents to the string, the idea here is to avoid allocations
-    fn key_onto(&self, idx: usize, buffer: &mut String) -> Result<(), ()> {
+    /// Writes the filterable key (id + sequence) for `idx` into `buffer`.
+    fn key_onto(&self, idx: usize, buffer: &mut String) {
         use std::fmt::Write;
         buffer.clear();
-        match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, _) => {
-                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
-            }
-            ElutionGroupCollection::MzpafLabels(egs, _) => {
-                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
-            }
-            ElutionGroupCollection::TinyIntLabels(egs, _) => {
-                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
-            }
-            ElutionGroupCollection::IntLabels(egs, _) => {
-                write!(buffer, "{}", egs[idx].id()).map_err(|_| ())?;
-            }
-        }
-        let extras_view = self.get_library_extras_view(idx);
-        if let Some(extra) = extras_view {
-            write!(
-                buffer,
-                "|{}|{}|{}",
-                extra.modified_peptide, extra.protein_id, extra.is_decoy
-            )
-            .map_err(|_| ())?;
-        }
-        Ok(())
-    }
-
-    /// Extracts a common view of library extras from either DIA-NN or Spectronaut format
-    fn get_library_extras_view(&self, idx: usize) -> Option<LibraryExtrasView> {
-        let extras = match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => extras.as_ref()?,
-        };
-        match extras {
-            FileReadingExtras::Diann(diann_extras) => {
-                let de = diann_extras.get(idx)?;
-                Some(LibraryExtrasView {
-                    modified_peptide: de.modified_peptide.clone(),
-                    protein_id: de.protein_id.clone(),
-                    is_decoy: de.is_decoy,
-                })
-            }
-            FileReadingExtras::Spectronaut(spectronaut_extras) => {
-                let se = spectronaut_extras.get(idx)?;
-                Some(LibraryExtrasView {
-                    modified_peptide: se.modified_peptide.clone(),
-                    protein_id: se.protein_id.clone(),
-                    is_decoy: se.is_decoy,
-                })
-            }
-            FileReadingExtras::Skyline(skyline_extras) => {
-                let sky = skyline_extras.get(idx)?;
-                Some(LibraryExtrasView {
-                    modified_peptide: sky.modified_peptide.clone(),
-                    protein_id: sky.protein_id.clone(),
-                    is_decoy: sky.is_decoy,
-                })
-            }
-        }
-    }
-
-    /// Checks if the collection has library extras (DIA-NN or Spectronaut)
-    fn has_library_extras(&self) -> bool {
-        match &self.inner {
-            ElutionGroupCollection::StringLabels(_, extras)
-            | ElutionGroupCollection::MzpafLabels(_, extras)
-            | ElutionGroupCollection::TinyIntLabels(_, extras)
-            | ElutionGroupCollection::IntLabels(_, extras) => extras.is_some(),
-        }
-    }
-
-    /// Builds ExpectedIntensities from library extras (shared by DIA-NN and Spectronaut)
-    fn build_expected_intensities(
-        stripped_peptide: &str,
-        relative_intensities: &[(IonAnnot, f32)],
-        eg: &mut TimsElutionGroup<String>,
-    ) -> Result<ExpectedIntensities<String>, ViewerError> {
-        let isotopes = match isotope_dist_from_seq(stripped_peptide) {
-            Ok(isotopes) => isotopes,
-            Err(e) => {
-                warn!(
-                    "Failed to calculate isotope distribution for sequence {}: {}",
-                    stripped_peptide, e
-                );
-                [1.0, 0.0, 0.0]
-            }
-        };
-
-        eg.set_precursor_labels([0, 1, 2].iter().cloned());
-
-        ExpectedIntensities::try_from_pairs(
-            relative_intensities
-                .iter()
-                .map(|(k, v)| (k.to_string(), *v)),
-            isotopes
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(i, intensity)| (i as i8, intensity)),
-        )
-        .map_err(|e| ViewerError::General(format!("library entry {}: {}", stripped_peptide, e)))
+        let q = self.item_at(idx);
+        let peptide = ScoredIdentity::materialize_peptide(&q);
+        let _ = write!(buffer, "{}|{}|{}", q.id(), peptide.raw, !q.is_target());
     }
 
     pub fn get_elem(
         &self,
         index: usize,
-    ) -> Result<(TimsElutionGroup<String>, ExpectedIntensities<String>), ViewerError> {
-        let (eg, extras) = match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, ext) => (egs.get(index).cloned(), ext),
-            ElutionGroupCollection::MzpafLabels(egs, ext) => {
-                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
-            }
-            ElutionGroupCollection::TinyIntLabels(egs, ext) => {
-                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
-            }
-            ElutionGroupCollection::IntLabels(egs, ext) => {
-                (egs.get(index).map(|eg| eg.cast(|x| x.to_string())), ext)
-            }
-        };
-        let mut eg = eg.ok_or(ViewerError::General(format!(
-            "Elution group index {} out of bounds",
-            index
-        )))?;
+    ) -> Result<(TimsElutionGroup<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
+        if index >= self.len() {
+            return Err(ViewerError::General(format!(
+                "Elution group index {index} out of bounds"
+            )));
+        }
 
-        let extra = match extras {
-            Some(FileReadingExtras::Diann(diann_extras)) => {
-                let de = diann_extras.get(index).ok_or(ViewerError::General(format!(
-                    "Diann extras index {} out of bounds",
-                    index
-                )))?;
-                Self::build_expected_intensities(
-                    &de.stripped_peptide,
-                    &de.relative_intensities,
-                    &mut eg,
-                )
-            }
-            Some(FileReadingExtras::Spectronaut(spectronaut_extras)) => {
-                let se = spectronaut_extras
-                    .get(index)
-                    .ok_or(ViewerError::General(format!(
-                        "Spectronaut extras index {} out of bounds",
-                        index
-                    )))?;
-                Self::build_expected_intensities(
-                    &se.stripped_peptide,
-                    &se.relative_intensities,
-                    &mut eg,
-                )
-            }
-            Some(FileReadingExtras::Skyline(skyline_extras)) => {
-                let sky = skyline_extras
-                    .get(index)
-                    .ok_or(ViewerError::General(format!(
-                        "Skyline extras index {} out of bounds",
-                        index
-                    )))?;
-                Self::build_expected_intensities(
-                    &sky.stripped_peptide,
-                    &sky.relative_intensities,
-                    &mut eg,
-                )
-            }
-            None => ExpectedIntensities::try_from_pairs(
-                eg.iter_fragments()
-                    .map(|(label, _mz)| (label.to_string(), 0.1)),
-                eg.iter_precursors().map(|(idx, _mz)| (idx, 1.0)),
-            )
-            .map_err(|e| ViewerError::General(format!("synthetic defaults: {}", e))),
-        }?;
-        Ok((eg, extra))
+        // Materialize the scratch elution group + expected intensities from the
+        // arena flyweight exactly the way the scoring pipeline does
+        // (`fill_scratch_from`). The precursor envelope comes from
+        // `expected_precursor_envelope()`, which routes through
+        // `isotope_dist_or_averagine` — no `[1.0, 0.0, 0.0]` fallback.
+        let q = self.item_at(index);
+        let mut eg = TimsElutionGroup::empty_like();
+        fill_scratch_from(&mut eg, &q);
+        let expected = ExpectedIntensities::try_from_pairs(
+            q.iter_expected_fragments(),
+            q.expected_precursor_envelope().into_iter(),
+        )
+        .map_err(|e| ViewerError::General(format!("library entry {index}: {e:?}")))?;
+        Ok((eg, expected))
     }
 
     pub fn render_table(
@@ -443,15 +306,6 @@ impl ElutionGroupData {
     fn add_columns<'a>(&self, mut table: TableBuilder<'a>) -> TableBuilder<'a> {
         // Max column width ~40 chars at typical font size
         const MAX_COL_WIDTH: f32 = 280.0;
-        if self.has_library_extras() {
-            for _ in LIBRARY_EXTRA_LABELS.iter() {
-                table = table.column(
-                    egui_extras::Column::auto()
-                        .at_least(100.0)
-                        .at_most(MAX_COL_WIDTH),
-                );
-            }
-        }
         for _ in BASE_LABELS.iter() {
             table = table.column(
                 egui_extras::Column::auto()
@@ -464,13 +318,6 @@ impl ElutionGroupData {
 
     fn add_headers<'a>(&self, builder: TableBuilder<'a>) -> Table<'a> {
         builder.header(20.0, |mut header| {
-            if self.has_library_extras() {
-                for label in LIBRARY_EXTRA_LABELS.iter() {
-                    header.col(|ui| {
-                        ui.strong(*label);
-                    });
-                }
-            }
             for label in BASE_LABELS.iter() {
                 header.col(|ui| {
                     ui.strong(*label);
@@ -479,25 +326,23 @@ impl ElutionGroupData {
         })
     }
 
-    /// Helper function to add row content
-    /// `is_selected` indicates if the row is currently selected
-    /// This function adds the appropriate columns based on available extras
-    /// Returns true if any of the content was clicked (for selection handling)
-    fn add_row_content_inner<T: KeyLike>(
-        eg: &TimsElutionGroup<T>,
-        extras: Option<LibraryExtrasView>,
+    fn add_row_content(
+        &self,
+        idx: usize,
+        selected_index: &mut Option<usize>,
         table_row: &mut egui_extras::TableRow,
-        is_selected: bool,
-    ) -> bool {
+    ) {
+        let q = self.item_at(idx);
+        let is_selected = Some(idx) == *selected_index;
+        let peptide = ScoredIdentity::materialize_peptide(&q);
+
         let mut clicked = false;
         let mut add_col = |ui: &mut egui::Ui, text: &str| {
-            // Highlight if selected
             let maybe_highlighted_text = if is_selected {
                 egui::RichText::new(text).background_color(ui.visuals().selection.bg_fill)
             } else {
                 egui::RichText::new(text)
             };
-            // Use Label with truncate to show "..." when text overflows column width
             let label = egui::Label::new(maybe_highlighted_text)
                 .truncate()
                 .sense(egui::Sense::click());
@@ -511,67 +356,100 @@ impl ElutionGroupData {
                 clicked = true;
             }
         };
-        if let Some(extra) = extras {
-            table_row.col(|ui| {
-                add_col(ui, &extra.modified_peptide);
-            });
-            table_row.col(|ui| {
-                add_col(ui, &extra.protein_id);
-            });
-            table_row.col(|ui| {
-                add_col(ui, if extra.is_decoy { "Yes" } else { "No" });
-            });
-        }
-        table_row.col(|ui| {
-            add_col(ui, &eg.id().to_string());
-        });
-        table_row.col(|ui| {
-            let text = format!("{:.2}", eg.rt_seconds());
-            add_col(ui, &text);
-        });
-        table_row.col(|ui| {
-            let text = format!("{:.4}", eg.mobility_ook0());
-            add_col(ui, &text);
-        });
-        table_row.col(|ui| {
-            let display_text = format!("{:.4}", eg.mono_precursor_mz());
-            add_col(ui, &display_text);
-        });
-        table_row.col(|ui| {
-            let text = format!("{}", eg.precursor_charge());
-            add_col(ui, &text);
-        });
-        table_row.col(|ui| {
-            let text = format!("{}", eg.fragment_count());
-            add_col(ui, &text);
-        });
-        clicked
-    }
 
-    fn add_row_content(
-        &self,
-        idx: usize,
-        selected_index: &mut Option<usize>,
-        table_row: &mut egui_extras::TableRow,
-    ) {
-        let library_extras = self.get_library_extras_view(idx);
-        let is_selected = Some(idx) == *selected_index;
-        let clicked = match &self.inner {
-            ElutionGroupCollection::StringLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
-            }
-            ElutionGroupCollection::MzpafLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
-            }
-            ElutionGroupCollection::TinyIntLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
-            }
-            ElutionGroupCollection::IntLabels(egs, _) => {
-                Self::add_row_content_inner(&egs[idx], library_extras, table_row, is_selected)
-            }
-        };
+        table_row.col(|ui| {
+            add_col(ui, &q.id().to_string());
+        });
+        table_row.col(|ui| {
+            add_col(ui, &peptide.raw);
+        });
+        table_row.col(|ui| {
+            add_col(ui, if q.is_target() { "No" } else { "Yes" });
+        });
+        table_row.col(|ui| {
+            add_col(ui, &format!("{:.2}", q.rt_seconds()));
+        });
+        table_row.col(|ui| {
+            add_col(ui, &format!("{:.4}", q.mobility_ook0()));
+        });
+        table_row.col(|ui| {
+            add_col(ui, &format!("{:.4}", q.mono_precursor_mz()));
+        });
+        table_row.col(|ui| {
+            add_col(ui, &format!("{}", q.precursor_charge()));
+        });
+        table_row.col(|ui| {
+            add_col(ui, &format!("{}", q.fragment_count()));
+        });
+
         if clicked {
             *selected_index = Some(idx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use timsquery::models::QueryCollection;
+    use timsquery::models::capabilities::LibCapabilities;
+    use timsquery::utils::constants::PROTON_MASS;
+    use timsseek::fragment_mass::isotope_dist_or_averagine;
+
+    /// Build a one-entry `ReferenceLibrary` whose STRIPPED sequence has an
+    /// uncountable composition (`B` is not a real residue), forcing the
+    /// averagine isotope path.
+    fn uncountable_lib() -> ReferenceLibrary {
+        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        geom.push_target(
+            600.0,
+            1,
+            10.0,
+            1.0,
+            &[
+                (IonAnnot::try_from("y3").unwrap(), 300.0),
+                (IonAnnot::try_from("y5").unwrap(), 500.0),
+            ],
+            "PEPBK",
+            "PEPBK",
+            &[],
+        );
+        geom.seal();
+        ReferenceLibrary {
+            geom,
+            frag_intens: vec![1.0, 0.5],
+        }
+    }
+
+    /// The envelope the viewer DISPLAYS (obtained via `get_elem`, i.e. the
+    /// flyweight's `expected_precursor_envelope`) must equal what the scoring
+    /// path computes via `isotope_dist_or_averagine` — NOT the deleted
+    /// `[1.0, 0.0, 0.0]` fallback.
+    #[test]
+    fn displayed_envelope_matches_isotope_dist_or_averagine() {
+        let data = ElutionGroupData::new(uncountable_lib());
+        let (_eg, expected) = data.get_elem(0).unwrap();
+
+        let charge = 1.0_f64;
+        let neutral = 600.0 * charge - charge * PROTON_MASS;
+        let (_src, env) = isotope_dist_or_averagine("PEPBK", neutral);
+
+        // Every displayed precursor isotope equals the shared model output.
+        for (iso_idx, ref_intensity) in env.iter().enumerate() {
+            let displayed = expected
+                .get_precursor(iso_idx as i8)
+                .unwrap_or_else(|| panic!("missing displayed precursor isotope {iso_idx}"));
+            assert!(
+                (displayed - ref_intensity).abs() < 1e-6,
+                "isotope {iso_idx}: displayed {displayed} != shared model {ref_intensity}",
+            );
+        }
+
+        // Prove the [1,0,0] fallback is gone: an averagine peptide of this mass
+        // has non-zero +1/+2 isotope peaks.
+        assert!(
+            expected.get_precursor(1).unwrap() > 0.0,
+            "the +1 isotope must be populated by the averagine model (not the [1,0,0] fallback)",
+        );
     }
 }

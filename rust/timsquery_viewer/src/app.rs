@@ -10,6 +10,7 @@ use egui_dock::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use timsquery::ion::IonAnnot;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 
@@ -46,10 +47,10 @@ use std::sync::mpsc::{
 type ChromatogramComputeResult = Result<
     (
         crate::chromatogram_processor::ChromatogramOutput,
-        crate::chromatogram_processor::ChromatogramCollector<String, f32>,
-        timsseek::ExpectedIntensities<String>,
+        crate::chromatogram_processor::ChromatogramCollector<IonAnnot, f32>,
+        timsseek::ExpectedIntensities<IonAnnot>,
         u64, // selected_idx as cache key
-        timsquery::models::elution_group::TimsElutionGroup<String>,
+        timsquery::models::elution_group::TimsElutionGroup<IonAnnot>,
     ),
     String,
 >;
@@ -592,8 +593,8 @@ impl ViewerApp {
 
     /// Compute chromatogram in background thread
     fn compute_chromatogram_background(
-        elution_group: timsquery::models::elution_group::TimsElutionGroup<String>,
-        expected_intensities: timsseek::ExpectedIntensities<String>,
+        elution_group: timsquery::models::elution_group::TimsElutionGroup<IonAnnot>,
+        expected_intensities: timsseek::ExpectedIntensities<IonAnnot>,
         selected_idx: usize,
         index: Arc<IndexedPeaksHandle>,
         tolerance: Tolerance,

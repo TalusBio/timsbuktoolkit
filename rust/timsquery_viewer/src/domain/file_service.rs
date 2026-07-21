@@ -28,13 +28,20 @@ impl FileService {
     /// # Returns
     /// Parsed elution group data
     pub fn load_elution_groups(path: &Path) -> Result<ElutionGroupData, ViewerError> {
-        let res = timsquery::serde::read_library_file(path)?;
+        // Load the SAME shared columnar arena the timsseek CLI scores, so the
+        // viewer displays exactly what gets scored (one isotope model, one
+        // intensity source). String-labelled JSON elution-group files no longer
+        // load here: scoring requires ion-annotated fragments + reference
+        // intensities, which only the DIA-NN family (.speclib/TSV/parquet)
+        // carry.
+        let lib = timsseek::Speclib::from_file(path, timsseek::DecoyStrategy::default())
+            .map_err(|e| ViewerError::General(format!("Failed to load library: {e:?}")))?;
         info!(
-            "Loaded {} elution groups from {}",
-            res.len(),
+            "Loaded {} library entries from {}",
+            lib.len(),
             path.display()
         );
-        Ok(ElutionGroupData::new(res))
+        Ok(ElutionGroupData::new(lib))
     }
 
     /// Load and index raw timsTOF data from a location (path or URL)
