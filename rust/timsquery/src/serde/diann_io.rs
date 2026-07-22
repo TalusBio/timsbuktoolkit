@@ -5,6 +5,8 @@ use crate::ion::{
 };
 use arrow::array::{
     Float32Array,
+    Float64Array,
+    Int32Array,
     Int64Array,
     LargeStringArray,
     StringArray,
@@ -601,6 +603,35 @@ mod tests {
         assert!(!first_extras.is_decoy);
         assert_eq!(first_eg.fragment_count(), 4);
     }
+
+    #[test]
+    fn test_read_carafe_parquet_library_file() {
+        // Carafe emits int32/float32/large_string arrow types (vs DIA-NN's
+        // int64). Ensure the widened column getters downcast these correctly.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("carafe_pq_speclib.parquet");
+
+        let result = read_parquet_library_file(file_path);
+        assert!(
+            result.is_ok(),
+            "Failed to read Carafe parquet library file: {:?}",
+            result.err()
+        );
+
+        let elution_groups = result.unwrap();
+        assert_eq!(elution_groups.len(), 1, "Expected 1 precursor");
+
+        let (eg, extras) = &elution_groups[0];
+        assert_eq!(
+            extras.modified_peptide,
+            "_AAAGLYENC[UniMod:4]FC[UniMod:4]NALLAK_"
+        );
+        assert!(!extras.is_decoy);
+        assert_eq!(eg.fragment_count(), 20);
+    }
 }
 
 /// Read a DIA-NN spectral library from a parquet file (DiaNN 2.2+ format)
@@ -676,16 +707,17 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             let column = batch.column_by_name(column_name).ok_or_else(|| {
                 DiannReadingError::ArrowError(format!("Column {} not found", column_name))
             })?;
-            let float_array = column
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    DiannReadingError::ArrowError(format!(
-                        "Column {} is not a float array",
-                        column_name
-                    ))
-                })?;
-            result.extend(float_array.iter().map(|v| v.unwrap_or(0.0)));
+            // Carafe/pandas emit float32; DIA-NN sometimes float64. Accept both.
+            if let Some(float_array) = column.as_any().downcast_ref::<Float32Array>() {
+                result.extend(float_array.iter().map(|v| v.unwrap_or(0.0)));
+            } else if let Some(float_array) = column.as_any().downcast_ref::<Float64Array>() {
+                result.extend(float_array.iter().map(|v| v.unwrap_or(0.0) as f32));
+            } else {
+                return Err(DiannReadingError::ArrowError(format!(
+                    "Column {} is not a float array",
+                    column_name
+                )));
+            }
         }
         Ok(result)
     }
@@ -699,16 +731,17 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             let column = batch.column_by_name(column_name).ok_or_else(|| {
                 DiannReadingError::ArrowError(format!("Column {} not found", column_name))
             })?;
-            let int_array = column
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| {
-                    DiannReadingError::ArrowError(format!(
-                        "Column {} is not an int array",
-                        column_name
-                    ))
-                })?;
-            result.extend(int_array.iter().map(|v| v.unwrap_or(0)));
+            // Carafe/pandas emit int32; DIA-NN sometimes int64. Accept both.
+            if let Some(int_array) = column.as_any().downcast_ref::<Int64Array>() {
+                result.extend(int_array.iter().map(|v| v.unwrap_or(0)));
+            } else if let Some(int_array) = column.as_any().downcast_ref::<Int32Array>() {
+                result.extend(int_array.iter().map(|v| v.unwrap_or(0) as i64));
+            } else {
+                return Err(DiannReadingError::ArrowError(format!(
+                    "Column {} is not an int array",
+                    column_name
+                )));
+            }
         }
         Ok(result)
     }
