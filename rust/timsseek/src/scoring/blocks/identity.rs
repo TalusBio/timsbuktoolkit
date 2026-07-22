@@ -10,6 +10,7 @@ use crate::scoring::apex_finding::PeptideMetadata;
 use crate::scoring::blocks::{
     ColSink,
     FeatSink,
+    NameSink,
     ScoreBlock,
 };
 
@@ -74,8 +75,14 @@ impl ScoreBlock for Identity {
 
     fn features(&self, o: &mut FeatSink) {
         // library_id / decoy_group_id / is_target are Parquet-only (not features).
-        o.push("precursor_mz_round5", (self.precursor_mz / 5.0).round());
-        o.push("precursor_charge", self.precursor_charge as f64);
-        o.push("precursor_mobility", self.precursor_mobility as f64);
+        o.push((self.precursor_mz / 5.0).round());
+        o.push(self.precursor_charge as f64);
+        o.push(self.precursor_mobility as f64);
+    }
+
+    fn feature_names(o: &mut NameSink) {
+        o.push("precursor_mz_round5");
+        o.push("precursor_charge");
+        o.push("precursor_mobility");
     }
 }

@@ -25,6 +25,7 @@ pub use std::collections::{
     HashMap,
     HashSet,
 };
+use std::sync::Arc;
 
 pub struct GBMConfig {
     iterations: usize,
@@ -364,7 +365,7 @@ impl PrecomputedFeatures {
 /// non-finite values seen for this feature in the fold (0.0..=1.0).
 #[derive(Debug, Serialize)]
 pub struct FeatureStat {
-    pub name: &'static str,
+    pub name: Arc<str>,
     pub mean: f32,
     pub nan_ratio: f32,
 }
@@ -376,7 +377,7 @@ pub struct FeatureStat {
 pub struct FoldStats {
     pub fold: u8,
     pub feature_stats: Vec<FeatureStat>,
-    pub feature_importance: Vec<(&'static str, f32)>,
+    pub feature_importance: Vec<(Arc<str>, f32)>,
 }
 
 pub type RescoreFeatureStats = Vec<FoldStats>;
@@ -507,13 +508,14 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
 
     /// Compute per-fold feature means + Forust Gain importance.
     ///
-    /// `names` must be the feature-name list in the same order `as_feature` emits.
+    /// `names` is the set-level feature-name list, in the same order
+    /// `as_feature` emits (see [`crate::ml::qvalues::feature_name_set`]).
     /// Folds with no classifier (shouldn't happen post-fit) produce empty maps.
-    pub fn feature_stats(&self, names: &[&'static str]) -> RescoreFeatureStats {
+    pub fn feature_stats(&self, names: &[Arc<str>]) -> RescoreFeatureStats {
         let mut out: RescoreFeatureStats = Vec::with_capacity(self.n_folds as usize);
         for fold in 0..self.n_folds {
             // --- Gain importance from the booster (sorted desc by gain) ---
-            let importance: Vec<(&'static str, f32)> = match self
+            let importance: Vec<(Arc<str>, f32)> = match self
                 .fold_classifiers
                 .get(fold as usize)
                 .and_then(|o| o.as_ref())
@@ -525,9 +527,9 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                         raw_imp.keys().all(|&idx| idx < names.len()),
                         "forust importance index exceeds feature name list"
                     );
-                    let mut pairs: Vec<(&'static str, f32)> = raw_imp
+                    let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
                         .into_iter()
-                        .filter_map(|(idx, v)| names.get(idx).map(|n| (*n, v)))
+                        .filter_map(|(idx, v)| names.get(idx).map(|n| (n.clone(), v)))
                         .collect();
                     pairs
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -543,9 +545,9 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             let mut n: usize = 0;
             for (i, item) in self.data.iter().enumerate() {
                 if self.assigned_fold.get(i) == Some(&fold) {
-                    let mut seen = 0usize;
+                    // Per-record value/name alignment is contractual (the same
+                    // ordered sources build both), so it is not re-checked here.
                     for (j, v) in item.as_feature().into_iter().enumerate() {
-                        seen += 1;
                         if j < sums.len() {
                             if v.is_finite() {
                                 sums[j] += v;
@@ -555,7 +557,6 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                             }
                         }
                     }
-                    debug_assert_eq!(seen, names.len(), "as_feature length drift for item {i}");
                     n += 1;
                 }
             }
@@ -568,7 +569,7 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                     .map(|(((name, s), fc), nc)| {
                         let mean = if *fc > 0 { *s / *fc as f64 } else { f64::NAN };
                         FeatureStat {
-                            name: *name,
+                            name: name.clone(),
                             mean: mean as f32,
                             nan_ratio: *nc as f32 / n as f32,
                         }

@@ -377,7 +377,7 @@ pub fn filter_zero_intensity_ions<T: KeyLike + Default>(
 }
 
 /// Raw secondary lazyscores produced during scoring; projected into the
-/// [`blocks::lazy::SecondaryLazyScores`] block via `From`.
+/// [`crate::scoring::blocks::lazy::SecondaryLazyScores`] block via `From`.
 #[derive(Debug, Clone, Copy)]
 pub struct SecondaryLazyScoresRaw {
     pub lazyscore: f32,

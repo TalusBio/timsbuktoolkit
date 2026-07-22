@@ -26,6 +26,7 @@ use super::blocks::split_product::SplitProduct;
 use super::blocks::{
     ColSink,
     FeatSink,
+    NameSink,
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
@@ -46,24 +47,77 @@ pub struct FinalizeInputs<'a> {
     pub apex: ApexBlocks,
 }
 
-/// Shared scoring fields produced by Phase 3, as a composition of typed
-/// blocks. Each block owns its whole lifecycle (compute, `columns`,
-/// `features`) in one file under [`super::blocks`].
-#[derive(Debug, Clone, Serialize)]
-pub struct ScoringFields {
-    pub identity: Identity,
-    pub rt: Rt,
-    pub mobility: Mobility,
-    pub primary: PrimaryScores,
-    pub split: SplitProduct,
-    pub features: ApexFeatures,
-    pub apex_lazy: ApexLazyScores,
-    pub secondary_lazy: SecondaryLazyScores,
-    pub counts: ApexCounts,
-    pub finalize_counts: FinalizeCounts,
-    pub intensities: Intensities,
-    pub ion_errors: IonErrors,
-    pub rel_intensities: RelativeIntensities,
+/// Compose [`ScoringFields`] from an ordered block list, deriving the struct
+/// and the three purely-mechanical walks (`push_columns`, `push_features`,
+/// `sample_default`) from that one list. Order is load-bearing — the ML
+/// feature-vector golden pins it — so folding all three from a single ordered
+/// source is what makes their order *impossible* to desync.
+///
+/// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
+/// the mobility-derived blocks participate) stay hand-written below: adding a
+/// block is a two-place edit (this list + `compute`), not five.
+macro_rules! compose_scoring_fields {
+    (
+        $(#[doc = $doc:literal])*
+        pub struct $Name:ident {
+            $( pub $fname:ident : $fty:ty ),* $(,)?
+        }
+    ) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Serialize)]
+        pub struct $Name {
+            $( pub $fname : $fty ),*
+        }
+
+        impl $Name {
+            /// Emit every block's Parquet columns, in the composition order.
+            pub fn push_columns(&self, o: &mut ColSink) {
+                $( self.$fname.columns(o); )*
+            }
+
+            /// Emit every block's direct ML feature *values* (not the
+            /// cross-field derived ones, nor the conditional sequence block).
+            pub fn push_features(&self, o: &mut FeatSink) {
+                $( self.$fname.features(o); )*
+            }
+
+            /// Emit every block's ML feature *names*, in the same order as
+            /// [`Self::push_features`] (set-level; no `&self`).
+            pub fn push_feature_names(o: &mut NameSink) {
+                $( <$fty as ScoreBlock>::feature_names(o); )*
+            }
+
+            /// Fixture using the placeholder peptide from [`Identity::sample`].
+            pub fn sample_default() -> Self {
+                Self {
+                    $( $fname : <$fty>::sample() ),*
+                }
+            }
+        }
+    };
+}
+
+compose_scoring_fields! {
+    /// Shared scoring fields produced by Phase 3, as a composition of typed
+    /// blocks. Each block owns its parquet/ML projections (`columns`,
+    /// `features`) in one file under [`super::blocks`]; the finalize-stage
+    /// blocks own their `compute` there too, while the apex-stage blocks are
+    /// built in [`super::apex_finding`].
+    pub struct ScoringFields {
+        pub identity: Identity,
+        pub rt: Rt,
+        pub mobility: Mobility,
+        pub primary: PrimaryScores,
+        pub split: SplitProduct,
+        pub features: ApexFeatures,
+        pub apex_lazy: ApexLazyScores,
+        pub secondary_lazy: SecondaryLazyScores,
+        pub counts: ApexCounts,
+        pub finalize_counts: FinalizeCounts,
+        pub intensities: Intensities,
+        pub ion_errors: IonErrors,
+        pub rel_intensities: RelativeIntensities,
+    }
 }
 
 impl ScoringFields {
@@ -99,66 +153,12 @@ impl ScoringFields {
         self.ion_errors.neutralize();
     }
 
-    /// Emit every block's Parquet columns, in a fixed order.
-    pub fn push_columns(&self, o: &mut ColSink) {
-        self.identity.columns(o);
-        self.rt.columns(o);
-        self.mobility.columns(o);
-        self.primary.columns(o);
-        self.split.columns(o);
-        self.features.columns(o);
-        self.apex_lazy.columns(o);
-        self.secondary_lazy.columns(o);
-        self.counts.columns(o);
-        self.finalize_counts.columns(o);
-        self.intensities.columns(o);
-        self.ion_errors.columns(o);
-        self.rel_intensities.columns(o);
-    }
-
-    /// Emit every block's direct ML features (not the cross-field derived ones,
-    /// nor the conditional sequence block).
-    pub fn push_features(&self, o: &mut FeatSink) {
-        self.identity.features(o);
-        self.rt.features(o);
-        self.mobility.features(o);
-        self.primary.features(o);
-        self.split.features(o);
-        self.features.features(o);
-        self.apex_lazy.features(o);
-        self.secondary_lazy.features(o);
-        self.counts.features(o);
-        self.finalize_counts.features(o);
-        self.intensities.features(o);
-        self.ion_errors.features(o);
-        self.rel_intensities.features(o);
-    }
-
     /// Baseline test fixture with every field populated. Callers (including
     /// other crates' tests) tweak the identity/score fields they care about.
     pub fn sample(peptide: Peptide) -> Self {
         let mut s = Self::sample_default();
         s.identity.peptide = peptide;
         s
-    }
-
-    /// Fixture using the placeholder peptide from [`Identity::sample`].
-    pub fn sample_default() -> Self {
-        Self {
-            identity: Identity::sample(),
-            rt: Rt::sample(),
-            mobility: Mobility::sample(),
-            primary: PrimaryScores::sample(),
-            split: SplitProduct::sample(),
-            features: ApexFeatures::sample(),
-            apex_lazy: ApexLazyScores::sample(),
-            secondary_lazy: SecondaryLazyScores::sample(),
-            counts: ApexCounts::sample(),
-            finalize_counts: FinalizeCounts::sample(),
-            intensities: Intensities::sample(),
-            ion_errors: IonErrors::sample(),
-            rel_intensities: RelativeIntensities::sample(),
-        }
     }
 }
 

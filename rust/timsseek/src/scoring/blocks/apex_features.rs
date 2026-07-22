@@ -1,11 +1,11 @@
 //! Apex-features family: the 11 apex-local features (METHODS.md §3.4).
 //!
 //! Owns its whole lifecycle in this file: the macro-generated struct +
-//! projection ([`score_block!`], all 11 fields `#[raw]`), the compute
+//! projection ([`crate::score_block!`], all 11 fields `#[raw]`), the compute
 //! (`compute_apex_features`, run at the apex stage while the chromatogram
 //! buffers are live), and the final weighted score (`compute_weighted_score` +
 //! `SCORING_WEIGHTS`). Reusable numeric primitives it leans on live in
-//! [`crate::scoring::apex_dsp`].
+//! `crate::scoring::apex_dsp`.
 
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;

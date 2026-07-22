@@ -1,6 +1,6 @@
 mod accumulator;
 pub mod apex;
-mod apex_dsp;
+pub(crate) mod apex_dsp;
 pub mod apex_finding;
 pub mod blocks;
 pub mod extraction;

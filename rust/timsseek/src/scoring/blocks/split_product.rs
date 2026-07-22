@@ -1,11 +1,11 @@
 //! Split-product family: cosine/scribe apex agreement scores (METHODS.md §3.1).
 //!
 //! Owns its whole lifecycle in this file: the macro-generated projection
-//! ([`score_block!`]), the raw compute (`compute_split_product`, run at the
-//! apex stage while chromatogram buffers are live) and its building blocks
+//! ([`crate::score_block!`]), the raw compute (`compute_split_product`, run at
+//! the apex stage while chromatogram buffers are live) and its building blocks
 //! (`area_uniqueness`, `coelution_gradient`) plus the reusable
 //! [`CoelutionScratch`] buffers the scorer owns for allocation reuse. Generic
-//! numeric primitives live in [`crate::scoring::apex_dsp`].
+//! numeric primitives live in `crate::scoring::apex_dsp`.
 
 use array2d::Array2D;
 use timsquery::models::MzMajorIntensityArray;

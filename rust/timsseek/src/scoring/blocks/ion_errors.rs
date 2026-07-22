@@ -4,15 +4,18 @@
 //! are checked against `NUM_MS*_IONS` at compile time, so a mismatch is a build
 //! error, not silent drift).
 //!
-//! Column and feature names are identical per quantity (`ms2_mz_error_0`, …) —
-//! same table drives both surfaces.
+//! Column and feature names match per quantity (`ms2_mz_error_0`, …); both
+//! surfaces generate them from the same prefix + ion count (`f32_array` for
+//! columns, `push_indexed` for feature names), so there is no name table to
+//! keep in sync.
 //!
 //! NOTE: adding/renaming a name here also requires updating the parquet schema
-//! golden (`parquet_writer`) and the feature-name golden (`ml::qvalues`).
+//! golden (`parquet_writer`).
 
 use crate::scoring::blocks::{
     ColSink,
     FeatSink,
+    NameSink,
     ScoreBlock,
 };
 use crate::scoring::offsets::MzMobilityOffsets;
@@ -20,31 +23,6 @@ use crate::scoring::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
 };
-
-const MS2_MZ_ERROR: [&str; NUM_MS2_IONS] = [
-    "ms2_mz_error_0",
-    "ms2_mz_error_1",
-    "ms2_mz_error_2",
-    "ms2_mz_error_3",
-    "ms2_mz_error_4",
-    "ms2_mz_error_5",
-    "ms2_mz_error_6",
-];
-const MS2_MOB_ERROR: [&str; NUM_MS2_IONS] = [
-    "ms2_mobility_error_0",
-    "ms2_mobility_error_1",
-    "ms2_mobility_error_2",
-    "ms2_mobility_error_3",
-    "ms2_mobility_error_4",
-    "ms2_mobility_error_5",
-    "ms2_mobility_error_6",
-];
-const MS1_MZ_ERROR: [&str; NUM_MS1_IONS] = ["ms1_mz_error_0", "ms1_mz_error_1", "ms1_mz_error_2"];
-const MS1_MOB_ERROR: [&str; NUM_MS1_IONS] = [
-    "ms1_mobility_error_0",
-    "ms1_mobility_error_1",
-    "ms1_mobility_error_2",
-];
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct IonErrors {
@@ -88,9 +66,16 @@ impl ScoreBlock for IonErrors {
     }
 
     fn features(&self, o: &mut FeatSink) {
-        o.push_slice(&MS2_MZ_ERROR, &self.ms2_mz_errors);
-        o.push_slice(&MS2_MOB_ERROR, &self.ms2_mobility_errors);
-        o.push_slice(&MS1_MZ_ERROR, &self.ms1_mz_errors);
-        o.push_slice(&MS1_MOB_ERROR, &self.ms1_mobility_errors);
+        o.push_slice(&self.ms2_mz_errors);
+        o.push_slice(&self.ms2_mobility_errors);
+        o.push_slice(&self.ms1_mz_errors);
+        o.push_slice(&self.ms1_mobility_errors);
+    }
+
+    fn feature_names(o: &mut NameSink) {
+        o.push_indexed("ms2_mz_error", NUM_MS2_IONS);
+        o.push_indexed("ms2_mobility_error", NUM_MS2_IONS);
+        o.push_indexed("ms1_mz_error", NUM_MS1_IONS);
+        o.push_indexed("ms1_mobility_error", NUM_MS1_IONS);
     }
 }

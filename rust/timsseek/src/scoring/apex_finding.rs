@@ -820,8 +820,8 @@ impl TraceScorer {
 
 /// Raw collector of the relative intensities of the MS1 and MS2 ions
 /// (relative to total intensity of the respective MS level). Projected into
-/// the [`blocks::relative_intensities::RelativeIntensities`] block via
-/// `from_collector`.
+/// the [`crate::scoring::blocks::relative_intensities::RelativeIntensities`]
+/// block via `from_collector`.
 #[derive(Debug, Clone, Copy)]
 pub struct RelativeIntensityCollector {
     pub ms1: TopNArray<NUM_MS1_IONS, f32>,

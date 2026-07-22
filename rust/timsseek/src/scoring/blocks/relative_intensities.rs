@@ -1,37 +1,24 @@
 //! Relative-intensity arrays (per-ion intensity relative to the MS-level
 //! total). Built from the secondary-query collector's sorted values.
 //!
-//! Same array-family shape as [`super::ion_errors`]: module-scope name tables +
-//! `FeatSink::push_slice`. Column and feature order both run MS2→MS1.
+//! Same array-family shape as [`super::ion_errors`]: names generated from a
+//! prefix + ion count (`f32_array` for columns, `push_indexed` for features),
+//! so no name table. Column and feature order both run MS2→MS1.
 //!
 //! NOTE: adding/renaming a name here also requires updating the parquet schema
-//! golden (`parquet_writer`) and the feature-name golden (`ml::qvalues`).
+//! golden (`parquet_writer`).
 
 use crate::scoring::apex_finding::RelativeIntensityCollector;
 use crate::scoring::blocks::{
     ColSink,
     FeatSink,
+    NameSink,
     ScoreBlock,
 };
 use crate::scoring::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
 };
-
-const MS2_INTENSITY_RATIO: [&str; NUM_MS2_IONS] = [
-    "ms2_intensity_ratio_0",
-    "ms2_intensity_ratio_1",
-    "ms2_intensity_ratio_2",
-    "ms2_intensity_ratio_3",
-    "ms2_intensity_ratio_4",
-    "ms2_intensity_ratio_5",
-    "ms2_intensity_ratio_6",
-];
-const MS1_INTENSITY_RATIO: [&str; NUM_MS1_IONS] = [
-    "ms1_intensity_ratio_0",
-    "ms1_intensity_ratio_1",
-    "ms1_intensity_ratio_2",
-];
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct RelativeIntensities {
@@ -62,7 +49,12 @@ impl ScoreBlock for RelativeIntensities {
     }
 
     fn features(&self, o: &mut FeatSink) {
-        o.push_slice(&MS2_INTENSITY_RATIO, &self.ms2_intensity_ratios);
-        o.push_slice(&MS1_INTENSITY_RATIO, &self.ms1_intensity_ratios);
+        o.push_slice(&self.ms2_intensity_ratios);
+        o.push_slice(&self.ms1_intensity_ratios);
+    }
+
+    fn feature_names(o: &mut NameSink) {
+        o.push_indexed("ms2_intensity_ratio", NUM_MS2_IONS);
+        o.push_indexed("ms1_intensity_ratio", NUM_MS1_IONS);
     }
 }

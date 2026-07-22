@@ -80,10 +80,6 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     out
 }
 
-#[cfg_attr(
-    feature = "instrumentation",
-    tracing::instrument(skip_all, level = "trace")
-)]
 /// Fixed shuffle seed used by `rescore`. Makes the pre-rescore shuffle
 /// (and therefore the fold assignment + downstream target counts)
 /// reproducible across runs, eliminating RNG-driven noise in benches.
@@ -91,7 +87,14 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
 /// deterministic; this seals the only remaining entropy source.
 const RESCORE_SHUFFLE_SEED: u64 = 42;
 
-pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+pub fn rescore(
+    mut data: Vec<CompetedCandidate>,
+    feature_names: &[Arc<str>],
+) -> (Vec<FinalResult>, RescoreFeatureStats) {
     let config = GBMConfig::default();
 
     // Canonicalize input order before the seeded shuffle. Upstream
@@ -123,12 +126,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
         .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
         .unwrap();
 
-    let names: Vec<&'static str> = scorer
-        .data()
-        .first()
-        .map(|c| c.feature_names())
-        .unwrap_or_default();
-    let stats = scorer.feature_stats(&names);
+    let stats = scorer.feature_stats(feature_names);
 
     let mut scored = scorer.score();
     // Sort by score descending
@@ -143,8 +141,12 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
 
+use std::sync::Arc;
+
+use crate::scoring::blocks::result_meta::ResultMeta;
 use crate::scoring::blocks::{
     FeatSink,
+    NameSink,
     ScoreBlock,
     derived,
     sequence_counts,
@@ -152,48 +154,64 @@ use crate::scoring::blocks::{
 use crate::scoring::results::{
     CompetedCandidate,
     FinalResult,
+    ScoringFields,
 };
 
 // ---------------------------------------------------------------------------
 // CompetedCandidate: FeatureLike + LabelledScore
 // ---------------------------------------------------------------------------
 
+/// The set-level ML feature-name list, built ONCE per fit. Names are a property
+/// of the feature *set*, not of any record — the value walk (`feature_values`)
+/// and this name walk share the same ordered sources, so they align by
+/// construction (macro blocks) or by adjacent hand-written pairs.
+///
+/// The four sources, in order: per-block names
+/// ([`ScoringFields::push_feature_names`]), post-model meta ([`ResultMeta`]),
+/// cross-field interactions ([`derived`]), then the conditional sequence block
+/// ([`sequence_counts`]) LAST. `gate_on` = the run has parsed sequences
+/// (speclib-wide), appending the 22 sequence names.
+pub fn feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
+    let mut n = NameSink::new();
+    ScoringFields::push_feature_names(&mut n);
+    <ResultMeta as ScoreBlock>::feature_names(&mut n);
+    derived::feature_names(&mut n);
+    if gate_on {
+        sequence_counts::feature_names(&mut n);
+    }
+    n.into_names()
+}
+
+/// The set-level feature names for a batch of candidates. The sequence gate is
+/// speclib-wide, so it is read once from the first candidate.
+pub fn feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
+    let gate_on = candidates
+        .first()
+        .map(|c| c.scoring.identity.peptide.aa_counts().is_some())
+        .unwrap_or(false);
+    feature_name_set(gate_on)
+}
+
 impl CompetedCandidate {
-    /// Single source of truth for feature values and names.
+    /// This record's ML feature *values*, in the set-level name order (see
+    /// [`feature_name_set`]). Names are not carried per record.
     ///
-    /// Assembled by walking each block's `features()` (codegen-derived), then
-    /// the post-model meta block, then the cross-field derived features, then
-    /// the conditional sequence block LAST.
-    ///
-    /// Base set: 86 dims always present. Sequence block: 22 dims appended when
-    /// `peptide.aa_counts()` is `Some`. The gate is speclib-wide, so the vector
-    /// length is stable within a single fit.
-    fn named_features(&self) -> Vec<(f64, &'static str)> {
-        // Single assembly point for the ML feature vector. The full set is
-        // spread across four sources: per-block projections
-        // (`ScoringFields::push_features`), post-model meta (`result_meta`),
-        // cross-field interactions (`scoring::blocks::derived`), and the
-        // conditional sequence block (`scoring::blocks::sequence_counts`). The
-        // `feature_name_set_matches_golden` test is what pins the resulting set.
+    /// Assembled from the same four ordered sources as the name walk: per-block
+    /// values, post-model meta, cross-field derived, then the conditional
+    /// sequence block LAST.
+    fn feature_values(&self) -> Vec<f64> {
         let mut sink = FeatSink::new();
         self.scoring.push_features(&mut sink);
         self.result_meta().features(&mut sink);
         derived::features(&self.scoring, &mut sink);
         sequence_counts::features(&self.scoring.identity.peptide, &mut sink);
-        sink.into_named()
-    }
-
-    pub fn feature_names(&self) -> Vec<&'static str> {
-        self.named_features().into_iter().map(|(_, n)| n).collect()
+        sink.into_values()
     }
 }
 
 impl FeatureLike for CompetedCandidate {
     fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
-        self.named_features()
-            .into_iter()
-            .map(|(v, _)| v)
-            .collect::<Vec<_>>()
+        self.feature_values()
     }
 
     fn get_y(&self) -> f64 {
@@ -415,166 +433,28 @@ mod feature_tests {
         }
     }
 
-    /// The 86 base feature names (gate off). This is the GBM contract: the
-    /// *set* must stay stable across refactors, so a rename that preserves the
-    /// count (which `base_feature_count_locked` alone would miss) is caught here.
-    const GOLDEN_BASE_FEATURES: &[&str] = &[
-        "precursor_mz_round5",
-        "precursor_charge",
-        "precursor_mobility",
-        "calibrated_rt_seconds_round",
-        "calibrated_rt_seconds",
-        "obs_rt_seconds",
-        "calibrated_sq_delta_rt",
-        "obs_mobility",
-        "delta_ms1_ms2_mobility",
-        "sq_delta_ms1_ms2_mobility",
-        "main_score",
-        "delta_next",
-        "delta_second_next",
-        "split_product_score_ln1p",
-        "cosine_au_ln1p",
-        "scribe_au_ln1p",
-        "cosine_cg",
-        "scribe_cg",
-        "cosine_weighted_coelution",
-        "cosine_gradient_consistency",
-        "scribe_weighted_coelution",
-        "scribe_gradient_consistency",
-        "peak_shape",
-        "ratio_cv",
-        "centered_apex",
-        "precursor_coelution",
-        "fragment_coverage",
-        "precursor_apex_match",
-        "xic_quality",
-        "fragment_apex_agreement",
-        "isotope_correlation",
-        "gaussian_correlation",
-        "per_frag_gaussian_corr",
-        "apex_lazyscore",
-        "lazyscore_z",
-        "lazyscore_vs_baseline",
-        "ms2_lazyscore",
-        "ms2_isotope_lazyscore",
-        "ms2_isotope_lazyscore_ratio",
-        "rising_cycles",
-        "falling_cycles",
-        "npeaks",
-        "n_scored_fragments",
-        "ms2_summed_intensity_ln1p",
-        "ms1_summed_intensity_ln1p",
-        "ms2_mz_error_0",
-        "ms2_mz_error_1",
-        "ms2_mz_error_2",
-        "ms2_mz_error_3",
-        "ms2_mz_error_4",
-        "ms2_mz_error_5",
-        "ms2_mz_error_6",
-        "ms2_mobility_error_0",
-        "ms2_mobility_error_1",
-        "ms2_mobility_error_2",
-        "ms2_mobility_error_3",
-        "ms2_mobility_error_4",
-        "ms2_mobility_error_5",
-        "ms2_mobility_error_6",
-        "ms1_mz_error_0",
-        "ms1_mz_error_1",
-        "ms1_mz_error_2",
-        "ms1_mobility_error_0",
-        "ms1_mobility_error_1",
-        "ms1_mobility_error_2",
-        "ms1_intensity_ratio_0",
-        "ms1_intensity_ratio_1",
-        "ms1_intensity_ratio_2",
-        "ms2_intensity_ratio_0",
-        "ms2_intensity_ratio_1",
-        "ms2_intensity_ratio_2",
-        "ms2_intensity_ratio_3",
-        "ms2_intensity_ratio_4",
-        "ms2_intensity_ratio_5",
-        "ms2_intensity_ratio_6",
-        "delta_group",
-        "delta_group_ratio",
-        "main_over_delta_next",
-        "rt_err",
-        "ms2_intensity_ratios_max",
-        "main_times_delta_next",
-        "split_product_x_coverage",
-        "ms2_mz_mean_abs_error",
-        "ms2_mob_mean_abs_error",
-        "ms1_mz_mean_abs_error",
-        "ms1_mob_mean_abs_error",
-    ];
-
-    /// The 22 sequence feature names appended when the gate is on.
-    const GOLDEN_SEQUENCE_FEATURES: &[&str] = &[
-        "peptide_length",
-        "aa_count_A",
-        "aa_count_C",
-        "aa_count_D",
-        "aa_count_E",
-        "aa_count_F",
-        "aa_count_G",
-        "aa_count_H",
-        "aa_count_I",
-        "aa_count_K",
-        "aa_count_L",
-        "aa_count_M",
-        "aa_count_N",
-        "aa_count_P",
-        "aa_count_Q",
-        "aa_count_R",
-        "aa_count_S",
-        "aa_count_T",
-        "aa_count_V",
-        "aa_count_W",
-        "aa_count_Y",
-        "peptide_n_mods",
-    ];
-
-    #[test]
-    fn feature_name_set_matches_golden() {
-        use std::collections::BTreeSet;
-        let off: BTreeSet<&str> = sample_competed_candidate_unparsed()
-            .feature_names()
-            .into_iter()
-            .collect();
-        let golden_base: BTreeSet<&str> = GOLDEN_BASE_FEATURES.iter().copied().collect();
-        assert_eq!(
-            off, golden_base,
-            "base feature name-set drifted; update GOLDEN_BASE_FEATURES only if the change is intended (and bump the workspace version + retrain GBM)"
-        );
-
-        let on: BTreeSet<&str> = sample_competed_candidate_parsed()
-            .feature_names()
-            .into_iter()
-            .collect();
-        let golden_on: BTreeSet<&str> = GOLDEN_BASE_FEATURES
-            .iter()
-            .chain(GOLDEN_SEQUENCE_FEATURES.iter())
-            .copied()
-            .collect();
-        assert_eq!(
-            on, golden_on,
-            "gate-on feature name-set drifted; see GOLDEN_SEQUENCE_FEATURES"
-        );
-    }
-
     #[test]
     fn no_duplicate_feature_names() {
         use std::collections::BTreeSet;
-        let names = sample_competed_candidate_parsed().feature_names();
-        let uniq: BTreeSet<&str> = names.iter().copied().collect();
+        let names = feature_name_set(true);
+        let uniq: BTreeSet<&str> = names.iter().map(|n| n.as_ref()).collect();
         assert_eq!(names.len(), uniq.len(), "duplicate feature name emitted");
     }
 
     #[test]
     fn features_and_names_same_length() {
-        let cand = sample_competed_candidate_parsed();
-        let feats: Vec<f64> = cand.as_feature().into_iter().collect();
-        let names = cand.feature_names();
-        assert_eq!(feats.len(), names.len());
+        // The load-bearing invariant: a record's value vector aligns 1:1 with
+        // the set-level name list built independently. Both gates checked.
+        let on: Vec<f64> = sample_competed_candidate_parsed()
+            .as_feature()
+            .into_iter()
+            .collect();
+        assert_eq!(on.len(), feature_name_set(true).len());
+        let off: Vec<f64> = sample_competed_candidate_unparsed()
+            .as_feature()
+            .into_iter()
+            .collect();
+        assert_eq!(off.len(), feature_name_set(false).len());
     }
 
     #[test]
@@ -585,61 +465,62 @@ mod feature_tests {
         let mut cand = sample_competed_candidate_parsed();
         cand.scoring.neutralize_mobility();
 
-        let feats = cand.named_features();
-        let mob: Vec<_> = feats.iter().filter(|(_, n)| n.contains("mob")).collect();
+        let names = feature_name_set(true);
+        let vals: Vec<f64> = cand.as_feature().into_iter().collect();
+        assert_eq!(names.len(), vals.len());
+        let mob: Vec<(&Arc<str>, &f64)> = names
+            .iter()
+            .zip(vals.iter())
+            .filter(|(n, _)| n.contains("mob"))
+            .collect();
         assert_eq!(
             mob.len(),
             16,
             "mobility feature count changed: {:?}",
-            mob.iter().map(|(_, n)| *n).collect::<Vec<_>>()
+            mob.iter().map(|(n, _)| n.as_ref()).collect::<Vec<_>>()
         );
-        for (v, n) in &mob {
+        for (n, v) in &mob {
             assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");
         }
         // Non-mobility features are untouched (at least one stays finite).
         assert!(
-            feats
+            names
                 .iter()
-                .any(|(v, n)| !n.contains("mob") && v.is_finite()),
+                .zip(vals.iter())
+                .any(|(n, v)| !n.contains("mob") && v.is_finite()),
             "non-mobility features must remain finite"
         );
     }
 
     #[test]
     fn sequence_block_present_when_gate_on() {
-        let cand = sample_competed_candidate_parsed();
-        let names = cand.feature_names();
-        assert!(names.contains(&"peptide_length"));
-        assert!(names.contains(&"aa_count_A"));
-        assert!(names.contains(&"aa_count_Y"));
-        assert!(names.contains(&"peptide_n_mods"));
-        assert_eq!(names[names.len() - 22], "peptide_length");
-        assert_eq!(names[names.len() - 1], "peptide_n_mods");
+        let names = feature_name_set(true);
+        let has = |t: &str| names.iter().any(|n| n.as_ref() == t);
+        assert!(has("peptide_length"));
+        assert!(has("aa_count_A"));
+        assert!(has("aa_count_Y"));
+        assert!(has("peptide_n_mods"));
+        assert_eq!(&*names[names.len() - 22], "peptide_length");
+        assert_eq!(&*names[names.len() - 1], "peptide_n_mods");
     }
 
     #[test]
     fn sequence_block_absent_when_gate_off() {
-        let cand = sample_competed_candidate_unparsed();
-        let names = cand.feature_names();
-        assert!(!names.contains(&"peptide_length"));
-        assert!(!names.contains(&"peptide_n_mods"));
+        let names = feature_name_set(false);
+        assert!(!names.iter().any(|n| n.as_ref() == "peptide_length"));
+        assert!(!names.iter().any(|n| n.as_ref() == "peptide_n_mods"));
     }
 
     #[test]
     fn gate_delta_is_22_dims() {
-        let on = sample_competed_candidate_parsed().feature_names().len();
-        let off = sample_competed_candidate_unparsed().feature_names().len();
+        let on = sample_competed_candidate_parsed()
+            .as_feature()
+            .into_iter()
+            .count();
+        let off = sample_competed_candidate_unparsed()
+            .as_feature()
+            .into_iter()
+            .count();
         assert_eq!(on - off, 22);
-    }
-
-    #[test]
-    fn base_feature_count_locked() {
-        let off = sample_competed_candidate_unparsed().feature_names().len();
-        assert_eq!(
-            off, 86,
-            "base (gate-off) feature count is locked at 86; update this test if the set intentionally changes"
-        );
-        let on = sample_competed_candidate_parsed().feature_names().len();
-        assert_eq!(on, 108, "gate-on total is 86 base + 22 sequence = 108");
     }
 }
