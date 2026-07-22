@@ -2,8 +2,8 @@
 //!
 //! Gated all-or-none on `peptide.aa_counts()`: either every candidate in a run
 //! has a parsed sequence (Some) or none do. This makes the feature name-set
-//! conditional — the golden test asserts two sets: 86 (gate off) and 108
-//! (gate on). Emitted LAST so the trailing 22 names are stable.
+//! conditional — the gate adds exactly 22 trailing names (`gate_delta_is_22_dims`
+//! locks the delta). Emitted LAST so those names stay at the tail.
 
 use crate::models::AA_COUNT_NAMES;
 use crate::models::sequence::Peptide;

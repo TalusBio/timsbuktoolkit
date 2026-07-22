@@ -48,10 +48,11 @@ pub struct FinalizeInputs<'a> {
 }
 
 /// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the three purely-mechanical walks (`push_columns`, `push_features`,
-/// `sample_default`) from that one list. Order is load-bearing — the ML
-/// feature-vector golden pins it — so folding all three from a single ordered
-/// source is what makes their order *impossible* to desync.
+/// and the four purely-mechanical walks (`push_columns`, `push_features`,
+/// `push_feature_names`, `sample_default`) from that one list. Order is
+/// load-bearing (parquet columns and the positional ML value vector both
+/// follow it), so folding all four from a single ordered source is what makes
+/// their order *impossible* to desync.
 ///
 /// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
 /// the mobility-derived blocks participate) stay hand-written below: adding a

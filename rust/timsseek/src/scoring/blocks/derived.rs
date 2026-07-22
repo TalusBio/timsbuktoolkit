@@ -1,8 +1,8 @@
 //! Cross-field / cross-block ML features. These reference more than one field,
 //! so they are NOT `#[feat]` attrs (which are strictly unary) and NOT
-//! compile-exhaustive — they are open-ended interactions, guarded by the golden
-//! feature-name-set test. Emitted after the per-block features, before the
-//! sequence block.
+//! compile-exhaustive — they are open-ended interactions. Names are codegen
+//! from the `NAMES` table (no golden). Emitted after the per-block features,
+//! before the sequence block.
 
 use crate::scoring::blocks::{
     FeatSink,

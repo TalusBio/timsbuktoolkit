@@ -3,9 +3,8 @@
 //! Owns its whole lifecycle in this file: the macro-generated struct +
 //! projection ([`crate::score_block!`], all 11 fields `#[raw]`), the compute
 //! (`compute_apex_features`, run at the apex stage while the chromatogram
-//! buffers are live), and the final weighted score (`compute_weighted_score` +
-//! `SCORING_WEIGHTS`). Reusable numeric primitives it leans on live in
-//! `crate::scoring::apex_dsp`.
+//! buffers are live), and the final weighted score (`compute_weighted_score`).
+//! Reusable numeric primitives it leans on live in `crate::scoring::apex_dsp`.
 
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
@@ -37,26 +36,6 @@ score_block! {
         #[raw] pub per_frag_gaussian_corr: f32,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Scoring weights: (offset, scale) pairs for each feature.
-// Final score = base * product(offset + scale * feature_k)
-// See METHODS.md Section 3.5.
-// ---------------------------------------------------------------------------
-
-const SCORING_WEIGHTS: [(f32, f32); 11] = [
-    (1.0, 3.5),  // peak_shape
-    (1.0, 3.0),  // ratio_cv
-    (1.0, 4.5),  // centered_apex
-    (1.0, 2.3),  // precursor_coelution
-    (0.32, 1.0), // fragment_coverage
-    (1.0, 8.0),  // precursor_apex_match
-    (1.0, 7.8),  // xic_quality
-    (0.43, 1.0), // fragment_apex_agreement
-    (1.0, 2.6),  // isotope_correlation
-    (0.27, 1.0), // gaussian_correlation
-    (0.65, 1.0), // per_frag_gaussian_corr
-];
 
 /// Compute all 11 apex-local features at the apex (METHODS.md Section 3.4).
 ///
@@ -136,26 +115,26 @@ pub fn compute_apex_features<T: KeyLike + Default>(
 ///
 /// score = base * product(offset_k + scale_k * feature_k)
 pub fn compute_weighted_score(base: f32, features: &ApexFeatures) -> f32 {
-    let feature_values = [
-        features.peak_shape,
-        features.ratio_cv,
-        features.centered_apex,
-        features.precursor_coelution,
-        features.fragment_coverage,
-        features.precursor_apex_match,
-        features.xic_quality,
-        features.fragment_apex_agreement,
-        features.isotope_correlation,
-        features.gaussian_correlation,
-        features.per_frag_gaussian_corr,
+    // (feature value, offset, scale) kept as one list so a value can never drift
+    // out of alignment with its weight. Final score = base * product(offset +
+    // scale * feature_k). See METHODS.md Section 3.5.
+    let terms = [
+        (features.peak_shape, 1.0, 3.5),
+        (features.ratio_cv, 1.0, 3.0),
+        (features.centered_apex, 1.0, 4.5),
+        (features.precursor_coelution, 1.0, 2.3),
+        (features.fragment_coverage, 0.32, 1.0),
+        (features.precursor_apex_match, 1.0, 8.0),
+        (features.xic_quality, 1.0, 7.8),
+        (features.fragment_apex_agreement, 0.43, 1.0),
+        (features.isotope_correlation, 1.0, 2.6),
+        (features.gaussian_correlation, 0.27, 1.0),
+        (features.per_frag_gaussian_corr, 0.65, 1.0),
     ];
 
-    let mut score = base;
-    for (i, &fval) in feature_values.iter().enumerate() {
-        let (offset, scale) = SCORING_WEIGHTS[i];
-        score *= offset + scale * fval;
-    }
-    score
+    terms.iter().fold(base, |score, &(fval, offset, scale)| {
+        score * (offset + scale * fval)
+    })
 }
 
 // ---------------------------------------------------------------------------

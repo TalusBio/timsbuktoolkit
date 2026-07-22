@@ -9,9 +9,23 @@ use super::{
     LabelledScore,
     TargetDecoy,
 };
+use crate::scoring::blocks::result_meta::ResultMeta;
+use crate::scoring::blocks::{
+    FeatSink,
+    NameSink,
+    ScoreBlock,
+    derived,
+    sequence_counts,
+};
+use crate::scoring::results::{
+    CompetedCandidate,
+    FinalResult,
+    ScoringFields,
+};
 use rand::prelude::*;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Assign q_values in place.
@@ -140,22 +154,6 @@ pub fn rescore(
 
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
-
-use std::sync::Arc;
-
-use crate::scoring::blocks::result_meta::ResultMeta;
-use crate::scoring::blocks::{
-    FeatSink,
-    NameSink,
-    ScoreBlock,
-    derived,
-    sequence_counts,
-};
-use crate::scoring::results::{
-    CompetedCandidate,
-    FinalResult,
-    ScoringFields,
-};
 
 // ---------------------------------------------------------------------------
 // CompetedCandidate: FeatureLike + LabelledScore
