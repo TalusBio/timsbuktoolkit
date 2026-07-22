@@ -35,17 +35,20 @@ use crate::IonAnnot;
 use crate::errors::DataProcessingError;
 use crate::models::ExpectedIntensities;
 use crate::models::sequence::Peptide;
+use crate::scoring::apex_dsp::SCRIBE_FLOOR;
+use crate::scoring::blocks::apex_features::{
+    ApexFeatures,
+    compute_apex_features,
+    compute_weighted_score,
+};
 use crate::scoring::blocks::counts::ApexCounts;
 use crate::scoring::blocks::intensities::Intensities;
 use crate::scoring::blocks::lazy::ApexLazyScores;
 use crate::scoring::blocks::primary::PrimaryScores;
-use crate::scoring::blocks::split_product::SplitProduct;
-use crate::scoring::scores::apex_features::{
-    ApexFeatures,
-    SCRIBE_FLOOR,
-    compute_apex_features,
+use crate::scoring::blocks::split_product::{
+    CoelutionScratch,
+    SplitProduct,
     compute_split_product,
-    compute_weighted_score,
 };
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
@@ -276,7 +279,7 @@ impl ElutionTraces {
 pub struct TraceScorer {
     pub traces: ElutionTraces,
     buffers: TraceScorerBuffers,
-    coel_scratch: crate::scoring::scores::apex_features::CoelutionScratch,
+    coel_scratch: CoelutionScratch,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
     cfg: ApexConfig,
@@ -329,10 +332,7 @@ impl TraceScorer {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
             buffers: TraceScorerBuffers::new(capacity, max_frags),
-            coel_scratch:
-                crate::scoring::scores::apex_features::CoelutionScratch::with_frag_capacity(
-                    max_frags,
-                ),
+            coel_scratch: CoelutionScratch::with_frag_capacity(max_frags),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
             cfg: ApexConfig::default(),
