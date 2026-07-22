@@ -9,12 +9,12 @@ use super::{
     LabelledScore,
     TargetDecoy,
 };
+use crate::scoring::blocks::derived::Derived;
 use crate::scoring::blocks::result_meta::ResultMeta;
 use crate::scoring::blocks::{
     FeatSink,
     NameSink,
     ScoreBlock,
-    derived,
     sequence_counts,
 };
 use crate::scoring::results::{
@@ -166,14 +166,14 @@ pub fn rescore(
 ///
 /// The four sources, in order: per-block names
 /// ([`ScoringFields::push_feature_names`]), post-model meta ([`ResultMeta`]),
-/// cross-field interactions ([`derived`]), then the conditional sequence block
+/// cross-field interactions ([`Derived`]), then the conditional sequence block
 /// ([`sequence_counts`]) LAST. `gate_on` = the run has parsed sequences
 /// (speclib-wide), appending the 22 sequence names.
 pub fn feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     ScoringFields::push_feature_names(&mut n);
     <ResultMeta as ScoreBlock>::feature_names(&mut n);
-    derived::feature_names(&mut n);
+    <Derived as ScoreBlock>::feature_names(&mut n);
     if gate_on {
         sequence_counts::feature_names(&mut n);
     }
@@ -201,7 +201,7 @@ impl CompetedCandidate {
         let mut sink = FeatSink::new();
         self.scoring.push_features(&mut sink);
         self.result_meta().features(&mut sink);
-        derived::features(&self.scoring, &mut sink);
+        Derived::compute(&self.scoring).features(&mut sink);
         sequence_counts::features(&self.scoring.identity.peptide, &mut sink);
         sink.into_values()
     }
