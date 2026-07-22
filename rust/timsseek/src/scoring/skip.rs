@@ -69,8 +69,7 @@ pub fn apex_error_to_skip(err: &DataProcessingError) -> SkipReason {
         DataProcessingError::ExpectedNonEmptyData { .. } => SkipReason::ApexEmptyData,
         DataProcessingError::ExpectedFiniteNonNanData { .. } => SkipReason::ApexNonFiniteScore,
         DataProcessingError::TimsQueryDataProcessingError { error, .. } => classify_tq_error(error),
-        DataProcessingError::ExpectedSlicesSameLength { .. }
-        | DataProcessingError::ExpectedSetField { .. } => SkipReason::InvariantViolation,
+        DataProcessingError::ExpectedSlicesSameLength { .. } => SkipReason::InvariantViolation,
     }
 }
 
@@ -78,8 +77,7 @@ pub fn apex_error_to_skip(err: &DataProcessingError) -> SkipReason {
 /// in the `FinalizeError` bucket rather than `ApexEmptyData`.
 pub fn finalize_error_to_skip(err: &DataProcessingError) -> SkipReason {
     match err {
-        DataProcessingError::ExpectedSlicesSameLength { .. }
-        | DataProcessingError::ExpectedSetField { .. } => SkipReason::InvariantViolation,
+        DataProcessingError::ExpectedSlicesSameLength { .. } => SkipReason::InvariantViolation,
         DataProcessingError::TimsQueryDataProcessingError { error, .. } => {
             match classify_tq_error(error) {
                 SkipReason::InvariantViolation => SkipReason::InvariantViolation,

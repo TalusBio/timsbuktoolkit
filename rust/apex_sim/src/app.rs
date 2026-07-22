@@ -272,7 +272,7 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams) -> bool {
     changed
 }
 
-/// Show the full `ApexScore` from pass 2 plus the pass-1 location.
+/// Show the full `ApexBlocks` from pass 2 plus the pass-1 location.
 fn score_readout(ui: &mut egui::Ui, score: Option<&ScoreResult>, err: Option<&str>) {
     ui.heading("Score");
     let Some(s) = score else {
@@ -291,43 +291,62 @@ fn score_readout(ui: &mut egui::Ui, score: Option<&ScoreResult>, err: Option<&st
             ui.label(v);
             ui.end_row();
         };
-        let sp = &p2.split_product;
+        let sp = &p2.split;
         row(ui, "pass1 apex cycle", s.pass1.apex_cycle.to_string());
         row(ui, "pass1 score", format!("{:.3e}", s.pass1.score));
         row(ui, "pass2 joint apex", p2.joint_apex_cycle.to_string());
-        row(ui, "pass2 score", format!("{:.3e}", p2.score));
+        row(ui, "pass2 score", format!("{:.3e}", p2.primary.main_score));
         row(ui, "rt (ms)", p2.retention_time_ms.to_string());
         // Score = base_score * feature_product. Decompose so magnitude blowups
         // (base ~ intensity^2 via the two area-uniqueness terms) are visible.
-        row(ui, "= base_score", format!("{:.3e}", sp.base_score));
+        row(
+            ui,
+            "= base_score",
+            format!("{:.3e}", sp.split_product_score),
+        );
         row(
             ui,
             "  x feat_product",
-            format!("{:.3e}", safe_ratio(p2.score, sp.base_score)),
+            format!(
+                "{:.3e}",
+                safe_ratio(p2.primary.main_score, sp.split_product_score)
+            ),
         );
         row(ui, "  cosine_au", format!("{:.3e}", sp.cosine_au));
         row(ui, "  cosine_cg", format!("{:.3}", sp.cosine_cg));
         row(ui, "  scribe_au", format!("{:.3e}", sp.scribe_au));
         row(ui, "  scribe_cg", format!("{:.3}", sp.scribe_cg));
-        row(ui, "delta_next", format!("{:.4}", p2.delta_next));
-        row(ui, "delta_2nd_next", format!("{:.4}", p2.delta_second_next));
-        row(ui, "lazyscore", format!("{:.4}", p2.lazyscore));
-        row(ui, "lazyscore_z", format!("{:.4}", p2.lazyscore_z));
-        row(ui, "npeaks", p2.npeaks.to_string());
+        row(ui, "delta_next", format!("{:.4}", p2.primary.delta_next));
+        row(
+            ui,
+            "delta_2nd_next",
+            format!("{:.4}", p2.primary.delta_second_next),
+        );
+        row(
+            ui,
+            "lazyscore",
+            format!("{:.4}", p2.apex_lazy.apex_lazyscore),
+        );
+        row(
+            ui,
+            "lazyscore_z",
+            format!("{:.4}", p2.apex_lazy.lazyscore_z),
+        );
+        row(ui, "npeaks", p2.counts.npeaks.to_string());
         row(
             ui,
             "ms1 summed int",
-            format!("{:.1}", p2.ms1_summed_intensity),
+            format!("{:.1}", p2.intensities.ms1_summed_intensity),
         );
         row(
             ui,
             "ms2 summed int",
-            format!("{:.1}", p2.ms2_summed_intensity),
+            format!("{:.1}", p2.intensities.ms2_summed_intensity),
         );
         row(
             ui,
             "rising/falling",
-            format!("{}/{}", p2.rising_cycles, p2.falling_cycles),
+            format!("{}/{}", p2.counts.rising_cycles, p2.counts.falling_cycles),
         );
     });
 

@@ -36,7 +36,7 @@ use timscentroid::rt_mapping::{
 use timscentroid::utils::OptionallyRestricted;
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::scoring::apex_finding::{
-    ApexScore,
+    ApexBlocks,
     Extraction,
     TraceScorer,
 };
@@ -52,7 +52,7 @@ pub(crate) struct ChromatogramComputationResult {
 
 #[derive(Debug)]
 struct ScoringResult {
-    apex_score: ApexScore,
+    apex_score: ApexBlocks,
     score_lines: ScoreLines,
     apex_rt_seconds: f64,
 }
@@ -172,7 +172,7 @@ impl ComputedState {
     /// Split out as a method so the borrow checker can see they are disjoint fields.
     pub fn chromatogram_render_context(
         &mut self,
-    ) -> Option<(&ChromatogramLines, Option<&ApexScore>, &mut u8)> {
+    ) -> Option<(&ChromatogramLines, Option<&ApexBlocks>, &mut u8)> {
         let result = self.result.as_ref()?;
         let lines = &result.lines;
         let apex = result.scoring.as_ref().map(|s| &s.apex_score);
@@ -324,7 +324,7 @@ impl ComputedState {
         trace_scorer: &mut TraceScorer,
         context: &Extraction<IonAnnot>,
         index: &IndexedPeaksHandle,
-    ) -> Result<ApexScore, ViewerError> {
+    ) -> Result<ApexBlocks, ViewerError> {
         trace_scorer.find_apex(context, &|idx| {
             index
                 .ms1_cycle_mapping()

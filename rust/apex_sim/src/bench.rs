@@ -419,10 +419,10 @@ pub fn run_discrimination(base: &SimParams, n_pairs: usize) -> DiscriminationRep
         }
         ap.precursor_intensity = 0.0;
         if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&pp).extraction, &map) {
-            present.push(s.score);
+            present.push(s.primary.main_score);
         }
         if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&ap).extraction, &map) {
-            absent.push(s.score);
+            absent.push(s.primary.main_score);
         }
     }
     let median = |mut v: Vec<f32>| {

@@ -21,7 +21,10 @@ use timsquery::{
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::ml::qvalues::report_qvalues_at_thresholds;
+use timsseek::ml::qvalues::{
+    feature_name_set_for,
+    report_qvalues_at_thresholds,
+};
 use timsseek::ml::{
     RescoreFeatureStats,
     rescore,
@@ -385,8 +388,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let mut competed = target_decoy_compete(results);
     competed.sort_unstable_by(|x, y| {
         y.scoring
+            .primary
             .main_score
-            .partial_cmp(&x.scoring.main_score)
+            .partial_cmp(&x.scoring.primary.main_score)
             .expect("NaN main_score should have been filtered during Phase 3 scoring")
     });
     let total_after_competition = competed.len();
@@ -397,7 +401,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    let (data, feature_stats) = rescore(competed);
+    // Feature names are a property of the set, built once and passed in.
+    let feature_names = feature_name_set_for(&competed);
+    let (data, feature_stats) = rescore(competed, &feature_names);
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -879,35 +885,45 @@ fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32,
 /// arbitrary relative order).
 fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
     results.sort_unstable_by(|x, y| {
-        let seq_ord = x.scoring.peptide.as_str().cmp(y.scoring.peptide.as_str());
+        let seq_ord = x
+            .scoring
+            .identity
+            .peptide
+            .as_str()
+            .cmp(y.scoring.identity.peptide.as_str());
         // Then sort descending by main_score
         // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
         // to some of them to make a "decoy"
         let score_ord = y
             .scoring
+            .primary
             .main_score
-            .partial_cmp(&x.scoring.main_score)
+            .partial_cmp(&x.scoring.primary.main_score)
             .expect("NaN main_score should have been filtered during Phase 3 scoring");
         let ord = seq_ord.then(score_ord);
 
         if ord == std::cmp::Ordering::Equal {
             // Move to the first position the target
-            match (x.scoring.is_target, y.scoring.is_target) {
+            match (x.scoring.identity.is_target, y.scoring.identity.is_target) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 // Total order: within a shared sequence the target and its
                 // ±decoys have distinct precursor m/z (mono / mono±shift/z),
                 // so this pins the previously order-dependent tie.
-                _ => x.scoring.precursor_mz.total_cmp(&y.scoring.precursor_mz),
+                _ => x
+                    .scoring
+                    .identity
+                    .precursor_mz
+                    .total_cmp(&y.scoring.identity.precursor_mz),
             }
         } else {
             ord
         }
     });
     results.dedup_by(|x, y| {
-        (x.scoring.peptide.as_str() == y.scoring.peptide.as_str())
-            && (x.scoring.precursor_charge == y.scoring.precursor_charge)
-            && (x.scoring.precursor_mz == y.scoring.precursor_mz)
+        (x.scoring.identity.peptide.as_str() == y.scoring.identity.peptide.as_str())
+            && (x.scoring.identity.precursor_charge == y.scoring.identity.precursor_charge)
+            && (x.scoring.identity.precursor_mz == y.scoring.identity.precursor_mz)
     });
 }
 
@@ -921,10 +937,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.scoring.peptide.as_str(),
-                    x.scoring.precursor_charge,
-                    x.scoring.precursor_mz,
-                    x.scoring.main_score
+                    x.scoring.identity.peptide.as_str(),
+                    x.scoring.identity.precursor_charge,
+                    x.scoring.identity.precursor_mz,
+                    x.scoring.primary.main_score
                 )
             })
             .collect::<Vec<_>>()
@@ -944,13 +960,20 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     // Compete target-decoy pairs at precursor level
     results.sort_unstable_by(|x, y| {
         x.scoring
+            .identity
             .decoy_group_id
-            .cmp(&y.scoring.decoy_group_id)
-            .then_with(|| x.scoring.precursor_charge.cmp(&y.scoring.precursor_charge))
+            .cmp(&y.scoring.identity.decoy_group_id)
             .then_with(|| {
                 x.scoring
+                    .identity
+                    .precursor_charge
+                    .cmp(&y.scoring.identity.precursor_charge)
+            })
+            .then_with(|| {
+                x.scoring
+                    .primary
                     .main_score
-                    .partial_cmp(&y.scoring.main_score)
+                    .partial_cmp(&y.scoring.primary.main_score)
                     .expect("NaN main_score should have been filtered during Phase 3 scoring")
                     .reverse()
             })
@@ -969,8 +992,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     for i in 0..results.len() {
         let current = &results[i];
         let current_key = (
-            current.scoring.decoy_group_id,
-            current.scoring.precursor_charge,
+            current.scoring.identity.decoy_group_id,
+            current.scoring.identity.precursor_charge,
         );
 
         if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
@@ -978,8 +1001,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 
             if current_key == prev_key {
                 // This is the second item in a target/decoy pair
-                let delta_score = current.scoring.main_score - prev_score;
-                let delta_ratio = current.scoring.main_score / prev_score;
+                let delta_score = current.scoring.primary.main_score - prev_score;
+                let delta_ratio = current.scoring.primary.main_score / prev_score;
 
                 delta_map[prev_index] = (-delta_score, delta_ratio);
 
@@ -990,10 +1013,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 
         // Start of a new group or first item overall
         previous = Some((
-            current.scoring.decoy_group_id,
-            current.scoring.precursor_charge,
+            current.scoring.identity.decoy_group_id,
+            current.scoring.identity.precursor_charge,
             i,
-            current.scoring.main_score,
+            current.scoring.primary.main_score,
         ));
     }
 
@@ -1004,8 +1027,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         let mut last_key: Option<(u32, u8)> = None;
         for i in 0..results.len() {
             let key = (
-                results[i].scoring.decoy_group_id,
-                results[i].scoring.precursor_charge,
+                results[i].scoring.identity.decoy_group_id,
+                results[i].scoring.identity.precursor_charge,
             );
             if last_key == Some(key) {
                 continue; // duplicate in same group
@@ -1096,12 +1119,12 @@ mod tests {
             decoy_group,
         };
         let mut scoring = ScoringFields::sample(peptide);
-        scoring.precursor_mz = mz;
-        scoring.is_target = is_target;
-        scoring.decoy_group_id = decoy_group;
+        scoring.identity.precursor_mz = mz;
+        scoring.identity.is_target = is_target;
+        scoring.identity.decoy_group_id = decoy_group;
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
         // is what orders them.
-        scoring.main_score = 5.0;
+        scoring.primary.main_score = 5.0;
         ScoredCandidate { scoring }
     }
 
@@ -1111,9 +1134,9 @@ mod tests {
             .iter()
             .map(|c| {
                 (
-                    c.scoring.peptide.as_str().to_string(),
-                    c.scoring.precursor_mz.to_bits(),
-                    c.scoring.is_target,
+                    c.scoring.identity.peptide.as_str().to_string(),
+                    c.scoring.identity.precursor_mz.to_bits(),
+                    c.scoring.identity.is_target,
                 )
             })
             .collect()
