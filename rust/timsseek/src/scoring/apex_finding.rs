@@ -818,15 +818,17 @@ impl TraceScorer {
     }
 }
 
-/// Represents the relative intensities of the MS1 and MS2
-/// ions, relative to total intensity of the respective MS level.
+/// Raw collector of the relative intensities of the MS1 and MS2 ions
+/// (relative to total intensity of the respective MS level). Projected into
+/// the [`blocks::relative_intensities::RelativeIntensities`] block via
+/// `from_collector`.
 #[derive(Debug, Clone, Copy)]
-pub struct RelativeIntensities {
+pub struct RelativeIntensityCollector {
     pub ms1: TopNArray<NUM_MS1_IONS, f32>,
     pub ms2: TopNArray<NUM_MS2_IONS, f32>,
 }
 
-impl RelativeIntensities {
+impl RelativeIntensityCollector {
     pub fn new(agg: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> Self {
         let mut ms1: TopNArray<NUM_MS1_IONS, f32> = TopNArray::new();
         let mut ms2: TopNArray<NUM_MS2_IONS, f32> = TopNArray::new();

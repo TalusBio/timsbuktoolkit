@@ -71,13 +71,13 @@ pub struct ApexFeatures {
 
 /// Result of the area-uniqueness calculation (METHODS.md Section 3.1).
 #[derive(Debug, Clone, Copy)]
-pub struct AreaUniquenessResult {
+struct AreaUniquenessResult {
     pub au_score: f32,
 }
 
 /// Result of the coelution-gradient quality calculation (METHODS.md Section 3.2).
 #[derive(Debug, Clone, Copy)]
-pub struct CoelutionGradientResult {
+struct CoelutionGradientResult {
     pub weighted_coelution: f32,
     pub gradient_consistency: f32,
     pub combined: f32,
@@ -103,7 +103,7 @@ pub struct SplitProductScore {
 // See METHODS.md Section 3.5.
 // ---------------------------------------------------------------------------
 
-pub const SCORING_WEIGHTS: [(f32, f32); 11] = [
+const SCORING_WEIGHTS: [(f32, f32); 11] = [
     (1.0, 3.5),  // peak_shape
     (1.0, 3.0),  // ratio_cv
     (1.0, 4.5),  // centered_apex
@@ -243,7 +243,7 @@ fn estimate_fwhm(profile: &[f32], apex: usize) -> f32 {
 /// `hw` is the half-width of the peak window (typically 5).
 ///
 /// AU = peak_area * (1 + 200 * peak_area / total_area)
-pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniquenessResult {
+fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniquenessResult {
     let n = signal.len();
     if n == 0 {
         return AreaUniquenessResult { au_score: 0.0 };
@@ -270,7 +270,7 @@ pub fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniqueness
 /// Weights use raw predicted intensity fractions (NOT sqrt-transformed).
 ///
 /// Returns `combined = 1.0` if fewer than 2 active fragments in the window.
-pub fn coelution_gradient<T: KeyLike>(
+fn coelution_gradient<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     expected: &[(T, f32)],
     apex: usize,

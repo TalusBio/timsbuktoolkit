@@ -169,6 +169,12 @@ impl CompetedCandidate {
     /// `peptide.aa_counts()` is `Some`. The gate is speclib-wide, so the vector
     /// length is stable within a single fit.
     fn named_features(&self) -> Vec<(f64, &'static str)> {
+        // Single assembly point for the ML feature vector. The full set is
+        // spread across four sources: per-block projections
+        // (`ScoringFields::push_features`), post-model meta (`result_meta`),
+        // cross-field interactions (`scoring::blocks::derived`), and the
+        // conditional sequence block (`scoring::blocks::sequence_counts`). The
+        // `feature_name_set_matches_golden` test is what pins the resulting set.
         let mut sink = FeatSink::new();
         self.scoring.push_features(&mut sink);
         self.result_meta().features(&mut sink);
@@ -458,26 +464,26 @@ mod feature_tests {
         "n_scored_fragments",
         "ms2_summed_intensity_ln1p",
         "ms1_summed_intensity_ln1p",
-        "ms2_mz_err_0",
-        "ms2_mz_err_1",
-        "ms2_mz_err_2",
-        "ms2_mz_err_3",
-        "ms2_mz_err_4",
-        "ms2_mz_err_5",
-        "ms2_mz_err_6",
-        "ms2_mob_err_0",
-        "ms2_mob_err_1",
-        "ms2_mob_err_2",
-        "ms2_mob_err_3",
-        "ms2_mob_err_4",
-        "ms2_mob_err_5",
-        "ms2_mob_err_6",
-        "ms1_mz_err_0",
-        "ms1_mz_err_1",
-        "ms1_mz_err_2",
-        "ms1_mob_err_0",
-        "ms1_mob_err_1",
-        "ms1_mob_err_2",
+        "ms2_mz_error_0",
+        "ms2_mz_error_1",
+        "ms2_mz_error_2",
+        "ms2_mz_error_3",
+        "ms2_mz_error_4",
+        "ms2_mz_error_5",
+        "ms2_mz_error_6",
+        "ms2_mobility_error_0",
+        "ms2_mobility_error_1",
+        "ms2_mobility_error_2",
+        "ms2_mobility_error_3",
+        "ms2_mobility_error_4",
+        "ms2_mobility_error_5",
+        "ms2_mobility_error_6",
+        "ms1_mz_error_0",
+        "ms1_mz_error_1",
+        "ms1_mz_error_2",
+        "ms1_mobility_error_0",
+        "ms1_mobility_error_1",
+        "ms1_mobility_error_2",
         "ms1_intensity_ratio_0",
         "ms1_intensity_ratio_1",
         "ms1_intensity_ratio_2",

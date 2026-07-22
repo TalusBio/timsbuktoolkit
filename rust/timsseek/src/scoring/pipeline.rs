@@ -56,7 +56,7 @@ use super::apex_finding::{
     ApexBlocks,
     ApexLocation,
     Extraction,
-    RelativeIntensities,
+    RelativeIntensityCollector,
     TraceScorer,
 };
 use super::hyperscore::single_lazyscore;
@@ -376,8 +376,10 @@ pub fn filter_zero_intensity_ions<T: KeyLike + Default>(
     );
 }
 
+/// Raw secondary lazyscores produced during scoring; projected into the
+/// [`blocks::lazy::SecondaryLazyScores`] block via `From`.
 #[derive(Debug, Clone, Copy)]
-pub struct SecondaryLazyScores {
+pub struct SecondaryLazyScoresRaw {
     pub lazyscore: f32,
     pub iso_lazyscore: f32,
     pub ratio: f32,
@@ -387,7 +389,7 @@ pub struct SecondaryLazyScores {
 fn compute_secondary_lazyscores(
     inner: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
     isotope: &SpectralCollector<IonAnnot, f32>,
-) -> SecondaryLazyScores {
+) -> SecondaryLazyScoresRaw {
     let lazyscore = single_lazyscore(
         inner
             .iter_fragments()
@@ -395,7 +397,7 @@ fn compute_secondary_lazyscores(
     );
     let iso_lazyscore = single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v));
     let ratio = iso_lazyscore / lazyscore.max(1.0);
-    SecondaryLazyScores {
+    SecondaryLazyScoresRaw {
         lazyscore,
         iso_lazyscore,
         ratio,
@@ -523,7 +525,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         isotope_collector: &SpectralCollector<IonAnnot, f32>,
     ) -> Result<ScoredCandidate, DataProcessingError> {
         let offsets = MzMobilityOffsets::new(inner_collector, metadata.ref_mobility_ook0 as f64);
-        let rel_inten = RelativeIntensities::new(inner_collector);
+        let rel_inten = RelativeIntensityCollector::new(inner_collector);
         let secondary_lazy = compute_secondary_lazyscores(inner_collector, isotope_collector);
 
         let mut scoring = ScoringFields::compute(FinalizeInputs {

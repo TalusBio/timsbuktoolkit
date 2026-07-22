@@ -3,7 +3,7 @@
 //! the secondary spectral-query collectors (finalize stage).
 
 use crate::score_block;
-use crate::scoring::pipeline::SecondaryLazyScores as SecondaryLazyRaw;
+use crate::scoring::pipeline::SecondaryLazyScoresRaw;
 
 score_block! {
     /// Stage: apex (traces are dead by finalize).
@@ -23,8 +23,8 @@ score_block! {
     }
 }
 
-impl From<SecondaryLazyRaw> for SecondaryLazyScores {
-    fn from(s: SecondaryLazyRaw) -> Self {
+impl From<SecondaryLazyScoresRaw> for SecondaryLazyScores {
+    fn from(s: SecondaryLazyScoresRaw) -> Self {
         Self {
             ms2_lazyscore: s.lazyscore,
             ms2_isotope_lazyscore: s.iso_lazyscore,

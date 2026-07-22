@@ -1,11 +1,14 @@
 //! Per-ion m/z and mobility error arrays. Hand-written array family: the
 //! `columns`/`features` bodies walk const name tables. Changing an ion count
-//! means editing `NUM_MS*_IONS` *and* the four feature name tables below (their
-//! lengths are checked against `NUM_MS*_IONS` at compile time, so a mismatch is
-//! a build error, not silent drift).
+//! means editing `NUM_MS*_IONS` *and* the four name tables below (their lengths
+//! are checked against `NUM_MS*_IONS` at compile time, so a mismatch is a build
+//! error, not silent drift).
 //!
-//! NOTE the column vs feature prefix differ by history: columns use
-//! `*_error_i`, features use `*_err_i`.
+//! Column and feature names are identical per quantity (`ms2_mz_error_0`, …) —
+//! same table drives both surfaces.
+//!
+//! NOTE: adding/renaming a name here also requires updating the parquet schema
+//! golden (`parquet_writer`) and the feature-name golden (`ml::qvalues`).
 
 use crate::scoring::blocks::{
     ColSink,
@@ -18,26 +21,30 @@ use crate::scoring::{
     NUM_MS2_IONS,
 };
 
-const MS2_MZ_ERR: [&str; NUM_MS2_IONS] = [
-    "ms2_mz_err_0",
-    "ms2_mz_err_1",
-    "ms2_mz_err_2",
-    "ms2_mz_err_3",
-    "ms2_mz_err_4",
-    "ms2_mz_err_5",
-    "ms2_mz_err_6",
+const MS2_MZ_ERROR: [&str; NUM_MS2_IONS] = [
+    "ms2_mz_error_0",
+    "ms2_mz_error_1",
+    "ms2_mz_error_2",
+    "ms2_mz_error_3",
+    "ms2_mz_error_4",
+    "ms2_mz_error_5",
+    "ms2_mz_error_6",
 ];
-const MS2_MOB_ERR: [&str; NUM_MS2_IONS] = [
-    "ms2_mob_err_0",
-    "ms2_mob_err_1",
-    "ms2_mob_err_2",
-    "ms2_mob_err_3",
-    "ms2_mob_err_4",
-    "ms2_mob_err_5",
-    "ms2_mob_err_6",
+const MS2_MOB_ERROR: [&str; NUM_MS2_IONS] = [
+    "ms2_mobility_error_0",
+    "ms2_mobility_error_1",
+    "ms2_mobility_error_2",
+    "ms2_mobility_error_3",
+    "ms2_mobility_error_4",
+    "ms2_mobility_error_5",
+    "ms2_mobility_error_6",
 ];
-const MS1_MZ_ERR: [&str; NUM_MS1_IONS] = ["ms1_mz_err_0", "ms1_mz_err_1", "ms1_mz_err_2"];
-const MS1_MOB_ERR: [&str; NUM_MS1_IONS] = ["ms1_mob_err_0", "ms1_mob_err_1", "ms1_mob_err_2"];
+const MS1_MZ_ERROR: [&str; NUM_MS1_IONS] = ["ms1_mz_error_0", "ms1_mz_error_1", "ms1_mz_error_2"];
+const MS1_MOB_ERROR: [&str; NUM_MS1_IONS] = [
+    "ms1_mobility_error_0",
+    "ms1_mobility_error_1",
+    "ms1_mobility_error_2",
+];
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct IonErrors {
@@ -81,16 +88,9 @@ impl ScoreBlock for IonErrors {
     }
 
     fn features(&self, o: &mut FeatSink) {
-        push_named(o, &MS2_MZ_ERR, &self.ms2_mz_errors);
-        push_named(o, &MS2_MOB_ERR, &self.ms2_mobility_errors);
-        push_named(o, &MS1_MZ_ERR, &self.ms1_mz_errors);
-        push_named(o, &MS1_MOB_ERR, &self.ms1_mobility_errors);
-    }
-}
-
-/// Push each `(name, value)` pair, zipping a const name table with its array.
-fn push_named(o: &mut FeatSink, names: &[&'static str], vals: &[f32]) {
-    for (name, v) in names.iter().zip(vals) {
-        o.push(name, *v as f64);
+        o.push_slice(&MS2_MZ_ERROR, &self.ms2_mz_errors);
+        o.push_slice(&MS2_MOB_ERROR, &self.ms2_mobility_errors);
+        o.push_slice(&MS1_MZ_ERROR, &self.ms1_mz_errors);
+        o.push_slice(&MS1_MOB_ERROR, &self.ms1_mobility_errors);
     }
 }

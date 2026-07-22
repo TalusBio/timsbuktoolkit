@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::apex_finding::{
     ApexBlocks,
     PeptideMetadata,
-    RelativeIntensities as RelativeIntensitiesRaw,
+    RelativeIntensityCollector,
 };
 use super::blocks::apex_features::ApexFeatures;
 use super::blocks::counts::{
@@ -29,7 +29,7 @@ use super::blocks::{
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
-use super::pipeline::SecondaryLazyScores as SecondaryLazyRaw;
+use super::pipeline::SecondaryLazyScoresRaw;
 use crate::models::sequence::Peptide;
 
 /// Inputs for the finalize-stage assembly of [`ScoringFields`]. Constructing
@@ -39,8 +39,8 @@ use crate::models::sequence::Peptide;
 pub struct FinalizeInputs<'a> {
     pub metadata: &'a PeptideMetadata,
     pub offsets: &'a MzMobilityOffsets,
-    pub rel_inten: RelativeIntensitiesRaw,
-    pub secondary_lazy: SecondaryLazyRaw,
+    pub rel_inten: RelativeIntensityCollector,
+    pub secondary_lazy: SecondaryLazyScoresRaw,
     pub nqueries: u8,
     /// Apex-stage blocks, moved in at zero cost.
     pub apex: ApexBlocks,
