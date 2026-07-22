@@ -1,4 +1,4 @@
-//! Split-product family: cosine/scribe apex agreement scores (METHODS.md §3.1).
+//! Split-product family: cosine/scribe apex agreement scores.
 //!
 //! Owns its whole lifecycle in this file: the macro-generated projection
 //! ([`crate::score_block!`]), the raw compute (`compute_split_product`, run at
@@ -50,8 +50,8 @@ impl From<&SplitProductScore> for SplitProduct {
     }
 }
 
-/// Split product score computed from independent cosine and scribe apexes
-/// (METHODS.md Section 3.1). Raw output of `compute_split_product`, projected
+/// Split product score computed from independent cosine and scribe apexes.
+/// Raw output of `compute_split_product`, projected
 /// into [`SplitProduct`] via [`From`].
 #[derive(Debug, Clone, Copy)]
 pub struct SplitProductScore {
@@ -102,13 +102,13 @@ impl CoelutionScratch {
     }
 }
 
-/// Result of the area-uniqueness calculation (METHODS.md Section 3.1).
+/// Result of the area-uniqueness calculation.
 #[derive(Debug, Clone, Copy)]
 struct AreaUniquenessResult {
     pub au_score: f32,
 }
 
-/// Result of the coelution-gradient quality calculation (METHODS.md Section 3.2).
+/// Result of the coelution-gradient quality calculation.
 #[derive(Debug, Clone, Copy)]
 struct CoelutionGradientResult {
     pub weighted_coelution: f32,
@@ -116,7 +116,7 @@ struct CoelutionGradientResult {
     pub combined: f32,
 }
 
-/// Split product score from independent cosine and scribe apexes (METHODS.md Section 3.1).
+/// Split product score from independent cosine and scribe apexes.
 ///
 /// Each profile finds its own argmax, computes area-uniqueness (hw=5) and
 /// coelution-gradient (coelution_hw=20, gradient_hw=10) at that apex.
@@ -155,7 +155,7 @@ pub fn compute_split_product<T: KeyLike>(
     }
 }
 
-/// Area-uniqueness score around an apex (METHODS.md Section 3.1).
+/// Area-uniqueness score around an apex.
 ///
 /// `signal` is the per-cycle profile (e.g. cosine_profile or scribe_profile).
 /// `apex` is the argmax index within `signal`.
@@ -183,7 +183,7 @@ fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniquenessResu
     AreaUniquenessResult { au_score }
 }
 
-/// Coelution-gradient quality at a given apex (METHODS.md Section 3.2).
+/// Coelution-gradient quality at a given apex.
 ///
 /// Measures whether the fragment XICs co-elute and change in the same direction.
 /// Weights use raw predicted intensity fractions (NOT sqrt-transformed).

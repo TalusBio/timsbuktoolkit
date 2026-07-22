@@ -1,4 +1,4 @@
-//! Apex-features family: the 11 apex-local features (METHODS.md §3.4).
+//! Apex-features family: the 11 apex-local features.
 //!
 //! Owns its whole lifecycle in this file: the macro-generated struct +
 //! projection ([`crate::score_block!`], all 11 fields `#[raw]`), the compute
@@ -20,7 +20,7 @@ use crate::scoring::apex_dsp::{
 };
 
 score_block! {
-    /// The 11 apex-local features described in METHODS.md Section 3.4.
+    /// The 11 apex-local features.
     /// Stage: apex (computed while chromatogram buffers are live).
     pub struct ApexFeatures {
         #[raw] pub peak_shape: f32,
@@ -37,7 +37,7 @@ score_block! {
     }
 }
 
-/// Compute all 11 apex-local features at the apex (METHODS.md Section 3.4).
+/// Compute all 11 apex-local features at the apex.
 ///
 /// `fragments` and `precursors` are the raw chromatogram data.
 /// `expected` contains both fragment and precursor predicted intensities.
@@ -56,13 +56,13 @@ pub fn compute_apex_features<T: KeyLike + Default>(
 ) -> ApexFeatures {
     let apex = joint_apex;
 
-    // ---- Peak Shape (Section 3.4) ----
+    // ---- Peak Shape ----
     let peak_shape = compute_peak_shape(cosine_profile, apex, 10);
 
-    // ---- Ratio CV (Section 3.4) ----
+    // ---- Ratio CV ----
     let ratio_cv = compute_ratio_cv(fragments, expected.fragment_intensities.as_slice(), apex);
 
-    // ---- Centered Apex (Section 3.4) ----
+    // ---- Centered Apex ----
     let centered_apex = if n_cycles > 0 {
         let half = n_cycles as f32 / 2.0;
         (1.0 - (apex as f32 - half).abs() / half).max(0.0)
@@ -70,30 +70,30 @@ pub fn compute_apex_features<T: KeyLike + Default>(
         0.0
     };
 
-    // ---- Precursor Coelution (Section 3.4) ----
+    // ---- Precursor Coelution ----
     let precursor_coelution =
         compute_precursor_coelution(fragments, precursor_trace, apex, 10, n_cycles);
 
-    // ---- Fragment Coverage (Section 3.4) ----
+    // ---- Fragment Coverage ----
     let fragment_coverage = compute_fragment_coverage(fragments, apex);
 
-    // ---- Precursor Apex Match (Section 3.4) ----
+    // ---- Precursor Apex Match ----
     let precursor_apex_match = compute_precursor_apex_match(precursor_trace, apex, n_cycles);
 
-    // ---- XIC Quality (Section 3.4) ----
+    // ---- XIC Quality ----
     let xic_quality = compute_xic_quality(fragments, apex, 8);
 
-    // ---- Fragment Apex Agreement (Section 3.4) ----
+    // ---- Fragment Apex Agreement ----
     let fragment_apex_agreement = compute_fragment_apex_agreement(fragments, apex);
 
-    // ---- Isotope Correlation (Section 3.4) ----
+    // ---- Isotope Correlation ----
     let isotope_correlation =
         compute_isotope_correlation(precursors, expected.precursor_intensities.as_slice(), apex);
 
-    // ---- Gaussian Correlation (Section 3.4) ----
+    // ---- Gaussian Correlation ----
     let gaussian_correlation = compute_gaussian_correlation(cosine_profile, apex, 15);
 
-    // ---- Per-Fragment Gaussian Correlation (Section 3.4) ----
+    // ---- Per-Fragment Gaussian Correlation ----
     let per_frag_gaussian_corr = compute_per_frag_gaussian_corr(fragments, apex, 10);
 
     ApexFeatures {
@@ -111,13 +111,13 @@ pub fn compute_apex_features<T: KeyLike + Default>(
     }
 }
 
-/// Compute the final weighted score (METHODS.md Section 3.5).
+/// Compute the final weighted score.
 ///
 /// score = base * product(offset_k + scale_k * feature_k)
 pub fn compute_weighted_score(base: f32, features: &ApexFeatures) -> f32 {
     // (feature value, offset, scale) kept as one list so a value can never drift
     // out of alignment with its weight. Final score = base * product(offset +
-    // scale * feature_k). See METHODS.md Section 3.5.
+    // scale * feature_k).
     let terms = [
         (features.peak_shape, 1.0, 3.5),
         (features.ratio_cv, 1.0, 3.0),
@@ -141,7 +141,7 @@ pub fn compute_weighted_score(base: f32, features: &ApexFeatures) -> f32 {
 // Feature implementation helpers (private)
 // ---------------------------------------------------------------------------
 
-/// Peak shape = 0.5 * symmetry + 0.5 * sharpness (Section 3.4).
+/// Peak shape = 0.5 * symmetry + 0.5 * sharpness.
 fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
     let n = profile.len();
     if n == 0 {
@@ -176,7 +176,7 @@ fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
     0.5 * symmetry + 0.5 * sharpness
 }
 
-/// Ratio CV: consistency of observed-to-predicted ratios at apex (Section 3.4).
+/// Ratio CV: consistency of observed-to-predicted ratios at apex.
 fn compute_ratio_cv<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     expected: &[(T, f32)],
@@ -209,7 +209,7 @@ fn compute_ratio_cv<T: KeyLike>(
 }
 
 /// Precursor coelution: Pearson correlation between precursor trace and summed
-/// fragment trace in a +/-hw window around apex (Section 3.4).
+/// fragment trace in a +/-hw window around apex.
 fn compute_precursor_coelution<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     precursor_trace: &[f32],
@@ -238,7 +238,7 @@ fn compute_precursor_coelution<T: KeyLike>(
     pearson_correlation(prec_win, &frag_sum).max(0.0)
 }
 
-/// Fragment coverage: fraction of fragments with nonzero intensity at apex (Section 3.4).
+/// Fragment coverage: fraction of fragments with nonzero intensity at apex.
 fn compute_fragment_coverage<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     apex: usize,
@@ -256,7 +256,7 @@ fn compute_fragment_coverage<T: KeyLike>(
     count as f32 / n_frags as f32
 }
 
-/// Precursor apex match = 0.5 * proximity + 0.5 * fraction (Section 3.4).
+/// Precursor apex match = 0.5 * proximity + 0.5 * fraction.
 fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: usize) -> f32 {
     if precursor_trace.is_empty() || n_cycles == 0 {
         return 0.0;
@@ -282,7 +282,7 @@ fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: 
     0.5 * proximity + 0.5 * fraction
 }
 
-/// XIC quality: mean per-fragment chromatographic peak quality (Section 3.4).
+/// XIC quality: mean per-fragment chromatographic peak quality.
 /// For each fragment in a +/-hw window:
 ///   alignment = max(0, 1 - d_i / (w/2))
 ///   sharpness = 1 - mean(edges) / peak
@@ -342,7 +342,7 @@ fn compute_xic_quality<T: KeyLike>(
 }
 
 /// Fragment apex agreement: fraction of fragments whose argmax is within +/-2
-/// of the joint apex (Section 3.4).
+/// of the joint apex.
 fn compute_fragment_apex_agreement<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     apex: usize,
@@ -371,7 +371,7 @@ fn compute_fragment_apex_agreement<T: KeyLike>(
 }
 
 /// Isotope correlation: cosine between observed and expected precursor isotope
-/// envelope at the apex cycle (Section 3.4).
+/// envelope at the apex cycle.
 ///
 /// Uses existing predicted precursor_intensities (keys 0, 1, 2) rather than
 /// re-implementing averagine — the codebase already has sequence-specific predictions.
@@ -420,7 +420,7 @@ fn compute_isotope_correlation(
 }
 
 /// Gaussian correlation: Pearson correlation between the combined elution profile
-/// and an ideal Gaussian centered at the apex (Section 3.4).
+/// and an ideal Gaussian centered at the apex.
 ///
 /// sigma is estimated from the observed FWHM: sigma = FWHM / 2.355
 fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize) -> f32 {
@@ -445,7 +445,7 @@ fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize) -> f32 
 }
 
 /// Per-fragment Gaussian correlation: mean per-fragment correlation with a Gaussian
-/// reference (Section 3.4, inspired by Beta-DIA).
+/// reference (inspired by Beta-DIA).
 ///
 /// sigma = max(window_size / 6, 1)
 fn compute_per_frag_gaussian_corr<T: KeyLike>(
