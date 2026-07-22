@@ -24,10 +24,6 @@ pub enum DataProcessingError {
     ExpectedFiniteNonNanData {
         context: String,
     },
-    ExpectedSetField {
-        field: &'static str,
-        context: String,
-    },
     TimsQueryDataProcessingError {
         error: TQDataProcessingError,
         context: String,
@@ -84,12 +80,6 @@ impl DataProcessingError {
                 None => *owned_context = Some(context.to_string()),
             },
             DataProcessingError::ExpectedFiniteNonNanData {
-                context: owned_context,
-            } => {
-                owned_context.push_str(context);
-            }
-            DataProcessingError::ExpectedSetField {
-                field: _owned_field,
                 context: owned_context,
             } => {
                 owned_context.push_str(context);

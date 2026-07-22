@@ -1,178 +1,163 @@
 use serde::Serialize;
 
 use super::apex_finding::{
-    ApexScore,
+    ApexBlocks,
     PeptideMetadata,
-    RelativeIntensities,
+    RelativeIntensities as RelativeIntensitiesRaw,
+};
+use super::blocks::apex_features::ApexFeatures;
+use super::blocks::counts::{
+    ApexCounts,
+    FinalizeCounts,
+};
+use super::blocks::identity::Identity;
+use super::blocks::intensities::Intensities;
+use super::blocks::ion_errors::IonErrors;
+use super::blocks::lazy::{
+    ApexLazyScores,
+    SecondaryLazyScores,
+};
+use super::blocks::mobility::Mobility;
+use super::blocks::primary::PrimaryScores;
+use super::blocks::relative_intensities::RelativeIntensities;
+use super::blocks::result_meta::ResultMeta;
+use super::blocks::rt::Rt;
+use super::blocks::split_product::SplitProduct;
+use super::blocks::{
+    ColSink,
+    FeatSink,
+    ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
-use super::pipeline::SecondaryLazyScores;
-use crate::errors::DataProcessingError;
+use super::pipeline::SecondaryLazyScores as SecondaryLazyRaw;
 use crate::models::sequence::Peptide;
 
-use super::{
-    NUM_MS1_IONS,
-    NUM_MS2_IONS,
-};
+/// Inputs for the finalize-stage assembly of [`ScoringFields`]. Constructing
+/// this struct IS the completeness guarantee: a score that needs data not yet
+/// present forces one new field here plus one line at the single construction
+/// site (`pipeline::finalize_results`).
+pub struct FinalizeInputs<'a> {
+    pub metadata: &'a PeptideMetadata,
+    pub offsets: &'a MzMobilityOffsets,
+    pub rel_inten: RelativeIntensitiesRaw,
+    pub secondary_lazy: SecondaryLazyRaw,
+    pub nqueries: u8,
+    /// Apex-stage blocks, moved in at zero cost.
+    pub apex: ApexBlocks,
+}
 
-/// Shared scoring fields produced by Phase 3. Every field is guaranteed populated.
+/// Shared scoring fields produced by Phase 3, as a composition of typed
+/// blocks. Each block owns its whole lifecycle (compute, `columns`,
+/// `features`) in one file under [`super::blocks`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringFields {
-    // Identity
-    pub peptide: Peptide,
-    pub library_id: u32,
-    pub decoy_group_id: u32,
-    pub precursor_mz: f64,
-    pub precursor_charge: u8,
-    pub precursor_mobility: f32,
-    pub is_target: bool,
-
-    // RT
-    pub library_rt: f32,
-    pub calibrated_rt_seconds: f32,
-    pub obs_rt_seconds: f32,
-    pub calibrated_sq_delta_rt: f32,
-
-    // Mobility
-    pub obs_mobility: f32,
-    pub delta_ms1_ms2_mobility: f32,
-    pub sq_delta_ms1_ms2_mobility: f32,
-
-    // Primary scores
-    pub main_score: f32,
-    pub delta_next: f32,
-    pub delta_second_next: f32,
-
-    // Lazyscores
-    pub apex_lazyscore: f32,
-    pub ms2_lazyscore: f32,
-    pub ms2_isotope_lazyscore: f32,
-    pub ms2_isotope_lazyscore_ratio: f32,
-    pub lazyscore_z: f32,
-    pub lazyscore_vs_baseline: f32,
-
-    // Split product (9 components)
-    pub split_product_score: f32,
-    pub cosine_au: f32,
-    pub scribe_au: f32,
-    pub cosine_cg: f32,
-    pub scribe_cg: f32,
-    pub cosine_weighted_coelution: f32,
-    pub cosine_gradient_consistency: f32,
-    pub scribe_weighted_coelution: f32,
-    pub scribe_gradient_consistency: f32,
-
-    // 11 apex features
-    pub peak_shape: f32,
-    pub ratio_cv: f32,
-    pub centered_apex: f32,
-    pub precursor_coelution: f32,
-    pub fragment_coverage: f32,
-    pub precursor_apex_match: f32,
-    pub xic_quality: f32,
-    pub fragment_apex_agreement: f32,
-    pub isotope_correlation: f32,
-    pub gaussian_correlation: f32,
-    pub per_frag_gaussian_corr: f32,
-
-    // Peak shape
-    pub rising_cycles: u8,
-    pub falling_cycles: u8,
-
-    // Counts
-    pub npeaks: u8,
-    pub n_scored_fragments: u8,
-
-    // Intensities
-    pub ms2_summed_intensity: f32,
-    pub ms1_summed_intensity: f32,
-
-    // Per-ion errors (real arrays, not numbered fields)
-    pub ms2_mz_errors: [f32; NUM_MS2_IONS],
-    pub ms2_mobility_errors: [f32; NUM_MS2_IONS],
-    pub ms1_mz_errors: [f32; NUM_MS1_IONS],
-    pub ms1_mobility_errors: [f32; NUM_MS1_IONS],
-
-    // Relative intensities
-    pub ms2_intensity_ratios: [f32; NUM_MS2_IONS],
-    pub ms1_intensity_ratios: [f32; NUM_MS1_IONS],
+    pub identity: Identity,
+    pub rt: Rt,
+    pub mobility: Mobility,
+    pub primary: PrimaryScores,
+    pub split: SplitProduct,
+    pub features: ApexFeatures,
+    pub apex_lazy: ApexLazyScores,
+    pub secondary_lazy: SecondaryLazyScores,
+    pub counts: ApexCounts,
+    pub finalize_counts: FinalizeCounts,
+    pub intensities: Intensities,
+    pub ion_errors: IonErrors,
+    pub rel_intensities: RelativeIntensities,
 }
 
 impl ScoringFields {
-    /// Zero out (as NaN) every mobility-derived feature. Used when the run's
-    /// mobility axis is not a searchable TIMS 1/K0 (mzML/FAIMS): the observed
-    /// mobility is a sentinel, so these features would otherwise feed the GBM
-    /// sentinel-derived constants (or `inf` from a divide-by-`ref_mobility==0`).
-    /// forust treats NaN as missing (`missing_node_treatment = AssignToParent`).
+    /// Assemble every finalize-stage block, moving the apex blocks in.
+    pub fn compute(inp: FinalizeInputs) -> Self {
+        let obs_rt_seconds = inp.apex.retention_time_ms as f32 / 1000.0;
+        Self {
+            identity: Identity::compute(inp.metadata),
+            rt: Rt::compute(inp.metadata, obs_rt_seconds),
+            mobility: Mobility::compute(inp.offsets),
+            primary: inp.apex.primary,
+            split: inp.apex.split,
+            features: inp.apex.features,
+            apex_lazy: inp.apex.apex_lazy,
+            secondary_lazy: SecondaryLazyScores::from(inp.secondary_lazy),
+            counts: inp.apex.counts,
+            finalize_counts: FinalizeCounts {
+                n_scored_fragments: inp.nqueries,
+            },
+            intensities: inp.apex.intensities,
+            ion_errors: IonErrors::compute(inp.offsets),
+            rel_intensities: RelativeIntensities::from_collector(&inp.rel_inten),
+        }
+    }
+
+    /// Zero out (as NaN) every mobility-derived field. Used when the run's
+    /// mobility axis is not a searchable TIMS 1/K0 (mzML/FAIMS). Each block
+    /// NaNs its own mobility-derived fields (including derived squares), so a
+    /// future move of a field cannot desync from its source.
     pub fn neutralize_mobility(&mut self) {
-        self.precursor_mobility = f32::NAN;
-        self.obs_mobility = f32::NAN;
-        self.delta_ms1_ms2_mobility = f32::NAN;
-        self.sq_delta_ms1_ms2_mobility = f32::NAN;
-        self.ms1_mobility_errors.fill(f32::NAN);
-        self.ms2_mobility_errors.fill(f32::NAN);
+        self.identity.neutralize_mobility();
+        self.mobility.neutralize();
+        self.ion_errors.neutralize();
+    }
+
+    /// Emit every block's Parquet columns, in a fixed order.
+    pub fn push_columns(&self, o: &mut ColSink) {
+        self.identity.columns(o);
+        self.rt.columns(o);
+        self.mobility.columns(o);
+        self.primary.columns(o);
+        self.split.columns(o);
+        self.features.columns(o);
+        self.apex_lazy.columns(o);
+        self.secondary_lazy.columns(o);
+        self.counts.columns(o);
+        self.finalize_counts.columns(o);
+        self.intensities.columns(o);
+        self.ion_errors.columns(o);
+        self.rel_intensities.columns(o);
+    }
+
+    /// Emit every block's direct ML features (not the cross-field derived ones,
+    /// nor the conditional sequence block).
+    pub fn push_features(&self, o: &mut FeatSink) {
+        self.identity.features(o);
+        self.rt.features(o);
+        self.mobility.features(o);
+        self.primary.features(o);
+        self.split.features(o);
+        self.features.features(o);
+        self.apex_lazy.features(o);
+        self.secondary_lazy.features(o);
+        self.counts.features(o);
+        self.finalize_counts.features(o);
+        self.intensities.features(o);
+        self.ion_errors.features(o);
+        self.rel_intensities.features(o);
     }
 
     /// Baseline test fixture with every field populated. Callers (including
     /// other crates' tests) tweak the identity/score fields they care about.
-    /// Plain `pub fn` (not `#[cfg(test)]`) so it is reachable cross-crate.
     pub fn sample(peptide: Peptide) -> Self {
+        let mut s = Self::sample_default();
+        s.identity.peptide = peptide;
+        s
+    }
+
+    /// Fixture using the placeholder peptide from [`Identity::sample`].
+    pub fn sample_default() -> Self {
         Self {
-            peptide,
-            library_id: 0,
-            decoy_group_id: 0,
-            precursor_mz: 500.0,
-            precursor_charge: 2,
-            precursor_mobility: 0.9,
-            is_target: true,
-            library_rt: 60.0,
-            calibrated_rt_seconds: 3600.0,
-            obs_rt_seconds: 3601.0,
-            calibrated_sq_delta_rt: 1.0,
-            obs_mobility: 0.91,
-            delta_ms1_ms2_mobility: 0.01,
-            sq_delta_ms1_ms2_mobility: 0.0001,
-            main_score: 10.0,
-            delta_next: 2.0,
-            delta_second_next: 1.0,
-            apex_lazyscore: 5.0,
-            ms2_lazyscore: 4.0,
-            ms2_isotope_lazyscore: 3.0,
-            ms2_isotope_lazyscore_ratio: 0.5,
-            lazyscore_z: 2.0,
-            lazyscore_vs_baseline: 1.5,
-            split_product_score: 0.8,
-            cosine_au: 0.7,
-            scribe_au: 0.6,
-            cosine_cg: 0.5,
-            scribe_cg: 0.4,
-            cosine_weighted_coelution: 0.9,
-            cosine_gradient_consistency: 0.85,
-            scribe_weighted_coelution: 0.88,
-            scribe_gradient_consistency: 0.82,
-            peak_shape: 0.95,
-            ratio_cv: 0.1,
-            centered_apex: 0.5,
-            precursor_coelution: 0.9,
-            fragment_coverage: 0.8,
-            precursor_apex_match: 0.7,
-            xic_quality: 0.75,
-            fragment_apex_agreement: 0.85,
-            isotope_correlation: 0.9,
-            gaussian_correlation: 0.88,
-            per_frag_gaussian_corr: 0.87,
-            rising_cycles: 3,
-            falling_cycles: 2,
-            npeaks: 5,
-            n_scored_fragments: 6,
-            ms2_summed_intensity: 1000.0,
-            ms1_summed_intensity: 500.0,
-            ms2_mz_errors: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
-            ms2_mobility_errors: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
-            ms1_mz_errors: [0.1, 0.2, 0.3],
-            ms1_mobility_errors: [0.01, 0.02, 0.03],
-            ms2_intensity_ratios: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
-            ms1_intensity_ratios: [0.9, 0.8, 0.7],
+            identity: Identity::sample(),
+            rt: Rt::sample(),
+            mobility: Mobility::sample(),
+            primary: PrimaryScores::sample(),
+            split: SplitProduct::sample(),
+            features: ApexFeatures::sample(),
+            apex_lazy: ApexLazyScores::sample(),
+            secondary_lazy: SecondaryLazyScores::sample(),
+            counts: ApexCounts::sample(),
+            finalize_counts: FinalizeCounts::sample(),
+            intensities: Intensities::sample(),
+            ion_errors: IonErrors::sample(),
+            rel_intensities: RelativeIntensities::sample(),
         }
     }
 }
@@ -195,6 +180,18 @@ pub struct CompetedCandidate {
     pub(crate) qvalue: f32,
 }
 
+impl CompetedCandidate {
+    /// The post-model meta block (used for the ML delta-group features).
+    pub(crate) fn result_meta(&self) -> ResultMeta {
+        ResultMeta {
+            delta_group: self.delta_group,
+            delta_group_ratio: self.delta_group_ratio,
+            discriminant_score: self.discriminant_score,
+            qvalue: self.qvalue,
+        }
+    }
+}
+
 /// After rescoring. Written to Parquet.
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalResult {
@@ -203,6 +200,29 @@ pub struct FinalResult {
     pub delta_group_ratio: f32,
     pub discriminant_score: f32,
     pub qvalue: f32,
+}
+
+impl FinalResult {
+    /// Schema/test fixture with zeroed meta fields.
+    pub fn sample() -> Self {
+        Self {
+            scoring: ScoringFields::sample_default(),
+            delta_group: 0.0,
+            delta_group_ratio: 0.0,
+            discriminant_score: 0.0,
+            qvalue: 0.0,
+        }
+    }
+
+    /// The post-model meta block (used for the Parquet meta columns).
+    pub(crate) fn result_meta(&self) -> ResultMeta {
+        ResultMeta {
+            delta_group: self.delta_group,
+            delta_group_ratio: self.delta_group_ratio,
+            discriminant_score: self.discriminant_score,
+            qvalue: self.qvalue,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,338 +255,5 @@ impl CompetedCandidate {
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
-
-/// Tracks whether a field has been set or is still unset.
-///
-/// Mirrors the `SetField` in `search_results.rs` but lives here so
-/// `ScoredCandidateBuilder` is self-contained.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum SetField<T> {
-    Some(T),
-    #[default]
-    None,
-}
-
-impl<T> SetField<T> {
-    pub fn is_some(&self) -> bool {
-        matches!(self, Self::Some(_))
-    }
-
-    pub fn expect_some(self, field_name: &'static str) -> Result<T, DataProcessingError> {
-        match self {
-            Self::Some(v) => Ok(v),
-            Self::None => Err(DataProcessingError::ExpectedSetField {
-                field: field_name,
-                context: "".into(),
-            }),
-        }
-    }
-}
-
-/// Builder that collects all inputs for a `ScoredCandidate` and validates
-/// completeness in `finalize()`.
-#[derive(Debug, Default)]
-pub struct ScoredCandidateBuilder {
-    // --- Identity ---
-    peptide: SetField<Peptide>,
-    library_id: SetField<u32>,
-    decoy_group_id: SetField<u32>,
-    precursor_mz: SetField<f64>,
-    precursor_charge: SetField<u8>,
-    precursor_mobility: SetField<f32>,
-    is_target: SetField<bool>,
-
-    // --- RT ---
-    library_rt: SetField<f32>,
-    calibrated_rt_seconds: SetField<f32>,
-
-    // --- Observed RT / mobility ---
-    obs_rt_seconds: SetField<f32>,
-    obs_mobility: SetField<f32>,
-    delta_ms1_ms2_mobility: SetField<f32>,
-
-    // --- Primary scores ---
-    main_score: SetField<f32>,
-    delta_next: SetField<f32>,
-    delta_second_next: SetField<f32>,
-
-    // --- Lazyscores ---
-    apex_lazyscore: SetField<f32>,
-    ms2_lazyscore: SetField<f32>,
-    ms2_isotope_lazyscore: SetField<f32>,
-    ms2_isotope_lazyscore_ratio: SetField<f32>,
-    lazyscore_z: SetField<f32>,
-    lazyscore_vs_baseline: SetField<f32>,
-
-    // --- Split product ---
-    split_product_score: SetField<f32>,
-    cosine_au: SetField<f32>,
-    scribe_au: SetField<f32>,
-    cosine_cg: SetField<f32>,
-    scribe_cg: SetField<f32>,
-    cosine_weighted_coelution: SetField<f32>,
-    cosine_gradient_consistency: SetField<f32>,
-    scribe_weighted_coelution: SetField<f32>,
-    scribe_gradient_consistency: SetField<f32>,
-
-    // --- 11 apex features ---
-    peak_shape: SetField<f32>,
-    ratio_cv: SetField<f32>,
-    centered_apex: SetField<f32>,
-    precursor_coelution: SetField<f32>,
-    fragment_coverage: SetField<f32>,
-    precursor_apex_match: SetField<f32>,
-    xic_quality: SetField<f32>,
-    fragment_apex_agreement: SetField<f32>,
-    isotope_correlation: SetField<f32>,
-    gaussian_correlation: SetField<f32>,
-    per_frag_gaussian_corr: SetField<f32>,
-
-    // --- Peak shape ---
-    rising_cycles: SetField<u8>,
-    falling_cycles: SetField<u8>,
-
-    // --- Counts ---
-    npeaks: SetField<u8>,
-    n_scored_fragments: SetField<u8>,
-
-    // --- Intensities ---
-    ms2_summed_intensity: SetField<f32>,
-    ms1_summed_intensity: SetField<f32>,
-
-    // --- Per-ion errors ---
-    ms2_mz_errors: SetField<[f32; NUM_MS2_IONS]>,
-    ms2_mobility_errors: SetField<[f32; NUM_MS2_IONS]>,
-    ms1_mz_errors: SetField<[f32; NUM_MS1_IONS]>,
-    ms1_mobility_errors: SetField<[f32; NUM_MS1_IONS]>,
-
-    // --- Relative intensities ---
-    relative_intensities: SetField<RelativeIntensities>,
-}
-
-impl ScoredCandidateBuilder {
-    /// Populate identity fields and reference values from peptide metadata.
-    pub fn with_metadata(mut self, metadata: &PeptideMetadata) -> Self {
-        self.library_id = SetField::Some(metadata.library_id);
-        self.peptide = SetField::Some(metadata.digest.clone());
-        self.is_target = SetField::Some(metadata.digest.decoy.is_target());
-        self.decoy_group_id = SetField::Some(metadata.digest.decoy_group);
-        self.precursor_charge = SetField::Some(metadata.charge);
-        self.precursor_mz = SetField::Some(metadata.ref_precursor_mz);
-        self.precursor_mobility = SetField::Some(metadata.ref_mobility_ook0);
-        self.library_rt = SetField::Some(metadata.library_rt);
-        self.calibrated_rt_seconds = SetField::Some(metadata.calibrated_rt_seconds);
-        self
-    }
-
-    /// Set the number of scored fragments (ions used during scoring).
-    pub fn with_nqueries(mut self, nqueries: u8) -> Self {
-        self.n_scored_fragments = SetField::Some(nqueries);
-        self
-    }
-
-    /// Populate per-ion m/z and mobility error arrays plus observed mobility.
-    pub fn with_sorted_offsets(mut self, offsets: &MzMobilityOffsets) -> Self {
-        self.ms1_mz_errors = SetField::Some(offsets.ms1_mz_errors());
-        self.ms1_mobility_errors = SetField::Some(offsets.ms1_mobility_errors());
-        self.ms2_mz_errors = SetField::Some(offsets.ms2_mz_errors());
-        self.ms2_mobility_errors = SetField::Some(offsets.ms2_mobility_errors());
-
-        let (ms1_err, ms2_err) = offsets.avg_delta_mobs();
-        let cum_err = ms1_err + ms2_err;
-        let obs_mob = (offsets.ref_mobility + cum_err.mean_mobility().unwrap_or(f64::NAN)) as f32;
-        let d_err = match (ms1_err.mean_mobility(), ms2_err.mean_mobility()) {
-            (Ok(ms1_mob), Ok(ms2_mob)) => ms1_mob - ms2_mob,
-            _ => f64::NAN,
-        };
-        self.delta_ms1_ms2_mobility = SetField::Some(d_err as f32);
-        self.obs_mobility = SetField::Some(obs_mob);
-        self
-    }
-
-    /// Populate secondary lazyscore fields from the isotope/inner collectors.
-    pub fn with_secondary_lazyscores(mut self, lazyscores: SecondaryLazyScores) -> Self {
-        self.ms2_lazyscore = SetField::Some(lazyscores.lazyscore);
-        self.ms2_isotope_lazyscore = SetField::Some(lazyscores.iso_lazyscore);
-        self.ms2_isotope_lazyscore_ratio = SetField::Some(lazyscores.ratio);
-        self
-    }
-
-    /// Populate relative intensity arrays from the inner collector.
-    pub fn with_relative_intensities(mut self, relative_intensities: RelativeIntensities) -> Self {
-        self.relative_intensities = SetField::Some(relative_intensities);
-        self
-    }
-
-    /// Populate all fields derived from the full apex score.
-    pub fn with_apex_score(mut self, main_score: &ApexScore) -> Self {
-        let ApexScore {
-            score,
-            retention_time_ms,
-            joint_apex_cycle: _,
-            split_product,
-            features,
-            delta_next,
-            delta_second_next,
-            lazyscore,
-            lazyscore_vs_baseline,
-            lazyscore_z,
-            npeaks,
-            ms2_summed_intensity,
-            ms1_summed_intensity,
-            rising_cycles,
-            falling_cycles,
-        } = *main_score;
-
-        self.main_score = SetField::Some(score);
-        self.delta_next = SetField::Some(delta_next);
-        self.delta_second_next = SetField::Some(delta_second_next);
-        self.obs_rt_seconds = SetField::Some(retention_time_ms as f32 / 1000.0);
-
-        self.split_product_score = SetField::Some(split_product.base_score);
-        self.cosine_au = SetField::Some(split_product.cosine_au);
-        self.scribe_au = SetField::Some(split_product.scribe_au);
-        self.cosine_cg = SetField::Some(split_product.cosine_cg);
-        self.scribe_cg = SetField::Some(split_product.scribe_cg);
-        self.cosine_weighted_coelution = SetField::Some(split_product.cosine_weighted_coelution);
-        self.cosine_gradient_consistency =
-            SetField::Some(split_product.cosine_gradient_consistency);
-        self.scribe_weighted_coelution = SetField::Some(split_product.scribe_weighted_coelution);
-        self.scribe_gradient_consistency =
-            SetField::Some(split_product.scribe_gradient_consistency);
-
-        self.peak_shape = SetField::Some(features.peak_shape);
-        self.ratio_cv = SetField::Some(features.ratio_cv);
-        self.centered_apex = SetField::Some(features.centered_apex);
-        self.precursor_coelution = SetField::Some(features.precursor_coelution);
-        self.fragment_coverage = SetField::Some(features.fragment_coverage);
-        self.precursor_apex_match = SetField::Some(features.precursor_apex_match);
-        self.xic_quality = SetField::Some(features.xic_quality);
-        self.fragment_apex_agreement = SetField::Some(features.fragment_apex_agreement);
-        self.isotope_correlation = SetField::Some(features.isotope_correlation);
-        self.gaussian_correlation = SetField::Some(features.gaussian_correlation);
-        self.per_frag_gaussian_corr = SetField::Some(features.per_frag_gaussian_corr);
-
-        self.apex_lazyscore = SetField::Some(lazyscore);
-        self.lazyscore_z = SetField::Some(lazyscore_z);
-        self.lazyscore_vs_baseline = SetField::Some(lazyscore_vs_baseline);
-        self.npeaks = SetField::Some(npeaks);
-        self.ms1_summed_intensity = SetField::Some(ms1_summed_intensity);
-        self.ms2_summed_intensity = SetField::Some(ms2_summed_intensity);
-        self.rising_cycles = SetField::Some(rising_cycles);
-        self.falling_cycles = SetField::Some(falling_cycles);
-
-        self
-    }
-
-    /// Validate completeness and construct a `ScoredCandidate`.
-    pub fn finalize(self) -> Result<ScoredCandidate, DataProcessingError> {
-        macro_rules! expect_some {
-            ($field:ident) => {
-                self.$field.expect_some(stringify!($field))?
-            };
-        }
-
-        let obs_rt_seconds = expect_some!(obs_rt_seconds);
-        let library_rt = expect_some!(library_rt);
-        let calibrated_rt_seconds = expect_some!(calibrated_rt_seconds);
-        let calibrated_delta_rt = obs_rt_seconds - calibrated_rt_seconds;
-        let calibrated_sq_delta_rt = calibrated_delta_rt * calibrated_delta_rt;
-
-        let delta_ms1_ms2_mobility = expect_some!(delta_ms1_ms2_mobility);
-        let sq_delta_ms1_ms2_mobility = delta_ms1_ms2_mobility * delta_ms1_ms2_mobility;
-
-        let relints = expect_some!(relative_intensities);
-        let ms1_intensity_ratios = relints.ms1.get_values_sorted();
-        let ms2_intensity_ratios = relints.ms2.get_values_sorted();
-
-        let scoring = ScoringFields {
-            // Identity
-            peptide: expect_some!(peptide),
-            library_id: expect_some!(library_id),
-            decoy_group_id: expect_some!(decoy_group_id),
-            precursor_mz: expect_some!(precursor_mz),
-            precursor_charge: expect_some!(precursor_charge),
-            precursor_mobility: expect_some!(precursor_mobility),
-            is_target: expect_some!(is_target),
-
-            // RT
-            library_rt,
-            calibrated_rt_seconds,
-            obs_rt_seconds,
-            calibrated_sq_delta_rt,
-
-            // Mobility
-            obs_mobility: expect_some!(obs_mobility),
-            delta_ms1_ms2_mobility,
-            sq_delta_ms1_ms2_mobility,
-
-            // Primary scores
-            main_score: expect_some!(main_score),
-            delta_next: expect_some!(delta_next),
-            delta_second_next: expect_some!(delta_second_next),
-
-            // Lazyscores
-            apex_lazyscore: expect_some!(apex_lazyscore),
-            ms2_lazyscore: expect_some!(ms2_lazyscore),
-            ms2_isotope_lazyscore: expect_some!(ms2_isotope_lazyscore),
-            ms2_isotope_lazyscore_ratio: expect_some!(ms2_isotope_lazyscore_ratio),
-            lazyscore_z: expect_some!(lazyscore_z),
-            lazyscore_vs_baseline: expect_some!(lazyscore_vs_baseline),
-
-            // Split product
-            split_product_score: expect_some!(split_product_score),
-            cosine_au: expect_some!(cosine_au),
-            scribe_au: expect_some!(scribe_au),
-            cosine_cg: expect_some!(cosine_cg),
-            scribe_cg: expect_some!(scribe_cg),
-            cosine_weighted_coelution: expect_some!(cosine_weighted_coelution),
-            cosine_gradient_consistency: expect_some!(cosine_gradient_consistency),
-            scribe_weighted_coelution: expect_some!(scribe_weighted_coelution),
-            scribe_gradient_consistency: expect_some!(scribe_gradient_consistency),
-
-            // 11 apex features
-            peak_shape: expect_some!(peak_shape),
-            ratio_cv: expect_some!(ratio_cv),
-            centered_apex: expect_some!(centered_apex),
-            precursor_coelution: expect_some!(precursor_coelution),
-            fragment_coverage: expect_some!(fragment_coverage),
-            precursor_apex_match: expect_some!(precursor_apex_match),
-            xic_quality: expect_some!(xic_quality),
-            fragment_apex_agreement: expect_some!(fragment_apex_agreement),
-            isotope_correlation: expect_some!(isotope_correlation),
-            gaussian_correlation: expect_some!(gaussian_correlation),
-            per_frag_gaussian_corr: expect_some!(per_frag_gaussian_corr),
-
-            // Peak shape
-            rising_cycles: expect_some!(rising_cycles),
-            falling_cycles: expect_some!(falling_cycles),
-
-            // Counts
-            npeaks: expect_some!(npeaks),
-            n_scored_fragments: expect_some!(n_scored_fragments),
-
-            // Intensities
-            ms2_summed_intensity: expect_some!(ms2_summed_intensity),
-            ms1_summed_intensity: expect_some!(ms1_summed_intensity),
-
-            // Per-ion errors
-            ms2_mz_errors: expect_some!(ms2_mz_errors),
-            ms2_mobility_errors: expect_some!(ms2_mobility_errors),
-            ms1_mz_errors: expect_some!(ms1_mz_errors),
-            ms1_mobility_errors: expect_some!(ms1_mobility_errors),
-
-            // Relative intensities
-            ms2_intensity_ratios,
-            ms1_intensity_ratios,
-        };
-
-        Ok(ScoredCandidate { scoring })
     }
 }

@@ -35,10 +35,14 @@ use crate::IonAnnot;
 use crate::errors::DataProcessingError;
 use crate::models::ExpectedIntensities;
 use crate::models::sequence::Peptide;
+use crate::scoring::blocks::counts::ApexCounts;
+use crate::scoring::blocks::intensities::Intensities;
+use crate::scoring::blocks::lazy::ApexLazyScores;
+use crate::scoring::blocks::primary::PrimaryScores;
+use crate::scoring::blocks::split_product::SplitProduct;
 use crate::scoring::scores::apex_features::{
     ApexFeatures,
     SCRIBE_FLOOR,
-    SplitProductScore,
     compute_apex_features,
     compute_split_product,
     compute_weighted_score,
@@ -128,35 +132,23 @@ pub struct ApexLocation {
     pub falling_cycles: u8,
 }
 
-/// The result of the full scoring process (Phase 3).
+/// The result of the full scoring process (Phase 3): the apex-stage score
+/// blocks, plus the two bridge scalars (`joint_apex_cycle`, `retention_time_ms`
+/// — the latter drives the secondary-query RT). Assembled while the
+/// chromatogram buffers are live; moves into `ScoringFields` at finalize.
 #[derive(Debug, Clone, Copy)]
-pub struct ApexScore {
-    /// The final weighted product score (higher is better).
-    pub score: f32,
-    /// Retention time at the apex (ms).
-    pub retention_time_ms: u32,
+pub struct ApexBlocks {
     /// Local cycle index of the joint apex.
     pub joint_apex_cycle: usize,
+    /// Retention time at the apex (ms). Also the secondary-query bridge input.
+    pub retention_time_ms: u32,
 
-    // --- Split product components ---
-    pub split_product: SplitProductScore,
-
-    // --- 11 features at joint apex ---
+    pub split: SplitProduct,
     pub features: ApexFeatures,
-
-    // --- Peak discrimination ---
-    pub delta_next: f32,
-    pub delta_second_next: f32,
-
-    // --- Retained from current (used downstream) ---
-    pub lazyscore: f32,
-    pub lazyscore_vs_baseline: f32,
-    pub lazyscore_z: f32,
-    pub npeaks: u8,
-    pub ms2_summed_intensity: f32,
-    pub ms1_summed_intensity: f32,
-    pub rising_cycles: u8,
-    pub falling_cycles: u8,
+    pub primary: PrimaryScores,
+    pub counts: ApexCounts,
+    pub intensities: Intensities,
+    pub apex_lazy: ApexLazyScores,
 }
 
 /// Chunk-8 vectorized accumulator for `compute_pass_1`'s 4 cheap
@@ -432,7 +424,7 @@ impl TraceScorer {
         cycle: usize,
         suggested: &ApexLocation,
         rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexScore, DataProcessingError> {
+    ) -> Result<ApexBlocks, DataProcessingError> {
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
 
         // Split product using cached profiles
@@ -508,22 +500,30 @@ impl TraceScorer {
             });
         }
 
-        Ok(ApexScore {
-            score,
-            retention_time_ms,
+        Ok(ApexBlocks {
             joint_apex_cycle: effective_apex,
-            split_product,
+            retention_time_ms,
+            split: SplitProduct::from(&split_product),
             features,
-            delta_next,
-            delta_second_next,
-            lazyscore: lazyscore_at,
-            lazyscore_vs_baseline: (lazyscore_at as f64 / lambda) as f32,
-            lazyscore_z,
-            npeaks: ms2_npeaks as u8,
-            ms2_summed_intensity,
-            ms1_summed_intensity,
-            rising_cycles: suggested.rising_cycles,
-            falling_cycles: suggested.falling_cycles,
+            primary: PrimaryScores {
+                main_score: score,
+                delta_next,
+                delta_second_next,
+            },
+            counts: ApexCounts {
+                rising_cycles: suggested.rising_cycles,
+                falling_cycles: suggested.falling_cycles,
+                npeaks: ms2_npeaks as u8,
+            },
+            intensities: Intensities {
+                ms2_summed_intensity,
+                ms1_summed_intensity,
+            },
+            apex_lazy: ApexLazyScores {
+                apex_lazyscore: lazyscore_at,
+                lazyscore_z,
+                lazyscore_vs_baseline: (lazyscore_at as f64 / lambda) as f32,
+            },
         })
     }
 
@@ -551,7 +551,7 @@ impl TraceScorer {
         &mut self,
         scoring_ctx: &Extraction<T>,
         rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexScore, DataProcessingError> {
+    ) -> Result<ApexBlocks, DataProcessingError> {
         self.compute_traces(scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let loc = self.suggest_apex(rt_mapper, cycle_offset)?;

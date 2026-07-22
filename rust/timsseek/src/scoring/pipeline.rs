@@ -53,8 +53,8 @@ use timsquery::{
 
 use super::accumulator::IonSearchAccumulator;
 use super::apex_finding::{
+    ApexBlocks,
     ApexLocation,
-    ApexScore,
     Extraction,
     RelativeIntensities,
     TraceScorer,
@@ -62,8 +62,9 @@ use super::apex_finding::{
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
 use super::results::{
+    FinalizeInputs,
     ScoredCandidate,
-    ScoredCandidateBuilder,
+    ScoringFields,
 };
 use super::skip::{
     SkipCounts,
@@ -460,21 +461,20 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 
     /// Performs refined secondary query at detected apex with two-pass strategy.
+    /// Results populate `worker.inner_collector` and `worker.isotope_collector` in place.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    /// Performs refined secondary query at detected apex with two-pass strategy.
-    /// Results populate `worker.inner_collector` and `worker.isotope_collector` in place.
     fn execute_secondary_query(
         &self,
         query: &TimsElutionGroup<IonAnnot>,
-        main_score: &ApexScore,
+        apex: &ApexBlocks,
         spectral_tol: &Tolerance,
         isotope_tol: &Tolerance,
         worker: &mut ScoringWorker,
     ) {
-        let new_rt_seconds = main_score.retention_time_ms as f32 / 1000.0;
+        let new_rt_seconds = apex.retention_time_ms as f32 / 1000.0;
 
         // **Pass 1**: query at apex RT to determine observed mobility.
         let inner = worker
@@ -518,29 +518,29 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         metadata: &super::apex_finding::PeptideMetadata,
         nqueries: u8,
-        main_score: &ApexScore,
+        apex: ApexBlocks,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
         isotope_collector: &SpectralCollector<IonAnnot, f32>,
     ) -> Result<ScoredCandidate, DataProcessingError> {
         let offsets = MzMobilityOffsets::new(inner_collector, metadata.ref_mobility_ook0 as f64);
         let rel_inten = RelativeIntensities::new(inner_collector);
-        let lazyscores = compute_secondary_lazyscores(inner_collector, isotope_collector);
+        let secondary_lazy = compute_secondary_lazyscores(inner_collector, isotope_collector);
 
-        let mut candidate = ScoredCandidateBuilder::default()
-            .with_metadata(metadata)
-            .with_nqueries(nqueries)
-            .with_sorted_offsets(&offsets)
-            .with_relative_intensities(rel_inten)
-            .with_secondary_lazyscores(lazyscores)
-            .with_apex_score(main_score)
-            .finalize()?;
+        let mut scoring = ScoringFields::compute(FinalizeInputs {
+            metadata,
+            offsets: &offsets,
+            rel_inten,
+            secondary_lazy,
+            nqueries,
+            apex,
+        });
 
         // No searchable mobility axis (mzML/FAIMS) → the observed mobility is a
         // sentinel, so drop every mobility feature to NaN (forust-missing).
         if !self.index.mobility_kind().is_scoreable() {
-            candidate.scoring.neutralize_mobility();
+            scoring.neutralize_mobility();
         }
-        Ok(candidate)
+        Ok(ScoredCandidate { scoring })
     }
 }
 
@@ -663,7 +663,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 self.finalize_results(
                     &metadata,
                     nqueries,
-                    &apex_score,
+                    apex_score,
                     inner_collector,
                     isotope_collector,
                 )

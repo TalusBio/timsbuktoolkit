@@ -7,11 +7,11 @@
 //!     score. Its `joint_apex_cycle` may differ from Pass 1's peak pick.
 //!
 //! No reimplementation: `TraceScorer`, `ElutionTraces`, `ApexLocation` and
-//! `ApexScore` are the exact types the CLI pipeline uses.
+//! `ApexBlocks` are the exact types the CLI pipeline uses.
 
 use timsseek::scoring::apex_finding::{
+    ApexBlocks,
     ApexLocation,
-    ApexScore,
     ElutionTraces,
     Extraction,
     TraceScorer,
@@ -24,7 +24,7 @@ pub struct ScoreResult {
     /// Pass 1: quick apex location (prescore).
     pub pass1: ApexLocation,
     /// Pass 2: full scored apex (may sit at a different cycle than pass1).
-    pub pass2: ApexScore,
+    pub pass2: ApexBlocks,
 }
 
 /// Run the two staged passes on a CALLER-OWNED scorer, returning only the
@@ -35,7 +35,7 @@ pub fn run_with(
     scorer: &mut TraceScorer,
     extraction: &Extraction<String>,
     rt_mapper: &dyn Fn(usize) -> u32,
-) -> Result<(ApexLocation, ApexScore), String> {
+) -> Result<(ApexLocation, ApexBlocks), String> {
     // Stage A: per-cycle traces (resizes the scorer's buffers as needed).
     scorer
         .compute_traces(extraction)
@@ -111,12 +111,16 @@ mod tests {
 
         let clean = build(&base);
         let map = base.rt_mapper();
-        let clean_score = run(&clean.extraction, &map).unwrap().pass2.score;
+        let clean_score = run(&clean.extraction, &map)
+            .unwrap()
+            .pass2
+            .primary
+            .main_score;
 
         let mut dropped = base.clone();
         dropped.real_fragments[0].obs_scale = 0.0; // top fragment goes missing
         let d = build(&dropped);
-        let dropped_score = run(&d.extraction, &map).unwrap().pass2.score;
+        let dropped_score = run(&d.extraction, &map).unwrap().pass2.primary.main_score;
 
         assert!(
             dropped_score < clean_score,

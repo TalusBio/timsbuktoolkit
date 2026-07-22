@@ -107,7 +107,12 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     // materialized eg id — a target and its ±decoy variants share it, but
     // target-decoy competition leaves exactly ONE candidate per
     // (target, charge), so the key stays unique among survivors here.
-    data.sort_unstable_by_key(|c| (c.scoring.library_id, c.scoring.precursor_charge));
+    data.sort_unstable_by_key(|c| {
+        (
+            c.scoring.identity.library_id,
+            c.scoring.identity.precursor_charge,
+        )
+    });
 
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
@@ -138,19 +143,16 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
 
-use crate::models::AA_COUNT_NAMES;
+use crate::scoring::blocks::{
+    FeatSink,
+    ScoreBlock,
+    derived,
+    sequence_counts,
+};
 use crate::scoring::results::{
     CompetedCandidate,
     FinalResult,
 };
-
-fn mean_abs_error(errs: &[f32]) -> f64 {
-    let (sum, n) = errs
-        .iter()
-        .filter(|e| e.is_finite() && **e != 0.0)
-        .fold((0.0f64, 0u32), |(s, n), &e| (s + (e as f64).abs(), n + 1));
-    if n > 0 { sum / n as f64 } else { f64::NAN }
-}
 
 // ---------------------------------------------------------------------------
 // CompetedCandidate: FeatureLike + LabelledScore
@@ -159,177 +161,20 @@ fn mean_abs_error(errs: &[f32]) -> f64 {
 impl CompetedCandidate {
     /// Single source of truth for feature values and names.
     ///
-    /// Base block: 88 dims always present.
-    /// Sequence block: 22 dims appended when `peptide.parsed.is_some()`.
-    /// The gate is speclib-wide: either all candidates in a run have Some,
-    /// or all have None — so vector length is stable within a single fit.
+    /// Assembled by walking each block's `features()` (codegen-derived), then
+    /// the post-model meta block, then the cross-field derived features, then
+    /// the conditional sequence block LAST.
+    ///
+    /// Base set: 86 dims always present. Sequence block: 22 dims appended when
+    /// `peptide.aa_counts()` is `Some`. The gate is speclib-wide, so the vector
+    /// length is stable within a single fit.
     fn named_features(&self) -> Vec<(f64, &'static str)> {
-        let s = &self.scoring;
-        let mut v: Vec<(f64, &'static str)> = vec![
-            // Identity / precursor
-            ((s.precursor_mz / 5.0).round(), "precursor_mz_round5"),
-            (s.precursor_charge as f64, "precursor_charge"),
-            (s.precursor_mobility as f64, "precursor_mobility"),
-            (
-                s.calibrated_rt_seconds.round() as f64,
-                "calibrated_rt_seconds_round",
-            ),
-            (s.n_scored_fragments as f64, "n_scored_fragments"),
-            // Combined
-            (s.main_score as f64, "main_score"),
-            ((s.main_score / s.delta_next) as f64, "main_over_delta_next"),
-            (s.delta_next as f64, "delta_next"),
-            (s.delta_second_next as f64, "delta_second_next"),
-            (s.obs_rt_seconds as f64, "obs_rt_seconds"),
-            (s.obs_mobility as f64, "obs_mobility"),
-            (
-                (s.obs_rt_seconds - s.calibrated_rt_seconds) as f64,
-                "rt_err",
-            ),
-            (s.calibrated_sq_delta_rt as f64, "calibrated_sq_delta_rt"),
-            (s.delta_ms1_ms2_mobility as f64, "delta_ms1_ms2_mobility"),
-            (
-                s.sq_delta_ms1_ms2_mobility as f64,
-                "sq_delta_ms1_ms2_mobility",
-            ),
-            (s.rising_cycles as f64, "rising_cycles"),
-            (s.falling_cycles as f64, "falling_cycles"),
-            // MS2
-            (s.npeaks as f64, "npeaks"),
-            (s.apex_lazyscore as f64, "apex_lazyscore"),
-            (
-                (s.ms2_summed_intensity as f64).ln_1p(),
-                "ms2_summed_intensity_ln1p",
-            ),
-            (s.ms2_lazyscore as f64, "ms2_lazyscore"),
-            (s.ms2_isotope_lazyscore as f64, "ms2_isotope_lazyscore"),
-            (
-                s.ms2_isotope_lazyscore_ratio as f64,
-                "ms2_isotope_lazyscore_ratio",
-            ),
-            (s.lazyscore_z as f64, "lazyscore_z"),
-            (s.lazyscore_vs_baseline as f64, "lazyscore_vs_baseline"),
-            // Split product & apex features
-            (
-                (s.split_product_score as f64).ln_1p(),
-                "split_product_score_ln1p",
-            ),
-            ((s.cosine_au as f64).ln_1p(), "cosine_au_ln1p"),
-            ((s.scribe_au as f64).ln_1p(), "scribe_au_ln1p"),
-            (s.cosine_cg as f64, "cosine_cg"),
-            (s.scribe_cg as f64, "scribe_cg"),
-            (
-                s.cosine_weighted_coelution as f64,
-                "cosine_weighted_coelution",
-            ),
-            (
-                s.cosine_gradient_consistency as f64,
-                "cosine_gradient_consistency",
-            ),
-            (
-                s.scribe_weighted_coelution as f64,
-                "scribe_weighted_coelution",
-            ),
-            (
-                s.scribe_gradient_consistency as f64,
-                "scribe_gradient_consistency",
-            ),
-            (s.peak_shape as f64, "peak_shape"),
-            (s.ratio_cv as f64, "ratio_cv"),
-            (s.centered_apex as f64, "centered_apex"),
-            (s.precursor_coelution as f64, "precursor_coelution"),
-            (s.fragment_coverage as f64, "fragment_coverage"),
-            (s.precursor_apex_match as f64, "precursor_apex_match"),
-            (s.xic_quality as f64, "xic_quality"),
-            (s.fragment_apex_agreement as f64, "fragment_apex_agreement"),
-            (s.isotope_correlation as f64, "isotope_correlation"),
-            (s.gaussian_correlation as f64, "gaussian_correlation"),
-            (s.per_frag_gaussian_corr as f64, "per_frag_gaussian_corr"),
-            // MS2 per-ion errors (7 mz + 7 mobility)
-            (s.ms2_mz_errors[0] as f64, "ms2_mz_err_0"),
-            (s.ms2_mz_errors[1] as f64, "ms2_mz_err_1"),
-            (s.ms2_mz_errors[2] as f64, "ms2_mz_err_2"),
-            (s.ms2_mz_errors[3] as f64, "ms2_mz_err_3"),
-            (s.ms2_mz_errors[4] as f64, "ms2_mz_err_4"),
-            (s.ms2_mz_errors[5] as f64, "ms2_mz_err_5"),
-            (s.ms2_mz_errors[6] as f64, "ms2_mz_err_6"),
-            (s.ms2_mobility_errors[0] as f64, "ms2_mob_err_0"),
-            (s.ms2_mobility_errors[1] as f64, "ms2_mob_err_1"),
-            (s.ms2_mobility_errors[2] as f64, "ms2_mob_err_2"),
-            (s.ms2_mobility_errors[3] as f64, "ms2_mob_err_3"),
-            (s.ms2_mobility_errors[4] as f64, "ms2_mob_err_4"),
-            (s.ms2_mobility_errors[5] as f64, "ms2_mob_err_5"),
-            (s.ms2_mobility_errors[6] as f64, "ms2_mob_err_6"),
-            // MS1
-            (
-                (s.ms1_summed_intensity as f64).ln_1p(),
-                "ms1_summed_intensity_ln1p",
-            ),
-            // MS1 per-ion errors (3 mz + 3 mobility)
-            (s.ms1_mz_errors[0] as f64, "ms1_mz_err_0"),
-            (s.ms1_mz_errors[1] as f64, "ms1_mz_err_1"),
-            (s.ms1_mz_errors[2] as f64, "ms1_mz_err_2"),
-            (s.ms1_mobility_errors[0] as f64, "ms1_mob_err_0"),
-            (s.ms1_mobility_errors[1] as f64, "ms1_mob_err_1"),
-            (s.ms1_mobility_errors[2] as f64, "ms1_mob_err_2"),
-            // Relative intensities
-            (s.ms1_intensity_ratios[0] as f64, "ms1_intensity_ratio_0"),
-            (s.ms1_intensity_ratios[1] as f64, "ms1_intensity_ratio_1"),
-            (s.ms1_intensity_ratios[2] as f64, "ms1_intensity_ratio_2"),
-            (s.ms2_intensity_ratios[0] as f64, "ms2_intensity_ratio_0"),
-            (s.ms2_intensity_ratios[1] as f64, "ms2_intensity_ratio_1"),
-            (s.ms2_intensity_ratios[2] as f64, "ms2_intensity_ratio_2"),
-            (s.ms2_intensity_ratios[3] as f64, "ms2_intensity_ratio_3"),
-            (s.ms2_intensity_ratios[4] as f64, "ms2_intensity_ratio_4"),
-            (s.ms2_intensity_ratios[5] as f64, "ms2_intensity_ratio_5"),
-            (s.ms2_intensity_ratios[6] as f64, "ms2_intensity_ratio_6"),
-            (self.delta_group as f64, "delta_group"),
-            (self.delta_group_ratio as f64, "delta_group_ratio"),
-            (s.calibrated_rt_seconds as f64, "calibrated_rt_seconds"),
-            // Derived intensity features
-            (
-                {
-                    let ratios = &s.ms2_intensity_ratios;
-                    ratios
-                        .iter()
-                        .filter(|r| r.is_finite())
-                        .fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64
-                },
-                "ms2_intensity_ratios_max",
-            ),
-            // Interaction features
-            (
-                (s.main_score * s.delta_next) as f64,
-                "main_times_delta_next",
-            ),
-            (
-                (s.split_product_score * s.fragment_coverage) as f64,
-                "split_product_x_coverage",
-            ),
-            // Summary error features
-            (mean_abs_error(&s.ms2_mz_errors), "ms2_mz_mean_abs_error"),
-            (
-                mean_abs_error(&s.ms2_mobility_errors),
-                "ms2_mob_mean_abs_error",
-            ),
-            (mean_abs_error(&s.ms1_mz_errors), "ms1_mz_mean_abs_error"),
-            (
-                mean_abs_error(&s.ms1_mobility_errors),
-                "ms1_mob_mean_abs_error",
-            ),
-        ];
-
-        // Sequence-derived block. Gated — all-or-none per speclib load.
-        if let Some(counts) = s.peptide.aa_counts() {
-            let length = s.peptide.length().unwrap() as f64;
-            let n_mods = s.peptide.n_mods().unwrap() as f64;
-            v.push((length, "peptide_length"));
-            for (i, c) in counts.iter().enumerate() {
-                v.push((*c, AA_COUNT_NAMES[i]));
-            }
-            v.push((n_mods, "peptide_n_mods"));
-        }
-        v
+        let mut sink = FeatSink::new();
+        self.scoring.push_features(&mut sink);
+        self.result_meta().features(&mut sink);
+        derived::features(&self.scoring, &mut sink);
+        sequence_counts::features(&self.scoring.identity.peptide, &mut sink);
+        sink.into_named()
     }
 
     pub fn feature_names(&self) -> Vec<&'static str> {
@@ -346,7 +191,11 @@ impl FeatureLike for CompetedCandidate {
     }
 
     fn get_y(&self) -> f64 {
-        if self.scoring.is_target { 1.0 } else { 0.0 }
+        if self.scoring.identity.is_target {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn assign_score(&mut self, score: f64) {
@@ -360,7 +209,7 @@ impl FeatureLike for CompetedCandidate {
 
 impl LabelledScore for CompetedCandidate {
     fn get_label(&self) -> TargetDecoy {
-        if self.scoring.is_target {
+        if self.scoring.identity.is_target {
             TargetDecoy::Target
         } else {
             TargetDecoy::Decoy
@@ -378,7 +227,7 @@ impl LabelledScore for CompetedCandidate {
 
 impl LabelledScore for FinalResult {
     fn get_label(&self) -> TargetDecoy {
-        if self.scoring.is_target {
+        if self.scoring.identity.is_target {
             TargetDecoy::Target
         } else {
             TargetDecoy::Decoy
@@ -511,63 +360,7 @@ mod feature_tests {
     use std::sync::Arc;
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
-        ScoringFields {
-            peptide,
-            library_id: 0,
-            decoy_group_id: 0,
-            precursor_mz: 500.0,
-            precursor_charge: 2,
-            precursor_mobility: 0.9,
-            is_target: true,
-            library_rt: 60.0,
-            calibrated_rt_seconds: 3600.0,
-            obs_rt_seconds: 3601.0,
-            calibrated_sq_delta_rt: 1.0,
-            obs_mobility: 0.91,
-            delta_ms1_ms2_mobility: 0.01,
-            sq_delta_ms1_ms2_mobility: 0.0001,
-            main_score: 10.0,
-            delta_next: 2.0,
-            delta_second_next: 1.0,
-            apex_lazyscore: 5.0,
-            ms2_lazyscore: 4.0,
-            ms2_isotope_lazyscore: 3.0,
-            ms2_isotope_lazyscore_ratio: 0.5,
-            lazyscore_z: 2.0,
-            lazyscore_vs_baseline: 1.5,
-            split_product_score: 0.8,
-            cosine_au: 0.7,
-            scribe_au: 0.6,
-            cosine_cg: 0.5,
-            scribe_cg: 0.4,
-            cosine_weighted_coelution: 0.9,
-            cosine_gradient_consistency: 0.85,
-            scribe_weighted_coelution: 0.88,
-            scribe_gradient_consistency: 0.82,
-            peak_shape: 0.95,
-            ratio_cv: 0.1,
-            centered_apex: 0.5,
-            precursor_coelution: 0.9,
-            fragment_coverage: 0.8,
-            precursor_apex_match: 0.7,
-            xic_quality: 0.75,
-            fragment_apex_agreement: 0.85,
-            isotope_correlation: 0.9,
-            gaussian_correlation: 0.88,
-            per_frag_gaussian_corr: 0.87,
-            rising_cycles: 3,
-            falling_cycles: 2,
-            npeaks: 5,
-            n_scored_fragments: 6,
-            ms2_summed_intensity: 1000.0,
-            ms1_summed_intensity: 500.0,
-            ms2_mz_errors: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
-            ms2_mobility_errors: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
-            ms1_mz_errors: [0.1, 0.2, 0.3],
-            ms1_mobility_errors: [0.01, 0.02, 0.03],
-            ms2_intensity_ratios: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
-            ms1_intensity_ratios: [0.9, 0.8, 0.7],
-        }
+        ScoringFields::sample(peptide)
     }
 
     fn sample_competed_candidate_parsed() -> CompetedCandidate {
@@ -614,6 +407,160 @@ mod feature_tests {
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
+    }
+
+    /// The 86 base feature names (gate off). This is the GBM contract: the
+    /// *set* must stay stable across refactors, so a rename that preserves the
+    /// count (which `base_feature_count_locked` alone would miss) is caught here.
+    const GOLDEN_BASE_FEATURES: &[&str] = &[
+        "precursor_mz_round5",
+        "precursor_charge",
+        "precursor_mobility",
+        "calibrated_rt_seconds_round",
+        "calibrated_rt_seconds",
+        "obs_rt_seconds",
+        "calibrated_sq_delta_rt",
+        "obs_mobility",
+        "delta_ms1_ms2_mobility",
+        "sq_delta_ms1_ms2_mobility",
+        "main_score",
+        "delta_next",
+        "delta_second_next",
+        "split_product_score_ln1p",
+        "cosine_au_ln1p",
+        "scribe_au_ln1p",
+        "cosine_cg",
+        "scribe_cg",
+        "cosine_weighted_coelution",
+        "cosine_gradient_consistency",
+        "scribe_weighted_coelution",
+        "scribe_gradient_consistency",
+        "peak_shape",
+        "ratio_cv",
+        "centered_apex",
+        "precursor_coelution",
+        "fragment_coverage",
+        "precursor_apex_match",
+        "xic_quality",
+        "fragment_apex_agreement",
+        "isotope_correlation",
+        "gaussian_correlation",
+        "per_frag_gaussian_corr",
+        "apex_lazyscore",
+        "lazyscore_z",
+        "lazyscore_vs_baseline",
+        "ms2_lazyscore",
+        "ms2_isotope_lazyscore",
+        "ms2_isotope_lazyscore_ratio",
+        "rising_cycles",
+        "falling_cycles",
+        "npeaks",
+        "n_scored_fragments",
+        "ms2_summed_intensity_ln1p",
+        "ms1_summed_intensity_ln1p",
+        "ms2_mz_err_0",
+        "ms2_mz_err_1",
+        "ms2_mz_err_2",
+        "ms2_mz_err_3",
+        "ms2_mz_err_4",
+        "ms2_mz_err_5",
+        "ms2_mz_err_6",
+        "ms2_mob_err_0",
+        "ms2_mob_err_1",
+        "ms2_mob_err_2",
+        "ms2_mob_err_3",
+        "ms2_mob_err_4",
+        "ms2_mob_err_5",
+        "ms2_mob_err_6",
+        "ms1_mz_err_0",
+        "ms1_mz_err_1",
+        "ms1_mz_err_2",
+        "ms1_mob_err_0",
+        "ms1_mob_err_1",
+        "ms1_mob_err_2",
+        "ms1_intensity_ratio_0",
+        "ms1_intensity_ratio_1",
+        "ms1_intensity_ratio_2",
+        "ms2_intensity_ratio_0",
+        "ms2_intensity_ratio_1",
+        "ms2_intensity_ratio_2",
+        "ms2_intensity_ratio_3",
+        "ms2_intensity_ratio_4",
+        "ms2_intensity_ratio_5",
+        "ms2_intensity_ratio_6",
+        "delta_group",
+        "delta_group_ratio",
+        "main_over_delta_next",
+        "rt_err",
+        "ms2_intensity_ratios_max",
+        "main_times_delta_next",
+        "split_product_x_coverage",
+        "ms2_mz_mean_abs_error",
+        "ms2_mob_mean_abs_error",
+        "ms1_mz_mean_abs_error",
+        "ms1_mob_mean_abs_error",
+    ];
+
+    /// The 22 sequence feature names appended when the gate is on.
+    const GOLDEN_SEQUENCE_FEATURES: &[&str] = &[
+        "peptide_length",
+        "aa_count_A",
+        "aa_count_C",
+        "aa_count_D",
+        "aa_count_E",
+        "aa_count_F",
+        "aa_count_G",
+        "aa_count_H",
+        "aa_count_I",
+        "aa_count_K",
+        "aa_count_L",
+        "aa_count_M",
+        "aa_count_N",
+        "aa_count_P",
+        "aa_count_Q",
+        "aa_count_R",
+        "aa_count_S",
+        "aa_count_T",
+        "aa_count_V",
+        "aa_count_W",
+        "aa_count_Y",
+        "peptide_n_mods",
+    ];
+
+    #[test]
+    fn feature_name_set_matches_golden() {
+        use std::collections::BTreeSet;
+        let off: BTreeSet<&str> = sample_competed_candidate_unparsed()
+            .feature_names()
+            .into_iter()
+            .collect();
+        let golden_base: BTreeSet<&str> = GOLDEN_BASE_FEATURES.iter().copied().collect();
+        assert_eq!(
+            off, golden_base,
+            "base feature name-set drifted; update GOLDEN_BASE_FEATURES only if the change is intended (and bump the workspace version + retrain GBM)"
+        );
+
+        let on: BTreeSet<&str> = sample_competed_candidate_parsed()
+            .feature_names()
+            .into_iter()
+            .collect();
+        let golden_on: BTreeSet<&str> = GOLDEN_BASE_FEATURES
+            .iter()
+            .chain(GOLDEN_SEQUENCE_FEATURES.iter())
+            .copied()
+            .collect();
+        assert_eq!(
+            on, golden_on,
+            "gate-on feature name-set drifted; see GOLDEN_SEQUENCE_FEATURES"
+        );
+    }
+
+    #[test]
+    fn no_duplicate_feature_names() {
+        use std::collections::BTreeSet;
+        let names = sample_competed_candidate_parsed().feature_names();
+        let uniq: BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), uniq.len(), "duplicate feature name emitted");
     }
 
     #[test]

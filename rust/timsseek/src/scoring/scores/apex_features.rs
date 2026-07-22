@@ -54,7 +54,7 @@ pub const SCRIBE_FLOOR: f32 = -100.0;
 // ---------------------------------------------------------------------------
 
 /// The 11 apex-local features described in METHODS.md Section 3.4.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct ApexFeatures {
     pub peak_shape: f32,
     pub ratio_cv: f32,

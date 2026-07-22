@@ -14,7 +14,7 @@ use timscentroid::rt_mapping::{
     RTIndex,
 };
 use timsseek::scoring::apex_finding::{
-    ApexScore,
+    ApexBlocks,
     ElutionTraces,
 };
 
@@ -62,14 +62,14 @@ pub struct ChromatogramLines {
 pub struct ScoreLines {
     main_score_line: LineData,
     lines: Vec<LineData>,
-    apex_score: ApexScore,
+    apex_score: ApexBlocks,
     rt_seconds_range: (f64, f64),
 }
 
 impl ScoreLines {
     #[instrument(skip_all)]
     pub(crate) fn from_scores(
-        apex: ApexScore,
+        apex: ApexBlocks,
         scores: &ElutionTraces,
         mapper: &CycleToRTMapping<MS1CycleIndex>,
         cycle_offset: usize,
@@ -434,7 +434,7 @@ pub fn render_chromatogram_plot(
     // Lines to add vertical markers for
     label_lines: &[(String, f64, Color32)],
     // Apex score for PeakApex auto-zoom mode
-    apex_score: Option<&ApexScore>,
+    apex_score: Option<&ApexBlocks>,
 ) -> Option<f64> {
     let mut clicked_rt = None;
 

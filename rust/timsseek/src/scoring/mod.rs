@@ -1,6 +1,7 @@
 mod accumulator;
 pub mod apex;
 pub mod apex_finding;
+pub mod blocks;
 pub mod extraction;
 mod maybe_par;
 pub mod offsets;
