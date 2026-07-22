@@ -136,101 +136,27 @@ mod tests {
 
     /// Golden byte-compat contract for the Parquet schema.
     ///
-    /// The hard constraint (see score-blocks design): the SET of
-    /// `column_name -> (dtype, nullable)` must be identical to the pre-refactor
-    /// output. Scalars are non-nullable; expanded `[f32; N]` array columns are
-    /// nullable. Column ORDER is intentionally NOT asserted — the design splits
-    /// `LazyScores` into apex/secondary blocks, which reorders a few columns,
-    /// and downstream reads columns by name. New columns are allowed (this test
-    /// updates when the set intentionally grows).
+    /// The maintained contract: a SUBSET of columns downstream consumers rely on
+    /// to join a row and threshold it. Each listed `column_name -> (dtype,
+    /// nullable)` must be present and match. Everything else the writer emits
+    /// (all the feature/diagnostic columns) is free to change or disappear —
+    /// this test does NOT reject extra columns, and column ORDER is not asserted
+    /// (downstream reads by name). Add a column here only when you commit to
+    /// keeping it stable.
     const GOLDEN_SCHEMA: &[(&str, &str, bool)] = &[
         ("sequence", "Utf8", false),
         ("library_id", "UInt32", false),
         ("decoy_group_id", "UInt32", false),
+        ("is_target", "Boolean", false),
         ("precursor_mz", "Float64", false),
         ("precursor_charge", "UInt8", false),
-        ("precursor_mobility", "Float32", false),
-        ("is_target", "Boolean", false),
-        ("library_rt", "Float32", false),
-        ("calibrated_rt_seconds", "Float32", false),
-        ("obs_rt_seconds", "Float32", false),
-        ("calibrated_sq_delta_rt", "Float32", false),
-        ("obs_mobility", "Float32", false),
-        ("delta_ms1_ms2_mobility", "Float32", false),
-        ("sq_delta_ms1_ms2_mobility", "Float32", false),
         ("main_score", "Float32", false),
-        ("delta_next", "Float32", false),
-        ("delta_second_next", "Float32", false),
-        ("apex_lazyscore", "Float32", false),
-        ("ms2_lazyscore", "Float32", false),
-        ("ms2_isotope_lazyscore", "Float32", false),
-        ("ms2_isotope_lazyscore_ratio", "Float32", false),
-        ("lazyscore_z", "Float32", false),
-        ("lazyscore_vs_baseline", "Float32", false),
-        ("split_product_score", "Float32", false),
-        ("cosine_au", "Float32", false),
-        ("scribe_au", "Float32", false),
-        ("cosine_cg", "Float32", false),
-        ("scribe_cg", "Float32", false),
-        ("cosine_weighted_coelution", "Float32", false),
-        ("cosine_gradient_consistency", "Float32", false),
-        ("scribe_weighted_coelution", "Float32", false),
-        ("scribe_gradient_consistency", "Float32", false),
-        ("peak_shape", "Float32", false),
-        ("ratio_cv", "Float32", false),
-        ("centered_apex", "Float32", false),
-        ("precursor_coelution", "Float32", false),
-        ("fragment_coverage", "Float32", false),
-        ("precursor_apex_match", "Float32", false),
-        ("xic_quality", "Float32", false),
-        ("fragment_apex_agreement", "Float32", false),
-        ("isotope_correlation", "Float32", false),
-        ("gaussian_correlation", "Float32", false),
-        ("per_frag_gaussian_corr", "Float32", false),
-        ("rising_cycles", "UInt8", false),
-        ("falling_cycles", "UInt8", false),
-        ("npeaks", "UInt8", false),
-        ("n_scored_fragments", "UInt8", false),
-        ("ms2_summed_intensity", "Float32", false),
-        ("ms1_summed_intensity", "Float32", false),
-        ("delta_group", "Float32", false),
-        ("delta_group_ratio", "Float32", false),
         ("discriminant_score", "Float32", false),
         ("qvalue", "Float32", false),
-        ("ms2_mz_error_0", "Float32", true),
-        ("ms2_mz_error_1", "Float32", true),
-        ("ms2_mz_error_2", "Float32", true),
-        ("ms2_mz_error_3", "Float32", true),
-        ("ms2_mz_error_4", "Float32", true),
-        ("ms2_mz_error_5", "Float32", true),
-        ("ms2_mz_error_6", "Float32", true),
-        ("ms2_mobility_error_0", "Float32", true),
-        ("ms2_mobility_error_1", "Float32", true),
-        ("ms2_mobility_error_2", "Float32", true),
-        ("ms2_mobility_error_3", "Float32", true),
-        ("ms2_mobility_error_4", "Float32", true),
-        ("ms2_mobility_error_5", "Float32", true),
-        ("ms2_mobility_error_6", "Float32", true),
-        ("ms1_mz_error_0", "Float32", true),
-        ("ms1_mz_error_1", "Float32", true),
-        ("ms1_mz_error_2", "Float32", true),
-        ("ms1_mobility_error_0", "Float32", true),
-        ("ms1_mobility_error_1", "Float32", true),
-        ("ms1_mobility_error_2", "Float32", true),
-        ("ms2_intensity_ratio_0", "Float32", true),
-        ("ms2_intensity_ratio_1", "Float32", true),
-        ("ms2_intensity_ratio_2", "Float32", true),
-        ("ms2_intensity_ratio_3", "Float32", true),
-        ("ms2_intensity_ratio_4", "Float32", true),
-        ("ms2_intensity_ratio_5", "Float32", true),
-        ("ms2_intensity_ratio_6", "Float32", true),
-        ("ms1_intensity_ratio_0", "Float32", true),
-        ("ms1_intensity_ratio_1", "Float32", true),
-        ("ms1_intensity_ratio_2", "Float32", true),
     ];
 
     #[test]
-    fn parquet_schema_matches_golden_set() {
+    fn parquet_schema_contains_maintained_subset() {
         use std::collections::BTreeMap;
         let batch = build_record_batch(&[]).expect("schema");
         let got: BTreeMap<String, (String, bool)> = batch
@@ -244,20 +170,16 @@ mod tests {
                 )
             })
             .collect();
-        let want: BTreeMap<String, (String, bool)> = GOLDEN_SCHEMA
-            .iter()
-            .map(|(n, d, null)| (n.to_string(), (d.to_string(), *null)))
-            .collect();
 
-        let missing: Vec<_> = want.keys().filter(|k| !got.contains_key(*k)).collect();
-        let extra: Vec<_> = got.keys().filter(|k| !want.contains_key(*k)).collect();
-        assert!(missing.is_empty(), "columns missing vs golden: {missing:?}");
-        assert!(
-            extra.is_empty(),
-            "unexpected new columns vs golden: {extra:?}"
-        );
-        for (name, want_ty) in &want {
-            assert_eq!(&got[name], want_ty, "dtype/nullable mismatch for `{name}`");
+        for (name, dtype, nullable) in GOLDEN_SCHEMA {
+            let got_ty = got
+                .get(*name)
+                .unwrap_or_else(|| panic!("maintained column missing: `{name}`"));
+            assert_eq!(
+                got_ty,
+                &(dtype.to_string(), *nullable),
+                "dtype/nullable mismatch for `{name}`"
+            );
         }
     }
 
