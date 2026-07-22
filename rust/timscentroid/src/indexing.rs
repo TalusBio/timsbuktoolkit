@@ -1559,9 +1559,13 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
 
     /// Query the bucket indices that overlap with the given m/z range.
     fn query_bucket_range(&self, mz_range: TupleRange<f32>) -> std::ops::Range<usize> {
+        // `<` not `<=`: `mz_range` is inclusive, so a bucket whose max mz
+        // exactly equals the query's lower bound still contains matching peaks
+        // and must not be skipped. Using `<=` dropped those peaks and made the
+        // query result depend on bucket layout (see the invariance test).
         let start_idx = self
             .bucket_mz_ranges
-            .partition_point(|x| x.end() <= mz_range.start());
+            .partition_point(|x| x.end() < mz_range.start());
         let end_idx = start_idx
             + self.bucket_mz_ranges[start_idx..].partition_point(|x| x.start() <= mz_range.end());
         // TODO: test since multiple buckets can have the same start/end values.
@@ -1743,6 +1747,86 @@ mod tests {
         let (ms1_group, _) = IndexedPeakGroup::new(peaks, CycleToRTMapping::new(vec![0]), 4);
         let index = IndexedTimstofPeaks::from_parts(ms1_group, vec![]);
         assert_eq!(index.mobility_kind(), &MobilityKind::Ook0);
+    }
+
+    /// The matched-peak set returned by `for_each_peak` (the production query
+    /// path) must NOT depend on `bucket_size` — bucketing is an index-layout
+    /// detail, not a filter. Regression guard for a bucket-boundary bug where
+    /// `query_bucket_range` used `end() <= mz_range.start()` and dropped peaks
+    /// at exactly the query's (inclusive) lower m/z bound. Stresses duplicated
+    /// mz values at would-be chunk boundaries under several cycle/im filters.
+    #[test]
+    fn for_each_peak_is_bucket_size_invariant() {
+        use crate::rt_mapping::CycleToRTMapping;
+
+        let mzs = [
+            100.0f32, 100.0, 100.0, 100.5, 100.5, 101.0, 101.0, 101.0, 101.0, 102.0, 103.0, 103.0,
+        ];
+        let mut data: Vec<(f32, f32, f32, u32)> = Vec::new();
+        let mut n = 0u32;
+        for (i, &mz) in mzs.iter().enumerate() {
+            for k in 0..3u32 {
+                let im = 0.8 + 0.1 * (((i as u32 + k) % 5) as f32);
+                data.push((mz, 10.0 + n as f32, im, n % 10));
+                n += 1;
+            }
+        }
+        let cycle_to_rt = CycleToRTMapping::new((0..10u32).map(|c| c * 1000).collect());
+        let peaks = tuples_to_peaks::<MS1CycleIndex>(&data);
+
+        let mz_windows = [
+            (99.0f32, 104.0f32),
+            (100.0, 101.0),
+            (100.5, 101.0),
+            (100.4, 100.6),
+            (101.0, 101.0),
+            (102.5, 103.0),
+        ];
+        let cycle_opts = [
+            OptionallyRestricted::Unrestricted,
+            OptionallyRestricted::Restricted(
+                TupleRange::try_new(MS1CycleIndex::new(2), MS1CycleIndex::new(7)).unwrap(),
+            ),
+        ];
+        let im_opts = [
+            OptionallyRestricted::Unrestricted,
+            OptionallyRestricted::Restricted(
+                TupleRange::try_new(f16::from_f32(0.85), f16::from_f32(1.05)).unwrap(),
+            ),
+        ];
+
+        let collect = |bs: usize,
+                       mzr: TupleRange<f32>,
+                       cr: OptionallyRestricted<TupleRange<MS1CycleIndex>>,
+                       imr: OptionallyRestricted<TupleRange<f16>>|
+         -> Vec<IndexedPeak<MS1CycleIndex>> {
+            let (g, _) = IndexedPeakGroup::new(peaks.clone(), cycle_to_rt.clone(), bs);
+            let mut out = Vec::new();
+            g.for_each_peak(mzr, cr, imr, |p| out.push(*p));
+            out.sort_by(|a, b| {
+                a.mz.total_cmp(&b.mz)
+                    .then(a.cycle_index.as_u32().cmp(&b.cycle_index.as_u32()))
+                    .then(a.mobility_ook0.to_f32().total_cmp(&b.mobility_ook0.to_f32()))
+                    .then(a.intensity.total_cmp(&b.intensity))
+            });
+            out
+        };
+
+        for &(lo, hi) in &mz_windows {
+            let mzr = TupleRange::try_new(lo, hi).unwrap();
+            for &cr in &cycle_opts {
+                for &imr in &im_opts {
+                    let reference = collect(64, mzr, cr, imr);
+                    for bs in [1usize, 2, 3, 5, 7, 11] {
+                        let got = collect(bs, mzr, cr, imr);
+                        assert_eq!(
+                            got, reference,
+                            "bucket_size={bs} mz=({lo},{hi}) changed the matched-peak set",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
