@@ -5,14 +5,14 @@
 //! # Examples
 //!
 //! ```no_run
-//! use timscentroid::{IndexedTimstofPeaks, CentroidingConfig, StorageLocation};
+//! use timscentroid::{IndexedTimstofPeaks, IndexingCentroidingConfig, StorageLocation};
 //! use timscentroid::serialization::SerializationConfig;
 //! use timsrust::TimsTofPath;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Index peaks from raw data
+//! // Index peaks from raw data (per-level MS1/MS2 config; `::default()` is tuned)
 //! let file = TimsTofPath::new("data.d")?;
-//! let config = CentroidingConfig::default();
+//! let config = IndexingCentroidingConfig::default();
 //! let (index, _) = IndexedTimstofPeaks::from_timstof_file(&file, config);
 //!
 //! // Save with default settings (balanced speed/size)

@@ -65,17 +65,13 @@
 //!
 //! ```no_run
 //! use timsquery::serde::TimsIndexReader;
-//! use timsquery::CentroidingConfig;
+//! use timsquery::IndexingCentroidingConfig;
 //! use timscentroid::serialization::SerializationConfig;
 //!
 //! let index = TimsIndexReader::new()
 //!     .with_local_cache("/tmp/cache")
-//!     .with_centroiding_config(CentroidingConfig {
-//!         max_peaks: 50_000,
-//!         mz_ppm_tol: 10.0,
-//!         im_pct_tol: 5.0,
-//!         early_stop_iterations: 200,
-//!     })
+//!     // Per-level MS1/MS2 config; `::default()` is the tuned recommendation.
+//!     .with_centroiding_config(IndexingCentroidingConfig::default())
 //!     .with_serialization_config(SerializationConfig::default())
 //!     .read_index("data.d").unwrap();
 //! ```
@@ -113,7 +109,7 @@
 //! ```
 
 use crate::{
-    CentroidingConfig,
+    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
 };
 use std::path::{
@@ -260,7 +256,7 @@ pub struct IndexLoadConfig {
     pub cache_location: CacheLocation,
 
     /// Centroiding configuration (only used when loading raw .d files)
-    pub centroiding_config: Option<CentroidingConfig>,
+    pub centroiding_config: Option<IndexingCentroidingConfig>,
 
     /// Serialization configuration
     pub serialization_config: SerializationConfig,
@@ -389,7 +385,7 @@ impl CacheLocation {
 pub struct TimsIndexReader {
     cache_location: CacheLocation,
     write_missing_cache: bool,
-    centroiding_config: Option<CentroidingConfig>,
+    centroiding_config: Option<IndexingCentroidingConfig>,
     serialization_config: SerializationConfig,
 }
 
@@ -446,7 +442,7 @@ impl TimsIndexReader {
     }
 
     /// Set custom centroiding configuration
-    pub fn with_centroiding_config(mut self, config: CentroidingConfig) -> Self {
+    pub fn with_centroiding_config(mut self, config: IndexingCentroidingConfig) -> Self {
         self.centroiding_config = Some(config);
         self
     }
@@ -547,12 +543,9 @@ impl TimsIndexReader {
         }
 
         // Build via the shared registry core (sniff-first; TDF, mzML, ...).
-        let centroiding_config = self.centroiding_config.unwrap_or(CentroidingConfig {
-            max_peaks: 50_000,
-            mz_ppm_tol: 10.0,
-            im_pct_tol: 5.0,
-            early_stop_iterations: 200,
-        });
+        let centroiding_config = self
+            .centroiding_config
+            .unwrap_or_else(IndexingCentroidingConfig::default);
         info!("Starting centroiding + load of the raw data (might take a min)");
         let path_str = path.to_str().ok_or_else(|| {
             crate::errors::DataReadingError::RawReadError(format!("non-UTF-8 path: {path:?}"))
@@ -873,7 +866,7 @@ pub fn load_index(
     uri: &str,
     backend: &dyn StagingBackend,
     save_sidecar: bool,
-    centroid_cfg: CentroidingConfig,
+    centroid_cfg: IndexingCentroidingConfig,
 ) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
     let canon = canonical_uri(uri);
     match resolve(&canon)? {

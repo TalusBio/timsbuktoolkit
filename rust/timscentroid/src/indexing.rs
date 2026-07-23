@@ -40,6 +40,7 @@ pub use timsrust::TimsTofPath;
 use crate::centroiding::{
     AggregatedClusteringSummary,
     CentroidingConfig,
+    IndexingCentroidingConfig,
     PeakCentroider,
 };
 use crate::geometry::QuadrupoleIsolationScheme;
@@ -159,20 +160,21 @@ impl IndexedTimstofPeaks {
 
     pub fn from_timstof_file(
         file: &TimsTofPath,
-        centroiding_config: CentroidingConfig,
+        centroiding_config: IndexingCentroidingConfig,
     ) -> (Self, IndexBuildingStats) {
         let frame_reader = file.load_frame_reader().unwrap();
         let metadata = file.load_metadata().unwrap();
 
-        // Read MS1 peaks
+        // Read MS1 peaks (MS1-specific centroiding config)
         let st = std::time::Instant::now();
-        let (ms1_peaks, ms1_summ) = Self::read_ms1(&frame_reader, &metadata, centroiding_config);
+        let (ms1_peaks, ms1_summ) =
+            Self::read_ms1(&frame_reader, &metadata, centroiding_config.ms1);
         let read_time_ms1 = st.elapsed();
 
-        // Read MS2 peaks organized by window groups
+        // Read MS2 peaks organized by window groups (MS2-specific config)
         let st = std::time::Instant::now();
         let (ms2_window_groups, ms2_summ) =
-            Self::read_ms2_window_groups(&frame_reader, &metadata, centroiding_config).unwrap();
+            Self::read_ms2_window_groups(&frame_reader, &metadata, centroiding_config.ms2).unwrap();
         let read_time_ms2 = st.elapsed();
 
         let out = Self {

@@ -6,7 +6,7 @@ mod processing;
 use clap::Parser;
 use timsquery::utils::TupleRange;
 use timsquery::{
-    CentroidingConfig,
+    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
     load_index,
 };
@@ -363,7 +363,7 @@ fn process_single_file(
 
     let step = TimedStep::begin("Loading index");
     let (index, index_source) =
-        load_index(raw_uri, backend, save_sidecar, CentroidingConfig::default()).map_err(|e| {
+        load_index(raw_uri, backend, save_sidecar, IndexingCentroidingConfig::default()).map_err(|e| {
             errors::CliError::Io {
                 source: format!("load_index({raw_uri}): {e}"),
                 path: Some(raw_uri.to_string()),

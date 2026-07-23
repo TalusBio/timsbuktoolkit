@@ -13,6 +13,7 @@ use timscentroid::utils::{
 use timscentroid::{
     CentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     StorageLocation,
 };
 use timsrust::TimsTofPath;
@@ -54,7 +55,7 @@ fn main() {
     };
 
     let start = std::time::Instant::now();
-    let (index, stats) = IndexedTimstofPeaks::from_timstof_file(&file, config);
+    let (index, stats) = IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(config));
     println!("Indexed in {:?}: {}\n", start.elapsed(), stats);
 
     // Generate deterministic queries

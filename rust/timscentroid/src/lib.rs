@@ -25,7 +25,10 @@ pub use indexing::{
 };
 
 #[doc(inline)]
-pub use centroiding::CentroidingConfig;
+pub use centroiding::{
+    CentroidingConfig,
+    IndexingCentroidingConfig,
+};
 
 #[doc(inline)]
 pub use dimension::MobilityKind;

@@ -43,7 +43,11 @@ pub struct CentroidingConfig {
     /// Number of consecutive iterations with no new peaks clustered
     /// after which the centroiding will stop early (instead of going
     /// through all peaks, which will very likely be noise).
-    /// A number ~200 seems to work well in practice.
+    /// A number ~200 seems to work well in practice. **`0` disables
+    /// early-stop** — the whole frame is clustered and only `max_peaks`
+    /// can truncate it. Disabling is the right choice under a tight
+    /// `mz_ppm_tol`, where most peaks are singletons and early-stop would
+    /// otherwise clip real signal (see `IndexingCentroidingConfig`).
     pub early_stop_iterations: u32,
 }
 
@@ -54,6 +58,50 @@ impl Default for CentroidingConfig {
             mz_ppm_tol: 5.0,
             im_pct_tol: 3.0,
             early_stop_iterations: 200,
+        }
+    }
+}
+
+/// Per-MS-level centroiding configuration for building an index.
+///
+/// MS1 and MS2 are centroided independently: MS1 favors precursor m/z
+/// precision (peak counts are small, so a tight merge is cheap), while MS2
+/// keeps a tight m/z merge with early-stop disabled and a moderate
+/// `max_peaks` cap — the setting that preserves fragment signal without the
+/// peak-count explosion of a full raw pass.
+///
+/// Use [`IndexingCentroidingConfig::uniform`] to apply one config to both
+/// levels (e.g. for non-TIMS sources or tests).
+#[derive(Clone, Copy, Debug)]
+pub struct IndexingCentroidingConfig {
+    pub ms1: CentroidingConfig,
+    pub ms2: CentroidingConfig,
+}
+
+impl IndexingCentroidingConfig {
+    /// Apply the same `CentroidingConfig` to both MS levels.
+    pub fn uniform(cfg: CentroidingConfig) -> Self {
+        Self { ms1: cfg, ms2: cfg }
+    }
+}
+
+impl Default for IndexingCentroidingConfig {
+    /// Tuned defaults from the centroiding sensitivity sweep (timsTOF):
+    /// MS1 `0.5ppm / 2%`; MS2 `1ppm / 3%`, `max_peaks=50k`, early-stop off.
+    fn default() -> Self {
+        Self {
+            ms1: CentroidingConfig {
+                max_peaks: 20_000,
+                mz_ppm_tol: 0.5,
+                im_pct_tol: 2.0,
+                early_stop_iterations: 200,
+            },
+            ms2: CentroidingConfig {
+                max_peaks: 50_000,
+                mz_ppm_tol: 1.0,
+                im_pct_tol: 3.0,
+                early_stop_iterations: 0, // disabled — see field doc
+            },
         }
     }
 }
@@ -453,7 +501,11 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
             global_num_included += num_includable;
 
-            if is_self_parent {
+            // `early_stop_iterations == 0` disables early-stop entirely: the
+            // whole frame is clustered (only `max_peaks` can still truncate).
+            // The guard also avoids the `0 - 1` u32 underflow that a zero
+            // config would otherwise hit on the first lonely peak.
+            if is_self_parent && self.early_stop_iterations != 0 {
                 if num_includable < 3 {
                     // If we have only incliuded 'self' peaks for MAX_EARLY_STOP
                     // iterations consecutively, we can stop early.

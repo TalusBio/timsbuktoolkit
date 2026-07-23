@@ -21,7 +21,7 @@ use std::path::{
 use http::Uri;
 use url::Url;
 
-use crate::centroiding::CentroidingConfig;
+use crate::centroiding::IndexingCentroidingConfig;
 use crate::indexing::IndexedTimstofPeaks;
 
 /// Outcome of a cheap URI-only claim check.
@@ -154,7 +154,7 @@ pub trait RawReader: Send + Sync {
     fn read(
         &self,
         src: &ResolvedSource,
-        cfg: &CentroidingConfig,
+        cfg: &IndexingCentroidingConfig,
     ) -> Result<IndexedTimstofPeaks, ReadError>;
 }
 
@@ -283,7 +283,7 @@ impl RawReader for BrukerTdfReader {
     fn read(
         &self,
         src: &ResolvedSource,
-        cfg: &CentroidingConfig,
+        cfg: &IndexingCentroidingConfig,
     ) -> Result<IndexedTimstofPeaks, ReadError> {
         let path = src.entry_path();
         let path_str = path

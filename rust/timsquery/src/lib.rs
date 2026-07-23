@@ -34,6 +34,7 @@ pub use timscentroid::utils::OptionallyRestricted;
 pub use timscentroid::{
     CentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     TimsTofPath,
 };
 
