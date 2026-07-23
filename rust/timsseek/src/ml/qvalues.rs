@@ -180,64 +180,36 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
         )
     });
 
-    let base_names: Vec<Arc<str>> = feature_name_set_for(&data);
-    let base_ncols = base_names.len();
+    // Names (and their abs/isna companions) are a property of the feature set,
+    // built once. The abs magnitude-fold and isna missingness indicators are now
+    // pure per-row `#[feat(..)]` transforms baked into `as_feature()` (see
+    // `scoring::blocks`), so this path no longer post-processes the matrix — the
+    // only steps left are the genuinely data-dependent ones (INT, standardize).
+    let names: Vec<Arc<str>> = feature_name_set_for(&data);
+    let ncols = names.len();
     let nrows = data.len();
 
-    // Materialize the base feature matrix once as a single flat row-major buffer
+    // Materialize the feature matrix once as a single flat row-major buffer
     // (`feat[i*ncols + j]`) — a `Vec<Vec<f64>>` here means one heap allocation
-    // per candidate, which dominates at tens of millions of rows. Track finite
-    // counts per column so we can encode informative missingness below.
+    // per candidate, which dominates at tens of millions of rows.
     let t = Instant::now();
-    let mut base: Vec<f64> = Vec::with_capacity(nrows * base_ncols);
+    let mut feat: Vec<f64> = Vec::with_capacity(nrows * ncols);
     for c in data.iter() {
-        base.extend(c.as_feature());
+        feat.extend(c.as_feature());
     }
-    debug_assert_eq!(base.len(), nrows * base_ncols);
+    debug_assert_eq!(feat.len(), nrows * ncols);
     let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
 
     // Optional raw-matrix dump for offline feature-engineering iteration.
     // `TIMSSEEK_LDA_DUMP=/prefix` writes `<prefix>.f64` (row-major matrix),
-    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. Pre-transform.
+    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. Pre-INT.
     if let Ok(prefix) = std::env::var("TIMSSEEK_LDA_DUMP") {
-        dump_feature_matrix(&prefix, &base, nrows, &base_names, &is_decoy);
+        dump_feature_matrix(&prefix, &feat, nrows, &names, &is_decoy);
     }
-
-    // Center-is-better -> monotone-is-better. Signed mass/mobility/RT errors are
-    // best near zero and bad in *either* tail. A linear discriminant assigns one
-    // sign per feature, so it cannot express "close to zero is good" and drives
-    // these ~22 high-value features to ~0 weight (GBM splits on |err| instead).
-    // Fold each to its magnitude so small error becomes a monotone extreme.
-    // Default on; `TIMSSEEK_LDA_ABS=none` disables.
-    let use_abs = std::env::var("TIMSSEEK_LDA_ABS")
-        .map(|v| !v.eq_ignore_ascii_case("none"))
-        .unwrap_or(true);
-    if use_abs {
-        absolutize_center_better(&mut base, base_ncols, &base_names);
-    }
-
-    // Missingness indicators. GBM handles NaN natively (a missing branch), and
-    // absence of higher-index fragment ions correlates with target/decoy. LDA
-    // imputes NaN -> mean, discarding that signal, so we hand it back as binary
-    // `<feat>_isna` columns for every feature whose missing rate is informative
-    // (neither ~always-present nor ~always-absent). Default on;
-    // `TIMSSEEK_LDA_INDICATORS=none` disables.
-    let use_indicators = std::env::var("TIMSSEEK_LDA_INDICATORS")
-        .map(|v| !v.eq_ignore_ascii_case("none"))
-        .unwrap_or(true);
-    let (feat, names, ncols) = if use_indicators {
-        let (feat, names) = augment_with_missingness(&base, nrows, &base_names);
-        let ncols = names.len();
-        (feat, names, ncols)
-    } else {
-        (base, base_names, base_ncols)
-    };
     eprintln!(
-        "  LDA: extracted {nrows} x {ncols} feature matrix ({} missingness cols) in {:.2?}",
-        ncols - base_ncols,
+        "  LDA: extracted {nrows} x {ncols} feature matrix in {:.2?}",
         t.elapsed()
     );
-    let mut feat = feat;
 
     // Gaussianize each feature toward the LDA normality assumption. Default on;
     // `TIMSSEEK_LDA_TRANSFORM=none` disables for A/B comparison.
@@ -307,7 +279,11 @@ fn dump_feature_matrix(
 
         let labels: Vec<u8> = is_decoy.iter().map(|&d| u8::from(!d)).collect();
         std::fs::write(format!("{prefix}.labels"), &labels)?;
-        let names_txt = names.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join("\n");
+        let names_txt = names
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(format!("{prefix}.names.txt"), names_txt)?;
         Ok(())
     };
@@ -315,89 +291,6 @@ fn dump_feature_matrix(
         Ok(()) => eprintln!("  LDA: dumped feature matrix to {prefix}.{{f64,labels,names.txt}}"),
         Err(e) => tracing::error!("feature dump failed: {e}"),
     }
-}
-
-/// Predicate: does this feature's discriminative structure put the *best*
-/// value at zero, with both tails bad? Such signed features are useless to a
-/// single-sign linear discriminant until folded to their magnitude.
-fn is_center_better(name: &str) -> bool {
-    // Signed per-ion / precursor mass + mobility errors, RT residual, and the
-    // MS1-vs-MS2 mobility offset. Excludes already-magnitude features
-    // (`*_sq_*`, `*_mean_abs_error`, `calibrated_sq_delta_rt`).
-    name == "rt_err"
-        || name == "delta_ms1_ms2_mobility"
-        || name.starts_with("ms2_mz_err_")
-        || name.starts_with("ms2_mob_err_")
-        || name.starts_with("ms1_mz_err_")
-        || name.starts_with("ms1_mob_err_")
-}
-
-/// Replace each center-is-better column with its magnitude (`|x|`, NaN
-/// preserved) so a linear model can weight it monotonically.
-fn absolutize_center_better(base: &mut [f64], base_ncols: usize, base_names: &[Arc<str>]) {
-    let abs_cols: Vec<usize> = (0..base_ncols)
-        .filter(|&j| is_center_better(&base_names[j]))
-        .collect();
-    if abs_cols.is_empty() {
-        return;
-    }
-    for row in base.chunks_exact_mut(base_ncols) {
-        for &j in &abs_cols {
-            row[j] = row[j].abs();
-        }
-    }
-}
-
-/// Fraction of rows that must be missing (and present) for a feature's
-/// missingness to earn its own indicator column. Below this it carries no
-/// signal; above `1 - this` it is ~always absent (equally useless).
-const MISSINGNESS_MIN_RATE: f64 = 0.01;
-
-/// Append a binary `<name>_isna` column (1.0 = the source value was non-finite)
-/// for every base feature whose missing rate lies in
-/// `[MISSINGNESS_MIN_RATE, 1 - MISSINGNESS_MIN_RATE]`. Returns the augmented
-/// row-major matrix and the extended name list.
-fn augment_with_missingness(
-    base: &[f64],
-    nrows: usize,
-    base_names: &[Arc<str>],
-) -> (Vec<f64>, Vec<Arc<str>>) {
-    let base_ncols = base_names.len();
-    // Per-column NaN counts.
-    let mut nan = vec![0u64; base_ncols];
-    for row in base.chunks_exact(base_ncols) {
-        for (j, &v) in row.iter().enumerate() {
-            if !v.is_finite() {
-                nan[j] += 1;
-            }
-        }
-    }
-    let n = nrows.max(1) as f64;
-    let sel: Vec<usize> = (0..base_ncols)
-        .filter(|&j| {
-            let r = nan[j] as f64 / n;
-            r >= MISSINGNESS_MIN_RATE && r <= 1.0 - MISSINGNESS_MIN_RATE
-        })
-        .collect();
-    if sel.is_empty() {
-        return (base.to_vec(), base_names.to_vec());
-    }
-
-    let ncols = base_ncols + sel.len();
-    let mut names: Vec<Arc<str>> = base_names.to_vec();
-    for &j in &sel {
-        names.push(Arc::from(format!("{}_isna", base_names[j])));
-    }
-
-    let mut out = vec![0.0f64; nrows * ncols];
-    for (i, row) in base.chunks_exact(base_ncols).enumerate() {
-        let obase = i * ncols;
-        out[obase..obase + base_ncols].copy_from_slice(row);
-        for (t, &j) in sel.iter().enumerate() {
-            out[obase + base_ncols + t] = if row[j].is_finite() { 0.0 } else { 1.0 };
-        }
-    }
-    (out, names)
 }
 
 /// Single-"fold" feature stats for the LDA path: per-feature finite means +
@@ -754,8 +647,11 @@ mod feature_tests {
     #[test]
     fn neutralize_mobility_nans_every_mobility_feature() {
         // For a run with no searchable mobility axis (mzML/FAIMS), all
-        // mobility-derived GBM features must become NaN (forust missing), so
-        // they cannot bias the score with sentinel-derived constants.
+        // mobility-derived value features must become NaN (forust missing), so
+        // they cannot bias the score with sentinel-derived constants. The one
+        // exception is the `_isna` missingness indicators: a neutralized source
+        // is non-finite, so its indicator is a finite 1.0 — that IS the signal,
+        // not a leak, so they are asserted separately.
         let mut cand = sample_competed_candidate_parsed();
         cand.scoring.neutralize_mobility();
 
@@ -769,12 +665,19 @@ mod feature_tests {
             .collect();
         assert_eq!(
             mob.len(),
-            16,
+            38,
             "mobility feature count changed: {:?}",
             mob.iter().map(|(n, _)| n.as_ref()).collect::<Vec<_>>()
         );
         for (n, v) in &mob {
-            assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");
+            if n.ends_with("_isna") {
+                assert_eq!(
+                    **v, 1.0,
+                    "mobility isna indicator {n} should be 1.0 (source is NaN), got {v}"
+                );
+            } else {
+                assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");
+            }
         }
         // Non-mobility features are untouched (at least one stays finite).
         assert!(

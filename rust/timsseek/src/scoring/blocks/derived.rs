@@ -15,7 +15,7 @@ score_block! {
     /// names; order is the emission order.
     pub struct Derived {
         #[raw] pub main_over_delta_next: f64,
-        #[raw] pub rt_err: f64,
+        #[feat(raw, abs)] pub rt_err: f64,
         #[raw] pub ms2_intensity_ratios_max: f64,
         #[raw] pub main_times_delta_next: f64,
         #[raw] pub split_product_x_coverage: f64,

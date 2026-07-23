@@ -12,7 +12,7 @@ score_block! {
     /// Stage: finalize (from `MzMobilityOffsets`).
     pub struct Mobility {
         #[raw] pub obs_mobility: f32,
-        #[raw] pub delta_ms1_ms2_mobility: f32,
+        #[feat(raw, abs, isna)] pub delta_ms1_ms2_mobility: f32,
         #[raw] pub sq_delta_ms1_ms2_mobility: f32,
     }
 }
