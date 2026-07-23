@@ -3,6 +3,7 @@ use timscentroid::utils::OptionallyRestricted;
 use timscentroid::{
     CentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     StorageLocation,
 };
 use timsrust::TimsTofPath;
@@ -35,7 +36,7 @@ fn main() {
 
     let start_centroid = std::time::Instant::now();
     let (index_original, index_stats) =
-        IndexedTimstofPeaks::from_timstof_file(&file, centroiding_config);
+        IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(centroiding_config));
     let centroid_time = start_centroid.elapsed();
 
     println!("Indexing Stats: {}", index_stats);

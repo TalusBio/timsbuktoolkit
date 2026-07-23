@@ -122,7 +122,7 @@ fn ingests_synthetic_dia_mzml() {
     let path = dir.path().join("synthetic.mzML");
     std::fs::write(&path, synthetic_dia_mzml()).unwrap();
 
-    let cfg = timscentroid::CentroidingConfig::default();
+    let cfg = timscentroid::IndexingCentroidingConfig::default();
     let idx = from_mzml_file(&path, &cfg).expect("synthetic DIA mzML should ingest");
 
     // No ion-mobility axis declared → Absent.

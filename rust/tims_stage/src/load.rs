@@ -22,7 +22,7 @@ use timscentroid::reader::{
     local_uri,
 };
 use timscentroid::{
-    CentroidingConfig,
+    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
     StorageProvider,
 };
@@ -61,7 +61,7 @@ pub enum LoadRawError {
 pub fn load_raw(
     uri: &str,
     backend: &dyn StagingBackend,
-    cfg: &CentroidingConfig,
+    cfg: &IndexingCentroidingConfig,
 ) -> Result<RawRead, LoadRawError> {
     let registry = ReaderRegistry::with_builtins();
 

@@ -7,14 +7,14 @@ Efficient indexing and lazy loading for timsTOF mass spectrometry data.
 ### Basic Usage (Local Files)
 
 ```rust
-use timscentroid::{IndexedTimstofPeaks, CentroidingConfig};
+use timscentroid::{IndexedTimstofPeaks, IndexingCentroidingConfig};
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
 use timscentroid::utils::{TupleRange, OptionallyRestricted::*};
 
-// 1. Index your timsTOF data
+// 1. Index your timsTOF data (per-level MS1/MS2 config; `::default()` is tuned)
 let index = IndexedTimstofPeaks::from_timstof_file(
     &file,
-    CentroidingConfig::default()
+    IndexingCentroidingConfig::default()
 );
 
 // 2. Save to disk
@@ -182,12 +182,17 @@ Smaller row groups = more granular queries but more overhead.
 ### Centroiding Settings
 
 ```rust
-use timscentroid::CentroidingConfig;
+use timscentroid::{CentroidingConfig, IndexingCentroidingConfig};
 
-let config = CentroidingConfig {
-    min_intensity: 100.0,
-    min_peaks_per_group: 3,
-    ..Default::default()
+// MS1 and MS2 are centroided independently. Override per level:
+let config = IndexingCentroidingConfig {
+    ms1: CentroidingConfig { mz_ppm_tol: 0.5, im_pct_tol: 2.0, ..Default::default() },
+    ms2: CentroidingConfig {
+        mz_ppm_tol: 1.0,
+        im_pct_tol: 3.0,
+        max_peaks: 50_000,
+        early_stop_iterations: 0, // disable early-stop
+    },
 };
 
 let index = IndexedTimstofPeaks::from_timstof_file(&file, config);

@@ -27,7 +27,7 @@ use super::{
     Sniff,
     path_ends_with,
 };
-use crate::centroiding::CentroidingConfig;
+use crate::centroiding::IndexingCentroidingConfig;
 use crate::dimension::MobilityKind;
 use crate::geometry::QuadrupoleIsolationScheme;
 use crate::indexing::{
@@ -94,7 +94,7 @@ impl RawReader for MzdataReader {
     fn read(
         &self,
         src: &ResolvedSource,
-        cfg: &CentroidingConfig,
+        cfg: &IndexingCentroidingConfig,
     ) -> Result<IndexedTimstofPeaks, ReadError> {
         from_mzml_file(&src.entry_path(), cfg)
     }
@@ -147,7 +147,7 @@ struct WindowAccum {
 /// `IndexedTimstofPeaks::from_timstof_file`.
 pub fn from_mzml_file(
     path: &Path,
-    _cfg: &CentroidingConfig,
+    _cfg: &IndexingCentroidingConfig,
 ) -> Result<IndexedTimstofPeaks, ReadError> {
     let file = std::fs::File::open(path)?;
     let reader = MzMLReader::new(BufReader::new(file));

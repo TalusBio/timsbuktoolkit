@@ -16,7 +16,7 @@ use timscentroid::reader::mzdata::from_mzml_file;
 fn ingests_real_thermo_dia_mzml() {
     let path =
         std::env::var("MZML_TEST_PATH").expect("set MZML_TEST_PATH to a local Thermo DIA .mzML");
-    let cfg = timscentroid::CentroidingConfig::default();
+    let cfg = timscentroid::IndexingCentroidingConfig::default();
     let idx = from_mzml_file(std::path::Path::new(&path), &cfg)
         .expect("from_mzml_file should succeed on a centroided DIA mzML");
 
