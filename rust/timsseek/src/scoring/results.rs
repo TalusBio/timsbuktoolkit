@@ -27,6 +27,7 @@ use super::blocks::{
     ColSink,
     FeatSink,
     NameSink,
+    SchemaSink,
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
@@ -74,6 +75,12 @@ macro_rules! compose_scoring_fields {
             /// Emit every block's Parquet columns, in the composition order.
             pub fn push_columns(&self, o: &mut ColSink) {
                 $( self.$fname.columns(o); )*
+            }
+
+            /// Emit every block's Parquet SCHEMA (value-free), in composition order —
+            /// same order as `push_columns`.
+            pub fn push_column_schema(o: &mut $crate::scoring::blocks::SchemaSink) {
+                $( <$fty as $crate::scoring::blocks::ScoreBlock>::column_schema(o); )*
             }
 
             /// Emit every block's direct ML feature *values* (not the
@@ -223,6 +230,13 @@ impl FinalResult {
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
+    }
+
+    /// Value-free Parquet schema: scoring blocks (composition order) then the
+    /// post-model meta block — mirrors `emit_row`'s column order exactly.
+    pub fn column_schema(o: &mut SchemaSink) {
+        ScoringFields::push_column_schema(o);
+        <ResultMeta as ScoreBlock>::column_schema(o);
     }
 }
 
