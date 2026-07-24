@@ -120,10 +120,12 @@ impl<'f> FrameSink<'f> {
     /// cursor reaches it — i.e. on the first row — with a
     /// `Vec::with_capacity(nrows)` buffer), advance the cursor, and append
     /// `v`. On later rows this instead checks the name at the cursor matches
-    /// (order must be identical every row). Mirrors `ColSink::slot` exactly:
-    /// `cursor == cols.len()` is "never seen this column before", with no
-    /// separate row counter needed.
-    fn slot(&mut self, name: String, v: f64) {
+    /// (order must be identical every row) via a `&str` comparison, with no
+    /// allocation. Mirrors `ColSink::slot` exactly: `cursor == cols.len()` is
+    /// "never seen this column before", with no separate row counter needed;
+    /// the owned `Arc<str>` is only created in the create branch, once per
+    /// column, ever.
+    fn slot(&mut self, name: &str, v: f64) {
         let i = self.cursor;
         if i == self.frame.cols.len() {
             self.frame.names.push(Arc::from(name));
@@ -131,41 +133,37 @@ impl<'f> FrameSink<'f> {
             col.push(v);
             self.frame.cols.push(col);
         } else {
-            debug_assert_eq!(
-                self.frame.names[i].as_ref(),
-                name.as_str(),
-                "column order mismatch"
-            );
+            debug_assert_eq!(&*self.frame.names[i], name, "column order mismatch");
             self.frame.cols[i].push(v);
         }
         self.cursor += 1;
     }
 
     pub fn push(&mut self, name: &str, v: f64) {
-        self.slot(name.to_string(), v);
+        self.slot(name, v);
     }
 
     pub fn push_ln1p(&mut self, name: &str, x: f64) {
-        self.slot(format!("{name}_ln1p"), x.ln_1p());
+        self.slot(&format!("{name}_ln1p"), x.ln_1p());
     }
 
     pub fn push_log2(&mut self, name: &str, x: f64) {
-        self.slot(format!("{name}_log2"), x.log2());
+        self.slot(&format!("{name}_log2"), x.log2());
     }
 
     pub fn push_round(&mut self, name: &str, x: f64) {
-        self.slot(format!("{name}_round"), x.round());
+        self.slot(&format!("{name}_round"), x.round());
     }
 
     /// Magnitude fold (`|x|`, NaN preserved).
     pub fn push_abs(&mut self, name: &str, x: f64) {
-        self.slot(format!("{name}_abs"), x.abs());
+        self.slot(&format!("{name}_abs"), x.abs());
     }
 
     /// Missingness indicator (`1.0` if `x` is non-finite, else `0.0`).
     pub fn push_isna(&mut self, name: &str, x: f64) {
         self.slot(
-            format!("{name}_isna"),
+            &format!("{name}_isna"),
             if x.is_finite() { 0.0 } else { 1.0 },
         );
     }
@@ -173,7 +171,7 @@ impl<'f> FrameSink<'f> {
     /// One bare column per element, named `{prefix}_{i}`.
     pub fn push_slice(&mut self, prefix: &str, vals: &[f32]) {
         for (i, v) in vals.iter().enumerate() {
-            self.slot(format!("{prefix}_{i}"), *v as f64);
+            self.slot(&format!("{prefix}_{i}"), *v as f64);
         }
     }
 
@@ -229,5 +227,99 @@ mod tests {
         assert_eq!(f.names(), &[Arc::from("x"), Arc::from("y_ln1p")]);
         assert_eq!(f.column(0), &[10.0, 20.0]);
         assert!((f.column(1)[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frame_sink_push_log2() {
+        let mut f = FeatFrame::with_capacity(1, 1);
+        {
+            let mut s = FrameSink::new(&mut f, 1);
+            s.begin_row();
+            s.push_log2("x", 8.0);
+            s.finish();
+        }
+        assert_eq!(f.names(), &[Arc::from("x_log2")]);
+        assert_eq!(f.column(0), &[3.0]);
+    }
+
+    #[test]
+    fn frame_sink_push_round() {
+        let mut f = FeatFrame::with_capacity(1, 1);
+        {
+            let mut s = FrameSink::new(&mut f, 1);
+            s.begin_row();
+            s.push_round("x", 2.6);
+            s.finish();
+        }
+        assert_eq!(f.names(), &[Arc::from("x_round")]);
+        assert_eq!(f.column(0), &[3.0]);
+    }
+
+    #[test]
+    fn frame_sink_push_abs() {
+        let mut f = FeatFrame::with_capacity(1, 2);
+        {
+            let mut s = FrameSink::new(&mut f, 2);
+            s.begin_row();
+            s.push_abs("x", -4.5);
+            s.begin_row();
+            s.push_abs("x", f64::NAN);
+            s.finish();
+        }
+        assert_eq!(f.names(), &[Arc::from("x_abs")]);
+        assert_eq!(f.column(0)[0], 4.5);
+        assert!(f.column(0)[1].is_nan());
+    }
+
+    #[test]
+    fn frame_sink_push_isna() {
+        let mut f = FeatFrame::with_capacity(1, 2);
+        {
+            let mut s = FrameSink::new(&mut f, 2);
+            s.begin_row();
+            s.push_isna("x", 1.0);
+            s.begin_row();
+            s.push_isna("x", f64::NAN);
+            s.finish();
+        }
+        assert_eq!(f.names(), &[Arc::from("x_isna")]);
+        assert_eq!(f.column(0), &[0.0, 1.0]);
+    }
+
+    #[test]
+    fn frame_sink_push_slice() {
+        let mut f = FeatFrame::with_capacity(3, 1);
+        {
+            let mut s = FrameSink::new(&mut f, 1);
+            s.begin_row();
+            s.push_slice("v", &[1.0f32, 2.5f32, 3.0f32]);
+            s.finish();
+        }
+        assert_eq!(
+            f.names(),
+            &[Arc::from("v_0"), Arc::from("v_1"), Arc::from("v_2")]
+        );
+        assert_eq!(f.column(0), &[1.0]);
+        assert_eq!(f.column(1), &[2.5]);
+        assert_eq!(f.column(2), &[3.0]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn push_column_wrong_length_panics() {
+        let mut f = FeatFrame::with_capacity(1, 3);
+        f.push_column("a", vec![1.0, 2.0]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn extend_mismatched_nrows_panics() {
+        let mut f = FeatFrame::with_capacity(1, 3);
+        f.push_column("a", vec![1.0, 2.0, 3.0]);
+
+        let mut g = FeatFrame::with_capacity(1, 2);
+        g.push_column("b", vec![4.0, 5.0]);
+
+        f.extend(g);
     }
 }
