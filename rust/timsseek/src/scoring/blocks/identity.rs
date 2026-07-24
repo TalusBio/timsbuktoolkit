@@ -10,7 +10,9 @@ use crate::scoring::apex_finding::PeptideMetadata;
 use crate::scoring::blocks::{
     ColSink,
     FeatSink,
+    FrameSink,
     NameSink,
+    SchemaSink,
     ScoreBlock,
 };
 
@@ -84,5 +86,79 @@ impl ScoreBlock for Identity {
         o.push("precursor_mz_round5");
         o.push("precursor_charge");
         o.push("precursor_mobility");
+    }
+
+    fn column_schema(o: &mut SchemaSink) {
+        o.str("sequence");
+        o.u32("library_id");
+        o.u32("decoy_group_id");
+        o.f64("precursor_mz");
+        o.u8("precursor_charge");
+        o.f32("precursor_mobility");
+        o.bool("is_target");
+    }
+
+    fn nonlinear_features(&self, o: &mut FrameSink) {
+        // context features -> tree-only (nonlinear) lane; same values/names as the
+        // legacy `features`/`feature_names` above.
+        o.push("precursor_mz_round5", (self.precursor_mz / 5.0).round());
+        o.push("precursor_charge", self.precursor_charge as f64);
+        o.push("precursor_mobility", self.precursor_mobility as f64);
+    }
+
+    fn nonlinear_feature_names(o: &mut NameSink) {
+        o.push("precursor_mz_round5");
+        o.push("precursor_charge");
+        o.push("precursor_mobility");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scoring::blocks::FeatFrame;
+
+    #[test]
+    fn nonlinear_lane_matches_legacy_features() {
+        let identity = Identity::sample();
+
+        let mut frame = FeatFrame::with_capacity(3, 1);
+        {
+            let mut sink = FrameSink::new(&mut frame, 1);
+            sink.begin_row();
+            identity.nonlinear_features(&mut sink);
+            sink.finish();
+        }
+        let mut names = NameSink::new();
+        Identity::nonlinear_feature_names(&mut names);
+        assert_eq!(frame.names(), names.into_names().as_slice());
+
+        let mut legacy = FeatSink::new();
+        identity.features(&mut legacy);
+        let legacy_vals = legacy.into_values();
+        assert_eq!(legacy_vals.len(), frame.ncols());
+        for (j, v) in legacy_vals.iter().enumerate() {
+            assert_eq!(frame.column(j)[0], *v);
+        }
+    }
+
+    #[test]
+    fn column_schema_matches_columns() {
+        let identity = Identity::sample();
+
+        let mut cols = ColSink::new();
+        identity.columns(&mut cols);
+        let (col_fields, _) = cols.finish();
+
+        let mut schema = SchemaSink::new();
+        Identity::column_schema(&mut schema);
+        let schema_fields = schema.into_fields();
+
+        assert_eq!(col_fields.len(), schema_fields.len());
+        for (a, b) in col_fields.iter().zip(schema_fields.iter()) {
+            assert_eq!(a.name(), b.name());
+            assert_eq!(a.data_type(), b.data_type());
+            assert_eq!(a.is_nullable(), b.is_nullable());
+        }
     }
 }
