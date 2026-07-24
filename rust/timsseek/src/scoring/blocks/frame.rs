@@ -175,6 +175,17 @@ impl<'f> FrameSink<'f> {
         }
     }
 
+    /// `push_isna` for each element of an array field: one column per
+    /// element, named `{prefix}_{i}_isna`.
+    pub fn push_slice_isna(&mut self, prefix: &str, vals: &[f32]) {
+        for (i, v) in vals.iter().enumerate() {
+            self.slot(
+                &format!("{prefix}_{i}_isna"),
+                if v.is_finite() { 0.0 } else { 1.0 },
+            );
+        }
+    }
+
     /// Consume the sink. The row cursor's final row count is tracked by the
     /// caller via `nrows` passed to [`FrameSink::new`]; this only exists to
     /// give callers an explicit place to end the borrow.
@@ -302,6 +313,20 @@ mod tests {
         assert_eq!(f.column(0), &[1.0]);
         assert_eq!(f.column(1), &[2.5]);
         assert_eq!(f.column(2), &[3.0]);
+    }
+
+    #[test]
+    fn frame_sink_push_slice_isna() {
+        let mut f = FeatFrame::with_capacity(2, 1);
+        {
+            let mut s = FrameSink::new(&mut f, 1);
+            s.begin_row();
+            s.push_slice_isna("v", &[1.0f32, f32::NAN]);
+            s.finish();
+        }
+        assert_eq!(f.names(), &[Arc::from("v_0_isna"), Arc::from("v_1_isna")]);
+        assert_eq!(f.column(0), &[0.0]);
+        assert_eq!(f.column(1), &[1.0]);
     }
 
     #[test]

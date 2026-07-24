@@ -58,15 +58,59 @@ pub use frame::{
 /// projection). Array fields fan out to one column per element, named
 /// `{field}_{i}`. `features` emits the ML projection, which may apply
 /// `#[feat(..)]` transforms and fan a single field out to several features.
+///
+/// Mid-migration shape (`#[derive(ScoreBlock)]`, see `timsseek_macros`): the
+/// only method every block (old `score_block!` and new derive alike) must
+/// provide is `columns`. The new schema + two-lane feature methods are
+/// DEFAULTED to no-ops so blocks still on `score_block!` (which does not
+/// implement them yet) keep compiling unmodified. The LEGACY `features` /
+/// `feature_names` are ALSO defaulted to no-ops — `score_block!`-generated
+/// blocks override them with their real walk; a derived block leaves them
+/// no-op because its features move to the lane methods instead (nothing
+/// consumes the lanes yet; restored in a later task). This means a block is
+/// on exactly one of the two paths at a time: legacy `features`/`feature_names`
+/// XOR the new lane methods, never both, which is why converting a block only
+/// touches that one file. `features`/`feature_names` are deleted once every
+/// block has migrated (tracked separately).
 pub trait ScoreBlock {
     fn columns(&self, out: &mut ColSink);
-    /// Emit this block's ML feature *values*, in a fixed per-block order.
-    fn features(&self, out: &mut FeatSink);
-    /// Emit this block's ML feature *names*, in the same order as
-    /// [`ScoreBlock::features`]. Associated (no `&self`): names are a property
-    /// of the feature set, built once, not carried per record. For macro blocks
-    /// both walks are generated from the one field list, so they cannot desync.
-    fn feature_names(out: &mut NameSink);
+
+    /// Parquet-adjacent schema (dtype/nullability only, no data) for the same
+    /// fields `columns` emits. Defaulted no-op until a block migrates.
+    fn column_schema(_out: &mut SchemaSink) {}
+    /// This block's linear-lane ML feature *values* (models that want raw/
+    /// monotone-transformed inputs, e.g. LDA). Defaulted no-op.
+    fn linear_features(&self, _out: &mut FrameSink) {}
+    /// Names for [`ScoreBlock::linear_features`], same order. Defaulted no-op.
+    fn linear_feature_names(_out: &mut NameSink) {}
+    /// This block's nonlinear-lane ML feature *values* (models that don't need
+    /// monotone transforms, e.g. GBM). Defaulted no-op.
+    fn nonlinear_features(&self, _out: &mut FrameSink) {}
+    /// Names for [`ScoreBlock::nonlinear_features`], same order. Defaulted
+    /// no-op.
+    fn nonlinear_feature_names(_out: &mut NameSink) {}
+    /// Both lanes, linear then nonlinear.
+    fn all_features(&self, o: &mut FrameSink) {
+        self.linear_features(o);
+        self.nonlinear_features(o);
+    }
+    /// Names for [`ScoreBlock::all_features`], same order.
+    fn all_feature_names(o: &mut NameSink)
+    where
+        Self: Sized,
+    {
+        Self::linear_feature_names(o);
+        Self::nonlinear_feature_names(o);
+    }
+
+    /// LEGACY (transition): this block's ML feature *values*, in a fixed
+    /// per-block order. Defaulted no-op; `score_block!` blocks override with
+    /// a real impl. Deleted once every block has migrated to the lane methods
+    /// above.
+    fn features(&self, _out: &mut FeatSink) {}
+    /// LEGACY (transition): this block's ML feature *names*, same order as
+    /// [`ScoreBlock::features`]. Defaulted no-op. Deleted alongside `features`.
+    fn feature_names(_out: &mut NameSink) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +269,66 @@ impl ColSink {
 }
 
 // ---------------------------------------------------------------------------
+// SchemaSink — Parquet schema-only accumulator (dtype/nullability, no data)
+// ---------------------------------------------------------------------------
+
+/// Accumulates Parquet field schema (name, dtype, nullability) without any row
+/// data — the schema-only counterpart to [`ColSink`]. Dtype/nullability MUST
+/// byte-match `ColSink`'s (scalars non-nullable, expanded array elements
+/// nullable); the golden schema test guards this.
+#[derive(Default)]
+pub struct SchemaSink {
+    fields: Vec<Field>,
+}
+
+impl SchemaSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn scalar(&mut self, name: &str, dt: DataType) {
+        self.fields.push(Field::new(name, dt, false));
+    }
+
+    pub fn f32(&mut self, n: &str) {
+        self.scalar(n, DataType::Float32);
+    }
+
+    pub fn f64(&mut self, n: &str) {
+        self.scalar(n, DataType::Float64);
+    }
+
+    pub fn u8(&mut self, n: &str) {
+        self.scalar(n, DataType::UInt8);
+    }
+
+    pub fn u32(&mut self, n: &str) {
+        self.scalar(n, DataType::UInt32);
+    }
+
+    pub fn bool(&mut self, n: &str) {
+        self.scalar(n, DataType::Boolean);
+    }
+
+    pub fn str(&mut self, n: &str) {
+        self.scalar(n, DataType::Utf8);
+    }
+
+    /// Expand a fixed-size `[f32; N]` into `{prefix}_0 .. {prefix}_{N-1}`
+    /// nullable fields (matching [`ColSink::f32_array`]'s layout).
+    pub fn f32_array(&mut self, prefix: &str, n: usize) {
+        for i in 0..n {
+            self.fields
+                .push(Field::new(format!("{prefix}_{i}"), DataType::Float32, true));
+        }
+    }
+
+    pub fn into_fields(self) -> Vec<Field> {
+        self.fields
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FeatSink — ML feature accumulator
 // ---------------------------------------------------------------------------
 
@@ -255,6 +359,10 @@ impl FeatSink {
 
     pub fn push_ln1p(&mut self, x: f64) {
         self.vals.push(x.ln_1p());
+    }
+
+    pub fn push_log2(&mut self, x: f64) {
+        self.vals.push(x.log2());
     }
 
     pub fn push_round(&mut self, x: f64) {
@@ -566,4 +674,22 @@ macro_rules! __block_feat_name_one {
     ($o:ident, $f:ident, $fty:tt, isna) => {
         $o.push(concat!(stringify!($f), "_isna"));
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_sink_matches_colsink_dtypes() {
+        let mut ss = SchemaSink::new();
+        ss.f32("a");
+        ss.f32_array("arr", 3);
+        let fields = ss.into_fields();
+        assert_eq!(fields[0].data_type(), &DataType::Float32);
+        assert!(!fields[0].is_nullable());
+        assert_eq!(fields[1].name(), "arr_0");
+        assert!(fields[1].is_nullable());
+        assert_eq!(fields.len(), 4);
+    }
 }

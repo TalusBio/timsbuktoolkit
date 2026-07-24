@@ -6207,6 +6207,7 @@ dependencies = [
  "timscentroid",
  "timsquery",
  "timsrust",
+ "timsseek_macros",
  "tracing",
  "zstd",
 ]

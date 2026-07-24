@@ -120,6 +120,18 @@ impl Scalar {
         };
         format_ident!("{name}")
     }
+
+    /// The scalar's own type, as tokens (e.g. `f32`) — used to reconstruct a
+    /// field's type for the generated `sample()`'s `BlockFixture` turbofish.
+    fn type_tokens(self) -> TokenStream {
+        match self {
+            Scalar::F32 => quote! { f32 },
+            Scalar::F64 => quote! { f64 },
+            Scalar::U8 => quote! { u8 },
+            Scalar::U32 => quote! { u32 },
+            Scalar::Bool => quote! { bool },
+        }
+    }
 }
 
 /// A field's shape: scalar, or a fixed-size `[f32; N]` array (`N` is an
@@ -130,6 +142,15 @@ enum FieldShape {
 }
 
 impl FieldShape {
+    /// The field's type, as tokens — `f32`/`f64`/... for a scalar,
+    /// `[f32; N]` for an array (reassembled from the parsed `len`).
+    fn type_tokens(&self) -> TokenStream {
+        match self {
+            FieldShape::Scalar(scalar) => scalar.type_tokens(),
+            FieldShape::Array { len } => quote! { [f32; #len] },
+        }
+    }
+
     fn from_type(ty: &Type) -> Result<Self> {
         if let Some(scalar) = Scalar::from_type(ty) {
             return Ok(FieldShape::Scalar(scalar));
@@ -353,10 +374,30 @@ fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<Tok
     Ok((feature_calls, name_calls))
 }
 
+/// Emits one `#field: <#ty as BlockFixture>::fixture()` initializer per
+/// field, for the generated `sample()` — mirrors `score_block!`'s
+/// `$fname : <$fty as BlockFixture>::fixture()` (mod.rs:540) byte-for-byte.
+fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
+    fields
+        .iter()
+        .map(|field| {
+            let ident = &field.ident;
+            let ty = field.shape.type_tokens();
+            quote! {
+                #ident: <#ty as crate::scoring::blocks::BlockFixture>::fixture()
+            }
+        })
+        .collect()
+}
+
 /// Pure codegen entry point: parses the `#[feat(...)]` grammar off each
 /// named field of `input` and emits an `impl ScoreBlock for $Name` with the
-/// six projection methods described in the crate docs. Unit-testable without
-/// a proc-macro context — see `tests` below.
+/// six projection methods described in the crate docs, plus an inherent
+/// `sample()` (transition scaffolding matching `score_block!`'s fixture
+/// constructor, since `ScoringFields::sample_default()` — reachable from
+/// production code in `parquet_writer::build_record_batch` — calls
+/// `<$fty>::sample()` uniformly across every block). Unit-testable without a
+/// proc-macro context — see `tests` below.
 pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let fields = collect_fields(&input)?;
     let name = &input.ident;
@@ -365,6 +406,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let (schema_calls, column_calls) = schema_and_column_calls(&fields);
     let (linear_feature_calls, linear_name_calls) = lane_calls(&fields, Lane::Linear)?;
     let (nonlinear_feature_calls, nonlinear_name_calls) = lane_calls(&fields, Lane::Nonlinear)?;
+    let sample_calls = sample_field_calls(&fields);
 
     Ok(quote! {
         impl #generics_impl crate::scoring::blocks::ScoreBlock for #name #generics_ty #generics_where {
@@ -390,6 +432,19 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 
             fn nonlinear_feature_names(out: &mut crate::scoring::blocks::NameSink) {
                 #(#nonlinear_name_calls)*
+            }
+        }
+
+        impl #generics_impl #name #generics_ty #generics_where {
+            /// Fixture with every field a fixed constant (see
+            /// [`crate::scoring::blocks::BlockFixture`]). Transition
+            /// scaffolding: un-gated because `ScoringFields::sample_default`
+            /// is reachable from production code today; a later task moves
+            /// this behind `cfg(test)` once that dependency is gone.
+            pub fn sample() -> Self {
+                Self {
+                    #(#sample_calls),*
+                }
             }
         }
     })
@@ -430,6 +485,21 @@ mod tests {
         assert!(ts.contains("\"a\""));
         // all three fields appear in column_schema
         assert!(ts.contains("\"c\""));
+    }
+
+    #[test]
+    fn emits_sample() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T {
+                #[feat(raw)] pub a: f32,
+                pub arr: [f32; 3],
+            }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        assert!(ts.contains("fn sample"));
+        assert!(ts.contains("BlockFixture"));
+        assert!(ts.contains("fixture"));
     }
 
     #[test]
