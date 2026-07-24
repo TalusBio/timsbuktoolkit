@@ -9,7 +9,6 @@ use proc_macro2::TokenStream;
 use quote::{
     format_ident,
     quote,
-    quote_spanned,
 };
 use syn::spanned::Spanned;
 use syn::{
@@ -23,7 +22,7 @@ use syn::{
     Type,
 };
 
-/// The scalar generators a `#[feature(...)]` field list may name.
+/// The scalar generators a `#[feat(...)]` field list may name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Generator {
     Raw,
@@ -46,7 +45,7 @@ impl Generator {
             other => Err(Error::new(
                 ident.span(),
                 format!(
-                    "unknown `#[feature(...)]` generator `{other}`; expected one of raw, log2, ln1p, abs, round, isna"
+                    "unknown `#[feat(...)]` generator `{other}`; expected one of raw, log2, ln1p, abs, round, isna"
                 ),
             )),
         }
@@ -78,7 +77,7 @@ impl Generator {
     }
 }
 
-/// Which feature lane a `#[feature(...)]` field's generators are routed into.
+/// Which feature lane a `#[feat(...)]` field's generators are routed into.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lane {
     Linear,
@@ -159,14 +158,14 @@ impl FieldShape {
     }
 }
 
-/// Parsed `#[feature(...)]` attribute contents: the requested generators plus
+/// Parsed `#[feat(...)]` attribute contents: the requested generators plus
 /// the optional `linear = <bool>` lane override.
 struct FeatureAttr {
     generators: Vec<Generator>,
     linear: bool,
 }
 
-/// Parses `#[feature(gen, gen, ..., linear = <bool>)]`: a comma-separated
+/// Parses `#[feat(gen, gen, ..., linear = <bool>)]`: a comma-separated
 /// list of generator names plus an optional `linear = <bool>` item, which may
 /// appear anywhere in the list.
 fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
@@ -176,7 +175,7 @@ fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("linear") {
             if linear.is_some() {
-                return Err(meta.error("duplicate `linear = ...` in #[feature(...)]"));
+                return Err(meta.error("duplicate `linear = ...` in #[feat(...)]"));
             }
             let value = meta.value()?;
             let lit: syn::LitBool = value.parse()?;
@@ -197,11 +196,11 @@ fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
 }
 
 /// One named field of the derived struct, with its parsed shape and (if
-/// present) its `#[feature(...)]` routing.
+/// present) its `#[feat(...)]` routing.
 struct Field {
     ident: Ident,
     shape: FieldShape,
-    /// `None` => column-only field (no `#[feature(...)]`).
+    /// `None` => column-only field (no `#[feat(...)]`).
     feature: Option<(Vec<Generator>, Lane)>,
 }
 
@@ -230,7 +229,7 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
         let feature_attrs: Vec<&syn::Attribute> = f
             .attrs
             .iter()
-            .filter(|a| a.path().is_ident("feature"))
+            .filter(|a| a.path().is_ident("feat"))
             .collect();
 
         let feature = match feature_attrs.as_slice() {
@@ -240,7 +239,7 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
                 if parsed.generators.is_empty() {
                     return Err(Error::new(
                         attr.span(),
-                        "#[feature(...)] requires at least one generator",
+                        "#[feat(...)] requires at least one generator",
                     ));
                 }
                 let lane = if parsed.linear {
@@ -253,7 +252,7 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
             [_, dup, ..] => {
                 return Err(Error::new(
                     dup.span(),
-                    "duplicate #[feature(...)] attribute on field",
+                    "duplicate #[feat(...)] attribute on field",
                 ));
             }
         };
@@ -293,7 +292,7 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
 }
 
 /// Emits the `FrameSink`/`NameSink` calls for one feature lane.
-fn lane_calls(fields: &[Field], lane: Lane) -> (Vec<TokenStream>, Vec<TokenStream>) {
+fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<TokenStream>)> {
     let mut feature_calls = Vec::new();
     let mut name_calls = Vec::new();
 
@@ -339,22 +338,22 @@ fn lane_calls(fields: &[Field], lane: Lane) -> (Vec<TokenStream>, Vec<TokenStrea
                         });
                     }
                     other => {
-                        let msg = format!(
-                            "generator `{other:?}` is not supported on array fields; only raw and isna apply"
-                        );
-                        feature_calls.push(quote_spanned! { ident.span() =>
-                            compile_error!(#msg);
-                        });
+                        return Err(Error::new(
+                            ident.span(),
+                            format!(
+                                "generator `{other:?}` is not supported on array fields; only raw and isna apply"
+                            ),
+                        ));
                     }
                 },
             }
         }
     }
 
-    (feature_calls, name_calls)
+    Ok((feature_calls, name_calls))
 }
 
-/// Pure codegen entry point: parses the `#[feature(...)]` grammar off each
+/// Pure codegen entry point: parses the `#[feat(...)]` grammar off each
 /// named field of `input` and emits an `impl ScoreBlock for $Name` with the
 /// six projection methods described in the crate docs. Unit-testable without
 /// a proc-macro context — see `tests` below.
@@ -364,8 +363,8 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let (generics_impl, generics_ty, generics_where) = input.generics.split_for_impl();
 
     let (schema_calls, column_calls) = schema_and_column_calls(&fields);
-    let (linear_feature_calls, linear_name_calls) = lane_calls(&fields, Lane::Linear);
-    let (nonlinear_feature_calls, nonlinear_name_calls) = lane_calls(&fields, Lane::Nonlinear);
+    let (linear_feature_calls, linear_name_calls) = lane_calls(&fields, Lane::Linear)?;
+    let (nonlinear_feature_calls, nonlinear_name_calls) = lane_calls(&fields, Lane::Nonlinear)?;
 
     Ok(quote! {
         impl #generics_impl crate::scoring::blocks::ScoreBlock for #name #generics_ty #generics_where {
@@ -396,7 +395,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     })
 }
 
-#[proc_macro_derive(ScoreBlock, attributes(feature))]
+#[proc_macro_derive(ScoreBlock, attributes(feat))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
     derive_score_block(di)
@@ -413,8 +412,8 @@ mod tests {
     fn emits_six_methods_and_routes_lane() {
         let di: syn::DeriveInput = syn::parse2(quote! {
             pub struct T {
-                #[feature(log2)] pub a: f32,
-                #[feature(raw, linear = false)] pub b: f32,
+                #[feat(log2)] pub a: f32,
+                #[feat(raw, linear = false)] pub b: f32,
                 pub c: f32,
             }
         })
@@ -436,7 +435,7 @@ mod tests {
     #[test]
     fn rejects_unknown_generator() {
         let di: syn::DeriveInput = syn::parse2(quote! {
-            pub struct T { #[feature(bogus)] pub a: f32 }
+            pub struct T { #[feat(bogus)] pub a: f32 }
         })
         .unwrap();
         assert!(derive_score_block(di).is_err());
@@ -445,12 +444,21 @@ mod tests {
     #[test]
     fn array_field_uses_slice_and_count() {
         let di: syn::DeriveInput = syn::parse2(quote! {
-            pub struct T { #[feature(raw)] pub arr: [f32; NUM_MS2_IONS] }
+            pub struct T { #[feat(raw)] pub arr: [f32; NUM_MS2_IONS] }
         })
         .unwrap();
         let ts = derive_score_block(di).unwrap().to_string();
         assert!(ts.contains("push_slice"));
         assert!(ts.contains("f32_array"));
         assert!(ts.contains("NUM_MS2_IONS"));
+    }
+
+    #[test]
+    fn rejects_non_raw_generator_on_array() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(log2)] pub arr: [f32; NUM_MS2_IONS] }
+        })
+        .unwrap();
+        assert!(derive_score_block(di).is_err());
     }
 }
