@@ -11,7 +11,7 @@ use crate::traits::{
     KeyLike,
     QueryGeom,
 };
-use crate::utils::constants::NEUTRON_MASS;
+use crate::utils::constants::C13_C12_MASS_DIFF;
 
 /// Flyweight handle over a `QueryCollection` arena: `lib` borrows (or owns via
 /// `Arc`) the arena, `handle` packs the target index and decoy variant. No
@@ -78,7 +78,7 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> Query<Lib
     /// Spacing between adjacent isotope peaks in m/z for this precursor's charge.
     fn isotope_step(&self) -> f64 {
         let charge = self.geom().charge[self.target_idx()] as f64;
-        NEUTRON_MASS / charge
+        C13_C12_MASS_DIFF / charge
     }
 }
 
@@ -214,10 +214,10 @@ mod tests {
     #[test]
     fn precursor_mz_limits_span_isotope_envelope() {
         // n_isotopes=3, charge 2, mono 654.855 -> limits span isotopes 0..3,
-        // i.e. (mono, mono + 2*NEUTRON_MASS/2).
+        // i.e. (mono, mono + 2*C13_C12_MASS_DIFF/2).
         let lib = one_target_lib();
         let q = Query::new(&lib, 0, 0);
-        let step = NEUTRON_MASS / 2.0;
+        let step = C13_C12_MASS_DIFF / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - 654.855).abs() < 1e-9);
         assert!((hi - (654.855 + 2.0 * step)).abs() < 1e-9);
@@ -264,7 +264,7 @@ mod tests {
         // limits shift by the same amount and keep the same width.
         let lib = one_target_lib();
         let q = Query::new(&lib, 0, 1);
-        let step = NEUTRON_MASS / 2.0;
+        let step = C13_C12_MASS_DIFF / 2.0;
         let mono = 654.855 + 14.0 / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - mono).abs() < 1e-9);
