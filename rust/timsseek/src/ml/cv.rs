@@ -374,7 +374,7 @@ impl DataBuffer {
 /// the results for all classifiers that didint use it
 /// for either training or early_stopping_rounds.
 /// Row-major precomputed feature matrix: features[sample_idx * ncols + feature_idx]
-struct PrecomputedFeatures {
+pub(crate) struct PrecomputedFeatures {
     features: Vec<f64>,
     responses: Vec<f64>,
     ncols: usize,
@@ -391,6 +391,24 @@ impl PrecomputedFeatures {
             features.extend(elem.as_feature());
             responses.push(elem.get_y());
         }
+        Self {
+            features,
+            responses,
+            ncols,
+        }
+    }
+
+    /// Build from an already-materialized row-major matrix
+    /// (`features[i*ncols + j]`) + responses, instead of walking
+    /// `FeatureLike::as_feature`. Rows MUST align with the `data` the scorer is
+    /// constructed from (same order). Used by the lane-frame consumer so GBM
+    /// trains on the `FeatFrame` column set, not the legacy per-record walk.
+    pub(crate) fn from_row_major(features: Vec<f64>, ncols: usize, responses: Vec<f64>) -> Self {
+        assert_eq!(
+            features.len(),
+            ncols.saturating_mul(responses.len()),
+            "row-major feature buffer must be nrows*ncols"
+        );
         Self {
             features,
             responses,
@@ -451,6 +469,40 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             .collect();
 
         let precomputed = PrecomputedFeatures::from_data(&data);
+
+        Self {
+            n_folds,
+            data,
+            assigned_fold,
+            fold_classifiers: Vec::new(),
+            weights,
+            config,
+            precomputed,
+        }
+    }
+
+    /// Like [`Self::new_from_shuffled`] but with the feature matrix supplied
+    /// externally (already row-major, row-aligned with `data`). Weights + fold
+    /// assignment still derive positionally from `data`, so the caller MUST
+    /// build `precomputed` from the SAME (already-shuffled) `data` order.
+    pub(crate) fn new_from_shuffled_with_precomputed(
+        n_folds: u8,
+        data: Vec<T>,
+        config: GBMConfig,
+        precomputed: PrecomputedFeatures,
+    ) -> Self {
+        assert_eq!(
+            precomputed.responses.len(),
+            data.len(),
+            "precomputed rows must align 1:1 with data"
+        );
+        let assigned_fold: Vec<u8> = (0..data.len())
+            .map(|x| (x % n_folds as usize).try_into().unwrap())
+            .collect();
+        let weights: Vec<f64> = data
+            .iter()
+            .map(|x| if x.get_y() > 0.5 { 0.5 } else { 1.0 })
+            .collect();
 
         Self {
             n_folds,
@@ -586,11 +638,13 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             let mut finite_counts: Vec<u32> = vec![0; names.len()];
             let mut nan_counts: Vec<u32> = vec![0; names.len()];
             let mut n: usize = 0;
-            for (i, item) in self.data.iter().enumerate() {
+            for i in 0..self.data.len() {
                 if self.assigned_fold.get(i) == Some(&fold) {
-                    // Per-record value/name alignment is contractual (the same
-                    // ordered sources build both), so it is not re-checked here.
-                    for (j, v) in item.as_feature().into_iter().enumerate() {
+                    // Read from the precomputed matrix (the exact columns the
+                    // booster trained on) rather than re-walking a per-record
+                    // feature fn, so the stats align with `names` by
+                    // construction even when features are supplied externally.
+                    for (j, &v) in self.precomputed.row(i).iter().enumerate() {
                         if j < sums.len() {
                             if v.is_finite() {
                                 sums[j] += v;

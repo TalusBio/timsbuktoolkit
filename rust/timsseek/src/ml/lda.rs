@@ -22,12 +22,13 @@
 //! # Layout & scaling
 //! The feature matrix is a single flat row-major `Vec<f64>` (`feat[i*d + j]`),
 //! never a `Vec<Vec<f64>>` — at tens of millions of candidates the per-row
-//! allocation and pointer-chasing dominate. The two heavy costs are both
-//! **linear in the row count but with large constants**, and both are
-//! parallelized (deterministically) over rayon:
-//!   * within-class scatter — `O(n * d^2)` (`d^2 ~ 11.6k` FMAs/row);
-//!   * inverse-normal transform — `O(d * n log n)` (`d` column sorts).
-//! Nothing here is super-linear in `n`.
+//! allocation and pointer-chasing dominate. The heavy cost is the within-class
+//! scatter — `O(n * d^2)` (`d^2` FMAs/row) — **linear in the row count but with
+//! a large constant**, parallelized (deterministically) over rayon. Nothing
+//! here is super-linear in `n`. Skew-taming is done at feature-emit time by the
+//! block grammar (log2/ln1p transforms); the linear lane only admits fields
+//! that are approx-Gaussian after their declared transform, so no rank-based
+//! gaussianization step runs here.
 
 use std::time::Instant;
 
@@ -406,165 +407,6 @@ fn solve_gauss(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// Send+Sync wrapper around a raw `*mut f64` so disjoint columns of the flat
-/// feature matrix can be transformed in parallel. Safe because each column `j`
-/// touches only the strided index set `{i*ncols + j}`, which is disjoint across
-/// distinct `j`.
-#[cfg(feature = "rayon")]
-struct ColPtr(*mut f64);
-#[cfg(feature = "rayon")]
-unsafe impl Sync for ColPtr {}
-
-/// Rank-based inverse-normal transform (van der Waerden). Rewrites each column
-/// of a flat row-major `nrows x ncols` matrix so its finite values become
-/// marginally ~N(0,1): rank -> `Phi^-1((rank - 0.5) / n_finite)`. This is the
-/// distribution-free way to satisfy the LDA per-feature normality assumption
-/// without knowing each feature's range (bounded correlations, heavy-tail
-/// scores, discrete counts all get Gaussianized uniformly). Non-finite values
-/// are left as-is (imputed downstream). Ties get averaged ranks.
-///
-/// Label-blind, so it is applied once to the whole dataset with no target/decoy
-/// leakage. Parallel over columns (`O(d * n log n)`).
-pub fn inverse_normal_transform_columns(feat: &mut [f64], nrows: usize, ncols: usize) {
-    if nrows == 0 {
-        return;
-    }
-    assert_eq!(feat.len(), nrows * ncols);
-
-    #[cfg(feature = "rayon")]
-    {
-        let base = ColPtr(feat.as_mut_ptr());
-        (0..ncols).into_par_iter().for_each(|j| {
-            // SAFETY: column `j` accesses only indices `i*ncols + j` for
-            // `i in 0..nrows`; these sets are disjoint across `j`, so parallel
-            // columns never alias.
-            let base = &base;
-            let get = |i: usize| unsafe { *base.0.add(i * ncols + j) };
-            let set = |i: usize, v: f64| unsafe { *base.0.add(i * ncols + j) = v };
-            int_one_column(nrows, get, set);
-        });
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        for j in 0..ncols {
-            let get = |i: usize| feat[i * ncols + j];
-            let mut vals: Vec<(usize, f64)> = Vec::new();
-            int_one_column_serial(nrows, get, &mut vals, |i, v| feat[i * ncols + j] = v);
-        }
-    }
-}
-
-/// INT for a single column addressed via `get`/`set` closures.
-#[cfg(feature = "rayon")]
-fn int_one_column(nrows: usize, get: impl Fn(usize) -> f64, set: impl Fn(usize, f64)) {
-    let mut order: Vec<usize> = (0..nrows).filter(|&i| get(i).is_finite()).collect();
-    let nf = order.len();
-    if nf == 0 {
-        return;
-    }
-    order.sort_unstable_by(|&a, &b| get(a).partial_cmp(&get(b)).unwrap());
-    let nf_f = nf as f64;
-    let mut i = 0usize;
-    while i < nf {
-        let vi = get(order[i]);
-        let mut k = i + 1;
-        while k < nf && get(order[k]) == vi {
-            k += 1;
-        }
-        let avg_rank = (i + k - 1) as f64 / 2.0;
-        let z = inverse_normal_cdf((avg_rank + 0.5) / nf_f);
-        for &idx in &order[i..k] {
-            set(idx, z);
-        }
-        i = k;
-    }
-}
-
-/// Serial-fallback INT for a single column (no rayon feature).
-#[cfg(not(feature = "rayon"))]
-fn int_one_column_serial(
-    nrows: usize,
-    get: impl Fn(usize) -> f64,
-    scratch: &mut Vec<(usize, f64)>,
-    mut set: impl FnMut(usize, f64),
-) {
-    scratch.clear();
-    scratch.extend((0..nrows).filter_map(|i| {
-        let v = get(i);
-        if v.is_finite() { Some((i, v)) } else { None }
-    }));
-    let nf = scratch.len();
-    if nf == 0 {
-        return;
-    }
-    scratch.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let nf_f = nf as f64;
-    let mut i = 0usize;
-    while i < nf {
-        let vi = scratch[i].1;
-        let mut k = i + 1;
-        while k < nf && scratch[k].1 == vi {
-            k += 1;
-        }
-        let avg_rank = (i + k - 1) as f64 / 2.0;
-        let z = inverse_normal_cdf((avg_rank + 0.5) / nf_f);
-        for m in i..k {
-            set(scratch[m].0, z);
-        }
-        i = k;
-    }
-}
-
-/// Acklam's rational approximation to the standard normal quantile function.
-/// Absolute error < 1.15e-9 across (0,1).
-fn inverse_normal_cdf(p: f64) -> f64 {
-    const A: [f64; 6] = [
-        -3.969683028665376e+01,
-        2.209460984245205e+02,
-        -2.759285104469687e+02,
-        1.383577518672690e+02,
-        -3.066479806614716e+01,
-        2.506628277459239e+00,
-    ];
-    const B: [f64; 5] = [
-        -5.447609879822406e+01,
-        1.615858368580409e+02,
-        -1.556989798598866e+02,
-        6.680131188771972e+01,
-        -1.328068155288572e+01,
-    ];
-    const C: [f64; 6] = [
-        -7.784894002430293e-03,
-        -3.223964580411365e-01,
-        -2.400758277161838e+00,
-        -2.549732539343734e+00,
-        4.374664141464968e+00,
-        2.938163982698783e+00,
-    ];
-    const D: [f64; 4] = [
-        7.784695709041462e-03,
-        3.224671290700398e-01,
-        2.445134137142996e+00,
-        3.754408661907416e+00,
-    ];
-    const P_LOW: f64 = 0.02425;
-    let p = p.clamp(1e-12, 1.0 - 1e-12);
-    if p < P_LOW {
-        let q = (-2.0 * p.ln()).sqrt();
-        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
-            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    } else if p <= 1.0 - P_LOW {
-        let q = p - 0.5;
-        let r = q * q;
-        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
-            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
-    } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
-            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -594,31 +436,6 @@ mod test {
         let a = vec![1.0, 2.0, 2.0, 4.0];
         let b = vec![1.0, 2.0];
         assert!(solve_gauss(a, b, 2).is_none());
-    }
-
-    #[test]
-    fn probit_known_values() {
-        assert!(inverse_normal_cdf(0.5).abs() < 1e-9);
-        assert!((inverse_normal_cdf(0.975) - 1.959963985).abs() < 1e-6);
-        assert!((inverse_normal_cdf(0.025) + 1.959963985).abs() < 1e-6);
-    }
-
-    #[test]
-    fn int_gaussianizes_and_is_monotone() {
-        let rows: Vec<Vec<f64>> = (0..1000)
-            .map(|i| vec![(i as f64).exp() % 1e6, (i as f64) / 1000.0])
-            .collect();
-        let (mut feat, nrows, ncols) = flat(&rows);
-        inverse_normal_transform_columns(&mut feat, nrows, ncols);
-        // Monotone in column 1 (was strictly increasing).
-        for i in 1..nrows {
-            assert!(
-                feat[i * ncols + 1] >= feat[(i - 1) * ncols + 1] - 1e-9,
-                "INT broke monotonicity"
-            );
-        }
-        let m: f64 = (0..nrows).map(|i| feat[i * ncols + 1]).sum::<f64>() / nrows as f64;
-        assert!(m.abs() < 1e-6, "INT column mean {m} not ~0");
     }
 
     #[test]

@@ -26,6 +26,7 @@ use super::blocks::split_product::SplitProduct;
 use super::blocks::{
     ColSink,
     FeatSink,
+    FrameSink,
     NameSink,
     SchemaSink,
     ScoreBlock,
@@ -93,6 +94,31 @@ macro_rules! compose_scoring_fields {
             /// [`Self::push_features`] (set-level; no `&self`).
             pub fn push_feature_names(o: &mut NameSink) {
                 $( <$fty as ScoreBlock>::feature_names(o); )*
+            }
+
+            /// Emit every block's LINEAR-lane ML feature *values* into a
+            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
+            /// The LDA consumer walks this lane.
+            pub fn push_linear_features(&self, o: &mut FrameSink) {
+                $( self.$fname.linear_features(o); )*
+            }
+
+            /// LINEAR-lane feature *names*, same order as
+            /// [`Self::push_linear_features`] (set-level; no `&self`).
+            pub fn push_linear_feature_names(o: &mut NameSink) {
+                $( <$fty as ScoreBlock>::linear_feature_names(o); )*
+            }
+
+            /// Emit every block's NONLINEAR-lane ML feature *values* into a
+            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
+            pub fn push_nonlinear_features(&self, o: &mut FrameSink) {
+                $( self.$fname.nonlinear_features(o); )*
+            }
+
+            /// NONLINEAR-lane feature *names*, same order as
+            /// [`Self::push_nonlinear_features`] (set-level; no `&self`).
+            pub fn push_nonlinear_feature_names(o: &mut NameSink) {
+                $( <$fty as ScoreBlock>::nonlinear_feature_names(o); )*
             }
 
             /// Fixture using the placeholder peptide from [`Identity::sample`].

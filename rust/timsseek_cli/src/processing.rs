@@ -21,10 +21,7 @@ use timsquery::{
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::ml::qvalues::{
-    feature_name_set_for,
-    report_qvalues_at_thresholds,
-};
+use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::{
     RescoreFeatureStats,
     rescore,
@@ -411,9 +408,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         eprintln!("  (rescore model: LDA)");
         rescore_lda(competed)
     } else {
-        // Feature names are a property of the set, built once and passed in.
-        let feature_names = feature_name_set_for(&competed);
-        rescore(competed, &feature_names)
+        // GBM trains on the ALL lane; `rescore` builds the feature frame + name
+        // set internally (after its seeded shuffle) so they stay row-aligned.
+        rescore(competed)
     };
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");

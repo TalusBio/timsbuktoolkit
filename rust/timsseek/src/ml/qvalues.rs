@@ -5,12 +5,12 @@ use super::cv::{
     FeatureStat,
     FoldStats,
     GBMConfig,
+    PrecomputedFeatures,
     RescoreFeatureStats,
 };
 use super::lda::{
     DEFAULT_LDA_SHRINKAGE,
     LdaModel,
-    inverse_normal_transform_columns,
 };
 use super::{
     LabelledScore,
@@ -19,7 +19,9 @@ use super::{
 use crate::scoring::blocks::derived::Derived;
 use crate::scoring::blocks::result_meta::ResultMeta;
 use crate::scoring::blocks::{
+    FeatFrame,
     FeatSink,
+    FrameSink,
     NameSink,
     ScoreBlock,
     sequence_counts,
@@ -112,10 +114,7 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn rescore(
-    mut data: Vec<CompetedCandidate>,
-    feature_names: &[Arc<str>],
-) -> (Vec<FinalResult>, RescoreFeatureStats) {
+pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     let config = GBMConfig::from_env();
 
     // Canonicalize input order before the seeded shuffle. Upstream
@@ -142,12 +141,34 @@ pub fn rescore(
     let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
     data.shuffle(&mut rng);
 
-    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled(3, data, config);
+    // Build the ALL-lane frame (linear ++ nonlinear) over the shuffled `data`,
+    // so frame row `i` aligns with `data[i]` — fold assignment + labels are
+    // positional, so the frame MUST be built AFTER the shuffle. The GBM sees
+    // the full lane feature set; feature names come from the same walk, so the
+    // frame columns and `names` align by construction (asserted below + the
+    // lane-parity test).
+    let names = all_feature_name_set_for(&data);
+    let frame = build_all_frame(&data);
+    debug_assert_eq!(
+        frame.names(),
+        names.as_slice(),
+        "ALL-lane frame columns must match all_feature_name_set order"
+    );
+    let ncols = frame.ncols();
+    let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+    let precomputed = PrecomputedFeatures::from_row_major(frame.row_major(), ncols, responses);
+
+    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled_with_precomputed(
+        3,
+        data,
+        config,
+        precomputed,
+    );
     scorer
         .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
         .unwrap();
 
-    let stats = scorer.feature_stats(feature_names);
+    let stats = scorer.feature_stats(&names);
 
     let mut scored = scorer.score();
     // Sort by score descending
@@ -180,50 +201,42 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
         )
     });
 
-    // Names (and their abs/isna companions) are a property of the feature set,
-    // built once. The abs magnitude-fold and isna missingness indicators are now
-    // pure per-row `#[feat(..)]` transforms baked into `as_feature()` (see
-    // `scoring::blocks`), so this path no longer post-processes the matrix — the
-    // only steps left are the genuinely data-dependent ones (INT, standardize).
-    let names: Vec<Arc<str>> = feature_name_set_for(&data);
-    let ncols = names.len();
+    // LDA trains on the LINEAR lane only: fields that are approx-Gaussian after
+    // their declared per-row transform (raw/log2/ln1p). Skew-taming is done at
+    // emit time by the grammar, so there is no data-dependent normalization step
+    // here — the only remaining data-dependent op is LDA's own standardization.
+    // The frame is built over `data` in its current (sorted) order, so row `i`
+    // aligns with `data[i]`; `names` comes from the same walk, so frame columns
+    // and names align by construction (asserted below + the parity test).
+    let names: Vec<Arc<str>> = linear_feature_name_set_for(&data);
     let nrows = data.len();
 
-    // Materialize the feature matrix once as a single flat row-major buffer
-    // (`feat[i*ncols + j]`) — a `Vec<Vec<f64>>` here means one heap allocation
-    // per candidate, which dominates at tens of millions of rows.
+    // Materialize the linear-lane matrix once as a single flat row-major buffer
+    // (`feat[i*ncols + j]`) — the layout LDA wants; the column store transposes
+    // in one pass.
     let t = Instant::now();
-    let mut feat: Vec<f64> = Vec::with_capacity(nrows * ncols);
-    for c in data.iter() {
-        feat.extend(c.as_feature());
-    }
+    let frame = build_lane_frame(&data, Lane::Linear);
+    debug_assert_eq!(
+        frame.names(),
+        names.as_slice(),
+        "linear-lane frame columns must match linear_feature_name_set order"
+    );
+    let ncols = frame.ncols();
+    let feat = frame.row_major();
     debug_assert_eq!(feat.len(), nrows * ncols);
     let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
 
     // Optional raw-matrix dump for offline feature-engineering iteration.
     // `TIMSSEEK_LDA_DUMP=/prefix` writes `<prefix>.f64` (row-major matrix),
-    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. Pre-INT.
+    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. This is the
+    // LINEAR-lane matrix + linear names (offline python reads this).
     if let Ok(prefix) = std::env::var("TIMSSEEK_LDA_DUMP") {
         dump_feature_matrix(&prefix, &feat, nrows, &names, &is_decoy);
     }
     eprintln!(
-        "  LDA: extracted {nrows} x {ncols} feature matrix in {:.2?}",
+        "  LDA: extracted {nrows} x {ncols} linear-lane matrix in {:.2?}",
         t.elapsed()
     );
-
-    // Gaussianize each feature toward the LDA normality assumption. Default on;
-    // `TIMSSEEK_LDA_TRANSFORM=none` disables for A/B comparison.
-    let use_int = std::env::var("TIMSSEEK_LDA_TRANSFORM")
-        .map(|v| !v.eq_ignore_ascii_case("none"))
-        .unwrap_or(true);
-    if use_int {
-        let t = Instant::now();
-        inverse_normal_transform_columns(&mut feat, nrows, ncols);
-        eprintln!(
-            "  LDA: inverse-normal transform ({ncols} cols) in {:.2?}",
-            t.elapsed()
-        );
-    }
 
     let stats = match LdaModel::fit(&feat, nrows, ncols, &is_decoy, DEFAULT_LDA_SHRINKAGE) {
         Some(model) => {
@@ -377,6 +390,111 @@ pub fn feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
         .map(|c| c.scoring.identity.peptide.aa_counts().is_some())
         .unwrap_or(false);
     feature_name_set(gate_on)
+}
+
+// ---------------------------------------------------------------------------
+// Lane feature walks (FeatFrame) — the ML consumer's live path
+// ---------------------------------------------------------------------------
+
+/// Which disjoint feature lane a walk targets. `Linear` = LDA (fields
+/// approx-Gaussian after their declared transform); `Nonlinear` = the rest
+/// (context, counts, sequence). `all` = linear ++ nonlinear (GBM).
+#[derive(Clone, Copy)]
+enum Lane {
+    Linear,
+    Nonlinear,
+}
+
+/// Build a batch [`FeatFrame`] for `data` in its CURRENT order (call AFTER any
+/// shuffle so frame row `i` aligns with `data[i]`). The walk order per lane is
+/// fixed — scoring blocks (composition order) -> `ResultMeta` -> `Derived` ->
+/// (nonlinear only) `sequence_counts` — identical to the name-set walk below,
+/// so frame columns and names cannot desync.
+fn build_lane_frame(data: &[CompetedCandidate], lane: Lane) -> FeatFrame {
+    let mut frame = FeatFrame::with_capacity(0, data.len());
+    {
+        let mut s = FrameSink::new(&mut frame, data.len());
+        for c in data {
+            s.begin_row();
+            match lane {
+                Lane::Linear => {
+                    c.scoring.push_linear_features(&mut s);
+                    c.result_meta().linear_features(&mut s);
+                    Derived::compute(&c.scoring).linear_features(&mut s);
+                    // sequence_counts has NO linear lane (context features).
+                }
+                Lane::Nonlinear => {
+                    c.scoring.push_nonlinear_features(&mut s);
+                    c.result_meta().nonlinear_features(&mut s);
+                    Derived::compute(&c.scoring).nonlinear_features(&mut s);
+                    sequence_counts::nonlinear_features(&c.scoring.identity.peptide, &mut s);
+                }
+            }
+        }
+        s.finish();
+    }
+    frame
+}
+
+/// The ALL-lane frame (linear then nonlinear, per row) — the GBM feature set.
+/// Column order = linear columns ++ nonlinear columns, matching
+/// [`all_feature_name_set`].
+fn build_all_frame(data: &[CompetedCandidate]) -> FeatFrame {
+    let mut frame = build_lane_frame(data, Lane::Linear);
+    frame.extend(build_lane_frame(data, Lane::Nonlinear));
+    frame
+}
+
+/// LINEAR-lane feature names (LDA), in the [`build_lane_frame`] walk order.
+/// `gate_on` is accepted for symmetry with the other lanes but is inert:
+/// `sequence_counts` (the only gated block) has no linear lane.
+pub fn linear_feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
+    let mut n = NameSink::new();
+    ScoringFields::push_linear_feature_names(&mut n);
+    <ResultMeta as ScoreBlock>::linear_feature_names(&mut n);
+    <Derived as ScoreBlock>::linear_feature_names(&mut n);
+    let _ = gate_on;
+    n.into_names()
+}
+
+/// NONLINEAR-lane feature names, in the [`build_lane_frame`] walk order. The
+/// gate appends the 22 trailing `sequence_counts` names when the run has parsed
+/// sequences (speclib-wide).
+pub fn nonlinear_feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
+    let mut n = NameSink::new();
+    ScoringFields::push_nonlinear_feature_names(&mut n);
+    <ResultMeta as ScoreBlock>::nonlinear_feature_names(&mut n);
+    <Derived as ScoreBlock>::nonlinear_feature_names(&mut n);
+    if gate_on {
+        sequence_counts::nonlinear_feature_names(&mut n);
+    }
+    n.into_names()
+}
+
+/// The ALL-lane feature names (GBM) = linear ++ nonlinear, matching
+/// [`build_all_frame`]'s column order.
+pub fn all_feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
+    let mut v = linear_feature_name_set(gate_on);
+    v.extend(nonlinear_feature_name_set(gate_on));
+    v
+}
+
+/// Read the speclib-wide sequence gate off the first candidate.
+fn gate_for(candidates: &[CompetedCandidate]) -> bool {
+    candidates
+        .first()
+        .map(|c| c.scoring.identity.peptide.aa_counts().is_some())
+        .unwrap_or(false)
+}
+
+/// [`linear_feature_name_set`] with the gate read from `candidates`.
+pub fn linear_feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
+    linear_feature_name_set(gate_for(candidates))
+}
+
+/// [`all_feature_name_set`] with the gate read from `candidates`.
+pub fn all_feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
+    all_feature_name_set(gate_for(candidates))
 }
 
 impl CompetedCandidate {
@@ -713,6 +831,58 @@ mod feature_tests {
         let names = feature_name_set(false);
         assert!(!names.iter().any(|n| n.as_ref() == "peptide_length"));
         assert!(!names.iter().any(|n| n.as_ref() == "peptide_n_mods"));
+    }
+
+    // --- Lane walks (the live ML path) ---
+
+    #[test]
+    fn lane_frame_columns_match_name_sets() {
+        // LANE ORDER PARITY: the FeatFrame column order MUST equal the name-set
+        // order for each lane. A desync here silently misattributes feature
+        // importances / stats and (for the value/label join) corrupts nothing
+        // by itself, but a column/name drift is exactly the class of bug this
+        // asserts against. Gate on (parsed sequence).
+        let data = vec![sample_competed_candidate_parsed()];
+
+        let lin = build_lane_frame(&data, Lane::Linear);
+        assert_eq!(lin.names(), linear_feature_name_set(true).as_slice());
+
+        let nonlin = build_lane_frame(&data, Lane::Nonlinear);
+        assert_eq!(nonlin.names(), nonlinear_feature_name_set(true).as_slice());
+
+        let all = build_all_frame(&data);
+        assert_eq!(all.names(), all_feature_name_set(true).as_slice());
+        assert_eq!(all.ncols(), lin.ncols() + nonlin.ncols());
+    }
+
+    #[test]
+    fn lane_frame_columns_match_name_sets_gate_off() {
+        // With no parsed sequence the nonlinear lane drops the 22 sequence names.
+        let data = vec![sample_competed_candidate_unparsed()];
+        let nonlin = build_lane_frame(&data, Lane::Nonlinear);
+        assert_eq!(nonlin.names(), nonlinear_feature_name_set(false).as_slice());
+        let all = build_all_frame(&data);
+        assert_eq!(all.names(), all_feature_name_set(false).as_slice());
+    }
+
+    #[test]
+    fn lane_feature_sets_are_nontrivial() {
+        // FEATURE-SET FLOOR GUARD: after the consumer flip the ALL set must be
+        // the full (~140) lane set, not the collapsed legacy walk (~25). Floors
+        // are set comfortably below the real counts so an accidental
+        // un-migration (a lane collapsing to no-op) fails loudly.
+        let lin = linear_feature_name_set(true).len();
+        let nonlin = nonlinear_feature_name_set(true).len();
+        let all = all_feature_name_set(true).len();
+        assert_eq!(all, lin + nonlin, "all == linear ++ nonlinear");
+        assert!(lin > 30, "linear lane collapsed? got {lin}");
+        assert!(nonlin > 10, "nonlinear lane collapsed? got {nonlin}");
+        assert!(all > 100, "feature set collapsed? got {all}");
+        // No duplicate names across the full set.
+        let mut seen = std::collections::HashSet::new();
+        for n in all_feature_name_set(true) {
+            assert!(seen.insert(n.clone()), "dup feature name: {n}");
+        }
     }
 
     #[test]
