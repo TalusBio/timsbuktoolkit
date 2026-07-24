@@ -663,9 +663,16 @@ mod feature_tests {
             .zip(vals.iter())
             .filter(|(n, _)| n.contains("mob"))
             .collect();
+        // NOTE(task D1): was 38 pre-migration. `mobility`/`ion_errors` moved
+        // off the legacy `features`/`feature_names` walk this counts onto
+        // `#[derive(ScoreBlock)]`'s new lane methods, which nothing consumes
+        // yet (see `ScoreBlock`'s trait docs) — only `identity`'s
+        // hand-written `precursor_mobility` still emits through this legacy
+        // path. Expected to grow back once the consumer switches to the lane
+        // methods (Task E/F).
         assert_eq!(
             mob.len(),
-            38,
+            1,
             "mobility feature count changed: {:?}",
             mob.iter().map(|(n, _)| n.as_ref()).collect::<Vec<_>>()
         );
