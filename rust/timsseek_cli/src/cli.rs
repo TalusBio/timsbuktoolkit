@@ -1,3 +1,4 @@
+use crate::config::RescoreModel;
 use clap::Parser;
 use std::path::PathBuf;
 use timsseek::DecoyPolicy;
@@ -57,6 +58,10 @@ pub struct Cli {
     /// - never: Use library as-is without decoy generation
     #[arg(long, value_name = "STRATEGY")]
     pub decoy_strategy: Option<DecoyPolicy>,
+
+    /// Rescore model; overrides the config file.
+    #[arg(long, value_enum)]
+    pub rescore_model: Option<RescoreModel>,
 
     /// Print the default TOML configuration to stdout and exit.
     #[arg(long, conflicts_with = "write_default_config")]

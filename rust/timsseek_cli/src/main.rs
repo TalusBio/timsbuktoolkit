@@ -389,15 +389,10 @@ fn process_single_file(
     // Rebucket to the scoring-optimal size. Existing on-disk caches
     // are written with `bucket_size=4096`, which is too large for the
     // tight mz tolerances used by Phase 1 / Phase 3 (measured: ~−24%
-    // wall at bucket_size=256). `BUCKET_SIZE` env var overrides for
-    // experiments.
-    let new_bucket_size: usize = std::env::var("BUCKET_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&bs| bs > 0)
-        .unwrap_or(256);
-    let step = TimedStep::begin(format_args!("Rebucket at {}", new_bucket_size));
-    let index = index.rebucket(new_bucket_size);
+    // wall at bucket_size=256).
+    const REBUCKET_LEN: usize = 256;
+    let step = TimedStep::begin(format_args!("Rebucket at {}", REBUCKET_LEN));
+    let index = index.rebucket(REBUCKET_LEN);
     step.finish();
 
     let fragmented_range = get_frag_range_from_index(&index)?;
@@ -453,6 +448,7 @@ fn process_single_file(
         load_index_ms,
         &config.calibration,
         no_feature_stats,
+        config.analysis.rescore_model,
     )
     .map_err(|e| errors::CliError::DataReading {
         source: format!("{}", e),
@@ -857,6 +853,11 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // Override decoy strategy if provided
     if let Some(strategy) = args.decoy_strategy {
         config.analysis.decoy_strategy = strategy;
+    }
+
+    // Override rescore model if provided
+    if let Some(model) = args.rescore_model {
+        config.analysis.rescore_model = model;
     }
 
     // Install tracing subscriber. The returned handle carries the log file

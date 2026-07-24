@@ -1,4 +1,7 @@
-use super::config::OutputConfig;
+use super::config::{
+    OutputConfig,
+    RescoreModel,
+};
 use indicatif::{
     ProgressBar,
     ProgressFinish,
@@ -208,6 +211,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
     no_feature_stats: bool,
+    rescore_model: RescoreModel,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -400,22 +404,27 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    // Model selectable at runtime; GBM is the default. `lda` = Sage-style
-    // shrinkage LDA (see timsseek::ml::lda), ~100x cheaper.
-    let model = std::env::var("TIMSSEEK_RESCORE_MODEL").unwrap_or_default();
-    let (data, feature_stats) = if model.eq_ignore_ascii_case("lda") {
-        eprintln!("  (rescore model: LDA)");
-        rescore_lda(competed)
-    } else if model.eq_ignore_ascii_case("hybrid") {
-        // Cross-fit LDA (linear lane) -> lda_score column -> GBM CV on
-        // `nonlinear + lda_score`. Leak-free: the cross-fit partition matches
-        // the GBM's internal fold assignment.
-        eprintln!("  (rescore model: hybrid LDA->GBM)");
-        rescore_hybrid(competed)
-    } else {
-        // GBM trains on the ALL lane; `rescore` builds the feature frame + name
-        // set internally (after its seeded shuffle) so they stay row-aligned.
-        rescore(competed)
+    // Model selectable via the `rescore_model` config field / `--rescore-model`
+    // CLI flag (CLI wins); GBM is the default. `Lda` = Sage-style shrinkage LDA
+    // (see timsseek::ml::lda), ~100x cheaper.
+    let (data, feature_stats) = match rescore_model {
+        RescoreModel::Lda => {
+            eprintln!("  (rescore model: LDA)");
+            rescore_lda(competed)
+        }
+        RescoreModel::Hybrid => {
+            // Cross-fit LDA (linear lane) -> lda_score column -> GBM CV on
+            // `nonlinear + lda_score`. Leak-free: the cross-fit partition matches
+            // the GBM's internal fold assignment.
+            eprintln!("  (rescore model: hybrid LDA->GBM)");
+            rescore_hybrid(competed)
+        }
+        RescoreModel::Gbm => {
+            // GBM trains on the ALL lane; `rescore` builds the feature frame +
+            // name set internally (after its seeded shuffle) so they stay
+            // row-aligned.
+            rescore(competed)
+        }
     };
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
@@ -1084,6 +1093,7 @@ pub fn run_pipeline(
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
     no_feature_stats: bool,
+    rescore_model: RescoreModel,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
@@ -1097,6 +1107,7 @@ pub fn run_pipeline(
         max_qvalue,
         calib_config,
         no_feature_stats,
+        rescore_model,
     )?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report

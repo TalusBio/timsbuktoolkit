@@ -137,49 +137,6 @@ impl Clone for GBMConfig {
     }
 }
 
-impl GBMConfig {
-    /// Start from `default()` and apply optional env overrides so the
-    /// accuracy/speed knob can be swept on the real pipeline without recompiling:
-    ///   TIMSSEEK_GBM_ITERS, TIMSSEEK_GBM_MAX_DEPTH, TIMSSEEK_GBM_MAX_LEAVES,
-    ///   TIMSSEEK_GBM_LR, TIMSSEEK_GBM_EARLY_STOP.
-    /// A slashed config (fewer/shallower trees) trades a small ID loss for a
-    /// large wall-clock win — the offline HistGBM sweep put ~100 it / ~15 leaves
-    /// at ~94% of the full-config IDs.
-    pub fn from_env() -> Self {
-        fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
-            std::env::var(k).ok().and_then(|v| v.parse().ok())
-        }
-        let mut c = Self::default();
-        if let Some(v) = env("TIMSSEEK_GBM_ITERS") {
-            c.iterations = v;
-        }
-        if let Some(v) = env("TIMSSEEK_GBM_MAX_DEPTH") {
-            c.max_depth = v;
-        }
-        if let Some(v) = env::<usize>("TIMSSEEK_GBM_MAX_LEAVES") {
-            c.max_leaves = v;
-            // Leaf-count caps only bite under loss-guided growth.
-            c.grow_policy = GrowPolicy::LossGuide;
-        }
-        if let Some(v) = env("TIMSSEEK_GBM_LR") {
-            c.learning_rate = v;
-        }
-        if let Some(v) = env("TIMSSEEK_GBM_EARLY_STOP") {
-            c.early_stopping_rounds = Some(v);
-        }
-        if std::env::var("TIMSSEEK_GBM_ITERS").is_ok()
-            || std::env::var("TIMSSEEK_GBM_MAX_LEAVES").is_ok()
-            || std::env::var("TIMSSEEK_GBM_MAX_DEPTH").is_ok()
-        {
-            eprintln!(
-                "  GBM config: iters={} max_depth={} max_leaves={} lr={} early_stop={:?}",
-                c.iterations, c.max_depth, c.max_leaves, c.learning_rate, c.early_stopping_rounds,
-            );
-        }
-        c
-    }
-}
-
 impl Default for GBMConfig {
     fn default() -> Self {
         GBMConfig {

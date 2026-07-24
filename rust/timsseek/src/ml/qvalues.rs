@@ -115,7 +115,7 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
     tracing::instrument(skip_all, level = "trace")
 )]
 pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
-    let config = GBMConfig::from_env();
+    let config = GBMConfig::default();
 
     // Canonicalize input order before the seeded shuffle. Upstream
     // stages can emit candidates in an order that drifts with
@@ -188,8 +188,9 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
 /// machinery (`assign_qval`, target-decoy competition) is untouched — only the
 /// discriminant score source changes.
 ///
-/// Selected at runtime via `TIMSSEEK_RESCORE_MODEL=lda`; the GBM `rescore`
-/// remains the default. See `ml::lda` for the fit details.
+/// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
+/// (`RescoreModel::Lda`); the GBM `rescore` remains the default. See
+/// `ml::lda` for the fit details.
 pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     use std::time::Instant;
 
@@ -284,13 +285,14 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
 /// a row's `lda_score` never saw its own label in either the LDA fit or the
 /// GBM fold it is held out of.
 ///
-/// Selected at runtime via `TIMSSEEK_RESCORE_MODEL=hybrid`.
+/// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
+/// (`RescoreModel::Hybrid`).
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
 pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
-    let config = GBMConfig::from_env();
+    let config = GBMConfig::default();
 
     // Canonical sort + seeded shuffle — IDENTICAL to `rescore` (same key, same
     // seed) so fold assignment and downstream q-values are reproducible.

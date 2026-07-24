@@ -26,6 +26,12 @@ chunk_size = 20000
 ## "never"       — trust the library's decoy labels
 decoy_strategy = "if_missing"
 
+## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
+## "gbm"    — cross-validated gradient-boosted trees (default)
+## "lda"    — Sage-style shrinkage LDA, ~100x cheaper
+## "hybrid" — cross-fit LDA score folded into the GBM feature frame
+rescore_model = "gbm"
+
 
 ## Extraction tolerances for the broad first-pass scoring (pre-calibration).
 ## Each field is an externally-tagged enum:

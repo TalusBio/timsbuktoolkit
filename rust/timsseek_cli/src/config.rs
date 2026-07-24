@@ -1,3 +1,4 @@
+use clap::ValueEnum;
 use serde::{
     Deserialize,
     Serialize,
@@ -80,6 +81,24 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub decoy_strategy: DecoyPolicy,
+
+    #[serde(default)]
+    pub rescore_model: RescoreModel,
+}
+
+/// Rescore model selectable via the `rescore_model` config field / the
+/// `--rescore-model` CLI flag (CLI wins). `Gbm` is the default; `Lda` is the
+/// ~100x cheaper Sage-style shrinkage-LDA path; `Hybrid` cross-fits an LDA
+/// score into the GBM's feature frame. See `timsseek::ml::qvalues` for the
+/// rescorers themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ValueEnum, Default)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum RescoreModel {
+    #[default]
+    Gbm,
+    Lda,
+    Hybrid,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -97,6 +116,7 @@ impl Config {
     /// - RT tolerance: unrestricted
     /// - Chunk size: 20000
     /// - Decoy strategy: if-missing
+    /// - Rescore model: gbm
     pub fn default_config() -> Self {
         Config {
             input: None,
@@ -110,6 +130,7 @@ impl Config {
                     rt: RtTolerance::Unrestricted,
                 },
                 decoy_strategy: DecoyPolicy::default(),
+                rescore_model: RescoreModel::default(),
             },
             calibration: CalibrationConfig::default(),
             output: None,
