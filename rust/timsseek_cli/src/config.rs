@@ -167,6 +167,23 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
+    /// Focused cross-crate drift guard: `CalibrationConfig::default()` lives in
+    /// the `timsseek` crate (where `mz_sigma` etc. are defined); the shipped
+    /// `[calibration]` toml is authored here. Changing one without the other is
+    /// exactly the `mz_sigma` 1.5→3.0 drift that slipped through — this asserts
+    /// they stay in sync with a pointed message so the culprit is obvious.
+    #[test]
+    fn toml_calibration_matches_rust_default() {
+        let from_toml: Config =
+            toml::from_str(DEFAULT_CONFIG_TOML).expect("default template must parse");
+        assert_eq!(
+            serde_json::to_string(&from_toml.calibration).unwrap(),
+            serde_json::to_string(&CalibrationConfig::default()).unwrap(),
+            "default_config.toml [calibration] drifted from timsseek \
+             CalibrationConfig::default() (e.g. mz_sigma) — update the toml to match"
+        );
+    }
+
     /// Drift guard: the embedded TOML template must deserialize to the same
     /// Config as `default_config()`. Comparison via JSON so we don't need
     /// PartialEq on every nested type.
