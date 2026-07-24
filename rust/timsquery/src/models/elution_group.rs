@@ -3,7 +3,7 @@ use crate::models::elution_group::tims_elution_group_builder::{
     SetPrecursorMonoMz,
 };
 use crate::traits::KeyLike;
-use crate::utils::constants::NEUTRON_MASS;
+use crate::utils::constants::C13_C12_MASS_DIFF;
 use serde::{
     Deserialize,
     Serialize,
@@ -176,7 +176,7 @@ impl<T: KeyLike> TimsElutionGroup<T> {
     }
 
     fn precursor_mz_iter(&self) -> impl Iterator<Item = f64> + '_ {
-        let offset = NEUTRON_MASS / self.precursor_charge as f64;
+        let offset = C13_C12_MASS_DIFF / self.precursor_charge as f64;
         self.precursor_labels.iter().map(move |isotope_index| {
             let idx = *isotope_index;
             self.precursor_mono_mz + (offset * idx as f64)

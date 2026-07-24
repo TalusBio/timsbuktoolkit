@@ -1,10 +1,10 @@
 use timsquery::TimsElutionGroup;
-use timsquery::utils::constants::NEUTRON_MASS;
+use timsquery::utils::constants::C13_C12_MASS_DIFF;
 
 use crate::IonAnnot;
 
 /// Buffer-override variant of `isotope_offset_fragments`: reset `dst` from `src`
-/// (reusing Vec/TinyVec capacity), then apply a neutron-mass m/z shift and label
+/// (reusing Vec/TinyVec capacity), then apply an isotope-spacing m/z shift and label
 /// rewrite to every fragment in place. Zero alloc after warm-up.
 ///
 /// `dst` and `src` must refer to distinct TimsElutionGroup values — typical use
@@ -19,7 +19,7 @@ pub fn apply_isotope_offset_fragments_into(
         let new_ions = k.try_with_offset_neutrons(offset).expect(
             "Isotope offset overflow - this should never happen with realistic isotope offsets",
         );
-        let mz_offset = (NEUTRON_MASS / k.get_charge() as f64) * offset as f64;
+        let mz_offset = (C13_C12_MASS_DIFF / k.get_charge() as f64) * offset as f64;
         *v += mz_offset;
         *k = new_ions;
     }
