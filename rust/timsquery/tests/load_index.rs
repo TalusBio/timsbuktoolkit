@@ -31,12 +31,14 @@ fn sidecar_roundtrip() {
     let dotd_copy = work.path().join("sample.d");
     copy_dir_recursive(&dotd, &dotd_copy).unwrap();
     let uri = dotd_copy.to_string_lossy().to_string();
-    let (_idx1, _) = load_index(&uri, &backend, true, IndexingCentroidingConfig::default()).unwrap();
+    let (_idx1, _) =
+        load_index(&uri, &backend, true, IndexingCentroidingConfig::default()).unwrap();
     assert!(
         work.path().join("sample.d.idx/metadata.json").is_file(),
         "sidecar .idx should contain metadata.json after build"
     );
-    let (_idx2, _) = load_index(&uri, &backend, false, IndexingCentroidingConfig::default()).unwrap();
+    let (_idx2, _) =
+        load_index(&uri, &backend, false, IndexingCentroidingConfig::default()).unwrap();
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {

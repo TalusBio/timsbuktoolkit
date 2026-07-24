@@ -2,8 +2,8 @@ use half::f16;
 use timscentroid::utils::OptionallyRestricted;
 use timscentroid::{
     CentroidingConfig,
-    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
 };
 use timsrust::TimsTofPath;
 
@@ -30,7 +30,10 @@ fn main() {
         early_stop_iterations: 200,
     };
     println!("Indexing with config: {:#?}", centroiding_config);
-    let (index, index_stats) = IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(centroiding_config));
+    let (index, index_stats) = IndexedTimstofPeaks::from_timstof_file(
+        &file,
+        IndexingCentroidingConfig::uniform(centroiding_config),
+    );
     println!("Indexing Stats: {}", index_stats);
 
     test_querying(&index);

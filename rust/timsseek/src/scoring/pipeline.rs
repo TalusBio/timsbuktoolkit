@@ -226,7 +226,7 @@ impl Default for CalibrationConfig {
         Self {
             n_calibrants: 2000,
             grid_size: 100,
-            mz_sigma: 1.5,
+            mz_sigma: 3.0,
             mobility_sigma: 3.0,
             rt_sigma_factor: 3.0,
             min_rt_tolerance_minutes: 0.5,

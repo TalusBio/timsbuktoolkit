@@ -6,8 +6,8 @@ mod processing;
 use clap::Parser;
 use timsquery::utils::TupleRange;
 use timsquery::{
-    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     load_index,
 };
 use timsseek::scoring::Scorer;
@@ -362,13 +362,16 @@ fn process_single_file(
     info!("Processing raw input: {}", raw_uri);
 
     let step = TimedStep::begin("Loading index");
-    let (index, index_source) =
-        load_index(raw_uri, backend, save_sidecar, IndexingCentroidingConfig::default()).map_err(|e| {
-            errors::CliError::Io {
-                source: format!("load_index({raw_uri}): {e}"),
-                path: Some(raw_uri.to_string()),
-            }
-        })?;
+    let (index, index_source) = load_index(
+        raw_uri,
+        backend,
+        save_sidecar,
+        IndexingCentroidingConfig::default(),
+    )
+    .map_err(|e| errors::CliError::Io {
+        source: format!("load_index({raw_uri}): {e}"),
+        path: Some(raw_uri.to_string()),
+    })?;
     // Surface the load mechanism (cache reuse vs raw build + which reader) on the
     // user-facing progress line — otherwise it's invisible.
     let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;

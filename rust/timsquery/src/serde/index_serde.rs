@@ -109,8 +109,8 @@
 //! ```
 
 use crate::{
-    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
 };
 use std::path::{
     Path,

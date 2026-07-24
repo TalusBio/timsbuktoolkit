@@ -35,8 +35,10 @@ fn main() {
     println!("Config: {:#?}", centroiding_config);
 
     let start_centroid = std::time::Instant::now();
-    let (index_original, index_stats) =
-        IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(centroiding_config));
+    let (index_original, index_stats) = IndexedTimstofPeaks::from_timstof_file(
+        &file,
+        IndexingCentroidingConfig::uniform(centroiding_config),
+    );
     let centroid_time = start_centroid.elapsed();
 
     println!("Indexing Stats: {}", index_stats);
