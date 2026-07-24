@@ -53,9 +53,8 @@ dp_lookback = 30
 
 ## Tolerance-derivation sigma multipliers. Bounds are set to
 ## `median ± sigma * 1.4826 * MAD` per dimension (robust-to-tails estimator
-## that matches mean ± stdev for Gaussian data). 1.5 on m/z is the observed
-## FDR-optimal trade between missing real peaks and admitting decoys.
-mz_sigma                 = 1.5
+## that matches mean ± stdev for Gaussian data).
+mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0
 
