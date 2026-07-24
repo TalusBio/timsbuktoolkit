@@ -1,7 +1,7 @@
 //! `#[derive(ScoreBlock)]` — projects a "score block" struct's fields into the
 //! six `ScoreBlock` trait methods (schema, columns, and the two ML feature
 //! lanes), so the projections cannot desync the way a hand-maintained
-//! `score_block!` macro_rules invocation could.
+//! `macro_rules!` invocation could.
 //!
 //! See the field grammar in [`derive_score_block`].
 
@@ -375,8 +375,7 @@ fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<Tok
 }
 
 /// Emits one `#field: <#ty as BlockFixture>::fixture()` initializer per
-/// field, for the generated `sample()` — mirrors `score_block!`'s
-/// `$fname : <$fty as BlockFixture>::fixture()` (mod.rs:540) byte-for-byte.
+/// field, for the generated `sample()`.
 fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
     fields
         .iter()
@@ -393,11 +392,12 @@ fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
 /// Pure codegen entry point: parses the `#[feat(...)]` grammar off each
 /// named field of `input` and emits an `impl ScoreBlock for $Name` with the
 /// six projection methods described in the crate docs, plus an inherent
-/// `sample()` (transition scaffolding matching `score_block!`'s fixture
-/// constructor, since `ScoringFields::sample_default()` — reachable from
-/// production code in `parquet_writer::build_record_batch` — calls
-/// `<$fty>::sample()` uniformly across every block). Unit-testable without a
-/// proc-macro context — see `tests` below.
+/// `sample()`. `sample()` stays un-gated (not `#[cfg(test)]`): it is called
+/// uniformly across every block by `ScoringFields::sample_default`, which
+/// itself must stay reachable in a normal (non-test) build because
+/// `ScoringFields::sample` is used from another crate's test module
+/// (`timsseek_cli`), compiled against timsseek's normal build. Unit-testable
+/// without a proc-macro context — see `tests` below.
 pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let fields = collect_fields(&input)?;
     let name = &input.ident;

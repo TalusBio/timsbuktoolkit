@@ -82,12 +82,6 @@ impl ScoreBlock for Identity {
         o.push(self.precursor_mobility as f64);
     }
 
-    fn feature_names(o: &mut NameSink) {
-        o.push("precursor_mz_round5");
-        o.push("precursor_charge");
-        o.push("precursor_mobility");
-    }
-
     fn column_schema(o: &mut SchemaSink) {
         o.str("sequence");
         o.u32("library_id");

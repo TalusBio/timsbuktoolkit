@@ -1,7 +1,7 @@
 //! Split-product family: cosine/scribe apex agreement scores.
 //!
-//! Owns its whole lifecycle in this file: the macro-generated projection
-//! ([`crate::score_block!`]), the raw compute (`compute_split_product`, run at
+//! Owns its whole lifecycle in this file: the derive-generated projection
+//! (`#[derive(ScoreBlock)]`), the raw compute (`compute_split_product`, run at
 //! the apex stage while chromatogram buffers are live) and its building blocks
 //! (`area_uniqueness`, `coelution_gradient`) plus the reusable
 //! [`CoelutionScratch`] buffers the scorer owns for allocation reuse. Generic

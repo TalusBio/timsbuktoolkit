@@ -16,7 +16,12 @@ use crate::scoring::blocks::{
 /// Push the 22 sequence feature *values* (`peptide_length`, 20 `aa_count_*`,
 /// `peptide_n_mods`) iff the peptide has a parsed sequence; otherwise nothing.
 /// The gate is speclib-wide, so within a fit either every record emits these or
-/// none do — see [`feature_names`] for the set-level names.
+/// none do.
+///
+/// Legacy (transition): kept only because [`crate::ml::cv::FeatureLike::as_feature`]
+/// must stay implemented for `CrossValidatedScorer<CompetedCandidate>`'s trait
+/// bound (a test-only ctor still exercises it); the live consumers read
+/// [`nonlinear_features`]/[`nonlinear_feature_names`] instead.
 pub fn features(peptide: &Peptide, o: &mut FeatSink) {
     if let Some(counts) = peptide.aa_counts() {
         let length = peptide.length().unwrap() as f64;
@@ -27,17 +32,6 @@ pub fn features(peptide: &Peptide, o: &mut FeatSink) {
         }
         o.push(n_mods);
     }
-}
-
-/// The 22 sequence feature *names*, in [`features`] order. Emitted by the
-/// set-level name builder only when the run's sequence gate is on; needs no
-/// peptide because the name-set is fixed (drives directly off `AA_COUNT_NAMES`).
-pub fn feature_names(o: &mut NameSink) {
-    o.push("peptide_length");
-    for &n in AA_COUNT_NAMES.iter() {
-        o.push(n);
-    }
-    o.push("peptide_n_mods");
 }
 
 /// Nonlinear-lane (tree-only) variant of [`features`]: same 22 values, but

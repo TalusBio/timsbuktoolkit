@@ -361,37 +361,6 @@ fn lda_feature_stats(
 // CompetedCandidate: FeatureLike + LabelledScore
 // ---------------------------------------------------------------------------
 
-/// The set-level ML feature-name list, built ONCE per fit. Names are a property
-/// of the feature *set*, not of any record — the value walk (`feature_values`)
-/// and this name walk share the same ordered sources, so they align by
-/// construction (macro blocks) or by adjacent hand-written pairs.
-///
-/// The four sources, in order: per-block names
-/// ([`ScoringFields::push_feature_names`]), post-model meta ([`ResultMeta`]),
-/// cross-field interactions ([`Derived`]), then the conditional sequence block
-/// ([`sequence_counts`]) LAST. `gate_on` = the run has parsed sequences
-/// (speclib-wide), appending the 22 sequence names.
-pub fn feature_name_set(gate_on: bool) -> Vec<Arc<str>> {
-    let mut n = NameSink::new();
-    ScoringFields::push_feature_names(&mut n);
-    <ResultMeta as ScoreBlock>::feature_names(&mut n);
-    <Derived as ScoreBlock>::feature_names(&mut n);
-    if gate_on {
-        sequence_counts::feature_names(&mut n);
-    }
-    n.into_names()
-}
-
-/// The set-level feature names for a batch of candidates. The sequence gate is
-/// speclib-wide, so it is read once from the first candidate.
-pub fn feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
-    let gate_on = candidates
-        .first()
-        .map(|c| c.scoring.identity.peptide.aa_counts().is_some())
-        .unwrap_or(false);
-    feature_name_set(gate_on)
-}
-
 // ---------------------------------------------------------------------------
 // Lane feature walks (FeatFrame) — the ML consumer's live path
 // ---------------------------------------------------------------------------
@@ -498,12 +467,16 @@ pub fn all_feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str
 }
 
 impl CompetedCandidate {
-    /// This record's ML feature *values*, in the set-level name order (see
-    /// [`feature_name_set`]). Names are not carried per record.
+    /// This record's ML feature *values* (legacy per-block walk). Retained only
+    /// because [`FeatureLike::as_feature`] must stay implemented for
+    /// `CrossValidatedScorer<CompetedCandidate>`'s trait bound — see
+    /// `ml::cv::CrossValidatedScorer::new_from_shuffled` (test-only caller);
+    /// the live `rescore`/`rescore_lda` paths read [`FeatFrame`] lanes instead
+    /// (`build_lane_frame`/`build_all_frame`).
     ///
-    /// Assembled from the same four ordered sources as the name walk: per-block
-    /// values, post-model meta, cross-field derived, then the conditional
-    /// sequence block LAST.
+    /// Assembled from the same three ordered sources: per-block values,
+    /// post-model meta, cross-field derived, then the conditional sequence
+    /// block LAST.
     fn feature_values(&self) -> Vec<f64> {
         let mut sink = FeatSink::new();
         self.scoring.push_features(&mut sink);
@@ -736,101 +709,6 @@ mod feature_tests {
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
-    }
-
-    #[test]
-    fn no_duplicate_feature_names() {
-        use std::collections::BTreeSet;
-        let names = feature_name_set(true);
-        let uniq: BTreeSet<&str> = names.iter().map(|n| n.as_ref()).collect();
-        assert_eq!(names.len(), uniq.len(), "duplicate feature name emitted");
-    }
-
-    #[test]
-    fn features_and_names_same_length() {
-        // The load-bearing invariant: a record's value vector aligns 1:1 with
-        // the set-level name list built independently. Both gates checked.
-        let on: Vec<f64> = sample_competed_candidate_parsed()
-            .as_feature()
-            .into_iter()
-            .collect();
-        assert_eq!(on.len(), feature_name_set(true).len());
-        let off: Vec<f64> = sample_competed_candidate_unparsed()
-            .as_feature()
-            .into_iter()
-            .collect();
-        assert_eq!(off.len(), feature_name_set(false).len());
-    }
-
-    #[test]
-    fn neutralize_mobility_nans_every_mobility_feature() {
-        // For a run with no searchable mobility axis (mzML/FAIMS), all
-        // mobility-derived value features must become NaN (forust missing), so
-        // they cannot bias the score with sentinel-derived constants. The one
-        // exception is the `_isna` missingness indicators: a neutralized source
-        // is non-finite, so its indicator is a finite 1.0 — that IS the signal,
-        // not a leak, so they are asserted separately.
-        let mut cand = sample_competed_candidate_parsed();
-        cand.scoring.neutralize_mobility();
-
-        let names = feature_name_set(true);
-        let vals: Vec<f64> = cand.as_feature().into_iter().collect();
-        assert_eq!(names.len(), vals.len());
-        let mob: Vec<(&Arc<str>, &f64)> = names
-            .iter()
-            .zip(vals.iter())
-            .filter(|(n, _)| n.contains("mob"))
-            .collect();
-        // NOTE(task D1): was 38 pre-migration. `mobility`/`ion_errors` moved
-        // off the legacy `features`/`feature_names` walk this counts onto
-        // `#[derive(ScoreBlock)]`'s new lane methods, which nothing consumes
-        // yet (see `ScoreBlock`'s trait docs) — only `identity`'s
-        // hand-written `precursor_mobility` still emits through this legacy
-        // path. Expected to grow back once the consumer switches to the lane
-        // methods (Task E/F).
-        assert_eq!(
-            mob.len(),
-            1,
-            "mobility feature count changed: {:?}",
-            mob.iter().map(|(n, _)| n.as_ref()).collect::<Vec<_>>()
-        );
-        for (n, v) in &mob {
-            if n.ends_with("_isna") {
-                assert_eq!(
-                    **v, 1.0,
-                    "mobility isna indicator {n} should be 1.0 (source is NaN), got {v}"
-                );
-            } else {
-                assert!(v.is_nan(), "mobility feature {n} should be NaN, got {v}");
-            }
-        }
-        // Non-mobility features are untouched (at least one stays finite).
-        assert!(
-            names
-                .iter()
-                .zip(vals.iter())
-                .any(|(n, v)| !n.contains("mob") && v.is_finite()),
-            "non-mobility features must remain finite"
-        );
-    }
-
-    #[test]
-    fn sequence_block_present_when_gate_on() {
-        let names = feature_name_set(true);
-        let has = |t: &str| names.iter().any(|n| n.as_ref() == t);
-        assert!(has("peptide_length"));
-        assert!(has("aa_count_A"));
-        assert!(has("aa_count_Y"));
-        assert!(has("peptide_n_mods"));
-        assert_eq!(&*names[names.len() - 22], "peptide_length");
-        assert_eq!(&*names[names.len() - 1], "peptide_n_mods");
-    }
-
-    #[test]
-    fn sequence_block_absent_when_gate_off() {
-        let names = feature_name_set(false);
-        assert!(!names.iter().any(|n| n.as_ref() == "peptide_length"));
-        assert!(!names.iter().any(|n| n.as_ref() == "peptide_n_mods"));
     }
 
     // --- Lane walks (the live ML path) ---

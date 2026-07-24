@@ -50,11 +50,12 @@ pub struct FinalizeInputs<'a> {
 }
 
 /// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the four purely-mechanical walks (`push_columns`, `push_features`,
-/// `push_feature_names`, `sample_default`) from that one list. Order is
-/// load-bearing (parquet columns and the positional ML value vector both
-/// follow it), so folding all four from a single ordered source is what makes
-/// their order *impossible* to desync.
+/// and the purely-mechanical walks (`push_columns`, `push_features` (legacy),
+/// `push_linear_features`/`push_nonlinear_features` (the live lane walks),
+/// `sample_default`) from that one list. Order is load-bearing (parquet
+/// columns and the positional ML value vector both follow it), so folding
+/// them all from a single ordered source is what makes their order
+/// *impossible* to desync.
 ///
 /// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
 /// the mobility-derived blocks participate) stay hand-written below: adding a
@@ -86,14 +87,16 @@ macro_rules! compose_scoring_fields {
 
             /// Emit every block's direct ML feature *values* (not the
             /// cross-field derived ones, nor the conditional sequence block).
+            ///
+            /// Legacy (transition) walk: kept only because
+            /// [`crate::ml::cv::FeatureLike::as_feature`] must stay
+            /// implemented for `CrossValidatedScorer<CompetedCandidate>`'s
+            /// trait bound (a test-only ctor calls it) — see
+            /// `CompetedCandidate::feature_values`. The live `rescore`/
+            /// `rescore_lda` paths read [`super::blocks::FeatFrame`] lanes via
+            /// `push_linear_features`/`push_nonlinear_features` instead.
             pub fn push_features(&self, o: &mut FeatSink) {
                 $( self.$fname.features(o); )*
-            }
-
-            /// Emit every block's ML feature *names*, in the same order as
-            /// [`Self::push_features`] (set-level; no `&self`).
-            pub fn push_feature_names(o: &mut NameSink) {
-                $( <$fty as ScoreBlock>::feature_names(o); )*
             }
 
             /// Emit every block's LINEAR-lane ML feature *values* into a
@@ -238,6 +241,7 @@ pub struct FinalResult {
 
 impl FinalResult {
     /// Schema/test fixture with zeroed meta fields.
+    #[cfg(test)]
     pub fn sample() -> Self {
         Self {
             scoring: ScoringFields::sample_default(),

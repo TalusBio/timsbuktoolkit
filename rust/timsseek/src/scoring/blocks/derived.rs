@@ -1,11 +1,12 @@
 //! Cross-field / cross-block ML features. These reference more than one field,
 //! so they are NOT `#[feat]` attrs (which are strictly unary) — instead a
 //! hand-written [`Derived::compute`] reads a view of the finalized
-//! [`ScoringFields`] and fills a normal `score_block!` struct. The block emits
-//! ML features/names through the same walks as every other block (so value and
-//! name can't desync), but is NOT part of `compose_scoring_fields!`, so
-//! `columns()` is never called and these stay ML-only (no parquet column).
-//! Emitted after the per-block features, before the sequence block.
+//! [`ScoringFields`] and fills a normal `#[derive(ScoreBlock)]` struct. The
+//! block emits ML features/names through the same lane walks as every other
+//! block (so value and name can't desync), but is NOT part of
+//! `compose_scoring_fields!`, so `columns()` is never called and these stay
+//! ML-only (no parquet column). Emitted after the per-block features, before
+//! the sequence block.
 
 use timsseek_macros::ScoreBlock;
 

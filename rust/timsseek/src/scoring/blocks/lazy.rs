@@ -3,10 +3,9 @@
 //! the secondary spectral-query collectors (finalize stage).
 //!
 //! Canary block for the `#[derive(ScoreBlock)]` migration (see
-//! `timsseek_macros`): both structs route their fields through the new
-//! `column_schema`/`linear_features`/`linear_feature_names` lane methods
-//! instead of the legacy `score_block!`-generated `features`/`feature_names`
-//! walk, which the derive leaves defaulted (no-op) for these two blocks.
+//! `timsseek_macros`): both structs route their fields through the
+//! `column_schema`/`linear_features`/`linear_feature_names` lane methods —
+//! the live path the ML consumer reads via `FeatFrame`.
 
 use serde::Serialize;
 use timsseek_macros::ScoreBlock;

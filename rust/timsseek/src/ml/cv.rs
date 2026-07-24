@@ -603,8 +603,9 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
 
     /// Compute per-fold feature means + Forust Gain importance.
     ///
-    /// `names` is the set-level feature-name list, in the same order
-    /// `as_feature` emits (see [`crate::ml::qvalues::feature_name_set`]).
+    /// `names` is the set-level feature-name list, in the same order as the
+    /// `PrecomputedFeatures` columns (see `crate::ml::qvalues::all_feature_name_set`
+    /// / `linear_feature_name_set` for the live lane-based callers).
     /// Folds with no classifier (shouldn't happen post-fit) produce empty maps.
     pub fn feature_stats(&self, names: &[Arc<str>]) -> RescoreFeatureStats {
         let mut out: RescoreFeatureStats = Vec::with_capacity(self.n_folds as usize);
