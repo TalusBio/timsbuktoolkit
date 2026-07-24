@@ -30,6 +30,7 @@ use std::sync::Arc;
 pub mod apex_features;
 pub mod counts;
 pub mod derived;
+pub mod frame;
 pub mod identity;
 pub mod intensities;
 pub mod ion_errors;
@@ -41,6 +42,11 @@ pub mod result_meta;
 pub mod rt;
 pub mod sequence_counts;
 pub mod split_product;
+
+pub use frame::{
+    FeatFrame,
+    FrameSink,
+};
 
 // ---------------------------------------------------------------------------
 // Trait
