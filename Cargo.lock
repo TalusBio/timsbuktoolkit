@@ -6237,6 +6237,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "timsseek_macros"
+version = "0.32.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "tiny-keccak"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
