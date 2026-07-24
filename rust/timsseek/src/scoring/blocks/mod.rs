@@ -49,10 +49,9 @@ pub mod split_product;
 /// A family of scores that projects itself into the two output surfaces.
 ///
 /// `columns` emits the raw stored value at its original dtype (the Parquet
-/// projection; schema/name-compatible with the pre-block schema — same column
-/// name→dtype→nullability set, though column order may differ). `features` emits the
-/// ML projection, which may apply `#[feat(..)]` transforms and fan a single
-/// field out to several features.
+/// projection). Array fields fan out to one column per element, named
+/// `{field}_{i}`. `features` emits the ML projection, which may apply
+/// `#[feat(..)]` transforms and fan a single field out to several features.
 pub trait ScoreBlock {
     fn columns(&self, out: &mut ColSink);
     /// Emit this block's ML feature *values*, in a fixed per-block order.
