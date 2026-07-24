@@ -5,16 +5,19 @@
 //! `sq_delta_ms1_ms2_mobility`, so a future move of the square cannot desync
 //! from its source (see [`crate::scoring::results::ScoringFields::neutralize_mobility`]).
 
-use crate::score_block;
+use timsseek_macros::ScoreBlock;
+
 use crate::scoring::offsets::MzMobilityOffsets;
 
-score_block! {
-    /// Stage: finalize (from `MzMobilityOffsets`).
-    pub struct Mobility {
-        #[raw] pub obs_mobility: f32,
-        #[raw] pub delta_ms1_ms2_mobility: f32,
-        #[raw] pub sq_delta_ms1_ms2_mobility: f32,
-    }
+/// Stage: finalize (from `MzMobilityOffsets`).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct Mobility {
+    #[feat(raw, linear = false)]
+    pub obs_mobility: f32,
+    #[feat(raw, isna)]
+    pub delta_ms1_ms2_mobility: f32,
+    #[feat(raw)]
+    pub sq_delta_ms1_ms2_mobility: f32,
 }
 
 impl Mobility {

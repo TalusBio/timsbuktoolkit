@@ -2,20 +2,22 @@
 //! `FinalizeCounts` field is the number of scored fragment ions (known only at
 //! finalize).
 
-use crate::score_block;
+use timsseek_macros::ScoreBlock;
 
-score_block! {
-    /// Stage: apex (peak-shape counts).
-    pub struct ApexCounts {
-        #[raw] pub rising_cycles: u8,
-        #[raw] pub falling_cycles: u8,
-        #[raw] pub npeaks: u8,
-    }
+/// Stage: apex (peak-shape counts).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct ApexCounts {
+    #[feat(raw)]
+    pub rising_cycles: u8,
+    #[feat(raw)]
+    pub falling_cycles: u8,
+    #[feat(raw)]
+    pub npeaks: u8,
 }
 
-score_block! {
-    /// Stage: finalize (number of scored fragment ions).
-    pub struct FinalizeCounts {
-        #[raw] pub n_scored_fragments: u8,
-    }
+/// Stage: finalize (number of scored fragment ions).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct FinalizeCounts {
+    #[feat(raw)]
+    pub n_scored_fragments: u8,
 }

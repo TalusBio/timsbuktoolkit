@@ -1,7 +1,7 @@
 //! Split-product family: cosine/scribe apex agreement scores.
 //!
-//! Owns its whole lifecycle in this file: the macro-generated projection
-//! ([`crate::score_block!`]), the raw compute (`compute_split_product`, run at
+//! Owns its whole lifecycle in this file: the derive-generated projection
+//! (`#[derive(ScoreBlock)]`), the raw compute (`compute_split_product`, run at
 //! the apex stage while chromatogram buffers are live) and its building blocks
 //! (`area_uniqueness`, `coelution_gradient`) plus the reusable
 //! [`CoelutionScratch`] buffers the scorer owns for allocation reuse. Generic
@@ -10,28 +10,36 @@
 use array2d::Array2D;
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
+use timsseek_macros::ScoreBlock;
 
 use crate::models::query_item::linear_get;
-use crate::score_block;
 use crate::scoring::apex_dsp::{
     argmax,
     center_normalize,
 };
 
-score_block! {
-    /// Stage: apex (built from `SplitProductScore`, computed while chromatogram
-    /// buffers are live).
-    pub struct SplitProduct {
-        #[feat(ln1p)] pub split_product_score: f32,
-        #[feat(ln1p)] pub cosine_au: f32,
-        #[feat(ln1p)] pub scribe_au: f32,
-        #[raw] pub cosine_cg: f32,
-        #[raw] pub scribe_cg: f32,
-        #[raw] pub cosine_weighted_coelution: f32,
-        #[raw] pub cosine_gradient_consistency: f32,
-        #[raw] pub scribe_weighted_coelution: f32,
-        #[raw] pub scribe_gradient_consistency: f32,
-    }
+/// Stage: apex (built from `SplitProductScore`, computed while chromatogram
+/// buffers are live).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct SplitProduct {
+    #[feat(ln1p)]
+    pub split_product_score: f32,
+    #[feat(ln1p)]
+    pub cosine_au: f32,
+    #[feat(ln1p)]
+    pub scribe_au: f32,
+    #[feat(raw)]
+    pub cosine_cg: f32,
+    #[feat(raw)]
+    pub scribe_cg: f32,
+    #[feat(raw)]
+    pub cosine_weighted_coelution: f32,
+    #[feat(raw)]
+    pub cosine_gradient_consistency: f32,
+    #[feat(raw)]
+    pub scribe_weighted_coelution: f32,
+    #[feat(raw)]
+    pub scribe_gradient_consistency: f32,
 }
 
 impl From<&SplitProductScore> for SplitProduct {

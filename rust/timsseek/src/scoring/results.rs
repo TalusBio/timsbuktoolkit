@@ -26,7 +26,9 @@ use super::blocks::split_product::SplitProduct;
 use super::blocks::{
     ColSink,
     FeatSink,
+    FrameSink,
     NameSink,
+    SchemaSink,
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
@@ -48,11 +50,12 @@ pub struct FinalizeInputs<'a> {
 }
 
 /// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the four purely-mechanical walks (`push_columns`, `push_features`,
-/// `push_feature_names`, `sample_default`) from that one list. Order is
-/// load-bearing (parquet columns and the positional ML value vector both
-/// follow it), so folding all four from a single ordered source is what makes
-/// their order *impossible* to desync.
+/// and the purely-mechanical walks (`push_columns`, `push_features` (legacy),
+/// `push_linear_features`/`push_nonlinear_features` (the live lane walks),
+/// `sample_default`) from that one list. Order is load-bearing (parquet
+/// columns and the positional ML value vector both follow it), so folding
+/// them all from a single ordered source is what makes their order
+/// *impossible* to desync.
 ///
 /// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
 /// the mobility-derived blocks participate) stay hand-written below: adding a
@@ -76,16 +79,49 @@ macro_rules! compose_scoring_fields {
                 $( self.$fname.columns(o); )*
             }
 
+            /// Emit every block's Parquet SCHEMA (value-free), in composition order —
+            /// same order as `push_columns`.
+            pub fn push_column_schema(o: &mut $crate::scoring::blocks::SchemaSink) {
+                $( <$fty as $crate::scoring::blocks::ScoreBlock>::column_schema(o); )*
+            }
+
             /// Emit every block's direct ML feature *values* (not the
             /// cross-field derived ones, nor the conditional sequence block).
+            ///
+            /// Legacy (transition) walk: kept only because
+            /// [`crate::ml::cv::FeatureLike::as_feature`] must stay
+            /// implemented for `CrossValidatedScorer<CompetedCandidate>`'s
+            /// trait bound (a test-only ctor calls it) — see
+            /// `CompetedCandidate::feature_values`. The live `rescore`/
+            /// `rescore_lda` paths read [`super::blocks::FeatFrame`] lanes via
+            /// `push_linear_features`/`push_nonlinear_features` instead.
             pub fn push_features(&self, o: &mut FeatSink) {
                 $( self.$fname.features(o); )*
             }
 
-            /// Emit every block's ML feature *names*, in the same order as
-            /// [`Self::push_features`] (set-level; no `&self`).
-            pub fn push_feature_names(o: &mut NameSink) {
-                $( <$fty as ScoreBlock>::feature_names(o); )*
+            /// Emit every block's LINEAR-lane ML feature *values* into a
+            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
+            /// The LDA consumer walks this lane.
+            pub fn push_linear_features(&self, o: &mut FrameSink) {
+                $( self.$fname.linear_features(o); )*
+            }
+
+            /// LINEAR-lane feature *names*, same order as
+            /// [`Self::push_linear_features`] (set-level; no `&self`).
+            pub fn push_linear_feature_names(o: &mut NameSink) {
+                $( <$fty as ScoreBlock>::linear_feature_names(o); )*
+            }
+
+            /// Emit every block's NONLINEAR-lane ML feature *values* into a
+            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
+            pub fn push_nonlinear_features(&self, o: &mut FrameSink) {
+                $( self.$fname.nonlinear_features(o); )*
+            }
+
+            /// NONLINEAR-lane feature *names*, same order as
+            /// [`Self::push_nonlinear_features`] (set-level; no `&self`).
+            pub fn push_nonlinear_feature_names(o: &mut NameSink) {
+                $( <$fty as ScoreBlock>::nonlinear_feature_names(o); )*
             }
 
             /// Fixture using the placeholder peptide from [`Identity::sample`].
@@ -205,6 +241,7 @@ pub struct FinalResult {
 
 impl FinalResult {
     /// Schema/test fixture with zeroed meta fields.
+    #[cfg(test)]
     pub fn sample() -> Self {
         Self {
             scoring: ScoringFields::sample_default(),
@@ -223,6 +260,13 @@ impl FinalResult {
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
+    }
+
+    /// Value-free Parquet schema: scoring blocks (composition order) then the
+    /// post-model meta block — mirrors `emit_row`'s column order exactly.
+    pub fn column_schema(o: &mut SchemaSink) {
+        ScoringFields::push_column_schema(o);
+        <ResultMeta as ScoreBlock>::column_schema(o);
     }
 }
 

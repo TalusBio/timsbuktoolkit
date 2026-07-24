@@ -26,6 +26,12 @@ chunk_size = 20000
 ## "never"       — trust the library's decoy labels
 decoy_strategy = "if_missing"
 
+## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
+## "gbm"    — cross-validated gradient-boosted trees (default)
+## "lda"    — Sage-style shrinkage LDA, ~100x cheaper
+## "hybrid" — cross-fit LDA score folded into the GBM feature frame
+rescore_model = "gbm"
+
 
 ## Extraction tolerances for the broad first-pass scoring (pre-calibration).
 ## Each field is an externally-tagged enum:
@@ -53,9 +59,8 @@ dp_lookback = 30
 
 ## Tolerance-derivation sigma multipliers. Bounds are set to
 ## `median ± sigma * 1.4826 * MAD` per dimension (robust-to-tails estimator
-## that matches mean ± stdev for Gaussian data). 1.5 on m/z is the observed
-## FDR-optimal trade between missing real peaks and admitting decoys.
-mz_sigma                 = 1.5
+## that matches mean ± stdev for Gaussian data).
+mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0
 

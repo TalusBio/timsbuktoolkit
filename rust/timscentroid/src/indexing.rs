@@ -1808,7 +1808,11 @@ mod tests {
             out.sort_by(|a, b| {
                 a.mz.total_cmp(&b.mz)
                     .then(a.cycle_index.as_u32().cmp(&b.cycle_index.as_u32()))
-                    .then(a.mobility_ook0.to_f32().total_cmp(&b.mobility_ook0.to_f32()))
+                    .then(
+                        a.mobility_ook0
+                            .to_f32()
+                            .total_cmp(&b.mobility_ook0.to_f32()),
+                    )
                     .then(a.intensity.total_cmp(&b.intensity))
             });
             out

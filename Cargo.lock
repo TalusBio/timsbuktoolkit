@@ -6207,6 +6207,7 @@ dependencies = [
  "timscentroid",
  "timsquery",
  "timsrust",
+ "timsseek_macros",
  "tracing",
  "zstd",
 ]
@@ -6234,6 +6235,15 @@ dependencies = [
  "tracing",
  "tracing-profile",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "timsseek_macros"
+version = "0.32.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

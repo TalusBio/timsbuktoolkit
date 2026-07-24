@@ -3,14 +3,15 @@
 //! emits only the two delta-group fields (`discriminant_score`/`qvalue` are
 //! Parquet-only).
 
-use crate::score_block;
+use timsseek_macros::ScoreBlock;
 
-score_block! {
-    /// Stage: post-model (output-only).
-    pub struct ResultMeta {
-        #[raw] pub delta_group: f32,
-        #[raw] pub delta_group_ratio: f32,
-        #[col_only] pub discriminant_score: f32,
-        #[col_only] pub qvalue: f32,
-    }
+/// Stage: post-model (output-only).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct ResultMeta {
+    #[feat(raw)]
+    pub delta_group: f32,
+    #[feat(raw)]
+    pub delta_group_ratio: f32,
+    pub discriminant_score: f32,
+    pub qvalue: f32,
 }

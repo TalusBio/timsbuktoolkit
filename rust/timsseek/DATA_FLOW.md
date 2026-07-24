@@ -277,8 +277,8 @@ The `as_feature()` method produces the following features for rescoring:
 - 11 apex features (peak_shape through per_frag_gaussian_corr)
 
 **Per-ion errors (20 values):**
-- 7× `ms2_mz_error`, 7× `ms2_mobility_error`
-- 3× `ms1_mz_error`, 3× `ms1_mobility_error`
+- 7× `ms2_mz_errors_{i}`, 7× `ms2_mobility_errors_{i}`
+- 3× `ms1_mz_errors_{i}`, 3× `ms1_mobility_errors_{i}`
 
 **Intensities:**
 - `ln(ms1_summed_precursor_intensity)`

@@ -1,29 +1,39 @@
 //! Cross-field / cross-block ML features. These reference more than one field,
 //! so they are NOT `#[feat]` attrs (which are strictly unary) — instead a
 //! hand-written [`Derived::compute`] reads a view of the finalized
-//! [`ScoringFields`] and fills a normal `score_block!` struct. The block emits
-//! ML features/names through the same walks as every other block (so value and
-//! name can't desync), but is NOT part of `compose_scoring_fields!`, so
-//! `columns()` is never called and these stay ML-only (no parquet column).
-//! Emitted after the per-block features, before the sequence block.
+//! [`ScoringFields`] and fills a normal `#[derive(ScoreBlock)]` struct. The
+//! block emits ML features/names through the same lane walks as every other
+//! block (so value and name can't desync), but is NOT part of
+//! `compose_scoring_fields!`, so `columns()` is never called and these stay
+//! ML-only (no parquet column). Emitted after the per-block features, before
+//! the sequence block.
 
-use crate::score_block;
+use timsseek_macros::ScoreBlock;
+
 use crate::scoring::results::ScoringFields;
 
-score_block! {
-    /// Cross-field interaction features (ML-only). Field names ARE the feature
-    /// names; order is the emission order.
-    pub struct Derived {
-        #[raw] pub main_over_delta_next: f64,
-        #[raw] pub rt_err: f64,
-        #[raw] pub ms2_intensity_ratios_max: f64,
-        #[raw] pub main_times_delta_next: f64,
-        #[raw] pub split_product_x_coverage: f64,
-        #[raw] pub ms2_mz_mean_abs_error: f64,
-        #[raw] pub ms2_mob_mean_abs_error: f64,
-        #[raw] pub ms1_mz_mean_abs_error: f64,
-        #[raw] pub ms1_mob_mean_abs_error: f64,
-    }
+/// Cross-field interaction features (ML-only). Field names ARE the feature
+/// names; order is the emission order.
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct Derived {
+    #[feat(log2)]
+    pub main_over_delta_next: f64,
+    #[feat(raw, abs)]
+    pub rt_err: f64,
+    #[feat(raw)]
+    pub ms2_intensity_ratios_max: f64,
+    #[feat(log2)]
+    pub main_times_delta_next: f64,
+    #[feat(log2)]
+    pub split_product_x_coverage: f64,
+    #[feat(raw)]
+    pub ms2_mz_mean_abs_error: f64,
+    #[feat(raw)]
+    pub ms2_mob_mean_abs_error: f64,
+    #[feat(raw)]
+    pub ms1_mz_mean_abs_error: f64,
+    #[feat(raw)]
+    pub ms1_mob_mean_abs_error: f64,
 }
 
 impl Derived {

@@ -9,13 +9,19 @@ use crate::models::AA_COUNT_NAMES;
 use crate::models::sequence::Peptide;
 use crate::scoring::blocks::{
     FeatSink,
+    FrameSink,
     NameSink,
 };
 
 /// Push the 22 sequence feature *values* (`peptide_length`, 20 `aa_count_*`,
 /// `peptide_n_mods`) iff the peptide has a parsed sequence; otherwise nothing.
 /// The gate is speclib-wide, so within a fit either every record emits these or
-/// none do — see [`feature_names`] for the set-level names.
+/// none do.
+///
+/// Legacy (transition): kept only because [`crate::ml::cv::FeatureLike::as_feature`]
+/// must stay implemented for `CrossValidatedScorer<CompetedCandidate>`'s trait
+/// bound (a test-only ctor still exercises it); the live consumers read
+/// [`nonlinear_features`]/[`nonlinear_feature_names`] instead.
 pub fn features(peptide: &Peptide, o: &mut FeatSink) {
     if let Some(counts) = peptide.aa_counts() {
         let length = peptide.length().unwrap() as f64;
@@ -28,10 +34,24 @@ pub fn features(peptide: &Peptide, o: &mut FeatSink) {
     }
 }
 
-/// The 22 sequence feature *names*, in [`features`] order. Emitted by the
-/// set-level name builder only when the run's sequence gate is on; needs no
-/// peptide because the name-set is fixed (drives directly off `AA_COUNT_NAMES`).
-pub fn feature_names(o: &mut NameSink) {
+/// Nonlinear-lane (tree-only) variant of [`features`]: same 22 values, but
+/// name-bound into a `FrameSink`. Conditional identically (emits iff parsed).
+/// `counts` and `AA_COUNT_NAMES` are both fixed `[_; 20]` arrays, so the zip
+/// is compile-time guaranteed to cover all 20 counts.
+pub fn nonlinear_features(peptide: &Peptide, o: &mut FrameSink) {
+    if let Some(counts) = peptide.aa_counts() {
+        let length = peptide.length().unwrap() as f64;
+        let n_mods = peptide.n_mods().unwrap() as f64;
+        o.push("peptide_length", length);
+        for (c, name) in counts.iter().zip(AA_COUNT_NAMES.iter()) {
+            o.push(name, *c);
+        }
+        o.push("peptide_n_mods", n_mods);
+    }
+}
+
+/// Nonlinear-lane names for [`nonlinear_features`] (same as [`feature_names`]).
+pub fn nonlinear_feature_names(o: &mut NameSink) {
     o.push("peptide_length");
     for &n in AA_COUNT_NAMES.iter() {
         o.push(n);
