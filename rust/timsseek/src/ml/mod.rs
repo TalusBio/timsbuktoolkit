@@ -4,6 +4,7 @@ pub mod qvalues;
 pub use cv::RescoreFeatureStats;
 pub use qvalues::{
     rescore,
+    rescore_hybrid,
     rescore_lda,
 };
 

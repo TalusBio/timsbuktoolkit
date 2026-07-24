@@ -25,6 +25,7 @@ use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::{
     RescoreFeatureStats,
     rescore,
+    rescore_hybrid,
     rescore_lda,
 };
 use timsseek::rt_calibration::{
@@ -401,12 +402,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let step = TimedStep::begin("Phase 5: Rescore");
     // Model selectable at runtime; GBM is the default. `lda` = Sage-style
     // shrinkage LDA (see timsseek::ml::lda), ~100x cheaper.
-    let use_lda = std::env::var("TIMSSEEK_RESCORE_MODEL")
-        .map(|v| v.eq_ignore_ascii_case("lda"))
-        .unwrap_or(false);
-    let (data, feature_stats) = if use_lda {
+    let model = std::env::var("TIMSSEEK_RESCORE_MODEL").unwrap_or_default();
+    let (data, feature_stats) = if model.eq_ignore_ascii_case("lda") {
         eprintln!("  (rescore model: LDA)");
         rescore_lda(competed)
+    } else if model.eq_ignore_ascii_case("hybrid") {
+        // Cross-fit LDA (linear lane) -> lda_score column -> GBM CV on
+        // `nonlinear + lda_score`. Leak-free: the cross-fit partition matches
+        // the GBM's internal fold assignment.
+        eprintln!("  (rescore model: hybrid LDA->GBM)");
+        rescore_hybrid(competed)
     } else {
         // GBM trains on the ALL lane; `rescore` builds the feature frame + name
         // set internally (after its seeded shuffle) so they stay row-aligned.

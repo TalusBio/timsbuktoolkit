@@ -269,6 +269,133 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
     (scored.into_iter().map(|c| c.into_final()).collect(), stats)
 }
 
+/// Hybrid rescorer: cross-fit an LDA on the LINEAR lane, push its (leak-free)
+/// `lda_score` as one extra column into the NONLINEAR lane, then train the GBM
+/// CV on `nonlinear + lda_score`. The GBM re-sees ~30 features instead of the
+/// full ~131 (the compression play) at ~parity.
+///
+/// LEAK-FREEDOM: `lda_score` is label-aware (LDA fits on target/decoy labels).
+/// A single LDA fit on all rows fed to the CV'd GBM would let each held-out
+/// fold's `lda_score` peek at its own labels -> optimistic FDR. Instead we
+/// cross-fit: for each fold `m`, fit the LDA on rows where `i % n_folds != m`
+/// and score only the rows where `i % n_folds == m`. This partition MUST match
+/// `CrossValidatedScorer`'s internal `assigned_fold[i] = i % n_folds`
+/// (`ml::cv::CrossValidatedScorer::new_from_shuffled_with_precomputed`) so that
+/// a row's `lda_score` never saw its own label in either the LDA fit or the
+/// GBM fold it is held out of.
+///
+/// Selected at runtime via `TIMSSEEK_RESCORE_MODEL=hybrid`.
+#[cfg_attr(
+    feature = "instrumentation",
+    tracing::instrument(skip_all, level = "trace")
+)]
+pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
+    let config = GBMConfig::from_env();
+
+    // Canonical sort + seeded shuffle — IDENTICAL to `rescore` (same key, same
+    // seed) so fold assignment and downstream q-values are reproducible.
+    data.sort_unstable_by_key(|c| {
+        (
+            c.scoring.identity.library_id,
+            c.scoring.identity.precursor_charge,
+        )
+    });
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
+    data.shuffle(&mut rng);
+
+    // 3 folds, fold(i) = i % n_folds — this MUST equal the scorer's internal
+    // `assigned_fold` (verified in cv.rs) or the leak-free guarantee breaks.
+    let n_folds: usize = 3;
+    let nrows = data.len();
+
+    // Build BOTH lane frames AFTER the shuffle over the SAME `data`, so row `i`
+    // is the same candidate in lin, nl, lda_score, responses, and the moved
+    // `data`.
+    let lin = build_lane_frame(&data, Lane::Linear);
+    let lin_ncols = lin.ncols();
+    let lin_rm = lin.row_major();
+    let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
+
+    // --- CROSS-FIT lda_score (leak-free) ---
+    let mut lda_score = vec![0.0f64; nrows];
+    for m in 0..n_folds {
+        // TRAIN rows = every row NOT in fold m, gathered contiguously.
+        let mut train: Vec<f64> = Vec::with_capacity(lin_rm.len());
+        let mut train_is_decoy: Vec<bool> = Vec::with_capacity(nrows);
+        for i in 0..nrows {
+            if i % n_folds != m {
+                train.extend_from_slice(&lin_rm[i * lin_ncols..(i + 1) * lin_ncols]);
+                train_is_decoy.push(is_decoy[i]);
+            }
+        }
+        let train_nrows = train_is_decoy.len();
+        match LdaModel::fit(
+            &train,
+            train_nrows,
+            lin_ncols,
+            &train_is_decoy,
+            DEFAULT_LDA_SHRINKAGE,
+        ) {
+            // Score only the held-out fold with an LDA that never saw it.
+            Some(m_lda) => {
+                for i in 0..nrows {
+                    if i % n_folds == m {
+                        lda_score[i] = m_lda.score(&lin_rm[i * lin_ncols..(i + 1) * lin_ncols]);
+                    }
+                }
+            }
+            None => {
+                eprintln!(
+                    "  hybrid: LDA fold {m} fit failed (singular/empty class); lda_score=0 for its rows"
+                );
+                // leave 0.0 for this fold's rows
+            }
+        }
+    }
+
+    // --- Build the NONLINEAR frame + push lda_score as the LAST column ---
+    // `nl.push_column` appends lda_score after the nonlinear columns, so `names`
+    // must be the nonlinear names THEN "lda_score" to match `row_major` order.
+    let mut nl = build_lane_frame(&data, Lane::Nonlinear);
+    let mut names = nonlinear_feature_name_set_for(&data);
+    nl.push_column("lda_score", lda_score);
+    names.push(Arc::from("lda_score"));
+    debug_assert_eq!(
+        nl.names(),
+        names.as_slice(),
+        "hybrid frame columns must match nonlinear names ++ lda_score"
+    );
+
+    let ncols = nl.ncols();
+    let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+    let precomputed = PrecomputedFeatures::from_row_major(nl.row_major(), ncols, responses);
+
+    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled_with_precomputed(
+        n_folds as u8,
+        data,
+        config,
+        precomputed,
+    );
+    scorer
+        .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
+        .unwrap();
+
+    let stats = scorer.feature_stats(&names);
+
+    let mut scored = scorer.score();
+    // Sort by score descending — identical tail to `rescore`.
+    #[cfg(feature = "rayon")]
+    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    #[cfg(not(feature = "rayon"))]
+    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
+    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
+    debug!("Best:\n{:#?}", scored.first());
+    debug!("Worst:\n{:#?}", scored.last());
+
+    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+}
+
 /// Dump the raw feature matrix + labels for offline analysis. Best-effort:
 /// logs and returns on any I/O error rather than aborting the run.
 fn dump_feature_matrix(
@@ -459,6 +586,11 @@ fn gate_for(candidates: &[CompetedCandidate]) -> bool {
 /// [`linear_feature_name_set`] with the gate read from `candidates`.
 pub fn linear_feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
     linear_feature_name_set(gate_for(candidates))
+}
+
+/// [`nonlinear_feature_name_set`] with the gate read from `candidates`.
+pub fn nonlinear_feature_name_set_for(candidates: &[CompetedCandidate]) -> Vec<Arc<str>> {
+    nonlinear_feature_name_set(gate_for(candidates))
 }
 
 /// [`all_feature_name_set`] with the gate read from `candidates`.
@@ -761,6 +893,77 @@ mod feature_tests {
         for n in all_feature_name_set(true) {
             assert!(seen.insert(n.clone()), "dup feature name: {n}");
         }
+    }
+
+    /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
+    /// target/decoy, distinct `library_id`, with the LINEAR-lane count fields
+    /// varied by label + row so the cross-fit LDA has real within-class scatter
+    /// and a class-mean gap (i.e. it actually fits, exercising the score path).
+    fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
+        (0..n)
+            .map(|i| {
+                let mut c = sample_competed_candidate_parsed();
+                c.scoring.identity.library_id = i;
+                let is_target = i % 2 == 0;
+                c.scoring.identity.is_target = is_target;
+                // Give the linear lane (counts) label-correlated variance.
+                let base: u8 = if is_target { 20 } else { 8 };
+                let jitter = (i % 5) as u8;
+                c.scoring.counts.rising_cycles = base + jitter;
+                c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
+                c.scoring.counts.npeaks = base + (i % 3) as u8;
+                c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
+                // Also vary the meta delta-group (nonlinear lane) for GBM signal.
+                c.delta_group = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
+                c.delta_group_ratio = if is_target { 0.8 } else { 0.3 };
+                c
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rescore_hybrid_smoke_and_determinism() {
+        let n = 90;
+        let (out_a, _stats_a) = rescore_hybrid(synthetic_competed(n));
+        let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n));
+
+        // (a) output length preserved
+        assert_eq!(out_a.len(), n as usize);
+        assert_eq!(out_b.len(), n as usize);
+
+        // (b) all discriminant scores finite, (c) qvalues in [0, 1]
+        for r in &out_a {
+            assert!(
+                r.discriminant_score.is_finite(),
+                "non-finite discriminant score: {}",
+                r.discriminant_score
+            );
+            assert!(
+                (0.0..=1.0).contains(&r.qvalue),
+                "qvalue out of [0,1]: {}",
+                r.qvalue
+            );
+        }
+
+        // (d) determinism: same seed + sort key -> identical scores per candidate.
+        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
+            let mut v: Vec<(u32, u32)> = out
+                .iter()
+                .map(|r| {
+                    (
+                        r.scoring.identity.library_id,
+                        r.discriminant_score.to_bits(),
+                    )
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(
+            key(&out_a),
+            key(&out_b),
+            "hybrid rescore not deterministic across runs"
+        );
     }
 
     #[test]
