@@ -106,11 +106,12 @@ pub fn effective_random_count(rp: &RandomPeaks, n_cycles: usize) -> usize {
 pub struct SimParams {
     pub n_cycles: usize,
     /// Shared apex position (cycle index) for all real fragments + precursor.
+    /// Always offset by a seeded sub-cycle `U(-0.5, 0.5)` -- the realized peak
+    /// never sits exactly on a cycle boundary. See `realized_apex_cycle`.
     pub apex_cycle: f32,
-    /// When `Some(range)`, each run draws the realized apex from the seeded rng
-    /// as `apex_cycle + U(-range, range) + U(-0.5, 0.5)` (position varies per
-    /// seed AND lands off-grid). `None` pins it exactly to `apex_cycle` (the
-    /// historical, unrealistically-easy on-grid, fixed-position behavior).
+    /// COARSE per-seed relocation on top of the sub-cycle offset: `Some(range)`
+    /// draws `U(-range, range)`, so the peak also moves around the window.
+    /// `None` keeps it near `apex_cycle`.
     pub apex_jitter: Option<f32>,
     /// Elution peak width (gaussian sigma, in cycles).
     pub width_sigma: f32,
@@ -198,8 +199,8 @@ pub struct SimData {
     pub extraction: Extraction<String>,
     pub fragment_rows: Vec<TransitionRow>,
     pub precursor_rows: Vec<TransitionRow>,
-    /// The apex cycle actually used to generate this realization (equals
-    /// `apex_cycle` when `apex_jitter` is `None`, else the jittered value).
+    /// The (fractional) apex cycle actually used to generate this realization:
+    /// `apex_cycle` + optional coarse jitter + the always-on sub-cycle offset.
     pub realized_apex_cycle: f32,
 }
 
@@ -215,17 +216,21 @@ pub fn build(params: &SimParams) -> SimData {
     let n = params.n_cycles;
     let dummy_mz = 500.0_f64;
 
-    // Realized apex: jittered per-seed + sub-cycle when enabled, else pinned.
-    // Drawn BEFORE any signal/noise sampling; the `None` branch consumes no rng
-    // so historical scenarios stay byte-identical.
-    let realized_apex = match params.apex_jitter {
-        Some(range) => {
-            let lo = 3.0f32;
-            let hi = (n as f32 - 4.0).max(lo);
-            (params.apex_cycle + rng.random_range(-range..=range) + rng.random_range(-0.5..=0.5))
-                .clamp(lo, hi)
-        }
-        None => params.apex_cycle,
+    // Realized apex, drawn BEFORE any signal/noise sampling. A real peak never
+    // lands exactly on a cycle boundary, so the sub-cycle offset is ALWAYS
+    // applied; `apex_jitter` adds coarse per-seed relocation on top of it.
+    // Draw order (coarse then sub-cycle) keeps JITTERED scenarios byte-identical
+    // to before the sub-cycle draw became unconditional. Non-jittered ones all
+    // shifted: that branch now consumes an rng draw where it previously
+    // consumed none, and pins to `apex_cycle` no longer.
+    let realized_apex = {
+        let lo = 3.0f32;
+        let hi = (n as f32 - 4.0).max(lo);
+        let coarse = params
+            .apex_jitter
+            .map_or(0.0, |range| rng.random_range(-range..=range));
+        let subcycle = rng.random_range(-0.5..=0.5);
+        (params.apex_cycle + coarse + subcycle).clamp(lo, hi)
     };
 
     // --- Expected intensities: THEORETICAL (library) ratios. ---
@@ -458,10 +463,12 @@ mod tests {
         q.seed = p.seed.wrapping_add(1);
         let c = build(&q).realized_apex_cycle;
         assert!((a - c).abs() > 1e-6);
-        // no jitter => exact
+        // No coarse jitter => still sub-cycle offset, never exactly on-grid.
         let mut r = p.clone();
         r.apex_jitter = None;
-        assert_eq!(build(&r).realized_apex_cycle, 100.0);
+        let d = build(&r).realized_apex_cycle;
+        assert!((d - 100.0).abs() <= 0.5, "sub-cycle offset only, got {d}");
+        assert!(d.fract() != 0.0, "peak must not land on a cycle boundary");
     }
 
     #[test]
@@ -471,7 +478,8 @@ mod tests {
         p.random_peaks.enabled = false;
         p.apex_cycle = 25.0;
         let data = build(&p);
-        // The tallest real fragment row should peak at cycle 25.
+        // The tallest real fragment row peaks at the cycle nearest the realized
+        // (sub-cycle offset) apex.
         let row = &data.fragment_rows[0];
         let (max_idx, _) = row
             .intensities
@@ -479,7 +487,8 @@ mod tests {
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .unwrap();
-        assert_eq!(max_idx, 25);
+        assert_eq!(max_idx, data.realized_apex_cycle.round() as usize);
+        assert!((data.realized_apex_cycle - 25.0).abs() <= 0.5);
     }
 
     #[test]
@@ -549,7 +558,14 @@ mod tests {
             .iter()
             .cloned()
             .fold(0.0_f32, f32::max);
-        // Observed peak reflects obs_scale, not the theoretical ratio.
-        assert!((observed_peak - p.height * 0.5).abs() < 1.0);
+        // Observed peak reflects obs_scale, not the theoretical ratio. The
+        // sampled max sits slightly below the true peak height: the realized
+        // apex is off-grid, so the nearest cycle samples the gaussian's flank.
+        let off = data.realized_apex_cycle - data.realized_apex_cycle.round();
+        let expected = p.height * 0.5 * (-0.5 * (off / p.width_sigma).powi(2)).exp();
+        assert!(
+            (observed_peak - expected).abs() < 1.0,
+            "observed={observed_peak} expected={expected} (sub-cycle offset {off})"
+        );
     }
 }

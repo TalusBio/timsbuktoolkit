@@ -48,6 +48,7 @@ use crate::scoring::blocks::primary::PrimaryScores;
 use crate::scoring::blocks::split_product::{
     CoelutionScratch,
     SplitProduct,
+    SplitProductScore,
     compute_split_product,
 };
 use crate::utils::top_n_array::TopNArray;
@@ -82,6 +83,7 @@ pub struct CandidateContext<T: KeyLike, L: Display> {
 ///
 /// This separates identity/reference information from the scoring data,
 /// making the scoring pipeline cleaner and more efficient.
+/// TODO: make generic digest info
 #[derive(Debug, Clone)]
 pub struct PeptideMetadata {
     /// The peptide sequence and modification information.
@@ -124,6 +126,8 @@ pub struct Extraction<T: KeyLike> {
 /// Contains only the apex location and a basic score for calibrant ranking.
 #[derive(Debug, Clone, Copy)]
 pub struct ApexLocation {
+    // TODO: FIXME: this struct is redundant (and could be just passed as a
+    // score block)
     /// Basic score (apex profile peak value) for ranking.
     pub score: f32,
     /// Retention time at the apex (ms).
@@ -415,20 +419,13 @@ impl TraceScorer {
         })
     }
 
-    /// Stage C: Compute full score at a given cycle index.
-    /// Uses precomputed traces and cached profiles.
-    /// `suggested` provides peak context for delta/baseline calculations.
-    pub fn score_at<T: KeyLike>(
-        &mut self, // needs &mut for PeakPicker on traces
-        scoring_ctx: &Extraction<T>,
-        cycle: usize,
-        suggested: &ApexLocation,
-        rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexBlocks, DataProcessingError> {
-        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
-
-        // Split product using cached profiles
-        let split_product = compute_split_product(
+    /// Stage B': the window-global split product. Cycle-invariant, so it is
+    /// computed ONCE per extraction and handed to [`Self::score_at`] — sweeping
+    /// `score_at` across cycles would otherwise redo four full-slice passes
+    /// (2x argmax, 2x `area_uniqueness` total-sum) per cycle, making the sweep
+    /// O(cycles^2). Needs `&mut self` only for `coel_scratch` reuse.
+    pub fn compute_split<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) -> SplitProductScore {
+        compute_split_product(
             &self.cosine_profile,
             &self.scribe_profile,
             &scoring_ctx.chromatograms.fragments,
@@ -437,7 +434,25 @@ impl TraceScorer {
                 .fragment_intensities
                 .as_slice(),
             &mut self.coel_scratch,
-        );
+        )
+    }
+
+    /// Stage C: Compute full score at a given cycle index.
+    /// Uses precomputed traces, cached profiles, and the extraction-global
+    /// `split` from [`Self::compute_split`].
+    /// `suggested` provides peak context for delta/baseline calculations.
+    ///
+    /// Takes `&self`: everything here is cycle-local, so a caller may sweep
+    /// every cycle off one `compute_traces` + one `compute_split`.
+    pub fn score_at<T: KeyLike>(
+        &self,
+        scoring_ctx: &Extraction<T>,
+        split: &SplitProductScore,
+        cycle: usize,
+        suggested: &ApexLocation,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<ApexBlocks, DataProcessingError> {
+        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
 
         // Delta scores: compare apex_profile[cycle] against global 2nd/3rd peaks
         let mut peak_picker = PeakPicker::new(&self.traces.apex_profile);
@@ -475,7 +490,7 @@ impl TraceScorer {
             n_cycles,
         );
 
-        let score = compute_weighted_score(split_product.base_score, &features);
+        let score = compute_weighted_score(split.base_score, &features);
         let retention_time_ms = rt_mapper(effective_apex + cycle_offset);
 
         // Intensity sums at effective apex
@@ -503,7 +518,7 @@ impl TraceScorer {
         Ok(ApexBlocks {
             joint_apex_cycle: effective_apex,
             retention_time_ms,
-            split: SplitProduct::from(&split_product),
+            split: SplitProduct::from(split),
             features,
             primary: PrimaryScores {
                 main_score: score,
@@ -555,7 +570,8 @@ impl TraceScorer {
         self.compute_traces(scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let loc = self.suggest_apex(rt_mapper, cycle_offset)?;
-        self.score_at(scoring_ctx, loc.apex_cycle, &loc, rt_mapper)
+        let split = self.compute_split(scoring_ctx);
+        self.score_at(scoring_ctx, &split, loc.apex_cycle, &loc, rt_mapper)
     }
 
     /// Single-pass scoring: cosine (sqrt-transformed), scribe, lazyscore,

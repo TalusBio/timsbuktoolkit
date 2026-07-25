@@ -8,6 +8,8 @@ use eframe::egui::{
     TextureOptions,
 };
 use egui_plot::{
+    Bar,
+    BarChart,
     Legend,
     Line,
     LineStyle,
@@ -89,7 +91,7 @@ fn vmarker(
 pub fn apex_caption(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label("apex markers:");
-        ui.colored_label(TRUE_APEX_COLOR, "TRUE (configured)");
+        ui.colored_label(TRUE_APEX_COLOR, "TRUE (realized, off-grid)");
         ui.label("·");
         ui.colored_label(PASS1_COLOR, "pass1 (quick)");
         ui.label("·");
@@ -336,6 +338,122 @@ pub fn traces(ui: &mut egui::Ui, score: &ScoreResult, tog: &TraceToggles, true_a
         });
 }
 
+/// Blue: the real peptide is present.
+pub const PRESENT_COLOR: Color32 = Color32::from_rgb(31, 119, 180);
+/// Red: the pure-noise twin of a present peptide.
+pub const ABSENT_COLOR: Color32 = Color32::from_rgb(214, 39, 40);
+
+/// Number of histogram bins over the log10 score range.
+const N_BINS: usize = 48;
+
+/// log10 of the finite, strictly-positive entries. A score of 0 (common for the
+/// pure-noise twin) has no log and is dropped; callers report how many.
+fn log10_positive(vals: &[f32]) -> Vec<f64> {
+    vals.iter()
+        .filter(|v| v.is_finite() && **v > 0.0)
+        .map(|v| (*v as f64).log10())
+        .collect()
+}
+
+/// Fraction-per-bin bars over `[lo, hi]`: heights sum to 1, so populations of
+/// different size stay comparable. Returns the bars and the tallest height.
+///
+/// `hi` must exceed `lo` — an empty range would give zero-width bins, so
+/// callers widen degenerate (all-equal) populations first.
+fn hist_bars(logs: &[f64], lo: f64, hi: f64) -> (Vec<Bar>, f64) {
+    debug_assert!(hi > lo, "empty bin range [{lo}, {hi}]");
+    let bin_width = (hi - lo) / N_BINS as f64;
+    let mut counts = vec![0usize; N_BINS];
+    for &v in logs {
+        let bin = (((v - lo) / bin_width).floor().max(0.0) as usize).min(N_BINS - 1);
+        counts[bin] += 1;
+    }
+    let n_values = logs.len().max(1) as f64;
+    let peak = counts.iter().max().copied().unwrap_or(0) as f64 / n_values;
+    let bars = counts
+        .iter()
+        .enumerate()
+        .map(|(bin, &count)| {
+            Bar::new(lo + (bin as f64 + 0.5) * bin_width, count as f64 / n_values).width(bin_width)
+        })
+        .collect();
+    (bars, peak)
+}
+
+/// One overlaid population in a score histogram.
+pub struct HistSeries<'a> {
+    pub name: &'a str,
+    pub values: &'a [f32],
+    pub color: Color32,
+}
+
+/// Overlaid log10 histograms of `main_score` populations (the score spans
+/// orders of magnitude, so raw-scale bins are useless). Bars are fractions of
+/// their own population, so series of different size stay comparable.
+/// `marker_score` draws a vertical reference line. `id` must be unique per plot.
+pub fn score_histogram(
+    ui: &mut egui::Ui,
+    id: &str,
+    series: &[HistSeries<'_>],
+    marker_score: Option<f32>,
+) {
+    let logs: Vec<Vec<f64>> = series.iter().map(|s| log10_positive(s.values)).collect();
+
+    let dropped: usize = series
+        .iter()
+        .zip(&logs)
+        .map(|(s, l)| s.values.len() - l.len())
+        .sum();
+    if dropped > 0 {
+        ui.label(format!(
+            "{dropped} value(s) scored <= 0 (not plottable in log10)"
+        ));
+    }
+    if logs.iter().all(|l| l.is_empty()) {
+        ui.label("(no positive scores to plot)");
+        return;
+    }
+
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &v in logs.iter().flatten() {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    // Degenerate (all-equal) populations still need a non-zero bin width.
+    if hi - lo < 1e-9 {
+        lo -= 0.5;
+        hi += 0.5;
+    }
+
+    let binned: Vec<(Vec<Bar>, f64)> = logs.iter().map(|l| hist_bars(l, lo, hi)).collect();
+    let y_max = binned
+        .iter()
+        .map(|(_, peak)| *peak)
+        .fold(1e-6_f64, f64::max);
+
+    Plot::new(id)
+        .legend(Legend::default())
+        .height(200.0)
+        .include_y(0.0)
+        .include_y(y_max * 1.05)
+        .show(ui, |pui| {
+            // Reverse order: the first series is drawn last, so it stays on top.
+            for (s, (bars, _)) in series.iter().zip(binned).rev() {
+                pui.bar_chart(BarChart::new(s.name, bars).color(s.color));
+            }
+            if let Some(m) = marker_score.filter(|m| m.is_finite() && *m > 0.0) {
+                pui.line(vmarker(
+                    "current run",
+                    (m as f64).log10(),
+                    y_max * 1.05,
+                    TRUE_APEX_COLOR,
+                    LineStyle::Solid,
+                    2.0,
+                ));
+            }
+        });
+}
+
 /// Min-max normalize to [0,1]; constant series -> zeros.
 fn normalize(ys: &[f32]) -> Vec<f32> {
     let mut lo = f32::INFINITY;
@@ -353,4 +471,29 @@ fn normalize(ys: &[f32]) -> Vec<f32> {
     ys.iter()
         .map(|&v| ((v - lo) / range).clamp(0.0, 1.0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log10_positive_drops_nonpositive_and_nonfinite() {
+        let got = log10_positive(&[100.0, 0.0, -1.0, f32::NAN, f32::INFINITY, 10.0]);
+        assert_eq!(got, vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn hist_bars_bins_everything_as_fractions() {
+        let logs = vec![0.0, 0.5, 1.0]; // lowest, middle, and the top edge
+        let (bars, peak) = hist_bars(&logs, 0.0, 1.0);
+        let total: f64 = bars.iter().map(|b| b.value).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "bars must sum to 1, got {total}"
+        );
+        // The top-edge value lands in the last bin, not out of bounds.
+        assert!(bars.last().unwrap().value > 0.0);
+        assert!((peak - 1.0 / 3.0).abs() < 1e-9);
+    }
 }

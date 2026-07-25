@@ -237,11 +237,11 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
     for data in &sims {
         let true_apex = data.realized_apex_cycle.round() as i64;
         match scorer::run_with(&mut scorer, &data.extraction, &map) {
-            Ok((pass1, pass2)) => {
-                if (pass1.apex_cycle as i64 - true_apex).abs() <= tol {
+            Ok(p) => {
+                if (p.pass1.apex_cycle as i64 - true_apex).abs() <= tol {
                     pass1_hits += 1;
                 }
-                let e2 = (pass2.joint_apex_cycle as i64 - true_apex).abs();
+                let e2 = (p.pass2.joint_apex_cycle as i64 - true_apex).abs();
                 if e2 <= tol {
                     pass2_hits += 1;
                 }
@@ -354,7 +354,7 @@ impl SensitivityReport {
 
 /// Present-vs-absent score-discrimination result for one scenario.
 pub struct DiscriminationReport {
-    pub n_pairs: usize,
+    pub n_seed_pairs: usize,
     /// ROC-AUC = P(score_present > score_absent), 0.5 tie credit. 1.0 = perfect
     /// signal/noise separation, 0.5 = useless.
     pub auc: f64,
@@ -397,16 +397,23 @@ pub fn roc_auc(present: &[f32], absent: &[f32]) -> f64 {
     u / (np as f64 * na as f64)
 }
 
-/// Score `n_pairs` matched present/absent realizations and report how well the
-/// production Pass-2 score separates real signal from pure noise. Each pair
-/// shares a seed, so the "absent" twin (all real fragments `obs_scale = 0`) has
-/// IDENTICAL noise + interferents — only the real peak differs.
-pub fn run_discrimination(base: &SimParams, n_pairs: usize) -> DiscriminationReport {
+/// Matched Pass-2 `main_score` populations, one entry per seed pair.
+pub struct ScorePopulations {
+    /// Scores of the real peptide.
+    pub present: Vec<f32>,
+    /// Scores of the pure-noise twin sharing the same seed.
+    pub absent: Vec<f32>,
+}
+
+/// Score `n_seed_pairs` matched present/absent realizations (varying only the
+/// seed). Each pair shares a seed, so the "absent" twin has IDENTICAL noise +
+/// interferents — only the real peak differs.
+pub fn score_populations(base: &SimParams, n_seed_pairs: usize) -> ScorePopulations {
     let map = base.rt_mapper();
     let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));
-    let mut present: Vec<f32> = Vec::with_capacity(n_pairs);
-    let mut absent: Vec<f32> = Vec::with_capacity(n_pairs);
-    for i in 0..n_pairs {
+    let mut present: Vec<f32> = Vec::with_capacity(n_seed_pairs);
+    let mut absent: Vec<f32> = Vec::with_capacity(n_seed_pairs);
+    for i in 0..n_seed_pairs {
         let mut pp = base.clone();
         pp.seed = base.seed.wrapping_add(i as u64);
         // Pure-noise twin: NO real signal at all (fragments AND precursor
@@ -418,23 +425,30 @@ pub fn run_discrimination(base: &SimParams, n_pairs: usize) -> DiscriminationRep
             f.obs_scale = 0.0;
         }
         ap.precursor_intensity = 0.0;
-        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&pp).extraction, &map) {
-            present.push(s.primary.main_score);
+        if let Ok(p) = scorer::run_with(&mut scorer, &sim::build(&pp).extraction, &map) {
+            present.push(p.pass2.primary.main_score);
         }
-        if let Ok((_, s)) = scorer::run_with(&mut scorer, &sim::build(&ap).extraction, &map) {
-            absent.push(s.primary.main_score);
+        if let Ok(p) = scorer::run_with(&mut scorer, &sim::build(&ap).extraction, &map) {
+            absent.push(p.pass2.primary.main_score);
         }
     }
+    ScorePopulations { present, absent }
+}
+
+/// Report how well the production Pass-2 score separates real signal from pure
+/// noise over `n_seed_pairs` matched realizations.
+pub fn run_discrimination(base: &SimParams, n_seed_pairs: usize) -> DiscriminationReport {
+    let pops = score_populations(base, n_seed_pairs);
     let median = |mut v: Vec<f32>| {
         v.sort_by(f32::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
     };
-    let auc = roc_auc(&present, &absent);
+    let auc = roc_auc(&pops.present, &pops.absent);
     DiscriminationReport {
-        n_pairs,
+        n_seed_pairs,
         auc,
-        median_present: median(present),
-        median_absent: median(absent),
+        median_present: median(pops.present),
+        median_absent: median(pops.absent),
     }
 }
 
