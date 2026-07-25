@@ -16,16 +16,16 @@ use timsseek::scoring::apex_finding::{
     Extraction,
     TraceScorer,
 };
-use timsseek::scoring::blocks::split_product::SplitProductScore;
+use timsseek::scoring::blocks::apex_evidence::ApexEvidence;
 
 /// The staged pass results for one extraction.
 pub struct Passes {
     /// Pass 1: quick apex location (prescore).
     pub pass1: ApexLocation,
-    /// The window-global split product Pass 2 was scored against. Returned
+    /// The window-global apex evidence Pass 2 was scored against. Returned
     /// rather than kept internal so a caller sweeping cycles reuses this one
     /// instead of recomputing it per cycle.
-    pub split: SplitProductScore,
+    pub evidence: ApexEvidence,
     /// Pass 2: full scored apex (may sit at a different cycle than pass1).
     pub pass2: ApexBlocks,
 }
@@ -40,7 +40,7 @@ pub struct ScoreResult {
     pub pass2: ApexBlocks,
     /// `main_score` from Pass 2 evaluated at EVERY cycle -- the score landscape
     /// of this one extraction. Only the 11 apex features vary with cycle: the
-    /// split-product base score is window-global and identical at every entry.
+    /// apex evidence is window-global and identical at every entry.
     pub landscape: Vec<f32>,
 }
 
@@ -65,17 +65,17 @@ pub fn run_with(
         .suggest_apex(rt_mapper, cycle_offset)
         .map_err(|e| format!("suggest_apex failed: {e:?}"))?;
 
-    // Stage B' : window-global split product (cycle-invariant).
-    let split = scorer.compute_split(extraction);
+    // Stage B' : window-global apex evidence (cycle-invariant).
+    let evidence = scorer.compute_apex_evidence(extraction);
 
     // Stage C (Pass 2): full score at the suggested apex.
     let pass2 = scorer
-        .score_at(extraction, &split, pass1.apex_cycle, &pass1, rt_mapper)
+        .score_at(extraction, &evidence, pass1.apex_cycle, &pass1, rt_mapper)
         .map_err(|e| format!("score_at failed: {e:?}"))?;
 
     Ok(Passes {
         pass1,
-        split,
+        evidence,
         pass2,
     })
 }
@@ -94,16 +94,16 @@ pub fn run(
     let mut scorer = TraceScorer::new(n_cycles, max_frags);
     let Passes {
         pass1,
-        split,
+        evidence,
         pass2,
     } = run_with(&mut scorer, extraction, rt_mapper)?;
-    // Traces and the window-global split product are already computed, so each
+    // Traces and the window-global apex evidence are already computed, so each
     // extra `score_at` is just the cycle-local feature block — the sweep is
     // O(cycles * window), not O(cycles^2). Cycles that fail to score give 0.
     let landscape = (0..n_cycles)
         .map(|c| {
             scorer
-                .score_at(extraction, &split, c, &pass1, rt_mapper)
+                .score_at(extraction, &evidence, c, &pass1, rt_mapper)
                 .map(|b| b.primary.main_score)
                 .unwrap_or(0.0)
         })

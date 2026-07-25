@@ -384,7 +384,7 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams, dist: &mut DistControls) -> bo
 fn landscape_histogram(ui: &mut egui::Ui, score: Option<&ScoreResult>) {
     ui.label(
         "this run only: main_score at every cycle. Only the 11 features vary with cycle -- \
-         the split-product base score is window-global.",
+         the apex evidence is window-global.",
     );
     let Some(s) = score else { return };
     plots::score_histogram(
@@ -455,31 +455,28 @@ fn score_readout(ui: &mut egui::Ui, score: Option<&ScoreResult>, err: Option<&st
             ui.label(v);
             ui.end_row();
         };
-        let sp = &p2.split;
+        let ev = &p2.evidence;
         row(ui, "pass1 apex cycle", s.pass1.apex_cycle.to_string());
         row(ui, "pass1 score", format!("{:.3e}", s.pass1.score));
         row(ui, "pass2 joint apex", p2.joint_apex_cycle.to_string());
         row(ui, "pass2 score", format!("{:.3e}", p2.primary.main_score));
         row(ui, "rt (ms)", p2.retention_time_ms.to_string());
-        // Score = base_score * feature_product. Decompose so magnitude blowups
-        // (base ~ intensity^2 via the two area-uniqueness terms) are visible.
-        row(
-            ui,
-            "= base_score",
-            format!("{:.3e}", sp.split_product_score),
-        );
+        // Score = apex_evidence * feature_product. Decompose so magnitude
+        // blowups (evidence ~ intensity^2 via the two area-uniqueness terms)
+        // are visible.
+        row(ui, "= apex_evidence", format!("{:.3e}", ev.apex_evidence));
         row(
             ui,
             "  x feat_product",
             format!(
                 "{:.3e}",
-                safe_ratio(p2.primary.main_score, sp.split_product_score)
+                safe_ratio(p2.primary.main_score, ev.apex_evidence)
             ),
         );
-        row(ui, "  cosine_au", format!("{:.3e}", sp.cosine_au));
-        row(ui, "  cosine_cg", format!("{:.3}", sp.cosine_cg));
-        row(ui, "  scribe_au", format!("{:.3e}", sp.scribe_au));
-        row(ui, "  scribe_cg", format!("{:.3}", sp.scribe_cg));
+        row(ui, "  cosine_au", format!("{:.3e}", ev.cosine_au));
+        row(ui, "  cosine_cg", format!("{:.3}", ev.cosine_cg));
+        row(ui, "  scribe_au", format!("{:.3e}", ev.scribe_au));
+        row(ui, "  scribe_cg", format!("{:.3}", ev.scribe_cg));
         row(ui, "delta_next", format!("{:.4}", p2.primary.delta_next));
         row(
             ui,

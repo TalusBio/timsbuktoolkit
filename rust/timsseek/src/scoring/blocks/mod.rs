@@ -10,7 +10,7 @@
 //! `timsseek_macros`), so a partial emission is unrepresentable. Feature
 //! *values* are per-record ([`FrameSink`]); feature *names* are a property of
 //! the set, built once ([`NameSink`]). The heavy apex-stage families
-//! ([`apex_features`], [`split_product`]) keep their compute here too, leaning
+//! ([`apex_features`], [`apex_evidence`]) keep their compute here too, leaning
 //! on the shared numeric primitives in `crate::scoring::apex_dsp`.
 //!
 //! `#[derive(ScoreBlock)]` handles both scalar and array (`[f32; N]`) fields,
@@ -28,6 +28,7 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use std::sync::Arc;
 
+pub mod apex_evidence;
 pub mod apex_features;
 pub mod counts;
 pub mod derived;
@@ -42,7 +43,6 @@ pub mod relative_intensities;
 pub mod result_meta;
 pub mod rt;
 pub mod sequence_counts;
-pub mod split_product;
 
 pub use frame::{
     FeatFrame,

@@ -25,7 +25,7 @@ pub struct Derived {
     #[feat(log2)]
     pub main_times_delta_next: f64,
     #[feat(log2)]
-    pub split_product_x_coverage: f64,
+    pub apex_evidence_x_coverage: f64,
     #[feat(raw)]
     pub ms2_mz_mean_abs_error: f64,
     #[feat(raw)]
@@ -50,7 +50,7 @@ impl Derived {
                 .fold(f32::NEG_INFINITY, |a, &b| a.max(b))
                 as f64,
             main_times_delta_next: (s.primary.main_score * s.primary.delta_next) as f64,
-            split_product_x_coverage: (s.split.split_product_score * s.features.fragment_coverage)
+            apex_evidence_x_coverage: (s.evidence.apex_evidence * s.features.fragment_coverage)
                 as f64,
             ms2_mz_mean_abs_error: mean_abs_error(&s.ion_errors.ms2_mz_errors),
             ms2_mob_mean_abs_error: mean_abs_error(&s.ion_errors.ms2_mobility_errors),

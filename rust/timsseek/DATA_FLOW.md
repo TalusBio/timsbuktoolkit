@@ -184,7 +184,7 @@ Same as `find_apex_location()` (compute_pass_1 + main_score), then additionally:
 
 1. **`extract_apex_score()`**:
    - Peak-pick with delta scoring (mask primary, find 2nd/3rd peaks)
-   - Split product: `SplitProductScore` with 9 component fields
+   - Apex evidence: `ApexEvidence` with 9 component fields
    - Joint precursor-fragment apex: `argmax(C(t) × (0.5 + P(t)/max(P)))`
    - **11 apex features** at joint apex (`compute_apex_features()`):
 
@@ -269,8 +269,8 @@ The `as_feature()` method produces the following features for rescoring:
 - `ms2_lazyerscore`, `ms2_isotope_lazyerscore`, `ms2_isotope_ratio`
 - `lazyscore_z`, `lazyscore_vs_baseline`
 
-**Split product & apex features (19 values):**
-- `ln(split_product_score)`, `ln(cosine_au)`, `ln(scribe_au)`
+**Apex evidence & apex features (19 values):**
+- `ln(apex_evidence)`, `ln(cosine_au)`, `ln(scribe_au)`
 - `coelution_gradient_cosine`, `coelution_gradient_scribe`
 - `cosine_weighted_coelution`, `cosine_gradient_consistency`
 - `scribe_weighted_coelution`, `scribe_gradient_consistency`
@@ -289,7 +289,7 @@ The `as_feature()` method produces the following features for rescoring:
 
 **Interaction features:**
 - `main_score × delta_next`
-- `split_product_score × fragment_coverage`
+- `apex_evidence × fragment_coverage`
 
 **Summary error features:**
 - Mean |ms2_mz_error|, Mean |ms2_mobility_error|
@@ -326,7 +326,7 @@ ApexLocation                          Phase 1 result (lightweight)
 
 ApexScore                             Phase 3 result (full)
 ├── score: f32                        weighted product score
-├── split_product: SplitProductScore  9 component scores
+├── evidence: ApexEvidence            9 component scores
 ├── features: ApexFeatures            11 apex-local features
 ├── delta_next, delta_second_next     peak discrimination
 ├── lazyscore_z: f32                  Poisson Z-score (peak vs baseline)

@@ -1,11 +1,16 @@
-//! Split-product family: cosine/scribe apex agreement scores.
+//! Apex-evidence family: how much evidence the cosine and scribe profiles give
+//! for a real peak, as the product of each lane's terms.
 //!
-//! Owns its whole lifecycle in this file: the derive-generated projection
-//! (`#[derive(ScoreBlock)]`), the raw compute (`compute_split_product`, run at
-//! the apex stage while chromatogram buffers are live) and its building blocks
-//! (`area_uniqueness`, `coelution_gradient`) plus the reusable
-//! [`CoelutionScratch`] buffers the scorer owns for allocation reuse. Generic
-//! numeric primitives live in `crate::scoring::apex_dsp`.
+//! Note this measures no agreement BETWEEN the two lanes -- each finds its own
+//! argmax and the two apexes are never compared. The product is a conjunction:
+//! both lanes have to look good for the evidence to be high.
+//!
+//! Owns its whole lifecycle in this file: the block (`#[derive(ScoreBlock)]`),
+//! the compute (`compute_apex_evidence`, run at the apex stage while
+//! chromatogram buffers are live) and its building blocks (`area_uniqueness`,
+//! `coelution_gradient`) plus the reusable [`CoelutionScratch`] buffers the
+//! scorer owns for allocation reuse. Generic numeric primitives live in
+//! `crate::scoring::apex_dsp`.
 
 use array2d::Array2D;
 use timsquery::models::MzMajorIntensityArray;
@@ -18,12 +23,17 @@ use crate::scoring::apex_dsp::{
     center_normalize,
 };
 
-/// Stage: apex (built from `SplitProductScore`, computed while chromatogram
-/// buffers are live).
+/// Stage: apex. Computed by [`compute_apex_evidence`] while the chromatogram
+/// buffers are live.
+///
+/// `apex_evidence` is the product of all four per-lane terms and is NOT
+/// normalized: `_au` carries peak area, so it scales with intensity (roughly
+/// intensity^2 once both lanes multiply), and `_cg` is a `>= 1` multiplier that
+/// can only inflate. Read it as an evidence magnitude, not a quality in [0, 1].
 #[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
-pub struct SplitProduct {
+pub struct ApexEvidence {
     #[feat(ln1p)]
-    pub split_product_score: f32,
+    pub apex_evidence: f32,
     #[feat(ln1p)]
     pub cosine_au: f32,
     #[feat(ln1p)]
@@ -39,38 +49,6 @@ pub struct SplitProduct {
     #[feat(raw)]
     pub scribe_weighted_coelution: f32,
     #[feat(raw)]
-    pub scribe_gradient_consistency: f32,
-}
-
-impl From<&SplitProductScore> for SplitProduct {
-    fn from(s: &SplitProductScore) -> Self {
-        Self {
-            split_product_score: s.base_score,
-            cosine_au: s.cosine_au,
-            scribe_au: s.scribe_au,
-            cosine_cg: s.cosine_cg,
-            scribe_cg: s.scribe_cg,
-            cosine_weighted_coelution: s.cosine_weighted_coelution,
-            cosine_gradient_consistency: s.cosine_gradient_consistency,
-            scribe_weighted_coelution: s.scribe_weighted_coelution,
-            scribe_gradient_consistency: s.scribe_gradient_consistency,
-        }
-    }
-}
-
-/// Split product score computed from independent cosine and scribe apexes.
-/// Raw output of `compute_split_product`, projected
-/// into [`SplitProduct`] via [`From`].
-#[derive(Debug, Clone, Copy)]
-pub struct SplitProductScore {
-    pub cosine_au: f32,
-    pub cosine_cg: f32,
-    pub scribe_au: f32,
-    pub scribe_cg: f32,
-    pub base_score: f32,
-    pub cosine_weighted_coelution: f32,
-    pub cosine_gradient_consistency: f32,
-    pub scribe_weighted_coelution: f32,
     pub scribe_gradient_consistency: f32,
 }
 
@@ -124,18 +102,18 @@ struct CoelutionGradientResult {
     pub combined: f32,
 }
 
-/// Split product score from independent cosine and scribe apexes.
+/// Apex evidence from independent cosine and scribe apexes.
 ///
 /// Each profile finds its own argmax, computes area-uniqueness (hw=5) and
 /// coelution-gradient (coelution_hw=20, gradient_hw=10) at that apex.
-/// base = cos_AU * cos_CG * scr_AU * scr_CG
-pub fn compute_split_product<T: KeyLike>(
+/// apex_evidence = cos_AU * cos_CG * scr_AU * scr_CG
+pub fn compute_apex_evidence<T: KeyLike>(
     cosine_profile: &[f32],
     scribe_profile: &[f32],
     fragments: &MzMajorIntensityArray<T, f32>,
     expected: &[(T, f32)],
     scratch: &mut CoelutionScratch,
-) -> SplitProductScore {
+) -> ApexEvidence {
     // Independent argmax on each profile
     let cos_apex = argmax(cosine_profile);
     let scr_apex = argmax(scribe_profile);
@@ -148,14 +126,14 @@ pub fn compute_split_product<T: KeyLike>(
     let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10, scratch);
     let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10, scratch);
 
-    let base_score = cos_au.au_score * cos_cg.combined * scr_au.au_score * scr_cg.combined;
+    let apex_evidence = cos_au.au_score * cos_cg.combined * scr_au.au_score * scr_cg.combined;
 
-    SplitProductScore {
+    ApexEvidence {
+        apex_evidence,
         cosine_au: cos_au.au_score,
         cosine_cg: cos_cg.combined,
         scribe_au: scr_au.au_score,
         scribe_cg: scr_cg.combined,
-        base_score,
         cosine_weighted_coelution: cos_cg.weighted_coelution,
         cosine_gradient_consistency: cos_cg.gradient_consistency,
         scribe_weighted_coelution: scr_cg.weighted_coelution,
@@ -207,6 +185,7 @@ fn coelution_gradient<T: KeyLike>(
 ) -> CoelutionGradientResult {
     let n_cycles = fragments.num_cycles();
     if n_cycles == 0 {
+        // TODO this should be an error
         return CoelutionGradientResult {
             weighted_coelution: 0.0,
             gradient_consistency: 0.0,
@@ -493,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_product_offset_peaks() {
+    fn test_apex_evidence_offset_peaks() {
         let n = 50;
         // Cosine profile peaks at 20, scribe at 30
         let cosine_profile: Vec<f32> = (0..n)
@@ -523,14 +502,14 @@ mod tests {
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::with_frag_capacity(16);
-        let result = compute_split_product(
+        let result = compute_apex_evidence(
             &cosine_profile,
             &scribe_profile,
             &fragments,
             &expected,
             &mut scratch,
         );
-        assert!(result.base_score > 0.0);
+        assert!(result.apex_evidence > 0.0);
         assert!(result.cosine_au > 0.0);
         assert!(result.scribe_au > 0.0);
     }

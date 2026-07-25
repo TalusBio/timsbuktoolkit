@@ -5,6 +5,7 @@ use super::apex_finding::{
     PeptideMetadata,
     RelativeIntensityCollector,
 };
+use super::blocks::apex_evidence::ApexEvidence;
 use super::blocks::apex_features::ApexFeatures;
 use super::blocks::counts::{
     ApexCounts,
@@ -22,7 +23,6 @@ use super::blocks::primary::PrimaryScores;
 use super::blocks::relative_intensities::RelativeIntensities;
 use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
-use super::blocks::split_product::SplitProduct;
 use super::blocks::{
     ColSink,
     FeatSink,
@@ -145,7 +145,7 @@ compose_scoring_fields! {
         pub rt: Rt,
         pub mobility: Mobility,
         pub primary: PrimaryScores,
-        pub split: SplitProduct,
+        pub evidence: ApexEvidence,
         pub features: ApexFeatures,
         pub apex_lazy: ApexLazyScores,
         pub secondary_lazy: SecondaryLazyScores,
@@ -166,7 +166,7 @@ impl ScoringFields {
             rt: Rt::compute(inp.metadata, obs_rt_seconds),
             mobility: Mobility::compute(inp.offsets),
             primary: inp.apex.primary,
-            split: inp.apex.split,
+            evidence: inp.apex.evidence,
             features: inp.apex.features,
             apex_lazy: inp.apex.apex_lazy,
             secondary_lazy: SecondaryLazyScores::from(inp.secondary_lazy),
