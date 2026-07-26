@@ -273,6 +273,24 @@ mod tests {
         assert!((out[2] - 50.0).abs() < 1e-9);
     }
 
+    /// Documented on `rank_percentile`: "a constant column maps entirely to
+    /// 50". Ties share the mid-rank, and for an all-tied column every value
+    /// shares the single mid-rank of the whole (0-indexed) run, which is
+    /// exactly 50% of the way from 0 to 100 regardless of length — so this
+    /// must hold for any length >= 2, not just the length-3 case above.
+    #[test]
+    fn rank_percentile_maps_an_all_tied_column_entirely_to_fifty() {
+        for len in [2, 3, 4, 10, 11] {
+            let values = vec![7.0; len];
+            let (out, dropped) = transform_column(XTransform::RankPercentile, &values);
+            assert_eq!(dropped, 0, "len {len}: nothing should be dropped");
+            assert!(
+                out.iter().all(|&v| (v - 50.0).abs() < 1e-9),
+                "len {len}: an all-tied column must map entirely to 50, got {out:?}"
+            );
+        }
+    }
+
     #[test]
     fn y_density_normalizes_per_class() {
         assert_eq!(YTransform::Density.apply(5, 10), 0.5);

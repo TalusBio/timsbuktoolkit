@@ -171,8 +171,13 @@ mod tests {
         }
     }
 
+    /// Axes are `(decoy CDF, target CDF)`; the panel draws the `y = x`
+    /// reference line, so a curve point where `d > tt` sits BELOW that
+    /// diagonal. When targets score higher, the decoy CDF races ahead of the
+    /// target CDF in the shared middle range — the curve dips below y = x,
+    /// which is what good target/decoy separation looks like on this plot.
     #[test]
-    fn pp_curve_bulges_when_targets_score_higher() {
+    fn pp_curve_dips_below_the_diagonal_when_targets_score_higher() {
         let mut score = Vec::new();
         let mut t = Vec::new();
         for i in 0..100 {
@@ -184,10 +189,11 @@ mod tests {
             t.push(true);
         }
         let curve = pp_curve(&score, &t, 25);
-        // Somewhere in the middle the decoy CDF is far ahead of the target CDF.
+        // Somewhere in the middle the decoy CDF is far ahead of the target CDF
+        // (d > tt), i.e. the curve point sits well below the diagonal.
         assert!(
             curve.iter().any(|(d, tt)| d - tt > 0.4),
-            "expected separation, got {curve:?}"
+            "expected separation below the diagonal, got {curve:?}"
         );
     }
 
