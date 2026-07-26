@@ -2,10 +2,12 @@
 //! the chromatogram traces (apex stage); `SecondaryLazyScores` is computed from
 //! the secondary spectral-query collectors (finalize stage).
 //!
-//! Canary block for the `#[derive(ScoreBlock)]` migration (see
-//! `timsseek_macros`): both structs route their fields through the
-//! `column_schema`/`linear_features`/`linear_feature_names` lane methods —
-//! the live path the ML consumer reads via `FeatFrame`.
+//! Both structs are ordinary `#[derive(ScoreBlock)]` blocks (see
+//! `timsseek_macros`): the derive generates all six projection methods
+//! (`column_schema`/`columns` plus both feature lanes' values and names) from
+//! the field list. Every field here is `#[feat(..)]`-annotated without
+//! `linear = false`, so they all land in the LINEAR lane — the live path the
+//! ML consumer reads via `FeatFrame`.
 
 use serde::Serialize;
 use timsseek_macros::ScoreBlock;

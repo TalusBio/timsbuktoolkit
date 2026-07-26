@@ -57,9 +57,21 @@ grid_size = 100
 ## DP lookback width during pathfinding (larger = smoother curve, slower fit).
 dp_lookback = 30
 
-## Tolerance-derivation sigma multipliers. Bounds are set to
-## `median ± sigma * 1.4826 * MAD` per dimension (robust-to-tails estimator
-## that matches mean ± stdev for Gaussian data).
+## Tolerance-derivation sigma multipliers. `1.4826 * MAD` is the robust stand-in
+## for a standard deviation (it equals the stdev for Gaussian data and resists
+## outlier inflation for heavier tails).
+##   - mz_sigma / mobility_sigma: bounds are `median ± sigma * 1.4826 * MAD`,
+##     i.e. offset-aware and asymmetric (see `mad_symmetric_bounds`).
+##   - rt_sigma_factor: a plain half-width, `sigma * 1.4826 * MAD` with NO
+##     median offset, then floored by `min_rt_tolerance_minutes` below.
+##
+## mz_sigma was widened from 1.5 to 3.0. This is an EXTRACTION TOLERANCE, not
+## an FDR knob — discrimination is handled downstream by the rescorer and the
+## q-value machinery. The trade it does control is: a wider window pulls more
+## signal into every candidate's traces (including more neighbor/noise
+## interference) and costs more work per query, while a narrower one risks
+## clipping real peaks whose calibrated center is slightly off. 3.0 is
+## deliberately on the permissive side of that trade.
 mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0

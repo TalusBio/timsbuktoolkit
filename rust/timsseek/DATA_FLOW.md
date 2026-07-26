@@ -17,7 +17,7 @@ The pipeline optimizes three independent concerns per peptide:
 
 1. **Apex finding** — locate the correct elution peak in time. Uses the composite apex profile (`cos³ × I × (0.5 + S_norm)`) for peak-picking. Quality measured by whether the detected apex RT matches the true elution time.
 
-2. **Feature extraction** — at the detected apex, compute features that discriminate true peptides from false matches. The 11 apex features, split product scores, lazyscore baseline stats, m/z/mobility errors, and relative intensities all serve this purpose.
+2. **Feature extraction** — at the detected apex, compute features that discriminate true peptides from false matches. The 11 apex features, apex evidence, lazyscore baseline stats, m/z/mobility errors, and relative intensities all serve this purpose.
 
 3. **Post-processing** — refine target/decoy assignments using inter-peptide relationships. Currently: target-decoy competition (dedup by sequence, compete within decoy groups). Potential: overlapping fragment ion competition (if two candidates share fragments and RT, the weaker one is likely false).
 
@@ -72,7 +72,7 @@ Both `prescore_batch` and `score_calibrated_batch` have serial paths gated behin
 
 ### `find_apex_location()`
 **In:** `ScoringContext` (chromatogram data + expected intensities)
-**Out:** `ApexLocation { score, retention_time_ms, apex_cycle, raising_cycles, falling_cycles }`
+**Out:** `ApexLocation { score, retention_time_ms, apex_cycle, rising_cycles, falling_cycles }`
 
 1. **`compute_pass_1()`** — single pass over all fragments × cycles:
    - **Cosine**: `dot(obs, sqrt(expected)) / (||obs|| × ||sqrt(expected)||)` per cycle
@@ -89,12 +89,10 @@ Both `prescore_batch` and `score_calibrated_batch` have serial paths gated behin
    apex_profile(t) = C(t) × (0.5 + S_norm(t))
    ```
 
-3. **Peak-pick** on apex profile → argmax
-4. **Split product score** for calibrant ranking:
-   - Independent argmax on cosine and scribe profiles
-   - Area-uniqueness (hw=5): `AU = peak_area × (1 + 200 × peak_area/total)`
-   - Coelution-gradient (hw=20, gradient hw=10): pairwise fragment correlation
-   - `base_score = cos_AU × cos_CG × scr_AU × scr_CG`
+3. **Peak-pick** on apex profile → argmax (`suggest_apex`). The returned
+   `ApexLocation.score` is the **apex profile peak value itself** — no evidence
+   or feature term is computed here. That value is what ranks calibrants in
+   Phase 1. (`ApexEvidence` is a Phase-3-only concern; see below.)
 
 ### `prescore_batch()`
 - Parallel (or serial with `--features serial_scoring`) iteration
@@ -178,15 +176,15 @@ Key difference from Phase 1:
 
 ### `find_apex()` — full scoring
 **In:** `ScoringContext` (narrow extraction)
-**Out:** `ApexScore`
+**Out:** `ApexBlocks`
 
-Same as `find_apex_location()` (compute_pass_1 + main_score), then additionally:
+Same as `find_apex_location()` (compute_traces + suggest_apex), then additionally:
 
-1. **`extract_apex_score()`**:
+1. **`compute_apex_evidence()`** — extraction-global (cycle-invariant), so it is
+   computed once and handed to `score_at`: `ApexEvidence` with 9 component fields.
+2. **`score_at()`** at the suggested apex cycle:
    - Peak-pick with delta scoring (mask primary, find 2nd/3rd peaks)
-   - Apex evidence: `ApexEvidence` with 9 component fields
-   - Joint precursor-fragment apex: `argmax(C(t) × (0.5 + P(t)/max(P)))`
-   - **11 apex features** at joint apex (`compute_apex_features()`):
+   - **11 apex features** at the apex (`compute_apex_features()`):
 
      | Feature | Description |
      |---------|------------|
@@ -204,12 +202,12 @@ Same as `find_apex_location()` (compute_pass_1 + main_score), then additionally:
 
    - **Weighted product score**:
      ```
-     score = base_score × Π(offset_k + scale_k × feature_k)
+     score = apex_evidence × Π(offset_k + scale_k × feature_k)
      ```
      With 11 (offset, scale) pairs from `SCORING_WEIGHTS`
 
 ### `execute_secondary_query()` — two-pass spectral refinement
-**In:** `QueryItemToScore` + `ApexScore`
+**In:** `QueryItemToScore` + `ApexBlocks`
 **Out:** `(SpectralCollector<MzMobilityStatsCollector>, SpectralCollector<f32>)`
 
 1. **Pass 1**: Query at apex RT with secondary tolerance → observed mobility
@@ -218,14 +216,18 @@ Same as `find_apex_location()` (compute_pass_1 + main_score), then additionally:
    - Isotope pattern (+1 Da offset) → `f32` intensities
 
 ### `finalize_results()`
-**In:** metadata + ApexScore + secondary collectors
-**Out:** `IonSearchResults`
+**In:** metadata + `ApexBlocks` + secondary collectors
+**Out:** `ScoredCandidate` (wrapping `ScoringFields`)
 
-Via `SearchResultBuilder`:
+Via `ScoringFields::compute(FinalizeInputs { .. })`:
 1. `MzMobilityOffsets::new()` — top-3 MS1 + top-7 MS2 m/z/mobility errors
-2. `RelativeIntensities::new()` — log-normalized MS1/MS2 intensities
+2. `RelativeIntensityCollector::new()` — log-normalized MS1/MS2 intensities
 3. `compute_secondary_lazyscores()` — main + isotope lazyscores + ratio
-4. Populate all ~90 fields from ApexScore features, split product, offsets
+4. Assemble the ~90 fields from the `ApexBlocks` blocks (evidence, features,
+   primary, counts, intensities, apex_lazy) plus the offsets/intensity blocks
+
+The candidate then walks `ScoredCandidate` → `CompetedCandidate` (after
+target/decoy competition) → `FinalResult` (after rescoring, written to parquet).
 
 ## Post-Processing
 
@@ -235,19 +237,45 @@ Via `SearchResultBuilder`:
 3. Compute delta_group scores between target/decoy pairs
 4. Keep one winner per (decoy_group_id, charge)
 
-**`rescore()`** — `timsseek/src/ml/qvalues.rs`
-1. Extract features from each `IonSearchResults` via `as_feature()` (see Feature Vector below)
-2. 3-fold cross-validated gradient boosting (forust)
-   - 1000 iterations, LR=0.1, max_depth=6, no early stopping
-   - Subsample=0.8, colsample_bytree=0.8, min_leaf_weight=5
-3. Predict discriminant scores
-4. Assign q-values: `q = cummin(decoys / targets)`
+**Phase 5: rescoring** — `timsseek/src/ml/qvalues.rs`
+
+Three interchangeable rescorers, selected by the `rescore_model` config field /
+`--rescore-model` CLI flag (CLI wins). All three share the same input
+(`Vec<CompetedCandidate>`), the same canonical sort + seeded shuffle
+(`RESCORE_SHUFFLE_SEED = 42`), and the same FDR tail
+(`assign_qval`, `q = cummin(decoys / targets)`) — only the discriminant-score
+source differs.
+
+| `rescore_model` | Function | Feature lane | Model |
+|---|---|---|---|
+| `gbm` (default) | `rescore()` | ALL (`build_all_frame`) | 3-fold CV gradient boosting (forust) |
+| `lda` | `rescore_lda()` | LINEAR (`build_lane_frame(Linear)`) | single closed-form shrinkage LDA, no CV (~100× cheaper) |
+| `hybrid` | `rescore_hybrid()` | NONLINEAR + `lda_score` | per-fold cross-fit LDA on the linear lane, its score pushed as one extra column into the GBM frame |
+
+Feature extraction is the **lane walk**, not a per-result feature method: a
+batch `FeatFrame` is built by `build_lane_frame` / `build_all_frame` over the
+already-shuffled candidate slice, so frame row *i* aligns with candidate *i*
+(the frame MUST be built after the shuffle — fold assignment and labels are
+positional). Column names come from the same walk via
+`linear_feature_name_set` / `nonlinear_feature_name_set` /
+`all_feature_name_set`, which is why columns and names cannot desync (asserted
+with `debug_assert_eq!` at each call site).
+
+Walk order per lane: scoring blocks (composition order) → `ResultMeta` →
+`Derived` → (nonlinear only) `sequence_counts`, the last of which is gated on
+the speclib having parsed sequences.
+
+For `hybrid`, the cross-fit uses `fold(i) = i % 3`, matching the GBM's internal
+fold assignment, so a candidate's `lda_score` never comes from an LDA that saw
+it.
 
 **Output:** Parquet file via `ResultParquetWriter`
 
-## Feature Vector (GBM input)
+## Feature Vector (combined lane feature set)
 
-The `as_feature()` method produces the following features for rescoring:
+The union of the LINEAR and NONLINEAR lanes — i.e. what `all_feature_name_set` /
+`build_all_frame` produce, the GBM's input. The LDA sees the linear subset; the
+hybrid GBM sees the nonlinear subset plus `lda_score`.
 
 **Context features:**
 - `precursor_mz` (binned to 5 Da), `charge`, `mobility_query`, `rt_query` (rounded)
@@ -262,7 +290,7 @@ The `as_feature()` method produces the following features for rescoring:
 - `calibrated_sq_delta_theo_rt`, `recalibrated_query_rt`
 
 **Peak shape:**
-- `raising_cycles`, `falling_cycles`
+- `rising_cycles`, `falling_cycles`
 
 **MS2 scores:**
 - `npeaks`, `apex_lazyerscore`, `ln(ms2_summed_intensity)`
@@ -271,7 +299,7 @@ The `as_feature()` method produces the following features for rescoring:
 
 **Apex evidence & apex features (19 values):**
 - `ln(apex_evidence)`, `ln(cosine_au)`, `ln(scribe_au)`
-- `coelution_gradient_cosine`, `coelution_gradient_scribe`
+- `cosine_cg`, `scribe_cg` (coelution-gradient, per profile)
 - `cosine_weighted_coelution`, `cosine_gradient_consistency`
 - `scribe_weighted_coelution`, `scribe_gradient_consistency`
 - 11 apex features (peak_shape through per_frag_gaussian_corr)
@@ -321,16 +349,20 @@ ScoreTraces                           6 per-cycle vectors
 └── main_score                        composite apex profile
 
 ApexLocation                          Phase 1 result (lightweight)
-├── score: f32                        split product base score
-└── retention_time_ms: u32
+├── score: f32                        apex_profile peak value (NOT apex_evidence)
+├── retention_time_ms: u32
+├── apex_cycle: usize
+└── rising_cycles, falling_cycles: u8
 
-ApexScore                             Phase 3 result (full)
-├── score: f32                        weighted product score
+ApexBlocks                            Phase 3 result (full)
+├── joint_apex_cycle: usize
+├── retention_time_ms: u32            also the secondary-query bridge input
 ├── evidence: ApexEvidence            9 component scores
 ├── features: ApexFeatures            11 apex-local features
-├── delta_next, delta_second_next     peak discrimination
-├── lazyscore_z: f32                  Poisson Z-score (peak vs baseline)
-└── lazyscore_vs_baseline: f32        signal-to-noise (k/lambda)
+├── primary: PrimaryScores            main_score, delta_next, delta_second_next
+├── counts: ApexCounts                rising/falling cycles, npeaks
+├── intensities: Intensities          ms1/ms2 summed intensity at apex
+└── apex_lazy: ApexLazyScores         lazyscore_z, lazyscore_vs_baseline
 
 CalibrationResult                     immutable, speclib not mutated
 ├── cal_curve: RTCalibration          iRT → calibrated RT
@@ -338,7 +370,10 @@ CalibrationResult                     immutable, speclib not mutated
 ├── mz_tolerance_ppm: (f64, f64)     asymmetric
 └── mobility_tolerance_pct: (f32, f32) asymmetric
 
-IonSearchResults                      ~90 fields → parquet
+ScoringFields                         ~90 fields, composed from ordered blocks
+  ScoredCandidate                     Phase 3 output
+  → CompetedCandidate                 + delta_group / delta_group_ratio
+  → FinalResult                       + discriminant_score / qvalue → parquet
 ```
 
 ## Constants
@@ -353,12 +388,12 @@ IonSearchResults                      ~90 fields → parquet
 | grid_size | 100 | CalibrationConfig |
 | rt_sigma_factor | 3.0 | CalibrationConfig |
 | min_rt_tolerance_minutes | 0.5 | CalibrationConfig |
-| mz_sigma | 2.0 | CalibrationConfig |
+| mz_sigma | 3.0 | CalibrationConfig |
 | mobility_sigma | 3.0 | CalibrationConfig |
 | MIN_SHARED_FRAGMENTS | 5 | processing.rs (calib lib matching) |
-| Area-uniqueness hw | 5 | apex_features.rs |
-| Coelution hw | 20 | apex_features.rs |
-| Gradient hw | 10 | apex_features.rs |
+| Area-uniqueness hw | 5 | blocks/apex_evidence.rs |
+| Coelution hw | 20 | blocks/apex_evidence.rs |
+| Gradient hw | 10 | blocks/apex_evidence.rs |
 | GBM iterations | 1000 | cv.rs |
 | GBM learning_rate | 0.1 | cv.rs |
 | GBM max_depth | 6 | cv.rs |
@@ -367,4 +402,7 @@ IonSearchResults                      ~90 fields → parquet
 | GBM colsample_bytree | 0.8 | cv.rs |
 | GBM early_stopping | None | cv.rs |
 | CV folds | 3 | qvalues.rs |
+| LDA shrinkage (`DEFAULT_LDA_SHRINKAGE`) | 1e-2 | ml/lda.rs |
+| LDA row-chunk (`CHUNK_ROWS`, determinism) | 65536 | ml/lda.rs |
+| Rescore shuffle seed | 42 | qvalues.rs |
 | Pathfinding lookback | 30 | pathfinding.rs |

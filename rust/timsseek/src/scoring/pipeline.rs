@@ -226,6 +226,10 @@ impl Default for CalibrationConfig {
         Self {
             n_calibrants: 2000,
             grid_size: 100,
+            // Keep in sync with `timsseek_cli/assets/default_config.toml`
+            // ([calibration]) — that file carries the rationale for these
+            // sigmas, and `config::tests::default_template_parses_with_expected_values`
+            // fails if the two drift apart.
             mz_sigma: 3.0,
             mobility_sigma: 3.0,
             rt_sigma_factor: 3.0,
@@ -289,7 +293,7 @@ impl ScratchBufs {
         fill_scratch_from(&mut self.eg, q);
         self.expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
-            q.expected_precursor_envelope().into_iter(),
+            q.expected_precursor_envelope(),
         )
         .expect("library flyweight yields unique fragment/precursor keys");
     }
@@ -772,7 +776,8 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 
     /// Phase 1: Lightweight prescore — broad extraction + find_apex_location only.
-    /// Returns the apex location (with split product score) and metadata.
+    /// Returns an [`ApexLocation`], whose `score` is the apex-profile peak
+    /// value — NOT the apex evidence (see `TraceScorer::suggest_apex`).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
