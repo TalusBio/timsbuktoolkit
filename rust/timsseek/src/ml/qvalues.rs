@@ -493,13 +493,13 @@ fn dump_feature_matrix(
     use std::io::Write;
     let write = || -> std::io::Result<()> {
         let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{prefix}.f64"))?);
-        // Header: nrows, ncols as u64 little-endian, then row-major f64.
+        // Header: nrows, ncols as u64 little-endian, then row-major f64, also
+        // little-endian. The reader is offline python, which assumes LE.
         f.write_all(&(nrows as u64).to_le_bytes())?;
         f.write_all(&(names.len() as u64).to_le_bytes())?;
-        // SAFETY: transmuting &[f64] to &[u8] for a bulk write.
-        let bytes =
-            unsafe { std::slice::from_raw_parts(base.as_ptr() as *const u8, base.len() * 8) };
-        f.write_all(bytes)?;
+        for v in base {
+            f.write_all(&v.to_le_bytes())?;
+        }
         f.flush()?;
 
         let labels: Vec<u8> = is_decoy.iter().map(|&d| u8::from(!d)).collect();
