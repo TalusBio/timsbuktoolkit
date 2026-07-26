@@ -111,7 +111,25 @@ fn hist_datasets(hist: &Hist, y: transform::YTransform) -> (Vec<(f64, f64)>, Vec
 /// Render a target/decoy histogram as a `Chart`. Tolerates an all-empty or
 /// all-zero `hist`: the y bound falls back to `1.0` rather than degenerating
 /// to `[0.0, 0.0]`.
-fn draw_hist(frame: &mut Frame, area: Rect, title: &str, hist: &Hist, y: transform::YTransform) {
+///
+/// `title` (what the panel shows: the score or feature name plus the
+/// transform label) goes on the top border; `subtitle` (the drop/out-of-range
+/// diagnostics) goes on the bottom border via `Block::title_bottom`. These
+/// used to be crammed into one parenthetical on `title`, which read as if
+/// "out of range" were a subset of "dropped" — it is not: `dropped` counts
+/// values the transform excluded (including non-finite ones), and the
+/// out-of-range count applies only to values that survived the transform and
+/// were then excluded at binning time. Keeping them on separate lines, worded
+/// as the separate things they are, is what `column_hist`'s two call sites
+/// both do now.
+fn draw_hist(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    subtitle: &str,
+    hist: &Hist,
+    y: transform::YTransform,
+) {
     let (target, decoy) = hist_datasets(hist, y);
     let ymax = target
         .iter()
@@ -139,7 +157,12 @@ fn draw_hist(frame: &mut Frame, area: Rect, title: &str, hist: &Hist, y: transfo
     // and get drawn inline over the last row of plot data.
     let mid = (hist.lo + hist.hi) / 2.0;
     let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom(subtitle),
+        )
         .x_axis(Axis::default().bounds([hist.lo, hist.hi]).labels([
             format!("{:.3}", hist.lo),
             format!("{mid:.3}"),
@@ -193,6 +216,19 @@ fn column_hist(app: &mut App, values: &[f64]) -> (Hist, usize) {
     (hist, dropped)
 }
 
+/// The two histogram panels' shared diagnostics line: values the transform
+/// excluded (`dropped`, with the non-finite subset broken out as
+/// `nan_count`), and, separately, finite values that survived the transform
+/// but landed outside the plotted range at binning time (`n_out`). These are
+/// two different exclusions at two different pipeline steps — `n_out` is not
+/// a subset of `dropped` — so they get worded as separate clauses rather than
+/// nested in one parenthetical.
+fn hist_subtitle(dropped: usize, nan_count: usize, n_out: usize) -> String {
+    format!(
+        "dropped {dropped} by transform ({nan_count} non-finite) | {n_out} finite values outside plotted range"
+    )
+}
+
 /// Score summary line plus the discriminant-score histogram.
 fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
@@ -218,12 +254,9 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let nan_count = score.iter().filter(|v| !v.is_finite()).count();
     let (hist, dropped) = column_hist(app, &score);
-    let title = format!(
-        "discriminant_score [{}] (dropped {dropped}, of which {nan_count} non-finite, {} out of range)",
-        app.x().label(),
-        hist.n_out
-    );
-    draw_hist(frame, chunks[1], &title, &hist, app.y());
+    let title = format!("discriminant_score [{}]", app.x().label());
+    let subtitle = hist_subtitle(dropped, nan_count, hist.n_out);
+    draw_hist(frame, chunks[1], &title, &subtitle, &hist, app.y());
 }
 
 /// Targets-passing-vs-q-value curve, plus a threshold table at fixed FDR
@@ -411,12 +444,9 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
             let name = app.view().feature_names[j].to_string();
             let nan_count = values.iter().filter(|v| !v.is_finite()).count();
             let (hist, dropped) = column_hist(app, &values);
-            let title = format!(
-                "{name} [{}] (dropped {dropped}, of which {nan_count} non-finite, {} out of range)",
-                app.x().label(),
-                hist.n_out
-            );
-            draw_hist(frame, chunks[1], &title, &hist, app.y());
+            let title = format!("{name} [{}]", app.x().label());
+            let subtitle = hist_subtitle(dropped, nan_count, hist.n_out);
+            draw_hist(frame, chunks[1], &title, &subtitle, &hist, app.y());
         }
         None => {
             frame.render_widget(
