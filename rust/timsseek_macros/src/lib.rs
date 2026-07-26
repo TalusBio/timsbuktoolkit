@@ -1,7 +1,16 @@
-//! `#[derive(ScoreBlock)]` — projects a "score block" struct's fields into the
-//! six `ScoreBlock` trait methods (schema, columns, and the two ML feature
-//! lanes), so the projections cannot desync the way a hand-maintained
+//! `#[derive(ScoreBlock)]` — projects a "score block" struct's fields into its
+//! Parquet surface (the `ScoreBlock` trait's `column_schema`/`columns`), the
+//! set-level ML feature-name walks (also on the trait), and the two ML feature
+//! *value* lanes, which are INHERENT `[f64; N]` methods sized by inherent
+//! `LINEAR_LEN`/`NONLINEAR_LEN` consts. All of it is walked off the one field
+//! list, so the projections cannot desync the way a hand-maintained
 //! `macro_rules!` invocation could.
+//!
+//! The lane values are inherent, not trait methods, on purpose: `fn f(&self) ->
+//! [f64; Self::LEN]` in a trait needs unstable `generic_const_exprs`, while the
+//! same signature on a concrete type is stable — and inherent consts compose
+//! (`Fields::LINEAR_LEN = A::LINEAR_LEN + B::LINEAR_LEN`), which is what lets
+//! the whole feature matrix be a compile-time width.
 //!
 //! See [`macro@ScoreBlock`] for the `#[feat(...)]` field grammar.
 
@@ -53,9 +62,9 @@ impl Generator {
 
     /// Suffix appended to the bare field name to form the emitted feature name.
     ///
-    /// This is the ONLY suffix table: both the value walk and the name walk are
-    /// emitted with the already-suffixed literal this produces, so `FrameSink`'s
-    /// `push_*` methods only apply arithmetic and never re-derive a name.
+    /// This is the ONLY suffix table, and [`Generator::apply`] is the only
+    /// arithmetic table; the two are read together at each generator site, so
+    /// a name and the value under it are emitted from one match arm apiece.
     fn name_suffix(self) -> &'static str {
         match self {
             Generator::Raw => "",
@@ -67,19 +76,18 @@ impl Generator {
         }
     }
 
-    /// `FrameSink` method used to push a scalar value for this generator. It
-    /// is called with the final, already-suffixed name (see
-    /// [`Generator::name_suffix`]); the method only applies the arithmetic.
-    fn scalar_push_method(self) -> Ident {
-        let name = match self {
-            Generator::Raw => "push",
-            Generator::Log2 => "push_log2",
-            Generator::Ln1p => "push_ln1p",
-            Generator::Abs => "push_abs",
-            Generator::Round => "push_round",
-            Generator::Isna => "push_isna",
-        };
-        format_ident!("{name}")
+    /// This generator's arithmetic, applied to an already-`f64` expression.
+    /// `isna` is the only non-arithmetic one: a missingness indicator, so it is
+    /// BY CONSTRUCTION never NaN, unlike `abs` which passes non-finites through.
+    fn apply(self, x: TokenStream) -> TokenStream {
+        match self {
+            Generator::Raw => x,
+            Generator::Log2 => quote! { (#x).log2() },
+            Generator::Ln1p => quote! { (#x).ln_1p() },
+            Generator::Abs => quote! { (#x).abs() },
+            Generator::Round => quote! { (#x).round() },
+            Generator::Isna => quote! { if (#x).is_finite() { 0.0 } else { 1.0 } },
+        }
     }
 }
 
@@ -139,7 +147,7 @@ impl Scalar {
         }
     }
 
-    /// `self.#ident` widened to the `f64` every `FrameSink` push takes.
+    /// `self.#ident` widened to the `f64` every feature-array slot holds.
     /// `bool` has no direct `as f64` cast (`error[E0606]`), so it goes through
     /// `u8` and lands as the usual 0.0/1.0 indicator.
     fn to_f64_expr(self, ident: &Ident) -> TokenStream {
@@ -348,10 +356,29 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
     (schema_calls, column_calls)
 }
 
-/// Emits the `FrameSink`/`NameSink` calls for one feature lane.
-fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<TokenStream>)> {
-    let mut feature_calls = Vec::new();
-    let mut name_calls = Vec::new();
+/// One feature lane's codegen: the width const's terms, the statements that
+/// fill the `[f64; LEN]` value array, and the set-level name pushes.
+struct LaneCode {
+    /// Summands of the lane's `LEN` const — `1usize` per scalar generator,
+    /// the array's own length expression (verbatim, so a const path like
+    /// `NUM_MS2_IONS` stays a const path) per array generator.
+    len_terms: Vec<TokenStream>,
+    /// Writes into `out` at the running `at` cursor; each advances `at` by
+    /// exactly the term it contributed to `len_terms`, in the same order.
+    fills: Vec<TokenStream>,
+    /// `NameSink` pushes, in the same order as `fills`.
+    name_calls: Vec<TokenStream>,
+}
+
+/// Emits the value-array fills, the width terms, and the `NameSink` calls for
+/// one feature lane. All three walk the field list once, in one loop, so they
+/// are index-for-index aligned by construction.
+fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
+    let mut code = LaneCode {
+        len_terms: Vec::new(),
+        fills: Vec::new(),
+        name_calls: Vec::new(),
+    };
 
     for field in fields {
         let Some((generators, field_lane)) = &field.feature else {
@@ -367,53 +394,87 @@ fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<Tok
             let generator = spec.generator;
             match &field.shape {
                 FieldShape::Scalar(scalar) => {
-                    let push = generator.scalar_push_method();
-                    let value = scalar.to_f64_expr(ident);
-                    // One name, computed once here, handed to BOTH walks as a
-                    // literal: the value walk cannot re-derive it differently
-                    // (and does not allocate to derive it at all).
+                    let value = generator.apply(scalar.to_f64_expr(ident));
+                    // One name, computed once here, used by the name walk; the
+                    // value walk is positional, so it cannot name anything
+                    // differently — there is nothing to name.
                     let feat_name = format!("{name}{}", generator.name_suffix());
-                    feature_calls.push(quote! {
-                        out.#push(#feat_name, #value);
+                    code.len_terms.push(quote! { 1usize });
+                    code.fills.push(quote! {
+                        out[at] = #value;
+                        at += 1;
                     });
-                    name_calls.push(quote! { out.push(#feat_name); });
+                    code.name_calls.push(quote! { out.push(#feat_name); });
                 }
-                FieldShape::Array { len } => match generator {
-                    Generator::Raw => {
-                        feature_calls.push(quote! {
-                            out.push_slice(#name, &self.#ident);
-                        });
-                        name_calls.push(quote! {
-                            for i in 0..#len {
-                                out.push(&format!("{}_{i}", #name));
-                            }
-                        });
-                    }
-                    Generator::Isna => {
-                        feature_calls.push(quote! {
-                            out.push_slice_isna(#name, &self.#ident);
-                        });
-                        name_calls.push(quote! {
-                            for i in 0..#len {
-                                out.push(&format!("{}_{i}_isna", #name));
-                            }
-                        });
-                    }
-                    _ => {
-                        let written = &spec.ident;
-                        return Err(Error::new(
-                            written.span(),
-                            format!(
-                                "generator `{written}` is not supported on array fields; only raw and isna apply"
-                            ),
-                        ));
-                    }
-                },
+                FieldShape::Array { len } => {
+                    let (elem, suffix) = match generator {
+                        Generator::Raw => (quote! { *v as f64 }, ""),
+                        Generator::Isna => {
+                            (quote! { if v.is_finite() { 0.0 } else { 1.0 } }, "_isna")
+                        }
+                        _ => {
+                            let written = &spec.ident;
+                            return Err(Error::new(
+                                written.span(),
+                                format!(
+                                    "generator `{written}` is not supported on array fields; only raw and isna apply"
+                                ),
+                            ));
+                        }
+                    };
+                    // Field names are identifiers, so the only brace in this
+                    // format string is the `{i}` the generated loop fills in.
+                    let name_fmt = format!("{name}_{{i}}{suffix}");
+                    code.len_terms.push(quote! { (#len) });
+                    code.fills.push(quote! {
+                        for (k, v) in self.#ident.iter().enumerate() {
+                            out[at + k] = #elem;
+                        }
+                        at += #len;
+                    });
+                    code.name_calls.push(quote! {
+                        for i in 0..#len {
+                            out.push(&format!(#name_fmt));
+                        }
+                    });
+                }
             }
         }
     }
 
-    Ok((feature_calls, name_calls))
+    Ok(code)
+}
+
+/// The inherent `pub const #len_const: usize` + `pub fn #method(&self) ->
+/// [f64; Self::#len_const]` pair for one lane. An empty lane skips the cursor
+/// entirely (a `let mut at` no statement ever touches is an `unused_mut`).
+fn lane_methods(code: &LaneCode, len_const: Ident, method: Ident) -> TokenStream {
+    let LaneCode {
+        len_terms, fills, ..
+    } = code;
+    let body = if fills.is_empty() {
+        quote! { [0.0f64; Self::#len_const] }
+    } else {
+        quote! {
+            let mut out = [0.0f64; Self::#len_const];
+            let mut at = 0usize;
+            #(#fills)*
+            debug_assert_eq!(at, Self::#len_const);
+            out
+        }
+    };
+    quote! {
+        /// This lane's feature count — the sum of one per scalar generator and
+        /// `N` per `[f32; N]` generator, so the lane's width is a compile-time
+        /// constant that composes into the whole matrix's width.
+        pub const #len_const: usize = 0usize #( + #len_terms )*;
+
+        /// This lane's feature *values*, positionally aligned with the
+        /// corresponding `*_feature_names` walk.
+        pub fn #method(&self) -> [f64; Self::#len_const] {
+            #body
+        }
+    }
 }
 
 /// Emits one `#field: <#ty as BlockFixture>::fixture()` initializer per
@@ -432,9 +493,10 @@ fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
 }
 
 /// Pure codegen entry point: parses the `#[feat(...)]` grammar off each
-/// named field of `input` and emits an `impl ScoreBlock for $Name` with the
-/// six projection methods described in the crate docs, plus an inherent
-/// `sample()`. `sample()` stays un-gated (not `#[cfg(test)]`): it is called
+/// named field of `input` and emits an `impl ScoreBlock for $Name` (Parquet
+/// schema + columns, and the two set-level name walks) plus an inherent impl
+/// carrying the two lane width consts, the two `[f64; N]` lane value methods,
+/// and `sample()`. `sample()` stays un-gated (not `#[cfg(test)]`): it is called
 /// uniformly across every block by `ScoringFields::sample_default`, which
 /// itself must stay reachable in a normal (non-test) build because
 /// `ScoringFields::sample` is used from another crate's test module
@@ -446,8 +508,20 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let (generics_impl, generics_ty, generics_where) = input.generics.split_for_impl();
 
     let (schema_calls, column_calls) = schema_and_column_calls(&fields);
-    let (linear_feature_calls, linear_name_calls) = lane_calls(&fields, Lane::Linear)?;
-    let (nonlinear_feature_calls, nonlinear_name_calls) = lane_calls(&fields, Lane::Nonlinear)?;
+    let linear = lane_code(&fields, Lane::Linear)?;
+    let nonlinear = lane_code(&fields, Lane::Nonlinear)?;
+    let linear_name_calls = &linear.name_calls;
+    let nonlinear_name_calls = &nonlinear.name_calls;
+    let linear_methods = lane_methods(
+        &linear,
+        format_ident!("LINEAR_LEN"),
+        format_ident!("linear_feature_array"),
+    );
+    let nonlinear_methods = lane_methods(
+        &nonlinear,
+        format_ident!("NONLINEAR_LEN"),
+        format_ident!("nonlinear_feature_array"),
+    );
     let sample_calls = sample_field_calls(&fields);
 
     Ok(quote! {
@@ -460,16 +534,8 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
                 #(#column_calls)*
             }
 
-            fn linear_features(&self, out: &mut crate::scoring::blocks::FrameSink) {
-                #(#linear_feature_calls)*
-            }
-
             fn linear_feature_names(out: &mut crate::scoring::blocks::NameSink) {
                 #(#linear_name_calls)*
-            }
-
-            fn nonlinear_features(&self, out: &mut crate::scoring::blocks::FrameSink) {
-                #(#nonlinear_feature_calls)*
             }
 
             fn nonlinear_feature_names(out: &mut crate::scoring::blocks::NameSink) {
@@ -478,6 +544,9 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
         }
 
         impl #generics_impl #name #generics_ty #generics_where {
+            #linear_methods
+            #nonlinear_methods
+
             /// Fixture with every field a fixed constant (see
             /// [`crate::scoring::blocks::BlockFixture`]). Transition
             /// scaffolding: un-gated because `ScoringFields::sample_default`
@@ -551,15 +620,29 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// # What is generated
 ///
-/// The six `ScoreBlock` methods:
+/// Four `ScoreBlock` trait methods:
 ///
 /// - `column_schema(&mut SchemaSink)` — Parquet field dtypes/nullability
 /// - `columns(&self, &mut ColSink)` — Parquet values
-/// - `linear_features(&self, &mut FrameSink)` / `linear_feature_names(&mut NameSink)`
-/// - `nonlinear_features(&self, &mut FrameSink)` / `nonlinear_feature_names(&mut NameSink)`
+/// - `linear_feature_names(&mut NameSink)` / `nonlinear_feature_names(&mut NameSink)`
 ///
-/// Each values/names pair walks the same field list in the same order, so the
-/// two halves of a lane cannot desync.
+/// and, on an INHERENT impl, the lane value surface:
+///
+/// - `pub const LINEAR_LEN: usize` / `pub const NONLINEAR_LEN: usize`
+/// - `pub fn linear_feature_array(&self) -> [f64; Self::LINEAR_LEN]`
+/// - `pub fn nonlinear_feature_array(&self) -> [f64; Self::NONLINEAR_LEN]`
+///
+/// The lane values are inherent because `-> [f64; Self::LEN]` in a *trait*
+/// needs unstable `generic_const_exprs`. Inherent, the width is a plain
+/// compile-time constant that composes: a set of blocks sums their consts to
+/// get the whole feature matrix's width, with no runtime length bookkeeping.
+///
+/// The name walk stays dynamic (`NameSink`) — an array field's `{field}_{i}`
+/// fan-out is a loop over a const *path*, which no macro can unroll.
+///
+/// A lane's value array and its name walk are emitted from the same single
+/// pass over the field list, so entry `j` of the array is always the feature
+/// named `j` — they cannot desync.
 ///
 /// Plus a public inherent `fn sample() -> Self` on the struct, filling every
 /// field from `BlockFixture::fixture()` — a fixed, finite, non-zero constant
@@ -583,6 +666,9 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///     pub n_cycles: u32,
 /// }
 /// ```
+///
+/// gives `MyScores::LINEAR_LEN == 1usize + (6)` and `MyScores::NONLINEAR_LEN ==
+/// 1usize + 1usize`.
 #[proc_macro_derive(ScoreBlock, attributes(feat))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
@@ -597,7 +683,7 @@ mod tests {
     use quote::quote;
 
     #[test]
-    fn emits_six_methods_and_routes_lane() {
+    fn emits_the_trait_and_inherent_lane_surface() {
         let di: syn::DeriveInput = syn::parse2(quote! {
             pub struct T {
                 #[feat(log2)] pub a: f32,
@@ -609,13 +695,26 @@ mod tests {
         let ts = derive_score_block(di).unwrap().to_string();
         assert!(ts.contains("fn column_schema"));
         assert!(ts.contains("fn columns"));
-        assert!(ts.contains("fn linear_features"));
         assert!(ts.contains("fn linear_feature_names"));
-        assert!(ts.contains("fn nonlinear_features"));
         assert!(ts.contains("fn nonlinear_feature_names"));
+        // The lane VALUES are inherent const-sized arrays, not trait methods.
+        assert!(!ts.contains("fn linear_features"), "{ts}");
+        assert!(!ts.contains("fn nonlinear_features"), "{ts}");
+        let f = flat(&ts);
+        assert!(
+            f.contains("pubconstLINEAR_LEN:usize=0usize+1usize;"),
+            "{ts}"
+        );
+        assert!(
+            f.contains("pubconstNONLINEAR_LEN:usize=0usize+1usize;"),
+            "{ts}"
+        );
+        assert!(
+            f.contains("pubfnlinear_feature_array(&self)->[f64;Self::LINEAR_LEN]"),
+            "{ts}"
+        );
         // a (log2) -> linear lane; b (raw) -> nonlinear lane; c -> column-only
-        assert!(ts.contains("push_log2"));
-        assert!(ts.contains("\"a\""));
+        assert!(ts.contains("log2"));
         // all three fields appear in column_schema
         assert!(ts.contains("\"c\""));
     }
@@ -626,30 +725,49 @@ mod tests {
         ts.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
-    /// The value walk gets the SAME already-suffixed literal as the name walk.
-    /// `Generator::name_suffix` is the only suffix table there is: a `FrameSink`
-    /// `push_*` must never see the bare field name, or it would have to
-    /// re-derive (and could disagree with) the name walk.
+    /// A lane with no fields must still emit its (zero) const and a method
+    /// returning `[f64; 0]`, and must NOT open a cursor no statement touches
+    /// (that is an `unused_mut` at the expansion site).
     #[test]
-    fn scalar_value_walk_gets_the_suffixed_name() {
+    fn empty_lane_emits_a_zero_length_array_without_a_cursor() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(raw)] pub a: f32 }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        let f = flat(&ts);
+        assert!(f.contains("pubconstNONLINEAR_LEN:usize=0usize;"), "{ts}");
+        assert!(
+            f.contains(
+                "pubfnnonlinear_feature_array(&self)->[f64;Self::NONLINEAR_LEN]\
+                 {[0.0f64;Self::NONLINEAR_LEN]}"
+            ),
+            "{ts}"
+        );
+    }
+
+    /// The name walk owns the only copy of a feature's name; the value walk is
+    /// positional. `Generator::name_suffix` is still the only suffix table, and
+    /// `Generator::apply` the only arithmetic table.
+    #[test]
+    fn scalar_name_is_suffixed_and_the_value_is_positional() {
         let di: syn::DeriveInput = syn::parse2(quote! {
             pub struct T { #[feat(log2)] pub a: f32 }
         })
         .unwrap();
         let ts = derive_score_block(di).unwrap().to_string();
         let f = flat(&ts);
-        assert!(
-            f.contains(r#"out.push_log2("a_log2",self.aasf64);"#),
-            "{ts}"
-        );
+        assert!(f.contains(r#"out[at]=(self.aasf64).log2();at+=1;"#), "{ts}");
         assert!(f.contains(r#"out.push("a_log2");"#), "{ts}");
-        // The bare `"a"` survives only as the Parquet column (schema + value).
+        // The bare `"a"` survives only as the Parquet column (schema + value);
+        // `"a_log2"` exists exactly once, in the name walk.
         assert_eq!(f.matches(r#""a""#).count(), 2, "{ts}");
+        assert_eq!(f.matches(r#""a_log2""#).count(), 1, "{ts}");
     }
 
     /// `Generator::Raw`'s empty suffix must still yield the bare name, and a
-    /// multi-generator field must emit one push per generator, in written
-    /// order.
+    /// multi-generator field must emit one slot per generator, in written
+    /// order, with the array width counting both.
     #[test]
     fn raw_keeps_bare_name_and_generators_keep_order() {
         let di: syn::DeriveInput = syn::parse2(quote! {
@@ -659,10 +777,17 @@ mod tests {
         let ts = derive_score_block(di).unwrap().to_string();
         let f = flat(&ts);
         assert!(
-            f.contains(r#"out.push("x",self.xasf64);out.push_isna("x_isna",self.xasf64);"#),
+            f.contains(
+                "out[at]=self.xasf64;at+=1;\
+                 out[at]=if(self.xasf64).is_finite(){0.0}else{1.0};at+=1;"
+            ),
             "{ts}"
         );
         assert!(f.contains(r#"out.push("x");out.push("x_isna");"#), "{ts}");
+        assert!(
+            f.contains("pubconstLINEAR_LEN:usize=0usize+1usize+1usize;"),
+            "{ts}"
+        );
     }
 
     #[test]
@@ -689,16 +814,50 @@ mod tests {
         assert!(derive_score_block(di).is_err());
     }
 
+    /// An array field's length is a const PATH, so it must reach the width
+    /// const verbatim (never a resolved literal, which the macro cannot know)
+    /// and the fill must advance the cursor by that same path.
     #[test]
-    fn array_field_uses_slice_and_count() {
+    fn array_field_width_is_the_const_path_verbatim() {
         let di: syn::DeriveInput = syn::parse2(quote! {
             pub struct T { #[feat(raw)] pub arr: [f32; NUM_MS2_IONS] }
         })
         .unwrap();
         let ts = derive_score_block(di).unwrap().to_string();
-        assert!(ts.contains("push_slice"));
+        let f = flat(&ts);
         assert!(ts.contains("f32_array"));
-        assert!(ts.contains("NUM_MS2_IONS"));
+        assert!(
+            f.contains("pubconstLINEAR_LEN:usize=0usize+(NUM_MS2_IONS);"),
+            "{ts}"
+        );
+        assert!(
+            f.contains(
+                "for(k,v)inself.arr.iter().enumerate(){out[at+k]=*vasf64;}at+=NUM_MS2_IONS;"
+            ),
+            "{ts}"
+        );
+        // The `{field}_{i}` name fan-out stays a runtime loop — no macro can
+        // unroll a const path — but the format string itself is a literal.
+        assert!(
+            f.contains(r#"foriin0..NUM_MS2_IONS{out.push(&format!("arr_{i}"));}"#),
+            "{ts}"
+        );
+    }
+
+    /// The array `isna` companion suffixes the INDEX, not the field: the
+    /// columns are `{field}_{i}_isna`, matching what the Parquet fan-out and
+    /// the pre-array-derive name table both used.
+    #[test]
+    fn array_isna_names_suffix_the_index() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(isna)] pub arr: [f32; NUM_MS2_IONS] }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        assert!(
+            flat(&ts).contains(r#"out.push(&format!("arr_{i}_isna"));"#),
+            "{ts}"
+        );
     }
 
     #[test]

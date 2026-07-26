@@ -9,7 +9,6 @@ use crate::models::sequence::Peptide;
 use crate::scoring::apex_finding::PeptideMetadata;
 use crate::scoring::blocks::{
     ColSink,
-    FrameSink,
     NameSink,
     SchemaSink,
     ScoreBlock,
@@ -27,6 +26,14 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Hand-written twin of what `#[derive(ScoreBlock)]` emits: no identity
+    /// field is a linear-lane feature.
+    pub const LINEAR_LEN: usize = 0;
+    /// `precursor_mz_round5`, `precursor_charge`, `precursor_mobility` — the
+    /// context features. `library_id` / `decoy_group_id` / `is_target` are
+    /// Parquet-only.
+    pub const NONLINEAR_LEN: usize = 3;
+
     pub fn compute(metadata: &PeptideMetadata) -> Self {
         Self {
             peptide: metadata.digest.clone(),
@@ -43,6 +50,19 @@ impl Identity {
     /// precursor mobility to NaN.
     pub fn neutralize_mobility(&mut self) {
         self.precursor_mobility = f32::NAN;
+    }
+
+    pub fn linear_feature_array(&self) -> [f64; Self::LINEAR_LEN] {
+        []
+    }
+
+    /// Values for [`Identity::nonlinear_feature_names`], same order.
+    pub fn nonlinear_feature_array(&self) -> [f64; Self::NONLINEAR_LEN] {
+        [
+            (self.precursor_mz / 5.0).round(),
+            self.precursor_charge as f64,
+            self.precursor_mobility as f64,
+        ]
     }
 
     pub fn sample() -> Self {
@@ -84,14 +104,6 @@ impl ScoreBlock for Identity {
         o.bool("is_target");
     }
 
-    fn nonlinear_features(&self, o: &mut FrameSink) {
-        // Context features -> tree-only (nonlinear) lane. library_id /
-        // decoy_group_id / is_target are Parquet-only (not features).
-        o.push("precursor_mz_round5", (self.precursor_mz / 5.0).round());
-        o.push("precursor_charge", self.precursor_charge as f64);
-        o.push("precursor_mobility", self.precursor_mobility as f64);
-    }
-
     fn nonlinear_feature_names(o: &mut NameSink) {
         o.push("precursor_mz_round5");
         o.push("precursor_charge");
@@ -102,27 +114,20 @@ impl ScoreBlock for Identity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::blocks::FeatFrame;
 
-    /// The two halves of the nonlinear lane — the per-record value walk and the
-    /// set-level name walk — must agree on count, order, and which value sits
-    /// under which name.
+    /// The two halves of the nonlinear lane — the per-record value array and
+    /// the set-level name walk — must agree on count, order, and which value
+    /// sits under which name. Hand-written here (the derive can't check this
+    /// block), so this is the only place the pairing is asserted.
     #[test]
     fn nonlinear_lane_names_match_values() {
         let identity = Identity::sample();
-
-        let mut frame = FeatFrame::with_capacity(3, 1);
-        {
-            let mut sink = FrameSink::new(&mut frame, 1);
-            sink.begin_row();
-            identity.nonlinear_features(&mut sink);
-        }
+        let values = identity.nonlinear_feature_array();
 
         let mut names = NameSink::new();
         Identity::nonlinear_feature_names(&mut names);
         let names = names.into_names();
-        assert_eq!(frame.names(), names.as_slice());
-        assert_eq!(frame.ncols(), names.len());
+        assert_eq!(names.len(), Identity::NONLINEAR_LEN);
 
         let expected = [
             ("precursor_mz_round5", (identity.precursor_mz / 5.0).round()),
@@ -132,7 +137,7 @@ mod tests {
         assert_eq!(expected.len(), names.len());
         for (j, (name, value)) in expected.iter().enumerate() {
             assert_eq!(&*names[j], *name);
-            assert_eq!(frame.column(j)[0], *value);
+            assert_eq!(values[j], *value);
         }
     }
 

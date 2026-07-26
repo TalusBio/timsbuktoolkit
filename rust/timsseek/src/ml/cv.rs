@@ -367,8 +367,8 @@ impl PrecomputedFeatures {
     /// Build from an already-materialized row-major matrix
     /// (`features[i*ncols + j]`) + responses, instead of walking
     /// [`FeatureVector::as_feature`]. Rows MUST align with the `data` the
-    /// scorer is constructed from (same order). This is how the lane-frame
-    /// consumer trains GBM on the `FeatFrame` column set.
+    /// scorer is constructed from (same order). This is how the lane-matrix
+    /// consumer trains GBM on a prebuilt lane feature set.
     pub(crate) fn from_row_major(features: Vec<f64>, ncols: usize, responses: Vec<f64>) -> Self {
         assert_eq!(
             features.len(),

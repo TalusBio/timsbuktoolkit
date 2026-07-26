@@ -1,37 +1,41 @@
-//! Sequence-derived features (features-only, conditionally present).
+//! Sequence-derived features (nonlinear lane, features-only — no Parquet
+//! column).
 //!
-//! Gated all-or-none on `peptide.aa_counts()`: either every candidate in a run
-//! has a parsed sequence (Some) or none do. This makes the feature name-set
-//! conditional — the gate adds `AA_COUNT_NAMES.len() + 2` trailing names
-//! (`gate_delta_is_the_sequence_count_block` locks the delta). Emitted LAST so
-//! those names stay at the tail.
+//! UNCONDITIONAL: always [`LEN`] features wide. A peptide with no parsed
+//! sequence emits `f64::NAN` for all of them rather than emitting nothing —
+//! NaN is exactly what forust reads as "missing", and a fixed width is what
+//! lets this block's contribution to the feature matrix be a compile-time
+//! constant like every other block's. Emitted LAST, so these names stay at the
+//! tail.
 
 use crate::models::AA_COUNT_NAMES;
-use crate::models::sequence::Peptide;
-use crate::scoring::blocks::{
-    FrameSink,
-    NameSink,
+use crate::models::sequence::{
+    CANONICAL_AA_LETTERS,
+    Peptide,
 };
+use crate::scoring::blocks::NameSink;
 
-/// Push the 22 nonlinear-lane (tree-only) sequence feature *values*
-/// (`peptide_length`, 20 `aa_count_*`, `peptide_n_mods`) iff the peptide has a
-/// parsed sequence; otherwise nothing. The gate is speclib-wide, so within a
-/// fit either every record emits these or none do. `counts` and
-/// `AA_COUNT_NAMES` are both fixed `[_; 20]` arrays, so the zip is compile-time
-/// guaranteed to cover all 20 counts.
-pub fn nonlinear_features(peptide: &Peptide, o: &mut FrameSink) {
+/// `peptide_length`, one count per canonical amino acid, `peptide_n_mods`.
+/// Sized off [`CANONICAL_AA_LETTERS`] rather than `AA_COUNT_NAMES` because the
+/// latter is a `LazyLock` (its `len()` is not const), and the two are the same
+/// 20 residues by construction.
+pub const LEN: usize = CANONICAL_AA_LETTERS.len() + 2;
+
+/// The [`LEN`] nonlinear-lane (tree-only) sequence feature *values*, or all
+/// `f64::NAN` when the peptide has no parsed sequence. `counts` and
+/// `CANONICAL_AA_LETTERS` are both fixed 20-element arrays, so the middle
+/// slice is compile-time guaranteed to cover all 20 counts.
+pub fn nonlinear_feature_array(peptide: &Peptide) -> [f64; LEN] {
+    let mut out = [f64::NAN; LEN];
     if let Some(counts) = peptide.aa_counts() {
-        let length = peptide.length().unwrap() as f64;
-        let n_mods = peptide.n_mods().unwrap() as f64;
-        o.push("peptide_length", length);
-        for (c, name) in counts.iter().zip(AA_COUNT_NAMES.iter()) {
-            o.push(name, *c);
-        }
-        o.push("peptide_n_mods", n_mods);
+        out[0] = peptide.length().unwrap() as f64;
+        out[1..1 + counts.len()].copy_from_slice(&counts);
+        out[LEN - 1] = peptide.n_mods().unwrap() as f64;
     }
+    out
 }
 
-/// Nonlinear-lane names for [`nonlinear_features`], same order.
+/// Nonlinear-lane names for [`nonlinear_feature_array`], same order.
 pub fn nonlinear_feature_names(o: &mut NameSink) {
     o.push("peptide_length");
     for &n in AA_COUNT_NAMES.iter() {

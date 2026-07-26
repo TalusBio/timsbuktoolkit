@@ -3,11 +3,11 @@
 //! the secondary spectral-query collectors (finalize stage).
 //!
 //! Both structs are ordinary `#[derive(ScoreBlock)]` blocks (see
-//! `timsseek_macros`): the derive generates all six projection methods
-//! (`column_schema`/`columns` plus both feature lanes' values and names) from
-//! the field list. Every field here is `#[feat(..)]`-annotated without
+//! `timsseek_macros`): the derive generates every projection
+//! (`column_schema`/`columns` plus both feature lanes' value arrays and names)
+//! from the field list. Every field here is `#[feat(..)]`-annotated without
 //! `linear = false`, so they all land in the LINEAR lane — the live path the
-//! ML consumer reads via `FeatFrame`.
+//! ML consumer reads.
 
 use serde::Serialize;
 use timsseek_macros::ScoreBlock;

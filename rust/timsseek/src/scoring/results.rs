@@ -25,7 +25,6 @@ use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
 use super::blocks::{
     ColSink,
-    FrameSink,
     NameSink,
     SchemaSink,
     ScoreBlock,
@@ -49,12 +48,16 @@ pub struct FinalizeInputs<'a> {
 }
 
 /// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the purely-mechanical walks (`push_columns`,
-/// `push_linear_features`/`push_nonlinear_features` (the lane walks),
-/// `sample_default`) from that one list. Order is load-bearing (parquet
-/// columns and the positional ML value vector both follow it), so folding
-/// them all from a single ordered source is what makes their order
-/// *impossible* to desync.
+/// and the purely-mechanical walks (`push_columns`, the two lane value arrays
+/// and their name walks, `sample_default`) from that one list. Order is
+/// load-bearing (parquet columns and the positional ML value vector both
+/// follow it), so folding them all from a single ordered source is what makes
+/// their order *impossible* to desync.
+///
+/// The lane widths compose the same way the values do: `LINEAR_LEN` is the sum
+/// of the blocks' own inherent `LINEAR_LEN` consts, so the composed lane array
+/// is `[f64; N]` with `N` known at compile time and no runtime length
+/// bookkeeping anywhere below it.
 ///
 /// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
 /// the mobility-derived blocks participate) stay hand-written below: adding a
@@ -73,6 +76,11 @@ macro_rules! compose_scoring_fields {
         }
 
         impl $Name {
+            /// LINEAR-lane width: the sum of the blocks' own widths.
+            pub const LINEAR_LEN: usize = 0usize $( + <$fty>::LINEAR_LEN )*;
+            /// NONLINEAR-lane width: the sum of the blocks' own widths.
+            pub const NONLINEAR_LEN: usize = 0usize $( + <$fty>::NONLINEAR_LEN )*;
+
             /// Emit every block's Parquet columns, in the composition order.
             pub fn push_columns(&self, o: &mut ColSink) {
                 $( self.$fname.columns(o); )*
@@ -84,27 +92,46 @@ macro_rules! compose_scoring_fields {
                 $( <$fty as $crate::scoring::blocks::ScoreBlock>::column_schema(o); )*
             }
 
-            /// Emit every block's LINEAR-lane ML feature *values* into a
-            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
-            /// The LDA consumer walks this lane.
-            pub fn push_linear_features(&self, o: &mut FrameSink) {
-                $( self.$fname.linear_features(o); )*
+            /// Every block's LINEAR-lane ML feature *values*, concatenated in
+            /// composition order. The LDA consumer walks this lane.
+            pub fn linear_feature_array(&self) -> [f64; Self::LINEAR_LEN] {
+                let mut out = [0.0f64; Self::LINEAR_LEN];
+                let mut at = 0usize;
+                $(
+                    {
+                        let block = self.$fname.linear_feature_array();
+                        out[at..at + block.len()].copy_from_slice(&block);
+                        at += block.len();
+                    }
+                )*
+                debug_assert_eq!(at, Self::LINEAR_LEN);
+                out
             }
 
             /// LINEAR-lane feature *names*, same order as
-            /// [`Self::push_linear_features`] (set-level; no `&self`).
+            /// [`Self::linear_feature_array`] (set-level; no `&self`).
             pub fn push_linear_feature_names(o: &mut NameSink) {
                 $( <$fty as ScoreBlock>::linear_feature_names(o); )*
             }
 
-            /// Emit every block's NONLINEAR-lane ML feature *values* into a
-            /// row-major `FeatFrame` (via [`FrameSink`]), in composition order.
-            pub fn push_nonlinear_features(&self, o: &mut FrameSink) {
-                $( self.$fname.nonlinear_features(o); )*
+            /// Every block's NONLINEAR-lane ML feature *values*, concatenated
+            /// in composition order.
+            pub fn nonlinear_feature_array(&self) -> [f64; Self::NONLINEAR_LEN] {
+                let mut out = [0.0f64; Self::NONLINEAR_LEN];
+                let mut at = 0usize;
+                $(
+                    {
+                        let block = self.$fname.nonlinear_feature_array();
+                        out[at..at + block.len()].copy_from_slice(&block);
+                        at += block.len();
+                    }
+                )*
+                debug_assert_eq!(at, Self::NONLINEAR_LEN);
+                out
             }
 
             /// NONLINEAR-lane feature *names*, same order as
-            /// [`Self::push_nonlinear_features`] (set-level; no `&self`).
+            /// [`Self::nonlinear_feature_array`] (set-level; no `&self`).
             pub fn push_nonlinear_feature_names(o: &mut NameSink) {
                 $( <$fty as ScoreBlock>::nonlinear_feature_names(o); )*
             }

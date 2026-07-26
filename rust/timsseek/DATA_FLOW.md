@@ -248,22 +248,27 @@ source differs.
 
 | `rescore_model` | Function | Feature lane | Model |
 |---|---|---|---|
-| `gbm` (default) | `rescore()` | ALL (`build_all_frame`) | 3-fold CV gradient boosting (forust) |
-| `lda` | `rescore_lda()` | LINEAR (`build_lane_frame(Linear)`) | single closed-form shrinkage LDA, no CV (~100× cheaper) |
-| `hybrid` | `rescore_hybrid()` | NONLINEAR + `lda_score` | per-fold cross-fit LDA on the linear lane, its score pushed as one extra column into the GBM frame |
+| `gbm` (default) | `rescore()` | ALL (`build_all_matrix`) | 3-fold CV gradient boosting (forust) |
+| `lda` | `rescore_lda()` | LINEAR (`build_linear_matrix`) | single closed-form shrinkage LDA, no CV (~100× cheaper) |
+| `hybrid` | `rescore_hybrid()` | NONLINEAR + `lda_score` | per-fold cross-fit LDA on the linear lane, its score appended as one extra column per row |
 
 Feature extraction is the **lane walk**, not a per-result feature method: a
-batch `FeatFrame` is built by `build_lane_frame` / `build_all_frame` over the
-already-shuffled candidate slice, so frame row *i* aligns with candidate *i*
-(the frame MUST be built after the shuffle — fold assignment and labels are
-positional). Column names come from the same walk via
+flat row-major `Vec<f64>` (`feat[i*ncols + j]`) is built by
+`build_linear_matrix` / `build_nonlinear_matrix` / `build_all_matrix` over the
+already-shuffled candidate slice, so row *i* aligns with candidate *i* (the
+matrix MUST be built after the shuffle — fold assignment and labels are
+positional). Each row is the concatenation of the contributing blocks'
+`[f64; N]` lane arrays, so `ncols` is a compile-time constant (`LINEAR_NCOLS` /
+`NONLINEAR_NCOLS` / `ALL_NCOLS`) summed from the blocks' inherent
+`LINEAR_LEN`/`NONLINEAR_LEN`. Column names come from the same walk order via
 `linear_feature_name_set` / `nonlinear_feature_name_set` /
-`all_feature_name_set`, which is why columns and names cannot desync (asserted
-with `debug_assert_eq!` at each call site).
+`all_feature_name_set`; the widths are cross-checked with `debug_assert_eq!` at
+each call site and by `lane_matrix_widths_match_name_sets`.
 
 Walk order per lane: scoring blocks (composition order) → `ResultMeta` →
-`Derived` → (nonlinear only) `sequence_counts`, the last of which is gated on
-the speclib having parsed sequences.
+`Derived` → (nonlinear only) `sequence_counts`. `sequence_counts` is
+unconditional: a peptide with no parsed sequence contributes `f64::NAN` for all
+22 of its features (forust reads NaN as missing) rather than a shorter row.
 
 For `hybrid`, the cross-fit uses `fold(i) = i % 3`, matching the GBM's internal
 fold assignment, so a candidate's `lda_score` never comes from an LDA that saw
@@ -274,7 +279,7 @@ it.
 ## Feature Vector (combined lane feature set)
 
 The union of the LINEAR and NONLINEAR lanes — i.e. what `all_feature_name_set` /
-`build_all_frame` produce, the GBM's input. The LDA sees the linear subset; the
+`build_all_matrix` produce, the GBM's input. The LDA sees the linear subset; the
 hybrid GBM sees the nonlinear subset plus `lda_score`.
 
 **Context features:**
