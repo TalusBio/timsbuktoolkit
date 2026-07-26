@@ -21,6 +21,7 @@ Run any with `--help` for the full flag list.
 | `parallel` / `rayon` | `timsseek_cli` / `timsseek` | Rayon parallel scoring | Default; fastest wall-time | On by default |
 | `instrumentation` | `timsseek_cli` / `timsseek` | `tracing-profile` perfetto spans | Perf tracing. **Requires `--no-default-features`** — the perfetto backend captures only the main thread, so rayon worker spans are dropped entirely. Run serial or traces for the hot path are empty. | `--features instrumentation --no-default-features` |
 | `track-alloc` | `timsseek_cli` | Global allocator tracking via `alloc_track` | Binary prints per-phase allocation deltas to stderr: `[alloc] <phase> d_bytes=... d_live=... churn=... peak=... hist=...`. Detect churn + memory regressions. Dev-only; do not ship. | `--features track-alloc` |
+| `dashboard` | `timsseek_cli` / `rescore_dash` | Ratatui TUI showing target/decoy score separation, opened after Phase 6 write | Interactive dev inspection of a rescoring run's feature matrix and FDR/calibration curves; gated on `TIMSSEEK_RESCORE_DASHBOARD=1` (see Env vars below). Skips (with a log warning) when stdout is not a terminal. Dev-only; do not ship interactive terminal use into automated pipelines. On by default — drop with `--no-default-features` to avoid the `ratatui` dependency entirely. | On by default; `--no-default-features` to exclude |
 | `query-instr` | `timscentroid` | Per-peak atomic counters in `IndexedPeakGroup::for_each_peak` | Filter-funnel shape + pass rates. ~10× wall-time inflation — funnel counts only, not timing. | `-p timscentroid --features query-instr` |
 | `aws` / `gcp` / `azure` | `timscentroid` | `object_store` cloud backends | Read `.d` / speclib from cloud | `--features aws` (etc.) |
 
@@ -33,6 +34,7 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `RUST_LOG` | all | `info` (where defaulted) | `tracing-subscriber` EnvFilter. Examples: `RUST_LOG=debug`, `RUST_LOG=timsseek=trace,timscentroid=debug`. |
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
+| `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek` (requires the `dashboard` feature) | unset (off) | Set to `1` to open the rescore dashboard TUI after results are written (Phase 6 already ran, so a dashboard left open — or killed — never costs a rerun). Skips silently, with a log warning, when stdout is not a terminal. Dev-only debugging aid, not part of the documented CLI surface; compile it out entirely with `--no-default-features`. |
 
 ## Taskfile
 
