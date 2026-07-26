@@ -95,6 +95,10 @@ pub struct App<'a> {
     y: YTransform,
     clip: bool,
     sort: SortKey,
+    /// Direction, whose "forward" reading differs by key: for `SortKey::Name`
+    /// `true` is ascending alphabetical (the natural reading order for text),
+    /// while for every numeric key `true` is largest-first (the natural
+    /// reading order for "what stands out"). `false` reverses either one.
     sort_desc: bool,
     filter: String,
     filter_editing: bool,
@@ -251,6 +255,9 @@ impl<'a> App<'a> {
 
         if self.sort == SortKey::Name {
             idx.sort_by(|&a, &b| self.view.feature_names[a].cmp(&self.view.feature_names[b]));
+            if !self.sort_desc {
+                idx.reverse();
+            }
         } else {
             // Numeric sorts need the summaries; this is the one place the cache
             // is filled eagerly, and only for the filtered subset. Built as a
@@ -269,21 +276,35 @@ impl<'a> App<'a> {
                     SortKey::Gain => self.view.mean_gain(&self.view.feature_names[j]) as f64,
                     SortKey::Name => 0.0,
                 };
-                // NaN sorts last in either direction.
-                keyed.push((j, if k.is_nan() { f64::NEG_INFINITY } else { k }));
+                keyed.push((j, k));
             }
-            keyed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // `sort_desc` picks the finite-value order; NaN sorts last either
+            // way. That rule has to live in the comparator itself, not in a
+            // value substitution followed by a blanket `idx.reverse()` below
+            // — a later reverse of the whole vector would undo a NaN-last
+            // placement exactly when `sort_desc` is false.
+            keyed.sort_by(|a, b| cmp_nan_last(a.1, b.1, self.sort_desc));
             idx = keyed.into_iter().map(|(j, _)| j).collect();
         }
 
-        if !self.sort_desc {
-            idx.reverse();
-        }
         self.visible = idx;
         self.cursor = previous
             .and_then(|j| self.visible.iter().position(|&v| v == j))
             .unwrap_or(0)
             .min(self.visible.len().saturating_sub(1));
+    }
+}
+
+/// Orders two sort-key values with `NaN` always last, independent of `desc`.
+/// `desc` breaks ties between two finite values only: `true` is largest
+/// first, `false` is smallest first.
+fn cmp_nan_last(a: f64, b: f64, desc: bool) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) if desc => b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal),
+        (false, false) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
     }
 }
 
@@ -445,5 +466,52 @@ mod tests {
         assert_eq!(s.target_mean, 2.0, "rows 0 and 2 are targets: (1+3)/2");
         assert_eq!(s.decoy_mean, 2.0);
         assert_eq!(app.summary(0), s, "second call returns the cached value");
+    }
+
+    /// `nan_feat` is NaN in every row, so `stats::summarize` gives it a NaN
+    /// AUC (no finite value contributes to either class): a real, naturally
+    /// occurring case, not a synthetic key. It must sort last regardless of
+    /// direction.
+    #[test]
+    fn nan_summary_keys_sort_last_in_both_directions() {
+        static MATRIX: [f64; 12] = [
+            1.0,
+            10.0,
+            f64::NAN,
+            2.0,
+            20.0,
+            f64::NAN,
+            3.0,
+            30.0,
+            f64::NAN,
+            4.0,
+            40.0,
+            f64::NAN,
+        ];
+        let v = RescoreView {
+            feature_names: vec![Arc::from("low"), Arc::from("high"), Arc::from("nan_feat")],
+            features: &MATRIX,
+            is_target: vec![true, false, true, false],
+            score: vec![0.0; 4],
+            qvalue: vec![0.0; 4],
+            importance: Vec::new(),
+        };
+        let mut app = App::new(&v);
+        while app.sort_key() != SortKey::Auc {
+            app.handle_key(key('s'));
+        }
+
+        assert_eq!(
+            app.visible().last().copied(),
+            Some(2),
+            "descending: NaN AUC still sorts last"
+        );
+
+        app.handle_key(key('S'));
+        assert_eq!(
+            app.visible().last().copied(),
+            Some(2),
+            "ascending: NaN AUC still sorts last"
+        );
     }
 }
