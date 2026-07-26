@@ -86,6 +86,23 @@ pub fn histogram(
     h
 }
 
+/// `(min, max)` over the finite values, or `None` if nothing is finite.
+///
+/// O(n), no allocation. Use this to pick a histogram range for a whole table
+/// of columns — `summarize` calls it once per feature, and at ~1e6 rows x 131
+/// features a sort per column (as `percentile_range` does) would mean 131
+/// full sorts just to find the endpoints. `percentile_range` is for the
+/// single selected-feature panel, where trimming outlier tails is wanted and
+/// a sorted copy is affordable.
+pub fn finite_range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    values
+        .filter(|v| v.is_finite())
+        .fold(None, |acc, v| match acc {
+            None => Some((v, v)),
+            Some((lo, hi)) => Some((lo.min(v), hi.max(v))),
+        })
+}
+
 /// `(lo, hi)` at the given percentiles over the finite values, or `None` if
 /// nothing is finite. Allocates a sorted copy — call it once per panel, not
 /// per frame.
@@ -181,8 +198,9 @@ pub struct FeatureSummary {
     pub nan_frac: f64,
 }
 
-/// One column's table row. Two passes: exact per-class mean/variance, then a
-/// binned AUC over the 0.5-99.5 percentile range.
+/// One column's table row. Two passes, both O(rows): exact per-class
+/// mean/variance via Welford's algorithm, then a histogram-binned AUC over
+/// the full finite value range (min/max via `finite_range`, not a sort).
 pub fn summarize(values: impl Iterator<Item = f64> + Clone, is_target: &[bool]) -> FeatureSummary {
     // Welford per class.
     let (mut nt, mut nd) = (0u64, 0u64);
@@ -237,7 +255,7 @@ pub fn summarize(values: impl Iterator<Item = f64> + Clone, is_target: &[bool]) 
         0.0
     };
 
-    let auc = match percentile_range(values.clone(), 0.0, 100.0) {
+    let auc = match finite_range(values.clone()) {
         Some((lo, hi)) => auc_from_hist(&histogram(values, is_target, lo, hi, N_BINS)),
         None => f64::NAN,
     };
@@ -362,13 +380,57 @@ mod tests {
     fn percentile_range_clips_the_tails() {
         let v: Vec<f64> = (0..=1000).map(|i| i as f64).collect();
         let (lo, hi) = percentile_range(v.into_iter(), 0.5, 99.5).unwrap();
-        assert!(lo >= 1.0 && lo <= 10.0, "lo = {lo}");
-        assert!(hi >= 990.0 && hi <= 999.0, "hi = {hi}");
+        assert!((1.0..=10.0).contains(&lo), "lo = {lo}");
+        assert!((990.0..=999.0).contains(&hi), "hi = {hi}");
     }
 
     #[test]
     fn percentile_range_is_none_when_everything_is_missing() {
         let v = vec![f64::NAN, f64::NEG_INFINITY];
         assert!(percentile_range(v.into_iter(), 0.5, 99.5).is_none());
+    }
+
+    #[test]
+    fn finite_range_spans_the_finite_values() {
+        let v = vec![3.0, -1.0, f64::NAN, 7.0, f64::INFINITY];
+        assert_eq!(finite_range(v.into_iter()), Some((-1.0, 7.0)));
+    }
+
+    #[test]
+    fn finite_range_is_none_when_everything_is_missing() {
+        let v = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        assert!(finite_range(v.into_iter()).is_none());
+    }
+
+    #[test]
+    fn finite_range_of_a_single_value_is_that_value_twice() {
+        let v = vec![42.0];
+        assert_eq!(finite_range(v.into_iter()), Some((42.0, 42.0)));
+    }
+
+    #[test]
+    fn histogram_degenerate_range_puts_everything_in_one_bin() {
+        let v = vec![5.0, 5.0, 5.0];
+        let t = vec![true, false, true];
+        let h = histogram(v.into_iter(), &t, 5.0, 5.0, 8);
+        assert_eq!(h.target.len(), 8);
+        assert_eq!(h.decoy.len(), 8);
+        assert_eq!(h.target[0], 2);
+        assert_eq!(h.decoy[0], 1);
+        assert_eq!(
+            h.n_out, 0,
+            "every value equals lo == hi, so none is out of range"
+        );
+    }
+
+    #[test]
+    fn histogram_zero_nbins_is_clamped_to_one_bin() {
+        let v = vec![1.0, 2.0, 3.0];
+        let t = vec![true, true, false];
+        let h = histogram(v.into_iter(), &t, 0.0, 3.0, 0);
+        assert_eq!(h.target.len(), 1, "nbins = 0 is clamped up to 1");
+        assert_eq!(h.decoy.len(), 1);
+        assert_eq!(h.target.iter().sum::<u32>(), 2);
+        assert_eq!(h.decoy.iter().sum::<u32>(), 1);
     }
 }
