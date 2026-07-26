@@ -152,19 +152,15 @@ fn canonicalize_and_shuffle(data: &mut [CompetedCandidate]) {
 /// this walk, so the key here and the key handed to `assign_qval` have to be
 /// the same function of a candidate.
 ///
-/// CAVEAT — tied scores: the sort is unstable (see
-/// [`maybe_par::sort_unstable_by`]), so candidates with bit-identical scores
-/// come out in an arbitrary, thread-count-dependent order. `assign_qval`'s
-/// third pass flattens each run of equal scores onto ONE q-value, but that
-/// shared value is the run's cumulative minimum, which the within-run
-/// target/decoy ordering can still move. Exact ties are the degenerate case
-/// (sharpest: the all-zero scores of a failed cross-fit), not the normal one,
-/// but they are not fully neutralized here.
+/// Tied scores change the q-values they produce, so the sort is stable: ties
+/// keep the seeded-shuffle input order and the result is reproducible on any
+/// thread count. Reproducible, not correct — breaking ties on a real key is a
+/// separate decision, not made here.
 fn finalize(
     mut scored: Vec<CompetedCandidate>,
     stats: RescoreFeatureStats,
 ) -> (Vec<FinalResult>, RescoreFeatureStats) {
-    maybe_par::sort_unstable_by(&mut scored, |a, b| b.get_score().total_cmp(&a.get_score()));
+    maybe_par::sort_by(&mut scored, |a, b| b.get_score().total_cmp(&a.get_score()));
     assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
     debug!("Best:\n{:#?}", scored.first());
     debug!("Worst:\n{:#?}", scored.last());

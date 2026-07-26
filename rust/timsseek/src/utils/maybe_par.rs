@@ -11,9 +11,9 @@
 //!   reproducible.
 //! * [`scatter_write`] — `out[i] = f(i)`. Each index is written independently,
 //!   so the result never depends on the schedule.
-//! * [`sort_unstable_by`] — in-place sort. NOT order-stable, and the tie order
-//!   is thread-count-dependent under rayon; see its own note before using it
-//!   for anything a later pass walks positionally.
+//! * [`sort_by`] — in-place STABLE sort: ties keep input order, on any thread
+//!   count. Reproducible, which matters when a later pass walks the order
+//!   positionally (see `assign_qval`).
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -129,30 +129,21 @@ where
 
 /// Sort `items` in place by `cmp`, in parallel when rayon is on.
 ///
-/// # Ordering: NOT stable, and the tie order is not reproducible
-/// Both branches use an UNSTABLE sort, so elements that `cmp` calls `Equal`
-/// come out in an arbitrary order — and under rayon that order additionally
-/// depends on how the slice happened to be split across workers, i.e. on the
-/// thread count. Two runs over identical input can therefore disagree on the
-/// relative position of tied elements.
-///
-/// That is invisible if ties are interchangeable to the consumer, and NOT
-/// invisible if a later pass walks the sorted order positionally and
-/// accumulates (running counts, cumulative extrema). Callers in that second
-/// group either need genuinely distinct keys or a stable sort — this shape
-/// will not give them a reproducible tie order.
-pub(crate) fn sort_unstable_by<T, F>(items: &mut [T], cmp: F)
+/// Stable, so ties keep input order on any thread count — `assign_qval` walks
+/// the sorted order positionally, so that reproducibility matters. Needs
+/// scratch proportional to `items.len() * size_of::<T>()`.
+pub(crate) fn sort_by<T, F>(items: &mut [T], cmp: F)
 where
     T: Send,
     F: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
 {
     #[cfg(feature = "rayon")]
     {
-        items.par_sort_unstable_by(cmp);
+        items.par_sort_by(cmp);
     }
     #[cfg(not(feature = "rayon"))]
     {
-        items.sort_unstable_by(cmp);
+        items.sort_by(cmp);
     }
 }
 
@@ -161,11 +152,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sorts_descending_by_key() {
-        let mut items: Vec<i32> = (0..1_000).map(|i| (i * 7919) % 1_001).collect();
-        sort_unstable_by(&mut items, |a, b| b.cmp(a));
-        assert!(items.windows(2).all(|w| w[0] >= w[1]));
-        assert_eq!(items.len(), 1_000);
+    fn sorts_descending_and_is_stable() {
+        // 5 keys over 1000 elements, so every key is a long tie run.
+        let mut items: Vec<(i32, usize)> = (0..1_000).map(|i| ((i % 5) as i32, i)).collect();
+        sort_by(&mut items, |a, b| b.0.cmp(&a.0));
+        assert!(items.windows(2).all(|w| w[0].0 >= w[1].0), "not descending");
+        for run in items.chunk_by(|a, b| a.0 == b.0) {
+            assert!(run.windows(2).all(|w| w[0].1 < w[1].1), "tie run reordered");
+        }
     }
 
     #[test]
