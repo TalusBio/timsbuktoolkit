@@ -6,6 +6,16 @@
 /// Distances smaller than this are treated as degenerate to avoid numerical instability.
 const DISTANCE_THRESHOLD: f64 = 1e-6;
 
+/// The scratch and output buffers `find_optimal_path` reuses across calls,
+/// grouped so the function itself doesn't take one parameter per buffer.
+/// Callers own these; nothing here allocates.
+pub(crate) struct PathfindingScratch<'a> {
+    pub max_weights: &'a mut Vec<f64>,
+    pub prev_node_indices: &'a mut Vec<Option<usize>>,
+    pub out_path: &'a mut Vec<crate::Point>,
+    pub considered: &'a mut Vec<(usize, f64)>,
+}
+
 /// Finds the highest-weight path through the nodes that satisfies the monotonic constraint.
 ///
 /// This implements a dynamic programming solution on a directed acyclic graph (DAG) where:
@@ -14,21 +24,23 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Edge weights favor high-confidence nodes that are geometrically close
 ///
 /// Writes the assembled path (DP chain plus any greedily-attached prefix/suffix,
-/// see Pass 2 below) into `out_path`, clearing it first. Returns the index
-/// range within that path the DP itself chose (`path[..range.start]` and
-/// `path[range.end..]` are the greedy tails), and the DP recurrence's
+/// see Pass 2 below) into `scratch.out_path`, clearing it first. Returns the
+/// index range within that path the DP itself chose (`path[..range.start]`
+/// and `path[range.end..]` are the greedy tails), and the DP recurrence's
 /// objective value at the chosen end node (covers only `path[range]`).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
-    max_weights: &mut Vec<f64>,
-    prev_node_indices: &mut Vec<Option<usize>>,
-    out_path: &mut Vec<crate::Point>,
+    scratch: PathfindingScratch,
     obs: &mut O,
     opts: crate::ObserveOpts,
-    considered: &mut Vec<(usize, f64)>,
 ) -> (std::ops::Range<usize>, f64) {
+    let PathfindingScratch {
+        max_weights,
+        prev_node_indices,
+        out_path,
+        considered,
+    } = scratch;
     out_path.clear();
     if nodes.is_empty() {
         return (0..0, 0.0);
@@ -240,12 +252,14 @@ mod tests {
         let (dp_range, dp_weight) = find_optimal_path(
             &mut nodes,
             5,
-            &mut max_weights,
-            &mut prev_indices,
-            &mut path,
+            PathfindingScratch {
+                max_weights: &mut max_weights,
+                prev_node_indices: &mut prev_indices,
+                out_path: &mut path,
+                considered: &mut considered,
+            },
             &mut (),
             ObserveOpts::NONE,
-            &mut considered,
         );
 
         assert_eq!(

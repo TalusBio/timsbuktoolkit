@@ -396,12 +396,14 @@ impl CalibrationState {
         let (dp_range, dp_weight) = pathfinding::find_optimal_path(
             &mut filtered,
             self.lookback,
-            &mut self.dp_max_weights,
-            &mut self.dp_prev_indices,
-            &mut path_points,
+            pathfinding::PathfindingScratch {
+                max_weights: &mut self.dp_max_weights,
+                prev_node_indices: &mut self.dp_prev_indices,
+                out_path: &mut path_points,
+                considered: &mut self.dp_considered,
+            },
             obs,
             opts,
-            &mut self.dp_considered,
         );
         self.filtered = filtered;
 
@@ -599,6 +601,16 @@ impl CalibrationState {
     }
 
     #[cfg(test)]
+    pub fn filtered_ptr(&self) -> *const grid::Node {
+        self.filtered.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub fn path_points_ptr(&self) -> *const Point {
+        self.path_points.as_ptr()
+    }
+
+    #[cfg(test)]
     pub fn path_points_cap(&self) -> usize {
         self.path_points.capacity()
     }
@@ -675,12 +687,14 @@ pub fn calibrate_with_ranges(
     let (_dp_range, _dp_weight) = pathfinding::find_optimal_path(
         &mut filtered_nodes,
         lookback,
-        &mut max_weights,
-        &mut prev_indices,
-        &mut optimal_path_points,
+        pathfinding::PathfindingScratch {
+            max_weights: &mut max_weights,
+            prev_node_indices: &mut prev_indices,
+            out_path: &mut optimal_path_points,
+            considered: &mut considered,
+        },
         &mut (),
         ObserveOpts::NONE,
-        &mut considered,
     );
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
@@ -1014,6 +1028,14 @@ mod calibration_state_tests {
             s.path_points_cap(),
             s.dp_max_weights_cap(),
         );
+        // Capacity equality alone can't distinguish "reused the same
+        // allocation" from "reallocated but Vec's growth policy landed on
+        // the same capacity anyway" (which is exactly what happens here: a
+        // fixed survivor count and identical input every iteration makes a
+        // fresh `collect()` converge to the same capacity too). Pointer
+        // identity is the part that actually proves reuse.
+        let filtered_ptr = s.filtered_ptr();
+        let path_points_ptr = s.path_points_ptr();
 
         for _ in 0..5 {
             s.reset();
@@ -1029,6 +1051,16 @@ mod calibration_state_tests {
             ),
             caps,
             "repeated fits on identical input must not reallocate"
+        );
+        assert_eq!(
+            s.filtered_ptr(),
+            filtered_ptr,
+            "filtered must be the same allocation, not a same-sized new one"
+        );
+        assert_eq!(
+            s.path_points_ptr(),
+            path_points_ptr,
+            "path_points must be the same allocation, not a same-sized new one"
         );
     }
 }
