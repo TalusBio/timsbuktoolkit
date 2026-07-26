@@ -1,12 +1,10 @@
 //! `FeatFrame` + `FrameSink` — name-bound, row-major-transposable feature
 //! matrix.
 //!
-//! Additive primitive for the `#[derive(ScoreBlock)]` migration: a column
-//! store (`Vec<Arc<str>>` names + `Vec<Vec<f64>>` data) that a [`FrameSink`]
-//! fills row by row, binding each pushed value to its column name so the two
-//! can never desync (unlike [`super::FeatSink`]/[`super::NameSink`], which are
-//! built and walked separately and rely on the caller keeping order in sync).
-//! Nothing consumes this yet.
+//! A column store (`Vec<Arc<str>>` names + `Vec<Vec<f64>>` data) that a
+//! [`FrameSink`] fills row by row, binding each pushed value to its column name
+//! so values and names cannot desync. This is the ML consumers' feature matrix;
+//! [`super::NameSink`] builds the same names set-level, without any record.
 
 use std::sync::Arc;
 
@@ -94,7 +92,7 @@ impl FeatFrame {
 /// column (name + `Vec::with_capacity(nrows)`); on later rows it walks a
 /// per-row cursor over the already-established columns,
 /// `debug_assert_eq!`ing that the name at the cursor matches, and appends.
-/// Mirrors [`super::ColSink::slot`]'s first-row-vs-append idiom.
+/// Mirrors `super::ColSink::slot`'s first-row-vs-append idiom.
 pub struct FrameSink<'f> {
     frame: &'f mut FeatFrame,
     nrows: usize,
@@ -125,13 +123,14 @@ impl<'f> FrameSink<'f> {
     /// "never seen this column before", with no separate row counter needed;
     /// the owned `Arc<str>` is only created in the create branch, once per
     /// column, ever.
+    ///
+    /// Callers that already hold the final name use this; callers that would
+    /// have to *build* one (the `{prefix}_{i}` array fan-out) use
+    /// `FrameSink::slot_lazy` instead, which never builds it on rows 1..N.
     fn slot(&mut self, name: &str, v: f64) {
         let i = self.cursor;
         if i == self.frame.cols.len() {
-            self.frame.names.push(Arc::from(name));
-            let mut col = Vec::with_capacity(self.nrows);
-            col.push(v);
-            self.frame.cols.push(col);
+            self.open_column(Arc::from(name), v);
         } else {
             debug_assert_eq!(&*self.frame.names[i], name, "column order mismatch");
             self.frame.cols[i].push(v);
@@ -139,48 +138,91 @@ impl<'f> FrameSink<'f> {
         self.cursor += 1;
     }
 
+    /// [`FrameSink::slot`] for names that have to be *constructed*: `name` is
+    /// invoked only when a column is actually created (the first row) and, in
+    /// debug builds, for the column-order check. On rows 1..N of a release
+    /// build the closure is never called, so the name costs nothing.
+    ///
+    /// `Fn`, not `FnOnce`, precisely so the debug order check can also call it.
+    fn slot_lazy(&mut self, name: impl Fn() -> String, v: f64) {
+        let i = self.cursor;
+        if i == self.frame.cols.len() {
+            self.open_column(Arc::from(name().as_str()), v);
+        } else {
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                &*self.frame.names[i],
+                name().as_str(),
+                "column order mismatch"
+            );
+            self.frame.cols[i].push(v);
+        }
+        self.cursor += 1;
+    }
+
+    /// Create the column at the cursor: record its name and open a
+    /// `nrows`-sized buffer holding `v`. Does not touch the cursor — the
+    /// `slot*` caller advances it.
+    fn open_column(&mut self, name: Arc<str>, v: f64) {
+        self.frame.names.push(name);
+        let mut col = Vec::with_capacity(self.nrows);
+        col.push(v);
+        self.frame.cols.push(col);
+    }
+
     pub fn push(&mut self, name: &str, v: f64) {
         self.slot(name, v);
     }
 
+    /// `x.ln_1p()` under the already-suffixed `name`. Every `push_*` below
+    /// takes the FINAL column name and only applies its arithmetic: the
+    /// suffix table lives in exactly one place, the macro's
+    /// `Generator::name_suffix`, which hands both the value walk and the name
+    /// walk the same compile-time literal.
     pub fn push_ln1p(&mut self, name: &str, x: f64) {
-        self.slot(&format!("{name}_ln1p"), x.ln_1p());
+        self.slot(name, x.ln_1p());
     }
 
+    /// `x.log2()` under the already-suffixed `name` (see
+    /// [`FrameSink::push_ln1p`]).
     pub fn push_log2(&mut self, name: &str, x: f64) {
-        self.slot(&format!("{name}_log2"), x.log2());
+        self.slot(name, x.log2());
     }
 
+    /// `x.round()` under the already-suffixed `name` (see
+    /// [`FrameSink::push_ln1p`]).
     pub fn push_round(&mut self, name: &str, x: f64) {
-        self.slot(&format!("{name}_round"), x.round());
+        self.slot(name, x.round());
     }
 
-    /// Magnitude fold (`|x|`, NaN preserved).
+    /// Magnitude fold (`|x|`, NaN preserved) under the already-suffixed
+    /// `name` (see [`FrameSink::push_ln1p`]).
     pub fn push_abs(&mut self, name: &str, x: f64) {
-        self.slot(&format!("{name}_abs"), x.abs());
+        self.slot(name, x.abs());
     }
 
-    /// Missingness indicator (`1.0` if `x` is non-finite, else `0.0`).
+    /// Missingness indicator (`1.0` if `x` is non-finite, else `0.0`) under
+    /// the already-suffixed `name` (see [`FrameSink::push_ln1p`]).
     pub fn push_isna(&mut self, name: &str, x: f64) {
-        self.slot(
-            &format!("{name}_isna"),
-            if x.is_finite() { 0.0 } else { 1.0 },
-        );
+        self.slot(name, if x.is_finite() { 0.0 } else { 1.0 });
     }
 
-    /// One bare column per element, named `{prefix}_{i}`.
+    /// One bare column per element, named `{prefix}_{i}`. The index is a
+    /// runtime value, so this is the one naming the macro cannot hand over as
+    /// a literal; `FrameSink::slot_lazy` keeps it off the per-row path.
     pub fn push_slice(&mut self, prefix: &str, vals: &[f32]) {
         for (i, v) in vals.iter().enumerate() {
-            self.slot(&format!("{prefix}_{i}"), *v as f64);
+            self.slot_lazy(|| format!("{prefix}_{i}"), *v as f64);
         }
     }
 
-    /// `push_isna` for each element of an array field: one column per
-    /// element, named `{prefix}_{i}_isna`.
+    /// [`FrameSink::push_isna`] for each element of an array field: one column
+    /// per element, named `{prefix}_{i}_isna` — again built lazily, see
+    /// [`FrameSink::push_slice`].
     pub fn push_slice_isna(&mut self, prefix: &str, vals: &[f32]) {
         for (i, v) in vals.iter().enumerate() {
-            self.slot(
-                &format!("{prefix}_{i}_isna"),
+            self.slot_lazy(
+                || format!("{prefix}_{i}_isna"),
                 if v.is_finite() { 0.0 } else { 1.0 },
             );
         }
@@ -229,10 +271,10 @@ mod tests {
             let mut s = FrameSink::new(&mut f, 2);
             s.begin_row();
             s.push("x", 10.0);
-            s.push_ln1p("y", 0.0);
+            s.push_ln1p("y_ln1p", 0.0);
             s.begin_row();
             s.push("x", 20.0);
-            s.push_ln1p("y", std::f64::consts::E - 1.0);
+            s.push_ln1p("y_ln1p", std::f64::consts::E - 1.0);
             s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x"), Arc::from("y_ln1p")]);
@@ -246,7 +288,7 @@ mod tests {
         {
             let mut s = FrameSink::new(&mut f, 1);
             s.begin_row();
-            s.push_log2("x", 8.0);
+            s.push_log2("x_log2", 8.0);
             s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x_log2")]);
@@ -259,7 +301,7 @@ mod tests {
         {
             let mut s = FrameSink::new(&mut f, 1);
             s.begin_row();
-            s.push_round("x", 2.6);
+            s.push_round("x_round", 2.6);
             s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x_round")]);
@@ -272,9 +314,9 @@ mod tests {
         {
             let mut s = FrameSink::new(&mut f, 2);
             s.begin_row();
-            s.push_abs("x", -4.5);
+            s.push_abs("x_abs", -4.5);
             s.begin_row();
-            s.push_abs("x", f64::NAN);
+            s.push_abs("x_abs", f64::NAN);
             s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x_abs")]);
@@ -288,9 +330,9 @@ mod tests {
         {
             let mut s = FrameSink::new(&mut f, 2);
             s.begin_row();
-            s.push_isna("x", 1.0);
+            s.push_isna("x_isna", 1.0);
             s.begin_row();
-            s.push_isna("x", f64::NAN);
+            s.push_isna("x_isna", f64::NAN);
             s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x_isna")]);
@@ -327,6 +369,82 @@ mod tests {
         assert_eq!(f.names(), &[Arc::from("v_0_isna"), Arc::from("v_1_isna")]);
         assert_eq!(f.column(0), &[0.0]);
         assert_eq!(f.column(1), &[1.0]);
+    }
+
+    /// The array fan-out builds its `{prefix}_{i}` names through a closure that
+    /// only the create branch (row 0) invokes, so rows 1..N never construct a
+    /// name. Across several rows the names must still be exactly the row-0 ones
+    /// and every value must land in its own column, in order.
+    #[test]
+    fn frame_sink_slice_names_come_from_first_row_only() {
+        let rows = [
+            [1.0f32, 2.0f32],
+            [3.0f32, 4.0f32],
+            [5.0f32, f32::NAN],
+            [7.0f32, 8.0f32],
+        ];
+        let mut f = FeatFrame::with_capacity(4, rows.len());
+        {
+            let mut s = FrameSink::new(&mut f, rows.len());
+            for r in &rows {
+                s.begin_row();
+                s.push_slice("v", r);
+                s.push_slice_isna("v", r);
+            }
+            s.finish();
+        }
+        assert_eq!(
+            f.names(),
+            &[
+                Arc::from("v_0"),
+                Arc::from("v_1"),
+                Arc::from("v_0_isna"),
+                Arc::from("v_1_isna"),
+            ]
+        );
+        assert_eq!(f.nrows(), 4);
+        assert_eq!(f.column(0), &[1.0, 3.0, 5.0, 7.0]);
+        assert_eq!(f.column(2), &[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(f.column(3), &[0.0, 0.0, 1.0, 0.0]);
+        // NaN does not compare equal, so column 1 is checked elementwise.
+        assert_eq!(f.column(1)[0], 2.0);
+        assert_eq!(f.column(1)[1], 4.0);
+        assert!(f.column(1)[2].is_nan());
+        assert_eq!(f.column(1)[3], 8.0);
+    }
+
+    /// Scalar `push_*` take the FINAL name (the macro already appended the
+    /// suffix) and must use it verbatim, not append anything of their own.
+    #[test]
+    fn scalar_pushes_use_the_name_verbatim() {
+        let mut f = FeatFrame::with_capacity(5, 3);
+        {
+            let mut s = FrameSink::new(&mut f, 3);
+            for i in 0..3 {
+                let x = (i + 1) as f64;
+                s.begin_row();
+                s.push("a", x);
+                s.push_log2("b_log2", x);
+                s.push_ln1p("c_ln1p", x);
+                s.push_abs("d_abs", -x);
+                s.push_isna("e_isna", x);
+            }
+            s.finish();
+        }
+        assert_eq!(
+            f.names(),
+            &[
+                Arc::from("a"),
+                Arc::from("b_log2"),
+                Arc::from("c_ln1p"),
+                Arc::from("d_abs"),
+                Arc::from("e_isna"),
+            ]
+        );
+        assert_eq!(f.column(0), &[1.0, 2.0, 3.0]);
+        assert_eq!(f.column(1)[1], 1.0);
+        assert_eq!(f.column(3), &[1.0, 2.0, 3.0]);
+        assert_eq!(f.column(4), &[0.0, 0.0, 0.0]);
     }
 
     #[test]

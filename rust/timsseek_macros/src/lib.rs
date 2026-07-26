@@ -3,7 +3,7 @@
 //! lanes), so the projections cannot desync the way a hand-maintained
 //! `macro_rules!` invocation could.
 //!
-//! See the field grammar in [`derive_score_block`].
+//! See [`macro@ScoreBlock`] for the `#[feat(...)]` field grammar.
 
 use proc_macro2::TokenStream;
 use quote::{
@@ -52,6 +52,10 @@ impl Generator {
     }
 
     /// Suffix appended to the bare field name to form the emitted feature name.
+    ///
+    /// This is the ONLY suffix table: both the value walk and the name walk are
+    /// emitted with the already-suffixed literal this produces, so `FrameSink`'s
+    /// `push_*` methods only apply arithmetic and never re-derive a name.
     fn name_suffix(self) -> &'static str {
         match self {
             Generator::Raw => "",
@@ -63,7 +67,9 @@ impl Generator {
         }
     }
 
-    /// `FrameSink` method used to push a scalar value for this generator.
+    /// `FrameSink` method used to push a scalar value for this generator. It
+    /// is called with the final, already-suffixed name (see
+    /// [`Generator::name_suffix`]); the method only applies the arithmetic.
     fn scalar_push_method(self) -> Ident {
         let name = match self {
             Generator::Raw => "push",
@@ -132,6 +138,16 @@ impl Scalar {
             Scalar::Bool => quote! { bool },
         }
     }
+
+    /// `self.#ident` widened to the `f64` every `FrameSink` push takes.
+    /// `bool` has no direct `as f64` cast (`error[E0606]`), so it goes through
+    /// `u8` and lands as the usual 0.0/1.0 indicator.
+    fn to_f64_expr(self, ident: &Ident) -> TokenStream {
+        match self {
+            Scalar::Bool => quote! { self.#ident as u8 as f64 },
+            _ => quote! { self.#ident as f64 },
+        }
+    }
 }
 
 /// A field's shape: scalar, or a fixed-size `[f32; N]` array (`N` is an
@@ -179,18 +195,26 @@ impl FieldShape {
     }
 }
 
+/// One generator as written in a `#[feat(...)]` list: the parsed variant plus
+/// the token it came from, kept so diagnostics can echo the user's own
+/// spelling and point at the offending token instead of the field name.
+struct GeneratorSpec {
+    generator: Generator,
+    ident: Ident,
+}
+
 /// Parsed `#[feat(...)]` attribute contents: the requested generators plus
 /// the optional `linear = <bool>` lane override.
 struct FeatureAttr {
-    generators: Vec<Generator>,
+    generators: Vec<GeneratorSpec>,
     linear: bool,
 }
 
 /// Parses `#[feat(gen, gen, ..., linear = <bool>)]`: a comma-separated
-/// list of generator names plus an optional `linear = <bool>` item, which may
-/// appear anywhere in the list.
+/// list of distinct generator names plus an optional `linear = <bool>` item,
+/// which may appear anywhere in the list.
 fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
-    let mut generators = Vec::new();
+    let mut generators: Vec<GeneratorSpec> = Vec::new();
     let mut linear: Option<bool> = None;
 
     attr.parse_nested_meta(|meta| {
@@ -206,7 +230,19 @@ fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
         let Some(ident) = meta.path.get_ident() else {
             return Err(meta.error("expected a generator name or `linear = <bool>`"));
         };
-        generators.push(Generator::parse(ident)?);
+        let generator = Generator::parse(ident)?;
+        // A repeat would emit the same feature name twice; the sinks would
+        // happily accept the duplicate column.
+        if generators.iter().any(|g| g.generator == generator) {
+            return Err(Error::new(
+                ident.span(),
+                format!("duplicate `#[feat(...)]` generator `{ident}`"),
+            ));
+        }
+        generators.push(GeneratorSpec {
+            generator,
+            ident: ident.clone(),
+        });
         Ok(())
     })?;
 
@@ -222,7 +258,7 @@ struct Field {
     ident: Ident,
     shape: FieldShape,
     /// `None` => column-only field (no `#[feat(...)]`).
-    feature: Option<(Vec<Generator>, Lane)>,
+    feature: Option<(Vec<GeneratorSpec>, Lane)>,
 }
 
 fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
@@ -327,14 +363,19 @@ fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<Tok
         let ident = &field.ident;
         let name = ident.to_string();
 
-        for &generator in generators {
+        for spec in generators {
+            let generator = spec.generator;
             match &field.shape {
-                FieldShape::Scalar(_) => {
+                FieldShape::Scalar(scalar) => {
                     let push = generator.scalar_push_method();
-                    feature_calls.push(quote! {
-                        out.#push(#name, self.#ident as f64);
-                    });
+                    let value = scalar.to_f64_expr(ident);
+                    // One name, computed once here, handed to BOTH walks as a
+                    // literal: the value walk cannot re-derive it differently
+                    // (and does not allocate to derive it at all).
                     let feat_name = format!("{name}{}", generator.name_suffix());
+                    feature_calls.push(quote! {
+                        out.#push(#feat_name, #value);
+                    });
                     name_calls.push(quote! { out.push(#feat_name); });
                 }
                 FieldShape::Array { len } => match generator {
@@ -358,11 +399,12 @@ fn lane_calls(fields: &[Field], lane: Lane) -> Result<(Vec<TokenStream>, Vec<Tok
                             }
                         });
                     }
-                    other => {
+                    _ => {
+                        let written = &spec.ident;
                         return Err(Error::new(
-                            ident.span(),
+                            written.span(),
                             format!(
-                                "generator `{other:?}` is not supported on array fields; only raw and isna apply"
+                                "generator `{written}` is not supported on array fields; only raw and isna apply"
                             ),
                         ));
                     }
@@ -450,6 +492,97 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     })
 }
 
+/// Derives `timsseek`'s `ScoreBlock` trait for a struct of named fields, so a
+/// score family's Parquet projection and its ML feature projections are all
+/// generated from the one field list that defines the struct.
+///
+/// # Fields and names
+///
+/// A field's **name is its name**: field `apex_lazyscore` becomes Parquet
+/// column `apex_lazyscore` and (if featurized) feature `apex_lazyscore`, with
+/// a per-generator suffix appended. There is no rename attribute.
+///
+/// Every field becomes a Parquet column. Fields *without* `#[feat(...)]` are
+/// Parquet-column-only: they are emitted by `column_schema`/`columns` and
+/// never reach a feature lane. `#[feat(...)]` is what additionally routes a
+/// field into the ML matrix.
+///
+/// Supported field types: `f32`, `f64`, `u8`, `u32`, `bool`, and `[f32; N]`
+/// (`N` may be any const expression; it is emitted verbatim).
+///
+/// # `#[feat(...)]` grammar
+///
+/// ```text
+/// #[feat(<generator>, <generator>, ..., linear = <bool>)]
+/// ```
+///
+/// At least one generator is required; repeats are rejected (they would emit
+/// the same feature name twice), as is a second `#[feat(...)]` on one field.
+/// The generators, and the suffix each appends to the field name:
+///
+/// | generator | feature name      | value                                  |
+/// |-----------|-------------------|----------------------------------------|
+/// | `raw`     | `{field}`         | the value itself                       |
+/// | `log2`    | `{field}_log2`    | `x.log2()`                             |
+/// | `ln1p`    | `{field}_ln1p`    | `x.ln_1p()`                            |
+/// | `abs`     | `{field}_abs`     | `x.abs()` (NaN preserved)              |
+/// | `round`   | `{field}_round`   | `x.round()`                            |
+/// | `isna`    | `{field}_isna`    | `1.0` if non-finite, else `0.0`        |
+///
+/// Values are pushed as `f64`. A `bool` field is widened through `u8`, so it
+/// lands as the usual 0.0/1.0 indicator.
+///
+/// ## Lanes
+///
+/// `linear = true` is the **default**: a plain `#[feat(raw)]` field goes to the
+/// LINEAR lane (the monotone-transform lane LDA reads). The LDA lane is
+/// therefore **opt-out**, not opt-in — write `linear = false` to route a field
+/// to the NONLINEAR lane instead (the tree/GBM lane, which needs no monotone
+/// transforms). A field is in exactly one lane; all of its generators go there
+/// together.
+///
+/// ## Array fields
+///
+/// `[f32; N]` fields accept only `raw` and `isna` — any other generator is a
+/// compile error pointing at the generator token. They fan out to one feature
+/// per element, `{field}_0 .. {field}_{N-1}` (and `{field}_{i}_isna` for
+/// `isna`), matching the `{field}_{i}` naming their Parquet columns already
+/// use.
+///
+/// # What is generated
+///
+/// The six `ScoreBlock` methods:
+///
+/// - `column_schema(&mut SchemaSink)` — Parquet field dtypes/nullability
+/// - `columns(&self, &mut ColSink)` — Parquet values
+/// - `linear_features(&self, &mut FrameSink)` / `linear_feature_names(&mut NameSink)`
+/// - `nonlinear_features(&self, &mut FrameSink)` / `nonlinear_feature_names(&mut NameSink)`
+///
+/// Each values/names pair walks the same field list in the same order, so the
+/// two halves of a lane cannot desync.
+///
+/// Plus a public inherent `fn sample() -> Self` on the struct, filling every
+/// field from `BlockFixture::fixture()` — a fixed, finite, non-zero constant
+/// per type. It is deliberately not `#[cfg(test)]`; see `derive_score_block`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Debug, Clone, Copy, ScoreBlock)]
+/// pub struct MyScores {
+///     /// LINEAR lane (default), feature `intensity_log2`.
+///     #[feat(log2)]
+///     pub intensity: f32,
+///     /// NONLINEAR lane, features `charge` and `charge_isna`.
+///     #[feat(raw, isna, linear = false)]
+///     pub charge: f32,
+///     /// LINEAR lane, features `ion_err_0 .. ion_err_5`.
+///     #[feat(raw)]
+///     pub ion_err: [f32; 6],
+///     /// Parquet column only — no feature.
+///     pub n_cycles: u32,
+/// }
+/// ```
 #[proc_macro_derive(ScoreBlock, attributes(feat))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
@@ -485,6 +618,51 @@ mod tests {
         assert!(ts.contains("\"a\""));
         // all three fields appear in column_schema
         assert!(ts.contains("\"c\""));
+    }
+
+    /// `TokenStream::to_string` spaces tokens out; the emitted *shape* is what
+    /// matters, so compare whitespace-stripped.
+    fn flat(ts: &str) -> String {
+        ts.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// The value walk gets the SAME already-suffixed literal as the name walk.
+    /// `Generator::name_suffix` is the only suffix table there is: a `FrameSink`
+    /// `push_*` must never see the bare field name, or it would have to
+    /// re-derive (and could disagree with) the name walk.
+    #[test]
+    fn scalar_value_walk_gets_the_suffixed_name() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(log2)] pub a: f32 }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        let f = flat(&ts);
+        assert!(
+            f.contains(r#"out.push_log2("a_log2",self.aasf64);"#),
+            "{ts}"
+        );
+        assert!(f.contains(r#"out.push("a_log2");"#), "{ts}");
+        // The bare `"a"` survives only as the Parquet column (schema + value).
+        assert_eq!(f.matches(r#""a""#).count(), 2, "{ts}");
+    }
+
+    /// `Generator::Raw`'s empty suffix must still yield the bare name, and a
+    /// multi-generator field must emit one push per generator, in written
+    /// order.
+    #[test]
+    fn raw_keeps_bare_name_and_generators_keep_order() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(raw, isna)] pub x: f32 }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        let f = flat(&ts);
+        assert!(
+            f.contains(r#"out.push("x",self.xasf64);out.push_isna("x_isna",self.xasf64);"#),
+            "{ts}"
+        );
+        assert!(f.contains(r#"out.push("x");out.push("x_isna");"#), "{ts}");
     }
 
     #[test]
@@ -529,6 +707,32 @@ mod tests {
             pub struct T { #[feat(log2)] pub arr: [f32; NUM_MS2_IONS] }
         })
         .unwrap();
-        assert!(derive_score_block(di).is_err());
+        let err = derive_score_block(di).unwrap_err();
+        // Echoes the spelling the user wrote, not the `Generator` variant.
+        let msg = err.to_string();
+        assert!(msg.contains("`log2`"), "{msg}");
+        assert!(!msg.contains("Log2"), "{msg}");
+    }
+
+    /// `bool as f64` is not a legal cast (E0606); the widening must go through
+    /// `u8` or the expansion fails to compile at the *use* site.
+    #[test]
+    fn bool_field_widens_through_u8() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(raw)] pub flag: bool }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        assert!(ts.contains("as u8 as f64"), "{ts}");
+    }
+
+    #[test]
+    fn rejects_duplicate_generator() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[feat(raw, raw)] pub a: f32 }
+        })
+        .unwrap();
+        let err = derive_score_block(di).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 }
