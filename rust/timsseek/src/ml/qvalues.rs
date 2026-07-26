@@ -29,9 +29,8 @@ use crate::scoring::results::{
     FinalResult,
     ScoringFields,
 };
+use crate::utils::maybe_par;
 use rand::prelude::*;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -145,6 +144,34 @@ fn canonicalize_and_shuffle(data: &mut [CompetedCandidate]) {
     data.shuffle(&mut rng);
 }
 
+/// The shared tail of ALL three rescorers: rank by discriminant score, derive
+/// q-values from that ranking, and convert to [`FinalResult`].
+///
+/// Rank direction is load-bearing and must stay DESCENDING: `assign_qval`
+/// asserts it, and every q-value is a running target/decoy ratio over exactly
+/// this walk, so the key here and the key handed to `assign_qval` have to be
+/// the same function of a candidate.
+///
+/// CAVEAT — tied scores: the sort is unstable (see
+/// [`maybe_par::sort_unstable_by`]), so candidates with bit-identical scores
+/// come out in an arbitrary, thread-count-dependent order. `assign_qval`'s
+/// third pass flattens each run of equal scores onto ONE q-value, but that
+/// shared value is the run's cumulative minimum, which the within-run
+/// target/decoy ordering can still move. Exact ties are the degenerate case
+/// (sharpest: the all-zero scores of a failed cross-fit), not the normal one,
+/// but they are not fully neutralized here.
+fn finalize(
+    mut scored: Vec<CompetedCandidate>,
+    stats: RescoreFeatureStats,
+) -> (Vec<FinalResult>, RescoreFeatureStats) {
+    maybe_par::sort_unstable_by(&mut scored, |a, b| b.get_score().total_cmp(&a.get_score()));
+    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
+    debug!("Best:\n{:#?}", scored.first());
+    debug!("Worst:\n{:#?}", scored.last());
+
+    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+}
+
 /// A cross-fit (leak-free) LDA over the canonical rescore fold partition.
 ///
 /// See `crossfit_lda` for the partition contract.
@@ -159,14 +186,37 @@ struct CrossFitLda {
 /// Cross-fit an [`LdaModel`] over the canonical rescore fold partition and
 /// return each row's HELD-OUT score.
 ///
-/// THE partition: `fold(i) = i % N_RESCORE_FOLDS`. This is the single
-/// definition used by `rescore_lda` and `rescore_hybrid`, and it MUST equal the
-/// partition `CrossValidatedScorer` builds internally
+/// THE canonical statement of leak-freedom — `rescore_lda` and `rescore_hybrid`
+/// both route through here and their docs just point back at this one.
+///
+/// # Why a row may never be scored by a model that saw it
+/// An LDA is label-aware: it fits on the target/decoy labels. One in-sample fit
+/// over all rows, scoring those same rows, lets every row's discriminant peek at
+/// its own label; the target/decoy separation then looks better than it is, and
+/// `assign_qval` derives the q-values from exactly that separation. The result
+/// is an FDR that is wrong in the flattering direction with nothing downstream
+/// to catch it. `N_RESCORE_FOLDS` fits instead of 1 is affordable precisely
+/// because the LDA is closed-form and cheap.
+///
+/// `rescore_hybrid` needs this even more sharply: there the held-out score is
+/// not the final score but ONE COLUMN (`lda_score`) fed to a cross-validated
+/// GBM. An in-sample `lda_score` would smuggle a row's own label into a feature
+/// the GBM reads while that row is held out of its GBM fold — so the GBM's own
+/// CV cannot notice, and the leak surfaces only as an optimistic FDR.
+///
+/// # THE partition
+/// `fold(i) = i % N_RESCORE_FOLDS`, the single definition used by both callers.
+/// For fold `f` the model is fitted on every row `i` with
+/// `i % N_RESCORE_FOLDS != f` and then scores only the rows with
+/// `i % N_RESCORE_FOLDS == f`, so no row contributes to the model scoring it.
+///
+/// It MUST equal the partition `CrossValidatedScorer` builds internally
 /// (`assigned_fold[i] = i % n_folds`, see
-/// `ml::cv::CrossValidatedScorer::new_from_shuffled`). For fold `f` the model is
-/// fitted on every row `i` with `i % N_RESCORE_FOLDS != f` and then scores only
-/// the rows with `i % N_RESCORE_FOLDS == f`, so no row ever contributes to the
-/// model that scores it.
+/// `ml::cv::CrossValidatedScorer::new_from_shuffled`), or a hybrid row's
+/// `lda_score` can come from an LDA trained on rows the GBM is holding out —
+/// leak restored, silently. NOTHING ENFORCES THAT MATCH: it is the same modulo
+/// written in two modules, kept together only by each side having exactly one
+/// definition. Changing either means changing both.
 ///
 /// # Failure policy — all-or-nothing
 /// Returns `None` if ANY fold's fit fails (singular scatter / empty class).
@@ -262,17 +312,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
 
     let stats = scorer.feature_stats(&names);
 
-    let mut scored = scorer.score();
-    // Sort by score descending
-    #[cfg(feature = "rayon")]
-    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    #[cfg(not(feature = "rayon"))]
-    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
-    debug!("Best:\n{:#?}", scored.first());
-    debug!("Worst:\n{:#?}", scored.last());
-
-    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+    finalize(scorer.score(), stats)
 }
 
 /// Sage-style shrinkage-LDA rescorer: closed-form linear fits, no boosting —
@@ -280,14 +320,9 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
 /// target-decoy competition) is untouched — only the discriminant score source
 /// changes.
 ///
-/// CROSS-FIT, not a single in-sample fit. Every row's score comes from an LDA
-/// fitted WITHOUT that row, via the shared `crossfit_lda` partition
-/// (`fold(i) = i % N_RESCORE_FOLDS`). An LDA is label-aware, so a single fit
-/// over all rows followed by scoring those same rows would let each row's
-/// discriminant peek at its own label — exactly the leak `rescore_hybrid`
-/// avoids — and the resulting target/decoy separation (hence the q-values that
-/// `assign_qval` derives from it) would be optimistically biased. `N_RESCORE_FOLDS`
-/// fits instead of 1 is affordable precisely because the LDA is cheap.
+/// CROSS-FIT, not a single in-sample fit: every row's score comes from an LDA
+/// fitted without that row, via [`crossfit_lda`] — see there for the partition
+/// and why it is mandatory.
 ///
 /// Returns PER-FOLD [`FoldStats`] (one per fold, like the GBM path): feature
 /// means/NaN ratios over each fold's held-out rows, `|coef|` importance from
@@ -349,12 +384,9 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
             lda_feature_stats(&names, &feat, nrows, ncols, &cf.models)
         }
         None => {
-            // All-or-nothing (see `crossfit_lda`): a partial cross-fit would
-            // leave one fold's rows at 0.0 and the rest at real discriminant
-            // values, making the score distribution depend on shuffle position.
-            // Zeroing every row keeps the failure uniform — q-values collapse to
-            // a single uninformative value instead of silently mis-ranking a
-            // third of the data.
+            // All-or-nothing (see `crossfit_lda`). Here that means every score
+            // stays 0.0, so the q-values collapse to a single uninformative
+            // value — uniformly useless rather than silently mis-ranked.
             tracing::error!(
                 "cross-fit LDA failed; ALL scores left at zero (uniform, so the ranking is \
                  degenerate rather than fold-dependent)"
@@ -367,14 +399,7 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
         }
     };
 
-    let mut scored = data;
-    #[cfg(feature = "rayon")]
-    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    #[cfg(not(feature = "rayon"))]
-    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
-
-    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+    finalize(data, stats)
 }
 
 /// Hybrid rescorer: cross-fit an LDA on the LINEAR lane, push its (leak-free)
@@ -382,17 +407,10 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
 /// CV on `nonlinear + lda_score`. The GBM re-sees ~30 features instead of the
 /// full ~131 (the compression play) at ~parity.
 ///
-/// LEAK-FREEDOM: `lda_score` is label-aware (LDA fits on target/decoy labels).
-/// A single LDA fit on all rows fed to the CV'd GBM would let each held-out
-/// fold's `lda_score` peek at its own labels -> optimistic FDR. Instead the
-/// column comes from the shared `crossfit_lda` helper, which owns the ONE
-/// definition of the partition (`fold(i) = i % N_RESCORE_FOLDS`) — the same
-/// helper `rescore_lda` uses. That partition MUST match `CrossValidatedScorer`'s
-/// internal `assigned_fold[i] = i % n_folds`
-/// (`ml::cv::CrossValidatedScorer::new_from_shuffled_with_precomputed`) so that
-/// a row's `lda_score` never saw its own label in either the LDA fit or the
-/// GBM fold it is held out of; keeping the partition in one function is what
-/// stops the two sides from drifting.
+/// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit_lda`] — see there for
+/// the partition, why a label-aware feature fed to a CV'd GBM in particular
+/// must be leak-free, and why that partition has to match the one
+/// `CrossValidatedScorer` builds internally.
 ///
 /// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
 /// ([`crate::ml::RescoreModel::Hybrid`]).
@@ -464,17 +482,7 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
 
     let stats = scorer.feature_stats(&names);
 
-    let mut scored = scorer.score();
-    // Sort by score descending — identical tail to `rescore`.
-    #[cfg(feature = "rayon")]
-    scored.par_sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    #[cfg(not(feature = "rayon"))]
-    scored.sort_unstable_by(|a, b| b.get_score().total_cmp(&a.get_score()));
-    assign_qval(&mut scored, |x| CompetedCandidate::get_score(x) as f32);
-    debug!("Best:\n{:#?}", scored.first());
-    debug!("Worst:\n{:#?}", scored.last());
-
-    (scored.into_iter().map(|c| c.into_final()).collect(), stats)
+    finalize(scorer.score(), stats)
 }
 
 /// Dump the raw feature matrix + labels for offline analysis. Best-effort:

@@ -1,5 +1,19 @@
 //! Rayon-or-serial data-parallel shapes, so the `#[cfg(feature = "rayon")]`
 //! pairs live here instead of at every call site.
+//!
+//! The shapes, and what each one promises about ordering:
+//!
+//! * [`fold_reduce`] — per-item fold with per-worker accumulators. The
+//!   accumulator count, and so the reduce order, follows the thread pool: NOT
+//!   reproducible for a non-associative `reduce` (e.g. float addition).
+//! * [`chunked_fold_reduce`] — per-chunk accumulate over a thread-count-
+//!   independent partition, merged in ascending chunk order: bitwise
+//!   reproducible.
+//! * [`scatter_write`] — `out[i] = f(i)`. Each index is written independently,
+//!   so the result never depends on the schedule.
+//! * [`sort_unstable_by`] — in-place sort. NOT order-stable, and the tie order
+//!   is thread-count-dependent under rayon; see its own note before using it
+//!   for anything a later pass walks positionally.
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -113,9 +127,46 @@ where
     }
 }
 
+/// Sort `items` in place by `cmp`, in parallel when rayon is on.
+///
+/// # Ordering: NOT stable, and the tie order is not reproducible
+/// Both branches use an UNSTABLE sort, so elements that `cmp` calls `Equal`
+/// come out in an arbitrary order — and under rayon that order additionally
+/// depends on how the slice happened to be split across workers, i.e. on the
+/// thread count. Two runs over identical input can therefore disagree on the
+/// relative position of tied elements.
+///
+/// That is invisible if ties are interchangeable to the consumer, and NOT
+/// invisible if a later pass walks the sorted order positionally and
+/// accumulates (running counts, cumulative extrema). Callers in that second
+/// group either need genuinely distinct keys or a stable sort — this shape
+/// will not give them a reproducible tie order.
+pub(crate) fn sort_unstable_by<T, F>(items: &mut [T], cmp: F)
+where
+    T: Send,
+    F: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
+{
+    #[cfg(feature = "rayon")]
+    {
+        items.par_sort_unstable_by(cmp);
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        items.sort_unstable_by(cmp);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorts_descending_by_key() {
+        let mut items: Vec<i32> = (0..1_000).map(|i| (i * 7919) % 1_001).collect();
+        sort_unstable_by(&mut items, |a, b| b.cmp(a));
+        assert!(items.windows(2).all(|w| w[0] >= w[1]));
+        assert_eq!(items.len(), 1_000);
+    }
 
     #[test]
     fn sum_matches_plain_fold() {
