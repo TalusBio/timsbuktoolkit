@@ -5,6 +5,7 @@ pub mod app;
 pub mod curves;
 pub mod stats;
 pub mod transform;
+pub mod ui;
 pub mod view;
 
 pub use app::{
@@ -12,6 +13,7 @@ pub use app::{
     Flow,
     SortKey,
     Tab,
+    run,
 };
 pub use view::{
     FoldImportance,

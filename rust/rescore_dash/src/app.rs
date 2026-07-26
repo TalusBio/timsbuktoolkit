@@ -295,6 +295,54 @@ impl<'a> App<'a> {
     }
 }
 
+/// Open the dashboard and block until the user quits.
+///
+/// Skips silently (with a warning) when stdout is not a terminal, so a piped
+/// or containerized run is unaffected. `ratatui::init` installs a panic hook
+/// that restores the terminal, so a panic inside the loop cannot leave the
+/// user's shell in raw mode.
+pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdout().is_terminal() {
+        tracing::warn!("rescore dashboard requested but stdout is not a terminal; skipping");
+        return Ok(());
+    }
+    if let Err(e) = view.validate() {
+        tracing::warn!("rescore dashboard input rejected: {e}");
+        return Ok(());
+    }
+
+    let mut terminal = ratatui::init();
+    let result = event_loop(&mut terminal, view);
+    ratatui::restore();
+    result
+}
+
+fn event_loop<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    view: &RescoreView<'_>,
+) -> std::io::Result<()> {
+    use ratatui::crossterm::event::{
+        self,
+        Event,
+        KeyEventKind,
+    };
+
+    let mut app = App::new(view);
+    loop {
+        terminal.draw(|f| crate::ui::draw(f, &mut app))?;
+        // Only key *presses*: on Windows crossterm also emits releases, which
+        // would double every keystroke.
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && matches!(app.handle_key(key), Flow::Quit)
+        {
+            return Ok(());
+        }
+    }
+}
+
 /// Orders two sort-key values with `NaN` always last, independent of `desc`.
 /// `desc` breaks ties between two finite values only: `true` is largest
 /// first, `false` is smallest first.
