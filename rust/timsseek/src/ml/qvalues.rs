@@ -624,22 +624,35 @@ const ALL_NCOLS: usize = LINEAR_NCOLS + NONLINEAR_NCOLS;
 const _: () = assert!(LINEAR_NCOLS > 0, "linear lane collapsed");
 const _: () = assert!(NONLINEAR_NCOLS > 0, "nonlinear lane collapsed");
 
-/// Append one candidate's LINEAR-lane row. `derived` is passed in rather than
+/// Append one row's LINEAR-lane values. `derived` is passed in rather than
 /// recomputed so the all-lane walk pays for `Derived::compute` once per row.
-fn push_linear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f64>) {
-    out.extend_from_slice(&c.scoring.linear_feature_array());
-    out.extend_from_slice(&c.result_meta().linear_feature_array());
+/// Takes the blocks rather than a candidate so that both `CompetedCandidate`
+/// (pre-rescore) and `FinalResult` (post-rescore) feed the SAME builder —
+/// there is exactly one definition of a feature row.
+fn push_linear_row(
+    scoring: &ScoringFields,
+    meta: &ResultMeta,
+    derived: &Derived,
+    out: &mut Vec<f64>,
+) {
+    out.extend_from_slice(&scoring.linear_feature_array());
+    out.extend_from_slice(&meta.linear_feature_array());
     out.extend_from_slice(&derived.linear_feature_array());
     // sequence_counts has NO linear lane (context features).
 }
 
-/// Append one candidate's NONLINEAR-lane row (see [`push_linear_row`]).
-fn push_nonlinear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f64>) {
-    out.extend_from_slice(&c.scoring.nonlinear_feature_array());
-    out.extend_from_slice(&c.result_meta().nonlinear_feature_array());
+/// Append one row's NONLINEAR-lane values (see [`push_linear_row`]).
+fn push_nonlinear_row(
+    scoring: &ScoringFields,
+    meta: &ResultMeta,
+    derived: &Derived,
+    out: &mut Vec<f64>,
+) {
+    out.extend_from_slice(&scoring.nonlinear_feature_array());
+    out.extend_from_slice(&meta.nonlinear_feature_array());
     out.extend_from_slice(&derived.nonlinear_feature_array());
     out.extend_from_slice(&sequence_counts::nonlinear_feature_array(
-        &c.scoring.identity.peptide,
+        &scoring.identity.peptide,
     ));
 }
 
@@ -648,7 +661,8 @@ fn push_nonlinear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f6
 fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
     for c in data {
-        push_linear_row(c, &Derived::compute(&c.scoring), &mut out);
+        let meta = c.result_meta();
+        push_linear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -658,7 +672,8 @@ fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
     for c in data {
-        push_nonlinear_row(c, &Derived::compute(&c.scoring), &mut out);
+        let meta = c.result_meta();
+        push_nonlinear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -672,10 +687,29 @@ fn build_all_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
     for c in data {
         let derived = Derived::compute(&c.scoring);
-        push_linear_row(c, &derived, &mut out);
-        push_nonlinear_row(c, &derived, &mut out);
+        let meta = c.result_meta();
+        push_linear_row(&c.scoring, &meta, &derived, &mut out);
+        push_nonlinear_row(&c.scoring, &meta, &derived, &mut out);
     }
     out
+}
+
+/// The ALL-lane feature names + matrix for post-rescore rows.
+///
+/// Same builders, same order, same width as [`build_all_matrix`] — this is the
+/// dashboard's entry point, and sharing the builders is what stops the
+/// displayed features from drifting away from the trained ones.
+///
+/// Row-major: value `j` of row `i` is at `matrix[i * names.len() + j]`.
+pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
+    let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
+    for r in data {
+        let derived = Derived::compute(&r.scoring);
+        let meta = r.result_meta();
+        push_linear_row(&r.scoring, &meta, &derived, &mut out);
+        push_nonlinear_row(&r.scoring, &meta, &derived, &mut out);
+    }
+    (all_feature_name_set(), out)
 }
 
 /// LINEAR-lane feature names (LDA), in [`push_linear_row`]'s order.
@@ -845,6 +879,50 @@ mod tests {
                 data.iter().map(|x| x.get_qval()).collect::<Vec<_>>(),
             );
         }
+    }
+
+    #[test]
+    fn feature_frame_matches_competed_matrix() {
+        let competed = CompetedCandidate {
+            scoring: crate::scoring::results::ScoringFields::sample_default(),
+            delta_group: 0.5,
+            delta_group_ratio: 0.25,
+            discriminant_score: 1.5,
+            qvalue: 0.01,
+        };
+        let expected = build_all_matrix(std::slice::from_ref(&competed));
+
+        let final_result = competed.clone().into_final();
+        let (names, got) = feature_frame(std::slice::from_ref(&final_result));
+
+        assert_eq!(names, all_feature_name_set());
+        assert_eq!(got.len(), names.len(), "one row, one value per name");
+        assert_eq!(got.len(), expected.len());
+        for (j, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                a == b || (a.is_nan() && b.is_nan()),
+                "column {j} ({}) differs: competed={a} final={b}",
+                names[j]
+            );
+        }
+    }
+
+    #[test]
+    fn feature_frame_rows_are_contiguous() {
+        let competed = CompetedCandidate {
+            scoring: crate::scoring::results::ScoringFields::sample_default(),
+            delta_group: 0.5,
+            delta_group_ratio: 0.25,
+            discriminant_score: 1.5,
+            qvalue: 0.01,
+        };
+        let rows = vec![
+            competed.clone().into_final(),
+            competed.clone().into_final(),
+            competed.into_final(),
+        ];
+        let (names, got) = feature_frame(&rows);
+        assert_eq!(got.len(), 3 * names.len());
     }
 }
 
