@@ -1,7 +1,39 @@
-use crate::config::RescoreModel;
-use clap::Parser;
+use clap::{
+    Parser,
+    ValueEnum,
+};
 use std::path::PathBuf;
 use timsseek::DecoyPolicy;
+use timsseek::ml::RescoreModel;
+
+/// Clap mirror of [`timsseek::ml::RescoreModel`].
+///
+/// The model enum itself lives in the library, next to the rescorers it selects
+/// between. `clap::ValueEnum` is a foreign trait, so it cannot be implemented
+/// for the lib-owned type from this crate — hence this mirror, which exists
+/// ONLY to render `[possible values: gbm, lda, hybrid]` and parse the flag. The
+/// `From` impl below is exhaustive on purpose: a new variant in the library
+/// fails to compile here instead of silently going unreachable from the CLI.
+///
+/// The TOML `rescore_model` field deserializes straight into the lib type; this
+/// mirror is not in that path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum CliRescoreModel {
+    Gbm,
+    Lda,
+    Hybrid,
+}
+
+impl From<CliRescoreModel> for RescoreModel {
+    fn from(v: CliRescoreModel) -> Self {
+        match v {
+            CliRescoreModel::Gbm => RescoreModel::Gbm,
+            CliRescoreModel::Lda => RescoreModel::Lda,
+            CliRescoreModel::Hybrid => RescoreModel::Hybrid,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -61,7 +93,7 @@ pub struct Cli {
 
     /// Rescore model; overrides the config file.
     #[arg(long, value_enum)]
-    pub rescore_model: Option<RescoreModel>,
+    pub rescore_model: Option<CliRescoreModel>,
 
     /// Print the default TOML configuration to stdout and exit.
     #[arg(long, conflicts_with = "write_default_config")]

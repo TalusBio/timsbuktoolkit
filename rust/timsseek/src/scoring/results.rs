@@ -25,7 +25,6 @@ use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
 use super::blocks::{
     ColSink,
-    FeatSink,
     FrameSink,
     NameSink,
     SchemaSink,
@@ -50,8 +49,8 @@ pub struct FinalizeInputs<'a> {
 }
 
 /// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the purely-mechanical walks (`push_columns`, `push_features` (legacy),
-/// `push_linear_features`/`push_nonlinear_features` (the live lane walks),
+/// and the purely-mechanical walks (`push_columns`,
+/// `push_linear_features`/`push_nonlinear_features` (the lane walks),
 /// `sample_default`) from that one list. Order is load-bearing (parquet
 /// columns and the positional ML value vector both follow it), so folding
 /// them all from a single ordered source is what makes their order
@@ -83,20 +82,6 @@ macro_rules! compose_scoring_fields {
             /// same order as `push_columns`.
             pub fn push_column_schema(o: &mut $crate::scoring::blocks::SchemaSink) {
                 $( <$fty as $crate::scoring::blocks::ScoreBlock>::column_schema(o); )*
-            }
-
-            /// Emit every block's direct ML feature *values* (not the
-            /// cross-field derived ones, nor the conditional sequence block).
-            ///
-            /// Legacy (transition) walk: kept only because
-            /// [`crate::ml::cv::FeatureLike::as_feature`] must stay
-            /// implemented for `CrossValidatedScorer<CompetedCandidate>`'s
-            /// trait bound (a test-only ctor calls it) — see
-            /// `CompetedCandidate::feature_values`. The live `rescore`/
-            /// `rescore_lda` paths read [`super::blocks::FeatFrame`] lanes via
-            /// `push_linear_features`/`push_nonlinear_features` instead.
-            pub fn push_features(&self, o: &mut FeatSink) {
-                $( self.$fname.features(o); )*
             }
 
             /// Emit every block's LINEAR-lane ML feature *values* into a
@@ -136,8 +121,8 @@ macro_rules! compose_scoring_fields {
 
 compose_scoring_fields! {
     /// Shared scoring fields produced by Phase 3, as a composition of typed
-    /// blocks. Each block owns its parquet/ML projections (`columns`,
-    /// `features`) in one file under [`super::blocks`]; the finalize-stage
+    /// blocks. Each block owns its parquet/ML projections (`columns`, the
+    /// lane methods) in one file under [`super::blocks`]; the finalize-stage
     /// blocks own their `compute` there too, while the apex-stage blocks are
     /// built in [`super::apex_finding`].
     pub struct ScoringFields {

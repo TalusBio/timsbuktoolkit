@@ -65,12 +65,6 @@ pub use frame::{
 /// `columns` is the only method every block must provide; the schema + lane
 /// methods are defaulted to no-ops for blocks that don't participate in a
 /// given lane (e.g. `sequence_counts` has no linear lane).
-///
-/// `features` (LEGACY, value-only — no matching name walk) is kept only
-/// because [`crate::ml::cv::FeatureLike::as_feature`] must stay implemented
-/// for `CrossValidatedScorer<CompetedCandidate>`'s trait bound, which a
-/// test-only ctor (`CrossValidatedScorer::new_from_shuffled`) still exercises.
-/// Defaulted no-op; only [`identity::Identity`] overrides it with a real impl.
 pub trait ScoreBlock {
     fn columns(&self, out: &mut ColSink);
 
@@ -88,23 +82,6 @@ pub trait ScoreBlock {
     /// Names for [`ScoreBlock::nonlinear_features`], same order. Defaulted
     /// no-op.
     fn nonlinear_feature_names(_out: &mut NameSink) {}
-    /// Both lanes, linear then nonlinear.
-    fn all_features(&self, o: &mut FrameSink) {
-        self.linear_features(o);
-        self.nonlinear_features(o);
-    }
-    /// Names for [`ScoreBlock::all_features`], same order.
-    fn all_feature_names(o: &mut NameSink)
-    where
-        Self: Sized,
-    {
-        Self::linear_feature_names(o);
-        Self::nonlinear_feature_names(o);
-    }
-
-    /// LEGACY (transition): this block's ML feature *values*, in a fixed
-    /// per-block order. Defaulted no-op. See the trait doc for why this stays.
-    fn features(&self, _out: &mut FeatSink) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -307,85 +284,12 @@ impl SchemaSink {
 }
 
 // ---------------------------------------------------------------------------
-// FeatSink — ML feature accumulator
-// ---------------------------------------------------------------------------
-
-/// Accumulates ML feature *values* in emission order. Names are not stored here
-/// — they are a property of the set, built once by [`NameSink`]. The
-/// transform-suffix convention (`_ln1p`, `_round`, …) is fixed and lives only in
-/// the `#[feat(..)]` grammar; the value transforms live here so a value and its
-/// name-suffix are defined by the same directive.
-#[derive(Default)]
-pub struct FeatSink {
-    vals: Vec<f64>,
-}
-
-impl FeatSink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push(&mut self, v: f64) {
-        self.vals.push(v);
-    }
-
-    /// Push one raw value per array element (`f32` widened to `f64`). Shared by
-    /// the array blocks ([`ion_errors`], [`relative_intensities`]).
-    pub fn push_slice(&mut self, vals: &[f32]) {
-        self.vals.extend(vals.iter().map(|v| *v as f64));
-    }
-
-    pub fn push_ln1p(&mut self, x: f64) {
-        self.vals.push(x.ln_1p());
-    }
-
-    pub fn push_log2(&mut self, x: f64) {
-        self.vals.push(x.log2());
-    }
-
-    pub fn push_round(&mut self, x: f64) {
-        self.vals.push(x.round());
-    }
-
-    /// Magnitude fold (`|x|`, NaN preserved). Turns a center-is-better signed
-    /// feature (small error good, both tails bad) into a monotone one a linear
-    /// discriminant can weight; inert for trees (monotone of the raw value).
-    pub fn push_abs(&mut self, x: f64) {
-        self.vals.push(x.abs());
-    }
-
-    /// Missingness indicator (`1.0` if the source value is non-finite, else
-    /// `0.0`). Pairs with a value transform to encode not-missing-at-random
-    /// structure a mean-impute would erase; the value column self-imputes to
-    /// the mean model-side, this preserves the "was missing" bit.
-    pub fn push_isna(&mut self, x: f64) {
-        self.vals.push(if x.is_finite() { 0.0 } else { 1.0 });
-    }
-
-    /// `push_abs` for each element of an array field.
-    pub fn push_slice_abs(&mut self, vals: &[f32]) {
-        self.vals.extend(vals.iter().map(|v| (*v as f64).abs()));
-    }
-
-    /// `push_isna` for each element of an array field.
-    pub fn push_slice_isna(&mut self, vals: &[f32]) {
-        self.vals
-            .extend(vals.iter().map(|v| if v.is_finite() { 0.0 } else { 1.0 }));
-    }
-
-    /// The accumulated values, in emission order.
-    pub fn into_values(self) -> Vec<f64> {
-        self.vals
-    }
-}
-
-// ---------------------------------------------------------------------------
 // NameSink — set-level ML feature-name accumulator
 // ---------------------------------------------------------------------------
 
 /// Builds the ML feature-name list ONCE for a whole fit (a property of the
 /// feature set, not of any record). Names are `Arc<str>` so array families can
-/// generate them lazily ([`NameSink::push_indexed`]) instead of const tables,
+/// generate their `{field}_{i}` fan-out lazily instead of keeping const tables,
 /// and so callers can share the list cheaply.
 #[derive(Default)]
 pub struct NameSink {
@@ -399,23 +303,6 @@ impl NameSink {
 
     pub fn push(&mut self, name: &str) {
         self.names.push(Arc::from(name));
-    }
-
-    /// The array-family fan-out: `{prefix}_0 .. {prefix}_{n-1}` (mirrors
-    /// [`ColSink::f32_array`]'s column naming).
-    pub fn push_indexed(&mut self, prefix: &str, n: usize) {
-        for i in 0..n {
-            self.names.push(Arc::from(format!("{prefix}_{i}")));
-        }
-    }
-
-    /// [`NameSink::push_indexed`] with a trailing transform suffix, so an
-    /// array family's `abs`/`isna` companions read `{prefix}_{i}_abs` — the
-    /// same `{name}{suffix}` convention the scalar macro uses.
-    pub fn push_indexed_suffixed(&mut self, prefix: &str, n: usize, suffix: &str) {
-        for i in 0..n {
-            self.names.push(Arc::from(format!("{prefix}_{i}{suffix}")));
-        }
     }
 
     /// The accumulated names, in emission order.

@@ -855,9 +855,9 @@ fn run() -> std::result::Result<(), errors::CliError> {
         config.analysis.decoy_strategy = strategy;
     }
 
-    // Override rescore model if provided
+    // Override rescore model if provided (CLI wins over the config file).
     if let Some(model) = args.rescore_model {
-        config.analysis.rescore_model = model;
+        config.analysis.rescore_model = model.into();
     }
 
     // Install tracing subscriber. The returned handle carries the log file

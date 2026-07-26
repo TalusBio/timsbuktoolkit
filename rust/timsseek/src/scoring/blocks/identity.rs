@@ -9,7 +9,6 @@ use crate::models::sequence::Peptide;
 use crate::scoring::apex_finding::PeptideMetadata;
 use crate::scoring::blocks::{
     ColSink,
-    FeatSink,
     FrameSink,
     NameSink,
     SchemaSink,
@@ -75,13 +74,6 @@ impl ScoreBlock for Identity {
         o.bool("is_target", self.is_target);
     }
 
-    fn features(&self, o: &mut FeatSink) {
-        // library_id / decoy_group_id / is_target are Parquet-only (not features).
-        o.push((self.precursor_mz / 5.0).round());
-        o.push(self.precursor_charge as f64);
-        o.push(self.precursor_mobility as f64);
-    }
-
     fn column_schema(o: &mut SchemaSink) {
         o.str("sequence");
         o.u32("library_id");
@@ -93,8 +85,8 @@ impl ScoreBlock for Identity {
     }
 
     fn nonlinear_features(&self, o: &mut FrameSink) {
-        // context features -> tree-only (nonlinear) lane; same values/names as the
-        // legacy `features`/`feature_names` above.
+        // Context features -> tree-only (nonlinear) lane. library_id /
+        // decoy_group_id / is_target are Parquet-only (not features).
         o.push("precursor_mz_round5", (self.precursor_mz / 5.0).round());
         o.push("precursor_charge", self.precursor_charge as f64);
         o.push("precursor_mobility", self.precursor_mobility as f64);
@@ -112,8 +104,11 @@ mod tests {
     use super::*;
     use crate::scoring::blocks::FeatFrame;
 
+    /// The two halves of the nonlinear lane — the per-record value walk and the
+    /// set-level name walk — must agree on count, order, and which value sits
+    /// under which name.
     #[test]
-    fn nonlinear_lane_matches_legacy_features() {
+    fn nonlinear_lane_names_match_values() {
         let identity = Identity::sample();
 
         let mut frame = FeatFrame::with_capacity(3, 1);
@@ -123,16 +118,22 @@ mod tests {
             identity.nonlinear_features(&mut sink);
             sink.finish();
         }
+
         let mut names = NameSink::new();
         Identity::nonlinear_feature_names(&mut names);
-        assert_eq!(frame.names(), names.into_names().as_slice());
+        let names = names.into_names();
+        assert_eq!(frame.names(), names.as_slice());
+        assert_eq!(frame.ncols(), names.len());
 
-        let mut legacy = FeatSink::new();
-        identity.features(&mut legacy);
-        let legacy_vals = legacy.into_values();
-        assert_eq!(legacy_vals.len(), frame.ncols());
-        for (j, v) in legacy_vals.iter().enumerate() {
-            assert_eq!(frame.column(j)[0], *v);
+        let expected = [
+            ("precursor_mz_round5", (identity.precursor_mz / 5.0).round()),
+            ("precursor_charge", identity.precursor_charge as f64),
+            ("precursor_mobility", identity.precursor_mobility as f64),
+        ];
+        assert_eq!(expected.len(), names.len());
+        for (j, (name, value)) in expected.iter().enumerate() {
+            assert_eq!(&*names[j], *name);
+            assert_eq!(frame.column(j)[0], *value);
         }
     }
 

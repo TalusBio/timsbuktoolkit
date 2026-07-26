@@ -1,7 +1,4 @@
-use super::config::{
-    OutputConfig,
-    RescoreModel,
-};
+use super::config::OutputConfig;
 use indicatif::{
     ProgressBar,
     ProgressFinish,
@@ -27,9 +24,8 @@ use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::{
     RescoreFeatureStats,
-    rescore,
-    rescore_hybrid,
-    rescore_lda,
+    RescoreModel,
+    rescore_with,
 };
 use timsseek::rt_calibration::{
     CalibRtError,
@@ -405,27 +401,10 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
     // Model selectable via the `rescore_model` config field / `--rescore-model`
-    // CLI flag (CLI wins); GBM is the default. `Lda` = Sage-style shrinkage LDA
-    // (see timsseek::ml::lda), ~100x cheaper.
-    let (data, feature_stats) = match rescore_model {
-        RescoreModel::Lda => {
-            eprintln!("  (rescore model: LDA)");
-            rescore_lda(competed)
-        }
-        RescoreModel::Hybrid => {
-            // Cross-fit LDA (linear lane) -> lda_score column -> GBM CV on
-            // `nonlinear + lda_score`. Leak-free: the cross-fit partition matches
-            // the GBM's internal fold assignment.
-            eprintln!("  (rescore model: hybrid LDA->GBM)");
-            rescore_hybrid(competed)
-        }
-        RescoreModel::Gbm => {
-            // GBM trains on the ALL lane; `rescore` builds the feature frame +
-            // name set internally (after its seeded shuffle) so they stay
-            // row-aligned.
-            rescore(competed)
-        }
-    };
+    // CLI flag (CLI wins); GBM is the default. Dispatch + per-model notes live
+    // in `timsseek::ml::rescore_with`.
+    info!("Phase 5 rescore model: {rescore_model:?}");
+    let (data, feature_stats) = rescore_with(rescore_model, competed);
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -477,12 +456,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
-    if !no_feature_stats {
-        if let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
+    if !no_feature_stats
+        && let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
             // Non-fatal: log and continue.
             tracing::warn!("Failed to write feature_stats sidecar: {}", e);
         }
-    }
 
     // Key result to stdout. The final output URI is printed by main.rs
     // per-file footer — out_path_pq here is the local working path (which

@@ -253,13 +253,22 @@ impl GBMConfig {
     }
 }
 
+/// Label + score access for a scored record — everything
+/// [`CrossValidatedScorer`] needs from `T` once the feature matrix exists.
 pub trait FeatureLike {
-    /// Note: the returned iterator MUST yield exactly N elements
-    /// for every element of this type.
-    fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_;
     fn get_y(&self) -> f64;
     fn assign_score(&mut self, score: f64) -> ();
     fn get_score(&self) -> f64;
+}
+
+/// A record that can also walk *itself* into a feature vector. Required only by
+/// the self-computing ctor ([`CrossValidatedScorer::new_from_shuffled`]); the
+/// production path hands in an externally built matrix
+/// (`PrecomputedFeatures::from_row_major`) and needs [`FeatureLike`] alone.
+pub trait FeatureVector: FeatureLike {
+    /// Note: the returned iterator MUST yield exactly N elements
+    /// for every element of this type.
+    fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_;
 }
 
 /// Materialized view into a `DataBuffer`: feature matrix + label slice.
@@ -338,7 +347,7 @@ pub(crate) struct PrecomputedFeatures {
 }
 
 impl PrecomputedFeatures {
-    fn from_data(data: &[impl FeatureLike]) -> Self {
+    fn from_data(data: &[impl FeatureVector]) -> Self {
         let ncols = data
             .first()
             .map_or(0, |d| d.as_feature().into_iter().count());
@@ -357,9 +366,9 @@ impl PrecomputedFeatures {
 
     /// Build from an already-materialized row-major matrix
     /// (`features[i*ncols + j]`) + responses, instead of walking
-    /// `FeatureLike::as_feature`. Rows MUST align with the `data` the scorer is
-    /// constructed from (same order). Used by the lane-frame consumer so GBM
-    /// trains on the `FeatFrame` column set, not the legacy per-record walk.
+    /// [`FeatureVector::as_feature`]. Rows MUST align with the `data` the
+    /// scorer is constructed from (same order). This is how the lane-frame
+    /// consumer trains GBM on the `FeatFrame` column set.
     pub(crate) fn from_row_major(features: Vec<f64>, ncols: usize, responses: Vec<f64>) -> Self {
         assert_eq!(
             features.len(),
@@ -416,7 +425,10 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
     /// NOTE: THIS ASSUMES YOUR DATA IS ALREADY SHUFFLED
     /// FOLDS WILL BE ASSIGNED IN ORDER (0, 1, 2, ..., n_folds-1, 0, 1, ...)
     /// IF YOUR DATA IS ORDERED IN ANY WAY, COULD LEAD TO BIASED RESULTS.
-    pub fn new_from_shuffled(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self {
+    pub fn new_from_shuffled(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self
+    where
+        T: FeatureVector,
+    {
         let assigned_fold: Vec<u8> = (0..data.len())
             .map(|x| (x % n_folds as usize).try_into().unwrap())
             .collect();
@@ -504,6 +516,15 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
     }
 
     pub fn get_scores(&self) -> Vec<f64> {
+        // Each row is scored by every fold classifier except its own training
+        // fold and that fold's early-stopping fold, i.e. `n_folds - 2` times.
+        // At n_folds == 2 that averaging divisor is 0 and the scores silently
+        // go inf/NaN instead of erroring, so pin the floor here.
+        debug_assert!(
+            self.n_folds >= 3,
+            "get_scores averages over n_folds - 2 classifiers; n_folds must be >= 3, got {}",
+            self.n_folds
+        );
         let mut scores = vec![0.0; self.data.len()];
         let mut buffer = DataBuffer::default();
 
@@ -715,7 +736,10 @@ mod test {
         Uniform,
     };
 
-    use crate::ml::cv::FeatureLike;
+    use crate::ml::cv::{
+        FeatureLike,
+        FeatureVector,
+    };
 
     struct MyFeature {
         vals: [f64; 5],
@@ -723,11 +747,13 @@ mod test {
         score: f64,
     }
 
-    impl FeatureLike for MyFeature {
+    impl FeatureVector for MyFeature {
         fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_ {
             self.vals
         }
+    }
 
+    impl FeatureLike for MyFeature {
         fn get_y(&self) -> f64 {
             self.class
         }
@@ -741,10 +767,14 @@ mod test {
         }
     }
 
-    fn random_data(num_targets: usize, num_decoys: usize) -> Vec<MyFeature> {
+    /// Seeded so the test is reproducible: with `rand::rng()` the thresholds
+    /// below had to absorb run-to-run sampling noise, which is exactly what
+    /// made them uninformative.
+    fn random_data(num_targets: usize, num_decoys: usize, seed: u64) -> Vec<MyFeature> {
+        use rand::SeedableRng;
         let between_unch = Uniform::try_from(1.0..10.0).unwrap();
         let between_targ = Uniform::try_from(1.0..20.0).unwrap();
-        let mut rng = rand::rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut out = Vec::new();
 
         for _nt in 0..num_targets {
@@ -781,7 +811,7 @@ mod test {
     #[test]
     fn test_cv_train() {
         let config = GBMConfig::default();
-        let data = random_data(500, 500);
+        let data = random_data(500, 500, 0xC0FFEE);
         let data_len = data.len();
 
         let mut scorer = CrossValidatedScorer::new_from_shuffled(3, data, config);
@@ -789,26 +819,28 @@ mod test {
             .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
             .unwrap();
 
+        // Rows 0..500 are the targets, 500..1000 the decoys.
         let out = scorer.get_scores();
-        let avg_t: f64 = out[..=500].iter().sum::<f64>() / 500.0;
+        let avg_t: f64 = out[..500].iter().sum::<f64>() / 500.0;
         let avg_d: f64 = out[500..].iter().sum::<f64>() / 500.0;
-        let num_t_gt_d = out[..=500].iter().filter(|&&x| x > avg_d).count();
+        let num_t_gt_d = out[..500].iter().filter(|&&x| x > avg_d).count();
         let num_d_gt_t = out[500..].iter().filter(|&&x| x > avg_t).count();
-        // There are 2 features that have 2x the uniform range.
-        // Thus 75% chance of having at least one feature where the value is out of the possible
-        // ranges in the decoys ... (500 * 0.75) = 375
-        // I can crunch more formal stats bc ... prob distributions ...
-        // but this should be a safe enough value to test.
+        // 3 of the 5 features are drawn from 2x the decoy uniform range, so a
+        // target usually lands outside the decoy support on at least one of
+        // them. With the RNG seeded these are exact-run facts rather than
+        // distributional guesses: this seed yields 470 and 0. Thresholds are
+        // tightened from the old 300 / 100 (which had to absorb unseeded
+        // sampling noise) but kept off the observed values so an unrelated GBM
+        // tweak still has slack.
         assert!(
-            num_t_gt_d > 300,
+            num_t_gt_d > 440,
             "num_t_gt_d: {}, averages={} {}",
             num_t_gt_d,
             avg_t,
             avg_d
         );
-        // assert!(num_t_gt0 > 375, "num_t_gt0: {}", num_t_gt0);
         assert!(
-            num_d_gt_t < 100,
+            num_d_gt_t < 25,
             "num_d_gt_t: {}, averages {} and {}",
             num_d_gt_t,
             avg_t,

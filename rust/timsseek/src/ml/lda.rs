@@ -6,12 +6,18 @@
 //!     fit. Sage skips this because exact Fisher LDA is scale-invariant; we add
 //!     ridge shrinkage below, which is NOT scale-invariant, so standardization
 //!     is required to make the `lambda * I` term comparable across features.
-//!   * The within-class scatter is ridge-regularized (`Sw + lambda*I`). The
-//!     timsseek feature set (~108 dims) is heavily collinear (main_score family,
-//!     the 7 per-ion error dims + their mean, 22 AA counts, ...), which makes
-//!     the raw `Sw` near-singular. Shrinkage keeps the linear solve stable
-//!     without hand-pruning the feature set, so LDA sees the exact same inputs
-//!     as the GBM path (clean apples-to-apples bench).
+//!   * The within-class scatter is ridge-regularized (`Sw + lambda*I`). The fit
+//!     input is the LINEAR lane only (~102 dims: the fields declared
+//!     approx-Gaussian after their per-row transform), and it is heavily
+//!     collinear (main_score family, the 7 per-ion error dims + their mean,
+//!     ...), which makes the raw `Sw` near-singular. Shrinkage keeps the linear
+//!     solve stable without hand-pruning the lane.
+//!     NOTE: this is NOT the GBM's input. The GBM trains on the ALL lane
+//!     (linear ++ nonlinear, ~131 dims), so it additionally sees the context /
+//!     count / sequence features — including the 22 `sequence_counts` AA counts,
+//!     which have no linear lane and never reach LDA. LDA-vs-GBM numbers are
+//!     therefore a lane comparison, not a same-inputs comparison; the
+//!     same-inputs-plus-LDA setup is `rescore_hybrid` (nonlinear ++ lda_score).
 //!   * NaN/non-finite feature values are imputed to the column mean (i.e. 0
 //!     after standardization). The GBM handles missing natively; LDA cannot.
 //!
@@ -38,7 +44,7 @@ use rayon::prelude::*;
 /// Fraction of `mean(diag(Sw))` added to the diagonal as ridge shrinkage.
 /// Small enough to barely perturb a well-conditioned problem, large enough to
 /// rescue a rank-deficient one.
-const DEFAULT_SHRINKAGE: f64 = 1e-2;
+pub const DEFAULT_SHRINKAGE: f64 = 1e-2;
 
 /// Row-chunk size for the parallel reductions. Fixed so chunk boundaries — and
 /// therefore the summation order of the partial accumulators — are identical
@@ -77,7 +83,7 @@ impl LdaModel {
 
         // --- Standardization stats (finite values only), parallel reduce ---
         let t = Instant::now();
-        let (sum, sumsq, cnt) = col_finite_moments(feat, nrows, ncols);
+        let (sum, sumsq, cnt) = col_finite_moments(feat, ncols);
         let mut mean = vec![0.0f64; ncols];
         let mut inv_std = vec![1.0f64; ncols];
         for j in 0..ncols {
@@ -195,7 +201,7 @@ impl LdaModel {
 
 /// Per-column finite sum / sum-of-squares / count, reduced over fixed row
 /// chunks (deterministic summation order).
-fn col_finite_moments(feat: &[f64], nrows: usize, ncols: usize) -> (Vec<f64>, Vec<f64>, Vec<u64>) {
+fn col_finite_moments(feat: &[f64], ncols: usize) -> (Vec<f64>, Vec<f64>, Vec<u64>) {
     let chunk = CHUNK_ROWS * ncols;
     let fold = |acc: &mut (Vec<f64>, Vec<f64>, Vec<u64>), block: &[f64]| {
         for row in block.chunks_exact(ncols) {
@@ -238,7 +244,6 @@ fn col_finite_moments(feat: &[f64], nrows: usize, ncols: usize) -> (Vec<f64>, Ve
             out.2[j] += c[j];
         }
     }
-    let _ = nrows;
     out
 }
 
@@ -423,7 +428,8 @@ mod test {
     }
 
     #[test]
-    fn solve_identity() {
+    fn solve_gauss_matches_hand_solved_2x2() {
+        // [2 1; 1 3] x = [3; 5]  =>  x = [0.8; 1.4] (det 5).
         let a = vec![2.0, 1.0, 1.0, 3.0];
         let b = vec![3.0, 5.0];
         let x = solve_gauss(a, b, 2).unwrap();
@@ -468,7 +474,9 @@ mod test {
     }
 
     #[test]
-    fn nan_imputed_not_propagated() {
+    fn nan_imputed_to_column_mean() {
+        // Col 1's only finite values are 1.0 and 2.0, so its imputation target
+        // (the finite-only column mean) is exactly 1.5.
         let rows = vec![
             vec![1.0, f64::NAN],
             vec![2.0, 1.0],
@@ -478,10 +486,24 @@ mod test {
         let labels = vec![false, false, true, true];
         let (feat, nrows, ncols) = flat(&rows);
         let lda = LdaModel::fit(&feat, nrows, ncols, &labels, DEFAULT_SHRINKAGE).unwrap();
+
         for i in 0..nrows {
             assert!(lda.score(&feat[i * ncols..(i + 1) * ncols]).is_finite());
         }
+
+        // The contract is not merely "finite": a NaN must score as if it held
+        // the column mean. `is_finite` alone would also pass for impute-to-zero.
+        const COL1_MEAN: f64 = 1.5;
+        for row in [vec![1.0, f64::NAN], vec![0.0, f64::NAN]] {
+            let imputed = vec![row[0], COL1_MEAN];
+            assert_eq!(
+                lda.score(&row),
+                lda.score(&imputed),
+                "NaN row {row:?} must score as its column-mean-imputed twin {imputed:?}"
+            );
+        }
+        // Guard the premise: a DIFFERENT col-1 value must move the score, else
+        // the equality above would be vacuous (e.g. a zeroed coefficient).
+        assert_ne!(lda.score(&[1.0, COL1_MEAN]), lda.score(&[1.0, 5.0]));
     }
 }
-
-pub const DEFAULT_LDA_SHRINKAGE: f64 = DEFAULT_SHRINKAGE;
