@@ -15,6 +15,7 @@ members = [
     "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros",
+    "rust/rescore_dash",
     "python/timsquery_pyo3"
 ]
 default-members = [
@@ -31,7 +32,8 @@ default-members = [
     "rust/apex_sim",
     "rust/speclib_build_cli",
     "rust/tims_stage",
-    "rust/timsseek_macros"
+    "rust/timsseek_macros",
+    "rust/rescore_dash"
 ]
 
 [workspace.package]

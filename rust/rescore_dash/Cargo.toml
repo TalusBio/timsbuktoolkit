@@ -1,0 +1,10 @@
+[package]
+name = "rescore_dash"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui = "0.29"
+tracing = { workspace = true }
