@@ -457,12 +457,25 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // Build the dashboard's inputs BEFORE Phase 6 — the writer consumes `data`.
     // Costs one feature-matrix walk, and only when the dashboard is on.
+    //
+    // The matrix is `n_rows * n_features * 8` bytes (f64) and stays live
+    // alongside `data`/the Parquet write buffers until the user quits the
+    // dashboard (Phase 6 runs first, but the dashboard opens after and blocks
+    // until closed) — at ~1e6 rows x 131 ALL-lane features that is roughly
+    // 1 GB held for as long as the dashboard stays open, so its size is
+    // logged rather than left invisible.
     #[cfg(feature = "dashboard")]
     let dashboard_input = dashboard_enabled().then(|| {
         let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(&data);
         let is_target: Vec<bool> = data.iter().map(|r| r.scoring.identity.is_target).collect();
         let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
         let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();
+        let n_rows = is_target.len();
+        let n_features = feature_names.len();
+        let matrix_mb = (matrix.len() * std::mem::size_of::<f64>()) as f64 / (1024.0 * 1024.0);
+        info!(
+            "rescore dashboard feature matrix: {n_rows} rows x {n_features} features ({matrix_mb:.1} MB), held live until the dashboard is closed"
+        );
         (feature_names, matrix, is_target, score, qvalue)
     });
 
