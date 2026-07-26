@@ -33,3 +33,18 @@ jobs:
         run: |
           cargo test -p timscentroid --features mzdata
           cargo test -p tims_stage -p timsquery
+
+  # CLI / simulator / macro crates, which the timsseek matrix above never
+  # touches: timsseek_cli's config drift guards live in its bin target,
+  # apex_sim's tests in its lib (default features, so the gui-gated modules
+  # compile too), timsseek_macros' in its proc-macro lib.
+  # `--all-targets` so examples are compiled as well — examples going unbuilt
+  # is what let `timsseek_cli/examples/load_bench.rs` rot undetected.
+  cli-and-sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros
+      - name: Run tests
+        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros --all-targets
