@@ -213,7 +213,7 @@ fn parse_header(block: &[u8]) -> Result<TarHeader, StageError> {
 fn parse_octal(raw: &[u8]) -> Result<u64, StageError> {
     let s = std::str::from_utf8(raw)
         .map_err(|e| StageError::ShapeMismatch(format!("octal field not ASCII: {e}")))?
-        .trim_end_matches(|c: char| c == '\0' || c == ' ')
+        .trim_end_matches(['\0', ' '])
         .trim_start_matches(' ');
     if s.is_empty() {
         return Ok(0);
@@ -259,7 +259,7 @@ fn walk_tar_index(reader: &mut dyn TarReader) -> Result<BTreeMap<String, (u64, u
         zero_run = 0;
         let h = parse_header(&block)?;
         let payload_offset = offset + BLOCK as u64;
-        let padded = ((h.size + BLOCK as u64 - 1) / BLOCK as u64) * BLOCK as u64;
+        let padded = h.size.div_ceil(BLOCK as u64) * BLOCK as u64;
         match h.typeflag {
             b'0' | 0 => {
                 let bn = basename_of(&h.name).to_string();
@@ -354,15 +354,13 @@ mod walker_tests {
         buf[124..124 + s.len()].copy_from_slice(s.as_bytes());
         buf[135] = 0;
         buf[156] = typeflag;
-        for i in 148..156 {
-            buf[i] = b' ';
-        }
+        buf[148..156].fill(b' ');
         buf
     }
 
     fn pad_to_block(payload: &mut Vec<u8>) {
         let pad = (BLOCK - payload.len() % BLOCK) % BLOCK;
-        payload.extend(std::iter::repeat(0u8).take(pad));
+        payload.extend(std::iter::repeat_n(0u8, pad));
     }
 
     struct InMemTar {
@@ -406,7 +404,7 @@ mod walker_tests {
             out.extend_from_slice(payload);
             pad_to_block(&mut out);
         }
-        out.extend(std::iter::repeat(0u8).take(BLOCK * 2));
+        out.extend(std::iter::repeat_n(0u8, BLOCK * 2));
         out
     }
 

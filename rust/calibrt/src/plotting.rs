@@ -323,6 +323,9 @@ mod tests {
     use super::*;
     use crate::Grid;
 
+    // -3.14/3.14 are round plot bounds baked into the committed snapshots, not
+    // an approximation of PI; swapping in the constant would rerender them.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn test_plot_sine_wave() {
         let plot = format_function_plot(|x| Ok(x.sin()), (-3.14, 3.14), 60, 20);
@@ -335,6 +338,8 @@ mod tests {
         insta::assert_snapshot!(plot);
     }
 
+    // See the note on `test_plot_sine_wave` re: the 3.14 bounds.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn test_plot_with_errors() {
         let plot = format_function_plot(

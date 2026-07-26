@@ -139,10 +139,10 @@ fn gaussian_smooth(data: &[f32], sigma: f32) -> Vec<f32> {
 
     // Compute Gaussian kernel weights
     let mut normalization_sum = 0.0;
-    for kernel_pos in 0..kernel_size {
+    for (kernel_pos, weight) in kernel.iter_mut().enumerate() {
         let distance_from_center = (kernel_pos as f32) - (kernel_radius as f32);
         let gaussian_value = (-0.5 * (distance_from_center / sigma).powi(2)).exp();
-        kernel[kernel_pos] = gaussian_value;
+        *weight = gaussian_value;
         normalization_sum += gaussian_value;
     }
 
@@ -158,11 +158,11 @@ fn gaussian_smooth(data: &[f32], sigma: f32) -> Vec<f32> {
         let mut weighted_sum = 0.0;
         let mut weight_total = 0.0;
 
-        for kernel_offset in 0..kernel_size {
+        for (kernel_offset, &weight) in kernel.iter().enumerate() {
             let data_idx = (point_idx + kernel_offset).saturating_sub(kernel_radius);
             if data_idx < data.len() {
-                weighted_sum += data[data_idx] * kernel[kernel_offset];
-                weight_total += kernel[kernel_offset];
+                weighted_sum += data[data_idx] * weight;
+                weight_total += weight;
             }
         }
 
@@ -192,11 +192,11 @@ fn savitzky_golay_smooth(data: &[f32], window: usize, polynomial: usize) -> Vec<
         let mut weighted_sum = 0.0;
         let mut weight_total = 0.0;
 
-        for window_offset in 0..window {
+        for (window_offset, &weight) in weights.iter().enumerate() {
             let data_idx = (point_idx + window_offset).saturating_sub(half_window);
             if data_idx < data.len() {
-                weighted_sum += data[data_idx] * weights[window_offset];
-                weight_total += weights[window_offset];
+                weighted_sum += data[data_idx] * weight;
+                weight_total += weight;
             }
         }
 

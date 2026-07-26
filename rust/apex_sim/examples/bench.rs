@@ -1,9 +1,11 @@
 //! Apex-finder + score benches.
 //!
 //! Runs three suites:
-//!   * canonical (historical 245-cyc scenarios; apex-recovery only),
-//!   * broad (production Phase-1 window ~1695 cyc; apex-recovery), and
-//!   * narrow (production Phase-3 window ~150 cyc; apex-recovery + score AUC).
+//!
+//! * canonical (historical 245-cyc scenarios; apex-recovery only),
+//! * broad (production Phase-1 window ~1695 cyc; apex-recovery), and
+//! * narrow (production Phase-3 window ~150 cyc; apex-recovery + score AUC).
+//!
 //! "recovery" = fraction of runs whose pass-2 apex lands within `tol` cycles of
 //! the (jittered) truth. "AUC" = ROC-AUC separating the Pass-2 score of a real
 //! peptide from a pure-noise twin (signal-vs-noise discrimination).

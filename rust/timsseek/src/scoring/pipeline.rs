@@ -335,7 +335,7 @@ pub fn select_top_n_fragments<T: KeyLike + Default>(
         .collect();
 
     // Sort drop-indices descending so highest index is removed first (avoids shift)
-    to_drop.sort_by(|a, b| b.0.cmp(&a.0));
+    to_drop.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     for (idx, key) in to_drop {
         agg.fragments

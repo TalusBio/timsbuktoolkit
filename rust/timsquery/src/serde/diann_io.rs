@@ -426,214 +426,6 @@ fn parse_precursor_group(
     Ok((eg, precursor_extras))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_sniff_diann_library_file() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let result = sniff_diann_library_file(file_path);
-        assert!(result, "File should be detected as DIA-NN library");
-
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir).join("Cargo.toml");
-        let result = sniff_diann_library_file(file_path);
-        assert!(
-            !result,
-            "Cargo.toml should not be detected as DIA-NN library"
-        );
-    }
-
-    #[test]
-    fn test_read_library_file() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let result = read_library_file(file_path);
-        assert!(
-            result.is_ok(),
-            "Failed to read library file: {:?}",
-            result.err()
-        );
-
-        let mut elution_groups = result.unwrap();
-
-        // Sample file has 2 unique precursors: MGRYSGK and HGDTGRR
-        assert_eq!(elution_groups.len(), 2, "Expected 2 elution groups");
-
-        // Find the MGRYSGK group (should be first if sorted, but let's be safe)
-        // Since we don't have access to peptide sequence in TimsElutionGroup,
-        // we identify by known properties from the sample data
-
-        // MGRYSGK: PrecursorMz=399.699980472937, IonMobility=0.7825, Tr=3.78, 5 fragments
-        // HGDTGRR: PrecursorMz=399.701900228177, IonMobility=0.7709, Tr=3.51, 4 fragments
-
-        // Order is not stable, so lets sort by RT to have a predictable order
-        elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
-
-        // More specific assertions if we can identify groups by ID or other means:
-        let mgrysgk = &elution_groups[1].0;
-        assert_eq!(mgrysgk.fragment_count(), 5);
-        assert!((mgrysgk.rt_seconds() - 3.78 * 60.).abs() < 0.01);
-        assert!((mgrysgk.mobility_ook0() - 0.7825).abs() < 0.001);
-
-        let hgdtgrr = &elution_groups[0].0;
-        assert_eq!(hgdtgrr.fragment_count(), 4);
-        assert!((hgdtgrr.rt_seconds() - 3.51 * 60.).abs() < 0.01);
-        assert!((hgdtgrr.mobility_ook0() - 0.7709).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_fragment_annotations_parsed_correctly() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let mut elution_groups = read_library_file(file_path).expect("Failed to read library");
-        elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
-
-        // More specific assertions if we can identify groups by ID or other means:
-        let mgrysgk = &elution_groups[1].0;
-        let hgdtgrr = &elution_groups[0].0;
-
-        let mut mgrysgk_expected_labels = vec!["y6", "b6", "b3", "b5", "y4"]
-            .into_iter()
-            .map(|s| IonAnnot::try_from(s).unwrap())
-            .collect::<Vec<_>>();
-        let mut actual_labels: Vec<IonAnnot> = mgrysgk
-            .iter_fragments()
-            .map(|(label, _mz)| label.clone())
-            .collect();
-        mgrysgk_expected_labels.sort();
-        actual_labels.sort();
-        assert_eq!(actual_labels, mgrysgk_expected_labels);
-
-        let mut hgdtgrr_expected_labels = vec!["y6", "b3", "y4", "y5"]
-            .into_iter()
-            .map(|s| IonAnnot::try_from(s).unwrap())
-            .collect::<Vec<_>>();
-        let mut actual_labels: Vec<IonAnnot> = hgdtgrr
-            .iter_fragments()
-            .map(|(label, _mz)| label.clone())
-            .collect();
-        hgdtgrr_expected_labels.sort();
-        actual_labels.sort();
-        assert_eq!(actual_labels, hgdtgrr_expected_labels);
-    }
-
-    #[test]
-    fn test_precursor_properties() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
-        // TODO ... implement the actual assertions
-    }
-
-    #[test]
-    fn test_speclib2_tsv_parsing() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.tsv");
-
-        // Check that sniff detects it correctly
-        let is_diann = sniff_diann_library_file(&file_path);
-        assert!(
-            is_diann,
-            "speclib2 TSV file should be detected as DIA-NN library"
-        );
-
-        // This test mainly checks that the name aliases wotk correctly
-        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
-    }
-
-    #[test]
-    fn test_sniff_parquet_library_file() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_pq_speclib.parquet");
-
-        let result = sniff_diann_parquet_library_file(file_path);
-        assert!(result, "File should be detected as DIA-NN parquet library");
-    }
-
-    #[test]
-    fn test_read_parquet_library_file() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_pq_speclib.parquet");
-
-        let result = read_parquet_library_file(file_path);
-        assert!(
-            result.is_ok(),
-            "Failed to read parquet library file: {:?}",
-            result.err()
-        );
-
-        let elution_groups = result.unwrap();
-
-        // Sample file has 3 unique precursors
-        assert_eq!(elution_groups.len(), 3, "Expected 3 elution groups");
-
-        // Verify basic properties of first precursor
-        let (first_eg, first_extras) = &elution_groups[0];
-        assert_eq!(first_extras.modified_peptide, "GREEWESAALQNANTK");
-        assert_eq!(first_extras.stripped_peptide, "GREEWESAALQNANTK");
-        assert!(!first_extras.is_decoy);
-        assert_eq!(first_eg.fragment_count(), 4);
-    }
-
-    #[test]
-    fn test_read_carafe_parquet_library_file() {
-        // Carafe emits int32/float32/large_string arrow types (vs DIA-NN's
-        // int64). Ensure the widened column getters downcast these correctly.
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let file_path = PathBuf::from(manifest_dir)
-            .join("tests")
-            .join("diann_io_files")
-            .join("carafe_pq_speclib.parquet");
-
-        let result = read_parquet_library_file(file_path);
-        assert!(
-            result.is_ok(),
-            "Failed to read Carafe parquet library file: {:?}",
-            result.err()
-        );
-
-        let elution_groups = result.unwrap();
-        assert_eq!(elution_groups.len(), 1, "Expected 1 precursor");
-
-        let (eg, extras) = &elution_groups[0];
-        assert_eq!(
-            extras.modified_peptide,
-            "_AAAGLYENC[UniMod:4]FC[UniMod:4]NALLAK_"
-        );
-        assert!(!extras.is_decoy);
-        assert_eq!(eg.fragment_count(), 20);
-    }
-}
-
 /// Read a DIA-NN spectral library from a parquet file (DiaNN 2.2+ format)
 pub fn read_parquet_library_file<T: AsRef<Path>>(
     file: T,
@@ -948,4 +740,212 @@ fn parse_precursor_group_from_parquet(
         .unwrap();
 
     Ok((eg, precursor_extras))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_sniff_diann_library_file() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let result = sniff_diann_library_file(file_path);
+        assert!(result, "File should be detected as DIA-NN library");
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir).join("Cargo.toml");
+        let result = sniff_diann_library_file(file_path);
+        assert!(
+            !result,
+            "Cargo.toml should not be detected as DIA-NN library"
+        );
+    }
+
+    #[test]
+    fn test_read_library_file() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let result = read_library_file(file_path);
+        assert!(
+            result.is_ok(),
+            "Failed to read library file: {:?}",
+            result.err()
+        );
+
+        let mut elution_groups = result.unwrap();
+
+        // Sample file has 2 unique precursors: MGRYSGK and HGDTGRR
+        assert_eq!(elution_groups.len(), 2, "Expected 2 elution groups");
+
+        // Find the MGRYSGK group (should be first if sorted, but let's be safe)
+        // Since we don't have access to peptide sequence in TimsElutionGroup,
+        // we identify by known properties from the sample data
+
+        // MGRYSGK: PrecursorMz=399.699980472937, IonMobility=0.7825, Tr=3.78, 5 fragments
+        // HGDTGRR: PrecursorMz=399.701900228177, IonMobility=0.7709, Tr=3.51, 4 fragments
+
+        // Order is not stable, so lets sort by RT to have a predictable order
+        elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
+
+        // More specific assertions if we can identify groups by ID or other means:
+        let mgrysgk = &elution_groups[1].0;
+        assert_eq!(mgrysgk.fragment_count(), 5);
+        assert!((mgrysgk.rt_seconds() - 3.78 * 60.).abs() < 0.01);
+        assert!((mgrysgk.mobility_ook0() - 0.7825).abs() < 0.001);
+
+        let hgdtgrr = &elution_groups[0].0;
+        assert_eq!(hgdtgrr.fragment_count(), 4);
+        assert!((hgdtgrr.rt_seconds() - 3.51 * 60.).abs() < 0.01);
+        assert!((hgdtgrr.mobility_ook0() - 0.7709).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fragment_annotations_parsed_correctly() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let mut elution_groups = read_library_file(file_path).expect("Failed to read library");
+        elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
+
+        // More specific assertions if we can identify groups by ID or other means:
+        let mgrysgk = &elution_groups[1].0;
+        let hgdtgrr = &elution_groups[0].0;
+
+        let mut mgrysgk_expected_labels = vec!["y6", "b6", "b3", "b5", "y4"]
+            .into_iter()
+            .map(|s| IonAnnot::try_from(s).unwrap())
+            .collect::<Vec<_>>();
+        let mut actual_labels: Vec<IonAnnot> = mgrysgk
+            .iter_fragments()
+            .map(|(label, _mz)| *label)
+            .collect();
+        mgrysgk_expected_labels.sort();
+        actual_labels.sort();
+        assert_eq!(actual_labels, mgrysgk_expected_labels);
+
+        let mut hgdtgrr_expected_labels = vec!["y6", "b3", "y4", "y5"]
+            .into_iter()
+            .map(|s| IonAnnot::try_from(s).unwrap())
+            .collect::<Vec<_>>();
+        let mut actual_labels: Vec<IonAnnot> = hgdtgrr
+            .iter_fragments()
+            .map(|(label, _mz)| *label)
+            .collect();
+        hgdtgrr_expected_labels.sort();
+        actual_labels.sort();
+        assert_eq!(actual_labels, hgdtgrr_expected_labels);
+    }
+
+    #[test]
+    fn test_precursor_properties() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+
+        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
+        // TODO ... implement the actual assertions
+    }
+
+    #[test]
+    fn test_speclib2_tsv_parsing() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.tsv");
+
+        // Check that sniff detects it correctly
+        let is_diann = sniff_diann_library_file(&file_path);
+        assert!(
+            is_diann,
+            "speclib2 TSV file should be detected as DIA-NN library"
+        );
+
+        // This test mainly checks that the name aliases wotk correctly
+        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
+    }
+
+    #[test]
+    fn test_sniff_parquet_library_file() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_pq_speclib.parquet");
+
+        let result = sniff_diann_parquet_library_file(file_path);
+        assert!(result, "File should be detected as DIA-NN parquet library");
+    }
+
+    #[test]
+    fn test_read_parquet_library_file() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_pq_speclib.parquet");
+
+        let result = read_parquet_library_file(file_path);
+        assert!(
+            result.is_ok(),
+            "Failed to read parquet library file: {:?}",
+            result.err()
+        );
+
+        let elution_groups = result.unwrap();
+
+        // Sample file has 3 unique precursors
+        assert_eq!(elution_groups.len(), 3, "Expected 3 elution groups");
+
+        // Verify basic properties of first precursor
+        let (first_eg, first_extras) = &elution_groups[0];
+        assert_eq!(first_extras.modified_peptide, "GREEWESAALQNANTK");
+        assert_eq!(first_extras.stripped_peptide, "GREEWESAALQNANTK");
+        assert!(!first_extras.is_decoy);
+        assert_eq!(first_eg.fragment_count(), 4);
+    }
+
+    #[test]
+    fn test_read_carafe_parquet_library_file() {
+        // Carafe emits int32/float32/large_string arrow types (vs DIA-NN's
+        // int64). Ensure the widened column getters downcast these correctly.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let file_path = PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("diann_io_files")
+            .join("carafe_pq_speclib.parquet");
+
+        let result = read_parquet_library_file(file_path);
+        assert!(
+            result.is_ok(),
+            "Failed to read Carafe parquet library file: {:?}",
+            result.err()
+        );
+
+        let elution_groups = result.unwrap();
+        assert_eq!(elution_groups.len(), 1, "Expected 1 precursor");
+
+        let (eg, extras) = &elution_groups[0];
+        assert_eq!(
+            extras.modified_peptide,
+            "_AAAGLYENC[UniMod:4]FC[UniMod:4]NALLAK_"
+        );
+        assert!(!extras.is_decoy);
+        assert_eq!(eg.fragment_count(), 20);
+    }
 }

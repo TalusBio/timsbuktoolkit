@@ -53,9 +53,11 @@ fn test_small_dataset_eager_vs_lazy_ms1() {
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 
-    let mut config = timscentroid::serialization::SerializationConfig::default();
-    // Just some weird number ...
-    config.row_group_size = 3;
+    let config = timscentroid::serialization::SerializationConfig {
+        // Just some weird number ...
+        row_group_size: 3,
+        ..Default::default()
+    };
 
     index
         .save_to_directory_with_config(&temp_dir, config)

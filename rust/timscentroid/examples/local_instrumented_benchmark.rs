@@ -184,16 +184,16 @@ fn build_queries(
     for _ in 0..num_queries {
         let prec_start: f32 = rng.random_range(600.0..800.0);
         let prec_end = prec_start + 0.05;
-        let prec = (prec_start, prec_end).try_into().unwrap();
+        let prec = (prec_start, prec_end);
 
         let frag_start: f32 = rng.random_range(600.0..800.0);
         let frag_end = frag_start + 0.05;
-        let frag = (frag_start, frag_end).try_into().unwrap();
+        let frag = (frag_start, frag_end);
 
         let im_start_i: f32 = rng.random_range(0.7..1.1);
         let im_start: f16 = f16::from_f32(im_start_i);
         let im_end = im_start + (f16::from_f32(0.1f32));
-        let im = (im_start, im_end).try_into().unwrap();
+        let im = (im_start, im_end);
 
         out.push((prec, frag, im));
     }

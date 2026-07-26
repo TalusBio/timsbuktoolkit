@@ -31,12 +31,12 @@ fn test_pipeline_digestion_and_dedup() {
         .iter()
         .flat_map(|p| params.digest(p.sequence.clone()))
         .collect();
-    assert!(all_digests.len() > 0);
+    assert!(!all_digests.is_empty());
 
     use speclib_build_cli::dedup::PeptideDedup;
     let deduped = PeptideDedup::dedup(all_digests.clone(), 100);
     assert!(deduped.len() <= all_digests.len());
-    assert!(deduped.len() > 0);
+    assert!(!deduped.is_empty());
 }
 
 #[test]

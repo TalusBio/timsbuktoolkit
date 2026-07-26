@@ -66,14 +66,14 @@ impl ResolvedTolerances {
             )
         })?;
 
-        if let Some(expected) = expected_len {
-            if list.len() != expected {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "tolerance list length ({}) must match elution_groups length ({})",
-                    list.len(),
-                    expected,
-                )));
-            }
+        if let Some(expected) = expected_len
+            && list.len() != expected
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "tolerance list length ({}) must match elution_groups length ({})",
+                list.len(),
+                expected,
+            )));
         }
 
         Ok(Self::PerQuery(

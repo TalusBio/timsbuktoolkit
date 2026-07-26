@@ -1105,7 +1105,7 @@ mod tests {
             .expect("from_file should load the .speclib fixture");
 
         let lib = expect_lazy(&speclib);
-        assert!(lib.len() > 0, "library should have entries");
+        assert!(!lib.is_empty(), "library should have entries");
 
         let first = lib.item_at(0);
         assert!(first.is_target(), "flat index 0 must be a target variant");

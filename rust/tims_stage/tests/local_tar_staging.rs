@@ -23,7 +23,7 @@ fn write_ustar_header(buf: &mut Vec<u8>, name: &str, size: u64, typeflag: u8) {
 
 fn pad(buf: &mut Vec<u8>) {
     let p = (512 - buf.len() % 512) % 512;
-    buf.extend(std::iter::repeat(0u8).take(p));
+    buf.extend(std::iter::repeat_n(0u8, p));
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn stage_local_tar_materializes_sample_d_wrapper() {
     );
     tar.extend_from_slice(&tdf_bin_body);
     pad(&mut tar);
-    tar.extend(std::iter::repeat(0u8).take(1024));
+    tar.extend(std::iter::repeat_n(0u8, 1024));
     std::fs::File::create(&tar_path)
         .unwrap()
         .write_all(&tar)
@@ -77,7 +77,7 @@ fn stage_local_tar_tempdir_vanishes_on_drop() {
     write_ustar_header(&mut tar, "analysis.tdf_bin", 3, b'0');
     tar.extend_from_slice(&[4, 5, 6]);
     pad(&mut tar);
-    tar.extend(std::iter::repeat(0u8).take(1024));
+    tar.extend(std::iter::repeat_n(0u8, 1024));
     std::fs::File::create(&tar_path)
         .unwrap()
         .write_all(&tar)

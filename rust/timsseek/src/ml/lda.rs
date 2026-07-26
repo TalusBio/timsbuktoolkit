@@ -116,8 +116,8 @@ impl LdaModel {
         let t = Instant::now();
         let mut sw =
             within_class_scatter(feat, nrows, ncols, is_decoy, &mean, &inv_std, &class_mean);
-        for c in 0..2 {
-            let inv_nc = 1.0 / class_cnt[c] as f64;
+        for (c, &cnt) in class_cnt.iter().enumerate() {
+            let inv_nc = 1.0 / cnt as f64;
             let off = c * ncols * ncols;
             for e in &mut sw[off..off + ncols * ncols] {
                 *e *= inv_nc;
@@ -161,6 +161,9 @@ impl LdaModel {
     pub fn score(&self, row: &[f64]) -> f64 {
         debug_assert_eq!(row.len(), self.ncols);
         let mut acc = 0.0;
+        // `self.ncols` (not `row.len()`) is the authoritative width across the four
+        // parallel arrays `row`/`mean`/`inv_std`/`coef`; a zip would need a 4-way nest.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..self.ncols {
             let v = row[j];
             let z = if v.is_finite() {
@@ -205,8 +208,7 @@ fn col_finite_moments(feat: &[f64], ncols: usize) -> (Vec<f64>, Vec<f64>, Vec<u6
     let chunk = CHUNK_ROWS * ncols;
     let fold = |acc: &mut (Vec<f64>, Vec<f64>, Vec<u64>), block: &[f64]| {
         for row in block.chunks_exact(ncols) {
-            for j in 0..ncols {
-                let v = row[j];
+            for (j, &v) in row.iter().enumerate() {
                 if v.is_finite() {
                     acc.0[j] += v;
                     acc.1[j] += v * v;
@@ -273,8 +275,8 @@ fn class_std_sums(
         for i in r0..r1 {
             let row = &feat[i * ncols..(i + 1) * ncols];
             let c = if is_decoy[i] { 0 } else { 1 };
-            for j in 0..ncols {
-                csum[c][j] += std_at(row, j);
+            for (j, s) in csum[c].iter_mut().enumerate() {
+                *s += std_at(row, j);
             }
             ccnt[c] += 1;
         }

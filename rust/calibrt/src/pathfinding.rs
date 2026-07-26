@@ -133,8 +133,8 @@ pub(crate) fn find_optimal_path(
     let mut suffix = Vec::new();
     if let Some(end_idx) = last_sorted_idx {
         let mut cursor = last;
-        for j in (end_idx + 1)..n {
-            let candidate = nodes[j].center;
+        for node in nodes.iter().skip(end_idx + 1) {
+            let candidate = node.center;
             if candidate.weight > 0.0
                 && candidate.library > cursor.library
                 && candidate.observed > cursor.observed

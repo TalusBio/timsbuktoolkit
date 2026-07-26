@@ -368,8 +368,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
         // sort by mz ... bc binary searching on the mz space
         // for neighbors is the fastest way to find neighbors that I have tried.
-        self.peaks
-            .sort_unstable_by(|a, b| a.tof_index.cmp(&b.tof_index));
+        self.peaks.sort_unstable_by_key(|a| a.tof_index);
         self.compute_neighbor_ranges_and_intensity();
         // self.compute_neighbor_ranges();
         // self.compute_neighborhood_intensity();

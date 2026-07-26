@@ -292,33 +292,6 @@ fn sample_name_from_uri(uri: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-mod sample_name_tests {
-    use super::sample_name_from_uri;
-    #[test]
-    fn local_dotd_plain() {
-        assert_eq!(sample_name_from_uri("/data/run.d").as_deref(), Some("run"));
-    }
-    #[test]
-    fn local_dotd_trailing_slash() {
-        assert_eq!(sample_name_from_uri("/data/run.d/").as_deref(), Some("run"));
-    }
-    #[test]
-    fn s3_tar_collapses_both_suffixes() {
-        assert_eq!(
-            sample_name_from_uri("s3://bkt/run.d.tar").as_deref(),
-            Some("run")
-        );
-    }
-    #[test]
-    fn s3_idx_directory() {
-        assert_eq!(
-            sample_name_from_uri("s3://bkt/run.d.idx/").as_deref(),
-            Some("run")
-        );
-    }
-}
-
 fn get_frag_range_from_index(
     index: &IndexedTimstofPeaks,
 ) -> Result<TupleRange<f64>, errors::CliError> {
@@ -1108,4 +1081,31 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod sample_name_tests {
+    use super::sample_name_from_uri;
+    #[test]
+    fn local_dotd_plain() {
+        assert_eq!(sample_name_from_uri("/data/run.d").as_deref(), Some("run"));
+    }
+    #[test]
+    fn local_dotd_trailing_slash() {
+        assert_eq!(sample_name_from_uri("/data/run.d/").as_deref(), Some("run"));
+    }
+    #[test]
+    fn s3_tar_collapses_both_suffixes() {
+        assert_eq!(
+            sample_name_from_uri("s3://bkt/run.d.tar").as_deref(),
+            Some("run")
+        );
+    }
+    #[test]
+    fn s3_idx_directory() {
+        assert_eq!(
+            sample_name_from_uri("s3://bkt/run.d.idx/").as_deref(),
+            Some("run")
+        );
+    }
 }

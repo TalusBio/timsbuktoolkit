@@ -119,7 +119,7 @@ impl FileLoader {
     }
 
     /// Load tolerance settings from a JSON file
-    pub fn load_tolerance(&self, path: &PathBuf) -> Result<Tolerance, ViewerError> {
+    pub fn load_tolerance(&self, path: &Path) -> Result<Tolerance, ViewerError> {
         FileService::load_tolerance(path)
     }
 
@@ -246,7 +246,7 @@ impl ElutionGroupData {
         fill_scratch_from(&mut eg, &q);
         let expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
-            q.expected_precursor_envelope().into_iter(),
+            q.expected_precursor_envelope(),
         )
         .map_err(|e| ViewerError::General(format!("library entry {index}: {e:?}")))?;
         Ok((eg, expected))
