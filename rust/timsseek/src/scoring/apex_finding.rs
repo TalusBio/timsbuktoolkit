@@ -70,7 +70,6 @@ use timsquery::{
 pub struct CandidateContext<T: KeyLike, L: Display> {
     /// The peptide sequence and modification information.
     pub label: L,
-    /// The precursor charge state.
     pub charge: u8,
     /// The expected theoretical intensities of precursor and fragment ions.
     pub expected_intensities: ExpectedIntensities<T>,
@@ -88,10 +87,8 @@ pub struct PeptideMetadata {
     /// The peptide sequence and modification information.
     pub digest: Peptide,
 
-    /// The precursor charge state.
     pub charge: u8,
 
-    /// Library identifier for this peptide.
     pub library_id: u32,
 
     /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).

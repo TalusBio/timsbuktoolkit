@@ -116,7 +116,6 @@ mod tests {
             let mut sink = FrameSink::new(&mut frame, 1);
             sink.begin_row();
             identity.nonlinear_features(&mut sink);
-            sink.finish();
         }
 
         let mut names = NameSink::new();

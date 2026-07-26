@@ -227,11 +227,6 @@ impl<'f> FrameSink<'f> {
             );
         }
     }
-
-    /// Consume the sink. The row cursor's final row count is tracked by the
-    /// caller via `nrows` passed to [`FrameSink::new`]; this only exists to
-    /// give callers an explicit place to end the borrow.
-    pub fn finish(self) {}
 }
 
 #[cfg(test)]
@@ -275,7 +270,6 @@ mod tests {
             s.begin_row();
             s.push("x", 20.0);
             s.push_ln1p("y_ln1p", std::f64::consts::E - 1.0);
-            s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x"), Arc::from("y_ln1p")]);
         assert_eq!(f.column(0), &[10.0, 20.0]);
@@ -289,86 +283,33 @@ mod tests {
             let mut s = FrameSink::new(&mut f, 1);
             s.begin_row();
             s.push_log2("x_log2", 8.0);
-            s.finish();
         }
         assert_eq!(f.names(), &[Arc::from("x_log2")]);
         assert_eq!(f.column(0), &[3.0]);
     }
 
+    /// The only non-arithmetic behavior among the scalar transforms: `push_abs`
+    /// must PASS a non-finite input through (`|NaN|` stays NaN rather than
+    /// becoming a number) while `push_isna` must flag it — for infinities as
+    /// well as NaN, since the predicate is `is_finite`, not `is_nan`. The
+    /// finite branches of both are covered by
+    /// `scalar_pushes_use_the_name_verbatim`.
     #[test]
-    fn frame_sink_push_round() {
-        let mut f = FeatFrame::with_capacity(1, 1);
-        {
-            let mut s = FrameSink::new(&mut f, 1);
-            s.begin_row();
-            s.push_round("x_round", 2.6);
-            s.finish();
-        }
-        assert_eq!(f.names(), &[Arc::from("x_round")]);
-        assert_eq!(f.column(0), &[3.0]);
-    }
-
-    #[test]
-    fn frame_sink_push_abs() {
-        let mut f = FeatFrame::with_capacity(1, 2);
+    fn nonfinite_scalar_pushes_pass_through_and_flag() {
+        let mut f = FeatFrame::with_capacity(2, 2);
         {
             let mut s = FrameSink::new(&mut f, 2);
-            s.begin_row();
-            s.push_abs("x_abs", -4.5);
             s.begin_row();
             s.push_abs("x_abs", f64::NAN);
-            s.finish();
-        }
-        assert_eq!(f.names(), &[Arc::from("x_abs")]);
-        assert_eq!(f.column(0)[0], 4.5);
-        assert!(f.column(0)[1].is_nan());
-    }
-
-    #[test]
-    fn frame_sink_push_isna() {
-        let mut f = FeatFrame::with_capacity(1, 2);
-        {
-            let mut s = FrameSink::new(&mut f, 2);
-            s.begin_row();
-            s.push_isna("x_isna", 1.0);
-            s.begin_row();
             s.push_isna("x_isna", f64::NAN);
-            s.finish();
-        }
-        assert_eq!(f.names(), &[Arc::from("x_isna")]);
-        assert_eq!(f.column(0), &[0.0, 1.0]);
-    }
-
-    #[test]
-    fn frame_sink_push_slice() {
-        let mut f = FeatFrame::with_capacity(3, 1);
-        {
-            let mut s = FrameSink::new(&mut f, 1);
             s.begin_row();
-            s.push_slice("v", &[1.0f32, 2.5f32, 3.0f32]);
-            s.finish();
+            s.push_abs("x_abs", f64::NEG_INFINITY);
+            s.push_isna("x_isna", f64::NEG_INFINITY);
         }
-        assert_eq!(
-            f.names(),
-            &[Arc::from("v_0"), Arc::from("v_1"), Arc::from("v_2")]
-        );
-        assert_eq!(f.column(0), &[1.0]);
-        assert_eq!(f.column(1), &[2.5]);
-        assert_eq!(f.column(2), &[3.0]);
-    }
-
-    #[test]
-    fn frame_sink_push_slice_isna() {
-        let mut f = FeatFrame::with_capacity(2, 1);
-        {
-            let mut s = FrameSink::new(&mut f, 1);
-            s.begin_row();
-            s.push_slice_isna("v", &[1.0f32, f32::NAN]);
-            s.finish();
-        }
-        assert_eq!(f.names(), &[Arc::from("v_0_isna"), Arc::from("v_1_isna")]);
-        assert_eq!(f.column(0), &[0.0]);
-        assert_eq!(f.column(1), &[1.0]);
+        assert_eq!(f.names(), &[Arc::from("x_abs"), Arc::from("x_isna")]);
+        assert!(f.column(0)[0].is_nan());
+        assert_eq!(f.column(0)[1], f64::INFINITY);
+        assert_eq!(f.column(1), &[1.0, 1.0]);
     }
 
     /// The array fan-out builds its `{prefix}_{i}` names through a closure that
@@ -381,7 +322,9 @@ mod tests {
             [1.0f32, 2.0f32],
             [3.0f32, 4.0f32],
             [5.0f32, f32::NAN],
-            [7.0f32, 8.0f32],
+            // 2.5 is exactly representable in both f32 and f64, so the widening
+            // in `push_slice` must be lossless on a non-integral value too.
+            [7.0f32, 2.5f32],
         ];
         let mut f = FeatFrame::with_capacity(4, rows.len());
         {
@@ -391,7 +334,6 @@ mod tests {
                 s.push_slice("v", r);
                 s.push_slice_isna("v", r);
             }
-            s.finish();
         }
         assert_eq!(
             f.names(),
@@ -410,7 +352,7 @@ mod tests {
         assert_eq!(f.column(1)[0], 2.0);
         assert_eq!(f.column(1)[1], 4.0);
         assert!(f.column(1)[2].is_nan());
-        assert_eq!(f.column(1)[3], 8.0);
+        assert_eq!(f.column(1)[3], 2.5);
     }
 
     /// Scalar `push_*` take the FINAL name (the macro already appended the
@@ -429,7 +371,6 @@ mod tests {
                 s.push_abs("d_abs", -x);
                 s.push_isna("e_isna", x);
             }
-            s.finish();
         }
         assert_eq!(
             f.names(),

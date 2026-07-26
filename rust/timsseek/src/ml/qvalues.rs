@@ -637,7 +637,6 @@ fn build_lane_frame(data: &[CompetedCandidate], lane: Lane) -> FeatFrame {
                 }
             }
         }
-        s.finish();
     }
     frame
 }
