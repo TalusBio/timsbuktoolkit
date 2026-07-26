@@ -202,7 +202,6 @@ impl ColSink {
         }
     }
 
-    /// Finish one row: reset the cursor to the first column.
     pub fn end_row(&mut self) {
         self.cursor = 0;
     }

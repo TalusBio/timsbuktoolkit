@@ -88,13 +88,11 @@ impl CoelutionScratch {
     }
 }
 
-/// Result of the area-uniqueness calculation.
 #[derive(Debug, Clone, Copy)]
 struct AreaUniquenessResult {
     pub au_score: f32,
 }
 
-/// Result of the coelution-gradient quality calculation.
 #[derive(Debug, Clone, Copy)]
 struct CoelutionGradientResult {
     pub weighted_coelution: f32,
