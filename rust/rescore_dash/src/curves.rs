@@ -6,6 +6,10 @@
 /// `(threshold, total passing, targets passing, decoys passing)` for each
 /// threshold. Mirrors `timsseek::ml::qvalues::report_qvalues_at_thresholds`, so
 /// the panel and the run log agree.
+///
+/// `is_target` is row-aligned with `qvalue`; a row with no label (past the end
+/// of `is_target`) is skipped entirely, so `total == targets + decoys` holds
+/// for every threshold by construction.
 pub fn threshold_table(
     qvalue: &[f32],
     is_target: &[bool],
@@ -18,14 +22,17 @@ pub fn threshold_table(
             let mut targets = 0;
             let mut decoys = 0;
             for (i, &q) in qvalue.iter().enumerate() {
+                let Some(&is_t) = is_target.get(i) else {
+                    continue;
+                };
                 if q > thresh || q.is_nan() {
                     continue;
                 }
                 total += 1;
-                match is_target.get(i) {
-                    Some(true) => targets += 1,
-                    Some(false) => decoys += 1,
-                    None => {}
+                if is_t {
+                    targets += 1;
+                } else {
+                    decoys += 1;
                 }
             }
             (thresh, total, targets, decoys)
@@ -56,7 +63,13 @@ pub fn qvalue_curve(qvalue: &[f32], is_target: &[bool], n_points: usize) -> Vec<
 }
 
 /// Empirical decoy CDF against empirical target CDF at a shared grid of score
-/// thresholds. `(0,0)` to `(1,1)`; the y=x reference is drawn by the caller.
+/// thresholds spanning the lowest to the highest finite score seen; the last
+/// point is always `(1,1)`. The y=x reference is drawn by the caller.
+///
+/// When every finite score is identical, `lo == hi` and the grid still runs
+/// over `n_points` steps (the span falls back to `1.0`), but every threshold
+/// already covers both classes, so the curve is `(1,1)` at every point rather
+/// than starting at `(0,0)`.
 ///
 /// Empty when either class is absent — a PP plot of one class says nothing.
 pub fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
@@ -106,6 +119,23 @@ mod tests {
         assert_eq!(got[0], (0.01, 1, 1, 0));
         assert_eq!(got[1], (0.05, 2, 2, 0));
         assert_eq!(got[2], (1.0, 4, 2, 2));
+    }
+
+    #[test]
+    fn threshold_table_total_matches_labeled_rows_only() {
+        // is_target is shorter than qvalue: rows 3 and 4 have no label and
+        // must be skipped entirely, not counted into `total` alone.
+        let q = vec![0.001f32, 0.02, 0.2, 0.9, 0.5];
+        let t = vec![true, true, false];
+        let got = threshold_table(&q, &t, &[0.01, 0.05, 1.0]);
+        for &(_, total, targets, decoys) in &got {
+            assert_eq!(
+                total,
+                targets + decoys,
+                "total must equal targets + decoys at every threshold"
+            );
+        }
+        assert_eq!(got[2], (1.0, 3, 2, 1), "unlabeled rows never counted");
     }
 
     #[test]
@@ -164,5 +194,16 @@ mod tests {
     #[test]
     fn pp_curve_is_empty_without_both_classes() {
         assert!(pp_curve(&[1.0, 2.0], &[true, true], 10).is_empty());
+    }
+
+    #[test]
+    fn pp_curve_handles_identical_scores_without_panicking() {
+        let score = vec![5.0f32; 10];
+        let t: Vec<bool> = (0..10).map(|i| i % 2 == 0).collect();
+        let curve = pp_curve(&score, &t, 10);
+        assert!(
+            curve.iter().all(|&(d, tt)| d == 1.0 && tt == 1.0),
+            "degenerate range: every threshold already covers both classes, got {curve:?}"
+        );
     }
 }
