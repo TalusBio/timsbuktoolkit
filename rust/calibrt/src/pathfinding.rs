@@ -12,14 +12,17 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Nodes are sorted by (x, y) to ensure topological order
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
-pub(crate) fn find_optimal_path(
+pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
     max_weights: &mut Vec<f64>,
     prev_node_indices: &mut Vec<Option<usize>>,
-) -> Vec<crate::Point> {
+    obs: &mut O,
+    opts: crate::ObserveOpts,
+    considered: &mut Vec<(usize, f64)>,
+) -> (Vec<crate::Point>, f64) {
     if nodes.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0.0);
     }
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
@@ -41,6 +44,9 @@ pub(crate) fn find_optimal_path(
 
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
+        if opts.dp_nodes {
+            considered.clear();
+        }
 
         let start = i.saturating_sub(lookback);
         for j in start..i {
@@ -59,6 +65,9 @@ pub(crate) fn find_optimal_path(
                     // - Division by distance: Penalizes long jumps, encouraging smooth curves
                     let edge_weight =
                         (nodes[i].center.weight.sqrt() * nodes[j].center.weight.sqrt()) / dist;
+                    if opts.dp_nodes {
+                        considered.push((j, edge_weight));
+                    }
                     let new_weight = max_weights[j] + edge_weight;
 
                     if new_weight > max_weights[i] {
@@ -67,6 +76,16 @@ pub(crate) fn find_optimal_path(
                     }
                 }
             }
+        }
+
+        if opts.dp_nodes {
+            obs.on_event(crate::FitEvent::DpNode {
+                i,
+                node: &nodes[i],
+                chose: prev_node_indices[i],
+                acc_weight: max_weights[i],
+                considered,
+            });
         }
     }
 
@@ -91,7 +110,7 @@ pub(crate) fn find_optimal_path(
     path.reverse();
 
     if path.is_empty() {
-        return path;
+        return (path, max_path_weight);
     }
 
     // Pass 2: Greedily extend the path beyond the DP endpoints.
@@ -149,5 +168,5 @@ pub(crate) fn find_optimal_path(
     let mut full_path = prefix;
     full_path.append(&mut path);
     full_path.append(&mut suffix);
-    full_path
+    (full_path, max_path_weight)
 }

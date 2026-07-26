@@ -184,12 +184,86 @@ pub struct CalibrationSnapshot {
     pub lookback: usize,
 }
 
+/// Grid geometry, emitted once per fit so a consumer can lay out `cells`
+/// without inferring it from the node coordinates (which is impossible for an
+/// empty or single-occupied grid).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridGeom {
+    pub bins: usize,
+    pub x_range: (f64, f64),
+    pub y_range: (f64, f64),
+    pub lookback: usize,
+}
+
+/// One step of the fit, borrowed from the state that produced it.
+///
+/// `cells` is `bins * bins` ROW-MAJOR: `index = row * bins + col`, where `row`
+/// indexes the observed-RT axis and `col` the library-RT axis. This matches
+/// `Grid::add_point`'s `gy * bins + gx`. Nothing in the type system enforces
+/// it and every consumer depends on it.
+pub enum FitEvent<'a> {
+    FitStarted {
+        geom: GridGeom,
+        n_points: usize,
+    },
+    GridReady {
+        cells: &'a [grid::Node],
+    },
+    Suppressed {
+        cells: &'a [grid::Node],
+        n_kept: usize,
+    },
+    /// Emitted once per DP node, only when `ObserveOpts::dp_nodes` is set.
+    /// `considered` holds every `(predecessor_index, edge_weight)` the node
+    /// evaluated, including the ones it rejected.
+    DpNode {
+        i: usize,
+        node: &'a grid::Node,
+        chose: Option<usize>,
+        acc_weight: f64,
+        considered: &'a [(usize, f64)],
+    },
+    PathFound {
+        path: &'a [Point],
+        total_weight: f64,
+    },
+    CurveFit {
+        curve: &'a CalibrationCurve,
+    },
+    RidgeMeasured {
+        widths: &'a [RidgeMeasurement],
+    },
+}
+
+pub trait FitObserver {
+    fn on_event(&mut self, ev: FitEvent<'_>);
+}
+
+/// The no-op observer. Because `fit_with` is generic, this monomorphizes away
+/// entirely — an unobserved fit pays nothing, not even a branch in the DP loop.
+impl FitObserver for () {
+    fn on_event(&mut self, _: FitEvent<'_>) {}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObserveOpts {
+    /// Emit `DpNode` from inside the `O(n * lookback)` loop. Off by default:
+    /// it is the one callback in a hot path.
+    pub dp_nodes: bool,
+}
+
+impl ObserveOpts {
+    pub const NONE: Self = Self { dp_nodes: false };
+}
+
 /// Reusable calibration state for incremental fitting. Owns all allocations.
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
     dp_max_weights: Vec<f64>,
     dp_prev_indices: Vec<Option<usize>>,
+    /// Filled only when `ObserveOpts::dp_nodes` is set; capacity `lookback`.
+    dp_considered: Vec<(usize, f64)>,
     curve: Option<CalibrationCurve>,
     stale: bool,
     lookback: usize,
@@ -207,6 +281,7 @@ impl CalibrationState {
             path_indices: Vec::new(),
             dp_max_weights: Vec::new(),
             dp_prev_indices: Vec::new(),
+            dp_considered: Vec::with_capacity(lookback),
             curve: None,
             stale: false,
             lookback,
@@ -231,12 +306,49 @@ impl CalibrationState {
     }
 
     pub fn fit(&mut self) {
+        self.fit_with(&mut (), ObserveOpts::NONE)
+    }
+
+    pub fn fit_with<O: FitObserver>(&mut self, obs: &mut O, opts: ObserveOpts) {
+        obs.on_event(FitEvent::FitStarted {
+            geom: GridGeom {
+                bins: self.grid.bins,
+                x_range: self.grid.x_range,
+                y_range: self.grid.y_range,
+                lookback: self.lookback,
+            },
+            n_points: self
+                .grid
+                .grid_cells()
+                .iter()
+                .filter(|n| n.center.weight > 0.0)
+                .count(),
+        });
+        obs.on_event(FitEvent::GridReady {
+            cells: self.grid.grid_cells(),
+        });
+
         if self.grid.suppress_nonmax().is_err() {
             self.curve = None;
             self.path_indices.clear();
             self.stale = false;
+            obs.on_event(FitEvent::Suppressed {
+                cells: self.grid.grid_cells(),
+                n_kept: 0,
+            });
             return;
         }
+
+        let n_kept = self
+            .grid
+            .grid_cells()
+            .iter()
+            .filter(|n| !n.suppressed)
+            .count();
+        obs.on_event(FitEvent::Suppressed {
+            cells: self.grid.grid_cells(),
+            n_kept,
+        });
 
         // Collect non-suppressed nodes for pathfinding
         let mut filtered: Vec<grid::Node> = self
@@ -248,11 +360,14 @@ impl CalibrationState {
             .collect();
 
         // Pathfinding with reused buffers
-        let path_points = pathfinding::find_optimal_path(
+        let (path_points, total_weight) = pathfinding::find_optimal_path(
             &mut filtered,
             self.lookback,
             &mut self.dp_max_weights,
             &mut self.dp_prev_indices,
+            obs,
+            opts,
+            &mut self.dp_considered,
         );
 
         // Store path indices by matching path points back to grid cells
@@ -266,8 +381,17 @@ impl CalibrationState {
             }
         }
 
+        obs.on_event(FitEvent::PathFound {
+            path: &path_points,
+            total_weight,
+        });
+
         self.curve = CalibrationCurve::new(path_points).ok();
         self.stale = false;
+
+        if let Some(c) = self.curve.as_ref() {
+            obs.on_event(FitEvent::CurveFit { curve: c });
+        }
     }
 
     pub fn reset(&mut self) {
@@ -312,6 +436,16 @@ impl CalibrationState {
     /// `total_weight`: sum of all cell weights in the expanded range — heavier
     /// columns should carry more authority in tolerance estimation.
     pub fn measure_ridge_width(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
+        self.measure_ridge_width_with(fraction, &mut ())
+    }
+
+    /// As [`Self::measure_ridge_width`], but reports the measurements through
+    /// `obs` once they're computed.
+    pub fn measure_ridge_width_with<O: FitObserver>(
+        &mut self,
+        fraction: f64,
+        obs: &mut O,
+    ) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
@@ -376,6 +510,7 @@ impl CalibrationState {
             });
         }
 
+        obs.on_event(FitEvent::RidgeMeasured { widths: &widths });
         widths
     }
 
@@ -479,11 +614,15 @@ pub fn calibrate_with_ranges(
     // Module 2: Find the optimal ascending path
     let mut max_weights = Vec::new();
     let mut prev_indices = Vec::new();
-    let optimal_path_points = pathfinding::find_optimal_path(
+    let mut considered = Vec::new();
+    let (optimal_path_points, _total_weight) = pathfinding::find_optimal_path(
         &mut filtered_nodes,
         lookback,
         &mut max_weights,
         &mut prev_indices,
+        &mut (),
+        ObserveOpts::NONE,
+        &mut considered,
     );
     // Module 3: Fit the final points and prepare for extrapolation
     let calcurve = CalibrationCurve::new(optimal_path_points);
@@ -552,6 +691,120 @@ pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve,
     let y_range = compute_range(points.iter().map(|p| p.observed))?;
 
     calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::*;
+
+    /// Records event names plus the payloads the assertions need.
+    #[derive(Default)]
+    struct Recorder {
+        names: Vec<&'static str>,
+        geom: Option<GridGeom>,
+        n_kept: usize,
+        dp_edges: Vec<(usize, Option<usize>)>,
+        path_len: usize,
+    }
+
+    impl FitObserver for Recorder {
+        fn on_event(&mut self, ev: FitEvent<'_>) {
+            match ev {
+                FitEvent::FitStarted { geom, .. } => {
+                    self.names.push("start");
+                    self.geom = Some(geom);
+                }
+                FitEvent::GridReady { .. } => self.names.push("grid"),
+                FitEvent::Suppressed { n_kept, .. } => {
+                    self.names.push("suppressed");
+                    self.n_kept = n_kept;
+                }
+                FitEvent::DpNode { i, chose, .. } => {
+                    self.names.push("dp");
+                    self.dp_edges.push((i, chose));
+                }
+                FitEvent::PathFound { path, .. } => {
+                    self.names.push("path");
+                    self.path_len = path.len();
+                }
+                FitEvent::CurveFit { .. } => self.names.push("curve"),
+                FitEvent::RidgeMeasured { .. } => self.names.push("ridge"),
+            }
+        }
+    }
+
+    /// A clean diagonal ridge: 10 points on y = x, one per grid column.
+    fn diagonal_state() -> CalibrationState {
+        let mut s = CalibrationState::new(10, (0.0, 10.0), (0.0, 10.0), 5).unwrap();
+        let pts: Vec<_> = (0..10)
+            .map(|i| {
+                let v = i as f64 + 0.5;
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
+            })
+            .collect();
+        s.update(pts.into_iter()).unwrap();
+        s
+    }
+
+    #[test]
+    fn events_arrive_in_pipeline_order() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        assert_eq!(
+            rec.names,
+            vec!["start", "grid", "suppressed", "path", "curve"],
+            "no dp events when dp_nodes is off"
+        );
+    }
+
+    #[test]
+    fn fit_started_carries_the_grid_geometry() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        let g = rec.geom.expect("FitStarted must be emitted");
+        assert_eq!(g.bins, 10);
+        assert_eq!(g.lookback, 5);
+        assert_eq!(g.x_range, (0.0, 10.0));
+        assert_eq!(g.y_range, (0.0, 10.0));
+    }
+
+    #[test]
+    fn suppressed_reports_the_surviving_count() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        // Ten distinct weights on a diagonal: each is the max of its own row
+        // and column, so all ten survive.
+        assert_eq!(rec.n_kept, 10);
+        assert_eq!(rec.path_len, 10);
+    }
+
+    #[test]
+    fn dp_events_appear_only_when_enabled_and_respect_monotonicity() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
+        assert!(rec.names.contains(&"dp"), "dp events must be emitted");
+        // Every recorded choice must point backwards in the sorted order.
+        for (i, chose) in &rec.dp_edges {
+            if let Some(j) = chose {
+                assert!(j < i, "node {i} chose non-predecessor {j}");
+            }
+        }
+        assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
+    }
+
+    #[test]
+    fn ridge_events_come_from_the_ridge_call_not_the_fit() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        assert!(!rec.names.contains(&"ridge"));
+        s.measure_ridge_width_with(0.1, &mut rec);
+        assert_eq!(rec.names.last(), Some(&"ridge"));
+    }
 }
 
 #[cfg(test)]
