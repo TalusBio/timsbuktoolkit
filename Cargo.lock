@@ -1359,6 +1359,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "calib_dash"
+version = "0.32.0"
+dependencies = [
+ "calibrt",
+ "insta",
+ "ratatui",
+ "tracing",
+]
+
+[[package]]
 name = "calibrt"
 version = "0.32.0"
 dependencies = [
