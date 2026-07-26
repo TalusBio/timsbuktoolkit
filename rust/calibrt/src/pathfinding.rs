@@ -12,6 +12,12 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Nodes are sorted by (x, y) to ensure topological order
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
+///
+/// Returns the assembled path (DP chain plus any greedily-attached prefix/suffix,
+/// see Pass 2 below), the index range within that path the DP itself chose
+/// (`path[..range.start]` and `path[range.end..]` are the greedy tails), and the
+/// DP recurrence's objective value at the chosen end node (covers only
+/// `path[range]`).
 pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
@@ -20,9 +26,9 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     obs: &mut O,
     opts: crate::ObserveOpts,
     considered: &mut Vec<(usize, f64)>,
-) -> (Vec<crate::Point>, f64) {
+) -> (Vec<crate::Point>, std::ops::Range<usize>, f64) {
     if nodes.is_empty() {
-        return (Vec::new(), 0.0);
+        return (Vec::new(), 0..0, 0.0);
     }
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
@@ -110,8 +116,9 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     path.reverse();
 
     if path.is_empty() {
-        return (path, max_path_weight);
+        return (path, 0..0, max_path_weight);
     }
+    let dp_len = path.len();
 
     // Pass 2: Greedily extend the path beyond the DP endpoints.
     // The DP optimizes total weight and may skip sparse-but-valid regions at
@@ -164,9 +171,89 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
         }
     }
 
+    // The DP's own span sits after `prefix` and before `suffix` in the
+    // assembled path below.
+    let dp_range = prefix.len()..(prefix.len() + dp_len);
+
     // Assemble: prefix + DP path + suffix
     let mut full_path = prefix;
     full_path.append(&mut path);
     full_path.append(&mut suffix);
-    (full_path, max_path_weight)
+    (full_path, dp_range, max_path_weight)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Node;
+    use crate::{
+        ObserveOpts,
+        Point,
+    };
+
+    /// A `Node` at diagonal position `i` (library = observed = i + 0.5) with
+    /// the given weight. `find_optimal_path` never reads `suppressed` or the
+    /// `sum_*` accumulators, so this bypasses `Grid`/`suppress_nonmax`
+    /// entirely — deliberately, since `suppress_nonmax` has its own floor
+    /// (nodes below weight 1.0 with no competing row/column entry are
+    /// dropped before ever reaching the DP) that would confound a fixture
+    /// aimed at the DP's own accept/decline behavior.
+    fn diag_node(i: usize, weight: f64) -> Node {
+        let v = i as f64 + 0.5;
+        Node {
+            center: Point {
+                library: v,
+                observed: v,
+                weight,
+            },
+            suppressed: false,
+            sum_wx: 0.0,
+            sum_wy: 0.0,
+            sum_w: 0.0,
+        }
+    }
+
+    /// Weights `[0.5, 10, 12, 11, 0.4]` on a diagonal: node 0 is a valid
+    /// monotonic predecessor of node 1 but too weak to be worth routing
+    /// through (chaining through it beats neither node 1's own weight of 10
+    /// nor, transitively, anything reachable from node 1 onward), so the DP
+    /// restarts fresh at node 1. Node 0 is still weight > 0 and monotonic, so
+    /// Pass 2's backward walk attaches it as a prefix. Nodes 1..4 chain
+    /// together under the DP (chaining through node 4 despite its own low
+    /// weight of 0.4 still beats stopping at node 3, since the edge weight
+    /// added is positive), so the DP's span is `1..5` of the assembled path.
+    #[test]
+    fn pass_two_attaches_a_dp_declined_leading_node_as_prefix() {
+        let mut nodes: Vec<Node> = [0.5, 10.0, 12.0, 11.0, 0.4]
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| diag_node(i, w))
+            .collect();
+        let mut max_weights = Vec::new();
+        let mut prev_indices = Vec::new();
+        let mut considered = Vec::new();
+
+        let (path, dp_range, dp_weight) = find_optimal_path(
+            &mut nodes,
+            5,
+            &mut max_weights,
+            &mut prev_indices,
+            &mut (),
+            ObserveOpts::NONE,
+            &mut considered,
+        );
+
+        assert_eq!(
+            path.len(),
+            5,
+            "all five nodes are monotonic and weight > 0, so all five appear \
+             in the assembled path"
+        );
+        assert_eq!(
+            dp_range,
+            1..5,
+            "the DP declines node 0, choosing only nodes 1..4"
+        );
+        assert!(dp_weight > 0.0);
+    }
 }

@@ -187,7 +187,7 @@ pub struct CalibrationSnapshot {
 /// Grid geometry, emitted once per fit so a consumer can lay out `cells`
 /// without inferring it from the node coordinates (which is impossible for an
 /// empty or single-occupied grid).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct GridGeom {
     pub bins: usize,
     pub x_range: (f64, f64),
@@ -204,6 +204,9 @@ pub struct GridGeom {
 pub enum FitEvent<'a> {
     FitStarted {
         geom: GridGeom,
+        /// Cells with nonzero accumulated weight, not the count of raw points
+        /// passed to `update`: several points landing in the same bin count
+        /// once here.
         n_points: usize,
     },
     GridReady {
@@ -225,7 +228,15 @@ pub enum FitEvent<'a> {
     },
     PathFound {
         path: &'a [Point],
-        total_weight: f64,
+        /// The DP-chosen segment within `path`: `path[..dp_range.start]` is a
+        /// greedily attached prefix and `path[dp_range.end..]` a greedily
+        /// attached suffix (Pass 2's monotonic extension beyond what the DP
+        /// itself scored).
+        dp_range: std::ops::Range<usize>,
+        /// The DP recurrence's objective value at the chosen end node —
+        /// covers only `path[dp_range]`, not the greedily-attached prefix or
+        /// suffix.
+        dp_weight: f64,
     },
     CurveFit {
         curve: &'a CalibrationCurve,
@@ -360,7 +371,7 @@ impl CalibrationState {
             .collect();
 
         // Pathfinding with reused buffers
-        let (path_points, total_weight) = pathfinding::find_optimal_path(
+        let (path_points, dp_range, dp_weight) = pathfinding::find_optimal_path(
             &mut filtered,
             self.lookback,
             &mut self.dp_max_weights,
@@ -383,7 +394,8 @@ impl CalibrationState {
 
         obs.on_event(FitEvent::PathFound {
             path: &path_points,
-            total_weight,
+            dp_range,
+            dp_weight,
         });
 
         self.curve = CalibrationCurve::new(path_points).ok();
@@ -615,7 +627,7 @@ pub fn calibrate_with_ranges(
     let mut max_weights = Vec::new();
     let mut prev_indices = Vec::new();
     let mut considered = Vec::new();
-    let (optimal_path_points, _total_weight) = pathfinding::find_optimal_path(
+    let (optimal_path_points, _dp_range, _dp_weight) = pathfinding::find_optimal_path(
         &mut filtered_nodes,
         lookback,
         &mut max_weights,
@@ -704,7 +716,13 @@ mod observer_tests {
         geom: Option<GridGeom>,
         n_kept: usize,
         dp_edges: Vec<(usize, Option<usize>)>,
+        /// `(library, observed)` of each DP node, indexed by `i`. `i` runs
+        /// 0..n in order (one `DpNode` event per node), so `push`ing here
+        /// keeps `dp_coords[i]` aligned with the node the DP loop saw at `i`.
+        dp_coords: Vec<(f64, f64)>,
         path_len: usize,
+        dp_range: Option<std::ops::Range<usize>>,
+        dp_weight: f64,
     }
 
     impl FitObserver for Recorder {
@@ -719,13 +737,21 @@ mod observer_tests {
                     self.names.push("suppressed");
                     self.n_kept = n_kept;
                 }
-                FitEvent::DpNode { i, chose, .. } => {
+                FitEvent::DpNode { i, node, chose, .. } => {
                     self.names.push("dp");
                     self.dp_edges.push((i, chose));
+                    self.dp_coords
+                        .push((node.center.library, node.center.observed));
                 }
-                FitEvent::PathFound { path, .. } => {
+                FitEvent::PathFound {
+                    path,
+                    dp_range,
+                    dp_weight,
+                } => {
                     self.names.push("path");
                     self.path_len = path.len();
+                    self.dp_range = Some(dp_range);
+                    self.dp_weight = dp_weight;
                 }
                 FitEvent::CurveFit { .. } => self.names.push("curve"),
                 FitEvent::RidgeMeasured { .. } => self.names.push("ridge"),
@@ -782,15 +808,51 @@ mod observer_tests {
     }
 
     #[test]
+    fn path_found_reports_the_dp_range_and_weight() {
+        let mut s = diagonal_state();
+        let mut rec = Recorder::default();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        // The leading node (weight 1.0) is a valid monotonic predecessor of
+        // node 1 (weight 2.0) but too weak to be worth routing through, so
+        // the DP restarts fresh at node 1 and Pass 2's backward walk
+        // reattaches node 0 as a prefix — the DP's own span is `1..10`, not
+        // the whole path. (The dedicated case for this behavior, worked out
+        // by hand, is the `find_optimal_path` test in `pathfinding.rs`; this
+        // test only checks that `fit_with` wires the DP's return value into
+        // `FitEvent::PathFound` correctly, without redoing that arithmetic.)
+        assert_eq!(rec.dp_range, Some(1..rec.path_len));
+        assert!(rec.dp_weight > 0.0);
+    }
+
+    #[test]
     fn dp_events_appear_only_when_enabled_and_respect_monotonicity() {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
         assert!(rec.names.contains(&"dp"), "dp events must be emitted");
         // Every recorded choice must point backwards in the sorted order.
+        // (Necessary but not sufficient: `chose` can only ever be `Some(j)`
+        // with `j < i` by construction of the `for j in start..i` scan below,
+        // so this alone can't fail. The real constraint — that a chosen
+        // predecessor strictly precedes its successor on both RT axes, not
+        // just in sort order — is checked next.)
         for (i, chose) in &rec.dp_edges {
             if let Some(j) = chose {
                 assert!(j < i, "node {i} chose non-predecessor {j}");
+            }
+        }
+        // The actual monotonic constraint the DP is supposed to enforce:
+        // a chosen predecessor's library AND observed RT must both be
+        // strictly less than the successor's.
+        for (i, chose) in &rec.dp_edges {
+            if let Some(j) = chose {
+                let (lib_i, obs_i) = rec.dp_coords[*i];
+                let (lib_j, obs_j) = rec.dp_coords[*j];
+                assert!(
+                    lib_i > lib_j && obs_i > obs_j,
+                    "node {i} at ({lib_i}, {obs_i}) chose predecessor {j} at ({lib_j}, {obs_j}), \
+                     which does not strictly precede it on both RT axes"
+                );
             }
         }
         assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
