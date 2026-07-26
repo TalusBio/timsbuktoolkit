@@ -28,6 +28,13 @@ pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
     suppressed: BitSet,
+    /// Grid indices of the assembled path (DP chain plus greedy tails).
+    /// Sized with `bins` capacity as a hint for the common case — with
+    /// distinct weights only one node per row can be maximal in both its row
+    /// and its column — but this is not a bound: `suppress_nonmax` keeps
+    /// *every* node tied for the row/column max, so weight ties can legitimately
+    /// push the survivor count past `bins`. A `Vec` growing past its hinted
+    /// capacity is just a reallocation, not a bug.
     path_indices: Vec<usize>,
     /// The DP-chosen segment within `path_indices`: `path_indices[..dp_range.start]`
     /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
@@ -35,6 +42,8 @@ pub struct FitRecording {
     dp_range: std::ops::Range<usize>,
     curve: Vec<Point>,
     ridge: Vec<RidgeMeasurement>,
+    /// One entry per DP node visited. Same `bins`-capacity hint and the same
+    /// weight-tie caveat as `path_indices` above.
     dp: Vec<DpDecision>,
     dp_weight: f64,
 }
@@ -50,10 +59,8 @@ impl FitRecording {
             },
             weights: vec![0.0; bins * bins],
             suppressed: BitSet::new(bins * bins),
-            // A path has at most `bins` nodes in practice: with distinct
-            // weights only one node per row can be maximal in both its row and
-            // its column. Weight ties can exceed it, so this is a capacity
-            // hint, not a bound.
+            // Capacity hint only — see the field doc comment for why this can
+            // legitimately be exceeded.
             path_indices: Vec::with_capacity(bins),
             dp_range: 0..0,
             curve: Vec::with_capacity(bins),
@@ -186,10 +193,6 @@ impl FitObserver for FitRecording {
                 acc_weight,
                 considered,
             } => {
-                debug_assert!(
-                    self.dp.len() < self.dp.capacity(),
-                    "dp buffer exceeded its `bins` capacity — weight ties?"
-                );
                 self.dp.push(DpDecision {
                     i,
                     library: node.center.library,
@@ -205,10 +208,6 @@ impl FitObserver for FitRecording {
                 dp_weight,
             } => {
                 self.dp_weight = dp_weight;
-                debug_assert!(
-                    path.len() <= self.path_indices.capacity(),
-                    "path exceeded its `bins` capacity — weight ties?"
-                );
                 debug_assert!(
                     dp_range.end <= path.len(),
                     "dp_range must fall within the assembled path"
@@ -252,6 +251,19 @@ mod tests {
     #[test]
     fn recording_captures_geometry_weights_and_path() {
         let mut s = diagonal_state(10);
+        // A genuinely off-diagonal point (library != observed): every other
+        // point in this fixture has library == observed, so a row/col swap in
+        // `col_of`/`row_of` would pass unnoticed without this one. Weight 0.5
+        // is too light to be a row/column max next to the diagonal's weight-8
+        // entry at row 7 and weight-3 entry at col 2, so it is suppressed and
+        // does not disturb the path/curve length assertions below — it only
+        // needs to show up in the raw weight grid.
+        s.update(std::iter::once((
+            LibraryRT(2.5),
+            ObservedRTSeconds(7.5),
+            0.5,
+        )))
+        .unwrap();
         let mut rec = FitRecording::new(10);
         s.fit_with(&mut rec, ObserveOpts::NONE);
 
@@ -259,6 +271,15 @@ mod tests {
         // The diagonal cell (row i, col i) carries weight 1 + i.
         assert!((rec.weight(3, 3) - 4.0).abs() < 1e-6);
         assert_eq!(rec.weight(0, 5), 0.0, "off-diagonal cells are empty");
+        assert!(
+            (rec.weight(7, 2) - 0.5).abs() < 1e-6,
+            "row = observed's bin, col = library's bin"
+        );
+        assert_eq!(
+            rec.weight(2, 7),
+            0.0,
+            "a row/col swap would put the extra point here instead"
+        );
         assert_eq!(rec.path_indices().len(), 10);
         assert_eq!(rec.curve().len(), 10);
     }
@@ -308,6 +329,45 @@ mod tests {
         assert_eq!(rec.weights_capacity(), cap);
         assert_eq!(rec.path_indices().len(), 0);
         assert_eq!(rec.weight(3, 3), 0.0);
+    }
+
+    #[test]
+    fn a_stale_suppression_bit_does_not_survive_a_refit_at_unchanged_bins() {
+        // Fit 1: A at (row 1, col 1) is dominated by B in the same row (B's
+        // weight 9 beats A's weight 2), so A fails the row-max check and is
+        // suppressed regardless of its column.
+        let mut s = CalibrationState::new(3, (0.0, 3.0), (0.0, 3.0), 2).unwrap();
+        s.update(
+            [
+                (LibraryRT(1.5), ObservedRTSeconds(1.5), 2.0),
+                (LibraryRT(2.5), ObservedRTSeconds(1.5), 9.0),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        let mut rec = FitRecording::new(3);
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        assert!(
+            rec.is_suppressed(1, 1),
+            "A is dominated by B in its row on the first fit"
+        );
+
+        // Fit 2, same `CalibrationState` (so `bins` is unchanged and
+        // `FitRecording` does not reallocate its bitset): B is gone and A is
+        // now the sole occupant of its row and column, so it survives.
+        s.reset();
+        s.update(std::iter::once((
+            LibraryRT(1.5),
+            ObservedRTSeconds(1.5),
+            5.0,
+        )))
+        .unwrap();
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        assert!(
+            !rec.is_suppressed(1, 1),
+            "A survives alone in its row/col on the second fit — a stale bit \
+             from the first fit must not linger"
+        );
     }
 
     #[test]
