@@ -396,17 +396,23 @@ impl<'a> App<'a> {
 /// Open the dashboard and block until the user quits.
 ///
 /// Skips silently (with a warning) when stdout is not a terminal, so a piped
-/// or containerized run is unaffected. Never fails or panics the caller: if
-/// terminal setup fails (`try_init`, e.g. no usable controlling terminal even
-/// though stdout is a tty — `setsid`, some container/CI pty setups), the error
-/// is returned rather than panicking (unlike `ratatui::init`, which is
-/// `try_init().expect(...)` and would unwind through the caller, past a
-/// warn-only `if let Err`, after Phase 6 has already written output). And if
-/// the event loop itself panics on some unanticipated input, [`catch_panics`]
-/// converts that into a warning too, so nothing here can abort a search run.
-/// `try_init` still installs a panic hook that restores the terminal before
-/// unwinding, and `ratatui::restore()` runs again unconditionally below —
-/// harmless if the hook already ran, load-bearing if it didn't.
+/// or containerized run is unaffected. Terminal setup failures are warn-only
+/// too: if `try_init` fails (e.g. no usable controlling terminal even though
+/// stdout is a tty — `setsid`, some container/CI pty setups), the terminal is
+/// restored and `run` returns `Ok(())` rather than propagating the error or
+/// panicking (unlike `ratatui::init`, which is `try_init().expect(...)` and
+/// would unwind through the caller, past a warn-only `if let Err`, after
+/// Phase 6 has already written output).
+///
+/// A panic inside the event loop is caught by [`catch_panics`] and turned
+/// into a warning too — but see that function's doc comment: this guard is
+/// inert in a release build, so a release-build panic in the loop still
+/// aborts the process. What `run` actually guarantees unconditionally is that
+/// terminal setup never panics or fails the caller, and that the terminal is
+/// restored on every path that returns (a panic that reaches `catch_unwind`
+/// at all triggers `try_init`'s panic hook first, which itself restores the
+/// terminal, so the explicit `ratatui::restore()` below is belt-and-braces —
+/// harmless if the hook already ran, load-bearing if it didn't).
 pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
     use std::io::IsTerminal;
 
@@ -419,16 +425,36 @@ pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let mut terminal = ratatui::try_init()?;
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(e) => {
+            // `try_init` can fail after partially succeeding (e.g. raw mode
+            // enabled, then `EnterAlternateScreen` fails), so restore
+            // unconditionally rather than assuming there is nothing to undo.
+            // `restore()` swallows its own errors (it can only print them),
+            // so this can't itself introduce a new failure path.
+            tracing::warn!("rescore dashboard failed to initialize the terminal: {e}");
+            ratatui::restore();
+            return Ok(());
+        }
+    };
     let result = catch_panics(|| event_loop(&mut terminal, view));
     ratatui::restore();
     result
 }
 
 /// Runs `f`, converting a panic into a `tracing::warn!` + `Ok(())` rather than
-/// letting it unwind. Factored out of [`run`] so the recovery behavior is
-/// testable without a real terminal: [`event_loop`] itself needs one, but this
-/// wrapper does not.
+/// letting it unwind — in builds where panics unwind at all. This workspace's
+/// top-level `Cargo.toml` sets `[profile.release] panic = "abort"`, so in the
+/// shipped release binary a panic inside `f` aborts the process immediately;
+/// `catch_unwind` never gets a chance to run, and this function's recovery
+/// does not apply there. It is real in dev/test builds (`panic = "unwind"`,
+/// the default profile.dev), which is what this module's tests exercise.
+/// Kept anyway because unwinding is strictly better than nothing when it is
+/// available, and because a future decision to drop `panic = "abort"` should
+/// not require re-adding this. Factored out of [`run`] so the recovery
+/// behavior is testable without a real terminal: [`event_loop`] itself needs
+/// one, but this wrapper does not.
 fn catch_panics(f: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -828,8 +854,12 @@ mod tests {
     }
 
     /// `catch_panics` is the piece of `run` that keeps a panic inside the
-    /// event loop from aborting the whole search run; unlike `event_loop`
-    /// itself, it needs no real terminal, so it can be exercised directly.
+    /// event loop from aborting the whole search run — in builds where
+    /// panics unwind, which is what this test runs under (`panic = "unwind"`,
+    /// the default dev/test profile). `[profile.release]` sets `panic =
+    /// "abort"` workspace-wide, where this guard cannot run at all; see
+    /// `catch_panics`'s doc comment. Exercised directly here since, unlike
+    /// `event_loop`, it needs no real terminal.
     #[test]
     fn catch_panics_converts_a_panic_into_ok() {
         let prev_hook = std::panic::take_hook();
