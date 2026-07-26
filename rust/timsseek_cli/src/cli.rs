@@ -6,17 +6,8 @@ use std::path::PathBuf;
 use timsseek::DecoyPolicy;
 use timsseek::ml::RescoreModel;
 
-/// Clap mirror of [`timsseek::ml::RescoreModel`].
-///
-/// The model enum itself lives in the library, next to the rescorers it selects
-/// between. `clap::ValueEnum` is a foreign trait, so it cannot be implemented
-/// for the lib-owned type from this crate — hence this mirror, which exists
-/// ONLY to render `[possible values: gbm, lda, hybrid]` and parse the flag. The
-/// `From` impl below is exhaustive on purpose: a new variant in the library
-/// fails to compile here instead of silently going unreachable from the CLI.
-///
-/// The TOML `rescore_model` field deserializes straight into the lib type; this
-/// mirror is not in that path.
+/// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
+/// trait, so it cannot be implemented for the lib-owned type from this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum CliRescoreModel {

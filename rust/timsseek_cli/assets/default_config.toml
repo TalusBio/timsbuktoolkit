@@ -57,21 +57,11 @@ grid_size = 100
 ## DP lookback width during pathfinding (larger = smoother curve, slower fit).
 dp_lookback = 30
 
-## Tolerance-derivation sigma multipliers. `1.4826 * MAD` is the robust stand-in
-## for a standard deviation (it equals the stdev for Gaussian data and resists
-## outlier inflation for heavier tails).
-##   - mz_sigma / mobility_sigma: bounds are `median ± sigma * 1.4826 * MAD`,
-##     i.e. offset-aware and asymmetric (see `mad_symmetric_bounds`).
-##   - rt_sigma_factor: a plain half-width, `sigma * 1.4826 * MAD` with NO
-##     median offset, then floored by `min_rt_tolerance_minutes` below.
-##
-## mz_sigma was widened from 1.5 to 3.0: 1.5 clipped real peaks, and 3.0 is worth
-## +12.6% sensitivity on an Astral run (validated on Astral and TimsTOF). This is
-## an EXTRACTION TOLERANCE, not an FDR knob — discrimination is handled downstream
-## by the rescorer and the q-value machinery. What it does trade is signal against
-## cost: a wider window pulls more into every candidate's traces (neighbours and
-## noise included) and costs more per query, a narrower one clips peaks whose
-## calibrated center is slightly off.
+## Tolerance-derivation sigma multipliers; `1.4826 * MAD` is the robust stdev
+## stand-in. mz_sigma / mobility_sigma give median-offset bounds
+## (`median ± sigma * 1.4826 * MAD`, asymmetric); rt_sigma_factor is a plain
+## half-width with NO median offset, floored by `min_rt_tolerance_minutes`.
+## mz_sigma 3.0 over 1.5: +12.6% sensitivity on an Astral run.
 mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0

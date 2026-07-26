@@ -1,43 +1,13 @@
-//! Shrinkage Linear Discriminant Analysis rescorer.
+//! Sage-style two-class Fisher LDA (github.com/lazear/sage) with ridge
+//! shrinkage: `w = (Sw + lambda*I)^-1 (mu_t - mu_d)`, targets projecting high.
 //!
-//! Sage-style two-class Fisher LDA (github.com/lazear/sage), adapted for the
-//! timsseek feature set. Differences from Sage:
-//!   * Features are z-standardized (mean/std over the training rows) before the
-//!     fit. Sage skips this because exact Fisher LDA is scale-invariant; we add
-//!     ridge shrinkage below, which is NOT scale-invariant, so standardization
-//!     is required to make the `lambda * I` term comparable across features.
-//!   * The within-class scatter is ridge-regularized (`Sw + lambda*I`). The fit
-//!     input is the LINEAR lane only (~102 dims: the fields declared
-//!     approx-Gaussian after their per-row transform), and it is heavily
-//!     collinear (main_score family, the 7 per-ion error dims + their mean,
-//!     ...), which makes the raw `Sw` near-singular. Shrinkage keeps the linear
-//!     solve stable without hand-pruning the lane.
-//!     NOTE: this is NOT the GBM's input. The GBM trains on the ALL lane
-//!     (linear ++ nonlinear, ~131 dims), so it additionally sees the context /
-//!     count / sequence features — including the 22 `sequence_counts` AA counts,
-//!     which have no linear lane and never reach LDA. LDA-vs-GBM numbers are
-//!     therefore a lane comparison, not a same-inputs comparison; the
-//!     same-inputs-plus-LDA setup is `rescore_hybrid` (nonlinear ++ lda_score).
-//!   * NaN/non-finite feature values are imputed to the column mean (i.e. 0
-//!     after standardization). The GBM handles missing natively; LDA cannot.
+//! Fits the LINEAR lane only (~102 dims). That lane is NOT the GBM's input —
+//! the GBM sees the ALL lane (~131 dims), including the 22 `sequence_counts`
+//! AA counts, which have no linear lane and never reach LDA.
 //!
-//! For two-class LDA the between-class scatter is rank-1 along `(mu_t - mu_d)`,
-//! so the discriminant direction is `w = (Sw + lambda*I)^-1 (mu_t - mu_d)`.
-//! Target rows project higher than decoy rows by construction.
-//!
-//! # Layout & scaling
-//! The feature matrix is a single flat row-major `Vec<f64>` (`feat[i*d + j]`),
-//! never a `Vec<Vec<f64>>` — at tens of millions of candidates the per-row
-//! allocation and pointer-chasing dominate. The heavy cost is the within-class
-//! scatter — `O(n * d^2)` (`d^2` FMAs/row) — **linear in the row count but with
-//! a large constant**. All three reductions go through
-//! [`crate::utils::maybe_par::chunked_fold_reduce`], which parallelizes them
-//! over fixed row chunks and so keeps them bitwise-deterministic regardless of
-//! thread count (or of whether the parallel backend is compiled in at all).
-//! Nothing here is super-linear in `n`. Skew-taming is done at feature-emit time by the
-//! block grammar (log2/ln1p transforms); the linear lane only admits fields
-//! that are approx-Gaussian after their declared transform, so no rank-based
-//! gaussianization step runs here.
+//! Features are z-standardized before the fit (Fisher LDA is scale-invariant,
+//! but the `lambda * I` term is not), and non-finite values are imputed to the
+//! column mean, i.e. 0 post-standardization — LDA cannot take missing natively.
 
 use crate::utils::maybe_par::{
     chunked_fold_reduce,

@@ -52,7 +52,6 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[global_allocator]
 static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::new();
 
-/// Validated inputs ready for processing
 struct ValidatedInputs {
     raw_inputs: Vec<String>,
     speclib_uri: String,
@@ -66,18 +65,14 @@ use tims_stage::{
     is_remote_uri,
 };
 
-/// Validates all inputs and outputs before processing begins.
-/// Returns ValidatedInputs on success, or an error if any validation fails.
 fn validate_inputs(
     config: &Config,
     args: &Cli,
 ) -> std::result::Result<ValidatedInputs, errors::CliError> {
     info!("Validating inputs and outputs before processing...");
 
-    // Get list of raw files to process. `~` in local paths is not expanded
-    // by `Path::exists` / `File::open`; canonicalise via tims_stage once so
-    // every downstream consumer (validation, staging, probes) sees the same
-    // expanded form.
+    // `~` is not expanded by `Path::exists` / `File::open`; canonicalise once
+    // so validation, staging and probes all see the same expanded form.
     let raw_inputs: Vec<String> = match config.analysis.raw_inputs.clone() {
         Some(files) => files.iter().map(|f| expand_local_uri(f)).collect(),
         None => {
@@ -87,7 +82,6 @@ fn validate_inputs(
         }
     };
 
-    // Get speclib URI
     let speclib_uri: String = match &config.input {
         Some(InputConfig::Speclib { uri }) => expand_local_uri(uri),
         None => {
@@ -97,7 +91,6 @@ fn validate_inputs(
         }
     };
 
-    // Get output URI (local path or s3:// etc.)
     let output_uri: String = match &config.output {
         Some(output_config) => expand_local_uri(&output_config.uri),
         None => {
@@ -107,7 +100,7 @@ fn validate_inputs(
         }
     };
 
-    // Validate speclib exists (local only — remote resolution happens at open)
+    // Local only: remote resolution happens at open.
     if !is_remote_uri(&speclib_uri) && !std::path::Path::new(&speclib_uri).exists() {
         return Err(errors::CliError::Io {
             source: "Speclib file does not exist".to_string(),
@@ -116,7 +109,6 @@ fn validate_inputs(
     }
     info!("✓ Speclib URI: {}", speclib_uri);
 
-    // Validate calib lib if provided
     let calib_lib_uri: Option<String> = args.calib_lib.as_deref().map(expand_local_uri);
     if let Some(ref uri) = calib_lib_uri {
         if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
@@ -128,8 +120,8 @@ fn validate_inputs(
         info!("✓ Calibration library URI: {}", uri);
     }
 
-    // Validate all raw inputs: local-path existence only. Remote URIs are
-    // resolved by tims_stage at staging time.
+    // Local-path existence only; remote URIs are resolved by tims_stage at
+    // staging time.
     for raw_uri in &raw_inputs {
         if !is_remote_uri(raw_uri) && !std::path::Path::new(raw_uri.as_str()).exists() {
             return Err(errors::CliError::Io {
@@ -140,8 +132,7 @@ fn validate_inputs(
     }
     info!("✓ All {} raw input(s) validated", raw_inputs.len());
 
-    // Local-output path checks: writability probe. Remote outputs skip this
-    // — the upload itself is the write test.
+    // Remote outputs skip the writability probe — the upload is the write test.
     if !is_remote_uri(&output_uri) {
         let output_dir_path = std::path::Path::new(&output_uri);
 
@@ -172,19 +163,13 @@ fn validate_inputs(
         }
     }
 
-    // Proactive overwrite check: probe every artifact this run will write
-    // (local or remote) and abort up-front if any exists and --overwrite
-    // isn't set. Fails fast before heavy analysis instead of after.
+    // Probe every artifact up-front so a collision fails before the heavy
+    // analysis rather than after it.
     //
-    // IMPORTANT — keep the two artifact lists below in sync with the writer
-    // sites. If you add or rename an output file, update both here and the
-    // writer. Drift-aware writer sites (search for `ARTIFACT-LIST`):
-    //   per-sample:
-    //     - processing.rs — results.parquet, performance_report.json
-    //     - main.rs overwrite-cleanup block (same two)
-    //   run-level:
-    //     - main.rs — run_report.json, config_used.json
-    //     - OutputSink::finalize_run call site
+    // IMPORTANT — the two artifact lists below must stay in sync with the
+    // writer sites (search for `ARTIFACT-LIST`):
+    //   per-sample: processing.rs, main.rs overwrite-cleanup block
+    //   run-level:  main.rs run report, OutputSink::finalize_run call site
     if !args.overwrite {
         let mut collisions: Vec<String> = Vec::new();
         for raw_uri in &raw_inputs {
@@ -242,9 +227,9 @@ fn validate_inputs(
     })
 }
 
-/// Join an artifact path onto a base output URI. For remote URIs this is a
-/// plain `base/rel` concat (single trailing slash); for local paths it goes
-/// through `PathBuf::join` so OS-specific separators are respected.
+/// Join an artifact path onto a base output URI. Remote URIs get a plain
+/// `base/rel` concat; local paths go through `PathBuf::join` so OS-specific
+/// separators are respected.
 fn join_output_uri(base: &str, rel: &str) -> String {
     if is_remote_uri(base) {
         format!("{}/{}", base.trim_end_matches('/'), rel)
@@ -264,15 +249,11 @@ fn probe_uri_exists(uri: &str) -> Result<bool, errors::CliError> {
     })
 }
 
-/// Extract a sample name from a raw-input URI. Strips trailing slashes and
-/// each of `.idx`, `.tar`, `.d` in turn so `sample.d.tar`, `sample.d/`,
-/// `sample.d.idx/` all collapse to `sample`. Previously used short-circuit
-/// `.or_else` which left `.d` in place on `.d.tar` inputs.
+/// `sample.d.tar`, `sample.d/`, `sample.d.idx/` all collapse to `sample`.
 fn sample_name_from_uri(uri: &str) -> Option<String> {
     let trimmed = uri.trim_end_matches('/');
     let mut stem = trimmed.rsplit('/').next()?;
-    // Strip known suffixes in outer-to-inner order, looping so chained
-    // suffixes (e.g. `.d.tar`) collapse fully. Order matters: `.idx`/`.tar`
+    // Loop so chained suffixes collapse fully. Order matters: `.idx`/`.tar`
     // come off before `.d` so they can't leave a bare `.d` behind.
     loop {
         let before = stem;
@@ -295,16 +276,8 @@ fn sample_name_from_uri(uri: &str) -> Option<String> {
 fn get_frag_range_from_index(
     index: &IndexedTimstofPeaks,
 ) -> Result<TupleRange<f64>, errors::CliError> {
-    // `IndexedTimstofPeaks::fragmented_range` already folds over every
-    // ms2 window-group via `QuadrupoleIsolationScheme::fragmented_range`,
-    // which is defined on the ring-shape geometry (AABB/Trapezoid/Polygon).
-    // It panics only if there are no window groups — treat that as a
-    // non-DIA run and surface a readable error instead.
-    //
-    // NOTE: the task spec proposed reaching into raw `isolation_mz` /
-    // `isolation_width` Vec<f32> fields, but `QuadrupoleIsolationScheme`
-    // stores classified ring shapes (not the raw arrays). Using the
-    // existing public accessor is both correct and narrower.
+    // `fragmented_range` panics only when there are no ms2 window groups —
+    // catch it and surface a readable "not a DIA run" error instead.
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| index.fragmented_range()));
     match result {
@@ -345,8 +318,7 @@ fn process_single_file(
         source: format!("load_index({raw_uri}): {e}"),
         path: Some(raw_uri.to_string()),
     })?;
-    // Surface the load mechanism (cache reuse vs raw build + which reader) on the
-    // user-facing progress line — otherwise it's invisible.
+    // Cache reuse vs raw build is otherwise invisible to the user.
     let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
     match index.mobility_kind() {
         timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
@@ -359,10 +331,8 @@ fn process_single_file(
     }
     alloc_track::snap!("Loading index");
 
-    // Rebucket to the scoring-optimal size. Existing on-disk caches
-    // are written with `bucket_size=4096`, which is too large for the
-    // tight mz tolerances used by Phase 1 / Phase 3 (measured: ~−24%
-    // wall at bucket_size=256).
+    // On-disk caches use `bucket_size=4096`, too large for the tight mz
+    // tolerances of Phase 1 / Phase 3 (measured: ~−24% wall at 256).
     const REBUCKET_LEN: usize = 256;
     let step = TimedStep::begin(format_args!("Rebucket at {}", REBUCKET_LEN));
     let index = index.rebucket(REBUCKET_LEN);
@@ -387,8 +357,7 @@ fn process_single_file(
         path: Some(file_output_dir.to_string_lossy().to_string()),
     })?;
 
-    // If overwrite mode, delete the specific files we're about to write.
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs proactive check.
+    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs.
     if overwrite {
         let results_file = file_output_dir.join("results.parquet");
         if results_file.exists() {
@@ -431,9 +400,8 @@ fn process_single_file(
     Ok(report)
 }
 
-/// Handles local-vs-remote output routing. When `dest_uri` is an s3:// /
-/// gs:// / az:// URL, writes into a tempdir and uploads per-sample; when
-/// local, writes directly.
+/// Local-vs-remote output routing: a remote `dest_uri` (s3://, gs://, az://)
+/// writes into a tempdir and uploads per-sample; a local one writes directly.
 struct OutputSink {
     dest_uri: String,
     working_dir: std::path::PathBuf,
@@ -480,10 +448,8 @@ impl OutputSink {
         &self.working_dir
     }
 
-    /// Final destination URI for a sample's output directory — the s3:// /
-    /// gs:// / local path where files *end up*, not the working tempdir.
-    /// Use this for user-facing output (log lines, reports) so users see the
-    /// real location instead of a transient tempdir that will be wiped.
+    /// Where a sample's files *end up*, not the working tempdir. Use for
+    /// user-facing output so users don't see a tempdir that will be wiped.
     fn dest_uri_for_sample(&self, sample: &str) -> String {
         if self.remote {
             format!("{}/{}", self.dest_uri.trim_end_matches('/'), sample)
@@ -545,11 +511,9 @@ impl OutputSink {
 
 /// Load a Speclib from a local path or remote URI.
 ///
-/// `Speclib::from_file` takes a `Path` (it sniffs format by extension), so
-/// remote URIs are streamed to a tempfile via `tims_stage::download_to_file`
-/// — preserving the original basename so extension-based format detection
-/// still works. Streaming (not `open_reader`) is used because speclibs can
-/// be multi-GB parquet files.
+/// Remote URIs are streamed (not buffered — speclibs can be multi-GB) to a
+/// tempfile keeping the original basename, because `Speclib::from_file`
+/// sniffs the format by extension.
 fn speclib_from_uri(
     uri: &str,
     decoy_strategy: timsseek::DecoyPolicy,
@@ -595,14 +559,9 @@ fn speclib_from_uri(
     Ok((lib, Some(td)))
 }
 
-/// Handle returned by [`init_tracing`]. Holds resources whose lifetime must
-/// span the entire run — notably the `instrumentation`-feature flush guard,
-/// which flushes aggregated spans on drop. Callers bind with a `_`-prefixed
-/// name and drop at end of scope.
-///
-/// The guard is type-erased via `Box<dyn Any>` so we don't have to name the
-/// `tracing_profile` guard type from outside the feature-gated section.
-/// Dropping the box runs the guard's `Drop` impl.
+/// Holds the `instrumentation` flush guard, which flushes aggregated spans on
+/// drop and so must outlive every traced span. Type-erased via `Box<dyn Any>`
+/// to avoid naming the `tracing_profile` type outside the feature gate.
 struct TracingHandle {
     #[cfg(feature = "instrumentation")]
     _tree_guard: Box<dyn std::any::Any>,
@@ -610,20 +569,15 @@ struct TracingHandle {
     _empty: (),
 }
 
-/// Install the tracing subscriber. Returns a handle whose lifetime keeps
-/// the flush guard alive for the whole run.
-///
-/// Resolution order for the log file:
-///   1. `--log-path -`          → stderr-only, no file
-///   2. `--log-path <p>`         → that path verbatim
-///   3. default, local output   → `<output_dir>/timsseek-<ts>.log`
+/// Install the tracing subscriber. Log file resolution order:
+///   1. `--log-path -`            → stderr-only, no file
+///   2. `--log-path <p>`          → that path verbatim
+///   3. default, local output     → `<output_dir>/timsseek-<ts>.log`
 ///   4. default, no/remote output → `./timsseek-<ts>.log` in CWD
 ///
-/// The timestamp suffix (`YYYYMMDDTHHMMSS`, local time) avoids clobbering
-/// previous runs that share the same directory. Tracing spans/logs
-/// always go to a file unless `--log-path -` explicitly opts in to
-/// stderr — matches the "no cli args, never tracing logs on terminal"
-/// contract.
+/// The `YYYYMMDDTHHMMSS` local-time suffix avoids clobbering previous runs
+/// sharing the directory. Logs never reach the terminal unless `--log-path -`
+/// opts in.
 fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
     let log_file_path: Option<std::path::PathBuf> = match args.log_path {
         Some(ref p) if p.to_str() == Some("-") => None,
@@ -752,10 +706,8 @@ fn main() {
 }
 
 fn run() -> std::result::Result<(), errors::CliError> {
-    // Parse command line arguments first
     let args = Cli::parse();
 
-    // Short-circuit flags that dump the embedded default config.
     if args.print_default_config {
         print!("{}", config::DEFAULT_CONFIG_TOML);
         return Ok(());
@@ -769,7 +721,6 @@ fn run() -> std::result::Result<(), errors::CliError> {
         return Ok(());
     }
 
-    // Load and parse configuration, or use defaults
     let mut config = match args.config {
         Some(ref config_path) => {
             let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
@@ -803,7 +754,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
         }
     };
 
-    // Override config with command line arguments if provided
+    // CLI args win over the config file.
     if !args.raw_inputs.is_empty() {
         config.analysis.raw_inputs = Some(args.raw_inputs.clone());
     }
@@ -823,20 +774,15 @@ fn run() -> std::result::Result<(), errors::CliError> {
         });
     }
 
-    // Override decoy strategy if provided
     if let Some(strategy) = args.decoy_strategy {
         config.analysis.decoy_strategy = strategy;
     }
-
-    // Override rescore model if provided (CLI wins over the config file).
     if let Some(model) = args.rescore_model {
         config.analysis.rescore_model = model.into();
     }
 
-    // Install tracing subscriber. The returned handle carries the log file
-    // path (if any) plus — under the `instrumentation` feature — the
-    // PrintTreeLayer flush guard that must outlive every traced span. Hold
-    // it in `run()`'s scope so drop order flushes after all work completes.
+    // Held in `run()`'s scope so the instrumentation flush guard drops after
+    // all work completes.
     let _tracing = init_tracing(&args, &config);
 
     info!("Parsed configuration: {:#?}", config.clone());
@@ -844,8 +790,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
 
     let validated = validate_inputs(&config, &args)?;
 
-    // Build staging backend once from [staging] config (falls back to
-    // defaults when absent). The sweep runs in `PerRunTempdir::new`.
+    // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
     let staging_cfg = config.staging.clone().unwrap_or_default();
     let save_sidecar_flag = staging_cfg.save_sidecar;
     let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig {
@@ -858,17 +803,12 @@ fn run() -> std::result::Result<(), errors::CliError> {
         path: None,
     })?;
 
-    // Route outputs through a local tempdir when the destination is remote
-    // (s3://, gs://, az://). Per-sample subdirs are uploaded + removed
-    // after each sample finishes; run-level files are uploaded after the
-    // batch.
     let sink = OutputSink::new(&validated.output_uri)?;
 
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
     let config_output_path = sink.root().join("config_used.json");
 
-    // If overwrite mode, delete existing config file (local-only; remote
-    // will simply overwrite on upload).
+    // Local-only; a remote destination just overwrites on upload.
     if validated.overwrite && config_output_path.exists() {
         std::fs::remove_file(&config_output_path).map_err(|e| errors::CliError::Io {
             source: format!("Failed to remove existing config file: {}", e),
@@ -890,7 +830,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     let mut failed_files: Vec<(String, errors::CliError)> = Vec::new();
     let mut successful_files: Vec<String> = Vec::new();
 
-    // Load speclib once (shared across all files)
+    // Loaded once, shared across all files.
     let step = TimedStep::begin("Loading speclib");
     info!(
         "Building database from speclib URI {}",
@@ -911,7 +851,6 @@ fn run() -> std::result::Result<(), errors::CliError> {
         .as_millis() as u64;
     alloc_track::snap!("Loading speclib");
 
-    // Load calibration library once (if provided)
     let (calib_lib, _calib_td, load_calib_lib_ms) = match &validated.calib_lib_uri {
         Some(uri) => {
             let step = TimedStep::begin("Loading calib lib");
@@ -959,9 +898,8 @@ fn run() -> std::result::Result<(), errors::CliError> {
             }
         };
 
-        // Per-file wall clock, printed as a footer so user sees total time per
-        // input even when several are batched. Intermediate phase output from
-        // `processing::run_pipeline` lands between the header and footer.
+        // Header/footer pair; `processing::run_pipeline` phase output lands
+        // between them, so batched runs still show per-input wall time.
         println!("=== [{}/{}] {} ===", idx + 1, total_files, sample_name);
         let file_start = std::time::Instant::now();
         let sample_dest = sink.dest_uri_for_sample(&sample_name);
@@ -1045,11 +983,10 @@ fn run() -> std::result::Result<(), errors::CliError> {
         }
     }
 
-    // Write run-level report into the sink's working dir.
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
     let finalize_step = TimedStep::begin("Finalize run");
-    // Populate top-level artifact list with final destination URIs before
-    // serialization so the report self-describes where to fetch everything.
+    // Must happen before serialization so the report self-describes where to
+    // fetch everything.
     let dest_root = sink
         .dest_uri_for_sample("")
         .trim_end_matches('/')
@@ -1064,8 +1001,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
         info!("Wrote run report to {:?}", run_report_path);
     }
 
-    // Upload run-level artifacts for remote destinations (no-op locally).
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs proactive check.
+    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
     sink.finalize_run(&["run_report.json", "config_used.json"])?;
     finalize_step.finish();
 
