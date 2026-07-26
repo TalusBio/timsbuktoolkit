@@ -21,13 +21,11 @@ use timsquery::{
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::ml::qvalues::{
-    feature_name_set_for,
-    report_qvalues_at_thresholds,
-};
+use timsseek::ml::qvalues::report_qvalues_at_thresholds;
 use timsseek::ml::{
     RescoreFeatureStats,
-    rescore,
+    RescoreModel,
+    rescore_with,
 };
 use timsseek::rt_calibration::{
     CalibRtError,
@@ -63,6 +61,12 @@ use tracing::{
     info,
     warn,
 };
+
+/// Lookup from `(precursor m/z * 100, precursor charge)` to the main speclib's
+/// entries in that bucket: `(library RT seconds, sorted fragment m/z * 100)`.
+/// Used to re-anchor a separate calibration library onto the main library's
+/// iRT axis via shared-fragment matching.
+type PrecursorFragmentLookup = std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>;
 
 /// Create a progress bar that writes to stderr when it is a TTY, or a hidden
 /// (no-op) bar when stderr is not a terminal (e.g. piped / redirected).
@@ -209,6 +213,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     max_qvalue: f32,
     calib_config: &CalibrationConfig,
     no_feature_stats: bool,
+    rescore_model: RescoreModel,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -251,31 +256,29 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Build lookup from main speclib when using a separate calib lib.
     // Maps (quantized_precursor_mz, charge) -> Vec<(rt, sorted_fragment_mzs)>.
     // Matching requires same precursor (0.01 Da) + charge + at least 5 shared fragment masses.
-    let main_lookup: Option<std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>> =
-        if calib_lib.is_some() {
-            let mut map: std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>> =
-                std::collections::HashMap::new();
-            for flat in 0..speclib.len() {
-                let item = speclib.item_at(flat);
-                let mz_key = (item.mono_precursor_mz() * 100.0).round() as i64;
-                let charge = item.precursor_charge();
-                let mut frag_mzs: Vec<i64> = item
-                    .iter_fragments_refs()
-                    .map(|(_, mz)| (mz * 100.0).round() as i64)
-                    .collect();
-                frag_mzs.sort_unstable();
-                map.entry((mz_key, charge))
-                    .or_default()
-                    .push((item.rt_seconds(), frag_mzs));
-            }
-            info!(
-                "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
-                map.len()
-            );
-            Some(map)
-        } else {
-            None
-        };
+    let main_lookup: Option<PrecursorFragmentLookup> = if calib_lib.is_some() {
+        let mut map: PrecursorFragmentLookup = std::collections::HashMap::new();
+        for flat in 0..speclib.len() {
+            let item = speclib.item_at(flat);
+            let mz_key = (item.mono_precursor_mz() * 100.0).round() as i64;
+            let charge = item.precursor_charge();
+            let mut frag_mzs: Vec<i64> = item
+                .iter_fragments_refs()
+                .map(|(_, mz)| (mz * 100.0).round() as i64)
+                .collect();
+            frag_mzs.sort_unstable();
+            map.entry((mz_key, charge))
+                .or_default()
+                .push((item.rt_seconds(), frag_mzs));
+        }
+        info!(
+            "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
+            map.len()
+        );
+        Some(map)
+    } else {
+        None
+    };
 
     // Snapshot calibrant points before calibration consumes them (for saving)
     let calibrant_points: Vec<[f64; 3]> = calibrants
@@ -401,9 +404,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    // Feature names are a property of the set, built once and passed in.
-    let feature_names = feature_name_set_for(&competed);
-    let (data, feature_stats) = rescore(competed, &feature_names);
+    // Model selectable via the `rescore_model` config field / `--rescore-model`
+    // CLI flag (CLI wins); GBM is the default. Dispatch + per-model notes live
+    // in `timsseek::ml::rescore_with`.
+    info!("Phase 5 rescore model: {rescore_model:?}");
+    let (data, feature_stats) = rescore_with(rescore_model, competed);
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -455,11 +460,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
 
-    if !no_feature_stats {
-        if let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
-            // Non-fatal: log and continue.
-            tracing::warn!("Failed to write feature_stats sidecar: {}", e);
-        }
+    if !no_feature_stats && let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
+        // Non-fatal: log and continue.
+        tracing::warn!("Failed to write feature_stats sidecar: {}", e);
     }
 
     // Key result to stdout. The final output URI is printed by main.rs
@@ -546,7 +549,7 @@ const MIN_SHARED_FRAGMENTS: usize = 5;
 fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &Speclib,
-    main_lookup: Option<&std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>>,
+    main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
 ) -> Result<CalibrationResult, CalibRtError> {
@@ -989,8 +992,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     let mut delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
     let mut previous: Option<(u32, u8, usize, f32)> = None;
 
-    for i in 0..results.len() {
-        let current = &results[i];
+    for (i, current) in results.iter().enumerate() {
         let current_key = (
             current.scoring.identity.decoy_group_id,
             current.scoring.identity.precursor_charge,
@@ -1025,10 +1027,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     let mut kept_indices: Vec<usize> = Vec::with_capacity(results.len());
     {
         let mut last_key: Option<(u32, u8)> = None;
-        for i in 0..results.len() {
+        for (i, result) in results.iter().enumerate() {
             let key = (
-                results[i].scoring.identity.decoy_group_id,
-                results[i].scoring.identity.precursor_charge,
+                result.scoring.identity.decoy_group_id,
+                result.scoring.identity.precursor_charge,
             );
             if last_key == Some(key) {
                 continue; // duplicate in same group
@@ -1071,6 +1073,7 @@ pub fn run_pipeline(
     load_index_ms: u64,
     calib_config: &CalibrationConfig,
     no_feature_stats: bool,
+    rescore_model: RescoreModel,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
     // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
     let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
@@ -1084,6 +1087,7 @@ pub fn run_pipeline(
         max_qvalue,
         calib_config,
         no_feature_stats,
+        rescore_model,
     )?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report

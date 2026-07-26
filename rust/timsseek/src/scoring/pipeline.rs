@@ -10,7 +10,7 @@
 //! - Chromatogram collectors (size varies with query complexity)
 //!
 //! `prescore_batch` and `score_calibrated_batch` dispatch through
-//! `super::maybe_par::fold_reduce`, which is compile-time gated on the
+//! `crate::utils::maybe_par::fold_reduce`, which is compile-time gated on the
 //! `rayon` feature. With rayon, each worker thread gets its own
 //! `ScoringWorker` via the `init` closure and reuses it across thousands
 //! of queries; without rayon, a single `ScoringWorker` is built and reused
@@ -226,7 +226,11 @@ impl Default for CalibrationConfig {
         Self {
             n_calibrants: 2000,
             grid_size: 100,
-            mz_sigma: 1.5,
+            // Keep in sync with `timsseek_cli/assets/default_config.toml`
+            // ([calibration]) — that file carries the rationale for these
+            // sigmas, and `config::tests::default_template_parses`
+            // fails if the two drift apart.
+            mz_sigma: 3.0,
             mobility_sigma: 3.0,
             rt_sigma_factor: 3.0,
             min_rt_tolerance_minutes: 0.5,
@@ -289,7 +293,7 @@ impl ScratchBufs {
         fill_scratch_from(&mut self.eg, q);
         self.expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
-            q.expected_precursor_envelope().into_iter(),
+            q.expected_precursor_envelope(),
         )
         .expect("library flyweight yields unique fragment/precursor keys");
     }
@@ -331,7 +335,7 @@ pub fn select_top_n_fragments<T: KeyLike + Default>(
         .collect();
 
     // Sort drop-indices descending so highest index is removed first (avoids shift)
-    to_drop.sort_by(|a, b| b.0.cmp(&a.0));
+    to_drop.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     for (idx, key) in to_drop {
         agg.fragments
@@ -728,7 +732,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
 
         let (_worker, _scratch, mut results): (ScoringWorker, ScratchBufs, IonSearchAccumulator) =
-            super::maybe_par::fold_reduce(
+            crate::utils::maybe_par::fold_reduce(
                 &flats,
                 || {
                     tracing::debug!(
@@ -772,7 +776,8 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 
     /// Phase 1: Lightweight prescore — broad extraction + find_apex_location only.
-    /// Returns the apex location (with split product score) and metadata.
+    /// Returns an [`ApexLocation`], whose `score` is the apex-profile peak
+    /// value — NOT the apex evidence (see `TraceScorer::suggest_apex`).
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
@@ -873,7 +878,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .max()
             .unwrap_or(0);
 
-        let (_worker, _scratch, heap, par_timings) = super::maybe_par::fold_reduce(
+        let (_worker, _scratch, heap, par_timings) = crate::utils::maybe_par::fold_reduce(
             &flats,
             || {
                 tracing::debug!(

@@ -5,6 +5,10 @@ use eframe::egui::{
     TextureHandle,
 };
 
+use crate::bench::{
+    self,
+    ScorePopulations,
+};
 use crate::plots;
 use crate::scorer::{
     self,
@@ -22,8 +26,27 @@ pub struct SimApp {
     data: Option<SimData>,
     score: Option<ScoreResult>,
     score_err: Option<String>,
-    heatmap: Option<(TextureHandle, usize)>,
+    heatmap: Option<TextureHandle>,
     dirty: bool,
+    dist_controls: DistControls,
+    /// Sampled score populations, cleared whenever a knob changes (they would
+    /// otherwise describe stale params).
+    populations: Option<SampledPopulations>,
+}
+
+/// Sampled populations plus the seed-pair count they were taken with, so a
+/// moved "seeds" slider is detectable as staleness.
+struct SampledPopulations {
+    n_seed_pairs: usize,
+    pops: ScorePopulations,
+}
+
+/// Knobs for the score-distribution panel.
+struct DistControls {
+    /// While on, the populations are resampled whenever they go stale.
+    enabled: bool,
+    n_seed_pairs: usize,
+    show_absent: bool,
 }
 
 impl Default for SimApp {
@@ -35,6 +58,12 @@ impl Default for SimApp {
             score_err: None,
             heatmap: None,
             dirty: true,
+            dist_controls: DistControls {
+                enabled: false,
+                n_seed_pairs: 200,
+                show_absent: true,
+            },
+            populations: None,
         }
     }
 }
@@ -58,7 +87,34 @@ impl SimApp {
 
         self.heatmap = Some(plots::build_heatmap(ctx, &data));
         self.data = Some(data);
+        self.populations = None; // sampled for the previous params -> stale
         self.dirty = false;
+    }
+
+    /// Resample the score populations if the ones on hand no longer describe
+    /// the current params or seed-pair count. Must run AFTER [`Self::recompute`],
+    /// which is what clears them on a param change.
+    ///
+    /// Skipped while a pointer button is down: a slider drag would otherwise
+    /// resample every frame, and one sample is `2 * n_seed_pairs` full
+    /// simulations.
+    fn resample_if_stale(&mut self, ctx: &egui::Context) {
+        if !self.dist_controls.enabled {
+            self.populations = None;
+            return;
+        }
+        let n_seed_pairs = self.dist_controls.n_seed_pairs;
+        let fresh = self
+            .populations
+            .as_ref()
+            .is_some_and(|p| p.n_seed_pairs == n_seed_pairs);
+        if fresh || ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.populations = Some(SampledPopulations {
+            n_seed_pairs,
+            pops: bench::score_populations(&self.params, n_seed_pairs),
+        });
     }
 }
 
@@ -68,7 +124,7 @@ impl eframe::App for SimApp {
             .default_width(320.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.dirty |= controls(ui, &mut self.params);
+                    self.dirty |= controls(ui, &mut self.params, &mut self.dist_controls);
                     ui.separator();
                     score_readout(ui, self.score.as_ref(), self.score_err.as_deref());
                 });
@@ -77,40 +133,68 @@ impl eframe::App for SimApp {
         if self.dirty {
             self.recompute(ctx);
         }
+        self.resample_if_stale(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let Some(data) = &self.data else { return };
-            let score = self.score.as_ref();
-            let true_apex = self.params.apex_cycle;
+            // Every section is collapsible (a collapsed one is not laid out at
+            // all, so hiding a plot also skips its rendering cost), and the
+            // stack still exceeds most window heights when all are open.
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let Some(data) = &self.data else { return };
+                let score = self.score.as_ref();
+                // The REALIZED apex, not `params.apex_cycle`: the sim always
+                // applies a sub-cycle offset, so the configured value is never
+                // where the peak actually landed.
+                let true_apex = data.realized_apex_cycle;
 
-            ui.heading("Chromatograms");
-            plots::apex_caption(ui);
-            plots::chromatograms(ui, data, score, true_apex);
+                section(ui, "Chromatograms", |ui| {
+                    plots::apex_caption(ui);
+                    plots::chromatograms(ui, data, score, true_apex);
+                });
 
-            ui.separator();
-            ui.heading("Heatmap (transitions x cycles)");
-            if let Some((tex, n_rows)) = &self.heatmap {
-                let _ = n_rows;
-                let n_cols = data
-                    .fragment_rows
-                    .first()
-                    .map(|r| r.intensities.len())
-                    .unwrap_or(1);
-                plots::heatmap(ui, tex, n_cols, score, true_apex);
-            }
+                section(ui, "Heatmap (transitions x cycles)", |ui| {
+                    if let Some(tex) = &self.heatmap {
+                        let n_cols = data
+                            .fragment_rows
+                            .first()
+                            .map(|r| r.intensities.len())
+                            .unwrap_or(1);
+                        plots::heatmap(ui, tex, n_cols, score, true_apex);
+                    }
+                });
 
-            ui.separator();
-            ui.heading("Apex-finder intermediate traces");
-            if let Some(score) = score {
-                plots::traces(
+                section(ui, "Apex-finder intermediate traces", |ui| {
+                    if let Some(score) = score {
+                        plots::traces(
+                            ui,
+                            score,
+                            &TRACE_TOGGLES.with(|t| t.borrow().clone()),
+                            true_apex,
+                        );
+                    } else if let Some(err) = &self.score_err {
+                        ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
+                    }
+                });
+
+                section(
                     ui,
-                    score,
-                    &TRACE_TOGGLES.with(|t| t.borrow().clone()),
-                    true_apex,
+                    "Main-score across cycles (log10, fraction per bin)",
+                    |ui| landscape_histogram(ui, score),
                 );
-            } else if let Some(err) = &self.score_err {
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
-            }
+
+                section(
+                    ui,
+                    "Main-score across seeds (log10, fraction per bin)",
+                    |ui| {
+                        seeds_histogram(
+                            ui,
+                            self.populations.as_ref().map(|p| &p.pops),
+                            self.dist_controls.show_absent,
+                            score.map(|s| s.pass2.primary.main_score),
+                        )
+                    },
+                );
+            });
         });
     }
 
@@ -129,14 +213,27 @@ thread_local! {
         std::cell::RefCell::new(plots::TraceToggles::default());
 }
 
+/// One collapsible plot section, open by default. egui remembers the open/shut
+/// state per title for the lifetime of the process.
+fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    ui.separator();
+    egui::CollapsingHeader::new(egui::RichText::new(title).heading())
+        .id_salt(title)
+        .default_open(true)
+        .show(ui, body);
+}
+
 /// OR a widget's `changed()` into `flag`. Non-capturing so it can be used
 /// inside nested `ui.horizontal` closures without a persistent borrow.
 fn chg(flag: &mut bool, r: egui::Response) {
     *flag |= r.changed();
 }
 
-/// Render every knob. Returns true if any value changed (=> recompute needed).
-fn controls(ui: &mut egui::Ui, p: &mut SimParams) -> bool {
+/// Render every knob. Returns true if any *simulation* param changed (=>
+/// recompute needed). The `dist` knobs deliberately do not set it: none of them
+/// affect the simulation, and a changed seed-pair count is picked up by
+/// [`SimApp::resample_if_stale`] instead.
+fn controls(ui: &mut egui::Ui, p: &mut SimParams, dist: &mut DistControls) -> bool {
     let mut changed = false;
 
     ui.heading("Simulation");
@@ -258,6 +355,16 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams) -> bool {
     }
 
     ui.separator();
+    ui.label("Score distribution");
+    ui.add(
+        egui::Slider::new(&mut dist.n_seed_pairs, 10..=2000)
+            .logarithmic(true)
+            .text("seeds"),
+    );
+    ui.checkbox(&mut dist.show_absent, "overlay pure-noise twin");
+    ui.checkbox(&mut dist.enabled, "sample across seeds (slow)");
+
+    ui.separator();
     ui.label("Traces to plot");
     TRACE_TOGGLES.with(|t| {
         let mut t = t.borrow_mut();
@@ -270,6 +377,63 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams) -> bool {
     });
 
     changed
+}
+
+/// The score landscape of the CURRENT run: `main_score` at every cycle of this
+/// one extraction, marked with the cycle Pass 2 actually reported.
+fn landscape_histogram(ui: &mut egui::Ui, score: Option<&ScoreResult>) {
+    ui.label(
+        "this run only: main_score at every cycle. Only the 11 features vary with cycle -- \
+         the apex evidence is window-global.",
+    );
+    let Some(s) = score else { return };
+    plots::score_histogram(
+        ui,
+        "hist_landscape",
+        &[plots::HistSeries {
+            name: "all cycles",
+            values: &s.landscape,
+            color: plots::PRESENT_COLOR,
+        }],
+        Some(s.pass2.primary.main_score),
+    );
+}
+
+/// Present-vs-absent `main_score` populations across seeds, with the ROC-AUC
+/// between them. `pops` is `None` until sampling is enabled in the controls.
+fn seeds_histogram(
+    ui: &mut egui::Ui,
+    pops: Option<&ScorePopulations>,
+    show_absent: bool,
+    marker_score: Option<f32>,
+) {
+    let Some(pops) = pops else {
+        ui.label(
+            "enable \"sample across seeds\" in the control panel (resamples on every param \
+             change)",
+        );
+        return;
+    };
+
+    let auc = bench::roc_auc(&pops.present, &pops.absent);
+    ui.label(format!(
+        "{} seeds · ROC-AUC vs pure noise = {auc:.4}",
+        pops.present.len()
+    ));
+
+    let mut series = vec![plots::HistSeries {
+        name: "peptide present",
+        values: &pops.present,
+        color: plots::PRESENT_COLOR,
+    }];
+    if show_absent {
+        series.push(plots::HistSeries {
+            name: "pure noise",
+            values: &pops.absent,
+            color: plots::ABSENT_COLOR,
+        });
+    }
+    plots::score_histogram(ui, "hist_seeds", &series, marker_score);
 }
 
 /// Show the full `ApexBlocks` from pass 2 plus the pass-1 location.
@@ -291,31 +455,28 @@ fn score_readout(ui: &mut egui::Ui, score: Option<&ScoreResult>, err: Option<&st
             ui.label(v);
             ui.end_row();
         };
-        let sp = &p2.split;
+        let ev = &p2.evidence;
         row(ui, "pass1 apex cycle", s.pass1.apex_cycle.to_string());
         row(ui, "pass1 score", format!("{:.3e}", s.pass1.score));
         row(ui, "pass2 joint apex", p2.joint_apex_cycle.to_string());
         row(ui, "pass2 score", format!("{:.3e}", p2.primary.main_score));
         row(ui, "rt (ms)", p2.retention_time_ms.to_string());
-        // Score = base_score * feature_product. Decompose so magnitude blowups
-        // (base ~ intensity^2 via the two area-uniqueness terms) are visible.
-        row(
-            ui,
-            "= base_score",
-            format!("{:.3e}", sp.split_product_score),
-        );
+        // Score = apex_evidence * feature_product. Decompose so magnitude
+        // blowups (evidence ~ intensity^2 via the two area-uniqueness terms)
+        // are visible.
+        row(ui, "= apex_evidence", format!("{:.3e}", ev.apex_evidence));
         row(
             ui,
             "  x feat_product",
             format!(
                 "{:.3e}",
-                safe_ratio(p2.primary.main_score, sp.split_product_score)
+                safe_ratio(p2.primary.main_score, ev.apex_evidence)
             ),
         );
-        row(ui, "  cosine_au", format!("{:.3e}", sp.cosine_au));
-        row(ui, "  cosine_cg", format!("{:.3}", sp.cosine_cg));
-        row(ui, "  scribe_au", format!("{:.3e}", sp.scribe_au));
-        row(ui, "  scribe_cg", format!("{:.3}", sp.scribe_cg));
+        row(ui, "  cosine_au", format!("{:.3e}", ev.cosine_au));
+        row(ui, "  cosine_cg", format!("{:.3}", ev.cosine_cg));
+        row(ui, "  scribe_au", format!("{:.3e}", ev.scribe_au));
+        row(ui, "  scribe_cg", format!("{:.3}", ev.scribe_cg));
         row(ui, "delta_next", format!("{:.4}", p2.primary.delta_next));
         row(
             ui,

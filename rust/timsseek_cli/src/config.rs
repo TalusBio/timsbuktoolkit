@@ -3,18 +3,14 @@ use serde::{
     Serialize,
 };
 use timsquery::Tolerance;
-use timsquery::models::tolerance::{
-    MobilityTolerance,
-    MzTolerance,
-    QuadTolerance,
-    RtTolerance,
-};
 use timsseek::DecoyPolicy;
+use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
 
-/// Hand-authored default configuration template. Kept in sync with
-/// `Config::default_config()` by the `default_template_matches_default_config`
-/// test (drift = CI failure).
+/// Hand-authored default configuration template, and the SINGLE source of the
+/// built-in defaults: `Config::default_config()` parses this string, and
+/// `--print-default-config` / `--write-default-config` emit it verbatim.
+/// Edit the defaults here, not in Rust.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../assets/default_config.toml");
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -80,6 +76,9 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub decoy_strategy: DecoyPolicy,
+
+    #[serde(default)]
+    pub rescore_model: RescoreModel,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -90,31 +89,15 @@ pub struct OutputConfig {
 }
 
 impl Config {
-    /// Creates a default configuration with sensible defaults:
-    /// - MS tolerance: 15 ppm
-    /// - Mobility tolerance: 5%
-    /// - Quad tolerance: 0.1 absolute
-    /// - RT tolerance: unrestricted
-    /// - Chunk size: 20000
-    /// - Decoy strategy: if-missing
+    /// The built-in default configuration, parsed from the embedded template
+    /// [`DEFAULT_CONFIG_TOML`] so there is exactly one place the defaults are
+    /// written down. Optional sections (`[input]`, `[output]`, `[staging]`)
+    /// are commented out in the template and therefore land as `None`.
+    ///
+    /// Panics only on a malformed template, which is a compile-time-embedded
+    /// asset and is covered by `default_template_parses`.
     pub fn default_config() -> Self {
-        Config {
-            input: None,
-            analysis: AnalysisConfig {
-                raw_inputs: None,
-                chunk_size: 20000,
-                tolerance: Tolerance {
-                    ms: MzTolerance::Ppm((15.0, 15.0)),
-                    mobility: MobilityTolerance::Pct((5.0, 5.0)),
-                    quad: QuadTolerance::Absolute((0.1, 0.1)),
-                    rt: RtTolerance::Unrestricted,
-                },
-                decoy_strategy: DecoyPolicy::default(),
-            },
-            calibration: CalibrationConfig::default(),
-            output: None,
-            staging: None,
-        }
+        toml::from_str(DEFAULT_CONFIG_TOML).expect("embedded default template must parse")
     }
 }
 
@@ -167,18 +150,31 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
-    /// Drift guard: the embedded TOML template must deserialize to the same
-    /// Config as `default_config()`. Comparison via JSON so we don't need
-    /// PartialEq on every nested type.
+    /// Template sanity guard. `default_config()` now *is* a parse of the
+    /// embedded template, so a template-vs-literal comparison would be
+    /// tautological — but a malformed or silently-edited template would
+    /// otherwise only blow up at runtime.
+    ///
+    /// No literal values are pinned here — those live in the template. The
+    /// `[calibration]` comparison is not a value check either: the template
+    /// spells every calibration field out, so this is the only thing tying it
+    /// to `CalibrationConfig::default()` (the `mz_sigma` 1.5→3.0 drift was
+    /// exactly this failure). JSON so we don't need `PartialEq` on it.
     #[test]
-    fn default_template_matches_default_config() {
-        let from_template: Config =
-            toml::from_str(DEFAULT_CONFIG_TOML).expect("default template must parse");
-        let a = serde_json::to_string(&from_template).unwrap();
-        let b = serde_json::to_string(&Config::default_config()).unwrap();
+    fn default_template_parses() {
+        let c = Config::default_config();
+
+        // Optional sections stay commented out, so the no-config fallback
+        // leaves them for the CLI flags to fill.
+        assert!(c.input.is_none(), "[input] must be commented out");
+        assert!(c.output.is_none(), "[output] must be commented out");
+        assert!(c.staging.is_none(), "[staging] must be commented out");
+        assert!(c.analysis.raw_inputs.is_none());
+
         assert_eq!(
-            a, b,
-            "default_config.toml drifted from Config::default_config()"
+            serde_json::to_string(&c.calibration).unwrap(),
+            serde_json::to_string(&CalibrationConfig::default()).unwrap(),
+            "[calibration] in default_config.toml drifted from CalibrationConfig::default()"
         );
     }
 }

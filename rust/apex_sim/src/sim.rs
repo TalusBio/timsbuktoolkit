@@ -106,11 +106,12 @@ pub fn effective_random_count(rp: &RandomPeaks, n_cycles: usize) -> usize {
 pub struct SimParams {
     pub n_cycles: usize,
     /// Shared apex position (cycle index) for all real fragments + precursor.
+    /// Always offset by a seeded sub-cycle `U(-0.5, 0.5)` -- the realized peak
+    /// never sits exactly on a cycle boundary. See `realized_apex_cycle`.
     pub apex_cycle: f32,
-    /// When `Some(range)`, each run draws the realized apex from the seeded rng
-    /// as `apex_cycle + U(-range, range) + U(-0.5, 0.5)` (position varies per
-    /// seed AND lands off-grid). `None` pins it exactly to `apex_cycle` (the
-    /// historical, unrealistically-easy on-grid, fixed-position behavior).
+    /// COARSE per-seed relocation on top of the sub-cycle offset: `Some(range)`
+    /// draws `U(-range, range)`, so the peak also moves around the window.
+    /// `None` keeps it near `apex_cycle`.
     pub apex_jitter: Option<f32>,
     /// Elution peak width (gaussian sigma, in cycles).
     pub width_sigma: f32,
@@ -198,8 +199,8 @@ pub struct SimData {
     pub extraction: Extraction<String>,
     pub fragment_rows: Vec<TransitionRow>,
     pub precursor_rows: Vec<TransitionRow>,
-    /// The apex cycle actually used to generate this realization (equals
-    /// `apex_cycle` when `apex_jitter` is `None`, else the jittered value).
+    /// The (fractional) apex cycle actually used to generate this realization:
+    /// `apex_cycle` + optional coarse jitter + the always-on sub-cycle offset.
     pub realized_apex_cycle: f32,
 }
 
@@ -215,17 +216,21 @@ pub fn build(params: &SimParams) -> SimData {
     let n = params.n_cycles;
     let dummy_mz = 500.0_f64;
 
-    // Realized apex: jittered per-seed + sub-cycle when enabled, else pinned.
-    // Drawn BEFORE any signal/noise sampling; the `None` branch consumes no rng
-    // so historical scenarios stay byte-identical.
-    let realized_apex = match params.apex_jitter {
-        Some(range) => {
-            let lo = 3.0f32;
-            let hi = (n as f32 - 4.0).max(lo);
-            (params.apex_cycle + rng.random_range(-range..=range) + rng.random_range(-0.5..=0.5))
-                .clamp(lo, hi)
-        }
-        None => params.apex_cycle,
+    // Realized apex, drawn BEFORE any signal/noise sampling. A real peak never
+    // lands exactly on a cycle boundary, so the sub-cycle offset is ALWAYS
+    // applied; `apex_jitter` adds coarse per-seed relocation on top of it.
+    // Draw order (coarse then sub-cycle) keeps JITTERED scenarios byte-identical
+    // to before the sub-cycle draw became unconditional. Non-jittered ones all
+    // shifted: that branch now consumes an rng draw where it previously
+    // consumed none, and pins to `apex_cycle` no longer.
+    let realized_apex = {
+        let lo = 3.0f32;
+        let hi = (n as f32 - 4.0).max(lo);
+        let coarse = params
+            .apex_jitter
+            .map_or(0.0, |range| rng.random_range(-range..=range));
+        let subcycle = rng.random_range(-0.5..=0.5);
+        (params.apex_cycle + coarse + subcycle).clamp(lo, hi)
     };
 
     // --- Expected intensities: THEORETICAL (library) ratios. ---
@@ -428,27 +433,36 @@ mod tests {
 
     #[test]
     fn density_scales_interferent_count_with_window() {
-        let mut p = SimParams::default();
-        p.random_peaks.count = 0;
-        p.random_peaks.density_per_cycle = 2.0;
-        p.random_peaks.hardness = 1.0;
+        let mut p = SimParams {
+            random_peaks: RandomPeaks {
+                count: 0,
+                density_per_cycle: 2.0,
+                hardness: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(effective_random_count(&p.random_peaks, 100), 200);
         assert_eq!(effective_random_count(&p.random_peaks, 1000), 2000);
         p.random_peaks.hardness = 3.0;
         assert_eq!(effective_random_count(&p.random_peaks, 100), 600);
         // count path preserved when density is 0
-        let mut q = RandomPeaks::default();
-        q.density_per_cycle = 0.0;
-        q.count = 77;
+        let q = RandomPeaks {
+            density_per_cycle: 0.0,
+            count: 77,
+            ..Default::default()
+        };
         assert_eq!(effective_random_count(&q, 5000), 77);
     }
 
     #[test]
     fn apex_jitter_is_deterministic_and_subcycle() {
-        let mut p = SimParams::default();
-        p.n_cycles = 200;
-        p.apex_cycle = 100.0;
-        p.apex_jitter = Some(20.0);
+        let p = SimParams {
+            n_cycles: 200,
+            apex_cycle: 100.0,
+            apex_jitter: Some(20.0),
+            ..Default::default()
+        };
         let a = build(&p).realized_apex_cycle;
         let b = build(&p).realized_apex_cycle; // same seed => identical
         assert_eq!(a, b);
@@ -458,20 +472,28 @@ mod tests {
         q.seed = p.seed.wrapping_add(1);
         let c = build(&q).realized_apex_cycle;
         assert!((a - c).abs() > 1e-6);
-        // no jitter => exact
+        // No coarse jitter => still sub-cycle offset, never exactly on-grid.
         let mut r = p.clone();
         r.apex_jitter = None;
-        assert_eq!(build(&r).realized_apex_cycle, 100.0);
+        let d = build(&r).realized_apex_cycle;
+        assert!((d - 100.0).abs() <= 0.5, "sub-cycle offset only, got {d}");
+        assert!(d.fract() != 0.0, "peak must not land on a cycle boundary");
     }
 
     #[test]
     fn clean_peak_apex_lands_at_configured_cycle() {
-        let mut p = SimParams::default();
-        p.noise_floor = 0.0;
-        p.random_peaks.enabled = false;
-        p.apex_cycle = 25.0;
+        let p = SimParams {
+            noise_floor: 0.0,
+            apex_cycle: 25.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let data = build(&p);
-        // The tallest real fragment row should peak at cycle 25.
+        // The tallest real fragment row peaks at the cycle nearest the realized
+        // (sub-cycle offset) apex.
         let row = &data.fragment_rows[0];
         let (max_idx, _) = row
             .intensities
@@ -479,7 +501,8 @@ mod tests {
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .unwrap();
-        assert_eq!(max_idx, 25);
+        assert_eq!(max_idx, data.realized_apex_cycle.round() as usize);
+        assert!((data.realized_apex_cycle - 25.0).abs() <= 0.5);
     }
 
     #[test]
@@ -498,9 +521,14 @@ mod tests {
         // At zero noise an absent (obs_scale=0) transition is an all-zero row.
         // Production's filter_zero_intensity_ions drops such rows AND their
         // expected entry, so the sim must too (matches timsseek exactly).
-        let mut p = SimParams::default();
-        p.noise_floor = 0.0;
-        p.random_peaks.enabled = false;
+        let mut p = SimParams {
+            noise_floor: 0.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         p.real_fragments[0].obs_scale = 0.0;
         let label = p.real_fragments[0].label.clone();
         let data = build(&p);
@@ -520,8 +548,13 @@ mod tests {
     fn top_n_fragments_capped_for_scoring() {
         // Add well beyond TOP_N; the scored extraction caps to TOP_N while
         // display keeps all raw rows.
-        let mut p = SimParams::default();
-        p.random_peaks.enabled = false;
+        let mut p = SimParams {
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         for i in 0..12 {
             p.real_fragments.push(FragmentSpec {
                 label: format!("z{i}"),
@@ -537,19 +570,50 @@ mod tests {
 
     #[test]
     fn observed_decoupled_from_theoretical() {
-        let mut p = SimParams::default();
-        p.noise_floor = 0.0;
-        p.random_peaks.enabled = false;
-        p.apex_cycle = 30.0;
+        let mut p = SimParams {
+            noise_floor: 0.0,
+            apex_cycle: 30.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Two fragments the LIBRARY calls identical, differing only in how much
+        // of that signal the instrument actually sees.
         p.real_fragments[0].theo_intensity = 1.0;
         p.real_fragments[0].obs_scale = 0.5; // observed at half of theory
+        p.real_fragments[1].theo_intensity = 1.0;
+        p.real_fragments[1].obs_scale = 1.0; // observed as predicted
+        let (half_label, full_label) = (
+            p.real_fragments[0].label.clone(),
+            p.real_fragments[1].label.clone(),
+        );
         let data = build(&p);
-        let observed_peak = data.fragment_rows[0]
-            .intensities
-            .iter()
-            .cloned()
-            .fold(0.0_f32, f32::max);
-        // Observed peak reflects obs_scale, not the theoretical ratio.
-        assert!((observed_peak - p.height * 0.5).abs() < 1.0);
+
+        let peak = |i: usize| {
+            data.fragment_rows[i]
+                .intensities
+                .iter()
+                .cloned()
+                .fold(0.0_f32, f32::max)
+        };
+        let (half, full) = (peak(0), peak(1));
+
+        // Both rows co-elute at the same realized (off-grid) apex with the same
+        // width, so every shape term — peak height scale, the gaussian, the
+        // sub-cycle sampling loss — is common to both and cancels in the ratio.
+        // What survives is exactly the obs_scale ratio, computed WITHOUT
+        // reproducing any of the generator's own arithmetic.
+        assert!(full > 0.0, "reference fragment must carry signal: {full}");
+        assert!(
+            ((half / full) - 0.5).abs() < 1e-4,
+            "observed ratio must track obs_scale (0.5), got {half}/{full}"
+        );
+
+        // ...while the THEORETICAL intensities handed to the scorer stay equal:
+        // obs_scale must not leak into the library side.
+        let theo = |l: &String| data.extraction.expected_intensities.get_fragment(l);
+        assert_eq!(theo(&half_label), theo(&full_label));
     }
 }

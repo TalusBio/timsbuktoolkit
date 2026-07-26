@@ -28,8 +28,8 @@ use tims_stage::{
     StagingConfig,
 };
 use timscentroid::{
-    CentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     StorageLocation,
 };
 use tracing::info;
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Phase 2 + 3: load directly (idx) or build via the unified raw core.
-    let cfg = CentroidingConfig::default();
+    let cfg = IndexingCentroidingConfig::default();
     match resolved {
         Resolved::Idx { loc } => {
             let t = Instant::now();

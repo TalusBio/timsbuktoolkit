@@ -1,9 +1,11 @@
 //! Apex-finder + score benches.
 //!
 //! Runs three suites:
-//!   * canonical (historical 245-cyc scenarios; apex-recovery only),
-//!   * broad (production Phase-1 window ~1695 cyc; apex-recovery), and
-//!   * narrow (production Phase-3 window ~150 cyc; apex-recovery + score AUC).
+//!
+//! * canonical (historical 245-cyc scenarios; apex-recovery only),
+//! * broad (production Phase-1 window ~1695 cyc; apex-recovery), and
+//! * narrow (production Phase-3 window ~150 cyc; apex-recovery + score AUC).
+//!
 //! "recovery" = fraction of runs whose pass-2 apex lands within `tol` cycles of
 //! the (jittered) truth. "AUC" = ROC-AUC separating the Pass-2 score of a real
 //! peptide from a pure-noise twin (signal-vs-noise discrimination).
@@ -24,8 +26,8 @@ use apex_sim::bench::{
 use apex_sim::sim::SimParams;
 
 /// Run a suite and print a comparison summary table under `=== {title} ===`.
-/// The canonical suite passes `title = "summary"` so `bench_out/score.sh`
-/// (which keys on `=== summary`) keeps working.
+/// The canonical suite passes `title = "summary"`; that header string is a
+/// stable anchor for scrapers, so keep it if you edit the output.
 fn run_and_print_recovery(
     suite: &[(&'static str, SimParams)],
     n_runs: usize,
@@ -72,7 +74,7 @@ fn main() {
     run_and_print_recovery(&narrow_suite(), n_runs, tol, "narrow recovery");
 
     // Narrow score discrimination: signal-present vs pure-noise (ROC-AUC).
-    println!("=== narrow score discrimination (AUC, n_pairs={n_runs}) ===");
+    println!("=== narrow score discrimination (AUC, n_seed_pairs={n_runs}) ===");
     println!(
         "  {:<28} {:>7} {:>12} {:>12}",
         "scenario", "AUC", "med+signal", "med-noise"

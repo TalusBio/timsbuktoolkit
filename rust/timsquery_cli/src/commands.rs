@@ -450,7 +450,7 @@ mod tests {
         // Write to a temp file ... while I implement direct reading api
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp_file.path(), ELUTION_GROUP_TEMPLATE).unwrap();
-        let arena = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
+        let arena = read_query_elution_groups(tmp_file.path()).unwrap();
         // mzpaf-parseable labels land in the Mzpaf arena (two template rows).
         match arena {
             LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
@@ -494,7 +494,7 @@ mod tests {
 
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp_file.path(), STRING_LABEL_TEMPLATE).unwrap();
-        let arena = read_query_elution_groups(&tmp_file.path().to_path_buf()).unwrap();
+        let arena = read_query_elution_groups(tmp_file.path()).unwrap();
 
         let geom = match arena {
             LibraryArena::Str { geom } => geom,

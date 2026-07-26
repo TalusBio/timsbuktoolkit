@@ -42,8 +42,8 @@ def _finite(df: pl.DataFrame, col: str) -> np.ndarray:
 def plot_mass_errors(df: pl.DataFrame, out: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
     for ax, col, title in [
-        (axes[0], "ms1_mz_error_0", "MS1 primary m/z error"),
-        (axes[1], "ms2_mz_error_0", "MS2 primary m/z error"),
+        (axes[0], "ms1_mz_errors_0", "MS1 primary m/z error"),
+        (axes[1], "ms2_mz_errors_0", "MS2 primary m/z error"),
     ]:
         vals = _finite(df, col)
         ax.hist(vals, bins=80, color="#3366cc", alpha=0.85)
@@ -64,7 +64,7 @@ def plot_mass_errors(df: pl.DataFrame, out: Path) -> None:
 
 
 def plot_mobility_error(df: pl.DataFrame, out: Path) -> None:
-    vals = _finite(df, "ms1_mobility_error_0")
+    vals = _finite(df, "ms1_mobility_errors_0")
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(vals, bins=80, color="#cc6633", alpha=0.85)
     ax.axvline(
@@ -103,8 +103,8 @@ def plot_rt_vs_mass_error(df: pl.DataFrame, out: Path) -> None:
     rt = df["obs_rt_seconds"].to_numpy()
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
     for ax, col, title in [
-        (axes[0], "ms1_mz_error_0", "MS1"),
-        (axes[1], "ms2_mz_error_0", "MS2"),
+        (axes[0], "ms1_mz_errors_0", "MS1"),
+        (axes[1], "ms2_mz_errors_0", "MS2"),
     ]:
         err = df[col].to_numpy()
         mask = np.isfinite(rt) & np.isfinite(err)

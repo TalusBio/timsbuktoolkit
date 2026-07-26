@@ -1,10 +1,14 @@
 use serde::Serialize;
+// The derive and the trait share a name but live in different namespaces
+// (macro vs type), so both are in scope here unambiguously.
+use timsseek_macros::ScoreBlock;
 
 use super::apex_finding::{
     ApexBlocks,
     PeptideMetadata,
     RelativeIntensityCollector,
 };
+use super::blocks::apex_evidence::ApexEvidence;
 use super::blocks::apex_features::ApexFeatures;
 use super::blocks::counts::{
     ApexCounts,
@@ -22,11 +26,8 @@ use super::blocks::primary::PrimaryScores;
 use super::blocks::relative_intensities::RelativeIntensities;
 use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
-use super::blocks::split_product::SplitProduct;
 use super::blocks::{
-    ColSink,
-    FeatSink,
-    NameSink,
+    SchemaSink,
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
@@ -47,78 +48,57 @@ pub struct FinalizeInputs<'a> {
     pub apex: ApexBlocks,
 }
 
-/// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the four purely-mechanical walks (`push_columns`, `push_features`,
-/// `push_feature_names`, `sample_default`) from that one list. Order is
-/// load-bearing (parquet columns and the positional ML value vector both
-/// follow it), so folding all four from a single ordered source is what makes
-/// their order *impossible* to desync.
+/// Shared scoring fields produced by Phase 3, as a composition of typed
+/// blocks. Each block owns its parquet/ML projections (`columns`, the lane
+/// methods) in one file under [`super::blocks`]; the finalize-stage blocks own
+/// their `compute` there too, while the apex-stage blocks are built in
+/// [`super::apex_finding`].
 ///
-/// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
-/// the mobility-derived blocks participate) stay hand-written below: adding a
-/// block is a two-place edit (this list + `compute`), not five.
-macro_rules! compose_scoring_fields {
-    (
-        $(#[doc = $doc:literal])*
-        pub struct $Name:ident {
-            $( pub $fname:ident : $fty:ty ),* $(,)?
-        }
-    ) => {
-        $(#[doc = $doc])*
-        #[derive(Debug, Clone, Serialize)]
-        pub struct $Name {
-            $( pub $fname : $fty ),*
-        }
-
-        impl $Name {
-            /// Emit every block's Parquet columns, in the composition order.
-            pub fn push_columns(&self, o: &mut ColSink) {
-                $( self.$fname.columns(o); )*
-            }
-
-            /// Emit every block's direct ML feature *values* (not the
-            /// cross-field derived ones, nor the conditional sequence block).
-            pub fn push_features(&self, o: &mut FeatSink) {
-                $( self.$fname.features(o); )*
-            }
-
-            /// Emit every block's ML feature *names*, in the same order as
-            /// [`Self::push_features`] (set-level; no `&self`).
-            pub fn push_feature_names(o: &mut NameSink) {
-                $( <$fty as ScoreBlock>::feature_names(o); )*
-            }
-
-            /// Fixture using the placeholder peptide from [`Identity::sample`].
-            pub fn sample_default() -> Self {
-                Self {
-                    $( $fname : <$fty>::sample() ),*
-                }
-            }
-        }
-    };
-}
-
-compose_scoring_fields! {
-    /// Shared scoring fields produced by Phase 3, as a composition of typed
-    /// blocks. Each block owns its parquet/ML projections (`columns`,
-    /// `features`) in one file under [`super::blocks`]; the finalize-stage
-    /// blocks own their `compute` there too, while the apex-stage blocks are
-    /// built in [`super::apex_finding`].
-    pub struct ScoringFields {
-        pub identity: Identity,
-        pub rt: Rt,
-        pub mobility: Mobility,
-        pub primary: PrimaryScores,
-        pub split: SplitProduct,
-        pub features: ApexFeatures,
-        pub apex_lazy: ApexLazyScores,
-        pub secondary_lazy: SecondaryLazyScores,
-        pub counts: ApexCounts,
-        pub finalize_counts: FinalizeCounts,
-        pub intensities: Intensities,
-        pub ion_errors: IonErrors,
-        pub rel_intensities: RelativeIntensities,
-    }
+/// The `#[block]` fields make this a DELEGATING `#[derive(ScoreBlock)]`: the
+/// same derive that projects a leaf block's `#[feat(...)]` scalars walks this
+/// list to emit the composed struct's Parquet columns/schema, its two lane
+/// value arrays and their name walks, and `sample_default`. Field order is
+/// load-bearing — parquet column order and the positional ML value vector both
+/// follow it — so folding every walk out of the one declaration order is what
+/// makes them *impossible* to desync.
+///
+/// The lane widths compose the same way the values do: `LINEAR_LEN` is the sum
+/// of the blocks' own inherent `LINEAR_LEN` consts, so the composed lane array
+/// is `[f64; N]` with `N` known at compile time and no runtime length
+/// bookkeeping anywhere below it.
+///
+/// [`Self::compute`] (per-block dep signatures vary) and
+/// [`Self::neutralize_mobility`] (only the mobility-derived blocks
+/// participate) stay hand-written below: adding a block is a two-place edit
+/// (this list + `compute`), not five.
+#[derive(Debug, Clone, Serialize, ScoreBlock)]
+pub struct ScoringFields {
+    #[block]
+    pub identity: Identity,
+    #[block]
+    pub rt: Rt,
+    #[block]
+    pub mobility: Mobility,
+    #[block]
+    pub primary: PrimaryScores,
+    #[block]
+    pub evidence: ApexEvidence,
+    #[block]
+    pub features: ApexFeatures,
+    #[block]
+    pub apex_lazy: ApexLazyScores,
+    #[block]
+    pub secondary_lazy: SecondaryLazyScores,
+    #[block]
+    pub counts: ApexCounts,
+    #[block]
+    pub finalize_counts: FinalizeCounts,
+    #[block]
+    pub intensities: Intensities,
+    #[block]
+    pub ion_errors: IonErrors,
+    #[block]
+    pub rel_intensities: RelativeIntensities,
 }
 
 impl ScoringFields {
@@ -130,7 +110,7 @@ impl ScoringFields {
             rt: Rt::compute(inp.metadata, obs_rt_seconds),
             mobility: Mobility::compute(inp.offsets),
             primary: inp.apex.primary,
-            split: inp.apex.split,
+            evidence: inp.apex.evidence,
             features: inp.apex.features,
             apex_lazy: inp.apex.apex_lazy,
             secondary_lazy: SecondaryLazyScores::from(inp.secondary_lazy),
@@ -205,6 +185,7 @@ pub struct FinalResult {
 
 impl FinalResult {
     /// Schema/test fixture with zeroed meta fields.
+    #[cfg(test)]
     pub fn sample() -> Self {
         Self {
             scoring: ScoringFields::sample_default(),
@@ -223,6 +204,13 @@ impl FinalResult {
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
+    }
+
+    /// Value-free Parquet schema: scoring blocks (composition order) then the
+    /// post-model meta block — mirrors `emit_row`'s column order exactly.
+    pub fn column_schema(o: &mut SchemaSink) {
+        <ScoringFields as ScoreBlock>::column_schema(o);
+        <ResultMeta as ScoreBlock>::column_schema(o);
     }
 }
 

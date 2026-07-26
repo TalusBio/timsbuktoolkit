@@ -53,7 +53,7 @@ impl std::error::Error for DuplicateKeyError {}
 /// # Invariants
 ///
 /// Keys within each field must be unique. [`linear_get`] and
-/// [`ExpectedIntensities::remove_fragment`]/[`remove_precursor`] return only
+/// [`ExpectedIntensities::remove_fragment`]/`remove_precursor` return only
 /// the first match; a duplicate silently hides data. All construction paths
 /// go through [`ExpectedIntensities::try_from_pairs`] which enforces this.
 /// Direct struct-literal construction bypasses the check — avoid it outside

@@ -1,17 +1,18 @@
 //! Apex-features family: the 11 apex-local features.
 //!
-//! Owns its whole lifecycle in this file: the macro-generated struct +
-//! projection ([`crate::score_block!`], all 11 fields `#[raw]`), the compute
-//! (`compute_apex_features`, run at the apex stage while the chromatogram
-//! buffers are live), and the final weighted score (`compute_weighted_score`).
+//! Owns its whole lifecycle in this file: the derive-generated struct +
+//! projection (`#[derive(ScoreBlock)]`, all 11 fields `#[feat(raw)]`), the
+//! compute (`compute_apex_features`, run at the apex stage while the
+//! chromatogram buffers are live), and the final weighted score
+//! (`compute_weighted_score`).
 //! Reusable numeric primitives it leans on live in `crate::scoring::apex_dsp`.
 
 use timsquery::models::MzMajorIntensityArray;
 use timsquery::traits::KeyLike;
+use timsseek_macros::ScoreBlock;
 
 use crate::models::ExpectedIntensities;
 use crate::models::query_item::linear_get;
-use crate::score_block;
 use crate::scoring::apex_dsp::{
     argmax,
     build_gaussian_reference,
@@ -19,22 +20,32 @@ use crate::scoring::apex_dsp::{
     pearson_correlation,
 };
 
-score_block! {
-    /// The 11 apex-local features.
-    /// Stage: apex (computed while chromatogram buffers are live).
-    pub struct ApexFeatures {
-        #[raw] pub peak_shape: f32,
-        #[raw] pub ratio_cv: f32,
-        #[raw] pub centered_apex: f32,
-        #[raw] pub precursor_coelution: f32,
-        #[raw] pub fragment_coverage: f32,
-        #[raw] pub precursor_apex_match: f32,
-        #[raw] pub xic_quality: f32,
-        #[raw] pub fragment_apex_agreement: f32,
-        #[raw] pub isotope_correlation: f32,
-        #[raw] pub gaussian_correlation: f32,
-        #[raw] pub per_frag_gaussian_corr: f32,
-    }
+/// The 11 apex-local features.
+/// Stage: apex (computed while chromatogram buffers are live).
+#[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
+pub struct ApexFeatures {
+    #[feat(raw)]
+    pub peak_shape: f32,
+    #[feat(raw)]
+    pub ratio_cv: f32,
+    #[feat(raw)]
+    pub centered_apex: f32,
+    #[feat(raw)]
+    pub precursor_coelution: f32,
+    #[feat(raw)]
+    pub fragment_coverage: f32,
+    #[feat(raw)]
+    pub precursor_apex_match: f32,
+    #[feat(raw)]
+    pub xic_quality: f32,
+    #[feat(raw)]
+    pub fragment_apex_agreement: f32,
+    #[feat(raw)]
+    pub isotope_correlation: f32,
+    #[feat(raw)]
+    pub gaussian_correlation: f32,
+    #[feat(raw)]
+    pub per_frag_gaussian_corr: f32,
 }
 
 /// Compute all 11 apex-local features at the apex.

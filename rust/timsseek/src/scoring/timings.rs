@@ -6,7 +6,7 @@
 //!
 //! Two helpers reduce timing boilerplate:
 //!
-//! - [`timed!`] — times a block and accumulates elapsed into a `Duration` field.
+//! - `timed!` — times a block and accumulates elapsed into a `Duration` field.
 //! - [`TimedStep`] — progressive CLI output: prints a label immediately, then
 //!   appends elapsed time when the work finishes. Re-exported from
 //!   [`timscentroid::TimedStep`].

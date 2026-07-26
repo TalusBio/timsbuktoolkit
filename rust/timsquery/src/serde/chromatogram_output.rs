@@ -8,6 +8,10 @@ use timscentroid::rt_mapping::{
     RTIndex, // Trait needed for the index method.
 };
 
+/// Shape produced by the nested `unzip` over the collector's fragments:
+/// `((fragment m/z, per-fragment intensity traces), fragment labels)`.
+type UnzippedFragmentTraces = ((Vec<f64>, Vec<Vec<f32>>), Vec<String>);
+
 /// Represents the output format for an aggregated chromatogram
 /// It is pretty ugly performance-wise but I am keeping it as is because
 /// we are meant to have only one for the whole runtime of the viewer.
@@ -100,27 +104,25 @@ impl ChromatogramOutput {
         let non_zero_min_idx = local_non_zero_min_idx + collector.cycle_offset();
         let non_zero_max_idx = local_non_zero_max_idx + collector.cycle_offset();
 
-        let ((fragment_mzs, fragment_intensities), fragment_labels): (
-            (Vec<f64>, Vec<Vec<f32>>),
-            Vec<String>,
-        ) = collector
-            .iter_mut_fragments()
-            .filter_map(|(&(ref idx, mz), cmg)| {
-                let out_slc = cmg
-                    .try_get_slice(non_zero_min_idx, non_zero_max_idx + 1)
-                    .expect("Failed to get slice from chromatogram");
-                if out_slc.iter().all(|&x| x == 0.0) {
-                    return None;
-                }
-                let out_vec = out_slc.to_vec();
-                Some(Ok::<_, crate::errors::DataProcessingError>((
-                    (mz, out_vec),
-                    format!("{}", idx),
-                )))
-            })
-            .collect::<Result<Vec<_>, crate::errors::DataProcessingError>>()?
-            .into_iter()
-            .unzip();
+        let ((fragment_mzs, fragment_intensities), fragment_labels): UnzippedFragmentTraces =
+            collector
+                .iter_mut_fragments()
+                .filter_map(|(&(ref idx, mz), cmg)| {
+                    let out_slc = cmg
+                        .try_get_slice(non_zero_min_idx, non_zero_max_idx + 1)
+                        .expect("Failed to get slice from chromatogram");
+                    if out_slc.iter().all(|&x| x == 0.0) {
+                        return None;
+                    }
+                    let out_vec = out_slc.to_vec();
+                    Some(Ok::<_, crate::errors::DataProcessingError>((
+                        (mz, out_vec),
+                        format!("{}", idx),
+                    )))
+                })
+                .collect::<Result<Vec<_>, crate::errors::DataProcessingError>>()?
+                .into_iter()
+                .unzip();
 
         Ok(ChromatogramOutput {
             id: collector.id,

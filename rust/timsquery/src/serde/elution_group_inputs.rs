@@ -41,7 +41,7 @@ impl<T: KeyLike> ElutionGroupInput<T> {
 
     pub fn try_fill_labels_u8(self) -> Result<ElutionGroupInput<u8>, ElutionGroupInputError> {
         let num_fragments = self.fragments.len();
-        if let Some(_) = self.fragment_labels {
+        if self.fragment_labels.is_some() {
             return Err(ElutionGroupInputError::AlreadyHasFragmentLabels);
         }
         let fragment_labels: Vec<u8> = (0..num_fragments).map(|i| i as u8).collect();

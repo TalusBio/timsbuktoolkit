@@ -501,6 +501,9 @@ fn xxyys_to_geometry(xxyys: &[(f64, f64, f64, f64)]) -> MultiPolygon<f64> {
 mod tests {
     use super::*;
 
+    /// A query box for intersection tests: `((mz_low, mz_high), (im_low, im_high))`.
+    type MzImQuery = ((f64, f64), (f64, f64));
+
     fn dummy_ims_converter(x: f64) -> f64 {
         // They go in inverted order from 0 == 1.5
         // to 708 == 0.5
@@ -645,7 +648,7 @@ mod tests {
         let quad: QuadrupoleIsolationScheme = serde_json::from_str(v1_json).unwrap();
         let v1: QuadrupoleIsolationSchemeV1 = serde_json::from_str(v1_json).unwrap();
         let mp = &v1.inner;
-        let cases: &[((f64, f64), (f64, f64))] = &[
+        let cases: &[MzImQuery] = &[
             ((980.0, 990.0), (1.2, 1.3)),
             ((970.0, 980.0), (1.18, 1.19)),
             ((850.0, 900.0), (1.2, 1.3)),

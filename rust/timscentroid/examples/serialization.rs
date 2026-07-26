@@ -35,8 +35,10 @@ fn main() {
     println!("Config: {:#?}", centroiding_config);
 
     let start_centroid = std::time::Instant::now();
-    let (index_original, index_stats) =
-        IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(centroiding_config));
+    let (index_original, index_stats) = IndexedTimstofPeaks::from_timstof_file(
+        &file,
+        IndexingCentroidingConfig::uniform(centroiding_config),
+    );
     let centroid_time = start_centroid.elapsed();
 
     println!("Indexing Stats: {}", index_stats);
@@ -89,10 +91,10 @@ fn main() {
 fn compare_results(index_original: &IndexedTimstofPeaks, index_loaded: &IndexedTimstofPeaks) {
     // Test querying on both to ensure functional equivalence
     println!("\n=== Query Test (Original) ===");
-    let original_result = test_querying(&index_original);
+    let original_result = test_querying(index_original);
 
     println!("\n=== Query Test (Loaded) ===");
-    let loaded_result = test_querying(&index_loaded);
+    let loaded_result = test_querying(index_loaded);
 
     println!("\n=== Query Result Comparison ===");
     println!(

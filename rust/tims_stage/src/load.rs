@@ -22,8 +22,8 @@ use timscentroid::reader::{
     local_uri,
 };
 use timscentroid::{
-    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
     StorageProvider,
 };
 

@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn test_edge_mutate() {
         let result = edge_mutate("PEPTIDEK");
-        assert_eq!(result.chars().nth(0).unwrap(), 'P'); // first preserved
+        assert_eq!(result.chars().next().unwrap(), 'P'); // first preserved
         assert_ne!(result.chars().nth(1).unwrap(), 'E'); // mutated
         assert_eq!(result.chars().last().unwrap(), 'K'); // last preserved
         // E maps to D in MUTATE_TABLE (from "GAVLIFMPWSCTYHKRQEND" → "LLLVVLLLLTSSSSLLNDQE",

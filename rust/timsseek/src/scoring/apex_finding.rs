@@ -36,6 +36,11 @@ use crate::errors::DataProcessingError;
 use crate::models::ExpectedIntensities;
 use crate::models::sequence::Peptide;
 use crate::scoring::apex_dsp::SCRIBE_FLOOR;
+use crate::scoring::blocks::apex_evidence::{
+    ApexEvidence,
+    CoelutionScratch,
+    compute_apex_evidence,
+};
 use crate::scoring::blocks::apex_features::{
     ApexFeatures,
     compute_apex_features,
@@ -45,11 +50,6 @@ use crate::scoring::blocks::counts::ApexCounts;
 use crate::scoring::blocks::intensities::Intensities;
 use crate::scoring::blocks::lazy::ApexLazyScores;
 use crate::scoring::blocks::primary::PrimaryScores;
-use crate::scoring::blocks::split_product::{
-    CoelutionScratch,
-    SplitProduct,
-    compute_split_product,
-};
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
 use timsquery::models::aggregators::ChromatogramCollector;
@@ -70,7 +70,6 @@ use timsquery::{
 pub struct CandidateContext<T: KeyLike, L: Display> {
     /// The peptide sequence and modification information.
     pub label: L,
-    /// The precursor charge state.
     pub charge: u8,
     /// The expected theoretical intensities of precursor and fragment ions.
     pub expected_intensities: ExpectedIntensities<T>,
@@ -82,15 +81,14 @@ pub struct CandidateContext<T: KeyLike, L: Display> {
 ///
 /// This separates identity/reference information from the scoring data,
 /// making the scoring pipeline cleaner and more efficient.
+/// TODO: make generic digest info
 #[derive(Debug, Clone)]
 pub struct PeptideMetadata {
     /// The peptide sequence and modification information.
     pub digest: Peptide,
 
-    /// The precursor charge state.
     pub charge: u8,
 
-    /// Library identifier for this peptide.
     pub library_id: u32,
 
     /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).
@@ -124,6 +122,8 @@ pub struct Extraction<T: KeyLike> {
 /// Contains only the apex location and a basic score for calibrant ranking.
 #[derive(Debug, Clone, Copy)]
 pub struct ApexLocation {
+    // TODO: FIXME: this struct is redundant (and could be just passed as a
+    // score block)
     /// Basic score (apex profile peak value) for ranking.
     pub score: f32,
     /// Retention time at the apex (ms).
@@ -146,7 +146,7 @@ pub struct ApexBlocks {
     /// Retention time at the apex (ms). Also the secondary-query bridge input.
     pub retention_time_ms: u32,
 
-    pub split: SplitProduct,
+    pub evidence: ApexEvidence,
     pub features: ApexFeatures,
     pub primary: PrimaryScores,
     pub counts: ApexCounts,
@@ -382,7 +382,7 @@ impl TraceScorer {
 
     /// Stage B: Suggest best apex from precomputed traces.
     /// Pure peak-pick on apex_profile — O(cycles). Truly cheap.
-    /// Returns apex_profile[max_loc] as the ranking score.
+    /// Returns `apex_profile[max_loc]` as the ranking score.
     pub fn suggest_apex(
         &self,
         rt_mapper: &dyn Fn(usize) -> u32,
@@ -407,7 +407,7 @@ impl TraceScorer {
         let retention_time_ms = rt_mapper(max_loc + cycle_offset);
 
         Ok(ApexLocation {
-            score: max_val, // apex_profile peak value, NOT split_product
+            score: max_val, // apex_profile peak value, NOT apex_evidence
             retention_time_ms,
             apex_cycle: max_loc,
             rising_cycles,
@@ -415,20 +415,16 @@ impl TraceScorer {
         })
     }
 
-    /// Stage C: Compute full score at a given cycle index.
-    /// Uses precomputed traces and cached profiles.
-    /// `suggested` provides peak context for delta/baseline calculations.
-    pub fn score_at<T: KeyLike>(
-        &mut self, // needs &mut for PeakPicker on traces
-        scoring_ctx: &Extraction<T>,
-        cycle: usize,
-        suggested: &ApexLocation,
-        rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexBlocks, DataProcessingError> {
-        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
-
-        // Split product using cached profiles
-        let split_product = compute_split_product(
+    /// Stage B': the window-global apex evidence. Cycle-invariant, so it is
+    /// computed ONCE per extraction and handed to [`Self::score_at`] — sweeping
+    /// `score_at` across cycles would otherwise redo four full-slice passes
+    /// (2x argmax, 2x `area_uniqueness` total-sum) per cycle, making the sweep
+    /// O(cycles^2). Needs `&mut self` only for `coel_scratch` reuse.
+    /// Thin wrapper over
+    /// [`crate::scoring::blocks::apex_evidence::compute_apex_evidence`],
+    /// binding the profiles and scratch this scorer already owns.
+    pub fn apex_evidence<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) -> ApexEvidence {
+        compute_apex_evidence(
             &self.cosine_profile,
             &self.scribe_profile,
             &scoring_ctx.chromatograms.fragments,
@@ -437,7 +433,25 @@ impl TraceScorer {
                 .fragment_intensities
                 .as_slice(),
             &mut self.coel_scratch,
-        );
+        )
+    }
+
+    /// Stage C: Compute full score at a given cycle index.
+    /// Uses precomputed traces, cached profiles, and the extraction-global
+    /// `evidence` from [`Self::apex_evidence`].
+    /// `suggested` provides peak context for delta/baseline calculations.
+    ///
+    /// Takes `&self`: everything here is cycle-local, so a caller may sweep
+    /// every cycle off one `compute_traces` + one `apex_evidence`.
+    pub fn score_at<T: KeyLike>(
+        &self,
+        scoring_ctx: &Extraction<T>,
+        evidence: &ApexEvidence,
+        cycle: usize,
+        suggested: &ApexLocation,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<ApexBlocks, DataProcessingError> {
+        let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
 
         // Delta scores: compare apex_profile[cycle] against global 2nd/3rd peaks
         let mut peak_picker = PeakPicker::new(&self.traces.apex_profile);
@@ -475,7 +489,7 @@ impl TraceScorer {
             n_cycles,
         );
 
-        let score = compute_weighted_score(split_product.base_score, &features);
+        let score = compute_weighted_score(evidence.apex_evidence, &features);
         let retention_time_ms = rt_mapper(effective_apex + cycle_offset);
 
         // Intensity sums at effective apex
@@ -503,7 +517,7 @@ impl TraceScorer {
         Ok(ApexBlocks {
             joint_apex_cycle: effective_apex,
             retention_time_ms,
-            split: SplitProduct::from(&split_product),
+            evidence: *evidence,
             features,
             primary: PrimaryScores {
                 main_score: score,
@@ -555,7 +569,8 @@ impl TraceScorer {
         self.compute_traces(scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let loc = self.suggest_apex(rt_mapper, cycle_offset)?;
-        self.score_at(scoring_ctx, loc.apex_cycle, &loc, rt_mapper)
+        let evidence = self.apex_evidence(scoring_ctx);
+        self.score_at(scoring_ctx, &evidence, loc.apex_cycle, &loc, rt_mapper)
     }
 
     /// Single-pass scoring: cosine (sqrt-transformed), scribe, lazyscore,

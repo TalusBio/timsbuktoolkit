@@ -1,6 +1,30 @@
-use clap::Parser;
+use clap::{
+    Parser,
+    ValueEnum,
+};
 use std::path::PathBuf;
 use timsseek::DecoyPolicy;
+use timsseek::ml::RescoreModel;
+
+/// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
+/// trait, so it cannot be implemented for the lib-owned type from this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum CliRescoreModel {
+    Gbm,
+    Lda,
+    Hybrid,
+}
+
+impl From<CliRescoreModel> for RescoreModel {
+    fn from(v: CliRescoreModel) -> Self {
+        match v {
+            CliRescoreModel::Gbm => RescoreModel::Gbm,
+            CliRescoreModel::Lda => RescoreModel::Lda,
+            CliRescoreModel::Hybrid => RescoreModel::Hybrid,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -57,6 +81,10 @@ pub struct Cli {
     /// - never: Use library as-is without decoy generation
     #[arg(long, value_name = "STRATEGY")]
     pub decoy_strategy: Option<DecoyPolicy>,
+
+    /// Rescore model; overrides the config file.
+    #[arg(long, value_enum)]
+    pub rescore_model: Option<CliRescoreModel>,
 
     /// Print the default TOML configuration to stdout and exit.
     #[arg(long, conflicts_with = "write_default_config")]

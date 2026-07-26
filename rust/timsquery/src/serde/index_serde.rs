@@ -109,8 +109,8 @@
 //! ```
 
 use crate::{
-    IndexingCentroidingConfig,
     IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
 };
 use std::path::{
     Path,
@@ -543,9 +543,7 @@ impl TimsIndexReader {
         }
 
         // Build via the shared registry core (sniff-first; TDF, mzML, ...).
-        let centroiding_config = self
-            .centroiding_config
-            .unwrap_or_else(IndexingCentroidingConfig::default);
+        let centroiding_config = self.centroiding_config.unwrap_or_default();
         info!("Starting centroiding + load of the raw data (might take a min)");
         let path_str = path.to_str().ok_or_else(|| {
             crate::errors::DataReadingError::RawReadError(format!("non-UTF-8 path: {path:?}"))

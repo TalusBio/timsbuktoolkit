@@ -1,6 +1,6 @@
 //! Reusable numeric primitives for apex-local scoring. These carry no scoring
 //! semantics — they are the shared math toolkit that the apex-stage score
-//! families ([`blocks::apex_features`], [`blocks::split_product`]) build on.
+//! families ([`blocks::apex_features`], [`blocks::apex_evidence`]) build on.
 //! Score-specific building blocks (area-uniqueness, coelution-gradient, the
 //! weighted-score weights) live in their own family file, not here.
 

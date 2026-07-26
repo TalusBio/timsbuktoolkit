@@ -151,11 +151,11 @@ fn sweep_stale(root: &Path, age_hours: u64) -> Result<(), StageError> {
             }
             continue;
         }
-        if let Some(mt) = mtime {
-            if mt < threshold {
-                tracing::info!(?path, "sweeping stale tempdir");
-                let _ = std::fs::remove_dir_all(&path);
-            }
+        if let Some(mt) = mtime
+            && mt < threshold
+        {
+            tracing::info!(?path, "sweeping stale tempdir");
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
     Ok(())

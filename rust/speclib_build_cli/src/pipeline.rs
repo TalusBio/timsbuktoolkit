@@ -279,10 +279,10 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         Some(tf)
     } else {
         // Ensure parent directory exists for local output.
-        if let Some(parent) = std::path::Path::new(output_uri).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = std::path::Path::new(output_uri).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         None
     };

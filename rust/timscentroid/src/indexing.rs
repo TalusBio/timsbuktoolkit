@@ -45,6 +45,13 @@ use crate::centroiding::{
 };
 use crate::geometry::QuadrupoleIsolationScheme;
 
+/// MS2 peak groups keyed by the DIA isolation window that produced them,
+/// one entry per distinct quadrupole isolation scheme in the run.
+type Ms2WindowGroups = Vec<(
+    QuadrupoleIsolationScheme,
+    IndexedPeakGroup<WindowCycleIndex>,
+)>;
+
 // Context numbers:
 // 15_241 - number of frames in a 22 min run
 // ~ 1694 per window group
@@ -370,16 +377,7 @@ impl IndexedTimstofPeaks {
         frame_reader: &FrameReader,
         metadata: &Metadata,
         centroiding_config: CentroidingConfig,
-    ) -> Result<
-        (
-            Vec<(
-                QuadrupoleIsolationScheme,
-                IndexedPeakGroup<WindowCycleIndex>,
-            )>,
-            IndexedPeakGroupBuildingStats,
-        ),
-        (),
-    > {
+    ) -> Result<(Ms2WindowGroups, IndexedPeakGroupBuildingStats), ()> {
         let windows = frame_reader.dia_windows.as_ref().ok_or(())?;
         let mut out = Vec::with_capacity(windows.len());
         let mut out_stats: Option<IndexedPeakGroupBuildingStats> = None;
@@ -1808,7 +1806,11 @@ mod tests {
             out.sort_by(|a, b| {
                 a.mz.total_cmp(&b.mz)
                     .then(a.cycle_index.as_u32().cmp(&b.cycle_index.as_u32()))
-                    .then(a.mobility_ook0.to_f32().total_cmp(&b.mobility_ook0.to_f32()))
+                    .then(
+                        a.mobility_ook0
+                            .to_f32()
+                            .total_cmp(&b.mobility_ook0.to_f32()),
+                    )
                     .then(a.intensity.total_cmp(&b.intensity))
             });
             out

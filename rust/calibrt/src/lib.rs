@@ -418,90 +418,6 @@ impl CalibrationState {
     }
 }
 
-#[cfg(test)]
-mod calibration_state_tests {
-    use super::*;
-
-    #[test]
-    fn test_update_fit_cycle() {
-        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-        let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = (0..10)
-            .map(|i| {
-                let v = (i as f64) * 10.0 + 5.0;
-                (LibraryRT(v), ObservedRTSeconds(v), 1.0)
-            })
-            .collect();
-
-        state.update(points.into_iter()).unwrap();
-        assert!(state.is_stale());
-
-        state.fit();
-        assert!(!state.is_stale());
-        assert!(state.curve().is_some());
-
-        let curve = state.curve().unwrap();
-        let pred = curve.predict(LibraryRT(50.0)).unwrap();
-        assert!(
-            (pred.0 - 50.0).abs() < 5.0,
-            "predicted {} expected ~50.0",
-            pred.0
-        );
-    }
-
-    #[test]
-    fn test_reset_clears_state() {
-        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-        let points = vec![
-            (LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0),
-            (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0),
-        ];
-        state.update(points.into_iter()).unwrap();
-        state.fit();
-        assert!(state.curve().is_some());
-
-        state.reset();
-        assert!(state.curve().is_none());
-        assert!(state.path_indices().is_empty());
-        assert!(!state.is_stale());
-    }
-
-    #[test]
-    fn test_refit_after_reset_update() {
-        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-
-        // First fit: y = x
-        let points1: Vec<_> = (0..10)
-            .map(|i| {
-                (
-                    LibraryRT((i as f64) * 10.0 + 5.0),
-                    ObservedRTSeconds((i as f64) * 10.0 + 5.0),
-                    1.0,
-                )
-            })
-            .collect();
-        state.update(points1.into_iter()).unwrap();
-        state.fit();
-        let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
-
-        // Reset and refit: y = 2x
-        state.reset();
-        let points2: Vec<_> = (0..10)
-            .map(|i| {
-                (
-                    LibraryRT((i as f64) * 10.0 + 5.0),
-                    ObservedRTSeconds((i as f64) * 20.0 + 5.0),
-                    1.0,
-                )
-            })
-            .collect();
-        state.update(points2.into_iter()).unwrap();
-        state.fit();
-        let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
-
-        assert!((curve2_pred.0 - curve1_pred.0).abs() > 10.0);
-    }
-}
-
 /// Computes the min and max values from an iterator of f64 values.
 ///
 /// # Returns
@@ -636,4 +552,88 @@ pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve,
     let y_range = compute_range(points.iter().map(|p| p.observed))?;
 
     calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
+}
+
+#[cfg(test)]
+mod calibration_state_tests {
+    use super::*;
+
+    #[test]
+    fn test_update_fit_cycle() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+        let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = (0..10)
+            .map(|i| {
+                let v = (i as f64) * 10.0 + 5.0;
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0)
+            })
+            .collect();
+
+        state.update(points.into_iter()).unwrap();
+        assert!(state.is_stale());
+
+        state.fit();
+        assert!(!state.is_stale());
+        assert!(state.curve().is_some());
+
+        let curve = state.curve().unwrap();
+        let pred = curve.predict(LibraryRT(50.0)).unwrap();
+        assert!(
+            (pred.0 - 50.0).abs() < 5.0,
+            "predicted {} expected ~50.0",
+            pred.0
+        );
+    }
+
+    #[test]
+    fn test_reset_clears_state() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+        let points = vec![
+            (LibraryRT(25.0), ObservedRTSeconds(25.0), 1.0),
+            (LibraryRT(75.0), ObservedRTSeconds(75.0), 1.0),
+        ];
+        state.update(points.into_iter()).unwrap();
+        state.fit();
+        assert!(state.curve().is_some());
+
+        state.reset();
+        assert!(state.curve().is_none());
+        assert!(state.path_indices().is_empty());
+        assert!(!state.is_stale());
+    }
+
+    #[test]
+    fn test_refit_after_reset_update() {
+        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
+
+        // First fit: y = x
+        let points1: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    LibraryRT((i as f64) * 10.0 + 5.0),
+                    ObservedRTSeconds((i as f64) * 10.0 + 5.0),
+                    1.0,
+                )
+            })
+            .collect();
+        state.update(points1.into_iter()).unwrap();
+        state.fit();
+        let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
+
+        // Reset and refit: y = 2x
+        state.reset();
+        let points2: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    LibraryRT((i as f64) * 10.0 + 5.0),
+                    ObservedRTSeconds((i as f64) * 20.0 + 5.0),
+                    1.0,
+                )
+            })
+            .collect();
+        state.update(points2.into_iter()).unwrap();
+        state.fit();
+        let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
+
+        assert!((curve2_pred.0 - curve1_pred.0).abs() > 10.0);
+    }
 }

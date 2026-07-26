@@ -4,7 +4,6 @@ use calibrt::{
     calibrate,
 };
 use rand::Rng;
-use tracing_subscriber;
 
 fn setup_tracing() {
     let _ = tracing_subscriber::fmt()

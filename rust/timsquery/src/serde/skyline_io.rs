@@ -161,10 +161,8 @@ fn strip_modifications(modified_seq: &str) -> String {
     for ch in modified_seq.chars() {
         match ch {
             '[' | '(' | '{' => depth += 1,
-            ']' | ')' | '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ']' | ')' | '}' if depth > 0 => {
+                depth -= 1;
             }
             _ if depth == 0 => out.push(ch),
             _ => {}
