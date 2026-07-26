@@ -220,7 +220,7 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     let nan_count = score.iter().filter(|v| !v.is_finite()).count();
     let (hist, dropped) = column_hist(app, &score);
     let title = format!(
-        "discriminant_score [{}] (dropped {dropped}, NaN {nan_count})",
+        "discriminant_score [{}] (dropped {dropped}, of which {nan_count} non-finite)",
         app.x().label()
     );
     draw_hist(frame, chunks[1], &title, &hist, app.y(), "score");
@@ -234,8 +234,8 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
+    let curve = app.qvalue_curve();
     let view = app.view();
-    let curve = curves::qvalue_curve(&view.qvalue, &view.is_target, 100);
     let n_targets = view.is_target.iter().filter(|&&t| t).count() as f64;
     let ymax = if n_targets > 0.0 { n_targets } else { 1.0 };
 
@@ -285,8 +285,7 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Target-vs-decoy PP plot (empirical CDF of one against the other) with the
 /// y = x reference line.
 fn draw_calibration(frame: &mut Frame, app: &mut App, area: Rect) {
-    let view = app.view();
-    let curve = curves::pp_curve(&view.score, &view.is_target, 200);
+    let curve = app.pp_curve();
     if curve.is_empty() {
         frame.render_widget(
             Paragraph::new("PP plot needs both targets and decoys")
@@ -400,7 +399,7 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
             let nan_count = values.iter().filter(|v| !v.is_finite()).count();
             let (hist, dropped) = column_hist(app, &values);
             let title = format!(
-                "{name} [{}] (dropped {dropped}, NaN {nan_count})",
+                "{name} [{}] (dropped {dropped}, of which {nan_count} non-finite)",
                 app.x().label()
             );
             draw_hist(frame, chunks[1], &title, &hist, app.y(), &name);

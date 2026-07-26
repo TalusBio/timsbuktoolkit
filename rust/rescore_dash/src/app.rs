@@ -1,6 +1,7 @@
 //! Dashboard state: which tab, which feature, which transforms, and the key
 //! bindings that move between them. Rendering lives in [`crate::ui`].
 
+use crate::curves;
 use crate::stats::{
     self,
     FeatureSummary,
@@ -107,6 +108,12 @@ pub struct App<'a> {
     /// Position within `visible`, not a feature index.
     cursor: usize,
     cache: HashMap<usize, FeatureSummary>,
+    /// Targets-passing-vs-q-value curve, cached: it depends only on
+    /// `view.qvalue`/`view.is_target`, neither of which ever changes, so it is
+    /// worth computing once rather than re-sorting on every keystroke.
+    qvalue_curve: Option<Vec<(f64, f64)>>,
+    /// Decoy/target PP curve, cached for the same reason.
+    pp_curve: Option<Vec<(f64, f64)>>,
 }
 
 impl<'a> App<'a> {
@@ -124,6 +131,8 @@ impl<'a> App<'a> {
             visible: Vec::new(),
             cursor: 0,
             cache: HashMap::new(),
+            qvalue_curve: None,
+            pp_curve: None,
         };
         app.refresh_visible();
         app
@@ -186,6 +195,26 @@ impl<'a> App<'a> {
         let s = stats::summarize(column.iter().copied(), &self.view.is_target);
         self.cache.insert(j, s);
         s
+    }
+
+    /// Targets-passing-vs-q-value curve, computed on first access and
+    /// cached, since `curves::qvalue_curve` sorts its input and neither
+    /// `view.qvalue` nor `view.is_target` ever changes. Fixed at 100 points,
+    /// matching the FDR panel's original per-frame call.
+    pub fn qvalue_curve(&mut self) -> Vec<(f64, f64)> {
+        self.qvalue_curve
+            .get_or_insert_with(|| {
+                curves::qvalue_curve(&self.view.qvalue, &self.view.is_target, 100)
+            })
+            .clone()
+    }
+
+    /// Decoy/target PP curve, computed on first access and cached. Fixed at
+    /// 200 points, matching the calibration panel's original per-frame call.
+    pub fn pp_curve(&mut self) -> Vec<(f64, f64)> {
+        self.pp_curve
+            .get_or_insert_with(|| curves::pp_curve(&self.view.score, &self.view.is_target, 200))
+            .clone()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Flow {
@@ -514,6 +543,40 @@ mod tests {
         assert_eq!(s.target_mean, 2.0, "rows 0 and 2 are targets: (1+3)/2");
         assert_eq!(s.decoy_mean, 2.0);
         assert_eq!(app.summary(0), s, "second call returns the cached value");
+    }
+
+    /// The FDR and PP curves sort their inputs, so they must be computed once
+    /// per session rather than once per frame. `qvalue_curve`/`pp_curve` don't
+    /// depend on any transform, clip, filter, or selection state, so a second
+    /// call must both return the same data and leave the cache field filled
+    /// rather than recomputing.
+    #[test]
+    fn qvalue_curve_is_cached() {
+        let v = view();
+        let mut app = App::new(&v);
+        assert!(
+            app.qvalue_curve.is_none(),
+            "not computed until first access"
+        );
+
+        let first = app.qvalue_curve();
+        assert!(app.qvalue_curve.is_some(), "cached after the first access");
+
+        let second = app.qvalue_curve();
+        assert_eq!(first, second, "cached data is returned, not recomputed");
+    }
+
+    #[test]
+    fn pp_curve_is_cached() {
+        let v = view();
+        let mut app = App::new(&v);
+        assert!(app.pp_curve.is_none(), "not computed until first access");
+
+        let first = app.pp_curve();
+        assert!(app.pp_curve.is_some(), "cached after the first access");
+
+        let second = app.pp_curve();
+        assert_eq!(first, second, "cached data is returned, not recomputed");
     }
 
     /// `nan_feat` is NaN in every row, so `stats::summarize` gives it a NaN
