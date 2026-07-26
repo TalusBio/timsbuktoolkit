@@ -228,7 +228,7 @@ impl Default for CalibrationConfig {
             grid_size: 100,
             // Keep in sync with `timsseek_cli/assets/default_config.toml`
             // ([calibration]) — that file carries the rationale for these
-            // sigmas, and `config::tests::default_template_parses_with_expected_values`
+            // sigmas, and `config::tests::default_template_parses`
             // fails if the two drift apart.
             mz_sigma: 3.0,
             mobility_sigma: 3.0,

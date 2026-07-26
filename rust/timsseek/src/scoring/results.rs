@@ -1,4 +1,7 @@
 use serde::Serialize;
+// The derive and the trait share a name but live in different namespaces
+// (macro vs type), so both are in scope here unambiguously.
+use timsseek_macros::ScoreBlock;
 
 use super::apex_finding::{
     ApexBlocks,
@@ -24,8 +27,6 @@ use super::blocks::relative_intensities::RelativeIntensities;
 use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
 use super::blocks::{
-    ColSink,
-    NameSink,
     SchemaSink,
     ScoreBlock,
 };
@@ -47,126 +48,57 @@ pub struct FinalizeInputs<'a> {
     pub apex: ApexBlocks,
 }
 
-/// Compose [`ScoringFields`] from an ordered block list, deriving the struct
-/// and the purely-mechanical walks (`push_columns`, the two lane value arrays
-/// and their name walks, `sample_default`) from that one list. Order is
-/// load-bearing (parquet columns and the positional ML value vector both
-/// follow it), so folding them all from a single ordered source is what makes
-/// their order *impossible* to desync.
+/// Shared scoring fields produced by Phase 3, as a composition of typed
+/// blocks. Each block owns its parquet/ML projections (`columns`, the lane
+/// methods) in one file under [`super::blocks`]; the finalize-stage blocks own
+/// their `compute` there too, while the apex-stage blocks are built in
+/// [`super::apex_finding`].
+///
+/// The `#[block]` fields make this a DELEGATING `#[derive(ScoreBlock)]`: the
+/// same derive that projects a leaf block's `#[feat(...)]` scalars walks this
+/// list to emit the composed struct's Parquet columns/schema, its two lane
+/// value arrays and their name walks, and `sample_default`. Field order is
+/// load-bearing — parquet column order and the positional ML value vector both
+/// follow it — so folding every walk out of the one declaration order is what
+/// makes them *impossible* to desync.
 ///
 /// The lane widths compose the same way the values do: `LINEAR_LEN` is the sum
 /// of the blocks' own inherent `LINEAR_LEN` consts, so the composed lane array
 /// is `[f64; N]` with `N` known at compile time and no runtime length
 /// bookkeeping anywhere below it.
 ///
-/// `compute` (per-block dep signatures vary) and `neutralize_mobility` (only
-/// the mobility-derived blocks participate) stay hand-written below: adding a
-/// block is a two-place edit (this list + `compute`), not five.
-macro_rules! compose_scoring_fields {
-    (
-        $(#[doc = $doc:literal])*
-        pub struct $Name:ident {
-            $( pub $fname:ident : $fty:ty ),* $(,)?
-        }
-    ) => {
-        $(#[doc = $doc])*
-        #[derive(Debug, Clone, Serialize)]
-        pub struct $Name {
-            $( pub $fname : $fty ),*
-        }
-
-        impl $Name {
-            /// LINEAR-lane width: the sum of the blocks' own widths.
-            pub const LINEAR_LEN: usize = 0usize $( + <$fty>::LINEAR_LEN )*;
-            /// NONLINEAR-lane width: the sum of the blocks' own widths.
-            pub const NONLINEAR_LEN: usize = 0usize $( + <$fty>::NONLINEAR_LEN )*;
-
-            /// Emit every block's Parquet columns, in the composition order.
-            pub fn push_columns(&self, o: &mut ColSink) {
-                $( self.$fname.columns(o); )*
-            }
-
-            /// Emit every block's Parquet SCHEMA (value-free), in composition order —
-            /// same order as `push_columns`.
-            pub fn push_column_schema(o: &mut $crate::scoring::blocks::SchemaSink) {
-                $( <$fty as $crate::scoring::blocks::ScoreBlock>::column_schema(o); )*
-            }
-
-            /// Every block's LINEAR-lane ML feature *values*, concatenated in
-            /// composition order. The LDA consumer walks this lane.
-            pub fn linear_feature_array(&self) -> [f64; Self::LINEAR_LEN] {
-                let mut out = [0.0f64; Self::LINEAR_LEN];
-                let mut at = 0usize;
-                $(
-                    {
-                        let block = self.$fname.linear_feature_array();
-                        out[at..at + block.len()].copy_from_slice(&block);
-                        at += block.len();
-                    }
-                )*
-                debug_assert_eq!(at, Self::LINEAR_LEN);
-                out
-            }
-
-            /// LINEAR-lane feature *names*, same order as
-            /// [`Self::linear_feature_array`] (set-level; no `&self`).
-            pub fn push_linear_feature_names(o: &mut NameSink) {
-                $( <$fty as ScoreBlock>::linear_feature_names(o); )*
-            }
-
-            /// Every block's NONLINEAR-lane ML feature *values*, concatenated
-            /// in composition order.
-            pub fn nonlinear_feature_array(&self) -> [f64; Self::NONLINEAR_LEN] {
-                let mut out = [0.0f64; Self::NONLINEAR_LEN];
-                let mut at = 0usize;
-                $(
-                    {
-                        let block = self.$fname.nonlinear_feature_array();
-                        out[at..at + block.len()].copy_from_slice(&block);
-                        at += block.len();
-                    }
-                )*
-                debug_assert_eq!(at, Self::NONLINEAR_LEN);
-                out
-            }
-
-            /// NONLINEAR-lane feature *names*, same order as
-            /// [`Self::nonlinear_feature_array`] (set-level; no `&self`).
-            pub fn push_nonlinear_feature_names(o: &mut NameSink) {
-                $( <$fty as ScoreBlock>::nonlinear_feature_names(o); )*
-            }
-
-            /// Fixture using the placeholder peptide from [`Identity::sample`].
-            pub fn sample_default() -> Self {
-                Self {
-                    $( $fname : <$fty>::sample() ),*
-                }
-            }
-        }
-    };
-}
-
-compose_scoring_fields! {
-    /// Shared scoring fields produced by Phase 3, as a composition of typed
-    /// blocks. Each block owns its parquet/ML projections (`columns`, the
-    /// lane methods) in one file under [`super::blocks`]; the finalize-stage
-    /// blocks own their `compute` there too, while the apex-stage blocks are
-    /// built in [`super::apex_finding`].
-    pub struct ScoringFields {
-        pub identity: Identity,
-        pub rt: Rt,
-        pub mobility: Mobility,
-        pub primary: PrimaryScores,
-        pub evidence: ApexEvidence,
-        pub features: ApexFeatures,
-        pub apex_lazy: ApexLazyScores,
-        pub secondary_lazy: SecondaryLazyScores,
-        pub counts: ApexCounts,
-        pub finalize_counts: FinalizeCounts,
-        pub intensities: Intensities,
-        pub ion_errors: IonErrors,
-        pub rel_intensities: RelativeIntensities,
-    }
+/// [`Self::compute`] (per-block dep signatures vary) and
+/// [`Self::neutralize_mobility`] (only the mobility-derived blocks
+/// participate) stay hand-written below: adding a block is a two-place edit
+/// (this list + `compute`), not five.
+#[derive(Debug, Clone, Serialize, ScoreBlock)]
+pub struct ScoringFields {
+    #[block]
+    pub identity: Identity,
+    #[block]
+    pub rt: Rt,
+    #[block]
+    pub mobility: Mobility,
+    #[block]
+    pub primary: PrimaryScores,
+    #[block]
+    pub evidence: ApexEvidence,
+    #[block]
+    pub features: ApexFeatures,
+    #[block]
+    pub apex_lazy: ApexLazyScores,
+    #[block]
+    pub secondary_lazy: SecondaryLazyScores,
+    #[block]
+    pub counts: ApexCounts,
+    #[block]
+    pub finalize_counts: FinalizeCounts,
+    #[block]
+    pub intensities: Intensities,
+    #[block]
+    pub ion_errors: IonErrors,
+    #[block]
+    pub rel_intensities: RelativeIntensities,
 }
 
 impl ScoringFields {
@@ -277,7 +209,7 @@ impl FinalResult {
     /// Value-free Parquet schema: scoring blocks (composition order) then the
     /// post-model meta block — mirrors `emit_row`'s column order exactly.
     pub fn column_schema(o: &mut SchemaSink) {
-        ScoringFields::push_column_schema(o);
+        <ScoringFields as ScoreBlock>::column_schema(o);
         <ResultMeta as ScoreBlock>::column_schema(o);
     }
 }

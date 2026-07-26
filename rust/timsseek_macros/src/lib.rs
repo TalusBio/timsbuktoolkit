@@ -12,7 +12,12 @@
 //! (`Fields::LINEAR_LEN = A::LINEAR_LEN + B::LINEAR_LEN`), which is what lets
 //! the whole feature matrix be a compile-time width.
 //!
-//! See [`macro@ScoreBlock`] for the `#[feat(...)]` field grammar.
+//! The same derive covers LEAF blocks (fields are scalars/arrays annotated
+//! `#[feat(...)]`) and COMPOSITIONS of blocks (fields annotated `#[block]`,
+//! which delegate every walk to the nested type and sum its width consts), so
+//! there is one mechanism, not two.
+//!
+//! See [`macro@ScoreBlock`] for the `#[feat(...)]` / `#[block]` field grammar.
 
 use proc_macro2::TokenStream;
 use quote::{
@@ -96,6 +101,28 @@ impl Generator {
 enum Lane {
     Linear,
     Nonlinear,
+}
+
+impl Lane {
+    /// The lane's three member names, in the order the emitted code needs
+    /// them: the width const, the inherent value-array method, and the
+    /// `ScoreBlock` name walk. Kept as one table so a `#[block]` field's
+    /// delegation cannot mix a lane's const with the other lane's method.
+    fn members(self) -> (Ident, Ident, Ident) {
+        let (len, array, names) = match self {
+            Lane::Linear => ("LINEAR_LEN", "linear_feature_array", "linear_feature_names"),
+            Lane::Nonlinear => (
+                "NONLINEAR_LEN",
+                "nonlinear_feature_array",
+                "nonlinear_feature_names",
+            ),
+        };
+        (
+            format_ident!("{len}"),
+            format_ident!("{array}"),
+            format_ident!("{names}"),
+        )
+    }
 }
 
 /// The scalar element types a field may declare.
@@ -260,13 +287,25 @@ fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
     })
 }
 
-/// One named field of the derived struct, with its parsed shape and (if
-/// present) its `#[feat(...)]` routing.
+/// What a field contributes to the six generated walks.
+enum FieldKind {
+    /// A scalar/array the struct owns outright: this struct emits its Parquet
+    /// column and (if `#[feat(...)]`) projects its lane values itself.
+    Leaf {
+        shape: FieldShape,
+        /// `None` => column-only field (no `#[feat(...)]`).
+        feature: Option<(Vec<GeneratorSpec>, Lane)>,
+    },
+    /// `#[block]`: the field's own type is a `ScoreBlock`, so every walk
+    /// DELEGATES to it — widths sum its consts, lane arrays splice its arrays
+    /// in, and the column/name walks call straight through.
+    Block { ty: Type },
+}
+
+/// One named field of the derived struct, with its parsed contribution.
 struct Field {
     ident: Ident,
-    shape: FieldShape,
-    /// `None` => column-only field (no `#[feat(...)]`).
-    feature: Option<(Vec<GeneratorSpec>, Lane)>,
+    kind: FieldKind,
 }
 
 fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
@@ -289,13 +328,33 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
             .ident
             .clone()
             .ok_or_else(|| Error::new(f.span(), "tuple struct fields are not supported"))?;
-        let shape = FieldShape::from_type(&f.ty)?;
 
         let feature_attrs: Vec<&syn::Attribute> = f
             .attrs
             .iter()
             .filter(|a| a.path().is_ident("feat"))
             .collect();
+
+        if let Some(block_attr) = f.attrs.iter().find(|a| a.path().is_ident("block")) {
+            block_attr
+                .meta
+                .require_path_only()
+                .map_err(|_| Error::new(block_attr.span(), "`#[block]` takes no arguments"))?;
+            if let Some(feat) = feature_attrs.first() {
+                return Err(Error::new(
+                    feat.span(),
+                    "a `#[block]` field delegates every projection to its own type; \
+                     `#[feat(...)]` belongs on that type's fields instead",
+                ));
+            }
+            fields.push(Field {
+                ident,
+                kind: FieldKind::Block { ty: f.ty.clone() },
+            });
+            continue;
+        }
+
+        let shape = FieldShape::from_type(&f.ty)?;
 
         let feature = match feature_attrs.as_slice() {
             [] => None,
@@ -324,15 +383,15 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
 
         fields.push(Field {
             ident,
-            shape,
-            feature,
+            kind: FieldKind::Leaf { shape, feature },
         });
     }
     Ok(fields)
 }
 
 /// Emits the `SchemaSink`/`ColSink` calls shared by `column_schema` and
-/// `columns` (every field is a parquet column, feature-routed or not).
+/// `columns` (every field is a parquet column — or, for `#[block]`, a whole
+/// run of them — feature-routed or not).
 fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut schema_calls = Vec::with_capacity(fields.len());
     let mut column_calls = Vec::with_capacity(fields.len());
@@ -340,15 +399,29 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
     for field in fields {
         let ident = &field.ident;
         let name = ident.to_string();
-        match &field.shape {
-            FieldShape::Scalar(scalar) => {
+        match &field.kind {
+            FieldKind::Leaf {
+                shape: FieldShape::Scalar(scalar),
+                ..
+            } => {
                 let method = scalar.sink_method();
                 schema_calls.push(quote! { out.#method(#name); });
                 column_calls.push(quote! { out.#method(#name, self.#ident); });
             }
-            FieldShape::Array { len } => {
+            FieldKind::Leaf {
+                shape: FieldShape::Array { len },
+                ..
+            } => {
                 schema_calls.push(quote! { out.f32_array(#name, #len); });
                 column_calls.push(quote! { out.f32_array(#name, &self.#ident); });
+            }
+            FieldKind::Block { ty } => {
+                schema_calls.push(quote! {
+                    <#ty as crate::scoring::blocks::ScoreBlock>::column_schema(out);
+                });
+                column_calls.push(quote! {
+                    crate::scoring::blocks::ScoreBlock::columns(&self.#ident, out);
+                });
             }
         }
     }
@@ -361,7 +434,8 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
 struct LaneCode {
     /// Summands of the lane's `LEN` const — `1usize` per scalar generator,
     /// the array's own length expression (verbatim, so a const path like
-    /// `NUM_MS2_IONS` stays a const path) per array generator.
+    /// `NUM_MS2_IONS` stays a const path) per array generator, and the nested
+    /// block's own `LEN` const per `#[block]` field.
     len_terms: Vec<TokenStream>,
     /// Writes into `out` at the running `at` cursor; each advances `at` by
     /// exactly the term it contributed to `len_terms`, in the same order.
@@ -381,18 +455,41 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
     };
 
     for field in fields {
-        let Some((generators, field_lane)) = &field.feature else {
-            continue;
-        };
-        if *field_lane != lane {
-            continue;
-        }
         let ident = &field.ident;
         let name = ident.to_string();
 
+        // A `#[block]` field contributes to BOTH lanes (its own type decides
+        // what lands in each), so it is handled before the lane filter.
+        let (shape, generators) = match &field.kind {
+            FieldKind::Block { ty } => {
+                let (len_const, array_method, names_method) = lane.members();
+                code.len_terms.push(quote! { <#ty>::#len_const });
+                code.fills.push(quote! {
+                    {
+                        let block = self.#ident.#array_method();
+                        out[at..at + block.len()].copy_from_slice(&block);
+                        at += block.len();
+                    }
+                });
+                code.name_calls.push(quote! {
+                    <#ty as crate::scoring::blocks::ScoreBlock>::#names_method(out);
+                });
+                continue;
+            }
+            FieldKind::Leaf { shape, feature } => {
+                let Some((generators, field_lane)) = feature else {
+                    continue;
+                };
+                if *field_lane != lane {
+                    continue;
+                }
+                (shape, generators)
+            }
+        };
+
         for spec in generators {
             let generator = spec.generator;
-            match &field.shape {
+            match shape {
                 FieldShape::Scalar(scalar) => {
                     let value = generator.apply(scalar.to_f64_expr(ident));
                     // One name, computed once here, used by the name walk; the
@@ -477,28 +574,33 @@ fn lane_methods(code: &LaneCode, len_const: Ident, method: Ident) -> TokenStream
     }
 }
 
-/// Emits one `#field: <#ty as BlockFixture>::fixture()` initializer per
-/// field, for the generated `sample()`.
+/// Emits one initializer per field for the generated `sample_default()`:
+/// `BlockFixture::fixture()` for a leaf, the nested block's own
+/// `sample_default()` for a `#[block]`.
 fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
     fields
         .iter()
         .map(|field| {
             let ident = &field.ident;
-            let ty = field.shape.type_tokens();
-            quote! {
-                #ident: <#ty as crate::scoring::blocks::BlockFixture>::fixture()
+            match &field.kind {
+                FieldKind::Leaf { shape, .. } => {
+                    let ty = shape.type_tokens();
+                    quote! {
+                        #ident: <#ty as crate::scoring::blocks::BlockFixture>::fixture()
+                    }
+                }
+                FieldKind::Block { ty } => quote! { #ident: <#ty>::sample_default() },
             }
         })
         .collect()
 }
 
-/// Pure codegen entry point: parses the `#[feat(...)]` grammar off each
-/// named field of `input` and emits an `impl ScoreBlock for $Name` (Parquet
-/// schema + columns, and the two set-level name walks) plus an inherent impl
-/// carrying the two lane width consts, the two `[f64; N]` lane value methods,
-/// and `sample()`. `sample()` stays un-gated (not `#[cfg(test)]`): it is called
-/// uniformly across every block by `ScoringFields::sample_default`, which
-/// itself must stay reachable in a normal (non-test) build because
+/// Pure codegen entry point: parses the `#[feat(...)]`/`#[block]` grammar off
+/// each named field of `input` and emits an `impl ScoreBlock for $Name`
+/// (Parquet schema + columns, and the two set-level name walks) plus an
+/// inherent impl carrying the two lane width consts, the two `[f64; N]` lane
+/// value methods, and `sample_default()`. `sample_default()` stays un-gated
+/// (not `#[cfg(test)]`): it is reachable in a normal (non-test) build because
 /// `ScoringFields::sample` is used from another crate's test module
 /// (`timsseek_cli`), compiled against timsseek's normal build. Unit-testable
 /// without a proc-macro context — see `tests` below.
@@ -512,16 +614,10 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let nonlinear = lane_code(&fields, Lane::Nonlinear)?;
     let linear_name_calls = &linear.name_calls;
     let nonlinear_name_calls = &nonlinear.name_calls;
-    let linear_methods = lane_methods(
-        &linear,
-        format_ident!("LINEAR_LEN"),
-        format_ident!("linear_feature_array"),
-    );
-    let nonlinear_methods = lane_methods(
-        &nonlinear,
-        format_ident!("NONLINEAR_LEN"),
-        format_ident!("nonlinear_feature_array"),
-    );
+    let (linear_len, linear_array, _) = Lane::Linear.members();
+    let (nonlinear_len, nonlinear_array, _) = Lane::Nonlinear.members();
+    let linear_methods = lane_methods(&linear, linear_len, linear_array);
+    let nonlinear_methods = lane_methods(&nonlinear, nonlinear_len, nonlinear_array);
     let sample_calls = sample_field_calls(&fields);
 
     Ok(quote! {
@@ -547,12 +643,13 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
             #linear_methods
             #nonlinear_methods
 
-            /// Fixture with every field a fixed constant (see
-            /// [`crate::scoring::blocks::BlockFixture`]). Transition
-            /// scaffolding: un-gated because `ScoringFields::sample_default`
-            /// is reachable from production code today; a later task moves
-            /// this behind `cfg(test)` once that dependency is gone.
-            pub fn sample() -> Self {
+            /// Fixture with every leaf field a fixed constant (see
+            /// [`crate::scoring::blocks::BlockFixture`]) and every `#[block]`
+            /// field its own `sample_default()`. Transition scaffolding:
+            /// un-gated because it is reachable from production code today; a
+            /// later task moves this behind `cfg(test)` once that dependency
+            /// is gone.
+            pub fn sample_default() -> Self {
                 Self {
                     #(#sample_calls),*
                 }
@@ -576,8 +673,27 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// never reach a feature lane. `#[feat(...)]` is what additionally routes a
 /// field into the ML matrix.
 ///
-/// Supported field types: `f32`, `f64`, `u8`, `u32`, `bool`, and `[f32; N]`
-/// (`N` may be any const expression; it is emitted verbatim).
+/// Supported LEAF field types: `f32`, `f64`, `u8`, `u32`, `bool`, and
+/// `[f32; N]` (`N` may be any const expression; it is emitted verbatim). A
+/// field of any other type must be a `#[block]`.
+///
+/// # `#[block]` — delegation
+///
+/// A field marked `#[block]` is itself a `ScoreBlock`, and every walk
+/// DELEGATES to it rather than projecting the field: the width consts sum
+/// `<FieldTy>::LINEAR_LEN` / `NONLINEAR_LEN`, the lane arrays `copy_from_slice`
+/// the field's own arrays in, the Parquet and name walks call straight
+/// through, and `sample_default()` fills the field with `<FieldTy>::
+/// sample_default()`. That is what lets a *composition* of blocks
+/// (`ScoringFields`) be derived from the same one field list as a leaf block,
+/// with parquet column order and ML lane order both following the declaration
+/// order.
+///
+/// A `#[block]` field is in BOTH lanes — which of its own features land in
+/// which lane is its own type's business — so `#[feat(...)]` on a `#[block]`
+/// field is rejected. Leaf, `#[block]`, and un-annotated fields may be freely
+/// mixed in one struct; each contributes its run of columns/features at its
+/// declaration position.
 ///
 /// # `#[feat(...)]` grammar
 ///
@@ -644,9 +760,11 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// pass over the field list, so entry `j` of the array is always the feature
 /// named `j` — they cannot desync.
 ///
-/// Plus a public inherent `fn sample() -> Self` on the struct, filling every
-/// field from `BlockFixture::fixture()` — a fixed, finite, non-zero constant
-/// per type. It is deliberately not `#[cfg(test)]`; see `derive_score_block`.
+/// Plus a public inherent `fn sample_default() -> Self` on the struct, filling
+/// every leaf field from `BlockFixture::fixture()` — a fixed, finite, non-zero
+/// constant per type — and every `#[block]` field from its own
+/// `sample_default()`. It is deliberately not `#[cfg(test)]`; see
+/// `derive_score_block`.
 ///
 /// # Example
 ///
@@ -668,8 +786,19 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// ```
 ///
 /// gives `MyScores::LINEAR_LEN == 1usize + (6)` and `MyScores::NONLINEAR_LEN ==
-/// 1usize + 1usize`.
-#[proc_macro_derive(ScoreBlock, attributes(feat))]
+/// 1usize + 1usize`. Composing it with another block:
+///
+/// ```ignore
+/// #[derive(Debug, Clone, ScoreBlock)]
+/// pub struct AllScores {
+///     #[block] pub mine: MyScores,
+///     #[block] pub theirs: OtherScores,
+/// }
+/// ```
+///
+/// gives `AllScores::LINEAR_LEN == <MyScores>::LINEAR_LEN +
+/// <OtherScores>::LINEAR_LEN`, and every walk visits `mine` then `theirs`.
+#[proc_macro_derive(ScoreBlock, attributes(feat, block))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
     derive_score_block(di)
@@ -791,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_sample() {
+    fn emits_sample_default() {
         let di: syn::DeriveInput = syn::parse2(quote! {
             pub struct T {
                 #[feat(raw)] pub a: f32,
@@ -800,9 +929,123 @@ mod tests {
         })
         .unwrap();
         let ts = derive_score_block(di).unwrap().to_string();
-        assert!(ts.contains("fn sample"));
+        assert!(ts.contains("fn sample_default"));
         assert!(ts.contains("BlockFixture"));
         assert!(ts.contains("fixture"));
+    }
+
+    /// `#[block]` DELEGATION: a composed struct's widths are the sum of its
+    /// blocks' own consts, its lane arrays splice the blocks' arrays in at a
+    /// running cursor, and its column/name/fixture walks call straight
+    /// through — the six walks a composition of blocks needs, all off the one
+    /// declaration order.
+    #[test]
+    fn block_fields_delegate_every_walk() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct Composed {
+                #[block] pub first: Identity,
+                #[block] pub second: Rt,
+            }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        let f = flat(&ts);
+        // Widths SUM the blocks' own consts — no literal count.
+        assert!(
+            f.contains("pubconstLINEAR_LEN:usize=0usize+<Identity>::LINEAR_LEN+<Rt>::LINEAR_LEN;"),
+            "{ts}"
+        );
+        assert!(
+            f.contains(
+                "pubconstNONLINEAR_LEN:usize=0usize+<Identity>::NONLINEAR_LEN+<Rt>::NONLINEAR_LEN;"
+            ),
+            "{ts}"
+        );
+        // Lane values are spliced in at the running cursor, in field order.
+        assert!(
+            f.contains(
+                "{letblock=self.first.linear_feature_array();\
+                 out[at..at+block.len()].copy_from_slice(&block);at+=block.len();}\
+                 {letblock=self.second.linear_feature_array();"
+            ),
+            "{ts}"
+        );
+        // Parquet + names + fixture all delegate, in the same order.
+        assert!(
+            f.contains(
+                "<Identityascrate::scoring::blocks::ScoreBlock>::column_schema(out);\
+                 <Rtascrate::scoring::blocks::ScoreBlock>::column_schema(out);"
+            ),
+            "{ts}"
+        );
+        assert!(
+            f.contains(
+                "crate::scoring::blocks::ScoreBlock::columns(&self.first,out);\
+                 crate::scoring::blocks::ScoreBlock::columns(&self.second,out);"
+            ),
+            "{ts}"
+        );
+        assert!(
+            f.contains(
+                "<Identityascrate::scoring::blocks::ScoreBlock>::nonlinear_feature_names(out);"
+            ),
+            "{ts}"
+        );
+        assert!(
+            f.contains("first:<Identity>::sample_default(),second:<Rt>::sample_default()"),
+            "{ts}"
+        );
+        // A delegated field is never a Parquet column under its own name.
+        assert!(!ts.contains("\"first\""), "{ts}");
+    }
+
+    /// Leaf, `#[block]` and column-only fields coexist, each contributing its
+    /// run at its declaration position.
+    #[test]
+    fn leaf_and_block_fields_may_be_mixed_in_declaration_order() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct Mixed {
+                #[feat(raw)] pub before: f32,
+                #[block] pub mid: Rt,
+                pub plain: u32,
+                #[feat(raw)] pub after: f32,
+            }
+        })
+        .unwrap();
+        let ts = derive_score_block(di).unwrap().to_string();
+        let f = flat(&ts);
+        assert!(
+            f.contains("pubconstLINEAR_LEN:usize=0usize+1usize+<Rt>::LINEAR_LEN+1usize;"),
+            "{ts}"
+        );
+        // Column walk: leaf, then the delegated run, then the column-only field.
+        assert!(
+            f.contains(concat!(
+                r#"out.f32("before",self.before);"#,
+                "crate::scoring::blocks::ScoreBlock::columns(&self.mid,out);",
+                r#"out.u32("plain",self.plain);"#,
+            )),
+            "{ts}"
+        );
+        // Name walk: same order — leaf name, delegated walk, leaf name.
+        assert!(
+            f.contains(concat!(
+                r#"out.push("before");"#,
+                "<Rtascrate::scoring::blocks::ScoreBlock>::linear_feature_names(out);",
+                r#"out.push("after");"#,
+            )),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn rejects_feat_on_a_block_field() {
+        let di: syn::DeriveInput = syn::parse2(quote! {
+            pub struct T { #[block] #[feat(raw)] pub a: Rt }
+        })
+        .unwrap();
+        let err = derive_score_block(di).unwrap_err();
+        assert!(err.to_string().contains("#[feat(...)]"), "{err}");
     }
 
     #[test]

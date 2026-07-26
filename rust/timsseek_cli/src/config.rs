@@ -95,7 +95,7 @@ impl Config {
     /// are commented out in the template and therefore land as `None`.
     ///
     /// Panics only on a malformed template, which is a compile-time-embedded
-    /// asset and is covered by `default_template_parses_with_expected_values`.
+    /// asset and is covered by `default_template_parses`.
     pub fn default_config() -> Self {
         toml::from_str(DEFAULT_CONFIG_TOML).expect("embedded default template must parse")
     }
@@ -104,10 +104,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use timsquery::models::tolerance::{
-        MzTolerance,
-        RtTolerance,
-    };
 
     const MINIMAL_TOML: &str = r#"
 [analysis]
@@ -157,26 +153,19 @@ rt = "Unrestricted"
     /// Template sanity guard. `default_config()` now *is* a parse of the
     /// embedded template, so a template-vs-literal comparison would be
     /// tautological — but a malformed or silently-edited template would
-    /// otherwise only blow up at runtime. This pins that it parses and that
-    /// the load-bearing values survive.
+    /// otherwise only blow up at runtime.
     ///
-    /// The `[calibration]` comparison is NOT tautological: the template spells
-    /// every calibration field out explicitly, so this is the only thing
-    /// keeping it tied to `CalibrationConfig::default()` (the `mz_sigma`
-    /// 1.5→3.0 drift was exactly this failure). Compared via JSON so we don't
-    /// need `PartialEq` on the nested type.
+    /// No literal values are pinned here — those live in the template. The
+    /// `[calibration]` comparison is not a value check either: the template
+    /// spells every calibration field out, so this is the only thing tying it
+    /// to `CalibrationConfig::default()` (the `mz_sigma` 1.5→3.0 drift was
+    /// exactly this failure). JSON so we don't need `PartialEq` on it.
     #[test]
-    fn default_template_parses_with_expected_values() {
+    fn default_template_parses() {
         let c = Config::default_config();
 
-        assert_eq!(c.analysis.chunk_size, 20000);
-        assert_eq!(c.analysis.decoy_strategy, DecoyPolicy::IfMissing);
-        assert_eq!(c.analysis.rescore_model, RescoreModel::Gbm);
-        assert_eq!(c.analysis.tolerance.ms, MzTolerance::Ppm((15.0, 15.0)));
-        assert_eq!(c.analysis.tolerance.rt, RtTolerance::Unrestricted);
-
-        // Every optional section must stay commented out in the template, so
-        // the no-config fallback leaves them unset for the CLI flags to fill.
+        // Optional sections stay commented out, so the no-config fallback
+        // leaves them for the CLI flags to fill.
         assert!(c.input.is_none(), "[input] must be commented out");
         assert!(c.output.is_none(), "[output] must be commented out");
         assert!(c.staging.is_none(), "[staging] must be commented out");

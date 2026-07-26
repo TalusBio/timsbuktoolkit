@@ -26,7 +26,7 @@ use super::results::FinalResult;
 /// Emit one result's columns into the sink (all scoring blocks, then the
 /// post-model meta block).
 fn emit_row(r: &FinalResult, sink: &mut ColSink) {
-    r.scoring.push_columns(sink);
+    r.scoring.columns(sink);
     r.result_meta().columns(sink);
     sink.end_row();
 }

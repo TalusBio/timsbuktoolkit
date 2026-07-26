@@ -65,7 +65,7 @@ impl Identity {
         ]
     }
 
-    pub fn sample() -> Self {
+    pub fn sample_default() -> Self {
         Self {
             peptide: Peptide {
                 raw: Arc::from("PEPTIDEK"),
@@ -121,7 +121,7 @@ mod tests {
     /// block), so this is the only place the pairing is asserted.
     #[test]
     fn nonlinear_lane_names_match_values() {
-        let identity = Identity::sample();
+        let identity = Identity::sample_default();
         let values = identity.nonlinear_feature_array();
 
         let mut names = NameSink::new();
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn column_schema_matches_columns() {
-        let identity = Identity::sample();
+        let identity = Identity::sample_default();
 
         let mut cols = ColSink::new();
         identity.columns(&mut cols);

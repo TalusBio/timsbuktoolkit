@@ -677,7 +677,7 @@ fn build_all_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// LINEAR-lane feature names (LDA), in [`push_linear_row`]'s order.
 pub fn linear_feature_name_set() -> Vec<Arc<str>> {
     let mut n = NameSink::new();
-    ScoringFields::push_linear_feature_names(&mut n);
+    <ScoringFields as ScoreBlock>::linear_feature_names(&mut n);
     <ResultMeta as ScoreBlock>::linear_feature_names(&mut n);
     <Derived as ScoreBlock>::linear_feature_names(&mut n);
     n.into_names()
@@ -688,7 +688,7 @@ pub fn linear_feature_name_set() -> Vec<Arc<str>> {
 /// sequence contributes NaN values under them, not a shorter row.
 pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
     let mut n = NameSink::new();
-    ScoringFields::push_nonlinear_feature_names(&mut n);
+    <ScoringFields as ScoreBlock>::nonlinear_feature_names(&mut n);
     <ResultMeta as ScoreBlock>::nonlinear_feature_names(&mut n);
     <Derived as ScoreBlock>::nonlinear_feature_names(&mut n);
     sequence_counts::nonlinear_feature_names(&mut n);

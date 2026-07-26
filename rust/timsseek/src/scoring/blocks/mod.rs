@@ -17,6 +17,10 @@
 //! not on [`ScoreBlock`]: `-> [f64; Self::LEN]` in a trait needs unstable
 //! `generic_const_exprs`.
 //!
+//! The same derive also composes blocks: a struct whose fields are `#[block]`
+//! delegates every walk to them and sums their width consts, which is how
+//! [`crate::scoring::results::ScoringFields`] is built.
+//!
 //! The heavy apex-stage families ([`apex_features`], [`apex_evidence`]) keep
 //! their compute here too, leaning on the shared numeric primitives in
 //! `crate::scoring::apex_dsp`.
@@ -315,10 +319,11 @@ impl NameSink {
 }
 
 // ---------------------------------------------------------------------------
-// BlockFixture — fixed sample constants for macro-generated `sample()`
+// BlockFixture — fixed constants for the generated `sample_default()`
 // ---------------------------------------------------------------------------
 
-/// Supplies a fixed constant per field type for a block's generated `sample()`.
+/// Supplies a fixed constant per field type for a block's generated
+/// `sample_default()`.
 /// Sample *values* are arbitrary but finite and non-zero (so ratio-derived
 /// features stay finite in tests).
 pub trait BlockFixture {
