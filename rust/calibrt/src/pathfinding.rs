@@ -13,22 +13,25 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
 ///
-/// Returns the assembled path (DP chain plus any greedily-attached prefix/suffix,
-/// see Pass 2 below), the index range within that path the DP itself chose
-/// (`path[..range.start]` and `path[range.end..]` are the greedy tails), and the
-/// DP recurrence's objective value at the chosen end node (covers only
-/// `path[range]`).
+/// Writes the assembled path (DP chain plus any greedily-attached prefix/suffix,
+/// see Pass 2 below) into `out_path`, clearing it first. Returns the index
+/// range within that path the DP itself chose (`path[..range.start]` and
+/// `path[range.end..]` are the greedy tails), and the DP recurrence's
+/// objective value at the chosen end node (covers only `path[range]`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
     max_weights: &mut Vec<f64>,
     prev_node_indices: &mut Vec<Option<usize>>,
+    out_path: &mut Vec<crate::Point>,
     obs: &mut O,
     opts: crate::ObserveOpts,
     considered: &mut Vec<(usize, f64)>,
-) -> (Vec<crate::Point>, std::ops::Range<usize>, f64) {
+) -> (std::ops::Range<usize>, f64) {
+    out_path.clear();
     if nodes.is_empty() {
-        return (Vec::new(), 0..0, 0.0);
+        return (0..0, 0.0);
     }
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
@@ -116,7 +119,7 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     path.reverse();
 
     if path.is_empty() {
-        return (path, 0..0, max_path_weight);
+        return (0..0, max_path_weight);
     }
     let dp_len = path.len();
 
@@ -175,11 +178,11 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     // assembled path below.
     let dp_range = prefix.len()..(prefix.len() + dp_len);
 
-    // Assemble: prefix + DP path + suffix
-    let mut full_path = prefix;
-    full_path.append(&mut path);
-    full_path.append(&mut suffix);
-    (full_path, dp_range, max_path_weight)
+    // Assemble into the caller-owned buffer: prefix + DP path + suffix.
+    out_path.append(&mut prefix);
+    out_path.append(&mut path);
+    out_path.append(&mut suffix);
+    (dp_range, max_path_weight)
 }
 
 #[cfg(test)]
@@ -232,12 +235,14 @@ mod tests {
         let mut max_weights = Vec::new();
         let mut prev_indices = Vec::new();
         let mut considered = Vec::new();
+        let mut path = Vec::new();
 
-        let (path, dp_range, dp_weight) = find_optimal_path(
+        let (dp_range, dp_weight) = find_optimal_path(
             &mut nodes,
             5,
             &mut max_weights,
             &mut prev_indices,
+            &mut path,
             &mut (),
             ObserveOpts::NONE,
             &mut considered,

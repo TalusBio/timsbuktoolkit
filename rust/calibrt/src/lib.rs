@@ -275,6 +275,13 @@ pub struct CalibrationState {
     dp_prev_indices: Vec<Option<usize>>,
     /// Filled only when `ObserveOpts::dp_nodes` is set; capacity `lookback`.
     dp_considered: Vec<(usize, f64)>,
+    /// Survivors of suppression, refilled per fit. Sized at `bins` — the
+    /// practical survivor count, since with distinct weights only one node per
+    /// row can be maximal in both its row and its column. Weight ties can push
+    /// past it, hence the debug assert rather than a hard bound.
+    filtered: Vec<grid::Node>,
+    /// The path, refilled per fit.
+    path_points: Vec<Point>,
     curve: Option<CalibrationCurve>,
     stale: bool,
     lookback: usize,
@@ -293,6 +300,8 @@ impl CalibrationState {
             dp_max_weights: Vec::new(),
             dp_prev_indices: Vec::new(),
             dp_considered: Vec::with_capacity(lookback),
+            filtered: Vec::with_capacity(grid_size),
+            path_points: Vec::new(),
             curve: None,
             stale: false,
             lookback,
@@ -361,25 +370,40 @@ impl CalibrationState {
             n_kept,
         });
 
-        // Collect non-suppressed nodes for pathfinding
-        let mut filtered: Vec<grid::Node> = self
-            .grid
-            .grid_cells()
-            .iter()
-            .filter(|n| !n.suppressed && n.center.weight > 0.0)
-            .copied()
-            .collect();
+        // Collect non-suppressed nodes for pathfinding, reusing the buffer
+        // across fits. `self.filtered` and `self.grid` are both fields, so we
+        // can't hold `&mut self.filtered` while reading `self.grid` — take it
+        // out, fill it, and put it back once we're done reading from it.
+        let mut filtered = std::mem::take(&mut self.filtered);
+        filtered.clear();
+        filtered.extend(
+            self.grid
+                .grid_cells()
+                .iter()
+                .filter(|n| !n.suppressed && n.center.weight > 0.0)
+                .copied(),
+        );
+        debug_assert!(
+            filtered.len() <= self.grid.bins,
+            "expected at most one surviving node per row (bins={}), got {} \
+             (weight ties can legitimately exceed this)",
+            self.grid.bins,
+            filtered.len()
+        );
 
-        // Pathfinding with reused buffers
-        let (path_points, dp_range, dp_weight) = pathfinding::find_optimal_path(
+        // Pathfinding with reused buffers.
+        let mut path_points = std::mem::take(&mut self.path_points);
+        let (dp_range, dp_weight) = pathfinding::find_optimal_path(
             &mut filtered,
             self.lookback,
             &mut self.dp_max_weights,
             &mut self.dp_prev_indices,
+            &mut path_points,
             obs,
             opts,
             &mut self.dp_considered,
         );
+        self.filtered = filtered;
 
         // Store path indices by matching path points back to grid cells
         self.path_indices.clear();
@@ -398,7 +422,12 @@ impl CalibrationState {
             dp_weight,
         });
 
-        self.curve = CalibrationCurve::new(path_points).ok();
+        // `CalibrationCurve::new` takes ownership and builds its own sorted
+        // points/slopes storage, so it gets a clone rather than `path_points`
+        // itself — that keeps `path_points` alive as a scratch buffer for the
+        // next fit instead of being consumed here every call.
+        self.curve = CalibrationCurve::new(path_points.clone()).ok();
+        self.path_points = path_points;
         self.stale = false;
 
         if let Some(c) = self.curve.as_ref() {
@@ -563,6 +592,21 @@ impl CalibrationState {
     pub fn is_stale(&self) -> bool {
         self.stale
     }
+
+    #[cfg(test)]
+    pub fn filtered_cap(&self) -> usize {
+        self.filtered.capacity()
+    }
+
+    #[cfg(test)]
+    pub fn path_points_cap(&self) -> usize {
+        self.path_points.capacity()
+    }
+
+    #[cfg(test)]
+    pub fn dp_max_weights_cap(&self) -> usize {
+        self.dp_max_weights.capacity()
+    }
 }
 
 /// Computes the min and max values from an iterator of f64 values.
@@ -627,11 +671,13 @@ pub fn calibrate_with_ranges(
     let mut max_weights = Vec::new();
     let mut prev_indices = Vec::new();
     let mut considered = Vec::new();
-    let (optimal_path_points, _dp_range, _dp_weight) = pathfinding::find_optimal_path(
+    let mut optimal_path_points = Vec::new();
+    let (_dp_range, _dp_weight) = pathfinding::find_optimal_path(
         &mut filtered_nodes,
         lookback,
         &mut max_weights,
         &mut prev_indices,
+        &mut optimal_path_points,
         &mut (),
         ObserveOpts::NONE,
         &mut considered,
@@ -950,5 +996,39 @@ mod calibration_state_tests {
         let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
 
         assert!((curve2_pred.0 - curve1_pred.0).abs() > 10.0);
+    }
+
+    #[test]
+    fn repeated_fits_do_not_grow_the_scratch_buffers() {
+        let mut s = CalibrationState::new(20, (0.0, 20.0), (0.0, 20.0), 5).unwrap();
+        let pts: Vec<_> = (0..20)
+            .map(|i| {
+                let v = i as f64 + 0.5;
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
+            })
+            .collect();
+        s.update(pts.iter().copied()).unwrap();
+        s.fit();
+        let caps = (
+            s.filtered_cap(),
+            s.path_points_cap(),
+            s.dp_max_weights_cap(),
+        );
+
+        for _ in 0..5 {
+            s.reset();
+            s.update(pts.iter().copied()).unwrap();
+            s.fit();
+        }
+
+        assert_eq!(
+            (
+                s.filtered_cap(),
+                s.path_points_cap(),
+                s.dp_max_weights_cap()
+            ),
+            caps,
+            "repeated fits on identical input must not reallocate"
+        );
     }
 }

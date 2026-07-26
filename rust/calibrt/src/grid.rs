@@ -197,15 +197,33 @@ impl Grid {
         self.weights_b.reset_with_value(self.bins, self.bins, 0.0);
     }
 
-    /// Reset the grid with new dimensions and ranges. Reallocates if the
-    /// bin count changes.
+    /// Reset the grid with new dimensions and ranges. Reallocates only if the
+    /// bin count changes; otherwise reuses the node buffer and recomputes cell
+    /// centers from the new ranges. Batch re-fits change ranges constantly and
+    /// never change `bins`, so this is the hot path.
     pub fn reconfigure(
         &mut self,
         bins: usize,
         x_range: (f64, f64),
         y_range: (f64, f64),
     ) -> Result<(), CalibRtError> {
-        *self = Self::new(bins, x_range, y_range)?;
+        if bins != self.bins {
+            *self = Self::new(bins, x_range, y_range)?;
+            return Ok(());
+        }
+        if bins == 0 {
+            return Err(CalibRtError::ZeroRange);
+        }
+        let x_span = x_range.1 - x_range.0;
+        let y_span = y_range.1 - y_range.0;
+        if x_span <= 0.0 || y_span <= 0.0 {
+            return Err(CalibRtError::ZeroRange);
+        }
+        self.x_range = x_range;
+        self.y_range = y_range;
+        self.x_span = x_span;
+        self.y_span = y_span;
+        self.reset();
         Ok(())
     }
 
@@ -261,6 +279,44 @@ pub struct Node {
 mod tests {
     use super::*;
     use crate::Point;
+
+    #[test]
+    fn reconfigure_preserves_allocation_when_bins_are_unchanged() {
+        let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let ptr_before = grid.nodes.as_ptr();
+        let cap_before = grid.nodes.capacity();
+
+        grid.reconfigure(10, (5.0, 200.0), (7.0, 300.0)).unwrap();
+
+        assert_eq!(grid.nodes.as_ptr(), ptr_before, "must not reallocate");
+        assert_eq!(grid.nodes.capacity(), cap_before);
+        assert_eq!(grid.x_range, (5.0, 200.0), "ranges must still update");
+        assert_eq!(grid.y_range, (7.0, 300.0));
+        // Centers are recomputed from the new ranges.
+        assert!((grid.nodes[0].center.library - (5.0 + 0.5 * 19.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reconfigure_reallocates_when_bins_change() {
+        let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        grid.reconfigure(20, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        assert_eq!(grid.nodes.len(), 400);
+        assert_eq!(grid.bins, 20);
+    }
+
+    #[test]
+    fn reconfigure_clears_previous_weights() {
+        let mut grid = Grid::new(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
+        grid.add_point(&Point {
+            library: 1.5,
+            observed: 1.5,
+            weight: 9.0,
+        })
+        .unwrap();
+        grid.reconfigure(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
+        assert!(grid.nodes.iter().all(|n| n.center.weight == 0.0));
+        assert!(grid.nodes.iter().all(|n| !n.suppressed));
+    }
 
     #[test]
     fn test_grid_reset_preserves_allocation() {
