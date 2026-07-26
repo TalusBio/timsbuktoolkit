@@ -41,7 +41,7 @@ path = "src/sample_speclib.rs"
 mimalloc = { workspace = true, features = ["secure"] }
 
 [features]
-default = ["parallel", "aws", "mzdata", "dashboard"]
+default = ["parallel", "aws", "mzdata"]
 parallel = ["timsseek/rayon"]
 instrumentation = ["timsseek/instrumentation", "tracing-profile"]
 track-alloc = ["alloc_track/enabled"]
@@ -52,6 +52,8 @@ azure = ["tims_stage/azure", "timscentroid/azure"]
 # mzML/mzdata ingest (open-format raw input). On by default; drop with
 # `--no-default-features`.
 mzdata = ["timsseek/mzdata"]
-# Dev-only rescore dashboard (TIMSSEEK_RESCORE_DASHBOARD=1). On by default;
-# drop with `--no-default-features` to avoid the ratatui dependency.
+# Dev-only rescore dashboard (TIMSSEEK_RESCORE_DASHBOARD=1). Opt-in, like
+# `track-alloc`: enable explicitly with `--features dashboard` to pull in
+# `rescore_dash`/`ratatui`. Without this feature, `TIMSSEEK_RESCORE_DASHBOARD`
+# does nothing.
 dashboard = ["dep:rescore_dash"]
