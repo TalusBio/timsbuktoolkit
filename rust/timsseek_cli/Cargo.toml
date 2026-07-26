@@ -10,6 +10,7 @@ timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 tims_stage = { path = "../tims_stage" }
 alloc_track = { path = "../alloc_track" }
+rescore_dash = { path = "../rescore_dash", optional = true }
 tempfile = { workspace = true }
 
 regex = "1.11.1"
@@ -40,7 +41,7 @@ path = "src/sample_speclib.rs"
 mimalloc = { workspace = true, features = ["secure"] }
 
 [features]
-default = ["parallel", "aws", "mzdata"]
+default = ["parallel", "aws", "mzdata", "dashboard"]
 parallel = ["timsseek/rayon"]
 instrumentation = ["timsseek/instrumentation", "tracing-profile"]
 track-alloc = ["alloc_track/enabled"]
@@ -51,3 +52,6 @@ azure = ["tims_stage/azure", "timscentroid/azure"]
 # mzML/mzdata ingest (open-format raw input). On by default; drop with
 # `--no-default-features`.
 mzdata = ["timsseek/mzdata"]
+# Dev-only rescore dashboard (TIMSSEEK_RESCORE_DASHBOARD=1). On by default;
+# drop with `--no-default-features` to avoid the ratatui dependency.
+dashboard = ["dep:rescore_dash"]

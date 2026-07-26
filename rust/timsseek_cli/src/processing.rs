@@ -62,6 +62,30 @@ use tracing::{
     warn,
 };
 
+/// Dev-only rescore dashboard, gated on an environment variable rather than a
+/// CLI flag: it is a debugging tool, not part of the documented interface.
+#[cfg(feature = "dashboard")]
+fn dashboard_enabled() -> bool {
+    std::env::var("TIMSSEEK_RESCORE_DASHBOARD").is_ok_and(|v| v == "1")
+}
+
+/// `timsseek`'s per-fold stats -> the dashboard's dependency-free equivalent.
+#[cfg(feature = "dashboard")]
+fn to_fold_importance(stats: &RescoreFeatureStats) -> Vec<rescore_dash::FoldImportance> {
+    stats
+        .iter()
+        .map(|f| rescore_dash::FoldImportance {
+            fold: f.fold,
+            gain: f.feature_importance.clone(),
+            stats: f
+                .feature_stats
+                .iter()
+                .map(|s| (s.name.clone(), s.mean, s.nan_ratio))
+                .collect(),
+        })
+        .collect()
+}
+
 /// Lookup from `(precursor m/z * 100, precursor charge)` to the main speclib's
 /// entries in that bucket: `(library RT seconds, sorted fragment m/z * 100)`.
 /// Used to re-anchor a separate calibration library onto the main library's
@@ -431,6 +455,17 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         }
     }
 
+    // Build the dashboard's inputs BEFORE Phase 6 — the writer consumes `data`.
+    // Costs one feature-matrix walk, and only when the dashboard is on.
+    #[cfg(feature = "dashboard")]
+    let dashboard_input = dashboard_enabled().then(|| {
+        let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(&data);
+        let is_target: Vec<bool> = data.iter().map(|r| r.scoring.identity.is_target).collect();
+        let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
+        let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();
+        (feature_names, matrix, is_target, score, qvalue)
+    });
+
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
     // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
@@ -463,6 +498,23 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     if !no_feature_stats && let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
         // Non-fatal: log and continue.
         tracing::warn!("Failed to write feature_stats sidecar: {}", e);
+    }
+
+    // After Phase 6, so a dashboard left open overnight — or killed — still has
+    // its results written.
+    #[cfg(feature = "dashboard")]
+    if let Some((feature_names, matrix, is_target, score, qvalue)) = dashboard_input {
+        let view = rescore_dash::RescoreView {
+            feature_names,
+            features: &matrix,
+            is_target,
+            score,
+            qvalue,
+            importance: to_fold_importance(&feature_stats),
+        };
+        if let Err(e) = rescore_dash::run(&view) {
+            tracing::warn!("rescore dashboard exited with an error: {e}");
+        }
     }
 
     // Key result to stdout. The final output URI is printed by main.rs

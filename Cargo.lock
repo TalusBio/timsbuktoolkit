@@ -6383,6 +6383,7 @@ dependencies = [
  "mimalloc",
  "rayon",
  "regex",
+ "rescore_dash",
  "serde",
  "serde_json",
  "tempfile",
