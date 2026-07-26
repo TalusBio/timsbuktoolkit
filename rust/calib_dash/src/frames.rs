@@ -38,6 +38,12 @@ pub struct FrameStore {
     index: Vec<FrameIndex>,
     n_calibrants: usize,
     keep_every: usize,
+    /// Number of on-stride spans the slab has room for. This, not
+    /// `index.capacity()`, is the bound `record` gates on: `Vec::capacity()`
+    /// is only guaranteed to be `>=` the requested amount and may
+    /// over-allocate, which would let an on-stride write drift into the
+    /// reserved final span or past the end of the slab.
+    retained: usize,
     /// Span reserved for the always-kept final frame.
     last_span: usize,
     last_index: Option<FrameIndex>,
@@ -46,6 +52,9 @@ pub struct FrameStore {
 
 impl FrameStore {
     pub fn new(n_frames: usize, n_calibrants: usize, budget_bytes: usize) -> Self {
+        // Defensive floor, not a semantic default: callers are expected to
+        // pass a real calibrant count. This only keeps a degenerate zero
+        // from producing a zero-sized frame_bytes / divide-by-zero below.
         let n_calibrants = n_calibrants.max(1);
         let frame_bytes = n_calibrants * std::mem::size_of::<CalibrantPoint>();
         let max_frames = (budget_bytes / frame_bytes.max(1)).max(1);
@@ -67,6 +76,7 @@ impl FrameStore {
             index: Vec::with_capacity(retained),
             n_calibrants,
             keep_every,
+            retained,
             last_span: retained * n_calibrants,
             last_index: None,
             seen: 0,
@@ -94,6 +104,11 @@ impl FrameStore {
         self.slab.capacity()
     }
 
+    #[cfg(test)]
+    pub fn index_capacity(&self) -> usize {
+        self.index.capacity()
+    }
+
     /// Copy this chunk's heap contents into the slab. Returns whether the frame
     /// was retained on the stride. The final frame is handled by `finish`.
     pub fn record(
@@ -103,8 +118,7 @@ impl FrameStore {
         points: impl Iterator<Item = CalibrantPoint>,
     ) -> bool {
         self.seen += 1;
-        let on_stride =
-            chunk.is_multiple_of(self.keep_every) && self.index.len() < self.index.capacity();
+        let on_stride = chunk.is_multiple_of(self.keep_every) && self.index.len() < self.retained;
         let offset = if on_stride {
             self.index.len() * self.n_calibrants
         } else {
@@ -131,12 +145,40 @@ impl FrameStore {
 
     /// Promote the reserved span into the index if the final chunk was not
     /// already retained on the stride.
+    ///
+    /// `last_chunk` must be the chunk passed to the most recent call to
+    /// `record`. The reserved slot is only ever promoted when it actually
+    /// holds that chunk — never blindly, because a stale non-stride entry
+    /// left over from an earlier chunk would otherwise get appended after
+    /// chunks already in the index, breaking the monotonic chunk order a
+    /// history scrubber depends on.
     pub fn finish(&mut self, last_chunk: usize) {
         if self.index.last().map(|f| f.chunk) == Some(last_chunk) {
             return;
         }
-        if let Some(idx) = self.last_index.take() {
+        let Some(idx) = self.last_index.take() else {
+            return;
+        };
+        if idx.chunk == last_chunk {
             self.index.push(idx);
+        } else {
+            // Only reachable if a caller passes a `last_chunk` that matches
+            // neither the index tail nor the reserved slot — i.e. a value
+            // that was never actually the last chunk recorded. That is a
+            // caller bug: flag it loudly in debug builds, and in release
+            // builds drop the stale entry instead of corrupting order.
+            debug_assert!(
+                false,
+                "FrameStore::finish({last_chunk}) called but the reserved slot holds \
+                 chunk {}; dropping it rather than corrupting index order",
+                idx.chunk
+            );
+            tracing::warn!(
+                last_chunk,
+                reserved_chunk = idx.chunk,
+                "FrameStore::finish called with a last_chunk matching neither the index \
+                 tail nor the reserved slot; dropping the stale reserved entry"
+            );
         }
     }
 
@@ -192,7 +234,10 @@ mod tests {
             "3 strided + 1 reserved last, got {}",
             store.len()
         );
-        assert_eq!(store.dropped(), 12 - store.len());
+        // Hand-computed for this fixture: chunks 0, 4, 8 land on the stride
+        // (keep_every = 4), chunk 11 is promoted as the reserved last frame,
+        // and the other 8 of the 12 recorded chunks are dropped.
+        assert_eq!(store.dropped(), 8);
     }
 
     #[test]
@@ -246,10 +291,49 @@ mod tests {
     #[test]
     fn the_slab_is_allocated_once() {
         let mut store = FrameStore::new(12, 4, budget_for(3, 4));
-        let cap = store.slab_capacity();
+        let slab_cap = store.slab_capacity();
+        let index_cap = store.index_capacity();
         for chunk in 0..12 {
             store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
         }
-        assert_eq!(store.slab_capacity(), cap, "recording must not reallocate");
+        assert_eq!(store.slab_capacity(), slab_cap, "slab must not reallocate");
+        // `record`'s safety bound is `index.len() < self.retained`, gated on
+        // an explicit field rather than `index.capacity()` — but if `index`
+        // reallocated anyway, that would defeat the "allocate once" promise
+        // this store is built on.
+        assert_eq!(
+            store.index_capacity(),
+            index_cap,
+            "index must not reallocate"
+        );
+    }
+
+    #[test]
+    fn finish_drops_a_mismatched_stale_entry_without_corrupting_order() {
+        // keep_every = 4, retained = 3: chunks 0, 4, 8 land on stride and
+        // fill the index outright, while chunks 5..7 leave a stale
+        // non-stride entry (chunk 7) sitting in the reserved slot that is
+        // never promoted, since chunk 8 was already retained on the stride.
+        let mut store = FrameStore::new(12, 4, budget_for(3, 4));
+        for chunk in 0..9 {
+            store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
+        }
+        // 20 matches neither the index tail (chunk 8) nor the reserved slot
+        // (chunk 7): a caller bug. The old code would push the stale chunk-7
+        // entry after chunk 8 regardless, producing out-of-order chunks.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.finish(20);
+        }));
+        assert!(
+            result.is_err(),
+            "a last_chunk matching neither slot must be flagged loudly in a debug build"
+        );
+        let chunks: Vec<usize> = (0..store.len())
+            .map(|i| store.frame(i).unwrap().0.chunk)
+            .collect();
+        assert!(
+            chunks.windows(2).all(|w| w[0] < w[1]),
+            "chunk order must stay monotonic even when finish() is misused, got {chunks:?}"
+        );
     }
 }
