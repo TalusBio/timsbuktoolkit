@@ -2,6 +2,7 @@
 //! target/decoy separation, FDR curve and decoy calibration.
 
 pub mod stats;
+pub mod transform;
 pub mod view;
 
 pub use view::{
