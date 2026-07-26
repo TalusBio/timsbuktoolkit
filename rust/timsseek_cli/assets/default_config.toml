@@ -65,13 +65,13 @@ dp_lookback = 30
 ##   - rt_sigma_factor: a plain half-width, `sigma * 1.4826 * MAD` with NO
 ##     median offset, then floored by `min_rt_tolerance_minutes` below.
 ##
-## mz_sigma was widened from 1.5 to 3.0. This is an EXTRACTION TOLERANCE, not
-## an FDR knob — discrimination is handled downstream by the rescorer and the
-## q-value machinery. The trade it does control is: a wider window pulls more
-## signal into every candidate's traces (including more neighbor/noise
-## interference) and costs more work per query, while a narrower one risks
-## clipping real peaks whose calibrated center is slightly off. 3.0 is
-## deliberately on the permissive side of that trade.
+## mz_sigma was widened from 1.5 to 3.0: 1.5 clipped real peaks, and 3.0 is worth
+## +12.6% sensitivity on an Astral run (validated on Astral and TimsTOF). This is
+## an EXTRACTION TOLERANCE, not an FDR knob — discrimination is handled downstream
+## by the rescorer and the q-value machinery. What it does trade is signal against
+## cost: a wider window pulls more into every candidate's traces (neighbours and
+## noise included) and costs more per query, a narrower one clips peaks whose
+## calibrated center is slightly off.
 mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0
