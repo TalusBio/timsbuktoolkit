@@ -30,16 +30,20 @@
 //! never a `Vec<Vec<f64>>` — at tens of millions of candidates the per-row
 //! allocation and pointer-chasing dominate. The heavy cost is the within-class
 //! scatter — `O(n * d^2)` (`d^2` FMAs/row) — **linear in the row count but with
-//! a large constant**, parallelized (deterministically) over rayon. Nothing
-//! here is super-linear in `n`. Skew-taming is done at feature-emit time by the
+//! a large constant**. All three reductions go through
+//! [`crate::utils::maybe_par::chunked_fold_reduce`], which parallelizes them
+//! over fixed row chunks and so keeps them bitwise-deterministic regardless of
+//! thread count (or of whether the parallel backend is compiled in at all).
+//! Nothing here is super-linear in `n`. Skew-taming is done at feature-emit time by the
 //! block grammar (log2/ln1p transforms); the linear lane only admits fields
 //! that are approx-Gaussian after their declared transform, so no rank-based
 //! gaussianization step runs here.
 
+use crate::utils::maybe_par::{
+    chunked_fold_reduce,
+    scatter_write,
+};
 use std::time::Instant;
-
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 
 /// Fraction of `mean(diag(Sw))` added to the diagonal as ridge shrinkage.
 /// Small enough to barely perturb a well-conditioned problem, large enough to
@@ -181,18 +185,7 @@ impl LdaModel {
         let d = self.ncols;
         assert_eq!(feat.len(), nrows * d);
         assert_eq!(out.len(), nrows);
-        #[cfg(feature = "rayon")]
-        {
-            out.par_iter_mut()
-                .enumerate()
-                .for_each(|(i, o)| *o = self.score(&feat[i * d..(i + 1) * d]));
-        }
-        #[cfg(not(feature = "rayon"))]
-        {
-            for (i, o) in out.iter_mut().enumerate() {
-                *o = self.score(&feat[i * d..(i + 1) * d]);
-            }
-        }
+        scatter_write(out, |i| self.score(&feat[i * d..(i + 1) * d]));
     }
 
     /// Discriminant weights in standardized space, `|coef|`-interpretable as
@@ -205,48 +198,29 @@ impl LdaModel {
 /// Per-column finite sum / sum-of-squares / count, reduced over fixed row
 /// chunks (deterministic summation order).
 fn col_finite_moments(feat: &[f64], ncols: usize) -> (Vec<f64>, Vec<f64>, Vec<u64>) {
-    let chunk = CHUNK_ROWS * ncols;
-    let fold = |acc: &mut (Vec<f64>, Vec<f64>, Vec<u64>), block: &[f64]| {
-        for row in block.chunks_exact(ncols) {
-            for (j, &v) in row.iter().enumerate() {
-                if v.is_finite() {
-                    acc.0[j] += v;
-                    acc.1[j] += v * v;
-                    acc.2[j] += 1;
+    chunked_fold_reduce(
+        feat,
+        CHUNK_ROWS * ncols,
+        || (vec![0.0f64; ncols], vec![0.0f64; ncols], vec![0u64; ncols]),
+        |acc, _ci, block| {
+            for row in block.chunks_exact(ncols) {
+                for (j, &v) in row.iter().enumerate() {
+                    if v.is_finite() {
+                        acc.0[j] += v;
+                        acc.1[j] += v * v;
+                        acc.2[j] += 1;
+                    }
                 }
             }
-        }
-    };
-    let zero = || (vec![0.0f64; ncols], vec![0.0f64; ncols], vec![0u64; ncols]);
-
-    #[cfg(feature = "rayon")]
-    let partials: Vec<(Vec<f64>, Vec<f64>, Vec<u64>)> = feat
-        .par_chunks(chunk)
-        .map(|block| {
-            let mut acc = zero();
-            fold(&mut acc, block);
-            acc
-        })
-        .collect();
-    #[cfg(not(feature = "rayon"))]
-    let partials: Vec<(Vec<f64>, Vec<f64>, Vec<u64>)> = feat
-        .chunks(chunk)
-        .map(|block| {
-            let mut acc = zero();
-            fold(&mut acc, block);
-            acc
-        })
-        .collect();
-
-    let mut out = zero();
-    for (s, sq, c) in &partials {
-        for j in 0..ncols {
-            out.0[j] += s[j];
-            out.1[j] += sq[j];
-            out.2[j] += c[j];
-        }
-    }
-    out
+        },
+        |out, (s, sq, c)| {
+            for j in 0..ncols {
+                out.0[j] += s[j];
+                out.1[j] += sq[j];
+                out.2[j] += c[j];
+            }
+        },
+    )
 }
 
 /// Per-class standardized-feature sums + counts (parallel, deterministic).
@@ -258,7 +232,7 @@ fn class_std_sums(
     mean: &[f64],
     inv_std: &[f64],
 ) -> ([Vec<f64>; 2], [u64; 2]) {
-    let chunk_rows = CHUNK_ROWS;
+    debug_assert_eq!(feat.len(), nrows * ncols);
     let std_at = |row: &[f64], j: usize| {
         let v = row[j];
         if v.is_finite() {
@@ -267,40 +241,31 @@ fn class_std_sums(
             0.0
         }
     };
-    let per_chunk = |ci: usize| {
-        let r0 = ci * chunk_rows;
-        let r1 = ((ci + 1) * chunk_rows).min(nrows);
-        let mut csum = [vec![0.0f64; ncols], vec![0.0f64; ncols]];
-        let mut ccnt = [0u64; 2];
-        for i in r0..r1 {
-            let row = &feat[i * ncols..(i + 1) * ncols];
-            let c = if is_decoy[i] { 0 } else { 1 };
-            for (j, s) in csum[c].iter_mut().enumerate() {
-                *s += std_at(row, j);
+    chunked_fold_reduce(
+        feat,
+        CHUNK_ROWS * ncols,
+        || ([vec![0.0f64; ncols], vec![0.0f64; ncols]], [0u64; 2]),
+        |(csum, ccnt), ci, block| {
+            // The block holds rows `ci * CHUNK_ROWS ..` of the matrix; the
+            // labels are indexed globally, so recover the offset.
+            let r0 = ci * CHUNK_ROWS;
+            for (local, row) in block.chunks_exact(ncols).enumerate() {
+                let c = if is_decoy[r0 + local] { 0 } else { 1 };
+                for (j, s) in csum[c].iter_mut().enumerate() {
+                    *s += std_at(row, j);
+                }
+                ccnt[c] += 1;
             }
-            ccnt[c] += 1;
-        }
-        (csum, ccnt)
-    };
-    let nchunks = nrows.div_ceil(chunk_rows);
-
-    #[cfg(feature = "rayon")]
-    let partials: Vec<([Vec<f64>; 2], [u64; 2])> =
-        (0..nchunks).into_par_iter().map(per_chunk).collect();
-    #[cfg(not(feature = "rayon"))]
-    let partials: Vec<([Vec<f64>; 2], [u64; 2])> = (0..nchunks).map(per_chunk).collect();
-
-    let mut class_sum = [vec![0.0f64; ncols], vec![0.0f64; ncols]];
-    let mut class_cnt = [0u64; 2];
-    for (csum, ccnt) in &partials {
-        for c in 0..2 {
-            for j in 0..ncols {
-                class_sum[c][j] += csum[c][j];
+        },
+        |(class_sum, class_cnt), (csum, ccnt)| {
+            for c in 0..2 {
+                for j in 0..ncols {
+                    class_sum[c][j] += csum[c][j];
+                }
+                class_cnt[c] += ccnt[c];
             }
-            class_cnt[c] += ccnt[c];
-        }
-    }
-    (class_sum, class_cnt)
+        },
+    )
 }
 
 /// Per-class within-class scatter (un-normalized), returned as two stacked
@@ -315,54 +280,47 @@ fn within_class_scatter(
     inv_std: &[f64],
     class_mean: &[Vec<f64>; 2],
 ) -> Vec<f64> {
-    let chunk_rows = CHUNK_ROWS;
+    debug_assert_eq!(feat.len(), nrows * ncols);
     let dd = ncols * ncols;
-    let per_chunk = |ci: usize| -> Vec<f64> {
-        let r0 = ci * chunk_rows;
-        let r1 = ((ci + 1) * chunk_rows).min(nrows);
-        let mut out = vec![0.0f64; 2 * dd];
-        let mut centered = vec![0.0f64; ncols];
-        for i in r0..r1 {
-            let row = &feat[i * ncols..(i + 1) * ncols];
-            let c = if is_decoy[i] { 0 } else { 1 };
-            let mu = &class_mean[c];
-            for j in 0..ncols {
-                let v = row[j];
-                let z = if v.is_finite() {
-                    (v - mean[j]) * inv_std[j]
-                } else {
-                    0.0
-                };
-                centered[j] = z - mu[j];
-            }
-            let base = c * dd;
-            for j in 0..ncols {
-                let cj = centered[j];
-                if cj == 0.0 {
-                    continue;
+    chunked_fold_reduce(
+        feat,
+        CHUNK_ROWS * ncols,
+        || vec![0.0f64; 2 * dd],
+        |out, ci, block| {
+            // Global row offset of this block, for the label lookup.
+            let r0 = ci * CHUNK_ROWS;
+            let mut centered = vec![0.0f64; ncols];
+            for (local, row) in block.chunks_exact(ncols).enumerate() {
+                let c = if is_decoy[r0 + local] { 0 } else { 1 };
+                let mu = &class_mean[c];
+                for j in 0..ncols {
+                    let v = row[j];
+                    let z = if v.is_finite() {
+                        (v - mean[j]) * inv_std[j]
+                    } else {
+                        0.0
+                    };
+                    centered[j] = z - mu[j];
                 }
-                let rowbase = base + j * ncols;
-                for k in 0..ncols {
-                    out[rowbase + k] += cj * centered[k];
+                let base = c * dd;
+                for j in 0..ncols {
+                    let cj = centered[j];
+                    if cj == 0.0 {
+                        continue;
+                    }
+                    let rowbase = base + j * ncols;
+                    for k in 0..ncols {
+                        out[rowbase + k] += cj * centered[k];
+                    }
                 }
             }
-        }
-        out
-    };
-    let nchunks = nrows.div_ceil(chunk_rows);
-
-    #[cfg(feature = "rayon")]
-    let partials: Vec<Vec<f64>> = (0..nchunks).into_par_iter().map(per_chunk).collect();
-    #[cfg(not(feature = "rayon"))]
-    let partials: Vec<Vec<f64>> = (0..nchunks).map(per_chunk).collect();
-
-    let mut sw = vec![0.0f64; 2 * dd];
-    for p in &partials {
-        for e in 0..2 * dd {
-            sw[e] += p[e];
-        }
-    }
-    sw
+        },
+        |sw, p| {
+            for e in 0..2 * dd {
+                sw[e] += p[e];
+            }
+        },
+    )
 }
 
 /// Solve `A x = b` for a row-major `n x n` matrix `A` via Gaussian elimination

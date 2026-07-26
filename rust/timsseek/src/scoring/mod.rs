@@ -4,7 +4,6 @@ pub(crate) mod apex_dsp;
 pub mod apex_finding;
 pub mod blocks;
 pub mod extraction;
-mod maybe_par;
 pub mod offsets;
 pub mod parquet_writer;
 pub mod pipeline;

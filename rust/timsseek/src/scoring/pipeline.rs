@@ -10,7 +10,7 @@
 //! - Chromatogram collectors (size varies with query complexity)
 //!
 //! `prescore_batch` and `score_calibrated_batch` dispatch through
-//! `super::maybe_par::fold_reduce`, which is compile-time gated on the
+//! `crate::utils::maybe_par::fold_reduce`, which is compile-time gated on the
 //! `rayon` feature. With rayon, each worker thread gets its own
 //! `ScoringWorker` via the `init` closure and reuses it across thousands
 //! of queries; without rayon, a single `ScoringWorker` is built and reused
@@ -732,7 +732,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
 
         let (_worker, _scratch, mut results): (ScoringWorker, ScratchBufs, IonSearchAccumulator) =
-            super::maybe_par::fold_reduce(
+            crate::utils::maybe_par::fold_reduce(
                 &flats,
                 || {
                     tracing::debug!(
@@ -878,7 +878,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .max()
             .unwrap_or(0);
 
-        let (_worker, _scratch, heap, par_timings) = super::maybe_par::fold_reduce(
+        let (_worker, _scratch, heap, par_timings) = crate::utils::maybe_par::fold_reduce(
             &flats,
             || {
                 tracing::debug!(
