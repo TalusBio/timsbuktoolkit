@@ -14,7 +14,9 @@ use crate::view::RescoreView;
 use ratatui::crossterm::event::{
     KeyCode,
     KeyEvent,
+    KeyModifiers,
 };
+use ratatui::widgets::TableState;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +116,15 @@ pub struct App<'a> {
     qvalue_curve: Option<Vec<(f64, f64)>>,
     /// Decoy/target PP curve, cached for the same reason.
     pp_curve: Option<Vec<(f64, f64)>>,
+    /// Exact rank-based AUC of the discriminant score, cached: it depends only
+    /// on `view.score`/`view.is_target` and sorts its input, so it is worth
+    /// computing once rather than on every Overview frame.
+    auc: Option<f64>,
+    /// Scroll/selection state for the features table, kept on `App` rather
+    /// than rebuilt per frame: `TableState::offset` is what lets a `Table`
+    /// scroll, and a fresh `TableState::default()` every render recomputes it
+    /// from `0`, pinning the viewport instead of tracking the cursor.
+    table_state: TableState,
 }
 
 impl<'a> App<'a> {
@@ -133,6 +144,8 @@ impl<'a> App<'a> {
             cache: HashMap::new(),
             qvalue_curve: None,
             pp_curve: None,
+            auc: None,
+            table_state: TableState::default(),
         };
         app.refresh_visible();
         app
@@ -187,12 +200,15 @@ impl<'a> App<'a> {
 
     /// Summary for feature `j`, computed on first access and cached. Filling
     /// all ~131 up front would cost a full matrix walk before the first frame.
+    ///
+    /// `feature_column` is `Clone` (it is a cheap strided iterator over the
+    /// borrowed matrix), so `summarize` can walk it directly rather than
+    /// paying for an intermediate `Vec` per column.
     pub fn summary(&mut self, j: usize) -> FeatureSummary {
         if let Some(s) = self.cache.get(&j) {
             return *s;
         }
-        let column: Vec<f64> = self.view.feature_column(j).collect();
-        let s = stats::summarize(column.iter().copied(), &self.view.is_target);
+        let s = stats::summarize(self.view.feature_column(j), &self.view.is_target);
         self.cache.insert(j, s);
         s
     }
@@ -217,35 +233,85 @@ impl<'a> App<'a> {
             .clone()
     }
 
+    /// Exact rank-based AUC of the discriminant score, computed on first
+    /// access and cached: `stats::auc_exact` sorts its input, so recomputing
+    /// it on every Overview frame is a full sort of every row per keystroke.
+    pub fn auc(&mut self) -> f64 {
+        *self.auc.get_or_insert_with(|| {
+            stats::auc_exact(
+                self.view.score.iter().map(|&s| s as f64),
+                &self.view.is_target,
+            )
+        })
+    }
+
+    /// The features table's `TableState`, synced to the current cursor before
+    /// each render. Returning the same stored `TableState` (rather than a
+    /// fresh `TableState::default()`) is what lets ratatui's `Table` keep its
+    /// scroll offset between frames.
+    pub fn table_state(&mut self) -> &mut TableState {
+        let selected = if self.visible.is_empty() {
+            None
+        } else {
+            Some(self.cursor)
+        };
+        self.table_state.select(selected);
+        &mut self.table_state
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        // Raw mode disables the terminal's own SIGINT handling, so Ctrl-C
+        // arrives as a plain key event rather than a signal. Handled before
+        // anything else — including the filter-editing dispatch below — so
+        // it always quits rather than being typed into the filter box or
+        // toggling clip (`KeyCode::Char('c')` with no modifiers).
+        if is_ctrl_c(key) {
+            return Flow::Quit;
+        }
         if self.filter_editing {
             self.handle_filter_key(key);
             return Flow::Continue;
         }
+        // CONTROL/ALT combinations are reserved (Ctrl-C above, and headroom
+        // for future bindings); only a bare or Shifted character triggers a
+        // command, so e.g. Ctrl-X does not cycle the x-transform.
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Flow::Quit,
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => self.tab = self.tab.shift(1),
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => self.tab = self.tab.shift(-1),
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Char('q') | KeyCode::Esc if plain => return Flow::Quit,
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab if plain => {
+                self.tab = self.tab.shift(1)
+            }
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab if plain => {
+                self.tab = self.tab.shift(-1)
+            }
+            KeyCode::Char('j') | KeyCode::Down if plain => {
                 self.cursor = (self.cursor + 1).min(self.visible.len().saturating_sub(1));
             }
-            KeyCode::Char('k') | KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Char('x') => self.x = self.x.next(),
-            KeyCode::Char('X') => self.x = self.x.prev(),
-            KeyCode::Char('y') => self.y = self.y.next(),
-            KeyCode::Char('Y') => self.y = self.y.prev(),
-            KeyCode::Char('c') => self.clip = !self.clip,
-            KeyCode::Char('s') => {
+            KeyCode::Char('k') | KeyCode::Up if plain => {
+                self.cursor = self.cursor.saturating_sub(1)
+            }
+            KeyCode::Char('x') if plain => self.x = self.x.next(),
+            KeyCode::Char('X') if plain => self.x = self.x.prev(),
+            KeyCode::Char('y') if plain => self.y = self.y.next(),
+            KeyCode::Char('Y') if plain => self.y = self.y.prev(),
+            KeyCode::Char('c') if plain => self.clip = !self.clip,
+            KeyCode::Char('s') if plain => {
                 self.sort = self.sort.next();
                 self.refresh_visible();
             }
-            KeyCode::Char('S') => {
+            KeyCode::Char('S') if plain => {
                 self.sort_desc = !self.sort_desc;
                 self.refresh_visible();
             }
-            KeyCode::Char('/') => {
+            KeyCode::Char('/') if plain => {
                 self.filter_editing = true;
                 self.filter.clear();
+                // Without this, the help line shows an empty filter while the
+                // table still shows whatever the previous filter left
+                // visible, until the user types the first character.
+                self.refresh_visible();
             }
             _ => {}
         }
@@ -253,6 +319,9 @@ impl<'a> App<'a> {
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
@@ -266,7 +335,7 @@ impl<'a> App<'a> {
             KeyCode::Backspace => {
                 self.filter.pop();
             }
-            KeyCode::Char(c) => self.filter.push(c),
+            KeyCode::Char(c) if plain => self.filter.push(c),
             _ => {}
         }
     }
@@ -327,9 +396,17 @@ impl<'a> App<'a> {
 /// Open the dashboard and block until the user quits.
 ///
 /// Skips silently (with a warning) when stdout is not a terminal, so a piped
-/// or containerized run is unaffected. `ratatui::init` installs a panic hook
-/// that restores the terminal, so a panic inside the loop cannot leave the
-/// user's shell in raw mode.
+/// or containerized run is unaffected. Never fails or panics the caller: if
+/// terminal setup fails (`try_init`, e.g. no usable controlling terminal even
+/// though stdout is a tty — `setsid`, some container/CI pty setups), the error
+/// is returned rather than panicking (unlike `ratatui::init`, which is
+/// `try_init().expect(...)` and would unwind through the caller, past a
+/// warn-only `if let Err`, after Phase 6 has already written output). And if
+/// the event loop itself panics on some unanticipated input, [`catch_panics`]
+/// converts that into a warning too, so nothing here can abort a search run.
+/// `try_init` still installs a panic hook that restores the terminal before
+/// unwinding, and `ratatui::restore()` runs again unconditionally below —
+/// harmless if the hook already ran, load-bearing if it didn't.
 pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
     use std::io::IsTerminal;
 
@@ -342,10 +419,33 @@ pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, view);
+    let mut terminal = ratatui::try_init()?;
+    let result = catch_panics(|| event_loop(&mut terminal, view));
     ratatui::restore();
     result
+}
+
+/// Runs `f`, converting a panic into a `tracing::warn!` + `Ok(())` rather than
+/// letting it unwind. Factored out of [`run`] so the recovery behavior is
+/// testable without a real terminal: [`event_loop`] itself needs one, but this
+/// wrapper does not.
+fn catch_panics(f: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                "rescore dashboard panicked; recovering so the search run is not aborted"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Whether `key` is Ctrl-C: raw mode disables the terminal's own `ISIG`
+/// handling, so Ctrl-C arrives as this key event rather than delivering
+/// `SIGINT`.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn event_loop<B: ratatui::backend::Backend>(
@@ -401,6 +501,10 @@ mod tests {
 
     fn code(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     static MATRIX: [f64; 6] = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
@@ -471,6 +575,37 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_quits_from_normal_mode() {
+        let v = view();
+        let mut app = App::new(&v);
+        assert!(
+            matches!(app.handle_key(ctrl('c')), Flow::Quit),
+            "Ctrl-C must quit rather than toggling clip"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_filter_editing() {
+        let v = view();
+        let mut app = App::new(&v);
+        app.handle_key(key('/'));
+        assert!(app.filter_editing());
+        assert!(
+            matches!(app.handle_key(ctrl('c')), Flow::Quit),
+            "Ctrl-C must quit even mid-filter, not type a literal 'c'"
+        );
+    }
+
+    #[test]
+    fn ctrl_x_does_not_cycle_the_x_transform() {
+        let v = view();
+        let mut app = App::new(&v);
+        let x0 = app.x();
+        assert!(matches!(app.handle_key(ctrl('x')), Flow::Continue));
+        assert_eq!(app.x(), x0, "Ctrl-X is reserved, not a transform cycle");
+    }
+
+    #[test]
     fn slash_filters_feature_names_and_esc_clears() {
         let v = view();
         let mut app = App::new(&v);
@@ -493,6 +628,30 @@ mod tests {
         app.handle_key(key('/'));
         app.handle_key(code(KeyCode::Esc));
         assert_eq!(app.visible().len(), 2, "esc clears the filter");
+    }
+
+    /// Reopening the filter box clears `self.filter` immediately; `visible`
+    /// must refresh in lockstep so the table does not keep showing the
+    /// previous (now-stale) filtered set while the help line already shows an
+    /// empty query.
+    #[test]
+    fn reopening_the_filter_refreshes_visible_immediately() {
+        let v = view();
+        let mut app = App::new(&v);
+        app.handle_key(key('/'));
+        for c in "beta".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(code(KeyCode::Enter));
+        assert_eq!(app.visible(), &[1], "filtered down to beta_count");
+
+        app.handle_key(key('/'));
+        assert_eq!(app.filter(), "", "filter text cleared on reopen");
+        assert_eq!(
+            app.visible().len(),
+            2,
+            "visible must refresh to match the cleared filter, not stay stale"
+        );
     }
 
     #[test]
@@ -579,6 +738,39 @@ mod tests {
         assert_eq!(first, second, "cached data is returned, not recomputed");
     }
 
+    /// `auc_exact` sorts its input, so it must be computed once per session
+    /// rather than once per Overview frame, exactly like the FDR/PP curves
+    /// above.
+    #[test]
+    fn auc_is_cached() {
+        let v = view();
+        let mut app = App::new(&v);
+        assert!(app.auc.is_none(), "not computed until first access");
+
+        let first = app.auc();
+        assert!(app.auc.is_some(), "cached after the first access");
+
+        let second = app.auc();
+        assert_eq!(first, second, "cached data is returned, not recomputed");
+    }
+
+    /// A fresh `TableState::default()` every frame resets `offset` to `0`, so
+    /// the viewport can never scroll. `table_state()` must hand out the same
+    /// stored state across calls, with `select()` following the cursor.
+    #[test]
+    fn table_state_is_shared_across_accesses_and_tracks_the_cursor() {
+        let v = view();
+        let mut app = App::new(&v);
+        assert_eq!(app.table_state().selected(), Some(0));
+
+        app.handle_key(key('j'));
+        assert_eq!(
+            app.table_state().selected(),
+            Some(1),
+            "table_state's selection follows the cursor"
+        );
+    }
+
     /// `nan_feat` is NaN in every row, so `stats::summarize` gives it a NaN
     /// AUC (no finite value contributes to either class): a real, naturally
     /// occurring case, not a synthetic key. It must sort last regardless of
@@ -624,5 +816,38 @@ mod tests {
             Some(2),
             "ascending: NaN AUC still sorts last"
         );
+    }
+
+    /// The test harness's stdout is not a terminal (captured, or at least not
+    /// a real tty in CI), so `run` must take the early-return path rather
+    /// than touching a real terminal, and it must return `Ok`, not panic.
+    #[test]
+    fn run_returns_ok_and_does_not_panic_when_stdout_is_not_a_terminal() {
+        let v = view();
+        assert!(super::run(&v).is_ok());
+    }
+
+    /// `catch_panics` is the piece of `run` that keeps a panic inside the
+    /// event loop from aborting the whole search run; unlike `event_loop`
+    /// itself, it needs no real terminal, so it can be exercised directly.
+    #[test]
+    fn catch_panics_converts_a_panic_into_ok() {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the default panic printout
+        let result = catch_panics(|| panic!("simulated event-loop panic"));
+        std::panic::set_hook(prev_hook);
+        assert!(result.is_ok(), "a caught panic must not fail the run");
+    }
+
+    #[test]
+    fn catch_panics_passes_through_a_successful_result() {
+        let result = catch_panics(|| Ok(()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn catch_panics_passes_through_an_io_error() {
+        let result = catch_panics(|| Err(std::io::Error::other("simulated io error")));
+        assert!(result.is_err(), "a real Err must not be swallowed");
     }
 }

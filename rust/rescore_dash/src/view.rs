@@ -10,6 +10,15 @@ use std::sync::Arc;
 ///
 /// A local plain struct rather than `timsseek`'s `RescoreFeatureStats` so this
 /// crate stays free of a `timsseek` dependency; the caller converts.
+///
+/// `gain` is read (via [`RescoreView::mean_gain`]) for the Features table's
+/// `gain` column; `fold` and `stats` are not read anywhere in this crate. Both
+/// are kept on the struct deliberately: they are part of the boundary for a
+/// deferred standalone viewer that would show per-fold detail this dashboard
+/// does not. In particular, do not read `stats`' NaN ratio for the table's
+/// `NaN%` column — `summarize` recomputes it from the matrix actually on
+/// screen, which is the more truthful source than a stat computed by the CLI
+/// before the dashboard's own filtering/clipping ever sees the data.
 pub struct FoldImportance {
     pub fold: u8,
     /// `(feature name, GBM gain)`
@@ -80,7 +89,12 @@ impl<'a> RescoreView<'a> {
 
     /// Values of feature `j` in row order. Panics only on an out-of-range `j`,
     /// which is a programming error, not user data.
-    pub fn feature_column(&self, j: usize) -> impl Iterator<Item = f64> + '_ {
+    ///
+    /// `+ Clone`: the underlying `Copied<StepBy<Skip<slice::Iter>>>` is cheap
+    /// to clone (it holds only a pointer/len and a stride), which lets callers
+    /// that need two passes over a column (e.g. `stats::summarize`) avoid
+    /// collecting it into a `Vec` first.
+    pub fn feature_column(&self, j: usize) -> impl Iterator<Item = f64> + Clone + '_ {
         assert!(j < self.n_features(), "feature index out of range");
         self.features
             .iter()

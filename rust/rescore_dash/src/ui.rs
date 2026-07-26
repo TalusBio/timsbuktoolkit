@@ -37,7 +37,6 @@ use ratatui::widgets::{
     Paragraph,
     Row,
     Table,
-    TableState,
     Tabs,
 };
 use ratatui::{
@@ -112,14 +111,7 @@ fn hist_datasets(hist: &Hist, y: transform::YTransform) -> (Vec<(f64, f64)>, Vec
 /// Render a target/decoy histogram as a `Chart`. Tolerates an all-empty or
 /// all-zero `hist`: the y bound falls back to `1.0` rather than degenerating
 /// to `[0.0, 0.0]`.
-fn draw_hist(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    hist: &Hist,
-    y: transform::YTransform,
-    x_label: &str,
-) {
+fn draw_hist(frame: &mut Frame, area: Rect, title: &str, hist: &Hist, y: transform::YTransform) {
     let (target, decoy) = hist_datasets(hist, y);
     let ymax = target
         .iter()
@@ -143,19 +135,16 @@ fn draw_hist(
             .data(&decoy),
     ];
 
+    // No axis title here: it would duplicate the block title passed in above
+    // and get drawn inline over the last row of plot data.
     let mid = (hist.lo + hist.hi) / 2.0;
     let chart = Chart::new(datasets)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .x_axis(
-            Axis::default()
-                .title(x_label)
-                .bounds([hist.lo, hist.hi])
-                .labels([
-                    format!("{:.3}", hist.lo),
-                    format!("{mid:.3}"),
-                    format!("{:.3}", hist.hi),
-                ]),
-        )
+        .x_axis(Axis::default().bounds([hist.lo, hist.hi]).labels([
+            format!("{:.3}", hist.lo),
+            format!("{mid:.3}"),
+            format!("{:.3}", hist.hi),
+        ]))
         .y_axis(Axis::default().bounds([0.0, ymax]));
     frame.render_widget(chart, area);
 }
@@ -181,10 +170,20 @@ fn column_hist(app: &mut App, values: &[f64]) -> (Hist, usize) {
         .filter_map(|(&v, &t)| x.apply(v).map(|_| t))
         .collect();
 
+    // Clipped: the 0.5/99.5 percentile range needs a sort, which is the whole
+    // point (trim outlier tails). Unclipped: the range is just the finite
+    // min/max, and `finite_range` gets there in one O(n) pass with no
+    // allocation, rather than sorting the whole column just to read off its
+    // endpoints (`percentile_range(.., 0.0, 100.0)` is a full sort for that).
     let range = if clip {
         stats::percentile_range(transformed.iter().copied(), 0.5, 99.5)
     } else {
-        stats::percentile_range(transformed.iter().copied(), 0.0, 100.0)
+        stats::finite_range(transformed.iter().copied()).map(|(lo, hi)| {
+            // Mirrors `percentile_range`'s degenerate-range fallback: a
+            // single distinct value (or none) would otherwise collapse the
+            // histogram to `[lo, lo]`.
+            if hi > lo { (lo, hi) } else { (lo, lo + 1.0) }
+        })
     };
 
     let hist = match range {
@@ -204,7 +203,6 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     let view = app.view();
     let n_targets = view.is_target.iter().filter(|&&t| t).count();
     let n_decoys = view.is_target.len() - n_targets;
-    let auc = stats::auc_exact(view.score.iter().map(|&s| s as f64), &view.is_target);
     let thresholds = curves::threshold_table(&view.qvalue, &view.is_target, &[0.01, 0.05, 0.10]);
     let counts = thresholds
         .iter()
@@ -213,17 +211,19 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect::<Vec<_>>()
         .join("   ");
+    let score: Vec<f64> = view.score.iter().map(|&s| s as f64).collect();
+    let auc = app.auc();
     let header = format!("{n_targets} targets   {n_decoys} decoys   AUC {auc:.4}\n{counts}");
     frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    let score: Vec<f64> = view.score.iter().map(|&s| s as f64).collect();
     let nan_count = score.iter().filter(|v| !v.is_finite()).count();
     let (hist, dropped) = column_hist(app, &score);
     let title = format!(
-        "discriminant_score [{}] (dropped {dropped}, of which {nan_count} non-finite)",
-        app.x().label()
+        "discriminant_score [{}] (dropped {dropped}, of which {nan_count} non-finite, {} out of range)",
+        app.x().label(),
+        hist.n_out
     );
-    draw_hist(frame, chunks[1], &title, &hist, app.y(), "score");
+    draw_hist(frame, chunks[1], &title, &hist, app.y());
 }
 
 /// Targets-passing-vs-q-value curve, plus a threshold table at fixed FDR
@@ -285,11 +285,18 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Target-vs-decoy PP plot (empirical CDF of one against the other) with the
 /// y = x reference line.
 fn draw_calibration(frame: &mut Frame, app: &mut App, area: Rect) {
+    // The plot's axes are (decoy CDF, target CDF): good target/decoy
+    // separation pulls the curve BELOW the y = x diagonal (targets need a
+    // higher score threshold before as many of them have "arrived" as
+    // decoys have), so the title carries that reading hint rather than
+    // leaving it to the viewer to work out from two bare axis labels.
+    let title = "Calibration (below y=x = separation)";
+
     let curve = app.pp_curve();
     if curve.is_empty() {
         frame.render_widget(
             Paragraph::new("PP plot needs both targets and decoys")
-                .block(Block::default().borders(Borders::ALL).title("Calibration")),
+                .block(Block::default().borders(Borders::ALL).title(title)),
             area,
         );
         return;
@@ -311,7 +318,7 @@ fn draw_calibration(frame: &mut Frame, app: &mut App, area: Rect) {
             .data(&reference),
     ];
     let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::ALL).title("Calibration"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .x_axis(Axis::default().title("decoy CDF").bounds([0.0, 1.0]))
         .y_axis(Axis::default().title("target CDF").bounds([0.0, 1.0]));
     frame.render_widget(chart, area);
@@ -335,7 +342,6 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let visible = app.visible().to_vec();
     let total = app.view().n_features();
-    let cursor = app.cursor();
 
     let header = Row::new(vec![
         SortKey::Name.label(),
@@ -364,14 +370,27 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
+    // ALL-lane feature names share long prefixes by construction (`ms1_*`,
+    // `ms2_*`, `lazyscore_*`), so a name column fixed at the old 16 chars
+    // renders an indistinguishable prefix for every row. `Min(16)` keeps that
+    // as a floor (so a narrow terminal never does worse than before) but lets
+    // the column grow to fill whatever space the numeric columns do not need
+    // — e.g. 26 chars at a 160-column terminal, comfortably showing names
+    // like `lazyscore_vs_baseline` in full. A plain `Fill(1)` or a larger
+    // fixed `Min` would instead pull width away from the numeric columns
+    // below (once the fixed name width plus six `Length(9)` columns exceeds
+    // the panel's content width, the layout solver shrinks the `Length`
+    // columns to make room, which is exactly the truncation this is fixing).
+    // The numeric columns themselves are widened to fit `fmt4`'s widest
+    // realistic output (e.g. `-307.0000`) without truncating.
     let widths = [
-        Constraint::Length(16),
-        Constraint::Length(6),
-        Constraint::Length(6),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(5),
+        Constraint::Min(16),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(9),
     ];
     let title = format!(
         "Features ({}/{}) sort:{}",
@@ -384,13 +403,7 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title(title));
 
-    let mut state = TableState::default();
-    state.select(if visible.is_empty() {
-        None
-    } else {
-        Some(cursor)
-    });
-    frame.render_stateful_widget(table, chunks[0], &mut state);
+    frame.render_stateful_widget(table, chunks[0], app.table_state());
 
     match app.selected_feature() {
         Some(j) => {
@@ -399,10 +412,11 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
             let nan_count = values.iter().filter(|v| !v.is_finite()).count();
             let (hist, dropped) = column_hist(app, &values);
             let title = format!(
-                "{name} [{}] (dropped {dropped}, of which {nan_count} non-finite)",
-                app.x().label()
+                "{name} [{}] (dropped {dropped}, of which {nan_count} non-finite, {} out of range)",
+                app.x().label(),
+                hist.n_out
             );
-            draw_hist(frame, chunks[1], &title, &hist, app.y(), &name);
+            draw_hist(frame, chunks[1], &title, &hist, app.y());
         }
         None => {
             frame.render_widget(
@@ -502,11 +516,122 @@ mod tests {
             qvalue: Vec::new(),
             importance: Vec::new(),
         };
+        // Every tab, not just the one `App::new` starts on: each tab's draw
+        // function reads the view/cache independently, and an empty matrix
+        // exercises the "no feature selected" / "needs both classes" paths
+        // that a non-empty fixture never reaches.
+        for tab in Tab::ALL {
+            let mut app = App::new(&view);
+            while app.tab() != tab {
+                app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            }
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|f| draw(f, &mut app))
+                .unwrap_or_else(|e| panic!("{:?} must still draw on an empty view: {e}", tab));
+        }
+    }
+
+    /// 100x20 backend, 40 features, ~13-row viewport: reproduces the
+    /// scenario where `TableState::default()` every frame pinned the
+    /// selected row to the bottom edge instead of letting the viewport
+    /// scroll. The offset must persist (and advance) across renders as the
+    /// cursor moves, since `TableState::offset` is what makes a `Table`
+    /// widget scroll at all.
+    #[test]
+    fn features_table_offset_persists_and_advances_across_renders() {
+        let n_features = 40;
+        let n_rows = 4;
+        let feature_names: Vec<Arc<str>> = (0..n_features)
+            .map(|i| Arc::from(format!("feature_{i:03}").as_str()))
+            .collect();
+        let mut matrix = Vec::new();
+        for r in 0..n_rows {
+            for j in 0..n_features {
+                matrix.push((r * n_features + j) as f64);
+            }
+        }
+        let is_target: Vec<bool> = (0..n_rows).map(|i| i % 2 == 0).collect();
+        let score: Vec<f32> = (0..n_rows)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let qvalue: Vec<f32> = (0..n_rows)
+            .map(|i| if i % 2 == 0 { 0.001 } else { 0.9 })
+            .collect();
+        let view = RescoreView {
+            feature_names,
+            features: &matrix,
+            is_target,
+            score,
+            qvalue,
+            importance: Vec::new(),
+        };
         let mut app = App::new(&view);
-        let backend = TestBackend::new(80, 24);
+        while app.tab() != Tab::Features {
+            app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        }
+
+        let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|f| draw(f, &mut app))
-            .expect("empty view must still draw");
+        terminal.draw(|f| draw(f, &mut app)).expect("first draw");
+        let offset_before = app.table_state().offset();
+
+        for _ in 0..30 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        terminal.draw(|f| draw(f, &mut app)).expect("second draw");
+        let offset_after = app.table_state().offset();
+
+        assert!(
+            offset_after > offset_before,
+            "offset must advance as the cursor scrolls past the viewport: {offset_before} -> {offset_after}"
+        );
+    }
+
+    /// At 160x30 with real, ALL-lane-length feature names (21 and 19 chars —
+    /// both would have collapsed to the same 16-char prefix under the old
+    /// `Constraint::Length(16)` name column, `"lazyscore_vs_bas"` for the
+    /// first), and a numeric value whose `fmt4` output is wider than the old
+    /// fixed 6-char column, neither may be silently truncated.
+    ///
+    /// `name_b` ("ms1_precursor_trace") is not the selected feature (that's
+    /// `name_a`, at cursor `0`), so it appears nowhere else in the frame —
+    /// the histogram panel's title only ever names the selection. Its full
+    /// presence in the render is therefore evidence about the *table
+    /// column's* width specifically, not a coincidental match against some
+    /// other panel.
+    #[test]
+    fn feature_table_does_not_truncate_long_names_or_wide_numbers() {
+        let name_a = "lazyscore_vs_baseline";
+        let name_b = "ms1_precursor_trace";
+        // Feature 0: target mean -307.0 (one target row), decoy mean 307.0.
+        let matrix = [-307.0, 1.0, 307.0, 2.0];
+        let view = RescoreView {
+            feature_names: vec![Arc::from(name_a), Arc::from(name_b)],
+            features: &matrix,
+            is_target: vec![true, false],
+            score: vec![1.0, -1.0],
+            qvalue: vec![0.001, 0.9],
+            importance: Vec::new(),
+        };
+        let mut app = App::new(&view);
+        while app.tab() != Tab::Features {
+            app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        }
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|f| draw(f, &mut app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            text.contains(name_b),
+            "name column truncated a real feature name that appears only in the table: {text}"
+        );
+        assert!(
+            text.contains("-307.0000"),
+            "numeric column truncated fmt4's output: {text}"
+        );
     }
 }
