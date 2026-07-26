@@ -385,7 +385,7 @@ impl TraceScorer {
 
     /// Stage B: Suggest best apex from precomputed traces.
     /// Pure peak-pick on apex_profile — O(cycles). Truly cheap.
-    /// Returns apex_profile[max_loc] as the ranking score.
+    /// Returns `apex_profile[max_loc]` as the ranking score.
     pub fn suggest_apex(
         &self,
         rt_mapper: &dyn Fn(usize) -> u32,
@@ -423,10 +423,10 @@ impl TraceScorer {
     /// `score_at` across cycles would otherwise redo four full-slice passes
     /// (2x argmax, 2x `area_uniqueness` total-sum) per cycle, making the sweep
     /// O(cycles^2). Needs `&mut self` only for `coel_scratch` reuse.
-    pub fn compute_apex_evidence<T: KeyLike>(
-        &mut self,
-        scoring_ctx: &Extraction<T>,
-    ) -> ApexEvidence {
+    /// Thin wrapper over
+    /// [`crate::scoring::blocks::apex_evidence::compute_apex_evidence`],
+    /// binding the profiles and scratch this scorer already owns.
+    pub fn apex_evidence<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) -> ApexEvidence {
         compute_apex_evidence(
             &self.cosine_profile,
             &self.scribe_profile,
@@ -441,11 +441,11 @@ impl TraceScorer {
 
     /// Stage C: Compute full score at a given cycle index.
     /// Uses precomputed traces, cached profiles, and the extraction-global
-    /// `evidence` from [`Self::compute_apex_evidence`].
+    /// `evidence` from [`Self::apex_evidence`].
     /// `suggested` provides peak context for delta/baseline calculations.
     ///
     /// Takes `&self`: everything here is cycle-local, so a caller may sweep
-    /// every cycle off one `compute_traces` + one `compute_apex_evidence`.
+    /// every cycle off one `compute_traces` + one `apex_evidence`.
     pub fn score_at<T: KeyLike>(
         &self,
         scoring_ctx: &Extraction<T>,
@@ -572,7 +572,7 @@ impl TraceScorer {
         self.compute_traces(scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let loc = self.suggest_apex(rt_mapper, cycle_offset)?;
-        let evidence = self.compute_apex_evidence(scoring_ctx);
+        let evidence = self.apex_evidence(scoring_ctx);
         self.score_at(scoring_ctx, &evidence, loc.apex_cycle, &loc, rt_mapper)
     }
 

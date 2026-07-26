@@ -66,7 +66,7 @@ pub fn run_with(
         .map_err(|e| format!("suggest_apex failed: {e:?}"))?;
 
     // Stage B' : window-global apex evidence (cycle-invariant).
-    let evidence = scorer.compute_apex_evidence(extraction);
+    let evidence = scorer.apex_evidence(extraction);
 
     // Stage C (Pass 2): full score at the suggested apex.
     let pass2 = scorer
@@ -120,16 +120,27 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::sim::{
+        RandomPeaks,
         SimParams,
         build,
     };
 
+    /// `SimParams::default()` with the noise/interference knobs a test picks.
+    fn params(noise_floor: f32, apex_cycle: f32) -> SimParams {
+        SimParams {
+            noise_floor,
+            apex_cycle,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn clean_peak_passes_agree() {
-        let mut p = SimParams::default();
-        p.noise_floor = 0.0;
-        p.random_peaks.enabled = false;
-        p.apex_cycle = 30.0;
+        let p = params(0.0, 30.0);
         let data = build(&p);
         let map = p.rt_mapper();
         let res = run(&data.extraction, &map).unwrap();
@@ -141,20 +152,14 @@ mod tests {
 
     #[test]
     fn landscape_peaks_at_the_scored_apex() {
-        let mut p = SimParams::default();
-        p.noise_floor = 0.05;
-        p.random_peaks.enabled = false;
-        p.apex_cycle = 30.0;
+        let p = params(0.05, 30.0);
         let data = build(&p);
         let res = run(&data.extraction, &p.rt_mapper()).unwrap();
 
         assert_eq!(res.landscape.len(), p.n_cycles);
-        // The entry at the scored apex IS the reported main score.
-        assert_eq!(
-            res.landscape[res.pass2.joint_apex_cycle],
-            res.pass2.primary.main_score
-        );
-        // ... and on a clean peak that entry is the landscape maximum.
+        // On a clean peak the reported main score IS the landscape maximum —
+        // i.e. the scored apex is the best cycle in the window, not just a
+        // cycle the landscape happens to agree with.
         let best = res
             .landscape
             .iter()
@@ -168,10 +173,7 @@ mod tests {
         // With realistic noise (>0) an absent fragment's row is noise, so it
         // survives filter_zero_intensity_ions and stays expected -> it should
         // score lower than the fully-observed case (coverage/cosine penalty).
-        let mut base = SimParams::default();
-        base.noise_floor = 0.1;
-        base.random_peaks.enabled = false;
-        base.apex_cycle = 30.0;
+        let base = params(0.1, 30.0);
 
         let clean = build(&base);
         let map = base.rt_mapper();

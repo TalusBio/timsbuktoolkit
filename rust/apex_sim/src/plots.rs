@@ -182,7 +182,7 @@ fn colormap(t: f32) -> [u8; 3] {
 }
 
 /// Build a heatmap texture: rows = transitions (fragments), cols = cycles.
-pub fn build_heatmap(ctx: &egui::Context, data: &SimData) -> (TextureHandle, usize) {
+pub fn build_heatmap(ctx: &egui::Context, data: &SimData) -> TextureHandle {
     let rows = &data.fragment_rows;
     let n_rows = rows.len().max(1);
     let n_cols = rows
@@ -210,8 +210,7 @@ pub fn build_heatmap(ctx: &egui::Context, data: &SimData) -> (TextureHandle, usi
     }
 
     let image = ColorImage::from_rgb([n_cols, n_rows], &rgb);
-    let tex = ctx.load_texture("heatmap", image, TextureOptions::NEAREST);
-    (tex, n_rows)
+    ctx.load_texture("heatmap", image, TextureOptions::NEAREST)
 }
 
 /// Middle panel: heatmap image + apex column overlays (TRUE + pass1/pass2).

@@ -26,7 +26,7 @@ pub struct SimApp {
     data: Option<SimData>,
     score: Option<ScoreResult>,
     score_err: Option<String>,
-    heatmap: Option<(TextureHandle, usize)>,
+    heatmap: Option<TextureHandle>,
     dirty: bool,
     dist_controls: DistControls,
     /// Sampled score populations, cleared whenever a knob changes (they would
@@ -153,7 +153,7 @@ impl eframe::App for SimApp {
                 });
 
                 section(ui, "Heatmap (transitions x cycles)", |ui| {
-                    if let Some((tex, _)) = &self.heatmap {
+                    if let Some(tex) = &self.heatmap {
                         let n_cols = data
                             .fragment_rows
                             .first()

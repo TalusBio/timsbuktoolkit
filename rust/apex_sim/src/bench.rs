@@ -14,6 +14,7 @@ use timsseek::scoring::apex_finding::TraceScorer;
 use crate::scorer;
 use crate::sim::{
     self,
+    RandomPeaks,
     SimData,
     SimParams,
 };
@@ -49,13 +50,12 @@ fn pct(num: usize, den: usize) -> f64 {
 /// All share the same peptide geometry (245 cycles, apex@30, sigma 1, seed
 /// 680); each isolates one stressor so the summary table reads as an ablation.
 pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
-    let base = || {
-        let mut p = SimParams::default();
-        p.n_cycles = 245;
-        p.apex_cycle = 30.0;
-        p.width_sigma = 1.0;
-        p.seed = 680;
-        p
+    let base = || SimParams {
+        n_cycles: 245,
+        apex_cycle: 30.0,
+        width_sigma: 1.0,
+        seed: 680,
+        ..Default::default()
     };
 
     // Baseline: low noise, no interference -> should be near-perfect.
@@ -118,16 +118,18 @@ pub fn canonical_suite() -> Vec<(&'static str, SimParams)> {
 /// does not make the task artificially easy and the finder faces a moving,
 /// off-grid target. Each scenario is its own line so it can be commented out.
 pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
-    let base = || {
-        let mut p = SimParams::default();
-        p.n_cycles = 1695;
-        p.apex_cycle = 847.0;
-        p.apex_jitter = Some(800.0);
-        p.width_sigma = 1.0;
-        p.seed = 680;
-        p.random_peaks.count = 0;
-        p.random_peaks.density_per_cycle = 0.41; // matches canonical 100/245
-        p
+    let base = || SimParams {
+        n_cycles: 1695,
+        apex_cycle: 847.0,
+        apex_jitter: Some(800.0),
+        width_sigma: 1.0,
+        seed: 680,
+        random_peaks: RandomPeaks {
+            count: 0,
+            density_per_cycle: 0.41, // matches canonical 100/245
+            ..Default::default()
+        },
+        ..Default::default()
     };
 
     let mut clean = base();
@@ -164,16 +166,18 @@ pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
 /// cycles). Same density-scaled interferents + jittered sub-cycle apex; used
 /// for BOTH apex recovery and score discrimination (`run_discrimination`).
 pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
-    let base = || {
-        let mut p = SimParams::default();
-        p.n_cycles = 150;
-        p.apex_cycle = 75.0;
-        p.apex_jitter = Some(60.0);
-        p.width_sigma = 1.0;
-        p.seed = 680;
-        p.random_peaks.count = 0;
-        p.random_peaks.density_per_cycle = 0.41;
-        p
+    let base = || SimParams {
+        n_cycles: 150,
+        apex_cycle: 75.0,
+        apex_jitter: Some(60.0),
+        width_sigma: 1.0,
+        seed: 680,
+        random_peaks: RandomPeaks {
+            count: 0,
+            density_per_cycle: 0.41,
+            ..Default::default()
+        },
+        ..Default::default()
     };
 
     let mut clean = base();
@@ -354,7 +358,6 @@ impl SensitivityReport {
 
 /// Present-vs-absent score-discrimination result for one scenario.
 pub struct DiscriminationReport {
-    pub n_seed_pairs: usize,
     /// ROC-AUC = P(score_present > score_absent), 0.5 tie credit. 1.0 = perfect
     /// signal/noise separation, 0.5 = useless.
     pub auc: f64,
@@ -445,7 +448,6 @@ pub fn run_discrimination(base: &SimParams, n_seed_pairs: usize) -> Discriminati
     };
     let auc = roc_auc(&pops.present, &pops.absent);
     DiscriminationReport {
-        n_seed_pairs,
         auc,
         median_present: median(pops.present),
         median_absent: median(pops.absent),
@@ -467,10 +469,15 @@ mod tests {
     fn discrimination_high_when_signal_present() {
         // Genuinely clean: low noise, no injected interferents. A real peptide
         // vs pure noise must separate near-perfectly.
-        let mut base = SimParams::default();
-        base.n_cycles = 150;
-        base.noise_floor = 0.05;
-        base.random_peaks.enabled = false;
+        let base = SimParams {
+            n_cycles: 150,
+            noise_floor: 0.05,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let rep = run_discrimination(&base, 200);
         assert!(
             rep.auc > 0.9,
