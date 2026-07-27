@@ -107,16 +107,22 @@ mod tests {
     /// `CalibrationCurve::new` is `pub(crate)` in `calibrt`, so this runs a
     /// tiny real fit (`CalibrationState`) instead. Each pair must be strictly
     /// increasing in both coordinates (monotone in x and y) and weight must
-    /// stay above 1.0: `suppress_nonmax` seeds its row/column maxima at 1.0,
-    /// so a fixture at or below that gets every node suppressed and produces
-    /// no path. With every point strictly monotone, in its own grid row and
+    /// be at or above 1.0: `suppress_nonmax` seeds its row/column maxima at
+    /// 1.0 and keeps a node when its weight *equals* that maximum, so a
+    /// fixture strictly below 1.0 gets every node suppressed and produces no
+    /// path. With every point strictly monotone, in its own grid row and
     /// column, and given equal weight, the DP always prefers chaining through
-    /// every point over skipping any of them — chaining any two hops always
-    /// beats a single direct hop between the same endpoints, since
-    /// `1/d1 + 1/d2 > 1/(d1+d2)` for any positive `d1, d2` — so the fitted
-    /// path reproduces `points` exactly (the weighted-centroid step in
-    /// `suppress_nonmax` also means grid quantization never perturbs the
-    /// coordinates, since each cell holds only one point).
+    /// every point over skipping any of them: for three monotone points i, j
+    /// (between), k, j sits inside the axis-aligned bounding box of i and k,
+    /// and the box's corner-to-corner diagonal is the longest distance between
+    /// any two points inside it, so `dist(i, j) <= dist(i, k)` and
+    /// `dist(j, k) <= dist(i, k)`. Each two-hop reciprocal term is therefore
+    /// `>= 1/dist(i, k)`, so `1/dist(i,j) + 1/dist(j,k) > 1/dist(i,k)` — the
+    /// two-hop chain strictly beats the direct edge regardless of whether the
+    /// points are collinear. So the fitted path reproduces `points` exactly
+    /// (the weighted-centroid step in `suppress_nonmax` also means grid
+    /// quantization never perturbs the coordinates, since each cell holds
+    /// only one point).
     fn curve_from(points: &[(f64, f64)]) -> CalibrationCurve {
         let n = points.len();
         let grid_size = (n * 4).max(8);
@@ -136,10 +142,16 @@ mod tests {
             )
             .expect("fixture points are finite");
         state.fit();
-        state
+        let curve = state
             .curve()
             .expect("fixture points are monotone and well-separated, so a path always exists")
-            .clone()
+            .clone();
+        // Guards the one-point-per-cell precondition the doc comment above
+        // relies on: if a future fixture packs two points into the same grid
+        // cell, this fails loudly instead of silently testing a curve with
+        // fewer, centroid-merged points.
+        debug_assert_eq!(curve.points().len(), points.len());
+        curve
     }
 
     #[test]
@@ -196,6 +208,18 @@ mod tests {
             (mean - 3.0).abs() < 1e-6,
             "only the overlapping half contributes"
         );
+    }
+
+    #[test]
+    fn disjoint_domains_never_overlap_and_delta_is_nan() {
+        // a and b's x ranges don't intersect at all, so every sample is
+        // out-of-bounds for at least one curve: n stays 0 and the result must
+        // be NaN, not 0.0 (which would read as "the curves agree").
+        let a = curve_from(&[(0.0, 0.0), (5.0, 5.0)]);
+        let b = curve_from(&[(20.0, 20.0), (25.0, 25.0)]);
+        let (max, mean) = curve_delta(&a, &b, (0.0, 5.0), 11);
+        assert!(max.is_nan(), "max should be NaN, got {max}");
+        assert!(mean.is_nan(), "mean should be NaN, got {mean}");
     }
 
     #[test]
