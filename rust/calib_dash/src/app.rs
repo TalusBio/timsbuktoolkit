@@ -564,6 +564,12 @@ impl App {
 /// than being spelled here.
 const RIDGE_FRACTION: f64 = calibrt::DEFAULT_RIDGE_FRACTION;
 
+/// The grid weight every calibrant carries, matching Step A in
+/// `timsseek_cli::processing`: the grid's own accumulation is what makes a busy
+/// cell outweigh a lonely one, so a per-point score would double-count evidence
+/// the fit deliberately measures by density.
+const CALIBRANT_WEIGHT: f64 = 1.0;
+
 /// How many library-RT samples `curve_delta` draws between batches' curves. Any
 /// `>= 2` produces a defined delta; this is high enough that a local kink is
 /// unlikely to fall between sample points.
@@ -663,11 +669,17 @@ fn fit_points(
 
 /// `CalibrantPoint` as `calibrt::CalibrationState::update`/`CalibrationCurve::wrmse`
 /// want it.
+///
+/// The weight is `1.0` for every calibrant, matching what Step A passes in
+/// `timsseek_cli::processing` — not the point's own score. Weight decides which
+/// nodes survive `suppress_nonmax` and scales every DP edge, so feeding the
+/// score here would show a fit the real calibration never computes, which is
+/// the one thing this dashboard exists not to do.
 fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f64>, f64) {
     (
         LibraryRT(p.library_rt),
         ObservedRTSeconds(p.observed_rt),
-        p.score,
+        CALIBRANT_WEIGHT,
     )
 }
 
@@ -1142,26 +1154,18 @@ mod tests {
         CalibDash::new(n_frames, n_calibrants, bins, lookback, 1 << 20)
     }
 
-    /// `n` points on the line `observed_rt = library_rt * slope`, weighted
-    /// `1.0 + i` — comfortably above `suppress_nonmax`'s 1.0 seed, so the fit
-    /// succeeds.
+    /// `n` points on the line `observed_rt = library_rt * slope`. A negative
+    /// slope is how a test asks for a fit that fails: the DP only chains pairs
+    /// that increase in both axes, so an anti-correlated batch yields a
+    /// one-node path and no curve.
     fn points(n: usize, slope: f64, chunk: usize) -> Vec<CalibrantPoint> {
-        scored_points(n, slope, chunk, |i| 1.0 + i as f64)
-    }
-
-    /// `points`, with the score picked per point — the only knob the
-    /// suppression-threshold tests need beyond the line itself.
-    fn scored_points(
-        n: usize,
-        slope: f64,
-        chunk: usize,
-        score: impl Fn(usize) -> f64,
-    ) -> Vec<CalibrantPoint> {
         (0..n)
             .map(|i| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: (i as f64 + 0.5) * slope,
-                score: score(i),
+                // Every calibrant weighs the same in the real Step A, so the
+                // score is not the knob any fixture turns here.
+                score: 1.0,
                 speclib_index: chunk * n + i,
             })
             .collect()
@@ -1774,6 +1778,53 @@ mod tests {
         }
     }
 
+    /// Step A weighs every calibrant `1.0`, so a calibrant's score must not
+    /// reach the grid: weight decides what survives `suppress_nonmax` and
+    /// scales every DP edge, and a dashboard showing a score-weighted fit would
+    /// be showing a fit the real calibration never ran. Replay already fed
+    /// `1.0` (that is what Step A writes to `calibration.json`), so this is also
+    /// what keeps the live view and a replay of the same points agreeing.
+    #[test]
+    fn a_calibrants_score_does_not_reach_the_fit() {
+        // A clean line is weight-blind: every occupied cell ties its own row and
+        // column maximum, so all of them survive whatever the weights are. The
+        // fit only becomes weight-sensitive where two points compete within one
+        // row, so the fixture puts a decoy in the same observed-RT bin as an
+        // on-line point. Under equal weights both survive the tie; under
+        // score-as-weight the heavier one evicts the other.
+        let n = 6;
+        let with_decoy = |decoy_score: f64| -> Vec<CalibrantPoint> {
+            let mut pts = points(n, 1.0, 0);
+            pts.push(CalibrantPoint {
+                library_rt: n as f64 - 0.5,
+                observed_rt: 1.5,
+                score: decoy_score,
+                speclib_index: 999,
+            });
+            pts
+        };
+
+        let mut scored = dash(1, n + 1, 10, 3);
+        scored.on_batch(0, with_decoy(1000.0).into_iter());
+
+        let mut unscored = dash(1, n + 1, 10, 3);
+        unscored.on_batch(0, with_decoy(1.0).into_iter());
+
+        assert!(
+            !scored.app.recording().curve().is_empty(),
+            "the fixture must produce a real curve for this to mean anything"
+        );
+        assert_same_curve(
+            scored.app.recording().curve(),
+            unscored.app.recording().curve(),
+        );
+        assert_eq!(
+            scored.app.metrics()[0].path_nodes,
+            unscored.app.metrics()[0].path_nodes,
+            "scores must not change which nodes survive suppression"
+        );
+    }
+
     /// An overlong batch (more points than `n_calibrants`) must not let the live
     /// re-fit see points the frame slab never recorded — `FrameStore` truncates
     /// its own copy, and `on_batch` must clamp identically so a later
@@ -1873,16 +1924,15 @@ mod tests {
 
     #[test]
     fn a_failed_fit_does_not_reset_the_delta_baseline() {
-        // A batch whose fit fails (every weight below `suppress_nonmax`'s 1.0
-        // seed, so nothing survives suppression and `curve()` stays `None`) must
-        // not wipe out the last real curve as the comparison point for the *next*
-        // successful batch's `curve_delta` — otherwise the Convergence tab would
-        // show a NaN-to-real discontinuity that never actually happened.
+        // A batch whose fit fails (anti-correlated calibrants, so the DP finds
+        // no monotonic chain and `curve()` stays `None`) must not wipe out the
+        // last real curve as the comparison point for the *next* successful
+        // batch's `curve_delta` — otherwise the Convergence tab would show a
+        // NaN-to-real discontinuity that never actually happened.
         let n = 4;
         let mut d = dash(3, n, 10, 3);
-        // Well above the suppression seed, versus below it for every point.
-        let good_points = || scored_points(n, 1.0, 0, |i| 2.0 + i as f64);
-        let failing_points = || scored_points(n, 1.0, 0, |_| 0.1);
+        let good_points = || points(n, 1.0, 0);
+        let failing_points = || points(n, -1.0, 0);
 
         d.on_batch(0, good_points().into_iter());
         assert!(
