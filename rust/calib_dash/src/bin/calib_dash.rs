@@ -45,6 +45,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    // The saved points are `[library_rt, observed_rt, weight]`; the third column
+    // is not read because Step A weighs every calibrant equally (see
+    // `CALIBRANT_WEIGHT`), so the only value production ever writes there is the
+    // `1.0` the fit would use regardless.
     let points: Vec<CalibrantPoint> = snapshot
         .points
         .iter()
@@ -52,7 +56,6 @@ fn main() {
         .map(|(i, p)| CalibrantPoint {
             library_rt: p[0],
             observed_rt: p[1],
-            score: p[2],
             speclib_index: i,
         })
         .collect();

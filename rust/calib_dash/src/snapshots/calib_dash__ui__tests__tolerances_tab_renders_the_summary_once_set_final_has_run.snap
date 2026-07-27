@@ -9,7 +9,7 @@ expression: "render(&mut app, 100, 12)"
 │                                                                                                  │
 │m/z tolerance: -8.5 .. +9.5 ppm                                                                   │
 │mobility tolerance: ±3.0 %                                                                        │
-│RT tolerance: ±12.5s across 42 calibrant(s)                                                       │
+│RT tol (fallback): ±12.5s across 42 calibrant(s)                                                  │
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -30,7 +30,6 @@ pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 pub struct CalibrantPoint {
     pub library_rt: f64,
     pub observed_rt: f64,
-    pub score: f64,
     pub speclib_index: usize,
 }
 
@@ -78,7 +77,6 @@ impl FrameStore {
             CalibrantPoint {
                 library_rt: 0.0,
                 observed_rt: 0.0,
-                score: 0.0,
                 speclib_index: 0
             };
             (retained + 1) * n_calibrants
@@ -153,7 +151,6 @@ mod tests {
         CalibrantPoint {
             library_rt: i as f64,
             observed_rt: i as f64 * 2.0,
-            score: 1.0,
             speclib_index: i,
         }
     }

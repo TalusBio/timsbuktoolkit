@@ -1679,7 +1679,7 @@ fn tolerance_lines(
                 fmt_interval(t.mobility_pct)
             )));
             lines.push(Line::raw(format!(
-                "RT tolerance: ±{:.1}s across {} calibrant(s)",
+                "RT tol (fallback): ±{:.1}s across {} calibrant(s)",
                 t.rt_seconds, t.n_calibrants
             )));
         }

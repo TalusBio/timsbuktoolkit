@@ -670,11 +670,12 @@ fn fit_points(
 /// `CalibrantPoint` as `calibrt::CalibrationState::update`/`CalibrationCurve::wrmse`
 /// want it.
 ///
-/// The weight is `1.0` for every calibrant, matching what Step A passes in
-/// `timsseek_cli::processing` — not the point's own score. Weight decides which
-/// nodes survive `suppress_nonmax` and scales every DP edge, so feeding the
-/// score here would show a fit the real calibration never computes, which is
-/// the one thing this dashboard exists not to do.
+/// The weight is [`CALIBRANT_WEIGHT`] for every calibrant, matching what Step A
+/// passes in `timsseek_cli::processing`. Weight decides which nodes survive
+/// `suppress_nonmax` and scales every DP edge, so any per-point weight here
+/// would show a fit the real calibration never computes, which is the one thing
+/// this dashboard exists not to do — hence `CalibrantPoint` carries no such
+/// field to reach for.
 fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f64>, f64) {
     (
         LibraryRT(p.library_rt),
@@ -698,6 +699,11 @@ pub struct ToleranceSummary {
     pub mz_ppm: (f64, f64),
     pub mobility_pct: (f64, f64),
     /// Half-width: the tolerance is `±rt_seconds`.
+    ///
+    /// A *fallback*, which is why the tab labels it one: Phase 3 prefers the
+    /// ridge half-width interpolated at each query's own library RT
+    /// (`CalibrationResult::get_tolerance`) and only falls back to this
+    /// MAD-derived scalar where the ridge has no measurement to interpolate.
     pub rt_seconds: f64,
     pub n_calibrants: usize,
 }
@@ -1163,9 +1169,6 @@ mod tests {
             .map(|i| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: (i as f64 + 0.5) * slope,
-                // Every calibrant weighs the same in the real Step A, so the
-                // score is not the knob any fixture turns here.
-                score: 1.0,
                 speclib_index: chunk * n + i,
             })
             .collect()
@@ -1173,8 +1176,7 @@ mod tests {
 
     /// Points at explicit `speclib_index`es, so a test can choose the two sets
     /// `churn` diffs independently of how many batches have gone by. On the
-    /// identity line with weights above `suppress_nonmax`'s 1.0 seed, so the fit
-    /// succeeds like `points`'.
+    /// identity line, so the fit succeeds like `points`'.
     fn indexed_points(indices: &[usize]) -> Vec<CalibrantPoint> {
         indices
             .iter()
@@ -1182,7 +1184,6 @@ mod tests {
             .map(|(i, &idx)| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: i as f64 + 0.5,
-                score: 1.0 + i as f64,
                 speclib_index: idx,
             })
             .collect()
@@ -1776,53 +1777,6 @@ mod tests {
                 "{action:?} must leave present() with {expected} render_pause call(s)"
             );
         }
-    }
-
-    /// Step A weighs every calibrant `1.0`, so a calibrant's score must not
-    /// reach the grid: weight decides what survives `suppress_nonmax` and
-    /// scales every DP edge, and a dashboard showing a score-weighted fit would
-    /// be showing a fit the real calibration never ran. Replay already fed
-    /// `1.0` (that is what Step A writes to `calibration.json`), so this is also
-    /// what keeps the live view and a replay of the same points agreeing.
-    #[test]
-    fn a_calibrants_score_does_not_reach_the_fit() {
-        // A clean line is weight-blind: every occupied cell ties its own row and
-        // column maximum, so all of them survive whatever the weights are. The
-        // fit only becomes weight-sensitive where two points compete within one
-        // row, so the fixture puts a decoy in the same observed-RT bin as an
-        // on-line point. Under equal weights both survive the tie; under
-        // score-as-weight the heavier one evicts the other.
-        let n = 6;
-        let with_decoy = |decoy_score: f64| -> Vec<CalibrantPoint> {
-            let mut pts = points(n, 1.0, 0);
-            pts.push(CalibrantPoint {
-                library_rt: n as f64 - 0.5,
-                observed_rt: 1.5,
-                score: decoy_score,
-                speclib_index: 999,
-            });
-            pts
-        };
-
-        let mut scored = dash(1, n + 1, 10, 3);
-        scored.on_batch(0, with_decoy(1000.0).into_iter());
-
-        let mut unscored = dash(1, n + 1, 10, 3);
-        unscored.on_batch(0, with_decoy(1.0).into_iter());
-
-        assert!(
-            !scored.app.recording().curve().is_empty(),
-            "the fixture must produce a real curve for this to mean anything"
-        );
-        assert_same_curve(
-            scored.app.recording().curve(),
-            unscored.app.recording().curve(),
-        );
-        assert_eq!(
-            scored.app.metrics()[0].path_nodes,
-            unscored.app.metrics()[0].path_nodes,
-            "scores must not change which nodes survive suppression"
-        );
     }
 
     /// An overlong batch (more points than `n_calibrants`) must not let the live

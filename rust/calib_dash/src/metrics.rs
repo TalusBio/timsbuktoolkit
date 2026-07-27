@@ -97,7 +97,6 @@ mod tests {
         CalibrantPoint {
             library_rt: 1.0,
             observed_rt: 1.0,
-            score: 1.0,
             speclib_index: idx,
         }
     }
