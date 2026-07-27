@@ -11,9 +11,10 @@ path = "src/bin/calib_dash.rs"
 
 [dependencies]
 calibrt = { path = "../calibrt" }
-ratatui = "0.29"
+ratatui = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+tempfile = { workspace = true }

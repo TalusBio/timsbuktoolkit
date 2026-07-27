@@ -20,6 +20,7 @@
 use calib_dash::{
     CalibDash,
     CalibrantPoint,
+    REPLAY_BUDGET_BYTES,
 };
 use calibrt::CalibrationSnapshot;
 use std::path::Path;
@@ -64,15 +65,12 @@ fn main() {
         path.display(),
     );
 
-    // A single frame never strides, so the budget only has to be big enough
-    // for one frame's worth of points; `1 << 20` is generous for any
-    // realistic calibrant count.
     let mut dash = CalibDash::new(
         1,
         n_calibrants,
         snapshot.grid_size,
         snapshot.lookback,
-        1 << 20,
+        REPLAY_BUDGET_BYTES,
     );
     dash.on_batch(0, points.into_iter());
     dash.finish(0);
@@ -125,23 +123,16 @@ fn validate_snapshot(snapshot: &CalibrationSnapshot) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
-    /// Writes `contents` to a fresh temp file and returns its path, so each
-    /// test gets an isolated file `load_snapshot` can read without the tests
-    /// stepping on each other's fixtures.
-    fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "calib_dash_test_{name}_{}_{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-        path
+    /// Writes `contents` to a fresh temp file, so each test gets an isolated
+    /// file `load_snapshot` can read without the tests stepping on each
+    /// other's fixtures. The handle is returned (not just its path) because
+    /// dropping it is what deletes the file — including when the test fails.
+    fn temp_file(contents: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().expect("a writable temp dir");
+        f.write_all(contents.as_bytes()).expect("write the fixture");
+        f
     }
 
     #[test]
@@ -156,10 +147,9 @@ mod tests {
 
     #[test]
     fn malformed_json_reports_a_message_not_a_panic() {
-        let path = temp_file("malformed", "{ not valid json ");
-        let err = load_snapshot(&path).expect_err("the file is not valid JSON");
+        let f = temp_file("{ not valid json ");
+        let err = load_snapshot(f.path()).expect_err("the file is not valid JSON");
         assert!(!err.is_empty());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

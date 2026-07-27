@@ -10,6 +10,18 @@
 //! batches are where the fit is volatile and where "when did this stabilize"
 //! gets answered.
 
+/// Default slab budget for a live Phase 1 run, and the value
+/// `CALIB_DASH_FRAME_BUDGET_MB` overrides. A run has as many frames as it has
+/// scoring chunks, so this is the budget that decides `keep_every`: too small
+/// and the history scrubber only has a handful of batches to step through.
+pub const DEFAULT_RUN_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Slab budget for replaying a single saved batch (`calib_dash <file>`).
+/// Deliberately far smaller than [`DEFAULT_RUN_BUDGET_BYTES`]: there is
+/// exactly one frame to hold, so nothing here ever strides and the budget only
+/// has to clear one frame's worth of points.
+pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
+
 /// One heap entry, flattened. `speclib_index` is carried because churn diffing
 /// needs a stable identity for a calibrant: RT coordinates are not unique and
 /// cannot distinguish "same peptide, re-scored" from "different peptide, same

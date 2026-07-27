@@ -1366,6 +1366,7 @@ dependencies = [
  "insta",
  "ratatui",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 

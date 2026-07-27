@@ -116,16 +116,30 @@ mod calib_dash_hook {
                          will skip every pause and Phase 1 will run unattended"
                     );
                 }
-                let budget_mb = std::env::var("CALIB_DASH_FRAME_BUDGET_MB")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(64);
+                let budget_bytes = match std::env::var_os("CALIB_DASH_FRAME_BUDGET_MB") {
+                    None => calib_dash::DEFAULT_RUN_BUDGET_BYTES,
+                    Some(raw) => match raw
+                        .to_str()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|mb| *mb > 0)
+                    {
+                        Some(mb) => mb.saturating_mul(1024 * 1024),
+                        None => {
+                            tracing::warn!(
+                                value = ?raw,
+                                "CALIB_DASH_FRAME_BUDGET_MB is not a positive whole number of \
+                                 megabytes; falling back to the default budget"
+                            );
+                            calib_dash::DEFAULT_RUN_BUDGET_BYTES
+                        }
+                    },
+                };
                 calib_dash::CalibDash::new(
                     speclib_len.div_ceil(chunk_size),
                     config.n_calibrants,
                     config.grid_size,
                     config.dp_lookback,
-                    budget_mb * 1024 * 1024,
+                    budget_bytes,
                 )
             });
         Dash {
