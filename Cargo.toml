@@ -80,6 +80,14 @@ tempfile = "3.23.0"
 [workspace.lints.clippy]
 len_without_is_empty = "allow"
 
+[profile.dev]
+# Full debuginfo put `target/debug` at 36 GB across this dependency tree.
+# Line tables keep `file:line` in panics and `RUST_BACKTRACE` output — which is
+# what test failures are actually read through — and drop the variable and type
+# records that a debugger would want but nothing here uses. Set `debug = true`
+# for an lldb session.
+debug = "line-tables-only"
+
 [profile.release]
 lto = 'thin'
 codegen-units = 1
