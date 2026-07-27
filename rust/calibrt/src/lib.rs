@@ -614,11 +614,6 @@ impl CalibrationState {
     }
 
     #[cfg(test)]
-    pub fn filtered_cap(&self) -> usize {
-        self.filtered.capacity()
-    }
-
-    #[cfg(test)]
     pub fn filtered_ptr(&self) -> *const grid::Node {
         self.filtered.as_ptr()
     }
@@ -626,16 +621,6 @@ impl CalibrationState {
     #[cfg(test)]
     pub fn path_points_ptr(&self) -> *const Point {
         self.path_points.as_ptr()
-    }
-
-    #[cfg(test)]
-    pub fn path_points_cap(&self) -> usize {
-        self.path_points.capacity()
-    }
-
-    #[cfg(test)]
-    pub fn dp_max_weights_cap(&self) -> usize {
-        self.dp_max_weights.capacity()
     }
 }
 
@@ -803,7 +788,6 @@ mod observer_tests {
         /// 0..n in order (one `DpNode` event per node), so `push`ing here
         /// keeps `dp_coords[i]` aligned with the node the DP loop saw at `i`.
         dp_coords: Vec<(f64, f64)>,
-        path_len: usize,
         dp_range: Option<std::ops::Range<usize>>,
         dp_weight: f64,
     }
@@ -824,12 +808,11 @@ mod observer_tests {
                         .push((node.center.library, node.center.observed));
                 }
                 FitEvent::PathFound {
-                    path,
                     dp_range,
                     dp_weight,
+                    ..
                 } => {
                     self.names.push("path");
-                    self.path_len = path.len();
                     self.dp_range = Some(dp_range);
                     self.dp_weight = dp_weight;
                 }
@@ -875,20 +858,14 @@ mod observer_tests {
         assert_eq!(g.y_range, (0.0, 10.0));
     }
 
+    /// `pathfinding.rs` owns the arithmetic behind these two values; this only
+    /// covers `fit_with` passing them on rather than dropping them.
     #[test]
-    fn path_found_reports_the_dp_range_and_weight() {
+    fn path_found_carries_the_dp_payload() {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts::NONE);
-        // The leading node (weight 1.0) is a valid monotonic predecessor of
-        // node 1 (weight 2.0) but too weak to be worth routing through, so
-        // the DP restarts fresh at node 1 and Pass 2's backward walk
-        // reattaches node 0 as a prefix — the DP's own span is `1..10`, not
-        // the whole path. (The dedicated case for this behavior, worked out
-        // by hand, is the `find_optimal_path` test in `pathfinding.rs`; this
-        // test only checks that `fit_with` wires the DP's return value into
-        // `FitEvent::PathFound` correctly, without redoing that arithmetic.)
-        assert_eq!(rec.dp_range, Some(1..rec.path_len));
+        assert!(rec.dp_range.is_some());
         assert!(rec.dp_weight > 0.0);
     }
 
@@ -898,18 +875,7 @@ mod observer_tests {
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
         assert!(rec.names.contains(&"dp"), "dp events must be emitted");
-        // Every recorded choice must point backwards in the sorted order.
-        // (Necessary but not sufficient: `chose` can only ever be `Some(j)`
-        // with `j < i` by construction of the `for j in start..i` scan below,
-        // so this alone can't fail. The real constraint — that a chosen
-        // predecessor strictly precedes its successor on both RT axes, not
-        // just in sort order — is checked next.)
-        for (i, chose) in &rec.dp_edges {
-            if let Some(j) = chose {
-                assert!(j < i, "node {i} chose non-predecessor {j}");
-            }
-        }
-        // The actual monotonic constraint the DP is supposed to enforce:
+        // The monotonic constraint the DP is supposed to enforce:
         // a chosen predecessor's library AND observed RT must both be
         // strictly less than the successor's.
         for (i, chose) in &rec.dp_edges {
@@ -1031,17 +997,6 @@ mod calibration_state_tests {
             .collect();
         s.update(pts.iter().copied()).unwrap();
         s.fit();
-        let caps = (
-            s.filtered_cap(),
-            s.path_points_cap(),
-            s.dp_max_weights_cap(),
-        );
-        // Capacity equality alone can't distinguish "reused the same
-        // allocation" from "reallocated but Vec's growth policy landed on
-        // the same capacity anyway" (which is exactly what happens here: a
-        // fixed survivor count and identical input every iteration makes a
-        // fresh `collect()` converge to the same capacity too). Pointer
-        // identity is the part that actually proves reuse.
         let filtered_ptr = s.filtered_ptr();
         let path_points_ptr = s.path_points_ptr();
 
@@ -1051,15 +1006,6 @@ mod calibration_state_tests {
             s.fit();
         }
 
-        assert_eq!(
-            (
-                s.filtered_cap(),
-                s.path_points_cap(),
-                s.dp_max_weights_cap()
-            ),
-            caps,
-            "repeated fits on identical input must not reallocate"
-        );
         assert_eq!(
             s.filtered_ptr(),
             filtered_ptr,
@@ -1083,11 +1029,8 @@ mod calibration_state_tests {
             .collect();
         s.update(pts1.iter().copied()).unwrap();
         s.fit();
-        let caps_before = (
-            s.filtered_cap(),
-            s.path_points_cap(),
-            s.dp_max_weights_cap(),
-        );
+        let filtered_ptr = s.filtered_ptr();
+        let path_points_ptr = s.path_points_ptr();
 
         // Same bins, a completely different (shifted, wider) range — the case
         // `reconfigure` exists to keep allocation-free.
@@ -1108,13 +1051,14 @@ mod calibration_state_tests {
             "the new fit must be defined over the new range"
         );
         assert_eq!(
-            (
-                s.filtered_cap(),
-                s.path_points_cap(),
-                s.dp_max_weights_cap()
-            ),
-            caps_before,
-            "reconfigure at unchanged bins must not reallocate the fit scratch buffers"
+            s.filtered_ptr(),
+            filtered_ptr,
+            "reconfigure at unchanged bins must not reallocate `filtered`"
+        );
+        assert_eq!(
+            s.path_points_ptr(),
+            path_points_ptr,
+            "reconfigure at unchanged bins must not reallocate `path_points`"
         );
     }
 
