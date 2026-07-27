@@ -5,6 +5,16 @@ use crate::{
 use array2d::Array2D;
 use tracing::info;
 
+/// The x/y extents of a grid geometry, rejecting the empty and inverted ones.
+fn spans(x_range: (f64, f64), y_range: (f64, f64)) -> Result<(f64, f64), CalibRtError> {
+    let x_span = x_range.1 - x_range.0;
+    let y_span = y_range.1 - y_range.0;
+    if x_span <= 0.0 || y_span <= 0.0 {
+        return Err(CalibRtError::ZeroRange);
+    }
+    Ok((x_span, y_span))
+}
+
 pub struct Grid {
     pub(crate) nodes: Vec<Node>,
     pub(crate) x_range: (f64, f64),
@@ -28,12 +38,7 @@ impl Grid {
         if bins == 0 {
             return Err(CalibRtError::ZeroRange);
         };
-        let x_span = x_range.1 - x_range.0;
-        let y_span = y_range.1 - y_range.0;
-
-        if x_span <= 0.0 || y_span <= 0.0 {
-            return Err(CalibRtError::ZeroRange);
-        }
+        let (x_span, y_span) = spans(x_range, y_range)?;
 
         let mut nodes = Vec::with_capacity(bins * bins);
         for r in 0..bins {
@@ -211,14 +216,7 @@ impl Grid {
             *self = Self::new(bins, x_range, y_range)?;
             return Ok(());
         }
-        if bins == 0 {
-            return Err(CalibRtError::ZeroRange);
-        }
-        let x_span = x_range.1 - x_range.0;
-        let y_span = y_range.1 - y_range.0;
-        if x_span <= 0.0 || y_span <= 0.0 {
-            return Err(CalibRtError::ZeroRange);
-        }
+        let (x_span, y_span) = spans(x_range, y_range)?;
         self.x_range = x_range;
         self.y_range = y_range;
         self.x_span = x_span;
