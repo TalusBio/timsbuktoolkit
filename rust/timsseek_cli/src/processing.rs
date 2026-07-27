@@ -85,6 +85,7 @@ mod calib_dash_hook {
         CalibrationResult,
         RidgeMeasurement,
     };
+    use calib_dash::FitObserver;
     use std::io::IsTerminal;
 
     /// The dashboard for a whole run, plus the last chunk index `on_batch`
@@ -99,7 +100,17 @@ mod calib_dash_hook {
     /// dashboard is running.
     pub struct Recording(Option<calib_dash::FitRecording>);
 
-    pub fn attach(speclib_len: usize, chunk_size: usize, config: &CalibrationConfig) -> Dash {
+    /// Lets the `Option` be an observer in its own right, so the fit calls
+    /// below don't have to branch on it.
+    impl FitObserver for Recording {
+        fn on_event(&mut self, ev: calib_dash::FitEvent<'_>) {
+            if let Some(rec) = self.0.as_mut() {
+                rec.on_event(ev);
+            }
+        }
+    }
+
+    pub fn attach(n_chunks: usize, config: &CalibrationConfig) -> Dash {
         let inner = std::env::var("TIMSSEEK_CALIB_DASHBOARD")
             .is_ok_and(|v| v == "1")
             .then(|| {
@@ -135,7 +146,7 @@ mod calib_dash_hook {
                     },
                 };
                 calib_dash::CalibDash::new(
-                    speclib_len.div_ceil(chunk_size),
+                    n_chunks,
                     config.n_calibrants,
                     config.grid_size,
                     config.dp_lookback,
@@ -189,24 +200,18 @@ mod calib_dash_hook {
     }
 
     pub fn fit(grid: &mut CalibratedGrid, recording: &mut Recording) {
-        match recording.0.as_mut() {
-            Some(rec) => grid.fit_with(rec, calib_dash::ObserveOpts::NONE),
-            None => grid.fit(),
-        }
+        grid.fit_with(recording, calib_dash::ObserveOpts::NONE);
     }
 
-    /// Routes the ridge measurement through the recording when there is one —
-    /// otherwise `recording.ridge()` stays empty and the Tolerances tab's
-    /// ridge overlay has nothing to show even though Step B did run.
+    /// Routes the ridge measurement through the recording — otherwise
+    /// `recording.ridge()` stays empty and the Tolerances tab's ridge overlay
+    /// has nothing to show even though Step B did run.
     pub fn measure_ridge_width(
         grid: &mut CalibratedGrid,
         fraction: f64,
         recording: &mut Recording,
     ) -> Vec<RidgeMeasurement> {
-        match recording.0.as_mut() {
-            Some(rec) => grid.measure_ridge_width_with(fraction, rec),
-            None => grid.measure_ridge_width(fraction),
-        }
+        grid.measure_ridge_width_with(fraction, recording)
     }
 
     /// Wires the real Phase 2 fit into the Tolerances tab, then opens the
@@ -250,7 +255,7 @@ mod calib_dash_hook {
     pub struct Dash;
     pub struct Recording;
 
-    pub fn attach(_speclib_len: usize, _chunk_size: usize, _config: &CalibrationConfig) -> Dash {
+    pub fn attach(_n_chunks: usize, _config: &CalibrationConfig) -> Dash {
         Dash
     }
 
@@ -447,17 +452,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // `query-instr` feature is disabled.
     timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 1: Prescore");
-    // Dev-only calibration fit dashboard: opt-in via `--features
-    // calib-dashboard`, gated at runtime on `TIMSSEEK_CALIB_DASHBOARD=1` so
-    // an ordinary run of a dashboard-enabled binary still doesn't pay for it.
-    let mut calib_dash_state = calib_dash_hook::attach(speclib.len(), chunk_size, calib_config);
-    let (calibrants, phase1_timings) = phase1_prescore(
-        phase1_lib,
-        pipeline,
-        chunk_size,
-        calib_config,
-        &mut calib_dash_state,
-    );
+    let (calibrants, phase1_timings, mut calib_dash_state) =
+        phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
     let phase1_ms = step
         .finish_with(format_args!(
             "{} calibrants/ {} candidates",
@@ -751,16 +747,27 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+/// Also builds the dashboard, so its chunk count is the same `n_chunks` this
+/// loop actually walks — the two cannot drift apart under `--calib-lib`, where
+/// the library scored here is not the one the rest of the pipeline scores.
 fn phase1_prescore<I: ScorerQueriable>(
     speclib: &Speclib,
     pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
-    dash: &mut calib_dash_hook::Dash,
-) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
+) -> (
+    Vec<CalibrantCandidate>,
+    timsseek::scoring::PrescoreTimings,
+    calib_dash_hook::Dash,
+) {
     let total = speclib.len();
     let n_chunks = total.div_ceil(chunk_size);
     let pb = make_progress_bar(n_chunks as u64, "Phase 1");
+
+    // Dev-only calibration fit dashboard: opt-in via `--features
+    // calib-dashboard`, gated at runtime on `TIMSSEEK_CALIB_DASHBOARD=1` so
+    // an ordinary run of a dashboard-enabled binary still doesn't pay for it.
+    let mut dash = calib_dash_hook::attach(n_chunks, config);
 
     let mut global_heap = CalibrantHeap::new(config.n_calibrants);
     let mut timings = timsseek::scoring::PrescoreTimings::default();
@@ -772,13 +779,13 @@ fn phase1_prescore<I: ScorerQueriable>(
         let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
 
-        if !calib_dash_hook::on_batch(dash, chunk_start / chunk_size, global_heap.iter()) {
+        if !calib_dash_hook::on_batch(&mut dash, chunk_start / chunk_size, global_heap.iter()) {
             break;
         }
     }
-    calib_dash_hook::finish(dash);
+    calib_dash_hook::finish(&mut dash);
 
-    (global_heap.into_vec(), timings)
+    (global_heap.into_vec(), timings, dash)
 }
 
 #[cfg_attr(

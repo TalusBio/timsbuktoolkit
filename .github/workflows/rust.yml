@@ -64,15 +64,11 @@ jobs:
       # Opt-in, so these call sites compile under no other leg.
       - name: Type-check (dashboard feature)
         run: cargo check -p timsseek_cli --features dashboard --all-targets
-      # calibrt/calib_dash: neither timsseek_cli's default build (which
-      # excludes calib_dash entirely unless `--features calib-dashboard` is
-      # passed) nor any other leg above ever built or tested these, so none
-      # of their tests ran in CI. `--features calib-dashboard` is also
-      # compile-checked (not just built as a dependency) so the
-      # `#[cfg(feature = "calib-dashboard")]`-gated extra parameters on
-      # `phase1_prescore`/`calibrate_from_phase1` don't silently rot the
-      # first time either signature changes.
+      # Every leg here is `-p`-scoped, so calibrt and calib_dash are built by
+      # no other one. The feature leg below keeps both arms of
+      # `calib_dash_hook` compiling — the default build only ever sees the
+      # no-op arm.
       - name: Run calibrt / calib_dash tests
         run: cargo test --verbose -p calibrt -p calib_dash
-      - name: Check timsseek_cli with the calib-dashboard feature
+      - name: Build timsseek_cli tests with the calib-dashboard feature
         run: cargo test --no-run --verbose -p timsseek_cli --features calib-dashboard --all-targets

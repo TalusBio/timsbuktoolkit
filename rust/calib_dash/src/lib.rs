@@ -12,8 +12,13 @@ pub use app::{
     ToleranceSummary,
 };
 /// Re-exported so a crate that records a fit through `FitRecording` can spell
-/// `fit_with`'s options without depending on `calibrt` itself.
-pub use calibrt::ObserveOpts;
+/// `fit_with`'s options — and wrap `FitRecording` in an observer of its own —
+/// without depending on `calibrt` itself.
+pub use calibrt::{
+    FitEvent,
+    FitObserver,
+    ObserveOpts,
+};
 pub use frames::{
     CalibrantPoint,
     DEFAULT_RUN_BUDGET_BYTES,

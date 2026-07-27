@@ -60,7 +60,6 @@ impl FitRecording {
                 bins,
                 x_range: (0.0, 1.0),
                 y_range: (0.0, 1.0),
-                lookback: 0,
             },
             weights: vec![0.0; bins * bins],
             suppressed: vec![false; bins * bins],
@@ -142,7 +141,7 @@ impl FitRecording {
 impl FitObserver for FitRecording {
     fn on_event(&mut self, ev: FitEvent<'_>) {
         match ev {
-            FitEvent::FitStarted { geom, .. } => {
+            FitEvent::FitStarted { geom } => {
                 // A geometry change means the caller re-fit at a different
                 // `bins`; resize rather than silently mis-indexing.
                 if geom.bins != self.geom.bins {
@@ -167,7 +166,7 @@ impl FitObserver for FitRecording {
                     self.weights[i] = n.center.weight as f32;
                 }
             }
-            FitEvent::Suppressed { cells, .. } => {
+            FitEvent::Suppressed { cells } => {
                 for (slot, n) in self.suppressed.iter_mut().zip(cells) {
                     if n.suppressed {
                         *slot = true;

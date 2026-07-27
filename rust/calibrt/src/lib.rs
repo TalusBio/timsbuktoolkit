@@ -192,7 +192,6 @@ pub struct GridGeom {
     pub bins: usize,
     pub x_range: (f64, f64),
     pub y_range: (f64, f64),
-    pub lookback: usize,
 }
 
 /// One step of the fit, borrowed from the state that produced it.
@@ -204,17 +203,12 @@ pub struct GridGeom {
 pub enum FitEvent<'a> {
     FitStarted {
         geom: GridGeom,
-        /// Cells with nonzero accumulated weight, not the count of raw points
-        /// passed to `update`: several points landing in the same bin count
-        /// once here.
-        n_points: usize,
     },
     GridReady {
         cells: &'a [grid::Node],
     },
     Suppressed {
         cells: &'a [grid::Node],
-        n_kept: usize,
     },
     /// Emitted once per DP node, only when `ObserveOpts::dp_nodes` is set.
     /// `considered` holds every `(predecessor_index, edge_weight)` the node
@@ -343,14 +337,7 @@ impl CalibrationState {
                 bins: self.grid.bins,
                 x_range: self.grid.x_range,
                 y_range: self.grid.y_range,
-                lookback: self.lookback,
             },
-            n_points: self
-                .grid
-                .grid_cells()
-                .iter()
-                .filter(|n| n.center.weight > 0.0)
-                .count(),
         });
         obs.on_event(FitEvent::GridReady {
             cells: self.grid.grid_cells(),
@@ -362,20 +349,12 @@ impl CalibrationState {
             self.stale = false;
             obs.on_event(FitEvent::Suppressed {
                 cells: self.grid.grid_cells(),
-                n_kept: 0,
             });
             return;
         }
 
-        let n_kept = self
-            .grid
-            .grid_cells()
-            .iter()
-            .filter(|n| !n.suppressed)
-            .count();
         obs.on_event(FitEvent::Suppressed {
             cells: self.grid.grid_cells(),
-            n_kept,
         });
 
         // Collect non-suppressed nodes for pathfinding, reusing the buffer
@@ -802,7 +781,6 @@ mod observer_tests {
     struct Recorder {
         names: Vec<&'static str>,
         geom: Option<GridGeom>,
-        n_kept: usize,
         dp_edges: Vec<(usize, Option<usize>)>,
         /// `(library, observed)` of each DP node, indexed by `i`. `i` runs
         /// 0..n in order (one `DpNode` event per node), so `push`ing here
@@ -821,10 +799,7 @@ mod observer_tests {
                     self.geom = Some(geom);
                 }
                 FitEvent::GridReady { .. } => self.names.push("grid"),
-                FitEvent::Suppressed { n_kept, .. } => {
-                    self.names.push("suppressed");
-                    self.n_kept = n_kept;
-                }
+                FitEvent::Suppressed { .. } => self.names.push("suppressed"),
                 FitEvent::DpNode { i, node, chose, .. } => {
                     self.names.push("dp");
                     self.dp_edges.push((i, chose));
@@ -879,20 +854,8 @@ mod observer_tests {
         s.fit_with(&mut rec, ObserveOpts::NONE);
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
-        assert_eq!(g.lookback, 5);
         assert_eq!(g.x_range, (0.0, 10.0));
         assert_eq!(g.y_range, (0.0, 10.0));
-    }
-
-    #[test]
-    fn suppressed_reports_the_surviving_count() {
-        let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        // Ten distinct weights on a diagonal: each is the max of its own row
-        // and column, so all ten survive.
-        assert_eq!(rec.n_kept, 10);
-        assert_eq!(rec.path_len, 10);
     }
 
     #[test]
