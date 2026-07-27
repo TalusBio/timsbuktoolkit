@@ -19,6 +19,9 @@ pub use app::{
     ToleranceSummary,
 };
 pub use bitset::BitSet;
+/// Re-exported so a crate that records a fit through `FitRecording` can spell
+/// `fit_with`'s options without depending on `calibrt` itself.
+pub use calibrt::ObserveOpts;
 pub use frames::{
     CalibrantPoint,
     FrameIndex,

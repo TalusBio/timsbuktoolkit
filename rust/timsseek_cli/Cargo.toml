@@ -13,10 +13,6 @@ alloc_track = { path = "../alloc_track" }
 rescore_dash = { path = "../rescore_dash", optional = true }
 tempfile = { workspace = true }
 calib_dash = { path = "../calib_dash", optional = true }
-# Needed directly (not just transitively via `timsseek`) for `ObserveOpts`,
-# which `timsseek::rt_calibration` does not re-export — only used behind
-# `calib-dashboard`, to record the real Phase 2 fit into a `FitRecording`.
-calibrt = { path = "../calibrt", optional = true }
 
 regex = "1.11.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -52,7 +48,7 @@ instrumentation = ["timsseek/instrumentation", "tracing-profile"]
 track-alloc = ["alloc_track/enabled"]
 # Dev-only calibration fit dashboard (TIMSSEEK_CALIB_DASHBOARD=1). Opt-in;
 # build with `--features calib-dashboard`.
-calib-dashboard = ["dep:calib_dash", "dep:calibrt"]
+calib-dashboard = ["dep:calib_dash"]
 # S3 is default (see above). GCS/Azure stay opt-in — add when actually needed.
 aws = ["tims_stage/aws", "timscentroid/aws"]
 gcp = ["tims_stage/gcp", "timscentroid/gcp"]

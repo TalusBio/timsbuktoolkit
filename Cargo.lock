@@ -6390,7 +6390,6 @@ version = "0.32.0"
 dependencies = [
  "alloc_track",
  "calib_dash",
- "calibrt",
  "chrono",
  "clap",
  "indicatif",
