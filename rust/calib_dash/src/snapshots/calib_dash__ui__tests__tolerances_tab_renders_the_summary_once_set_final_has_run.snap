@@ -31,4 +31,4 @@ expression: out
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 Grid n next · r run · h l tab · q detach · ^C abort                                      ? keys
+ b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys

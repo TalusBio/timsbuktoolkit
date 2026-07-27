@@ -2,10 +2,9 @@
 //!
 //! `weights` are `f32` for storage and display only — every metric is computed
 //! from the `f64` values in the live events, never from this downcast copy.
-//! At `bins = 100` a recording is ~41 KB; the `Grid` the fit already holds is
+//! At `bins = 100` a recording is ~50 KB; the `Grid` the fit already holds is
 //! ~40 bytes per cell, so this is roughly a tenth of what the fit itself spends.
 
-use crate::bitset::BitSet;
 use calibrt::{
     FitEvent,
     FitObserver,
@@ -34,7 +33,7 @@ pub struct DpDecision {
 pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
-    suppressed: BitSet,
+    suppressed: Vec<bool>,
     /// Grid indices of the assembled path (DP chain plus greedy tails).
     /// Sized with `bins` capacity as a hint for the common case — with
     /// distinct weights only one node per row can be maximal in both its row
@@ -52,7 +51,6 @@ pub struct FitRecording {
     /// One entry per DP node visited. Same `bins`-capacity hint and the same
     /// weight-tie caveat as `path_indices` above.
     dp: Vec<DpDecision>,
-    dp_weight: f64,
 }
 
 impl FitRecording {
@@ -65,7 +63,7 @@ impl FitRecording {
                 lookback: 0,
             },
             weights: vec![0.0; bins * bins],
-            suppressed: BitSet::new(bins * bins),
+            suppressed: vec![false; bins * bins],
             // Capacity hint only — see the field doc comment for why this can
             // legitimately be exceeded.
             path_indices: Vec::with_capacity(bins),
@@ -73,76 +71,59 @@ impl FitRecording {
             curve: Vec::with_capacity(bins),
             ridge: Vec::with_capacity(bins),
             dp: Vec::with_capacity(bins),
-            dp_weight: 0.0,
         }
     }
 
-    pub fn reset(&mut self) {
-        self.weights.fill(0.0);
-        self.suppressed.clear();
-        self.reset_body_only();
-    }
-
-    /// Everything `reset` does except clearing `weights`/`suppressed` — split
-    /// out so `FitStarted` can reuse it after (conditionally) resizing those
-    /// two for a changed `bins`, without also paying for the fill/clear this
-    /// helper skips.
+    /// Clears everything except `weights`/`suppressed` — split out so
+    /// `FitStarted` can reuse it after (conditionally) resizing those two for
+    /// a changed `bins`, without also paying for the fill/clear this helper
+    /// skips.
     fn reset_body_only(&mut self) {
         self.path_indices.clear();
         self.dp_range = 0..0;
         self.curve.clear();
         self.ridge.clear();
         self.dp.clear();
-        self.dp_weight = 0.0;
     }
 
-    pub fn geom(&self) -> GridGeom {
+    pub(crate) fn geom(&self) -> GridGeom {
         self.geom
     }
 
-    pub fn path_indices(&self) -> &[usize] {
+    pub(crate) fn path_indices(&self) -> &[usize] {
         &self.path_indices
     }
 
     /// The DP-chosen slice of `path_indices`. Indices outside it were attached
     /// by Pass 2's greedy extension.
-    pub fn dp_range(&self) -> std::ops::Range<usize> {
+    pub(crate) fn dp_range(&self) -> std::ops::Range<usize> {
         self.dp_range.clone()
     }
 
-    pub fn curve(&self) -> &[Point] {
+    pub(crate) fn curve(&self) -> &[Point] {
         &self.curve
     }
 
-    pub fn ridge(&self) -> &[RidgeMeasurement] {
+    pub(crate) fn ridge(&self) -> &[RidgeMeasurement] {
         &self.ridge
     }
 
-    pub fn dp(&self) -> &[DpDecision] {
+    pub(crate) fn dp(&self) -> &[DpDecision] {
         &self.dp
     }
 
-    /// The DP recurrence's objective at the chosen end node. Covers only the
-    /// nodes in `dp_range` — the greedily attached prefix/suffix are not in
-    /// it.
-    pub fn dp_weight(&self) -> f64 {
-        self.dp_weight
-    }
-
-    pub fn weight(&self, row: usize, col: usize) -> f32 {
+    pub(crate) fn weight(&self, row: usize, col: usize) -> f32 {
         self.weights
             .get(row * self.geom.bins + col)
             .copied()
             .unwrap_or(0.0)
     }
 
-    pub fn is_suppressed(&self, row: usize, col: usize) -> bool {
-        self.suppressed.get(row * self.geom.bins + col)
-    }
-
-    #[cfg(test)]
-    pub fn weights_capacity(&self) -> usize {
-        self.weights.capacity()
+    pub(crate) fn is_suppressed(&self, row: usize, col: usize) -> bool {
+        self.suppressed
+            .get(row * self.geom.bins + col)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn col_of(&self, x: f64) -> usize {
@@ -166,7 +147,7 @@ impl FitObserver for FitRecording {
                 // `bins`; resize rather than silently mis-indexing.
                 if geom.bins != self.geom.bins {
                     self.weights = vec![0.0; geom.bins * geom.bins];
-                    self.suppressed = BitSet::new(geom.bins * geom.bins);
+                    self.suppressed = vec![false; geom.bins * geom.bins];
                 }
                 self.geom = geom;
                 // `Suppressed` below only ever sets bits for cells that are
@@ -175,7 +156,7 @@ impl FitObserver for FitRecording {
                 // a re-fit at the same `bins` (the common case — no
                 // reallocation above) would carry forward stale suppression
                 // flags from the previous fit.
-                self.suppressed.clear();
+                self.suppressed.fill(false);
                 self.reset_body_only();
             }
             FitEvent::GridReady { cells } => {
@@ -187,9 +168,9 @@ impl FitObserver for FitRecording {
                 }
             }
             FitEvent::Suppressed { cells, .. } => {
-                for (i, n) in cells.iter().enumerate() {
+                for (slot, n) in self.suppressed.iter_mut().zip(cells) {
                     if n.suppressed {
-                        self.suppressed.set(i);
+                        *slot = true;
                     }
                 }
             }
@@ -209,12 +190,7 @@ impl FitObserver for FitRecording {
                     considered: considered.to_vec(),
                 });
             }
-            FitEvent::PathFound {
-                path,
-                dp_range,
-                dp_weight,
-            } => {
-                self.dp_weight = dp_weight;
+            FitEvent::PathFound { path, dp_range, .. } => {
                 debug_assert!(
                     dp_range.end <= path.len(),
                     "dp_range must fall within the assembled path"
@@ -327,18 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_reuses_the_allocation() {
-        let mut rec = FitRecording::new(10);
-        let mut s = diagonal_state(10);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        let cap = rec.weights_capacity();
-        rec.reset();
-        assert_eq!(rec.weights_capacity(), cap);
-        assert_eq!(rec.path_indices().len(), 0);
-        assert_eq!(rec.weight(3, 3), 0.0);
-    }
-
-    #[test]
     fn a_stale_suppression_bit_does_not_survive_a_refit_at_unchanged_bins() {
         // Fit 1: A at (row 1, col 1) is dominated by B in the same row (B's
         // weight 9 beats A's weight 2), so A fails the row-max check and is
@@ -360,7 +324,7 @@ mod tests {
         );
 
         // Fit 2, same `CalibrationState` (so `bins` is unchanged and
-        // `FitRecording` does not reallocate its bitset): B is gone and A is
+        // `FitRecording` does not reallocate its mask): B is gone and A is
         // now the sole occupant of its row and column, so it survives.
         s.reset();
         s.update(std::iter::once((

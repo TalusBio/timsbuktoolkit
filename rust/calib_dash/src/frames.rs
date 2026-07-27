@@ -10,8 +10,6 @@
 //! batches are where the fit is volatile and where "when did this stabilize"
 //! gets answered.
 
-use std::ops::Range;
-
 /// One heap entry, flattened. `speclib_index` is carried because churn diffing
 /// needs a stable identity for a calibrant: RT coordinates are not unique and
 /// cannot distinguish "same peptide, re-scored" from "different peptide, same
@@ -27,8 +25,6 @@ pub struct CalibrantPoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameIndex {
     pub chunk: usize,
-    /// Speclib indices this chunk covered.
-    pub range: Range<usize>,
     offset: usize,
     pub len: usize,
 }
@@ -91,32 +87,13 @@ impl FrameStore {
         self.index.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
     pub fn dropped(&self) -> usize {
         self.seen.saturating_sub(self.index.len())
     }
 
-    #[cfg(test)]
-    pub fn slab_capacity(&self) -> usize {
-        self.slab.capacity()
-    }
-
-    #[cfg(test)]
-    pub fn index_capacity(&self) -> usize {
-        self.index.capacity()
-    }
-
     /// Copy this chunk's heap contents into the slab. Returns whether the frame
     /// was retained on the stride. The final frame is handled by `finish`.
-    pub fn record(
-        &mut self,
-        chunk: usize,
-        range: Range<usize>,
-        points: impl Iterator<Item = CalibrantPoint>,
-    ) -> bool {
+    pub fn record(&mut self, chunk: usize, points: impl Iterator<Item = CalibrantPoint>) -> bool {
         self.seen += 1;
         let on_stride = chunk.is_multiple_of(self.keep_every) && self.index.len() < self.retained;
         let offset = if on_stride {
@@ -129,12 +106,7 @@ impl FrameStore {
             self.slab[offset + len] = p;
             len += 1;
         }
-        let idx = FrameIndex {
-            chunk,
-            range,
-            offset,
-            len,
-        };
+        let idx = FrameIndex { chunk, offset, len };
         if on_stride {
             self.index.push(idx);
         } else {
@@ -186,10 +158,6 @@ impl FrameStore {
         let idx = self.index.get(i)?;
         Some((idx, &self.slab[idx.offset..idx.offset + idx.len]))
     }
-
-    pub fn last(&self) -> Option<(&FrameIndex, &[CalibrantPoint])> {
-        self.frame(self.index.len().checked_sub(1)?)
-    }
 }
 
 #[cfg(test)]
@@ -226,7 +194,7 @@ mod tests {
     fn retained_frames_never_exceed_the_budget() {
         let mut store = FrameStore::new(12, 4, budget_for(3, 4));
         for chunk in 0..12 {
-            store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
+            store.record(chunk, (0..4).map(pt));
         }
         store.finish(11);
         assert!(
@@ -244,17 +212,19 @@ mod tests {
     fn the_last_frame_is_always_retained() {
         let mut store = FrameStore::new(10, 4, budget_for(3, 4));
         for chunk in 0..10 {
-            store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
+            store.record(chunk, (0..4).map(pt));
         }
         store.finish(9);
-        let (idx, _) = store.last().expect("a last frame must exist");
+        let (idx, _) = store
+            .frame(store.len() - 1)
+            .expect("a last frame must exist");
         assert_eq!(idx.chunk, 9);
     }
 
     #[test]
     fn recorded_points_round_trip() {
         let mut store = FrameStore::new(1, 4, budget_for(1, 4));
-        store.record(0, 0..1, (0..4).map(pt));
+        store.record(0, (0..4).map(pt));
         let (idx, pts) = store.frame(0).unwrap();
         assert_eq!(idx.len, 4);
         assert_eq!(pts, &[pt(0), pt(1), pt(2), pt(3)]);
@@ -264,7 +234,7 @@ mod tests {
     fn a_short_frame_records_its_real_length() {
         // Early chunks have not filled the heap yet.
         let mut store = FrameStore::new(1, 4, budget_for(1, 4));
-        store.record(0, 0..1, (0..2).map(pt));
+        store.record(0, (0..2).map(pt));
         let (idx, pts) = store.frame(0).unwrap();
         assert_eq!(idx.len, 2);
         assert_eq!(pts.len(), 2);
@@ -273,7 +243,7 @@ mod tests {
     #[test]
     fn an_overlong_frame_is_truncated_not_overrun() {
         let mut store = FrameStore::new(1, 4, budget_for(1, 4));
-        store.record(0, 0..1, (0..9).map(pt));
+        store.record(0, (0..9).map(pt));
         let (_, pts) = store.frame(0).unwrap();
         assert_eq!(pts.len(), 4, "clamped to n_calibrants");
     }
@@ -288,23 +258,30 @@ mod tests {
         );
     }
 
+    /// The dashboard's "allocate once at startup, never during a run"
+    /// promise, for the one allocation big enough to matter. Pinned by
+    /// pointer identity rather than `Vec::capacity()` — capacity equality
+    /// cannot distinguish "reused the same allocation" from "reallocated and
+    /// landed on the same capacity anyway", and `frame()`'s own slice is
+    /// already a view into the slab, so no test-only accessor is needed to
+    /// see it.
     #[test]
     fn the_slab_is_allocated_once() {
         let mut store = FrameStore::new(12, 4, budget_for(3, 4));
-        let slab_cap = store.slab_capacity();
-        let index_cap = store.index_capacity();
-        for chunk in 0..12 {
-            store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
+        store.record(0, (0..4).map(pt));
+        let base = store
+            .frame(0)
+            .expect("chunk 0 lands on the stride")
+            .1
+            .as_ptr();
+        for chunk in 1..12 {
+            store.record(chunk, (0..4).map(pt));
         }
-        assert_eq!(store.slab_capacity(), slab_cap, "slab must not reallocate");
-        // `record`'s safety bound is `index.len() < self.retained`, gated on
-        // an explicit field rather than `index.capacity()` — but if `index`
-        // reallocated anyway, that would defeat the "allocate once" promise
-        // this store is built on.
+        store.finish(11);
         assert_eq!(
-            store.index_capacity(),
-            index_cap,
-            "index must not reallocate"
+            store.frame(0).expect("frame 0 is still there").1.as_ptr(),
+            base,
+            "the slab must not reallocate"
         );
     }
 
@@ -326,7 +303,7 @@ mod tests {
         // never promoted, since chunk 8 was already retained on the stride.
         let mut store = FrameStore::new(12, 4, budget_for(3, 4));
         for chunk in 0..9 {
-            store.record(chunk, chunk..chunk + 1, (0..4).map(pt));
+            store.record(chunk, (0..4).map(pt));
         }
         // 20 matches neither the index tail (chunk 8) nor the reserved slot
         // (chunk 7): a caller bug. The old code would push the stale chunk-7

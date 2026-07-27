@@ -4,7 +4,7 @@ expression: out
 ---
  Fit │ Convergence │ Tolerances                                                                     
  SCRUBBED — retained frame 3/5, batch 17 (not live; `>` returns to now)                             
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ────────────────────────────────────── b0 · Grid ┐
+    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
     │ Showing: none — density only                                                                 │
     │                                                                                  ████████████│
   15┤                                                                                  ████████████│
@@ -31,4 +31,4 @@ expression: out
    0┤░░░░░░░░░░░░                                                                                  │
     └┴──────────────────────┴───────────────────────┴──────────────────────┴──────────────────────┴┘
      0                      2                       4                      6                      8 
- b0 Grid n · r · [ ] · < > · m M · d · h l · q · ^C                                          ? keys
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys

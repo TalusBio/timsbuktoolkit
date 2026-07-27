@@ -1,4 +1,4 @@
-//! Dashboard app state: the tab/stage cursors, the vim-style count prefix,
+//! Dashboard app state: the tab cursor, the vim-style count prefix,
 //! and the pause action a keypress resolves to. [`CalibDash`] is the piece
 //! that ties all of it to a running search: [`CalibDash::on_batch`] is
 //! called once per Phase 1 scoring chunk.
@@ -9,17 +9,17 @@
 //! The accumulator is a single `Option<u32>` on `App` and serves every
 //! motion, not just batch stepping.
 
+use crate::frames::{
+    CalibrantPoint,
+    FrameStore,
+};
 use crate::metrics::{
+    BatchMetrics,
     churn,
     curve_delta,
     weighted_ridge_half_width,
 };
-use crate::{
-    BatchMetrics,
-    CalibrantPoint,
-    FitRecording,
-    FrameStore,
-};
+use crate::recording::FitRecording;
 use calibrt::{
     CalibrationCurve,
     CalibrationState,
@@ -64,10 +64,9 @@ impl Tab {
             .expect("Tab::ALL lists every variant")
     }
 
-    /// One tab forward, wrapping — unlike `Stage::next`, which clamps at the
-    /// end of a pipeline that has no "next stage after the last one" to wrap
-    /// to. A tab bar has no natural end, so `l` past `Tolerances` is `Fit`
-    /// again, the same as vim's own `l`/`h` inside a fixed-width line.
+    /// One tab forward, wrapping. A tab bar has no natural end, so `l` past
+    /// `Tolerances` is `Fit` again, the same as vim's own `l`/`h` inside a
+    /// fixed-width line.
     pub fn next(self) -> Self {
         Tab::ALL[(self.index() + 1) % Tab::ALL.len()]
     }
@@ -78,86 +77,11 @@ impl Tab {
     }
 }
 
-/// A stage in the fit pipeline the Fit tab steps through with `[` and `]`.
-/// Order matches the pipeline itself: a raw grid is suppressed down to
-/// row/column maxima, chained into a path, fitted into a curve, and finally
-/// measured for ridge width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
-    Grid,
-    Suppressed,
-    Path,
-    Curve,
-    Ridge,
-}
-
-impl Stage {
-    /// Every variant, in pipeline order. Lets a count-driven caller derive
-    /// how many steps could possibly matter (`ALL.len() - 1`) instead of
-    /// hardcoding the variant count, which would silently go stale the next
-    /// time a stage is added.
-    pub const ALL: [Stage; 5] = [
-        Stage::Grid,
-        Stage::Suppressed,
-        Stage::Path,
-        Stage::Curve,
-        Stage::Ridge,
-    ];
-
-    /// One step forward, clamped at `Ridge` — stepping past the end of the
-    /// pipeline holds rather than wrapping back to `Grid`.
-    pub fn next(self) -> Self {
-        match self {
-            Stage::Grid => Stage::Suppressed,
-            Stage::Suppressed => Stage::Path,
-            Stage::Path => Stage::Curve,
-            Stage::Curve => Stage::Ridge,
-            Stage::Ridge => Stage::Ridge,
-        }
-    }
-
-    /// One step back, clamped at `Grid`.
-    pub fn prev(self) -> Self {
-        match self {
-            Stage::Grid => Stage::Grid,
-            Stage::Suppressed => Stage::Grid,
-            Stage::Path => Stage::Suppressed,
-            Stage::Curve => Stage::Path,
-            Stage::Ridge => Stage::Curve,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Stage::Grid => "Grid",
-            Stage::Suppressed => "Suppressed",
-            Stage::Path => "Path",
-            Stage::Curve => "Curve",
-            Stage::Ridge => "Ridge",
-        }
-    }
-}
-
 /// Which mark overlay the Fit heatmap draws on top of the density field,
 /// cycled by `m`/`M`. Exactly one is active at a time — unlike the
 /// independent per-overlay toggles this replaced, a layer is a *view*, not a
 /// set of flags, so there is nothing to compose and no priority order to
 /// maintain between marks that can never appear on screen together.
-///
-/// **Relationship to [`Stage`]:** the two are independent axes.
-/// `App::set_stage`/`[`/`]` no longer touch `layer` at all (the coupling
-/// used to run through `sync_overlays_to_stage`, now deleted) — stepping the
-/// pipeline stage only ever changes the `{stage}` label in the block title
-/// and status line. This is a deliberate decoupling, not an oversight:
-/// `Stage` used to imply a *cumulative* overlay set (`Stage::Ridge` meant
-/// "show suppressed AND path AND curve AND ridge, all at once"), which is
-/// exactly the composited-priority design this pass removes. A layer is a
-/// single, isolated view by construction, so re-coupling it to a cumulative
-/// stage would either resurrect the old composition problem or silently
-/// stop being cumulative — neither is coherent. A user reasoning about "what
-/// did the Suppressed stage produce" now does that by cycling to the
-/// `Suppressed` layer explicitly, independent of wherever `[`/`]` happens to
-/// have left `stage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     /// Bare heatmap, no marks — the only way to see the raw density the fit
@@ -175,9 +99,8 @@ pub enum Layer {
 
 impl Layer {
     /// Every variant, in cycle order (Item: layer cycling). This is a fixed
-    /// stop list a user steps through, like `Tab::ALL` — not a pipeline with
-    /// a genuine last step like `Stage::ALL` — so `next`/`prev` wrap rather
-    /// than clamp.
+    /// stop list a user steps through, like `Tab::ALL`, so `next`/`prev` wrap
+    /// rather than clamp.
     pub const ALL: [Layer; 5] = [
         Layer::None,
         Layer::Path,
@@ -296,12 +219,11 @@ impl Stepper {
     }
 }
 
-/// Dashboard state for one pause: which tab and pipeline stage are showing,
-/// the DP pane toggle, the current batch number, the recording of the fit
-/// that ran at this batch, and the pending vim-style count prefix.
+/// Dashboard state for one pause: which tab is showing, the DP pane toggle,
+/// the current batch number, the recording of the fit that ran at this
+/// batch, and the pending vim-style count prefix.
 pub struct App {
     tab: Tab,
-    stage: Stage,
     dp_pane: bool,
     batch: u32,
     recording: FitRecording,
@@ -333,9 +255,7 @@ pub struct App {
     retained_frames: usize,
     frame_stride: usize,
     dropped_frames: usize,
-    /// Which mark layer the Fit heatmap draws, cycled by `m`/`M`. See
-    /// [`Layer`]'s doc comment for why this is independent of `stage` rather
-    /// than derived from it.
+    /// Which mark layer the Fit heatmap draws, cycled by `m`/`M`.
     layer: Layer,
     /// The pending count prefix, e.g. the `15` typed before `n` in `15n`.
     /// Lives for exactly one motion: a motion consumes it via `take_count`,
@@ -344,7 +264,7 @@ pub struct App {
     count: Option<u32>,
     /// Which retained frame `<`/`>` have scrubbed the Fit tab to, or `None`
     /// for the live batch. Bounded by `retained_frames` — see `handle_key`'s
-    /// `<`/`>` arms — the same way `stage` is bounded by `Stage::ALL`. `App`
+    /// `<`/`>` arms. `App`
     /// only tracks *which* frame; it owns no `FrameStore` to refit from, so
     /// the actual recording lives in `scrub_recording`, kept in lockstep by
     /// `CalibDash::sync_scrub` (the one piece of this that needs a
@@ -384,7 +304,6 @@ impl App {
     pub fn new(bins: usize) -> Self {
         Self {
             tab: Tab::Fit,
-            stage: Stage::Grid,
             dp_pane: false,
             batch: 0,
             recording: FitRecording::new(bins),
@@ -402,23 +321,6 @@ impl App {
             live_dp_recording: None,
             show_keys: false,
         }
-    }
-
-    /// Switches tabs directly, bypassing `handle_key`. `handle_key` does not
-    /// yet route a tab-switching key (that lands with the rest of the key
-    /// map in the next task), so this is how both tests and, later, that key
-    /// handler change the tab.
-    pub fn set_tab(&mut self, tab: Tab) {
-        self.tab = tab;
-    }
-
-    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count.
-    /// Kept separate from `handle_key`'s stepping so a test (or a future
-    /// jump-to-stage key) can land on a specific stage in one call. Does not
-    /// touch `layer` — see [`Layer`]'s doc comment for why the two are
-    /// independent axes.
-    pub fn set_stage(&mut self, stage: Stage) {
-        self.stage = stage;
     }
 
     /// Mutable access to the live recording, so a caller — `CalibDash::on_batch`,
@@ -490,10 +392,6 @@ impl App {
         self.tab
     }
 
-    pub fn stage(&self) -> Stage {
-        self.stage
-    }
-
     pub fn batch(&self) -> u32 {
         self.batch
     }
@@ -504,14 +402,6 @@ impl App {
 
     pub fn layer(&self) -> Layer {
         self.layer
-    }
-
-    /// Sets the active mark layer directly, bypassing `m`/`M`'s cycling.
-    /// Kept separate from `handle_key` for the same reason `set_stage` is:
-    /// tests (and any future jump-to-layer key) can land on a specific layer
-    /// in one call.
-    pub fn set_layer(&mut self, layer: Layer) {
-        self.layer = layer;
     }
 
     pub fn recording(&self) -> &FitRecording {
@@ -623,22 +513,12 @@ impl App {
         self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
     }
 
-    /// Consumes the pending count and clamps it to the number of steps that
-    /// could possibly move `stage` — `Stage::ALL.len() - 1`, derived rather
-    /// than hardcoded so a stage added later cannot silently go uncapped —
-    /// so a huge typed count costs no more work than a real motion ever
-    /// could.
-    fn max_stage_steps(&mut self) -> u32 {
-        self.take_count().min(Stage::ALL.len() as u32 - 1)
-    }
-
     /// Consumes the pending count and reduces it mod `Tab::ALL.len()` for
-    /// `h`/`l`'s tab cycling. Unlike `max_stage_steps`'s clamp, `Tab` wraps
-    /// rather than stopping at an end, so the count that actually matters
-    /// isn't "how far can this possibly move" but "where does this land
-    /// after wrapping" — `n % 3` answers that directly with no loop at all,
-    /// which is a stronger anti-spin guarantee than a clamped loop: the cost
-    /// is one division, never proportional to the typed count.
+    /// `h`/`l`'s tab cycling. `Tab` wraps rather than stopping at an end, so
+    /// the count that actually matters isn't "how far can this possibly
+    /// move" but "where does this land after wrapping" — `n % 3` answers
+    /// that directly with no loop at all: the cost is one division, never
+    /// proportional to the typed count.
     fn tab_cycle_steps(&mut self) -> u32 {
         self.take_count() % Tab::ALL.len() as u32
     }
@@ -656,8 +536,7 @@ impl App {
     /// retained frames (`n` from `take_count`), or does nothing if no frames
     /// have been retained yet. Saturating arithmetic against `retained_frames`
     /// keeps this O(1) and panic-free for any `n`, including the huge counts
-    /// `push_digit` no longer rejects — there is no loop here to spin at all,
-    /// which is a stronger bound than `max_stage_steps`'s clamped one.
+    /// `push_digit` no longer rejects — there is no loop here to spin at all.
     /// `CalibDash::sync_scrub` is what actually turns the new `scrub_frame`
     /// into a recording to render; this only moves the cursor.
     fn scrub_back(&mut self, n: u32) {
@@ -735,24 +614,6 @@ impl App {
                 // next pause if that's what's wanted.
                 self.clear_scrub();
                 PauseAction::Next(n)
-            }
-            KeyCode::Char(']') if key.modifiers.is_empty() => {
-                // `Stage` has a fixed, tiny state space, so anything past
-                // `ALL.len() - 1` steps is wasted work — without this clamp,
-                // a large typed count (reachable now that digit overflow no
-                // longer panics) would loop synchronously for as long as it
-                // takes to freeze the UI. Does not touch `layer` — see
-                // `Layer`'s doc comment for why the two axes are independent.
-                for _ in 0..self.max_stage_steps() {
-                    self.stage = self.stage.next();
-                }
-                PauseAction::Stay
-            }
-            KeyCode::Char('[') if key.modifiers.is_empty() => {
-                for _ in 0..self.max_stage_steps() {
-                    self.stage = self.stage.prev();
-                }
-                PauseAction::Stay
             }
             KeyCode::Char('d') if key.modifiers.is_empty() => {
                 self.dp_pane = !self.dp_pane;
@@ -1067,14 +928,14 @@ impl CalibDash {
     pub fn on_batch(
         &mut self,
         chunk: usize,
-        range: Range<usize>,
+        _range: Range<usize>,
         points: impl Iterator<Item = CalibrantPoint>,
     ) -> Flow {
         self.current_points.clear();
         self.current_points.extend(points.take(self.n_calibrants));
 
         self.frames
-            .record(chunk, range, self.current_points.iter().copied());
+            .record(chunk, self.current_points.iter().copied());
         self.sync_frame_summary();
 
         let metrics = self.refit_live(chunk);
@@ -1147,7 +1008,7 @@ impl CalibDash {
     /// of it. `None` if the frame index doesn't exist or its points are too
     /// degenerate to configure a grid from (mirrors `on_batch`'s own
     /// skip-the-refit behavior for the live path).
-    pub fn refit_frame(&mut self, i: usize) -> Option<&FitRecording> {
+    fn refit_frame(&mut self, i: usize) -> Option<&FitRecording> {
         let (_idx, pts) = self.frames.frame(i)?;
         let (x_range, y_range) = point_ranges(pts)?;
         self.refit_state
@@ -1161,33 +1022,6 @@ impl CalibDash {
         self.refit_state
             .measure_ridge_width_with(RIDGE_FRACTION, &mut self.refit_recording);
         Some(&self.refit_recording)
-    }
-
-    pub fn metrics(&self) -> &[BatchMetrics] {
-        self.app.metrics()
-    }
-
-    pub fn frames(&self) -> &FrameStore {
-        &self.frames
-    }
-
-    /// The live batch's recording — the one `on_batch` just fit into,
-    /// distinct from whatever `refit_frame` most recently produced.
-    pub fn recording(&self) -> &FitRecording {
-        self.app.recording()
-    }
-
-    /// Only pins the grid-weights buffer, not the per-DP-node `considered`
-    /// `Vec`s `refit_frame`'s `ObserveOpts { dp_nodes: true }` fills:
-    /// `FitRecording::on_event` pushes a fresh `considered.to_vec()` into
-    /// `self.dp` for every `DpNode` event, and `reset_body_only`'s
-    /// `self.dp.clear()` drops those per-node `Vec`s along with the elements
-    /// — reusing them would mean `calibrt`'s own `FitRecording` tracking a
-    /// pool of them, which is out of this task's scope. See
-    /// `a_repeated_refit_does_not_reallocate`'s doc comment.
-    #[cfg(test)]
-    pub fn refit_capacity(&self) -> usize {
-        self.refit_recording.weights_capacity()
     }
 
     #[cfg(test)]
@@ -1598,29 +1432,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn counts_drive_list_and_scrub_motions_too() {
-        let mut app = App::new(10);
-        press(&mut app, "3]");
-        assert_eq!(app.stage(), Stage::Curve, "Grid + 3 stages");
-        assert_eq!(app.pending_count(), None);
-    }
-
-    #[test]
-    fn a_huge_count_on_a_stage_motion_is_capped_by_the_state_space() {
-        // `Stage` has 5 variants, so no count can usefully move it more than
-        // 4 steps. Without the cap this loops once per requested step —
-        // typed as a huge count, that would freeze the UI for as long as the
-        // loop takes, for work none of which has any effect past step 4.
-        let mut app = App::new(10);
-        press(&mut app, "999999999]");
-        assert_eq!(
-            app.stage(),
-            Stage::Ridge,
-            "clamped to the last stage, not looped hundreds of millions of times"
-        );
-    }
-
     // ---- pause actions ----
 
     #[test]
@@ -1637,11 +1448,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_is_not_a_stage_or_overlay_key() {
+    fn a_modified_key_is_not_a_motion() {
         let mut app = App::new(10);
-        let before = app.stage();
-        app.handle_key(ctrl(']'));
-        assert_eq!(app.stage(), before, "modified keys are not motions");
+        let before = app.tab();
+        app.handle_key(ctrl('l'));
+        assert_eq!(app.tab(), before, "modified keys are not motions");
     }
 
     // ---- the `?` key-map overlay ----
@@ -1914,30 +1725,6 @@ mod tests {
         );
     }
 
-    /// Pins `Layer`'s doc comment: `stage` and `layer` are independent axes,
-    /// so stepping one must never move the other. Before this pass, `Stage`
-    /// drove a cumulative overlay set (`sync_overlays_to_stage`); this test
-    /// exists to catch a regression back toward that coupling.
-    #[test]
-    fn stage_stepping_and_layer_cycling_are_independent() {
-        let mut app = App::new(10);
-        app.set_layer(Layer::Ridge);
-        press(&mut app, "3]");
-        assert_eq!(
-            app.layer(),
-            Layer::Ridge,
-            "stepping the pipeline stage must not touch the mark layer"
-        );
-
-        app.set_stage(Stage::Grid);
-        press(&mut app, "m");
-        assert_eq!(
-            app.stage(),
-            Stage::Grid,
-            "cycling the mark layer must not touch the pipeline stage"
-        );
-    }
-
     // ---- the stepper ----
 
     #[test]
@@ -2038,7 +1825,11 @@ mod tests {
             ));
         }
         d.finish(3);
-        assert_eq!(d.metrics().len(), 4, "a metric per batch, even unrendered");
+        assert_eq!(
+            d.app.metrics().len(),
+            4,
+            "a metric per batch, even unrendered"
+        );
     }
 
     #[test]
@@ -2056,8 +1847,8 @@ mod tests {
             d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
         }
         d.finish(9);
-        assert_eq!(d.metrics().len(), 10, "metrics are undecimated");
-        assert!(d.frames().len() < 10, "frames are decimated");
+        assert_eq!(d.app.metrics().len(), 10, "metrics are undecimated");
+        assert!(d.frames.len() < 10, "frames are decimated");
     }
 
     #[test]
@@ -2075,7 +1866,7 @@ mod tests {
         d.on_batch(0, 0..1, pts.into_iter());
         d.finish(0);
 
-        let live: Vec<_> = d.recording().curve().to_vec();
+        let live: Vec<_> = d.app.recording().curve().to_vec();
         let refit = d.refit_frame(0).expect("frame 0 exists");
         assert_eq!(refit.curve().len(), live.len());
         for (a, b) in live.iter().zip(refit.curve()) {
@@ -2127,7 +1918,7 @@ mod tests {
         // The live view is unaffected by scrubbing — `recording()` (not
         // `active_recording()`) still reflects batch 2's own fit.
         assert!(
-            !d.recording().curve().is_empty(),
+            !d.app.recording().curve().is_empty(),
             "sanity: batch 2 produced a real curve too"
         );
     }
@@ -2137,7 +1928,7 @@ mod tests {
     /// test builds its `App`) followed by pressing `d` must leave the pane
     /// with decisions to show. `on_batch`'s own live re-fit deliberately
     /// uses `ObserveOpts::NONE` (see `refit_live`'s doc comment), so
-    /// `d.recording().dp()` staying empty is not the bug — the bug was `d`
+    /// `d.app.recording().dp()` staying empty is not the bug — the bug was `d`
     /// only flipping a boolean with nothing behind it to populate. `sync_dp`
     /// is the piece `event_loop` would call before every draw; called
     /// directly here since there is no terminal under `cargo test`.
@@ -2155,7 +1946,7 @@ mod tests {
         d.on_batch(0, 0..8, pts.into_iter());
 
         assert!(
-            d.recording().dp().is_empty(),
+            d.app.recording().dp().is_empty(),
             "sanity: the live per-batch fit must not pay the DP-node cost"
         );
         assert!(
@@ -2293,40 +2084,6 @@ mod tests {
         assert_eq!(d.render_pause_calls(), 0);
     }
 
-    /// This is one of the four tests given verbatim in the task brief, so
-    /// its name and body are kept as specified. What it actually pins is
-    /// narrower than the name alone suggests: `refit_capacity` only reads
-    /// the grid-weights buffer's capacity. `refit_frame` runs with
-    /// `ObserveOpts { dp_nodes: true }`, and every `DpNode` event pushes a
-    /// fresh `considered.to_vec()` (see `FitRecording::on_event`) that
-    /// `reset_body_only`'s `self.dp.clear()` then drops along with the rest
-    /// of `self.dp` on the next fit — those per-node allocations are real and
-    /// this test does not (and cannot, without changing `calibrt`'s own
-    /// `FitRecording` internals) claim they don't happen. See
-    /// `refit_capacity`'s doc comment for the same scope note.
-    #[test]
-    fn a_repeated_refit_does_not_reallocate() {
-        let mut d = CalibDash::new(2, 8, 10, 5, 1 << 20);
-        for chunk in 0..2 {
-            let pts: Vec<_> = (0..8)
-                .map(|i| CalibrantPoint {
-                    library_rt: i as f64 + 0.5,
-                    observed_rt: i as f64 + 0.5,
-                    score: 1.0 + i as f64,
-                    speclib_index: i,
-                })
-                .collect();
-            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
-        }
-        d.finish(1);
-        let cap = d.refit_capacity();
-        for _ in 0..5 {
-            d.refit_frame(0);
-            d.refit_frame(1);
-        }
-        assert_eq!(d.refit_capacity(), cap);
-    }
-
     /// An overlong batch (more points than `n_calibrants`) must not let the
     /// live re-fit see points the frame slab never recorded — `FrameStore`
     /// already truncates its own copy to `n_calibrants`
@@ -2351,10 +2108,10 @@ mod tests {
         d.on_batch(0, 0..8, pts.into_iter());
         d.finish(0);
 
-        let (idx, _) = d.frames().frame(0).expect("frame 0 exists");
+        let (idx, _) = d.frames.frame(0).expect("frame 0 exists");
         assert_eq!(idx.len, n_calibrants, "the slab truncates to n_calibrants");
 
-        let live: Vec<_> = d.recording().curve().to_vec();
+        let live: Vec<_> = d.app.recording().curve().to_vec();
         let refit = d.refit_frame(0).expect("frame 0 exists").curve().to_vec();
         assert_eq!(
             live.len(),
@@ -2423,8 +2180,8 @@ mod tests {
     // ---- no-reallocation, pinned by pointer identity ----
     //
     // Matches the convention used everywhere else in this codebase for a
-    // "does not reallocate" claim (`FrameStore`'s `slab_capacity`/
-    // `index_capacity`, `calibrt`'s `filtered_ptr`/`path_points_ptr`):
+    // "does not reallocate" claim (`frames.rs`'s `the_slab_is_allocated_once`,
+    // `calibrt`'s `filtered_ptr`/`path_points_ptr`):
     // capacity equality alone can't distinguish "reused the same allocation"
     // from "reallocated but landed on the same capacity anyway" — pointer
     // identity is the part that actually proves reuse.
@@ -2521,13 +2278,13 @@ mod tests {
 
         d.on_batch(0, 0..n_calibrants, good_points().into_iter());
         assert!(
-            d.metrics()[0].wrmse.is_finite(),
+            d.app.metrics()[0].wrmse.is_finite(),
             "batch 0 must produce a real curve"
         );
 
         d.on_batch(1, 0..n_calibrants, failing_points().into_iter());
         assert!(
-            d.metrics()[1].wrmse.is_nan(),
+            d.app.metrics()[1].wrmse.is_nan(),
             "batch 1's fit must fail outright (every weight is sub-threshold)"
         );
 
@@ -2536,7 +2293,7 @@ mod tests {
         // against it is ~0 — not NaN, which is what a reset-to-None baseline
         // would report instead.
         d.on_batch(2, 0..n_calibrants, good_points().into_iter());
-        let m2 = d.metrics()[2];
+        let m2 = d.app.metrics()[2];
         assert!(
             !m2.max_delta.is_nan() && !m2.mean_delta.is_nan(),
             "batch 2 must compare against batch 0's curve (the last real one, \

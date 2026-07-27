@@ -23,14 +23,16 @@
 //! below are for the raw buffer/grid indexing this module does by hand for
 //! the half-block heatmap, not for widget layout.
 
-use crate::metrics::weighted_ridge_half_width;
-use crate::{
+use crate::app::{
     App,
-    BatchMetrics,
-    FitRecording,
     Layer,
     Tab,
 };
+use crate::metrics::{
+    BatchMetrics,
+    weighted_ridge_half_width,
+};
+use crate::recording::FitRecording;
 use calibrt::Point;
 use ratatui::Frame;
 use ratatui::layout::{
@@ -160,7 +162,7 @@ fn fit_status_hints(
     Line::default()
 }
 
-/// The status line: batch/stage/pending-count on the left, key hints in the
+/// The status line: batch/pending-count on the left, key hints in the
 /// middle (degrading as `fit_status_hints` describes when the terminal is
 /// narrow), `? keys` pinned to the right. Three `Paragraph`s rather than one
 /// `Line`, because a `Line` has a single alignment and `? keys` must stay
@@ -169,11 +171,7 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let mut state_spans = vec![Span::raw(format!(
-        " b{} {} ",
-        app.batch(),
-        app.stage().label()
-    ))];
+    let mut state_spans = vec![Span::raw(format!(" b{} ", app.batch()))];
     // The pending vim-style count only takes a column when there is one to
     // show — unlike the line this replaced, which spent six columns
     // permanently reporting its absence (`cnt:-`). `REVERSED` marks it as a
@@ -190,13 +188,12 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
 
     // ---- per-tab binding sets (Item 2) ----------------------------------
     // Convergence and Tolerances only ever respond to `n`/`r` — advertising
-    // the Fit tab's stage/frame/overlay/dp keys on them (as the line this
-    // replaced did) is four bindings that do nothing there.
+    // the Fit tab's frame/overlay/dp keys on them (as the line this replaced
+    // did) is three bindings that do nothing there.
     let tab_local: &[(&str, &str)] = match app.tab() {
         Tab::Fit => &[
             ("n", "next"),
             ("r", "run"),
-            ("[ ]", "stage"),
             ("< >", "frame"),
             ("m M", "layer"),
             ("d", "dp"),
@@ -255,7 +252,6 @@ fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
         heading("Fit tab"),
         Line::raw("  n          next batch"),
         Line::raw("  r          run to end"),
-        Line::raw("  [ ]        step pipeline stage"),
         Line::raw("  < >        scrub retained frames"),
         Line::raw("  m M        cycle mark layer"),
         Line::raw("  d          toggle DP pane"),
@@ -511,15 +507,15 @@ fn heat_color(v: f32, max: f32) -> Color {
 /// The geometry every mark/overlay helper below needs: the terminal area's
 /// size in cells (`w`, `h`), the grid's own bin count, and the display
 /// resolution the two are reconciled at (`disp_rows` is `h * 2` — the
-/// half-block doubling — `disp_cols` is `w`). Grouped into one `Copy` struct
-/// so these helpers take one argument for "where on screen" instead of five.
+/// half-block doubling; the horizontal display resolution is `w` itself).
+/// Grouped into one `Copy` struct so these helpers take one argument for
+/// "where on screen" instead of four.
 #[derive(Clone, Copy)]
 struct Dims {
     w: usize,
     h: usize,
     bins: usize,
     disp_rows: usize,
-    disp_cols: usize,
 }
 
 /// Which half of a terminal cell a grid row landed in — the half-block
@@ -611,15 +607,10 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let (block_area, x_label_area) = (rows[0], rows[1]);
 
     let title_left = " Fit \u{2014} observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
-    // `batch`/`stage` only — the active layer used to share this corner too,
-    // but now has its own dedicated subtitle row (below) and no longer
-    // competes with these for width. See `heatmap_title_right`'s doc comment
-    // for why `stage` is still the one dropped here under a narrow DP pane.
-    let title_right = heatmap_title_right(
-        app.batch(),
-        app.stage().label(),
-        (block_area.width as usize).saturating_sub(title_left.chars().count()),
-    );
+    // `batch` only — the active layer used to share this corner too, but now
+    // has its own dedicated subtitle row (below) and no longer competes with
+    // it for width.
+    let title_right = format!(" b{} ", app.batch());
     let block = Block::bordered()
         .title_top(Line::from(title_left).left_aligned())
         .title_top(Line::from(title_right).right_aligned());
@@ -692,41 +683,14 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Picks the most detailed right-side block title that still fits `avail`
-/// columns, degrading by dropping the pipeline stage label: `Stage` is
-/// already shown on the global status line (`draw_status_line`) for every
-/// tab, so losing it here under a narrow DP pane (that pane's grid area is
-/// only 65% of the terminal, further reduced by the y-axis gutter — see
-/// `draw_fit_tab`/`y_gutter_width`) costs nothing not already visible
-/// elsewhere.
-///
-/// The active layer used to be a third field crammed into this same corner,
-/// dropped first of the three when space ran out — exactly backwards, since
-/// it has no other home on screen at all. It now has its own dedicated
-/// subtitle row (`fit_subtitle`, rendered just below this title) that never
-/// competes with `batch`/`stage` for width, so there is nothing left here to
-/// rank it against.
-///
-/// This exists because `ratatui`'s `Block` draws each of its titles
-/// independently into the border row with no collision detection — two
-/// titles whose combined width exceeds the block's simply overlap and
-/// garble each other rather than one yielding space to the other.
-fn heatmap_title_right(batch: u32, stage: &str, avail: usize) -> String {
-    let full = format!(" b{batch} \u{b7} {stage} ");
-    if full.chars().count() <= avail {
-        return full;
-    }
-    format!(" b{batch} ")
-}
-
 /// One phrase glossing what an active layer's marks mean, appended to its
 /// name in `fit_subtitle`. Needed because a `Region` mark (`Mark`'s doc
 /// comment) is identified purely by `Modifier::REVERSED` now, not by a
 /// distinct glyph — there is no glyph-coded legend left to read the marks
 /// against, so the subtitle is the only place left to say what an inverted
-/// cell on the active layer actually means. Lives beside `heatmap_title_right`/
-/// `fit_subtitle` rather than on `Layer` itself (`app.rs`): this is about how
-/// `ui.rs` renders the layer, not a fact about the layer.
+/// cell on the active layer actually means. Lives beside `fit_subtitle`
+/// rather than on `Layer` itself (`app.rs`): this is about how `ui.rs`
+/// renders the layer, not a fact about the layer.
 fn layer_gloss(layer: Layer) -> &'static str {
     match layer {
         Layer::None => "density only",
@@ -743,8 +707,7 @@ fn layer_gloss(layer: Layer) -> &'static str {
 /// interpret a single inverted cell on this tab at all, so this states it in
 /// full rather than abbreviating.
 ///
-/// Degrades in the same fits-or-drops style as `heatmap_title_right`, but
-/// with the gloss as the one thing shed first and the layer name itself
+/// Degrades fits-or-drops: the gloss is shed first and the layer name itself
 /// truncated (never wrapped) only as the last resort, character by
 /// character, so this can never wrap or panic — including at `avail == 0`,
 /// where it renders as an empty line rather than nothing at all crashing.
@@ -782,7 +745,6 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
         h,
         bins,
         disp_rows: h * 2,
-        disp_cols: w,
     };
     let cells = heatmap_cells(rec, area.width, area.height);
     let max_w = cells.iter().copied().fold(0.0f32, f32::max).max(1e-9);
@@ -805,7 +767,7 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
 
     for ty in 0..h {
         for tx in 0..w {
-            let idx = (ty * dims.disp_cols + tx) * 2;
+            let idx = (ty * dims.w + tx) * 2;
             let upper_heat = cells.get(idx).copied().unwrap_or(0.0);
             let lower_heat = cells.get(idx + 1).copied().unwrap_or(0.0);
             let cell = ty * w + tx;
@@ -1107,7 +1069,7 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let (x_lo, x_hi) = geom.x_range;
     let span = (x_hi - x_lo).max(1e-9);
     for tx in 0..dims.w {
-        let col_range = bin_range(tx, dims.disp_cols, bins);
+        let col_range = bin_range(tx, dims.w, bins);
         let col = col_range.start;
         let x = x_lo + (col as f64 + 0.5) / bins as f64 * span;
         let Some(y) = predict_curve(curve, x) else {
@@ -1215,7 +1177,7 @@ fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
 /// Each display cell aggregates by taking the max weight over the block of
 /// source cells that maps to it, in both directions: this is exactly a
 /// partition of `0..bins` into `disp_rows` (`area_h * 2`) contiguous ranges
-/// and of `0..bins` into `disp_cols` (`area_w`) contiguous ranges, so the
+/// and of `0..bins` into `area_w` contiguous ranges, so the
 /// total work is `bins * bins` regardless of how the area is shaped — the
 /// same amount of work as visiting the whole grid once. When `bins` is
 /// smaller than the display area, several display cells legitimately share
@@ -1291,7 +1253,7 @@ fn forward_map(src_i: usize, src_n: usize, disp_n: usize) -> usize {
 /// flipped index.
 fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, Half) {
     let dr = forward_map(row, dims.bins, dims.disp_rows);
-    let dc = forward_map(col, dims.bins, dims.disp_cols);
+    let dc = forward_map(col, dims.bins, dims.w);
     let (ty, half) = flip_display_row(dr, dims.disp_rows);
     (ty, dc, half)
 }
@@ -1568,7 +1530,6 @@ fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Stage;
     use calibrt::{
         CalibrationState,
         LibraryRT,
@@ -1577,6 +1538,32 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{
+        KeyCode,
+        KeyEvent,
+        KeyModifiers,
+    };
+
+    fn press(app: &mut App, c: char) {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    /// Cycles to `tab` with the real `l` binding — `App` has no
+    /// jump-to-tab setter, and driving the key handler is what the user
+    /// actually does.
+    fn goto_tab(app: &mut App, tab: Tab) {
+        while app.tab() != tab {
+            press(app, 'l');
+        }
+    }
+
+    /// Cycles to `layer` with the real `m` binding, for the same reason
+    /// `goto_tab` cycles with `l`.
+    fn goto_layer(app: &mut App, layer: Layer) {
+        while app.layer() != layer {
+            press(app, 'm');
+        }
+    }
 
     fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut t = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
@@ -1703,46 +1690,21 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
-    /// One snapshot per stop of the `m`/`M` cycle — the direct replacement
-    /// for the old per-`Stage` snapshots. Unlike those (`Stage::Ridge` used
-    /// to imply every overlay was on at once, via `sync_overlays_to_stage`),
-    /// each of these renders in isolation: `Layer::Path` shows only the DP
-    /// chain/tail, not also the suppressed mask, and so on.
+    /// One snapshot per stop of the `m`/`M` cycle. Each renders in
+    /// isolation: `Layer::Path` shows only the DP chain/tail, not also the
+    /// suppressed mask, and so on.
     #[test]
     fn fit_tab_renders_each_layer() {
         for layer in Layer::ALL {
             let mut app = fixture_app_with_ridge();
-            app.set_layer(layer);
+            goto_layer(&mut app, layer);
             insta::assert_snapshot!(format!("fit_layer_{:?}", layer), render(&mut app, 100, 30));
         }
     }
 
-    /// Pins the Fit tab's title-line home for the active layer's name (Layer's
-    /// doc comment: `stage` and `layer` are independent axes now). Stepping
-    /// the pipeline stage must not move the mark layer, and cycling the mark
-    /// layer must not move the pipeline stage — a regression back toward the
-    /// old `sync_overlays_to_stage` coupling would fail this.
-    #[test]
-    fn fit_tab_stage_and_layer_are_independent_axes() {
-        let mut app = fixture_app_with_ridge();
-        app.set_layer(Layer::Curve);
-        app.set_stage(Stage::Ridge);
-        assert_eq!(
-            app.layer(),
-            Layer::Curve,
-            "changing the pipeline stage must not change the mark layer"
-        );
-
-        let out = render(&mut app, 100, 30);
-        assert!(
-            out.contains("Ridge") && out.contains("curve"),
-            "the title states both axes independently:\n{out}"
-        );
-    }
-
-    /// Guards the degrade order directly: the active layer used to share
-    /// `heatmap_title_right`'s corner with `batch`/`stage` and was the first
-    /// of the three dropped under a narrow DP pane — exactly backwards, since
+    /// Guards the degrade order directly: the active layer used to share the
+    /// heatmap block's right-hand title corner with `batch` and was dropped
+    /// first under a narrow DP pane — exactly backwards, since
     /// a reader who doesn't know the active layer cannot interpret a single
     /// inverted mark on this tab at all. It now has its own subtitle row
     /// (`fit_subtitle`) instead, spelled out in full with a gloss of what its
@@ -1757,7 +1719,7 @@ mod tests {
             (Layer::Suppressed, "discarded by non-max suppression"),
         ] {
             let mut app = fixture_app_with_ridge();
-            app.set_layer(layer);
+            goto_layer(&mut app, layer);
             let out = render(&mut app, 100, 30);
             assert!(
                 out.contains("Showing:") && out.contains(layer.label()) && out.contains(gloss),
@@ -1774,14 +1736,8 @@ mod tests {
     /// the pane on and check its content is present and looks right.
     #[test]
     fn dp_pane_shows_the_selected_nodes_decision_and_considered_list() {
-        use ratatui::crossterm::event::{
-            KeyCode,
-            KeyEvent,
-            KeyModifiers,
-        };
         let mut app = fixture_app_with_ridge();
-        app.set_stage(Stage::Path);
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        press(&mut app, 'd');
         assert!(app.dp_pane());
 
         let out = render(&mut app, 100, 30);
@@ -1870,14 +1826,14 @@ mod tests {
     #[test]
     fn convergence_tab_renders_metrics_and_churn() {
         let mut app = fixture_app_with_metrics();
-        app.set_tab(Tab::Convergence);
+        goto_tab(&mut app, Tab::Convergence);
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
     #[test]
     fn tolerances_tab_explains_itself_during_phase_one() {
         let mut app = fixture_app_with_ridge(); // real_fit is None
-        app.set_tab(Tab::Tolerances);
+        goto_tab(&mut app, Tab::Tolerances);
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
@@ -1906,7 +1862,7 @@ mod tests {
                 n_calibrants: 42,
             },
         );
-        app.set_tab(Tab::Tolerances);
+        goto_tab(&mut app, Tab::Tolerances);
         let out = render(&mut app, 100, 30);
         assert!(
             out.contains("-8.5") && out.contains("9.5"),
@@ -1929,7 +1885,7 @@ mod tests {
     fn every_tab_survives_an_empty_state() {
         for tab in Tab::ALL {
             let mut app = App::new(10); // no frames, no metrics, no fit
-            app.set_tab(tab);
+            goto_tab(&mut app, tab);
             render(&mut app, 80, 24); // must not panic
         }
     }
@@ -1952,15 +1908,10 @@ mod tests {
     /// same small area feeds `draw_dp_pane` when it's on.
     #[test]
     fn every_small_terminal_size_survives_every_tab() {
-        use ratatui::crossterm::event::{
-            KeyCode,
-            KeyEvent,
-            KeyModifiers,
-        };
         let mut app = fixture_app_with_ridge();
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)); // dp_pane on
+        press(&mut app, 'd'); // dp_pane on
         for tab in Tab::ALL {
-            app.set_tab(tab);
+            goto_tab(&mut app, tab);
             for w in 0..=12u16 {
                 for h in 0..=12u16 {
                     render(&mut app, w, h);
@@ -2001,7 +1952,7 @@ mod tests {
         let bins = 20;
         let mut app = App::new(bins);
         *app.recording_mut() = fixture_recording(bins);
-        app.set_layer(Layer::Path);
+        goto_layer(&mut app, Layer::Path);
 
         let out = render(&mut app, 100, 30);
         // `O` is the DP-chain glyph (Item 3); collect the screen (row, col)
@@ -2049,8 +2000,8 @@ mod tests {
     /// rather than through a fixture engineered to make two grid rows
     /// collapse into one terminal cell. Before this pass, that fixture
     /// forced a *suppressed* mark and a *DP-chain* mark into the same cell —
-    /// the one collision reachable at all, since `Stage::Path` used to show
-    /// both overlays at once. Suppressed and DP-chain can no longer collide:
+    /// the one collision reachable back when a single view showed both
+    /// overlays at once. Suppressed and DP-chain can no longer collide:
     /// they are two different, mutually exclusive `Layer`s now, so the only
     /// same-layer collision left is a DP node against a tail node within the
     /// `Path` layer (`mark_path` marks both), and this pins that the DP
@@ -2109,7 +2060,7 @@ mod tests {
     #[test]
     fn curve_layer_never_renders_a_reversed_space_on_a_zero_weight_cell() {
         let mut app = fixture_app_with_ridge();
-        app.set_layer(Layer::Curve);
+        goto_layer(&mut app, Layer::Curve);
         let mut t = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
         t.draw(|f| draw(f, &mut app)).expect("draw");
         let buf = t.backend().buffer().clone();
@@ -2147,7 +2098,7 @@ mod tests {
     #[test]
     fn path_layer_shows_the_dp_chain_and_tail_glyphs_distinctly() {
         let mut app = fixture_app_with_ridge();
-        app.set_layer(Layer::Path);
+        goto_layer(&mut app, Layer::Path);
         let out = render(&mut app, 100, 30);
         assert!(out.contains('O'), "missing the DP-chain glyph:\n{out}");
         assert!(out.contains('X'), "missing the tail glyph:\n{out}");
@@ -2173,7 +2124,6 @@ mod tests {
             h: 15,
             bins: rec.geom().bins,
             disp_rows: 30,
-            disp_cols: 100,
         };
 
         let mut suppressed = vec![Mark::None; dims.w * dims.h * 2];
@@ -2235,15 +2185,9 @@ mod tests {
     // ever overflows `area.width`. -----------------------------------------
 
     fn long_prefix_app() -> App {
-        use ratatui::crossterm::event::{
-            KeyCode,
-            KeyEvent,
-            KeyModifiers,
-        };
         let mut app = App::new(10);
-        app.set_stage(Stage::Suppressed); // the longest stage label
         for c in "123456789".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            press(&mut app, c);
         }
         app
     }
@@ -2261,12 +2205,10 @@ mod tests {
     }
 
     #[test]
-    fn status_line_shows_batch_stage_and_hides_the_permanent_cnt_column() {
+    fn status_line_shows_the_batch_and_hides_the_permanent_cnt_column() {
         let mut app = App::new(10);
-        app.set_stage(Stage::Ridge);
         let status = status_line(&mut app, 100);
         assert!(status.contains("b0"), "{status:?}");
-        assert!(status.contains("Ridge"), "{status:?}");
         // The line this replaced spent six columns permanently reporting
         // `cnt:-`; there is no pending count here, so nothing should.
         assert!(!status.contains("cnt"), "{status:?}");
@@ -2278,13 +2220,8 @@ mod tests {
     /// this reads the `TestBackend` buffer directly.
     #[test]
     fn status_line_pending_count_is_reversed() {
-        use ratatui::crossterm::event::{
-            KeyCode,
-            KeyEvent,
-            KeyModifiers,
-        };
         let mut app = App::new(10);
-        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        press(&mut app, '4');
         assert_eq!(app.pending_count(), Some(4));
 
         let mut t = Terminal::new(TestBackend::new(60, 3)).expect("test terminal");
@@ -2305,9 +2242,9 @@ mod tests {
     #[test]
     fn status_line_hides_fit_only_bindings_on_other_tabs() {
         let mut app = App::new(10);
-        app.set_tab(Tab::Convergence);
+        goto_tab(&mut app, Tab::Convergence);
         let status = status_line(&mut app, 200);
-        for word in ["stage", "frame", "layer", "dp"] {
+        for word in ["frame", "layer", "dp"] {
             assert!(
                 !status.contains(word),
                 "Convergence must not advertise Fit-only bindings that do \

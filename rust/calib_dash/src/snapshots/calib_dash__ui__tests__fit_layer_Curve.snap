@@ -3,7 +3,7 @@ source: rust/calib_dash/src/ui.rs
 expression: "render(&mut app, 100, 30)"
 ---
  Fit │ Convergence │ Tolerances                                                                     
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ────────────────────────────────────── b0 · Grid ┐
+    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
     │ Showing: curve — fitted calibration                                                          │
     │                                                                                              │
     │                                                                                        ▄▄▄▄▄▄│
@@ -31,4 +31,4 @@ expression: "render(&mut app, 100, 30)"
    0┤·····▒▒▒▒▒▒▒                                                                                  │
     └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
      0                            5                           10                            15      
- b0 Grid n · r · [ ] · < > · m M · d · h l · q · ^C                                          ? keys
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys

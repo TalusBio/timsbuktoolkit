@@ -3,7 +3,7 @@ source: rust/calib_dash/src/ui.rs
 expression: out
 ---
  Fit │ Convergence │ Tolerances                                                                     
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ─── b0 · Path ┐┌DP───────────────────────────────┐
+    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ────────── b0 ┐┌DP───────────────────────────────┐
     │ Showing: none — density only                              ││node 12: lib=15.500 obs=44.000   │
     │                                                           ││chose=11 acc_w=3.111             │
     │                                                       ▄▄▄▄││  considered:                    │
@@ -31,4 +31,4 @@ expression: out
    0┤   ▒▒▒▒▒                                                   ││                                 │
     └┴───────────────────────────────────┴──────────────────────┘│                                 │
      0                                  10                       └─────────────────────────────────┘
- b0 Path n · r · [ ] · < > · m M · d · h l · q · ^C                                          ? keys
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys
