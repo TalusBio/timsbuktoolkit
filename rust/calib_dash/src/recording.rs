@@ -34,13 +34,10 @@ pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
     suppressed: Vec<bool>,
-    /// Grid indices of the assembled path (DP chain plus greedy tails).
-    /// Sized with `bins` capacity as a hint for the common case — with
-    /// distinct weights only one node per row can be maximal in both its row
-    /// and its column — but this is not a bound: `suppress_nonmax` keeps
-    /// *every* node tied for the row/column max, so weight ties can legitimately
-    /// push the survivor count past `bins`. A `Vec` growing past its hinted
-    /// capacity is just a reallocation, not a bug.
+    /// Grid indices of the assembled path (DP chain plus greedy tails). The
+    /// `bins` capacity is a hint, not a bound — weight ties can push the
+    /// survivor count past it, as `calibrt`'s survivor debug assert spells
+    /// out. Growing past a hinted capacity is a reallocation, not a bug.
     path_indices: Vec<usize>,
     /// The DP-chosen segment within `path_indices`: `path_indices[..dp_range.start]`
     /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
@@ -48,8 +45,8 @@ pub struct FitRecording {
     dp_range: std::ops::Range<usize>,
     curve: Vec<Point>,
     ridge: Vec<RidgeMeasurement>,
-    /// One entry per DP node visited. Same `bins`-capacity hint and the same
-    /// weight-tie caveat as `path_indices` above.
+    /// One entry per DP node visited. Same `bins`-capacity hint as
+    /// `path_indices` above.
     dp: Vec<DpDecision>,
 }
 
@@ -63,8 +60,7 @@ impl FitRecording {
             },
             weights: vec![0.0; bins * bins],
             suppressed: vec![false; bins * bins],
-            // Capacity hint only — see the field doc comment for why this can
-            // legitimately be exceeded.
+            // Capacity hint only — see the field doc comment.
             path_indices: Vec::with_capacity(bins),
             dp_range: 0..0,
             curve: Vec::with_capacity(bins),

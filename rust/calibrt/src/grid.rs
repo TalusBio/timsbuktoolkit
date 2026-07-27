@@ -204,8 +204,7 @@ impl Grid {
 
     /// Reset the grid with new dimensions and ranges. Reallocates only if the
     /// bin count changes; otherwise reuses the node buffer and recomputes cell
-    /// centers from the new ranges. Re-fitting at a fixed `bins` over moving
-    /// ranges therefore keeps its node buffer for the life of the grid.
+    /// centers from the new ranges.
     pub fn reconfigure(
         &mut self,
         bins: usize,

@@ -244,24 +244,15 @@ pub trait FitObserver {
     fn on_event(&mut self, ev: FitEvent<'_>);
 }
 
-/// The no-op observer. Because `fit_with` is generic, this monomorphizes away
-/// entirely — the callback itself costs an unobserved fit nothing. The
-/// `ObserveOpts` flags are separate: they are plain runtime `bool`s and are
-/// still tested at their call sites either way (see `ObserveOpts::dp_nodes`).
+/// The no-op observer: `fit_with` is generic, so this monomorphizes away.
 impl FitObserver for () {
     fn on_event(&mut self, _: FitEvent<'_>) {}
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObserveOpts {
-    /// Emit `DpNode` from inside the `O(n * lookback)` loop. Off by default:
-    /// it is the one callback in a hot path. A runtime flag, so the DP still
-    /// tests it when unset, at three sites: twice around the inner loop and
-    /// once per accepted candidate edge. None of those tests guard the
-    /// distance and edge-weight arithmetic, and all of them predict perfectly,
-    /// so an unset `dp_nodes` costs a negligible amount rather than nothing. A
-    /// const generic would erase the tests at the price of monomorphizing the
-    /// entire DP twice, which is not worth it for a predicted branch.
+    /// Emit `DpNode` from the DP's inner loop. Off by default: it fires once
+    /// per node.
     pub dp_nodes: bool,
 }
 
@@ -277,10 +268,8 @@ pub struct CalibrationState {
     dp_prev_indices: Vec<Option<usize>>,
     /// Filled only when `ObserveOpts::dp_nodes` is set; capacity `lookback`.
     dp_considered: Vec<(usize, f64)>,
-    /// Survivors of suppression, refilled per fit. Sized at `bins` — the
-    /// practical survivor count, since with distinct weights only one node per
-    /// row can be maximal in both its row and its column. Weight ties can push
-    /// past it, hence the debug assert rather than a hard bound.
+    /// Survivors of suppression, refilled per fit. Sized at `bins`, which is a
+    /// hint and not a bound — see the debug assert in `fit_with`.
     filtered: Vec<grid::Node>,
     /// The path, refilled per fit.
     path_points: Vec<Point>,
@@ -363,9 +352,7 @@ impl CalibrationState {
         });
 
         // Collect non-suppressed nodes for pathfinding, reusing the buffer
-        // across fits. `self.filtered` and `self.grid` are both fields, so we
-        // can't hold `&mut self.filtered` while reading `self.grid` — take it
-        // out, fill it, and put it back once we're done reading from it.
+        // across fits.
         let mut filtered = std::mem::take(&mut self.filtered);
         filtered.clear();
         filtered.extend(
@@ -377,8 +364,11 @@ impl CalibrationState {
         );
         debug_assert!(
             filtered.len() <= self.grid.bins,
-            "expected at most one surviving node per row (bins={}), got {} \
-             (weight ties can legitimately exceed this)",
+            "expected at most one surviving node per row (bins={}), got {}: \
+             with distinct weights only one node per row can be maximal in \
+             both its row and its column, but `suppress_nonmax` keeps every \
+             node tied for a row/column max, so ties can legitimately exceed \
+             `bins`",
             self.grid.bins,
             filtered.len()
         );
@@ -420,9 +410,8 @@ impl CalibrationState {
         });
 
         // `CalibrationCurve::new` takes ownership and builds its own sorted
-        // points/slopes storage, so it gets a clone rather than `path_points`
-        // itself — that keeps `path_points` alive as a scratch buffer for the
-        // next fit instead of being consumed here every call.
+        // points/slopes storage, so it gets a clone — `path_points` stays
+        // alive as a scratch buffer for the next fit.
         self.curve = CalibrationCurve::new(path_points.clone()).ok();
         self.path_points = path_points;
         self.stale = false;
@@ -447,10 +436,9 @@ impl CalibrationState {
     /// Re-point `self` at a new geometry, reusing the grid's node buffer when
     /// `bins` is unchanged (see [`grid::Grid::reconfigure`]) and clearing the
     /// previous fit the same way `reset` does. Use it in place of `reset` when
-    /// re-fitting at a constant `bins`
-    /// against fresh `x_range`/`y_range` — the point-derived ranges of a new
-    /// batch, say — which is the one way to move the geometry without
-    /// discarding the allocations.
+    /// re-fitting at a constant `bins` against fresh `x_range`/`y_range` — the
+    /// point-derived ranges of a new batch, say — which is the one way to move
+    /// the geometry without discarding the allocations.
     pub fn reconfigure(
         &mut self,
         bins: usize,
