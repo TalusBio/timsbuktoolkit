@@ -31,11 +31,10 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          # This action defaults to `-D warnings`, which is a lint-policy change
-          # this workflow never asked for: it fails the build on apex_sim's
-          # pre-existing `f32: From<f64>` future-compat warnings. Empty keeps
-          # warnings as warnings, which is what CI did before caching. `task
-          # clippy` is where `-D warnings` belongs.
+          # This action defaults to `-D warnings`. Adding it for caching should
+          # not also change lint policy — that turned a warning into a build
+          # failure the first time. Empty keeps warnings as warnings, which is
+          # what this workflow did before; `task clippy` owns `-D warnings`.
           rustflags: ''
           cache-key: ${{ matrix.features }}
       - name: Build
@@ -51,12 +50,15 @@ jobs:
           cargo test -p timscentroid --features mzdata
           cargo test -p tims_stage -p timsquery
 
-  # CLI / simulator / macro crates, which the timsseek matrix above never
-  # touches: timsseek_cli's config drift guards live in its bin target,
+  # CLI / simulator / viewer / macro crates, which the timsseek matrix above
+  # never touches: timsseek_cli's config drift guards live in its bin target,
   # apex_sim's tests in its lib (default features, so the gui-gated modules
   # compile too), timsseek_macros' in its proc-macro lib.
   # `--all-targets` so examples are compiled as well — examples going unbuilt
   # is what let `timsseek_cli/examples/load_bench.rs` rot undetected.
+  # timsquery_viewer is here because no job compiled it at all, which is how it
+  # accumulated 16 unreported `f32: From<f64>` warnings that a future rustc
+  # turns into hard errors.
   cli-and-sim:
     runs-on: ubuntu-latest
     steps:
@@ -65,16 +67,15 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          # This action defaults to `-D warnings`, which is a lint-policy change
-          # this workflow never asked for: it fails the build on apex_sim's
-          # pre-existing `f32: From<f64>` future-compat warnings. Empty keeps
-          # warnings as warnings, which is what CI did before caching. `task
-          # clippy` is where `-D warnings` belongs.
+          # This action defaults to `-D warnings`. Adding it for caching should
+          # not also change lint policy — that turned a warning into a build
+          # failure the first time. Empty keeps warnings as warnings, which is
+          # what this workflow did before; `task clippy` owns `-D warnings`.
           rustflags: ''
       - name: Build
-        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash
+        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
       - name: Run tests
-        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash --all-targets
+        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
       # The dashboard is opt-in, so its call sites in `timsseek_cli` compile
       # under no other leg of this matrix. Without this they rot silently the
       # next time `FinalResult` or `RescoreFeatureStats` changes.
