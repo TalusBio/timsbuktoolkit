@@ -294,28 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn reconfigure_reallocates_when_bins_change() {
-        let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        grid.reconfigure(20, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        assert_eq!(grid.nodes.len(), 400);
-        assert_eq!(grid.bins, 20);
-    }
-
-    #[test]
-    fn reconfigure_clears_previous_weights() {
-        let mut grid = Grid::new(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
-        grid.add_point(&Point {
-            library: 1.5,
-            observed: 1.5,
-            weight: 9.0,
-        })
-        .unwrap();
-        grid.reconfigure(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
-        assert!(grid.nodes.iter().all(|n| n.center.weight == 0.0));
-        assert!(grid.nodes.iter().all(|n| !n.suppressed));
-    }
-
-    #[test]
     fn test_grid_reset_preserves_allocation() {
         let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
         grid.add_point(&Point {

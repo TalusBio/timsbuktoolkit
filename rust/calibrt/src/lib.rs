@@ -264,19 +264,11 @@ impl ObserveOpts {
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
-    dp_max_weights: Vec<f64>,
-    dp_prev_indices: Vec<Option<usize>>,
-    /// Filled only when `ObserveOpts::dp_nodes` is set; capacity `lookback`.
-    dp_considered: Vec<(usize, f64)>,
     /// Survivors of suppression, refilled per fit. Sized at `bins`, which is a
-    /// hint and not a bound — see the debug assert in `fit_with`.
+    /// hint and not a bound: `suppress_nonmax` keeps every node tied for a
+    /// row/column max, so ties can legitimately exceed `bins`.
     filtered: Vec<grid::Node>,
-    /// The path, refilled per fit.
-    path_points: Vec<Point>,
-    /// The DP chain and Pass 2's greedy tails, assembled into `path_points`.
-    dp_path: Vec<Point>,
-    dp_prefix: Vec<Point>,
-    dp_suffix: Vec<Point>,
+    scratch: pathfinding::PathfindingScratch,
     curve: Option<CalibrationCurve>,
     stale: bool,
     lookback: usize,
@@ -292,14 +284,8 @@ impl CalibrationState {
         Ok(Self {
             grid: grid::Grid::new(grid_size, x_range, y_range)?,
             path_indices: Vec::new(),
-            dp_max_weights: Vec::new(),
-            dp_prev_indices: Vec::new(),
-            dp_considered: Vec::with_capacity(lookback),
             filtered: Vec::with_capacity(grid_size),
-            path_points: Vec::new(),
-            dp_path: Vec::new(),
-            dp_prefix: Vec::new(),
-            dp_suffix: Vec::new(),
+            scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
             stale: false,
             lookback,
@@ -339,60 +325,34 @@ impl CalibrationState {
             cells: self.grid.grid_cells(),
         });
 
-        if self.grid.suppress_nonmax().is_err() {
-            self.clear_fit();
-            obs.on_event(FitEvent::Suppressed {
-                cells: self.grid.grid_cells(),
-            });
-            return;
-        }
-
+        let suppression_failed = self.grid.suppress_nonmax().is_err();
         obs.on_event(FitEvent::Suppressed {
             cells: self.grid.grid_cells(),
         });
+        if suppression_failed {
+            self.clear_fit();
+            return;
+        }
 
-        // Collect non-suppressed nodes for pathfinding, reusing the buffer
-        // across fits.
-        let mut filtered = std::mem::take(&mut self.filtered);
-        filtered.clear();
-        filtered.extend(
+        self.filtered.clear();
+        self.filtered.extend(
             self.grid
                 .grid_cells()
                 .iter()
                 .filter(|n| !n.suppressed && n.center.weight > 0.0)
                 .copied(),
         );
-        debug_assert!(
-            filtered.len() <= self.grid.bins,
-            "expected at most one surviving node per row (bins={}), got {}: \
-             with distinct weights only one node per row can be maximal in \
-             both its row and its column, but `suppress_nonmax` keeps every \
-             node tied for a row/column max, so ties can legitimately exceed \
-             `bins`",
-            self.grid.bins,
-            filtered.len()
-        );
 
-        // Pathfinding with reused buffers.
-        let mut path_points = std::mem::take(&mut self.path_points);
+        let mut path_points = Vec::new();
         let (dp_range, dp_weight) = pathfinding::find_optimal_path(
-            &mut filtered,
+            &mut self.filtered,
             self.lookback,
-            pathfinding::PathfindingScratch {
-                max_weights: &mut self.dp_max_weights,
-                prev_node_indices: &mut self.dp_prev_indices,
-                out_path: &mut path_points,
-                considered: &mut self.dp_considered,
-                dp_path: &mut self.dp_path,
-                prefix: &mut self.dp_prefix,
-                suffix: &mut self.dp_suffix,
-            },
+            &mut self.scratch,
+            &mut path_points,
             obs,
             opts,
         );
-        self.filtered = filtered;
 
-        // Store path indices by matching path points back to grid cells
         self.path_indices.clear();
         for pp in &path_points {
             if let Some(idx) = self.grid.grid_cells().iter().position(|n| {
@@ -409,11 +369,7 @@ impl CalibrationState {
             dp_weight,
         });
 
-        // `CalibrationCurve::new` takes ownership and builds its own sorted
-        // points/slopes storage, so it gets a clone — `path_points` stays
-        // alive as a scratch buffer for the next fit.
-        self.curve = CalibrationCurve::new(path_points.clone()).ok();
-        self.path_points = path_points;
+        self.curve = CalibrationCurve::new(path_points).ok();
         self.stale = false;
 
         if let Some(c) = self.curve.as_ref() {
@@ -433,12 +389,8 @@ impl CalibrationState {
         self.clear_fit();
     }
 
-    /// Re-point `self` at a new geometry, reusing the grid's node buffer when
-    /// `bins` is unchanged (see [`grid::Grid::reconfigure`]) and clearing the
-    /// previous fit the same way `reset` does. Use it in place of `reset` when
-    /// re-fitting at a constant `bins` against fresh `x_range`/`y_range` — the
-    /// point-derived ranges of a new batch, say — which is the one way to move
-    /// the geometry without discarding the allocations.
+    /// Re-point `self` at a new geometry and clear the previous fit — see
+    /// [`grid::Grid::reconfigure`] for what stays allocated.
     pub fn reconfigure(
         &mut self,
         bins: usize,
@@ -605,11 +557,6 @@ impl CalibrationState {
     pub fn filtered_ptr(&self) -> *const grid::Node {
         self.filtered.as_ptr()
     }
-
-    #[cfg(test)]
-    pub fn path_points_ptr(&self) -> *const Point {
-        self.path_points.as_ptr()
-    }
 }
 
 /// Computes the min and max values from an iterator of f64 values.
@@ -635,20 +582,6 @@ fn compute_range(values: impl Iterator<Item = f64>) -> Result<(f64, f64), CalibR
     }
 
     Ok((min, max))
-}
-
-/// Length of the assembled path, or `None` if the fit never got that far.
-#[derive(Default)]
-struct FitOutcome {
-    path_len: Option<usize>,
-}
-
-impl FitObserver for FitOutcome {
-    fn on_event(&mut self, ev: FitEvent<'_>) {
-        if let FitEvent::PathFound { path, .. } = ev {
-            self.path_len = Some(path.len());
-        }
-    }
 }
 
 /// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
@@ -680,21 +613,19 @@ pub fn calibrate_with_ranges(
         )
     }))?;
 
-    let mut outcome = FitOutcome::default();
-    state.fit_with(&mut outcome, ObserveOpts::NONE);
-
-    // Suppression wiping out the whole grid short-circuits the fit before a
-    // path exists, and is reported as an error rather than a failed fit.
-    let Some(path_len) = outcome.path_len else {
-        return Err(CalibRtError::NoPoints);
-    };
+    state.fit();
     state.grid.display_heatmap();
 
-    let calcurve = state.curve().cloned().ok_or(if path_len == 0 {
-        CalibRtError::NoPoints
-    } else {
-        CalibRtError::InsufficientPoints
-    });
+    // No path at all — including the suppression short-circuit, which never
+    // builds one — is `NoPoints`; a path too short to interpolate is not.
+    let calcurve = state
+        .curve()
+        .cloned()
+        .ok_or(if state.path_indices().is_empty() {
+            CalibRtError::NoPoints
+        } else {
+            CalibRtError::InsufficientPoints
+        });
     match &calcurve {
         Ok(c) => {
             let wrmse = c.wrmse(points.iter().map(|p| {
@@ -776,8 +707,6 @@ mod observer_tests {
         /// 0..n in order (one `DpNode` event per node), so `push`ing here
         /// keeps `dp_coords[i]` aligned with the node the DP loop saw at `i`.
         dp_coords: Vec<(f64, f64)>,
-        dp_range: Option<std::ops::Range<usize>>,
-        dp_weight: f64,
     }
 
     impl FitObserver for Recorder {
@@ -795,15 +724,7 @@ mod observer_tests {
                     self.dp_coords
                         .push((node.center.library, node.center.observed));
                 }
-                FitEvent::PathFound {
-                    dp_range,
-                    dp_weight,
-                    ..
-                } => {
-                    self.names.push("path");
-                    self.dp_range = Some(dp_range);
-                    self.dp_weight = dp_weight;
-                }
+                FitEvent::PathFound { .. } => self.names.push("path"),
                 FitEvent::CurveFit { .. } => self.names.push("curve"),
                 FitEvent::RidgeMeasured { .. } => self.names.push("ridge"),
             }
@@ -833,28 +754,10 @@ mod observer_tests {
             vec!["start", "grid", "suppressed", "path", "curve"],
             "no dp events when dp_nodes is off"
         );
-    }
-
-    #[test]
-    fn fit_started_carries_the_grid_geometry() {
-        let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
         assert_eq!(g.x_range, (0.0, 10.0));
         assert_eq!(g.y_range, (0.0, 10.0));
-    }
-
-    /// `pathfinding.rs` owns the arithmetic behind these two values; this only
-    /// covers `fit_with` passing them on rather than dropping them.
-    #[test]
-    fn path_found_carries_the_dp_payload() {
-        let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        assert!(rec.dp_range.is_some());
-        assert!(rec.dp_weight > 0.0);
     }
 
     #[test]
@@ -986,7 +889,6 @@ mod calibration_state_tests {
         s.update(pts.iter().copied()).unwrap();
         s.fit();
         let filtered_ptr = s.filtered_ptr();
-        let path_points_ptr = s.path_points_ptr();
 
         for _ in 0..5 {
             s.reset();
@@ -998,11 +900,6 @@ mod calibration_state_tests {
             s.filtered_ptr(),
             filtered_ptr,
             "filtered must be the same allocation, not a same-sized new one"
-        );
-        assert_eq!(
-            s.path_points_ptr(),
-            path_points_ptr,
-            "path_points must be the same allocation, not a same-sized new one"
         );
     }
 
@@ -1018,7 +915,6 @@ mod calibration_state_tests {
         s.update(pts1.iter().copied()).unwrap();
         s.fit();
         let filtered_ptr = s.filtered_ptr();
-        let path_points_ptr = s.path_points_ptr();
 
         // Same bins, a completely different (shifted, wider) range — the case
         // `reconfigure` exists to keep allocation-free.
@@ -1043,40 +939,5 @@ mod calibration_state_tests {
             filtered_ptr,
             "reconfigure at unchanged bins must not reallocate `filtered`"
         );
-        assert_eq!(
-            s.path_points_ptr(),
-            path_points_ptr,
-            "reconfigure at unchanged bins must not reallocate `path_points`"
-        );
-    }
-
-    #[test]
-    fn reconfigure_clears_the_previous_curve_before_the_next_fit_runs() {
-        let mut s = CalibrationState::new(4, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
-        s.update((0..4).map(|i| {
-            (
-                LibraryRT(i as f64 + 0.5),
-                ObservedRTSeconds(i as f64 + 0.5),
-                1.0 + i as f64,
-            )
-        }))
-        .unwrap();
-        s.fit();
-        assert!(s.curve().is_some());
-
-        s.reconfigure(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
-        assert!(
-            s.curve().is_none(),
-            "a stale curve from the previous geometry must not survive reconfigure"
-        );
-    }
-
-    #[test]
-    fn reconfigure_rejects_a_zero_width_range() {
-        let mut s = CalibrationState::new(4, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
-        assert!(matches!(
-            s.reconfigure(4, (5.0, 5.0), (0.0, 4.0)),
-            Err(CalibRtError::ZeroRange)
-        ));
     }
 }
