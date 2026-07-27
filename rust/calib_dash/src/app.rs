@@ -189,12 +189,25 @@ pub struct App {
     /// history to render without a live pipeline.
     metrics: Vec<BatchMetrics>,
     /// The three numbers the Convergence tab's header states about the frame
-    /// slab's decimation. Not derived from a live `FrameStore` yet — that
-    /// wiring is the next task's — so these default to "nothing decimated"
-    /// until `set_frame_summary` is called.
+    /// slab's decimation. The design spec puts this state pipeline-side, on
+    /// a `CalibTrace` the next task introduces — these three plain fields
+    /// are this task's stopgap so the header has something to read now, and
+    /// default to "nothing decimated" until `set_frame_summary` is called.
+    /// Task 8 should reconcile this with `CalibTrace`/`FrameStore` rather
+    /// than have both exist.
     retained_frames: usize,
     frame_stride: usize,
     dropped_frames: usize,
+    /// Per-overlay visibility on the Fit tab. Each is independently
+    /// toggleable (`set_show_*`), but changing `stage` re-derives all four
+    /// from "the set implied by that stage" first — see
+    /// `sync_overlays_to_stage` — so stepping `[`/`]` alone still tells the
+    /// story, and an independent toggle is a deliberate override on top of
+    /// that default rather than a second, disconnected source of truth.
+    show_suppressed: bool,
+    show_path: bool,
+    show_curve: bool,
+    show_ridge: bool,
     /// The pending count prefix, e.g. the `15` typed before `n` in `15n`.
     /// Lives for exactly one motion: a motion consumes it via `take_count`,
     /// and any other key clears it directly, so a half-typed number never
@@ -215,6 +228,10 @@ impl App {
             retained_frames: 0,
             frame_stride: 1,
             dropped_frames: 0,
+            show_suppressed: false,
+            show_path: false,
+            show_curve: false,
+            show_ridge: false,
             count: None,
         }
     }
@@ -227,11 +244,30 @@ impl App {
         self.tab = tab;
     }
 
-    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count.
-    /// Kept separate from `handle_key`'s stepping so a test (or a future
-    /// jump-to-stage key) can land on a specific stage in one call.
+    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count,
+    /// and re-derives the four overlay toggles from it (see
+    /// `sync_overlays_to_stage`). Kept separate from `handle_key`'s stepping
+    /// so a test (or a future jump-to-stage key) can land on a specific
+    /// stage in one call.
     pub fn set_stage(&mut self, stage: Stage) {
         self.stage = stage;
+        self.sync_overlays_to_stage();
+    }
+
+    /// Resets all four overlay toggles to the set `self.stage` implies —
+    /// cumulative, so `Stage::Ridge` implies all four are on. Called
+    /// whenever `stage` changes (`set_stage`, and `handle_key`'s `[`/`]`),
+    /// so stepping the stage alone still tells the whole story; an
+    /// independent `set_show_*` call after that is an explicit override,
+    /// not fighting a second default.
+    fn sync_overlays_to_stage(&mut self) {
+        self.show_suppressed = matches!(
+            self.stage,
+            Stage::Suppressed | Stage::Path | Stage::Curve | Stage::Ridge
+        );
+        self.show_path = matches!(self.stage, Stage::Path | Stage::Curve | Stage::Ridge);
+        self.show_curve = matches!(self.stage, Stage::Curve | Stage::Ridge);
+        self.show_ridge = matches!(self.stage, Stage::Ridge);
     }
 
     /// Mutable access to the live recording, so a caller — `on_batch` in the
@@ -294,6 +330,38 @@ impl App {
 
     pub fn dp_pane(&self) -> bool {
         self.dp_pane
+    }
+
+    pub fn show_suppressed(&self) -> bool {
+        self.show_suppressed
+    }
+
+    pub fn show_path(&self) -> bool {
+        self.show_path
+    }
+
+    pub fn show_curve(&self) -> bool {
+        self.show_curve
+    }
+
+    pub fn show_ridge(&self) -> bool {
+        self.show_ridge
+    }
+
+    pub fn set_show_suppressed(&mut self, on: bool) {
+        self.show_suppressed = on;
+    }
+
+    pub fn set_show_path(&mut self, on: bool) {
+        self.show_path = on;
+    }
+
+    pub fn set_show_curve(&mut self, on: bool) {
+        self.show_curve = on;
+    }
+
+    pub fn set_show_ridge(&mut self, on: bool) {
+        self.show_ridge = on;
     }
 
     pub fn recording(&self) -> &FitRecording {
@@ -368,12 +436,14 @@ impl App {
                 for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.next();
                 }
+                self.sync_overlays_to_stage();
                 PauseAction::Stay
             }
             KeyCode::Char('[') if key.modifiers.is_empty() => {
                 for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.prev();
                 }
+                self.sync_overlays_to_stage();
                 PauseAction::Stay
             }
             KeyCode::Char('d') if key.modifiers.is_empty() => {

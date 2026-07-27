@@ -20,7 +20,6 @@ use crate::{
     App,
     BatchMetrics,
     FitRecording,
-    Stage,
     Tab,
 };
 use calibrt::Point;
@@ -84,9 +83,11 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         .pending_count()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "-".to_string());
+    // Deliberately terse: at 100 columns the previous, fuller wording clipped
+    // before `d:dp-pane`, hiding that key entirely rather than just looking
+    // busy.
     let text = format!(
-        " batch {}  stage:{}  count:{}  |  n:next  Nn:skip N  r:run-to-end  q:detach  \
-         ctrl-c:abort  [/]:stage  d:dp-pane",
+        " b{} {} cnt:{} | n:next r:run q:detach ^C:abort [/]:stage d:dp",
         app.batch(),
         app.stage().label(),
         count,
@@ -212,6 +213,17 @@ struct Dims {
     disp_cols: usize,
 }
 
+/// Which half of a terminal cell a grid row landed in — the half-block
+/// doubling `heatmap_cells`/`grid_to_screen` compute. Tracked per half
+/// (rather than collapsed to one value per cell) so two grid rows sharing a
+/// terminal line stay visually distinct: this is the vertical resolution
+/// `heatmap_cells` computes and the interface promises.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Half {
+    Upper,
+    Lower,
+}
+
 fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -235,52 +247,109 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let cells = heatmap_cells(rec, area.width, area.height);
     let max_w = cells.iter().copied().fold(0.0f32, f32::max).max(1e-9);
 
-    let mut marks = vec![MARK_NONE; w * h];
-    let stage = app.stage();
-    if matches!(
-        stage,
-        Stage::Suppressed | Stage::Path | Stage::Curve | Stage::Ridge
-    ) {
+    // Two mark slots per terminal cell — index `(ty * w + tx) * 2 + half`,
+    // `half` 0 for upper, 1 for lower — so an overlay on one grid row never
+    // clobbers what the *other* grid row sharing that character wanted to
+    // show.
+    let mut marks = vec![MARK_NONE; w * h * 2];
+    if app.show_suppressed() {
         mark_suppressed(&mut marks, dims, rec);
     }
-    if matches!(stage, Stage::Path | Stage::Curve | Stage::Ridge) {
+    if app.show_path() {
         mark_path(&mut marks, dims, rec);
     }
-    if matches!(stage, Stage::Curve | Stage::Ridge) {
+    if app.show_curve() {
         mark_curve(&mut marks, dims, rec);
     }
-    if matches!(stage, Stage::Ridge) {
+    if app.show_ridge() {
         mark_ridge(&mut marks, dims, rec);
     }
 
     for ty in 0..h {
         for tx in 0..w {
             let idx = (ty * dims.disp_cols + tx) * 2;
-            let upper = cells.get(idx).copied().unwrap_or(0.0);
-            let lower = cells.get(idx + 1).copied().unwrap_or(0.0);
-            let heat = upper.max(lower);
-            let m = marks[ty * w + tx];
-            let (symbol, color) = match (mark_glyph(m), mark_color(m)) {
-                (Some(sym), Some(col)) => (sym, col),
-                _ => (heat_glyph(heat, max_w), heat_color(heat, max_w)),
-            };
-            if let Some(cell) = frame
+            let upper_heat = cells.get(idx).copied().unwrap_or(0.0);
+            let lower_heat = cells.get(idx + 1).copied().unwrap_or(0.0);
+            let cell = ty * w + tx;
+            let upper_mark = marks[cell * 2];
+            let lower_mark = marks[cell * 2 + 1];
+            let (symbol, color) =
+                compose_cell(upper_mark, lower_mark, upper_heat, lower_heat, max_w);
+            if let Some(buf_cell) = frame
                 .buffer_mut()
                 .cell_mut((area.x + tx as u16, area.y + ty as u16))
             {
-                cell.set_symbol(symbol);
-                cell.set_fg(color);
-                cell.set_bg(Color::Reset);
+                buf_cell.set_symbol(symbol);
+                buf_cell.set_fg(color);
+                buf_cell.set_bg(Color::Reset);
             }
         }
     }
 }
 
-fn raise_mark(marks: &mut [u8], dims: Dims, tx: usize, ty: usize, level: u8) {
+/// Picks one terminal cell's glyph and color from its two independent
+/// half-rows.
+///
+/// "Occupied" means either half has a nonzero weight or an overlay mark.
+/// Occupancy shape is the primary, `TestBackend`-visible signal (`▀` upper
+/// only, `▄` lower only, `█`/a density glyph when both, ` ` when neither) —
+/// this is what makes `heatmap_cells`'s two-half-rows-per-line resolution
+/// actually show up in a snapshot instead of being silently collapsed to one
+/// glyph per cell.
+///
+/// When only one half is occupied, an overlay mark on that half wins its
+/// glyph/color outright (marks are sparse and meant to stand out); with no
+/// mark, that half's own heat intensity picks the color, and the shape is
+/// plain (there is no standard partial-block character for "the upper half,
+/// at quarter density").
+///
+/// When *both* halves are occupied, `heatmap_cells` collapsing them to one
+/// glyph is unavoidable — one character cannot show two independent overlay
+/// marks at once — so the placement rule is: the higher-priority mark
+/// between the two halves wins the whole cell (an overlay is never invisible
+/// just because it shares a character with the other half), and only when
+/// *neither* half carries a mark does the cell fall back to a density glyph
+/// over the combined (max) heat, which is exactly the common "both grid rows
+/// on the ridge have real weight" case. `fit_tab_marks_the_higher_priority_half_when_both_are_occupied`
+/// pins this rule with a fixture built so it actually triggers.
+fn compose_cell(
+    upper_mark: u8,
+    lower_mark: u8,
+    upper_heat: f32,
+    lower_heat: f32,
+    max: f32,
+) -> (&'static str, Color) {
+    let upper_on = upper_mark != MARK_NONE || upper_heat > 0.0;
+    let lower_on = lower_mark != MARK_NONE || lower_heat > 0.0;
+    match (upper_on, lower_on) {
+        (false, false) => (" ", Color::Reset),
+        (true, false) => match (mark_glyph(upper_mark), mark_color(upper_mark)) {
+            (Some(sym), Some(col)) => (sym, col),
+            _ => ("\u{2580}", heat_color(upper_heat, max)), // ▀
+        },
+        (false, true) => match (mark_glyph(lower_mark), mark_color(lower_mark)) {
+            (Some(sym), Some(col)) => (sym, col),
+            _ => ("\u{2584}", heat_color(lower_heat, max)), // ▄
+        },
+        (true, true) => {
+            let winner = upper_mark.max(lower_mark);
+            match (mark_glyph(winner), mark_color(winner)) {
+                (Some(sym), Some(col)) => (sym, col),
+                _ => {
+                    let heat = upper_heat.max(lower_heat);
+                    (heat_glyph(heat, max), heat_color(heat, max))
+                }
+            }
+        }
+    }
+}
+
+fn raise_mark(marks: &mut [u8], dims: Dims, tx: usize, ty: usize, half: Half, level: u8) {
     if tx >= dims.w || ty >= dims.h {
         return;
     }
-    if let Some(slot) = marks.get_mut(ty * dims.w + tx)
+    let slot_idx = (ty * dims.w + tx) * 2 + if half == Half::Upper { 0 } else { 1 };
+    if let Some(slot) = marks.get_mut(slot_idx)
         && level > *slot
     {
         *slot = level;
@@ -294,8 +363,8 @@ fn mark_grid_indices(marks: &mut [u8], dims: Dims, indices: &[usize], level: u8)
     for &idx in indices {
         let row = idx / dims.bins;
         let col = idx % dims.bins;
-        let (ty, tx, _) = grid_to_screen(row, col, dims);
-        raise_mark(marks, dims, tx, ty, level);
+        let (ty, tx, half) = grid_to_screen(row, col, dims);
+        raise_mark(marks, dims, tx, ty, half, level);
     }
 }
 
@@ -304,8 +373,8 @@ fn mark_suppressed(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
     for row in 0..bins {
         for col in 0..bins {
             if rec.is_suppressed(row, col) && rec.weight(row, col) > 0.0 {
-                let (ty, tx, _) = grid_to_screen(row, col, dims);
-                raise_mark(marks, dims, tx, ty, MARK_SUPPRESSED);
+                let (ty, tx, half) = grid_to_screen(row, col, dims);
+                raise_mark(marks, dims, tx, ty, half, MARK_SUPPRESSED);
             }
         }
     }
@@ -353,8 +422,13 @@ fn mark_curve(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
             continue;
         };
         let row = bin_of(y, geom.y_range, bins);
-        let ty = forward_map(row, bins, dims.disp_rows) / 2;
-        raise_mark(marks, dims, tx, ty, MARK_CURVE);
+        let dr = forward_map(row, bins, dims.disp_rows);
+        let half = if dr.is_multiple_of(2) {
+            Half::Upper
+        } else {
+            Half::Lower
+        };
+        raise_mark(marks, dims, tx, dr / 2, half, MARK_CURVE);
     }
 }
 
@@ -372,8 +446,8 @@ fn mark_ridge(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
         let col = bin_of(m.library.0, geom.x_range, bins);
         for y in [center + m.half_width, center - m.half_width] {
             let row = bin_of(y, geom.y_range, bins);
-            let (ty, tx, _) = grid_to_screen(row, col, dims);
-            raise_mark(marks, dims, tx, ty, MARK_RIDGE);
+            let (ty, tx, half) = grid_to_screen(row, col, dims);
+            raise_mark(marks, dims, tx, ty, half, MARK_RIDGE);
         }
     }
 }
@@ -511,11 +585,16 @@ fn forward_map(src_i: usize, src_n: usize, disp_n: usize) -> usize {
     (src_i * disp_n / src_n).min(disp_n - 1)
 }
 
-/// Maps a grid `(row, col)` to `(terminal_row, terminal_col, is_upper_half)`.
-fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, bool) {
+/// Maps a grid `(row, col)` to `(terminal_row, terminal_col, half)`.
+fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, Half) {
     let dr = forward_map(row, dims.bins, dims.disp_rows);
     let dc = forward_map(col, dims.bins, dims.disp_cols);
-    (dr / 2, dc, dr.is_multiple_of(2))
+    let half = if dr.is_multiple_of(2) {
+        Half::Upper
+    } else {
+        Half::Lower
+    };
+    (dr / 2, dc, half)
 }
 
 /// Grid-bin index of `v` within `range`, replicating `FitRecording`'s private
@@ -619,7 +698,11 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
         ("ridge_half_width", scaled_u64(&ridge_hw)),
     ];
 
-    let spark_rows = Layout::vertical([Constraint::Ratio(1, 5); 5]).split(area);
+    // `Fill(1)` rather than `Ratio(1, 5)`: ratatui distributes leftover space
+    // from integer rounding more evenly across `Fill` segments, so the five
+    // sparklines come out the same height (or within one row of each other)
+    // instead of a few segments silently absorbing all of the remainder.
+    let spark_rows = Layout::vertical([Constraint::Fill(1); 5]).split(area);
     for (i, (label, data)) in series.iter().enumerate() {
         let Some(row) = spark_rows.get(i).copied() else {
             continue;
@@ -749,6 +832,7 @@ fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Stage;
     use calibrt::{
         CalibrationState,
         LibraryRT,
@@ -898,6 +982,78 @@ mod tests {
         }
     }
 
+    /// `set_stage(Curve)` implies `suppressed`, `path` and `curve` are all
+    /// on — but each is independently toggleable, not just a byproduct of
+    /// the stage. Overriding `show_path` off afterward must remove the path
+    /// marks (`#`/`+`) while `show_curve` (untouched) keeps the curve
+    /// (`*`) rendering, proving the two are separate state rather than one
+    /// stage-derived flag read two ways.
+    #[test]
+    fn fit_tab_overlay_toggles_are_independent_of_stage() {
+        let mut app = fixture_app_with_ridge();
+        app.set_stage(Stage::Curve);
+        assert!(
+            app.show_path(),
+            "Curve stage implies the path overlay is on"
+        );
+        app.set_show_path(false);
+        assert!(!app.show_path());
+        assert!(
+            app.show_curve(),
+            "turning off `path` must not have touched `curve`"
+        );
+
+        let out = render(&mut app, 100, 30);
+        assert!(
+            !out.contains('#') && !out.contains('+'),
+            "path overlay was toggled off, so no DP-chain or tail marks should \
+             remain:\n{out}"
+        );
+        assert!(
+            out.contains('*'),
+            "curve overlay was left on and should still render:\n{out}"
+        );
+        insta::assert_snapshot!(out);
+    }
+
+    /// No given test toggles `dp_pane`, so nothing pinned the pane's content
+    /// before this — an off-by-one in which node is "selected" or a
+    /// formatting regression in `chose`/`acc_weight`/`considered` could
+    /// silently drift. `fixture_app_with_ridge` already fits with
+    /// `dp_nodes: true`, so `rec.dp()` is populated; this just has to turn
+    /// the pane on and check its content is present and looks right.
+    #[test]
+    fn dp_pane_shows_the_selected_nodes_decision_and_considered_list() {
+        use ratatui::crossterm::event::{
+            KeyCode,
+            KeyEvent,
+            KeyModifiers,
+        };
+        let mut app = fixture_app_with_ridge();
+        app.set_stage(Stage::Path);
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.dp_pane());
+
+        let out = render(&mut app, 100, 30);
+        assert!(
+            out.contains("chose="),
+            "missing the selected node's chose:\n{out}"
+        );
+        assert!(
+            out.contains("acc_w="),
+            "missing the selected node's acc_weight:\n{out}"
+        );
+        assert!(
+            out.contains("considered"),
+            "missing the considered list:\n{out}"
+        );
+        assert!(
+            out.contains("edge_w="),
+            "missing a considered edge weight:\n{out}"
+        );
+        insta::assert_snapshot!(out);
+    }
+
     #[test]
     fn convergence_tab_renders_metrics_and_churn() {
         let mut app = fixture_app_with_metrics();
@@ -945,5 +1101,44 @@ mod tests {
         let rec = fixture_recording(4); // bins far smaller than the area
         let cells = heatmap_cells(&rec, 40, 10);
         assert_eq!(cells.len(), 40 * 10 * 2);
+    }
+
+    /// A `bins=4` grid rendered into a body exactly 2 rows tall (`disp_rows
+    /// == bins`, one-to-one) with a single display column, so both grid rows
+    /// are known to land in the terminal's one heatmap character: row 0 (a
+    /// point too light to survive `suppress_nonmax`'s 1.0 seed, so it is
+    /// suppressed but still weight > 0 — the suppressed mark) in the upper
+    /// half, row 1 (the sole survivor, so it is trivially the whole DP chain)
+    /// in the lower half. `compose_cell`'s placement rule says the
+    /// higher-priority mark wins the whole cell when both halves are
+    /// occupied — `MARK_DP_CHAIN > MARK_SUPPRESSED` — so the character must
+    /// be `#`, not `.`, and not some blend of the two.
+    #[test]
+    fn fit_tab_marks_the_higher_priority_half_when_both_are_occupied() {
+        let bins = 4;
+        let mut app = App::new(bins);
+        let mut state = CalibrationState::new(bins, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
+        state
+            .update(
+                [
+                    (LibraryRT(0.5), ObservedRTSeconds(0.5), 0.5),
+                    (LibraryRT(1.5), ObservedRTSeconds(1.5), 2.0),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        state.fit_with(app.recording_mut(), ObserveOpts::NONE);
+        app.set_stage(Stage::Path); // shows both the suppressed mask and the path
+
+        // 1 tab-bar row + 2 heatmap rows + 1 status row; 1 column.
+        let out = render(&mut app, 1, 4);
+        let heatmap_char = out.lines().nth(1).and_then(|l| l.chars().next());
+        assert_eq!(
+            heatmap_char,
+            Some('#'),
+            "the DP chain mark must win the whole cell over the suppressed mark \
+             sharing its other half, got:\n{out}"
+        );
+        insta::assert_snapshot!(out);
     }
 }
