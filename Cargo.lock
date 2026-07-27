@@ -1365,6 +1365,7 @@ dependencies = [
  "calibrt",
  "insta",
  "ratatui",
+ "serde_json",
  "tracing",
 ]
 

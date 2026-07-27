@@ -444,6 +444,26 @@ impl CalibrationState {
         self.stale = false;
     }
 
+    /// Re-point `self` at a new geometry, reusing the grid's node buffer when
+    /// `bins` is unchanged (see [`grid::Grid::reconfigure`]) and clearing the
+    /// previous fit's `curve`/`path_indices`/`stale` the same way `reset`
+    /// does. A caller that re-fits every batch against that batch's own
+    /// point-derived ranges (constant `bins`, ever-changing `x_range`/
+    /// `y_range`) uses this instead of `reset` so the hot path never
+    /// reallocates.
+    pub fn reconfigure(
+        &mut self,
+        bins: usize,
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+    ) -> Result<(), CalibRtError> {
+        self.grid.reconfigure(bins, x_range, y_range)?;
+        self.curve = None;
+        self.path_indices.clear();
+        self.stale = false;
+        Ok(())
+    }
+
     pub fn grid_cells(&self) -> &[grid::Node] {
         self.grid.grid_cells()
     }
@@ -1062,5 +1082,81 @@ mod calibration_state_tests {
             path_points_ptr,
             "path_points must be the same allocation, not a same-sized new one"
         );
+    }
+
+    #[test]
+    fn reconfigure_reuses_state_across_batches_with_changing_ranges() {
+        let mut s = CalibrationState::new(10, (0.0, 10.0), (0.0, 10.0), 3).unwrap();
+        let pts1: Vec<_> = (0..10)
+            .map(|i| {
+                let v = i as f64 + 0.5;
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
+            })
+            .collect();
+        s.update(pts1.iter().copied()).unwrap();
+        s.fit();
+        let caps_before = (
+            s.filtered_cap(),
+            s.path_points_cap(),
+            s.dp_max_weights_cap(),
+        );
+
+        // Same bins, a completely different (shifted, wider) range — the hot
+        // path a per-batch re-fit exercises every call.
+        s.reconfigure(10, (100.0, 200.0), (100.0, 200.0)).unwrap();
+        let pts2: Vec<_> = (0..10)
+            .map(|i| {
+                let v = 100.0 + i as f64 * 10.0 + 0.5;
+                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
+            })
+            .collect();
+        s.update(pts2.iter().copied()).unwrap();
+        s.fit();
+
+        assert_eq!(s.grid_x_range(), (100.0, 200.0));
+        assert_eq!(s.grid_y_range(), (100.0, 200.0));
+        assert!(
+            s.curve().unwrap().predict(LibraryRT(150.0)).is_ok(),
+            "the new fit must be defined over the new range"
+        );
+        assert_eq!(
+            (
+                s.filtered_cap(),
+                s.path_points_cap(),
+                s.dp_max_weights_cap()
+            ),
+            caps_before,
+            "reconfigure at unchanged bins must not reallocate the fit scratch buffers"
+        );
+    }
+
+    #[test]
+    fn reconfigure_clears_the_previous_curve_before_the_next_fit_runs() {
+        let mut s = CalibrationState::new(4, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
+        s.update((0..4).map(|i| {
+            (
+                LibraryRT(i as f64 + 0.5),
+                ObservedRTSeconds(i as f64 + 0.5),
+                1.0 + i as f64,
+            )
+        }))
+        .unwrap();
+        s.fit();
+        assert!(s.curve().is_some());
+
+        s.reconfigure(4, (0.0, 4.0), (0.0, 4.0)).unwrap();
+        assert!(
+            s.curve().is_none(),
+            "a stale curve from the previous geometry must not survive reconfigure"
+        );
+    }
+
+    #[test]
+    fn reconfigure_rejects_a_zero_width_range() {
+        let mut s = CalibrationState::new(4, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
+        assert!(matches!(
+            s.reconfigure(4, (5.0, 5.0), (0.0, 4.0)),
+            Err(CalibRtError::ZeroRange)
+        ));
     }
 }
