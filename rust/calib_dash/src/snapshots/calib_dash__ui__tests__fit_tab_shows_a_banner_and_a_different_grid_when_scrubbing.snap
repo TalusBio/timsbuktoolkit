@@ -31,4 +31,7 @@ expression: out
    0┤░░░░░░░░░░░░                                                                                  │
     └┴──────────────────────┴───────────────────────┴──────────────────────┴──────────────────────┴┘
      0                      2                       4                      6                      8 
- b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys 
+--- REVERSED cells (row: column spans) ---
+  0: 1-3
+  1: 0-99

@@ -31,4 +31,6 @@ expression: out
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys
+ b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys 
+--- REVERSED cells (row: column spans) ---
+  0: 21-30

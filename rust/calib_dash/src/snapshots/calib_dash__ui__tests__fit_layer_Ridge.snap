@@ -1,6 +1,6 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render(&mut app, 100, 30)"
+expression: "render_snapshot(&mut app, 100, 30)"
 ---
  Fit │ Convergence │ Tolerances                                                                     
     ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
@@ -31,4 +31,20 @@ expression: "render(&mut app, 100, 30)"
    0┤     ▒▒▒▒▒▒▒                                                                                  │
     └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
      0                            5                           10                            15      
- b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys 
+--- REVERSED cells (row: column spans) ---
+  0: 1-3
+  4: 93
+  5: 81
+  7: 75 93
+ 10: 63
+ 11: 69
+ 13: 57 81
+ 16: 69 75
+ 17: 46 52
+ 19: 63
+ 20: 28 34
+ 22: 46 52 57
+ 23: 16
+ 25: 10 28 34
+ 26: 10 16

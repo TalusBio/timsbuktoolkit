@@ -1548,6 +1548,7 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{
         KeyCode,
         KeyEvent,
@@ -1575,11 +1576,20 @@ mod tests {
         }
     }
 
+    /// The drawn glyphs alone, one string per row so the output is readable
+    /// as a picture. Style-blind: use `render_snapshot` for anything pinned
+    /// with `insta`.
     fn render(app: &mut App, w: u16, h: u16) -> String {
+        glyph_grid(&draw_to_buffer(app, w, h))
+    }
+
+    fn draw_to_buffer(app: &mut App, w: u16, h: u16) -> Buffer {
         let mut t = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
         t.draw(|f| draw(f, app)).expect("draw");
-        let buf = t.backend().buffer().clone();
-        // One string per row, so the snapshot is readable as a picture.
+        t.backend().buffer().clone()
+    }
+
+    fn glyph_grid(buf: &Buffer) -> String {
         (0..buf.area.height)
             .map(|y| {
                 (0..buf.area.width)
@@ -1588,6 +1598,66 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The glyph grid plus a trailing section naming every cell drawn
+    /// `REVERSED`.
+    ///
+    /// Inversion carries real meaning on several tabs — the Fit tab's mark
+    /// layers are inversion applied *on top of* the density glyph, and so are
+    /// the selected tab, the scrub banner and a pending count — none of which
+    /// a `.symbol()`-only grid can see. Without this section a layer that
+    /// marks the wrong cells, or none at all, is byte-identical to one that
+    /// marks the right ones.
+    ///
+    /// Written as column spans, one line per affected terminal row, rather
+    /// than as a second full-size grid: a 30-row canvas would double the
+    /// snapshot with mostly-empty rows, and a band that moves reads directly
+    /// as `12: 40-46` becoming `12: 41-47`.
+    fn render_snapshot(app: &mut App, w: u16, h: u16) -> String {
+        let buf = draw_to_buffer(app, w, h);
+        let mut out = glyph_grid(&buf);
+        out.push_str("\n--- REVERSED cells (row: column spans) ---");
+        let mut any = false;
+        for y in 0..buf.area.height {
+            let spans = reversed_spans(&buf, y);
+            if spans.is_empty() {
+                continue;
+            }
+            any = true;
+            out.push_str(&format!("\n{y:>3}: {spans}"));
+        }
+        if !any {
+            out.push_str("\n    (none)");
+        }
+        out
+    }
+
+    /// The inverted column runs on terminal row `y`, as `12-18` for a run and
+    /// `7` for a single column, space separated. Empty when the row carries no
+    /// inversion at all.
+    fn reversed_spans(buf: &Buffer, y: u16) -> String {
+        let mut spans: Vec<String> = Vec::new();
+        let mut start: Option<u16> = None;
+        // `..=width`: the one-past-the-end step closes a run that reaches the
+        // right edge.
+        for x in 0..=buf.area.width {
+            let reversed = x < buf.area.width && buf[(x, y)].modifier.contains(Modifier::REVERSED);
+            match (reversed, start) {
+                (true, None) => start = Some(x),
+                (false, Some(lo)) => {
+                    let hi = x - 1;
+                    spans.push(if lo == hi {
+                        format!("{lo}")
+                    } else {
+                        format!("{lo}-{hi}")
+                    });
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        spans.join(" ")
     }
 
     /// An asymmetric ridge: `x` ranges over `(0, 16)`, `y` over `(0, 48)` —
@@ -1694,21 +1764,20 @@ mod tests {
         app
     }
 
-    #[test]
-    fn fit_tab_renders_a_diagonal_ridge() {
-        let mut app = fixture_app_with_ridge();
-        insta::assert_snapshot!(render(&mut app, 100, 30));
-    }
-
     /// One snapshot per stop of the `m`/`M` cycle. Each renders in
     /// isolation: `Layer::Path` shows only the DP chain/tail, not also the
-    /// suppressed mask, and so on.
+    /// suppressed mask, and so on. `Layer::None` is the default layer, so
+    /// that frame doubles as the plain Fit-tab render — density field, axes
+    /// and all.
     #[test]
     fn fit_tab_renders_each_layer() {
         for layer in Layer::ALL {
             let mut app = fixture_app_with_ridge();
             goto_layer(&mut app, layer);
-            insta::assert_snapshot!(format!("fit_layer_{:?}", layer), render(&mut app, 100, 30));
+            insta::assert_snapshot!(
+                format!("fit_layer_{:?}", layer),
+                render_snapshot(&mut app, 100, 30)
+            );
         }
     }
 
@@ -1750,7 +1819,7 @@ mod tests {
         press(&mut app, 'd');
         assert!(app.dp_pane());
 
-        let out = render(&mut app, 100, 30);
+        let out = render_snapshot(&mut app, 100, 30);
         assert!(
             out.contains("chose="),
             "missing the selected node's chose:\n{out}"
@@ -1782,7 +1851,7 @@ mod tests {
         let scrubbed = fixture_recording(8); // deliberately a different grid
         app.set_scrub_recording(2, Some(17), scrubbed);
 
-        let out = render(&mut app, 100, 30);
+        let out = render_snapshot(&mut app, 100, 30);
         assert!(
             out.contains("SCRUBBED"),
             "must announce this is a replayed batch:\n{out}"
@@ -1837,14 +1906,14 @@ mod tests {
     fn convergence_tab_renders_metrics_and_churn() {
         let mut app = fixture_app_with_metrics();
         goto_tab(&mut app, Tab::Convergence);
-        insta::assert_snapshot!(render(&mut app, 100, 30));
+        insta::assert_snapshot!(render_snapshot(&mut app, 100, 30));
     }
 
     #[test]
     fn tolerances_tab_explains_itself_during_phase_one() {
         let mut app = fixture_app_with_ridge(); // real_fit is None
         goto_tab(&mut app, Tab::Tolerances);
-        insta::assert_snapshot!(render(&mut app, 100, 30));
+        insta::assert_snapshot!(render_snapshot(&mut app, 100, 30));
     }
 
     /// Once `App::set_final` (the same setter `CalibDash::show_final` uses)
@@ -1873,7 +1942,7 @@ mod tests {
             },
         );
         goto_tab(&mut app, Tab::Tolerances);
-        let out = render(&mut app, 100, 30);
+        let out = render_snapshot(&mut app, 100, 30);
         assert!(
             out.contains("-8.5") && out.contains("9.5"),
             "m/z tolerance missing:\n{out}"
@@ -2119,12 +2188,12 @@ mod tests {
     /// (`.symbol()`-only) snapshot whenever it lands on a nonzero-weight
     /// cell. That is actually the *common* case for `mark_suppressed`, since
     /// it only ever marks cells with `weight > 0.0` to begin with (see its
-    /// own guard), so `fit_layer_Suppressed`'s snapshot can look
-    /// byte-identical to `fit_layer_None`'s in plain text and still be
-    /// correct — the density glyph is preserved on purpose, and only the
-    /// (untested-by-`.symbol()`) `REVERSED` style differs. This pins that
+    /// own guard), so `fit_layer_Suppressed`'s glyph grid is identical to
+    /// `fit_layer_None`'s and still correct — the density glyph is preserved
+    /// on purpose, and only the `REVERSED` style differs (which
+    /// `render_snapshot`'s trailing section is what records). This pins that
     /// the two functions actually mark something in the standard fixture,
-    /// directly, rather than relying on a snapshot that cannot see it.
+    /// directly, at the level of the mark buffer itself.
     #[test]
     fn mark_suppressed_and_mark_ridge_mark_at_least_one_cell() {
         let app = fixture_app_with_ridge();
