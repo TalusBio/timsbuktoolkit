@@ -48,6 +48,18 @@ pub enum Stage {
 }
 
 impl Stage {
+    /// Every variant, in pipeline order. Lets a count-driven caller derive
+    /// how many steps could possibly matter (`ALL.len() - 1`) instead of
+    /// hardcoding the variant count, which would silently go stale the next
+    /// time a stage is added.
+    pub const ALL: [Stage; 5] = [
+        Stage::Grid,
+        Stage::Suppressed,
+        Stage::Path,
+        Stage::Curve,
+        Stage::Ridge,
+    ];
+
     /// One step forward, clamped at `Ridge` — stepping past the end of the
     /// pipeline holds rather than wrapping back to `Grid`.
     pub fn next(self) -> Self {
@@ -213,11 +225,27 @@ impl App {
     /// Folds one more digit into the pending count. A leading `0` does not
     /// start a count — matching vim, which keeps `0` free as a motion later
     /// — but `0` extends an already-started count like any other digit.
+    ///
+    /// Saturating, not checked: a held-down digit key is ordinary user input,
+    /// not a bug, so the 10th keystroke of a run must not panic (overflow
+    /// checks are on in dev/test) or silently wrap (the release behavior,
+    /// which is not better — a wrapped count would drive some other,
+    /// unrelated number of batches). Clamping at `u32::MAX` is a count no
+    /// motion below will ever exhaust anyway.
     fn push_digit(&mut self, d: u32) {
         if d == 0 && self.count.is_none() {
             return;
         }
-        self.count = Some(self.count.unwrap_or(0) * 10 + d);
+        self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
+    }
+
+    /// Consumes the pending count and clamps it to the number of steps that
+    /// could possibly move `stage` — `Stage::ALL.len() - 1`, derived rather
+    /// than hardcoded so a stage added later cannot silently go uncapped —
+    /// so a huge typed count costs no more work than a real motion ever
+    /// could.
+    fn max_stage_steps(&mut self) -> u32 {
+        self.take_count().min(Stage::ALL.len() as u32 - 1)
     }
 
     /// Routes one keypress: digits build the count prefix, motions consume
@@ -235,19 +263,28 @@ impl App {
                 self.push_digit(c.to_digit(10).expect("guarded by is_ascii_digit"));
                 PauseAction::Stay
             }
+            // No modifier guard: Esc clears the count and stays either way,
+            // which is exactly what the catch-all arm below would also do
+            // for a modified Esc — unlike the `Char` arms, there is no
+            // distinct action a modified Esc could be mistaken for.
             KeyCode::Esc => {
                 self.count = None;
                 PauseAction::Stay
             }
             KeyCode::Char('n') if key.modifiers.is_empty() => PauseAction::Next(self.take_count()),
             KeyCode::Char(']') if key.modifiers.is_empty() => {
-                for _ in 0..self.take_count() {
+                // `Stage` has a fixed, tiny state space, so anything past
+                // `ALL.len() - 1` steps is wasted work — without this clamp,
+                // a large typed count (reachable now that digit overflow no
+                // longer panics) would loop synchronously for as long as it
+                // takes to freeze the UI.
+                for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.next();
                 }
                 PauseAction::Stay
             }
             KeyCode::Char('[') if key.modifiers.is_empty() => {
-                for _ in 0..self.take_count() {
+                for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.prev();
                 }
                 PauseAction::Stay
@@ -336,6 +373,16 @@ mod tests {
     }
 
     #[test]
+    fn a_long_digit_run_saturates_instead_of_overflowing() {
+        let mut app = App::new(10);
+        // 16 nines: `9_999_999_999 * 10 + 9` overflows a u32 well before the
+        // end of this run, so this both must not panic (overflow checks are
+        // on in dev/test builds) and must land on a sane clamped value.
+        press(&mut app, "9999999999999999");
+        assert_eq!(app.pending_count(), Some(u32::MAX));
+    }
+
+    #[test]
     fn esc_clears_a_pending_count() {
         let mut app = App::new(10);
         press(&mut app, "42");
@@ -360,6 +407,21 @@ mod tests {
         press(&mut app, "3]");
         assert_eq!(app.stage(), Stage::Curve, "Grid + 3 stages");
         assert_eq!(app.pending_count(), None);
+    }
+
+    #[test]
+    fn a_huge_count_on_a_stage_motion_is_capped_by_the_state_space() {
+        // `Stage` has 5 variants, so no count can usefully move it more than
+        // 4 steps. Without the cap this loops once per requested step —
+        // typed as a huge count, that would freeze the UI for as long as the
+        // loop takes, for work none of which has any effect past step 4.
+        let mut app = App::new(10);
+        press(&mut app, "999999999]");
+        assert_eq!(
+            app.stage(),
+            Stage::Ridge,
+            "clamped to the last stage, not looped hundreds of millions of times"
+        );
     }
 
     // ---- pause actions ----
