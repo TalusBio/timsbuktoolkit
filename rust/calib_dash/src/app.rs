@@ -571,12 +571,15 @@ pub struct ToleranceSummary {
 /// `refit_state` are each a single `CalibrationState` reused via
 /// `reconfigure` (`bins` never changes, only the point-derived ranges do),
 /// `app`'s live `FitRecording` and `refit_recording` are reused the same way
-/// `fit_with` always reuses a `FitRecording`, `current_points`/`prev_points`
-/// are `Vec`s reused via `clear`+`extend`, and `frames`' slab is allocated
-/// once at construction. `prev_curve` does clone one `CalibrationCurve` per
-/// batch to keep a comparison point for `curve_delta` — an additional cost
-/// of the same kind `calibrt` already pays per fit, not a new category of
-/// allocation this dashboard introduces.
+/// `fit_with` always reuses a `FitRecording`, and `frames`' slab is allocated
+/// once at construction. `current_points` is pre-sized to `n_calibrants` at
+/// construction and reused via `clear`+`extend` from the very first batch;
+/// `prev_points` starts as an empty `Vec` and grows once, on the first
+/// `on_batch` call, to that same steady-state size — a one-time asymmetry
+/// between the two, not a per-batch cost. `prev_curve` does clone one
+/// `CalibrationCurve` per batch to keep a comparison point for `curve_delta`
+/// — an additional cost of the same kind `calibrt` already pays per fit, not
+/// a new category of allocation this dashboard introduces.
 pub struct CalibDash {
     app: App,
     frames: FrameStore,
@@ -626,21 +629,28 @@ impl CalibDash {
     ) -> Self {
         // The unit range is only ever a placeholder: the first `on_batch`
         // call reconfigures both states to the batch's own point-derived
-        // ranges before anything is fit against them.
+        // ranges before anything is fit against them. It is fixed and always
+        // nonzero-width, so the only way `CalibrationState::new` can fail
+        // here is `bins == 0` — the `.expect` messages below name that, not
+        // the placeholder range, so a caller who does pass `bins == 0`
+        // (there is no `Result` on this constructor to report it through
+        // otherwise — see the standalone binary's `validate_snapshot`, which
+        // exists specifically to catch this before it ever reaches here)
+        // gets a message that points at the actual cause.
         let placeholder = (0.0, 1.0);
         Self {
             app: App::new(bins),
             frames: FrameStore::new(n_frames, n_calibrants, budget_bytes),
             stepper: Stepper::new(),
             state: CalibrationState::new(bins, placeholder, placeholder, lookback)
-                .expect("the unit range is never zero-width"),
+                .expect("bins must be nonzero (the placeholder range is always valid)"),
             current_points: Vec::with_capacity(n_calibrants),
             n_calibrants,
             prev_points: Vec::new(),
             prev_curve: None,
             bins,
             refit_state: CalibrationState::new(bins, placeholder, placeholder, lookback)
-                .expect("the unit range is never zero-width"),
+                .expect("bins must be nonzero (the placeholder range is always valid)"),
             refit_recording: FitRecording::new(bins),
             tolerances: None,
         }
@@ -745,9 +755,27 @@ impl CalibDash {
         self.tolerances.as_ref()
     }
 
+    /// Only pins the grid-weights buffer, not the per-DP-node `considered`
+    /// `Vec`s `refit_frame`'s `ObserveOpts { dp_nodes: true }` fills:
+    /// `FitRecording::on_event` pushes a fresh `considered.to_vec()` into
+    /// `self.dp` for every `DpNode` event, and `reset_body_only`'s
+    /// `self.dp.clear()` drops those per-node `Vec`s along with the elements
+    /// — reusing them would mean `calibrt`'s own `FitRecording` tracking a
+    /// pool of them, which is out of this task's scope. See
+    /// `a_repeated_refit_does_not_reallocate`'s doc comment.
     #[cfg(test)]
     pub fn refit_capacity(&self) -> usize {
         self.refit_recording.weights_capacity()
+    }
+
+    #[cfg(test)]
+    pub fn current_points_ptr(&self) -> *const CalibrantPoint {
+        self.current_points.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub fn prev_points_ptr(&self) -> *const CalibrantPoint {
+        self.prev_points.as_ptr()
     }
 
     /// Re-fits the live `CalibrationState` from `current_points` and returns
@@ -806,8 +834,17 @@ impl CalibDash {
                             max_delta = d_max;
                             mean_delta = d_mean;
                         }
+                        // Only overwrite the baseline when this batch actually
+                        // produced a curve: a batch whose fit fails (e.g.
+                        // `suppress_nonmax` finds nothing survives) must not
+                        // reset `prev_curve` to `None`, or the *next*
+                        // successful batch would report a NaN delta as if
+                        // there were no prior curve at all, instead of
+                        // comparing against the last real one — a
+                        // discontinuity on the Convergence tab that never
+                        // actually happened.
+                        self.prev_curve = Some(curve.clone());
                     }
-                    self.prev_curve = self.state.curve().cloned();
                 }
             }
         }
@@ -1186,6 +1223,17 @@ mod tests {
         }
     }
 
+    /// This is one of the four tests given verbatim in the task brief, so
+    /// its name and body are kept as specified. What it actually pins is
+    /// narrower than the name alone suggests: `refit_capacity` only reads
+    /// the grid-weights buffer's capacity. `refit_frame` runs with
+    /// `ObserveOpts { dp_nodes: true }`, and every `DpNode` event pushes a
+    /// fresh `considered.to_vec()` (see `FitRecording::on_event`) that
+    /// `reset_body_only`'s `self.dp.clear()` then drops along with the rest
+    /// of `self.dp` on the next fit — those per-node allocations are real and
+    /// this test does not (and cannot, without changing `calibrt`'s own
+    /// `FitRecording` internals) claim they don't happen. See
+    /// `refit_capacity`'s doc comment for the same scope note.
     #[test]
     fn a_repeated_refit_does_not_reallocate() {
         let mut d = CalibDash::new(2, 8, 10, 5, 1 << 20);
@@ -1288,6 +1336,137 @@ mod tests {
         assert_eq!(
             catch_panics(|| PauseAction::RunToEnd),
             PauseAction::RunToEnd
+        );
+    }
+
+    // ---- no-reallocation, pinned by pointer identity ----
+    //
+    // Matches the convention used everywhere else in this codebase for a
+    // "does not reallocate" claim (`FrameStore`'s `slab_capacity`/
+    // `index_capacity`, `calibrt`'s `filtered_ptr`/`path_points_ptr`):
+    // capacity equality alone can't distinguish "reused the same allocation"
+    // from "reallocated but landed on the same capacity anyway" — pointer
+    // identity is the part that actually proves reuse.
+
+    #[test]
+    fn current_points_never_reallocates_once_constructed() {
+        let n_calibrants = 8;
+        let mut d = CalibDash::new(5, n_calibrants, 10, 5, 1 << 20);
+        // `current_points` is pre-sized to `n_calibrants` at construction —
+        // unlike `prev_points` (see the next test), it should be stable from
+        // before the very first batch, not just after it.
+        let ptr_before_any_batch = d.current_points_ptr();
+        for chunk in 0..5 {
+            let pts: Vec<_> = (0..n_calibrants)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: i as f64 + 0.5,
+                    score: 1.0 + i as f64,
+                    speclib_index: chunk * n_calibrants + i,
+                })
+                .collect();
+            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+            assert_eq!(
+                d.current_points_ptr(),
+                ptr_before_any_batch,
+                "current_points must not reallocate on batch {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn prev_points_stabilizes_after_growing_once_on_the_first_batch() {
+        let n_calibrants = 8;
+        let mut d = CalibDash::new(5, n_calibrants, 10, 5, 1 << 20);
+        let batch = |chunk: usize| -> Vec<CalibrantPoint> {
+            (0..n_calibrants)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: i as f64 + 0.5,
+                    score: 1.0 + i as f64,
+                    speclib_index: chunk * n_calibrants + i,
+                })
+                .collect()
+        };
+        // `prev_points` starts as an empty `Vec` (no allocation at all), so
+        // its first-ever growth happens inside this very call — pointer
+        // identity is only meaningful to compare *after* that first batch,
+        // not before it.
+        d.on_batch(0, 0..n_calibrants, batch(0).into_iter());
+        let ptr_after_first_batch = d.prev_points_ptr();
+        for chunk in 1..5 {
+            d.on_batch(chunk, chunk..chunk + 1, batch(chunk).into_iter());
+            assert_eq!(
+                d.prev_points_ptr(),
+                ptr_after_first_batch,
+                "prev_points must not reallocate again after its first growth (batch {chunk})"
+            );
+        }
+    }
+
+    // ---- prev_curve survives a failed batch ----
+
+    #[test]
+    fn a_failed_fit_does_not_reset_the_delta_baseline() {
+        // A batch whose fit fails (every weight lands below
+        // `suppress_nonmax`'s 1.0 seed, so nothing survives suppression and
+        // `CalibrationState::curve()` stays `None`) must not wipe out the
+        // last real curve as the comparison point for the *next* successful
+        // batch's `curve_delta` — otherwise the Convergence tab would show a
+        // discontinuity (a sudden NaN-to-real jump) that never actually
+        // happened.
+        let n_calibrants = 4;
+        let mut d = CalibDash::new(3, n_calibrants, 10, 3, 1 << 20);
+        let good_points = || -> Vec<CalibrantPoint> {
+            (0..n_calibrants)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: i as f64 + 0.5,
+                    score: 2.0 + i as f64, // well above the 1.0 suppression seed
+                    speclib_index: i,
+                })
+                .collect()
+        };
+        let failing_points = || -> Vec<CalibrantPoint> {
+            (0..n_calibrants)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: i as f64 + 0.5,
+                    score: 0.1, // below the seed: everything gets suppressed
+                    speclib_index: i,
+                })
+                .collect()
+        };
+
+        d.on_batch(0, 0..n_calibrants, good_points().into_iter());
+        assert!(
+            d.metrics()[0].wrmse.is_finite(),
+            "batch 0 must produce a real curve"
+        );
+
+        d.on_batch(1, 0..n_calibrants, failing_points().into_iter());
+        assert!(
+            d.metrics()[1].wrmse.is_nan(),
+            "batch 1's fit must fail outright (every weight is sub-threshold)"
+        );
+
+        // Identical points to batch 0: if `prev_curve` correctly survived
+        // batch 1's failure, this fits the same curve again and the delta
+        // against it is ~0 — not NaN, which is what a reset-to-None baseline
+        // would report instead.
+        d.on_batch(2, 0..n_calibrants, good_points().into_iter());
+        let m2 = d.metrics()[2];
+        assert!(
+            !m2.max_delta.is_nan() && !m2.mean_delta.is_nan(),
+            "batch 2 must compare against batch 0's curve (the last real one, \
+             preserved across batch 1's failure), not report NaN as though there \
+             were no prior curve at all: {m2:?}"
+        );
+        assert!(
+            m2.max_delta < 1e-6,
+            "identical points to batch 0 should reproduce an identical curve, \
+             got max_delta={}",
+            m2.max_delta
         );
     }
 }
