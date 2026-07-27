@@ -197,6 +197,17 @@ impl Stepper {
         true
     }
 
+    /// Whether a prior pause resolved to `RunToEnd`, `Detach`, or `Abort` —
+    /// the user has already asked to stop seeing the dashboard (or stop the
+    /// search outright), and nothing later should reopen it. Read-only,
+    /// unlike `should_render`: querying this must not draw down the skip
+    /// counter, since a caller like `CalibDash::present` isn't asking "should
+    /// I render *this* batch" at all, just "has the user already opted out
+    /// of every future pause."
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
     /// Called after a pause with whatever the user chose.
     pub fn apply(&mut self, action: PauseAction) {
         match action {
@@ -630,7 +641,20 @@ impl App {
                 self.count = None;
                 PauseAction::Stay
             }
-            KeyCode::Char('n') if key.modifiers.is_empty() => PauseAction::Next(self.take_count()),
+            KeyCode::Char('n') if key.modifiers.is_empty() => {
+                let n = self.take_count();
+                // `n` advances the *live* batch loop, so a scrub cursor left
+                // over from browsing history at this pause must not still be
+                // showing at the next one — nothing about it would be wrong
+                // (the bound is still safe and the banner still names the
+                // real batch), but reopening on a replayed frame after the
+                // user just asked to advance reads as confusing rather than
+                // useful. Advancing back to live is the more expected
+                // default; `<`/`>` are still there to scrub again at the
+                // next pause if that's what's wanted.
+                self.clear_scrub();
+                PauseAction::Next(n)
+            }
             KeyCode::Char(']') if key.modifiers.is_empty() => {
                 // `Stage` has a fixed, tiny state space, so anything past
                 // `ALL.len() - 1` steps is wasted work — without this clamp,
@@ -861,6 +885,14 @@ pub struct CalibDash {
     /// screen for the *live* batch stays exactly as it was fit.
     refit_state: CalibrationState,
     refit_recording: FitRecording,
+    /// Counts calls into `render_pause` — test-only instrumentation so
+    /// `present`'s stepper guard (see its doc comment) is provable without a
+    /// real terminal: under `cargo test`, `render_pause` always detaches
+    /// immediately regardless of whether the guard let it through, so a
+    /// test asserting `present()` "did nothing" can't tell the two apart by
+    /// output alone. This is what it checks instead.
+    #[cfg(test)]
+    render_pause_calls: u32,
 }
 
 impl CalibDash {
@@ -896,6 +928,8 @@ impl CalibDash {
             refit_state: CalibrationState::new(bins, placeholder, placeholder, lookback)
                 .expect("bins must be nonzero (the placeholder range is always valid)"),
             refit_recording: FitRecording::new(bins),
+            #[cfg(test)]
+            render_pause_calls: 0,
         }
     }
 
@@ -947,7 +981,22 @@ impl CalibDash {
     /// no-op here rather than propagated — `processing.rs` calls this right
     /// after `show_final`, with nothing left downstream for an abort to
     /// cancel.
+    ///
+    /// Guarded on `stepper.is_stopped()`: a user who chose `r`/`q`/Ctrl-C at
+    /// any Phase 1 pause has already asked to stop seeing the dashboard (or
+    /// stop the search outright) — `on_batch` already honors that via
+    /// `Stepper::should_render`, and this must too, or that choice stops
+    /// meaning anything the moment Phase 2 finishes: `processing.rs` reaches
+    /// this call regardless of `Flow::Abort` (Phase 1 breaking its own loop
+    /// early does not skip Phase 2), so an unguarded `present` would reopen
+    /// the alternate screen and block in `event::read()` for a keypress the
+    /// user already told it not to wait for — stalling the run rather than
+    /// failing it, but defeating the one documented way to end the search
+    /// promptly either way.
     pub fn present(&mut self) {
+        if self.stepper.is_stopped() {
+            return;
+        }
         render_pause(self);
     }
 
@@ -1028,6 +1077,15 @@ impl CalibDash {
     #[cfg(test)]
     pub fn prev_points_ptr(&self) -> *const CalibrantPoint {
         self.prev_points.as_ptr()
+    }
+
+    /// How many times `render_pause` has actually been entered — see the
+    /// field's own doc comment for why a test needs this rather than just
+    /// reading `present`'s return value (there isn't one) or the terminal
+    /// state (there is no terminal under `cargo test`).
+    #[cfg(test)]
+    pub fn render_pause_calls(&self) -> u32 {
+        self.render_pause_calls
     }
 
     /// Re-fits the live `CalibrationState` from `current_points` and returns
@@ -1178,6 +1236,10 @@ impl CalibDash {
 /// is logged at `warn` and also treated as `Detach`: a dashboard that cannot
 /// draw must not stop a search.
 fn render_pause(dash: &mut CalibDash) -> PauseAction {
+    #[cfg(test)]
+    {
+        dash.render_pause_calls += 1;
+    }
     if !std::io::stdout().is_terminal() {
         return PauseAction::Detach;
     }
@@ -1534,6 +1596,30 @@ mod tests {
         );
     }
 
+    /// `n` advances the *live* batch loop, so a scrub cursor left over from
+    /// browsing history at this pause must not silently carry into the next
+    /// one — the bound stays safe and the banner would still name the real
+    /// batch either way, but reopening on a replayed frame right after the
+    /// user asked to advance reads as confusing. `n` returning to the live
+    /// view is the more useful default.
+    #[test]
+    fn n_clears_a_scrub_cursor_left_over_from_this_pause() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "<");
+        assert_eq!(
+            app.scrub_frame(),
+            Some(4),
+            "sanity: scrubbed back one frame"
+        );
+        assert_eq!(press(&mut app, "n"), PauseAction::Next(1));
+        assert_eq!(
+            app.scrub_frame(),
+            None,
+            "n must return to the live view, not keep replaying frame 4"
+        );
+    }
+
     // ---- Fit-tab overlay toggles: s / p / c / w ----
 
     #[test]
@@ -1627,6 +1713,34 @@ mod tests {
         let mut s = Stepper::new();
         s.apply(PauseAction::Detach);
         assert!((0..1000).all(|_| !s.should_render()));
+    }
+
+    /// `is_stopped` is what `CalibDash::present` consults instead of
+    /// `should_render` — read-only, so checking it must not itself draw down
+    /// a pending skip count the way `should_render` deliberately does.
+    #[test]
+    fn is_stopped_reflects_run_to_end_detach_and_abort_without_side_effects() {
+        for action in [
+            PauseAction::RunToEnd,
+            PauseAction::Detach,
+            PauseAction::Abort,
+        ] {
+            let mut s = Stepper::new();
+            assert!(!s.is_stopped(), "a fresh stepper has not stopped");
+            s.apply(action);
+            assert!(s.is_stopped(), "{action:?} must set stopped");
+            // Checking it again must not change anything either.
+            assert!(s.is_stopped());
+        }
+    }
+
+    #[test]
+    fn is_stopped_is_false_while_only_stay_or_next_has_been_applied() {
+        let mut s = Stepper::new();
+        s.apply(PauseAction::Stay);
+        assert!(!s.is_stopped());
+        s.apply(PauseAction::Next(5));
+        assert!(!s.is_stopped(), "Next skips batches, it does not stop");
     }
 
     // ---- CalibDash::on_batch ----
@@ -1755,6 +1869,66 @@ mod tests {
     fn present_never_blocks_without_a_terminal() {
         let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
         d.present();
+    }
+
+    /// `present` must still open the pause when nothing has stopped it —
+    /// this is the baseline the next test's guard is checked against, so a
+    /// bug that made the guard fire unconditionally wouldn't slip past.
+    #[test]
+    fn present_renders_when_the_stepper_has_not_stopped() {
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        d.present();
+        assert_eq!(
+            d.render_pause_calls(),
+            1,
+            "present() must still attempt render_pause when nothing stopped it"
+        );
+    }
+
+    /// A user who pressed `q` (or `r`, or Ctrl-C) at a Phase 1 pause has
+    /// already asked to stop seeing the dashboard — `processing.rs` reaches
+    /// `present()` regardless (Phase 1 breaking its own loop early on
+    /// `Flow::Abort` does not skip Phase 2), so without this guard the
+    /// post-Phase-2 pause would reopen the alternate screen and block in
+    /// `event::read()` for a keypress the user already declined to keep
+    /// giving — the one documented escape hatch stops working the moment
+    /// Phase 2 finishes. `render_pause_calls` is what makes "did not even
+    /// attempt to render" provable here: under `cargo test`, `render_pause`
+    /// always detaches immediately regardless of this guard (stdout isn't a
+    /// terminal), so the *return value* can't tell a fixed bypass from a
+    /// working guard — only whether it was entered at all can.
+    #[test]
+    fn present_does_not_render_once_a_pause_chose_detach() {
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        d.stepper.apply(PauseAction::Detach);
+        d.present();
+        assert_eq!(
+            d.render_pause_calls(),
+            0,
+            "present() must not attempt render_pause once the stepper is stopped"
+        );
+    }
+
+    /// Same guard, reached via `RunToEnd` (`r`) instead of `Detach` (`q`) —
+    /// both, like `Abort`, set `Stepper::stopped`, and `present` must honor
+    /// all three identically.
+    #[test]
+    fn present_does_not_render_once_a_pause_chose_run_to_end() {
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        d.stepper.apply(PauseAction::RunToEnd);
+        d.present();
+        assert_eq!(d.render_pause_calls(), 0);
+    }
+
+    /// Same guard, reached via `Abort` (Ctrl-C) — the case the review
+    /// specifically called out: a user who explicitly asked to stop must
+    /// not have the dashboard reopen on them after Phase 2 regardless.
+    #[test]
+    fn present_does_not_render_once_a_pause_chose_abort() {
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        d.stepper.apply(PauseAction::Abort);
+        d.present();
+        assert_eq!(d.render_pause_calls(), 0);
     }
 
     /// This is one of the four tests given verbatim in the task brief, so

@@ -83,21 +83,45 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         .pending_count()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "-".to_string());
-    // Deliberately terse: at 100 columns the previous, fuller wording clipped
-    // before `d:dp-pane`, hiding that key entirely rather than just looking
-    // busy. `h/l`, `<>` and the overlay letters are the same idea applied to
-    // the keys the key map task added — see `App::handle_key`'s "tabs" /
-    // "Fit-tab batch scrubber" / "Fit-tab overlay toggles" sections for what
-    // each one actually does; the Fit tab's own scrub banner (`draw_fit_tab`)
-    // is what actually says *which* frame is on screen, so this line only
-    // needs to list the keys, not the current scrub position too.
-    let text = format!(
-        " b{} {} cnt:{} | n:next r:run q:detach ^C:abort [/]:stage h/l:tab \
-         <>:frame s/p/c/w:ovl d:dp",
+    // `prefix`/`suffix` are the part of this line every earlier version of
+    // the dashboard already fit: `d:dp` in particular is the exact key this
+    // line's terseness was originally written to protect (see below), so it
+    // is never dropped. Assuming a fixed "100 columns" was itself the bug —
+    // a wide batch number (`b1234`) plus a typed count can push even the
+    // original wording past 100, and a large speclib reaches four-digit
+    // batch numbers routinely. So this budgets against `area.width`, the
+    // *actual* render width, not an assumed one.
+    let prefix = format!(
+        " b{} {} cnt:{} | n:next r:run q:detach ^C:abort [/]:stage",
         app.batch(),
         app.stage().label(),
         count,
     );
+    let suffix = " d:dp";
+    // The `h/l`/`<>`/`s/p/c/w` hints this task added, in priority order.
+    // Appended only as long as they still fit `area.width` — dropped as
+    // whole segments starting from the end of this list, not truncated
+    // mid-word, so a narrow terminal never shows a half key hint that reads
+    // like a typo. See `App::handle_key`'s "tabs" / "Fit-tab batch
+    // scrubber" / "Fit-tab overlay toggles" sections for what each one
+    // does; the Fit tab's own scrub banner (`draw_fit_tab`) is what actually
+    // says *which* frame is on screen, so this line only needs to list the
+    // keys, not the current scrub position too.
+    let hints = [" h/l:tab", " <>:frame", " s/p/c/w:ovl"];
+    let width = area.width as usize;
+    let budget = prefix.chars().count() + suffix.chars().count();
+
+    let mut shown = String::new();
+    let mut used = 0usize;
+    for hint in hints {
+        let hint_len = hint.chars().count();
+        if budget + used + hint_len > width {
+            break;
+        }
+        shown.push_str(hint);
+        used += hint_len;
+    }
+    let text = format!("{prefix}{shown}{suffix}");
     frame.render_widget(Paragraph::new(text), area);
 }
 
@@ -122,14 +146,17 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
     // this is a replayed batch rather than the live one — the whole reason
     // `<`/`>` exist is to compare an earlier batch against the current one,
     // which only works if it's always obvious which is which. Skipped
-    // entirely for the live view (the common case) and when there isn't
-    // room, rather than shrinking the heatmap into uselessness.
+    // entirely for the live view (the common case); otherwise the banner
+    // always wins the one row it needs, even when that leaves the heatmap
+    // zero rows (`draw_heatmap` already handles a zero-height area without
+    // panicking) — a heatmap too short to show anything useful is a worse
+    // outcome than an unlabeled one that a user might mistake for live.
     let (banner, area) = match app.scrub_frame() {
-        Some(i) if area.height > 1 => {
+        Some(i) => {
             let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
             (Some((i, rows[0])), rows[1])
         }
-        _ => (None, area),
+        None => (None, area),
     };
     if let Some((i, banner_area)) = banner {
         let total = app.retained_frames().max(1);
@@ -1162,6 +1189,25 @@ mod tests {
         insta::assert_snapshot!(out);
     }
 
+    /// A Fit-tab body exactly one row tall must still show the banner rather
+    /// than spend that one row on a heatmap too short to read anyway — a
+    /// review of the original fix found the old `area.height > 1` guard
+    /// silently dropped the banner here, leaving the replayed grid
+    /// indistinguishable from live in that one edge case.
+    #[test]
+    fn the_scrub_banner_still_shows_when_the_fit_tab_body_is_one_row_tall() {
+        let mut app = fixture_app_with_ridge();
+        app.set_frame_summary(5, 1, 0);
+        app.set_scrub_recording(2, Some(17), fixture_recording(8));
+        // 1 tab-bar row + 1 body row + 1 status row = 3.
+        let out = render(&mut app, 100, 3);
+        assert!(
+            out.contains("SCRUBBED"),
+            "the banner must win the body's only row rather than leave it \
+             looking like an unlabeled (and possibly mistaken-for-live) heatmap:\n{out}"
+        );
+    }
+
     /// Clearing the scrub (as `>` past the last retained frame does) must
     /// drop the banner and go back to rendering the live recording.
     #[test]
@@ -1346,5 +1392,109 @@ mod tests {
     fn scaled_u64_of_an_all_nan_series_is_flat_zero_not_a_panic() {
         let scaled = scaled_u64(&[f64::NAN, f64::NAN, f64::NAN]);
         assert_eq!(scaled, vec![0, 0, 0]);
+    }
+
+    // ---- status line: must fit the real render width, not an assumed one ----
+    //
+    // A prior fix made this line terse enough to fit "100 columns" — but
+    // hardcoded to that one wording, not to `area.width`. A wide batch
+    // number (a large speclib reaches four-digit chunk counts routinely)
+    // plus a typed count reproduces the exact regression: at `stage =
+    // Suppressed` (the longest label) and a 9-digit pending count, the
+    // budget below the hints is:
+    //   prefix + suffix (no hints):                76 chars
+    //   + " h/l:tab":                               84
+    //   + " <>:frame":                              93
+    //   + " s/p/c/w:ovl":                          105
+    // so a 100-column terminal (common, and the exact width the old
+    // hardcoded wording clipped `d:dp` at) has room for the first two hints
+    // but not the third.
+
+    fn long_prefix_app() -> App {
+        use ratatui::crossterm::event::{
+            KeyCode,
+            KeyEvent,
+            KeyModifiers,
+        };
+        let mut app = App::new(10);
+        app.set_stage(Stage::Suppressed); // the longest stage label
+        for c in "123456789".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app
+    }
+
+    fn status_line(app: &mut App, width: u16) -> String {
+        render(app, width, 3)
+            .lines()
+            .last()
+            .expect("draw() always renders a status row")
+            .to_string()
+    }
+
+    #[test]
+    fn status_line_shows_every_hint_when_there_is_room() {
+        let status = status_line(&mut long_prefix_app(), 120);
+        for hint in ["h/l:tab", "<>:frame", "s/p/c/w:ovl", "d:dp"] {
+            assert!(
+                status.contains(hint),
+                "missing {hint} at a generous width:\n{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_line_drops_only_the_lowest_priority_hint_at_100_columns() {
+        // 93 chars of hints fit in 100; the 105-char full line does not.
+        let status = status_line(&mut long_prefix_app(), 100);
+        assert!(status.chars().count() <= 100, "{status:?}");
+        assert!(status.contains("h/l:tab"), "{status:?}");
+        assert!(status.contains("<>:frame"), "{status:?}");
+        assert!(
+            !status.contains("s/p/c/w:ovl"),
+            "the lowest-priority hint must drop first, not d:dp:\n{status}"
+        );
+        assert!(
+            status.contains("d:dp"),
+            "d:dp must survive at exactly the width it used to get clipped at:\n{status}"
+        );
+    }
+
+    #[test]
+    fn status_line_drops_two_hints_at_90_columns() {
+        // Only the 84-char (one-hint) line fits in 90; 93 does not.
+        let status = status_line(&mut long_prefix_app(), 90);
+        assert!(status.chars().count() <= 90, "{status:?}");
+        assert!(status.contains("h/l:tab"), "{status:?}");
+        assert!(!status.contains("<>:frame"), "{status:?}");
+        assert!(!status.contains("s/p/c/w:ovl"), "{status:?}");
+        assert!(status.contains("d:dp"), "{status:?}");
+    }
+
+    #[test]
+    fn status_line_drops_every_hint_but_keeps_d_dp_at_the_bare_minimum_width() {
+        // 76 chars is exactly prefix+suffix with zero hints.
+        let status = status_line(&mut long_prefix_app(), 76);
+        assert!(status.chars().count() <= 76, "{status:?}");
+        for hint in ["h/l:tab", "<>:frame", "s/p/c/w:ovl"] {
+            assert!(!status.contains(hint), "{status:?}");
+        }
+        assert!(
+            status.contains("d:dp"),
+            "the one hint every earlier version of this line already fit must survive \
+             even with zero room for the newer ones:\n{status}"
+        );
+    }
+
+    #[test]
+    fn status_line_never_exceeds_a_range_of_realistic_widths() {
+        for width in [76, 80, 90, 96, 100, 101, 110, 120, 150] {
+            let status = status_line(&mut long_prefix_app(), width);
+            assert!(
+                status.chars().count() <= width as usize,
+                "status line ({} chars) exceeded render width {width}: {status:?}",
+                status.chars().count()
+            );
+        }
     }
 }

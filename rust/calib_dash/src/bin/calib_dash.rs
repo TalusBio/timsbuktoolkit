@@ -11,10 +11,11 @@
 //! own save format.
 //!
 //! The loaded points become a single Phase-1-shaped batch (chunk 0, one
-//! frame), so the batch scrubber a future task wires in shows exactly one
-//! frame and the Convergence tab's history is a single point — there was
-//! only ever one fit to show, this being a Phase 2 snapshot rather than a
-//! live run's sequence of batches.
+//! frame), so the `<`/`>` batch scrubber (`App`'s `scrub_frame`/
+//! `CalibDash::sync_scrub`) shows exactly one frame and the Convergence
+//! tab's history is a single point — there was only ever one fit to show,
+//! this being a Phase 2 snapshot rather than a live run's sequence of
+//! batches.
 
 use calib_dash::{
     CalibDash,
