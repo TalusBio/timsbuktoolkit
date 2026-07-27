@@ -30,7 +30,10 @@ use crate::metrics::{
     BatchMetrics,
     weighted_ridge_half_width,
 };
-use crate::recording::FitRecording;
+use crate::recording::{
+    FitRecording,
+    bin_index,
+};
 use calibrt::Point;
 use ratatui::Frame;
 use ratatui::layout::{
@@ -62,7 +65,7 @@ use std::ops::Range;
 /// How many of the most recent batches the Convergence tab's table shows.
 const TABLE_ROWS: usize = 8;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let rows = Layout::vertical([
         Constraint::Length(1),
@@ -462,7 +465,10 @@ fn node_glyph_and_style(m: Mark) -> (&'static str, Color, Modifier) {
     match m {
         Mark::DpNode => ("O", Color::Green, Modifier::BOLD),
         Mark::Tail => ("X", Color::Yellow, Modifier::BOLD),
-        _ => (" ", Color::Reset, Modifier::empty()),
+        // Spelled out rather than caught by a `_`: `compose_marked` only ever
+        // routes the two node kinds here, and a new `Mark` variant should
+        // fail to compile until it is given a glyph, not silently blank out.
+        Mark::None | Mark::Region => (" ", Color::Reset, Modifier::empty()),
     }
 }
 
@@ -607,11 +613,6 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let rec = app.active_recording();
-    let bins = rec.geom().bins;
-    if bins == 0 {
-        frame.render_widget(Paragraph::new("Grid has zero bins."), area);
-        return;
-    }
     let geom = rec.geom();
     let (x_lo, x_hi) = geom.x_range;
     let (y_lo, y_hi) = geom.y_range;
@@ -765,6 +766,8 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // The one zero-bins gate for everything the mark layers below reach: they
+    // are only ever called from here, so none of them repeats it.
     let bins = rec.geom().bins;
     if bins == 0 {
         return;
@@ -1039,6 +1042,9 @@ fn raise_mark(marks: &mut [Mark], dims: Dims, tx: usize, ty: usize, half: Half, 
 }
 
 fn mark_grid_indices(marks: &mut [Mark], dims: Dims, indices: &[usize], level: Mark) {
+    // Kept next to the `/` and `%` it protects rather than left to
+    // `paint_heatmap`'s gate: this is the only mark helper where zero bins is
+    // a panic instead of an empty loop.
     if dims.bins == 0 {
         return;
     }
@@ -1072,7 +1078,7 @@ fn mark_suppressed(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 /// cell where downsampling rounds one of each into the same slot.
 fn mark_path(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let path = rec.path_indices();
-    if dims.bins == 0 || path.is_empty() {
+    if path.is_empty() {
         return;
     }
     let dp_range = rec.dp_range();
@@ -1094,7 +1100,7 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
     let curve = rec.curve();
-    if bins == 0 || curve.is_empty() {
+    if curve.is_empty() {
         return;
     }
     let (x_lo, x_hi) = geom.x_range;
@@ -1120,9 +1126,6 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 fn mark_ridge(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
-    if bins == 0 {
-        return;
-    }
     let curve = rec.curve();
     for m in rec.ridge() {
         let Some(center) = predict_curve(curve, m.library.0) else {
@@ -1221,7 +1224,7 @@ fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
 /// The flip goes through `flip_display_row`, the same helper `grid_to_screen`
 /// routes the overlay marks through, so the density field and the marks
 /// cannot disagree about where a grid row lives.
-pub fn heatmap_cells(rec: &FitRecording, area_w: u16, area_h: u16) -> Vec<f32> {
+fn heatmap_cells(rec: &FitRecording, area_w: u16, area_h: u16) -> Vec<f32> {
     let area_w = area_w as usize;
     let area_h = area_h as usize;
     let total = area_w * area_h * 2;
@@ -1288,16 +1291,16 @@ fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, Half) {
     (ty, dc, half)
 }
 
-/// Grid-bin index of `v` within `range`, replicating `FitRecording`'s private
-/// `col_of`/`row_of` (not reusable directly — `ui.rs` only has `FitRecording`'s
-/// public surface). Non-finite `v` or a zero-width range map to bin 0 rather
-/// than panicking or producing NaN.
+/// `recording::bin_index` with this module's domain screening in front of it:
+/// zero bins, a non-finite `v` or a zero-width range map to bin 0 rather than
+/// panicking or producing NaN. Overlay placement reads geometry straight off a
+/// recording, so it cannot assume the caller has already ruled those out the
+/// way `FitRecording`'s own placement can.
 fn bin_of(v: f64, range: (f64, f64), bins: usize) -> usize {
     if bins == 0 {
         return 0;
     }
-    let (lo, hi) = range;
-    let span = hi - lo;
+    let span = range.1 - range.0;
     // Written as a positive check (rather than `!(span > 0.0)`) so a NaN
     // `span` is unambiguously "not usable" rather than relying on how `!`
     // interacts with a partial order.
@@ -1305,7 +1308,7 @@ fn bin_of(v: f64, range: (f64, f64), bins: usize) -> usize {
     if !usable {
         return 0;
     }
-    (((v - lo) / span * bins as f64) as usize).min(bins - 1)
+    bin_index(v, range, bins)
 }
 
 /// Linear interpolation over a (library-sorted) curve, clamped at the

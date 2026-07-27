@@ -120,18 +120,20 @@ impl FitRecording {
             .copied()
             .unwrap_or(false)
     }
+}
 
-    fn col_of(&self, x: f64) -> usize {
-        let (lo, hi) = self.geom.x_range;
-        let span = hi - lo;
-        (((x - lo) / span * self.geom.bins as f64) as usize).min(self.geom.bins - 1)
-    }
-
-    fn row_of(&self, y: f64) -> usize {
-        let (lo, hi) = self.geom.y_range;
-        let span = hi - lo;
-        (((y - lo) / span * self.geom.bins as f64) as usize).min(self.geom.bins - 1)
-    }
+/// Grid-bin index of `v` within `range`, at `bins` bins: the one place the
+/// value-to-bin arithmetic is written, shared by `FitRecording`'s own
+/// row/column placement and by `ui.rs`'s overlay placement, so a mark can
+/// never land in a different bin than the weight it is marking.
+///
+/// Callers own the domain: `bins` must be nonzero and `range` a finite,
+/// positive-width span. `ui.rs`'s `bin_of` wrapper is what screens for those
+/// before calling in.
+pub(crate) fn bin_index(v: f64, range: (f64, f64), bins: usize) -> usize {
+    let (lo, hi) = range;
+    let span = hi - lo;
+    (((v - lo) / span * bins as f64) as usize).min(bins - 1)
 }
 
 impl FitObserver for FitRecording {
@@ -193,8 +195,8 @@ impl FitObserver for FitRecording {
                 self.dp_range = dp_range;
                 // path_indices are grid indices, derived from the point's cell.
                 for p in path {
-                    let col = self.col_of(p.library);
-                    let row = self.row_of(p.observed);
+                    let col = bin_index(p.library, self.geom.x_range, self.geom.bins);
+                    let row = bin_index(p.observed, self.geom.y_range, self.geom.bins);
                     self.path_indices.push(row * self.geom.bins + col);
                 }
             }
