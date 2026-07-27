@@ -559,21 +559,6 @@ impl CalibrationState {
         widths
     }
 
-    /// Bundle current config into a snapshot (caller provides the points).
-    pub fn save_snapshot(
-        &self,
-        points: &[(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)],
-    ) -> CalibrationSnapshot {
-        CalibrationSnapshot {
-            points: points
-                .iter()
-                .map(|&(lib, obs, w)| [lib.0, obs.0, w])
-                .collect(),
-            grid_size: self.grid.bins,
-            lookback: self.lookback,
-        }
-    }
-
     /// Reconstruct a CalibrationState from a snapshot.
     pub fn from_snapshot(snapshot: &CalibrationSnapshot) -> Result<Self, CalibRtError> {
         if snapshot.points.is_empty() {

@@ -72,6 +72,12 @@ const DEFAULT_GRID_SIZE: usize = 100;
 /// Default DP lookback for calibrt pathfinding.
 const DEFAULT_LOOKBACK: usize = 30;
 
+/// Grid weight every calibrant gets, matching Step A in
+/// `timsseek_cli::processing`: weight decides which nodes survive
+/// `suppress_nonmax` and scales every DP edge, and Step A weighs every
+/// calibrant equally rather than by score.
+const CALIBRANT_WEIGHT: f64 = 1.0;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -206,20 +212,28 @@ impl ViewerCalibrationState {
         if self.snapshot_points.is_empty() {
             return None;
         }
-        // Use CalibrationState's save_snapshot if available, otherwise build from raw points
-        if let Some(cs) = &self.calibration_state {
-            Some(cs.save_snapshot(&self.snapshot_points))
-        } else {
-            Some(calibrt::CalibrationSnapshot {
-                points: self
-                    .snapshot_points
-                    .iter()
-                    .map(|&(lib, obs, w)| [lib.0, obs.0, w])
-                    .collect(),
-                grid_size: DEFAULT_GRID_SIZE,
-                lookback: DEFAULT_LOOKBACK,
-            })
-        }
+        Some(calibrt::CalibrationSnapshot {
+            points: self.persisted_points(),
+            grid_size: self
+                .calibration_state
+                .as_ref()
+                .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins),
+            lookback: DEFAULT_LOOKBACK,
+        })
+    }
+
+    /// The calibrant points as a snapshot stores them: `[library_rt,
+    /// observed_rt, weight]`.
+    ///
+    /// The third column is the *grid weight*, not the calibrant's score — both
+    /// load paths feed it straight back in as the weight — so it is
+    /// [`CALIBRANT_WEIGHT`], which is also the only value production writes
+    /// there (`timsseek_cli::processing`, `calibrant_points`).
+    fn persisted_points(&self) -> Vec<[f64; 3]> {
+        self.snapshot_points
+            .iter()
+            .map(|&(lib, obs, _score)| [lib.0, obs.0, CALIBRANT_WEIGHT])
+            .collect()
     }
 
     /// Start the calibration background thread.
@@ -238,19 +252,11 @@ impl ViewerCalibrationState {
         self.snapshot_points.clear();
         self.elution_group_count = elution_groups.len();
 
-        // Build calibration state with RT range from the data.
-        let cycle_mapping = index.ms1_cycle_mapping();
-        let (rt_min_ms, rt_max_ms) = cycle_mapping.range_milis();
-        let rt_min_sec = rt_min_ms as f64 / 1000.0;
-        let rt_max_sec = rt_max_ms as f64 / 1000.0;
-
-        self.calibration_state = CalibrationState::new(
-            DEFAULT_GRID_SIZE,
-            (rt_min_sec, rt_max_sec),
-            (rt_min_sec, rt_max_sec),
-            DEFAULT_LOOKBACK,
-        )
-        .ok();
+        // No calibration state yet: the grid geometry comes from the calibrant
+        // points, so it is not knowable until the first snapshot arrives (see
+        // `refit`). Dropping any previous run's state also keeps a stale fit
+        // from being drawn over the new run's points.
+        self.calibration_state = None;
 
         // Set up channel and control flag.
         let (tx, rx) = mpsc::sync_channel::<CalibrationMessage>(1);
@@ -339,6 +345,7 @@ impl ViewerCalibrationState {
         };
 
         let mut changed = false;
+        let mut new_points = false;
 
         loop {
             match rx.try_recv() {
@@ -350,35 +357,7 @@ impl ViewerCalibrationState {
                     self.n_scored = n_scored;
                     self.n_calibrants = heap_len;
                     self.snapshot_points = points;
-
-                    // Feed points into CalibrationState for curve fitting.
-                    // Reset first — each snapshot is the full heap, not a delta.
-                    if let Some(cs) = &mut self.calibration_state {
-                        cs.reset();
-                        if let Err(e) = cs.update(
-                            self.snapshot_points
-                                .iter()
-                                .map(|&(lib_rt, apex_rt, _weight)| (lib_rt, apex_rt, 1.0)),
-                        ) {
-                            tracing::warn!("Calibration update rejected points: {:?}", e);
-                        }
-                        cs.fit();
-                        let has_curve = cs.curve().is_some();
-                        let n_path = cs.path_indices().len();
-                        let n_retained = cs
-                            .grid_cells()
-                            .iter()
-                            .filter(|n| !n.suppressed && n.center.weight > 0.0)
-                            .count();
-                        tracing::info!(
-                            "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={}",
-                            n_scored,
-                            heap_len,
-                            n_retained,
-                            n_path,
-                            has_curve,
-                        );
-                    }
+                    new_points = true;
                     changed = true;
                 }
                 Ok(CalibrationMessage::Done { n_scored }) => {
@@ -404,7 +383,82 @@ impl ViewerCalibrationState {
             }
         }
 
+        // Each snapshot is the full heap, not a delta, so only the last one
+        // drained is worth fitting.
+        if new_points {
+            self.refit();
+        }
+
         changed
+    }
+
+    /// Re-fit the curve to `self.snapshot_points`, on a grid the points
+    /// themselves span — library RTs on x, observed on y — as production does
+    /// (`timsseek_cli::processing::calibrate_from_phase1`) and as this viewer's
+    /// own reload path does (`calibrt::CalibrationState::from_snapshot`). The
+    /// file's acquisition RT range would clamp an iRT-scaled library, whose RTs
+    /// fall entirely outside it, into a single edge column.
+    ///
+    /// A geometry the points cannot support leaves the previous fit alone: a
+    /// later snapshot with more calibrants may well span a usable range.
+    fn refit(&mut self) {
+        let ranges = calibrt::point_ranges(
+            self.snapshot_points
+                .iter()
+                .map(|&(lib_rt, apex_rt, _score)| (lib_rt.0, apex_rt.0)),
+        );
+        let (x_range, y_range) = match ranges {
+            Ok(ranges) => ranges,
+            Err(e) => {
+                let n = self.snapshot_points.len();
+                tracing::warn!("Calibration refit skipped: {n} points span no grid: {e:?}");
+                return;
+            }
+        };
+
+        // `reconfigure` is the single geometry setter — it reuses the allocation
+        // at unchanged bins, and re-setting the geometry a just-built state
+        // already has is free.
+        let bins = self
+            .calibration_state
+            .as_ref()
+            .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins);
+        if self.calibration_state.is_none() {
+            self.calibration_state =
+                CalibrationState::new(bins, x_range, y_range, DEFAULT_LOOKBACK).ok();
+        }
+        let Some(cs) = self.calibration_state.as_mut() else {
+            tracing::warn!("Calibration refit skipped: no grid over x={x_range:?} y={y_range:?}");
+            return;
+        };
+        if let Err(e) = cs.reconfigure(bins, x_range, y_range) {
+            tracing::warn!("Calibration refit skipped: grid rejected: {e:?}");
+            return;
+        }
+
+        if let Err(e) = cs.update(
+            self.snapshot_points
+                .iter()
+                .map(|&(lib_rt, apex_rt, _score)| (lib_rt, apex_rt, CALIBRANT_WEIGHT)),
+        ) {
+            tracing::warn!("Calibration update rejected points: {e:?}");
+        }
+        cs.fit();
+        let n_retained = cs
+            .grid_cells()
+            .iter()
+            .filter(|n| !n.suppressed && n.center.weight > 0.0)
+            .count();
+        tracing::info!(
+            "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={} x={:?} y={:?}",
+            self.n_scored,
+            self.n_calibrants,
+            n_retained,
+            cs.path_indices().len(),
+            cs.curve().is_some(),
+            x_range,
+            y_range,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -569,11 +623,7 @@ impl ViewerCalibrationState {
             version: "v2".to_string(),
             rt_range_seconds,
             calibration: CalibrationSnapshot {
-                points: self
-                    .snapshot_points
-                    .iter()
-                    .map(|&(lib, obs, w)| [lib.0, obs.0, w])
-                    .collect(),
+                points: self.persisted_points(),
                 grid_size: DEFAULT_GRID_SIZE,
                 lookback: DEFAULT_LOOKBACK,
             },
@@ -1078,21 +1128,34 @@ impl ViewerCalibrationState {
             });
         }
 
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             if let Some((rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct)) = suggested {
-                ui.label(format!(
-                    "Suggested RT: \u{00B1}{:.2} min   Ridge: {:.0} s (min {:.0}, max {:.0})   ({} cols)   {:.0}% in-ridge",
-                    rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct,
-                ));
-                if ui.button("Apply").clicked() {
-                    let rt_tol = rt_min as f32;
-                    tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
-                }
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "RT tol (fallback): \u{00B1}{rt_min:.2} min, uniform over all queries",
+                    ));
+                    // Applying the ridge half-width at each query's own library
+                    // RT — what `timsseek::rt_calibration::get_tolerance` does —
+                    // is issue #83; this button only writes the uniform scalar.
+                    if ui.button("Apply").clicked() {
+                        let rt_tol = rt_min as f32;
+                        tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "A real search interpolates it per query instead: ridge half-width {hw_s:.0} s weighted mean, {min_s:.0}-{max_s:.0} s over {n_cols} cols, {in_ridge_pct:.0}% in-ridge.",
+                    ))
+                    .weak()
+                    .small(),
+                );
             } else if self.phase == CalibrationPhase::Idle {
                 ui.label("Start calibration to compute RT tolerance suggestion.");
             } else {
-                ui.label("Collecting data...");
-                ui.spinner();
+                ui.horizontal(|ui| {
+                    ui.label("Collecting data...");
+                    ui.spinner();
+                });
             }
         });
     }
