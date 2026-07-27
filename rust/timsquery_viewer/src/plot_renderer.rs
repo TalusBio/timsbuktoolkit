@@ -105,7 +105,7 @@ impl ScoreLines {
                 LineData {
                     points,
                     name: name.into(),
-                    stroke: egui::Stroke::new(1.5, egui::Color32::LIGHT_BLUE),
+                    stroke: egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_BLUE),
                 }
             })
             .collect();
@@ -301,7 +301,7 @@ impl ChromatogramLines {
                     data: LineData {
                         points,
                         name: format!("Precursor m/z {:.4}", mz),
-                        stroke: egui::Stroke::new(2.0, color),
+                        stroke: egui::Stroke::new(2.0_f32, color),
                     },
                     intensity_max,
                 }
@@ -332,7 +332,7 @@ impl ChromatogramLines {
                     data: LineData {
                         points,
                         name: format!("{} mz={:.4}", label, mz),
-                        stroke: egui::Stroke::new(1.5, color),
+                        stroke: egui::Stroke::new(1.5_f32, color),
                     },
                     intensity_max,
                 }
@@ -625,7 +625,7 @@ fn zoom_behavior(plot_ui: &mut egui_plot::PlotUi, scroll_delta: &egui::Vec2) {
                     )
                     .fill_color(egui::Color32::from_rgba_premultiplied(100, 150, 255, 50))
                     .stroke(egui::Stroke::new(
-                        1.5,
+                        1.5_f32,
                         egui::Color32::from_rgb(100, 150, 255),
                     ));
 
@@ -694,7 +694,7 @@ fn plot_reflines(
             PlotPoints::new(vec![[*rt_seconds, min_y], [*rt_seconds, max_y]]),
         )
         .color(*color)
-        .stroke(egui::Stroke::new(1.0, *color))
+        .stroke(egui::Stroke::new(1.0_f32, *color))
         .style(egui_plot::LineStyle::dashed_loose());
         plot_ui.line(vertical_line);
     }

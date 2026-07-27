@@ -131,7 +131,7 @@ pub fn chromatograms(
             for r in data.precursor_rows.iter() {
                 let line = line_from(&r.label, &r.intensities)
                     .color(PRECURSOR_COLOR)
-                    .width(2.5);
+                    .width(2.5_f32);
                 pui.line(line);
             }
             // TRUE apex kept named (green) so it is easy to locate the real
@@ -237,18 +237,18 @@ pub fn heatmap(
     painter.vline(
         x_of(true_apex),
         rect.y_range(),
-        egui::Stroke::new(2.0, TRUE_APEX_COLOR),
+        egui::Stroke::new(2.0_f32, TRUE_APEX_COLOR),
     );
     if let Some(s) = score {
         painter.vline(
             x_of(s.pass1.apex_cycle as f32),
             rect.y_range(),
-            egui::Stroke::new(1.5, PASS1_COLOR),
+            egui::Stroke::new(1.5_f32, PASS1_COLOR),
         );
         painter.vline(
             x_of(s.pass2.joint_apex_cycle as f32),
             rect.y_range(),
-            egui::Stroke::new(2.0, PASS2_COLOR),
+            egui::Stroke::new(2.0_f32, PASS2_COLOR),
         );
     }
 }
