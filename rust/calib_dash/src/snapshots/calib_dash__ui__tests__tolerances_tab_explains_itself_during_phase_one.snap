@@ -1,0 +1,34 @@
+---
+source: rust/calib_dash/src/ui.rs
+expression: "render(&mut app, 100, 30)"
+---
+ Fit │ Convergence │ Tolerances                                                                     
+┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
+│Step B (m/z, mobility and RT-residual tolerance estimation) has not run yet. This dashboard is    │
+│paused inside Phase 1 batch scoring; those measurements are only made after Phase 2 derives the   │
+│final calibration from every collected calibrant. They do not exist yet — this is not an empty    │
+│panel, there is nothing to show.                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ batch 0  stage:Grid  count:-  |  n:next  Nn:skip N  r:run-to-end  q:detach  ctrl-c:abort  [/]:stage

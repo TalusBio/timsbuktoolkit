@@ -5,6 +5,7 @@ pub mod bitset;
 pub mod frames;
 pub mod metrics;
 pub mod recording;
+pub mod ui;
 
 pub use app::{
     App,

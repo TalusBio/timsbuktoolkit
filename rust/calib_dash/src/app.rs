@@ -7,7 +7,10 @@
 //! The accumulator is a single `Option<u32>` on `App` and serves every
 //! motion, not just batch stepping.
 
-use crate::FitRecording;
+use crate::{
+    BatchMetrics,
+    FitRecording,
+};
 use ratatui::crossterm::event::{
     KeyCode,
     KeyEvent,
@@ -174,6 +177,24 @@ pub struct App {
     dp_pane: bool,
     batch: u32,
     recording: FitRecording,
+    /// The post-Phase-2 recording, set once `calibration.json` is written.
+    /// `None` for the whole of Phase 1: the Tolerances tab reads this to
+    /// decide whether Step B has run yet at all. Wiring a real value in here
+    /// is `on_batch`'s job (the next task), not this one's — `ui.rs` only
+    /// needs to read it.
+    real_fit: Option<FitRecording>,
+    /// Every batch's metrics, undecimated — see `metrics.rs`'s module doc for
+    /// why the series must have no holes. Populated by `on_batch` in the next
+    /// task; `push_metrics` exists now only so `ui.rs`'s fixtures can build a
+    /// history to render without a live pipeline.
+    metrics: Vec<BatchMetrics>,
+    /// The three numbers the Convergence tab's header states about the frame
+    /// slab's decimation. Not derived from a live `FrameStore` yet — that
+    /// wiring is the next task's — so these default to "nothing decimated"
+    /// until `set_frame_summary` is called.
+    retained_frames: usize,
+    frame_stride: usize,
+    dropped_frames: usize,
     /// The pending count prefix, e.g. the `15` typed before `n` in `15n`.
     /// Lives for exactly one motion: a motion consumes it via `take_count`,
     /// and any other key clears it directly, so a half-typed number never
@@ -189,8 +210,74 @@ impl App {
             dp_pane: false,
             batch: 0,
             recording: FitRecording::new(bins),
+            real_fit: None,
+            metrics: Vec::new(),
+            retained_frames: 0,
+            frame_stride: 1,
+            dropped_frames: 0,
             count: None,
         }
+    }
+
+    /// Switches tabs directly, bypassing `handle_key`. `handle_key` does not
+    /// yet route a tab-switching key (that lands with the rest of the key
+    /// map in the next task), so this is how both tests and, later, that key
+    /// handler change the tab.
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
+    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count.
+    /// Kept separate from `handle_key`'s stepping so a test (or a future
+    /// jump-to-stage key) can land on a specific stage in one call.
+    pub fn set_stage(&mut self, stage: Stage) {
+        self.stage = stage;
+    }
+
+    /// Mutable access to the live recording, so a caller — `on_batch` in the
+    /// next task, or a test fixture here — can fit directly into the
+    /// allocation `App` already owns rather than building a `FitRecording`
+    /// elsewhere and having nowhere to put it.
+    pub fn recording_mut(&mut self) -> &mut FitRecording {
+        &mut self.recording
+    }
+
+    /// The post-Phase-2 recording. `None` throughout Phase 1 — the
+    /// Tolerances tab's whole reason for existing is to explain that rather
+    /// than render an empty panel.
+    pub fn real_fit(&self) -> Option<&FitRecording> {
+        self.real_fit.as_ref()
+    }
+
+    pub fn metrics(&self) -> &[BatchMetrics] {
+        &self.metrics
+    }
+
+    /// Appends one batch's metrics. `on_batch` calls this every batch,
+    /// rendered or not, in the next task; fixtures call it directly here.
+    pub fn push_metrics(&mut self, m: BatchMetrics) {
+        self.metrics.push(m);
+    }
+
+    pub fn retained_frames(&self) -> usize {
+        self.retained_frames
+    }
+
+    pub fn frame_stride(&self) -> usize {
+        self.frame_stride
+    }
+
+    pub fn dropped_frames(&self) -> usize {
+        self.dropped_frames
+    }
+
+    /// Sets the three numbers the Convergence tab's header states about the
+    /// frame slab's decimation. A real `FrameStore` is what will drive this
+    /// once `on_batch` exists; until then it is set explicitly.
+    pub fn set_frame_summary(&mut self, retained: usize, stride: usize, dropped: usize) {
+        self.retained_frames = retained;
+        self.frame_stride = stride;
+        self.dropped_frames = dropped;
     }
 
     pub fn tab(&self) -> Tab {
