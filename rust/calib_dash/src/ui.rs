@@ -194,7 +194,24 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
 
     draw_heatmap(frame, grid_area, app);
     if let Some(dp_area) = dp_area {
-        draw_dp_pane(frame, dp_area, rec);
+        // The DP pane needs a recording actually fit with `dp_nodes: true`,
+        // which `rec` (`active_recording()`) is not guaranteed to be: the
+        // live batch's own recording is deliberately fit with
+        // `ObserveOpts::NONE` (see `CalibDash::refit_live`'s doc comment) to
+        // keep that cost off the per-batch hot path. While scrubbed, `rec`
+        // already qualifies — `refit_frame` always observes DP nodes — so
+        // only the live case needs the on-demand recording
+        // `CalibDash::sync_dp` maintains. Falling back to `rec` when that is
+        // `None` (pane just switched on and not yet synced, or the batch was
+        // too degenerate to refit) still renders a real recording rather
+        // than nothing — `draw_dp_pane` already says so when its `dp()` is
+        // empty, instead of leaving the pane blank.
+        let dp_rec = if app.scrub_frame().is_some() {
+            rec
+        } else {
+            app.live_dp_recording().unwrap_or(rec)
+        };
+        draw_dp_pane(frame, dp_area, dp_rec);
     }
 }
 

@@ -293,6 +293,16 @@ pub struct App {
     /// the next `sync_scrub` call catches up — `active_recording` falls back
     /// to the live view for that gap rather than showing nothing.
     scrub_recording: Option<FitRecording>,
+    /// The live batch's on-demand, `dp_nodes`-observed recording — what the
+    /// DP pane actually reads while the Fit tab is showing the live batch
+    /// (not a scrubbed frame; `active_recording()` already carries DP data
+    /// in that case, since `refit_frame` always observes it). `None` when
+    /// the pane is off, when the Fit tab is scrubbed, or when the live
+    /// batch's points were too degenerate to refit at all — see
+    /// `CalibDash::sync_dp`, the only writer of this field, for how it stays
+    /// in sync with `dp_pane` and the current batch without ever touching
+    /// the per-batch hot-path fit.
+    live_dp_recording: Option<FitRecording>,
 }
 
 impl App {
@@ -317,6 +327,7 @@ impl App {
             scrub_frame: None,
             scrub_chunk: None,
             scrub_recording: None,
+            live_dp_recording: None,
         }
     }
 
@@ -527,6 +538,23 @@ impl App {
         self.scrub_recording = None;
     }
 
+    /// The live batch's on-demand DP recording, if `CalibDash::sync_dp` has
+    /// one fresh for the current batch. `ui.rs`'s Fit tab falls back to
+    /// `active_recording()` (which renders "no DP trace" on its own) when
+    /// this is `None`, rather than needing a special-cased blank pane.
+    pub fn live_dp_recording(&self) -> Option<&FitRecording> {
+        self.live_dp_recording.as_ref()
+    }
+
+    /// Wires (or clears) the on-demand DP recording. Only ever called by
+    /// `CalibDash::sync_dp`, the one piece of this with `current_points` and
+    /// a `CalibrationState` to refit from — `App` cannot compute this
+    /// itself, the same division of labor `set_scrub_recording`/
+    /// `clear_scrub` use for the batch scrubber.
+    pub fn set_live_dp_recording(&mut self, recording: Option<FitRecording>) {
+        self.live_dp_recording = recording;
+    }
+
     pub fn pending_count(&self) -> Option<u32> {
         self.count
     }
@@ -676,6 +704,16 @@ impl App {
             }
             KeyCode::Char('d') if key.modifiers.is_empty() => {
                 self.dp_pane = !self.dp_pane;
+                if !self.dp_pane {
+                    // Drop back to the normal path: nothing here keeps the
+                    // expensive `dp_nodes: true` observation "enabled" going
+                    // forward (that was only ever a one-shot refit — see
+                    // `CalibDash::sync_dp` — never a per-batch cost), but a
+                    // stale recording from the last time the pane was open
+                    // has no reader left once it's closed, so there is no
+                    // reason to keep it around either.
+                    self.live_dp_recording = None;
+                }
                 self.count = None;
                 PauseAction::Stay
             }
@@ -885,6 +923,30 @@ pub struct CalibDash {
     /// screen for the *live* batch stays exactly as it was fit.
     refit_state: CalibrationState,
     refit_recording: FitRecording,
+    /// A third `CalibrationState`/`FitRecording` pair, wholly separate again
+    /// from both `state`/`app.recording` (the live per-batch hot path) and
+    /// `refit_state`/`refit_recording` (replaying a frame retained in
+    /// `frames`), for the on-demand `dp_nodes: true` re-fit of the *live*
+    /// batch that pressing `d` triggers — see `sync_dp`. Reusing
+    /// `refit_state`/`refit_recording` here would collide with the batch
+    /// scrubber: a user who scrubbed to frame 5 and then pressed `d` would
+    /// have this refit clobber `refit_recording` right before `sync_scrub`'s
+    /// own `refit_frame` call reads it back out (or vice versa, depending on
+    /// call order within one draw), corrupting whichever one loses the race
+    /// — not a data race in the concurrency sense, just two unrelated
+    /// features fighting over one buffer. In practice this particular
+    /// collision cannot happen anyway (`sync_dp` is a no-op while
+    /// scrubbing — see its doc comment), but the separate buffer means that
+    /// stays true because of what `sync_dp` chooses to skip, not because of
+    /// which allocation happens to be free at the time.
+    dp_state: CalibrationState,
+    dp_recording: FitRecording,
+    /// Which batch `dp_recording` was last computed for, or `None` before
+    /// the first on-demand DP refit. Lets `sync_dp` skip the refit on every
+    /// other keystroke/draw of the same pause (it runs once per `draw`, the
+    /// same as `sync_scrub`) — only a change in `app.batch()` (a new pause)
+    /// or the pane just having been switched on invalidates it.
+    dp_recording_batch: Option<u32>,
     /// Counts calls into `render_pause` — test-only instrumentation so
     /// `present`'s stepper guard (see its doc comment) is provable without a
     /// real terminal: under `cargo test`, `render_pause` always detaches
@@ -928,6 +990,10 @@ impl CalibDash {
             refit_state: CalibrationState::new(bins, placeholder, placeholder, lookback)
                 .expect("bins must be nonzero (the placeholder range is always valid)"),
             refit_recording: FitRecording::new(bins),
+            dp_state: CalibrationState::new(bins, placeholder, placeholder, lookback)
+                .expect("bins must be nonzero (the placeholder range is always valid)"),
+            dp_recording: FitRecording::new(bins),
+            dp_recording_batch: None,
             #[cfg(test)]
             render_pause_calls: 0,
         }
@@ -1220,6 +1286,69 @@ impl CalibDash {
             None => self.app.clear_scrub(),
         }
     }
+
+    /// Re-fits `current_points` — the live batch's own points, exactly what
+    /// `refit_live`'s `ObserveOpts::NONE` fit just consumed — into
+    /// `dp_state`/`dp_recording`, but with `ObserveOpts { dp_nodes: true }`
+    /// this time, so the DP pane has decisions to show for whichever batch
+    /// is actually on screen. Only ever called from `sync_dp`, never from
+    /// `on_batch`: that separation is what keeps the expensive per-DP-node
+    /// observation off the per-batch hot path, paying its cost once per
+    /// keypress instead of once per chunk.
+    ///
+    /// `None` if `current_points` is empty or spans a zero-width range on
+    /// either axis — mirrors `refit_live`'s own skip-the-refit case, and
+    /// `refit_frame`'s, for the same reason: a `CalibrationState` cannot be
+    /// configured with a zero-width range, and there is nothing to show
+    /// instead of nothing.
+    fn dp_refit_current(&mut self) -> Option<&FitRecording> {
+        let (x_range, y_range) = point_ranges(&self.current_points)?;
+        self.dp_state
+            .reconfigure(self.bins, x_range, y_range)
+            .ok()?;
+        self.dp_state
+            .update(self.current_points.iter().map(as_calibrt_tuple))
+            .ok()?;
+        self.dp_state
+            .fit_with(&mut self.dp_recording, ObserveOpts { dp_nodes: true });
+        self.dp_state
+            .measure_ridge_width_with(RIDGE_FRACTION, &mut self.dp_recording);
+        Some(&self.dp_recording)
+    }
+
+    /// Keeps `App::live_dp_recording` in sync with `App::dp_pane`. Called at
+    /// the top of every `event_loop` iteration, right alongside `sync_scrub`
+    /// — before drawing.
+    ///
+    /// A no-op whenever the pane is off, or the Fit tab is showing a
+    /// scrubbed frame rather than the live batch: `refit_frame` already runs
+    /// with `ObserveOpts { dp_nodes: true }` for every scrubbed frame, so
+    /// `active_recording()` already carries DP data in that case (see
+    /// `App::live_dp_recording`'s doc comment) — recomputing it here from
+    /// `current_points` would at best duplicate that work, and at worst show
+    /// the *live* batch's DP trace on top of a Fit tab that is actually
+    /// showing an older, scrubbed one.
+    ///
+    /// Otherwise, re-fits once per batch, not once per draw:
+    /// `dp_recording_batch` records which batch the last on-demand refit was
+    /// for, so re-entering this on every keystroke of the same pause (`d`
+    /// toggling other overlays, stepping stages, and so on) costs one
+    /// `Option` comparison once the first draw after `d` — or after a fresh
+    /// pause that left the pane on from before — has caught up. This is the
+    /// "paid once on keypress, not per batch" property `on_batch`'s own
+    /// `ObserveOpts::NONE` fit depends on: nothing here ever runs from
+    /// inside `on_batch`.
+    fn sync_dp(&mut self) {
+        if !self.app.dp_pane() || self.app.scrub_frame().is_some() {
+            return;
+        }
+        if self.dp_recording_batch == Some(self.app.batch()) {
+            return;
+        }
+        let refit = self.dp_refit_current().cloned();
+        self.app.set_live_dp_recording(refit);
+        self.dp_recording_batch = Some(self.app.batch());
+    }
 }
 
 /// Pauses the batch loop to render one interactive frame and block until the
@@ -1298,6 +1427,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // iteration, and a no-op whenever it's `None` (the common, live
         // case) — see `sync_scrub`'s own doc comment.
         dash.sync_scrub();
+        dash.sync_dp();
         if let Err(e) = terminal.draw(|f| crate::ui::draw(f, &mut dash.app)) {
             tracing::warn!("calib_dash failed to draw a frame: {e}");
             return PauseAction::Detach;
@@ -1856,6 +1986,95 @@ mod tests {
         assert!(
             !d.recording().curve().is_empty(),
             "sanity: batch 2 produced a real curve too"
+        );
+    }
+
+    /// Reproduces the reported defect directly: a *live* `on_batch` (not a
+    /// fixture pre-fit with `dp_nodes: true`, the way every `ui.rs` DP-pane
+    /// test builds its `App`) followed by pressing `d` must leave the pane
+    /// with decisions to show. `on_batch`'s own live re-fit deliberately
+    /// uses `ObserveOpts::NONE` (see `refit_live`'s doc comment), so
+    /// `d.recording().dp()` staying empty is not the bug — the bug was `d`
+    /// only flipping a boolean with nothing behind it to populate. `sync_dp`
+    /// is the piece `event_loop` would call before every draw; called
+    /// directly here since there is no terminal under `cargo test`.
+    #[test]
+    fn d_on_a_live_batch_refits_with_dp_nodes_so_the_pane_has_decisions() {
+        let mut d = CalibDash::new(2, 8, 10, 5, 1 << 20);
+        let pts: Vec<_> = (0..8)
+            .map(|i| CalibrantPoint {
+                library_rt: i as f64 + 0.5,
+                observed_rt: i as f64 + 0.5,
+                score: 1.0 + i as f64,
+                speclib_index: i,
+            })
+            .collect();
+        d.on_batch(0, 0..8, pts.into_iter());
+
+        assert!(
+            d.recording().dp().is_empty(),
+            "sanity: the live per-batch fit must not pay the DP-node cost"
+        );
+        assert!(
+            d.app.live_dp_recording().is_none(),
+            "sanity: nothing has refit on demand yet"
+        );
+
+        assert_eq!(press(&mut d.app, "d"), PauseAction::Stay);
+        assert!(d.app.dp_pane(), "d must turn the pane on");
+
+        // What `event_loop` runs before every draw.
+        d.sync_dp();
+
+        let rec = d
+            .app
+            .live_dp_recording()
+            .expect("d on the live batch must have triggered an on-demand refit");
+        assert!(
+            !rec.dp().is_empty(),
+            "the DP pane must have decisions to show after pressing d on a live batch, \
+             not an empty recording"
+        );
+    }
+
+    /// Pressing `d` while scrubbed to an earlier frame must not trigger the
+    /// on-demand live refit at all — `active_recording()` (what
+    /// `sync_scrub` already populated via `refit_frame`) already carries DP
+    /// data in that case, and `sync_dp` recomputing it from `current_points`
+    /// would show the *live* batch's decisions on a Fit tab that is actually
+    /// showing a different, scrubbed one.
+    #[test]
+    fn d_while_scrubbed_does_not_touch_the_live_on_demand_recording() {
+        let mut d = CalibDash::new(2, 8, 10, 5, 1 << 20);
+        for chunk in 0..2 {
+            let pts: Vec<_> = (0..8)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: (i as f64 + 0.5) * (1.0 + chunk as f64 * 0.1),
+                    score: 1.0 + i as f64,
+                    speclib_index: chunk * 8 + i,
+                })
+                .collect();
+            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+        }
+        d.finish(1);
+
+        press(&mut d.app, "<");
+        d.sync_scrub();
+        assert_eq!(
+            d.app.scrub_frame(),
+            Some(1),
+            "sanity: one step back from live lands on the last retained frame (index 1 of 2)"
+        );
+        // `active_recording()` already has DP data (`refit_frame` always
+        // observes it) without anyone pressing `d` at all.
+        assert!(!d.app.active_recording().dp().is_empty());
+
+        press(&mut d.app, "d");
+        d.sync_dp();
+        assert!(
+            d.app.live_dp_recording().is_none(),
+            "sync_dp must stay a no-op while scrubbed, not refit the live batch"
         );
     }
 
