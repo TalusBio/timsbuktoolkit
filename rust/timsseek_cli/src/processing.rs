@@ -235,6 +235,48 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // `query-instr` feature is disabled.
     timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 1: Prescore");
+    // Dev-only calibration fit dashboard: opt-in via `--features
+    // calib-dashboard`, gated at runtime on `TIMSSEEK_CALIB_DASHBOARD=1` so
+    // an ordinary run of a dashboard-enabled binary still doesn't pay for it.
+    #[cfg(feature = "calib-dashboard")]
+    let mut calib_dash_state = std::env::var("TIMSSEEK_CALIB_DASHBOARD")
+        .is_ok_and(|v| v == "1")
+        .then(|| {
+            // The dashboard's own pause (`render_pause`) checks this again
+            // every batch and silently detaches without logging anything —
+            // it must stay silent there so a normal interactive TTY session
+            // isn't spammed once per pause. Logging it once, here, up front,
+            // is what tells a redirected/piped run (e.g. `> file 2>&1`, CI)
+            // that the dashboard is skipping every pause rather than
+            // pretending it never ran.
+            if !std::io::stdout().is_terminal() {
+                tracing::warn!(
+                    "TIMSSEEK_CALIB_DASHBOARD=1 but stdout is not a terminal; the dashboard \
+                     will skip every pause and Phase 1 will run unattended"
+                );
+            }
+            let n_frames = speclib.len().div_ceil(chunk_size);
+            let budget_mb = std::env::var("CALIB_DASH_FRAME_BUDGET_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(64);
+            calib_dash::CalibDash::new(
+                n_frames,
+                calib_config.n_calibrants,
+                calib_config.grid_size,
+                calib_config.dp_lookback,
+                budget_mb * 1024 * 1024,
+            )
+        });
+    #[cfg(feature = "calib-dashboard")]
+    let (calibrants, phase1_timings) = phase1_prescore(
+        phase1_lib,
+        pipeline,
+        chunk_size,
+        calib_config,
+        calib_dash_state.as_mut(),
+    );
+    #[cfg(not(feature = "calib-dashboard"))]
     let (calibrants, phase1_timings) =
         phase1_prescore(phase1_lib, pipeline, chunk_size, calib_config);
     let phase1_ms = step
@@ -291,13 +333,31 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
-    let calibration = match calibrate_from_phase1(
+    // Only allocate a `FitRecording` when the dashboard is actually running —
+    // an ordinary dashboard-enabled build with the env var unset stays `None`
+    // all the way through, same as `calib_dash_state` itself.
+    #[cfg(feature = "calib-dashboard")]
+    let mut phase2_recording = calib_dash_state
+        .is_some()
+        .then(|| calib_dash::FitRecording::new(calib_config.grid_size));
+    #[cfg(feature = "calib-dashboard")]
+    let calib_result = calibrate_from_phase1(
         calibrants,
         phase1_lib,
         main_lookup.as_ref(),
         pipeline,
         calib_config,
-    ) {
+        phase2_recording.as_mut(),
+    );
+    #[cfg(not(feature = "calib-dashboard"))]
+    let calib_result = calibrate_from_phase1(
+        calibrants,
+        phase1_lib,
+        main_lookup.as_ref(),
+        pipeline,
+        calib_config,
+    );
+    let calibration = match calib_result {
         Ok(calib) => {
             info!("Calibration succeeded");
             calib
@@ -368,6 +428,24 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         } else {
             info!("Saved calibration to {:?}", cal_json_path);
         }
+    }
+
+    // Wire the real Phase 2 fit into the dashboard's Tolerances tab, if it's
+    // running. `phase2_recording` is only `Some` when `calib_dash_state` is,
+    // so this never allocates or fits anything extra on an ordinary run.
+    #[cfg(feature = "calib-dashboard")]
+    if let (Some(d), Some(recording)) = (calib_dash_state.as_mut(), phase2_recording) {
+        let mobility = calibration.mobility_tolerance();
+        let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
+        d.show_final(
+            recording,
+            calib_dash::ToleranceSummary {
+                mz_ppm: calibration.mz_tolerance(),
+                mobility_pct: (mobility.0 as f64, mobility.1 as f64),
+                rt_seconds: (rt_tolerance_seconds, rt_tolerance_seconds),
+                n_calibrants: calibration.errors().rt_seconds.n,
+            },
+        );
     }
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
@@ -524,6 +602,7 @@ fn phase1_prescore<I: ScorerQueriable>(
     pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
+    #[cfg(feature = "calib-dashboard")] mut dash: Option<&mut calib_dash::CalibDash>,
 ) -> (Vec<CalibrantCandidate>, timsseek::scoring::PrescoreTimings) {
     let total = speclib.len();
     let n_chunks = total.div_ceil(chunk_size);
@@ -534,10 +613,36 @@ fn phase1_prescore<I: ScorerQueriable>(
 
     // Chunk the flat index space `0..len` (no materialized slice on the lazy
     // arm); each flat index is also the global speclib index.
+    #[cfg(feature = "calib-dashboard")]
+    let mut last_chunk_idx = 0usize;
     for chunk_start in (0..total).step_by(chunk_size).progress_with(pb) {
         let end = (chunk_start + chunk_size).min(total);
         let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
+
+        #[cfg(feature = "calib-dashboard")]
+        if let Some(d) = dash.as_deref_mut() {
+            let chunk_idx = chunk_start / chunk_size;
+            last_chunk_idx = chunk_idx;
+            let flow = d.on_batch(
+                chunk_idx,
+                chunk_start..end,
+                global_heap.iter().map(|c| calib_dash::CalibrantPoint {
+                    library_rt: c.library_rt.0 as f64,
+                    observed_rt: c.apex_rt.0 as f64,
+                    score: c.score as f64,
+                    speclib_index: c.speclib_index,
+                }),
+            );
+            if matches!(flow, calib_dash::Flow::Abort) {
+                tracing::warn!("calibration dashboard aborted Phase 1 at chunk {chunk_idx}");
+                break;
+            }
+        }
+    }
+    #[cfg(feature = "calib-dashboard")]
+    if let Some(d) = dash {
+        d.finish(last_chunk_idx);
     }
 
     (global_heap.into_vec(), timings)
@@ -575,6 +680,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
+    #[cfg(feature = "calib-dashboard")] dash_recording: Option<&mut calib_dash::FitRecording>,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
@@ -694,6 +800,12 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             p.weight,
         )
     }))?;
+    #[cfg(feature = "calib-dashboard")]
+    match dash_recording {
+        Some(recording) => cal_state.fit_with(recording, calibrt::ObserveOpts::NONE),
+        None => cal_state.fit(),
+    }
+    #[cfg(not(feature = "calib-dashboard"))]
     cal_state.fit();
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
