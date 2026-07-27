@@ -31,6 +31,12 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
+          # This action defaults to `-D warnings`, which is a lint-policy change
+          # this workflow never asked for: it fails the build on apex_sim's
+          # pre-existing `f32: From<f64>` future-compat warnings. Empty keeps
+          # warnings as warnings, which is what CI did before caching. `task
+          # clippy` is where `-D warnings` belongs.
+          rustflags: ''
           cache-key: ${{ matrix.features }}
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
@@ -59,6 +65,12 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
+          # This action defaults to `-D warnings`, which is a lint-policy change
+          # this workflow never asked for: it fails the build on apex_sim's
+          # pre-existing `f32: From<f64>` future-compat warnings. Empty keeps
+          # warnings as warnings, which is what CI did before caching. `task
+          # clippy` is where `-D warnings` belongs.
+          rustflags: ''
       - name: Build
         run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash
       - name: Run tests
