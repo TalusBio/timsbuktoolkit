@@ -12,9 +12,7 @@
 //! time, cycled by `m`/`M`: `none`, `path`, `curve`, `ridge`, `suppressed`.
 //! Each layer is internally overlap-free (the DP chain and greedy tails
 //! partition the path by construction; the other three layers only ever
-//! emit one mark kind), so there is no cross-layer priority to resolve —
-//! unlike the composited overlay this replaced, a layer is a single,
-//! isolated view.
+//! emit one mark kind), so there is no cross-layer priority to resolve.
 //!
 //! Every panel here follows one rule: if there is nothing to draw, or the
 //! area is too small to draw it in, render a `Paragraph` saying so. Nothing
@@ -90,11 +88,10 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
     let selected = Tab::ALL.iter().position(|t| *t == app.tab()).unwrap_or(0);
     // `REVERSED`, not a hue: color is reserved for "what a mark is" on the
-    // Fit tab (Item 3/4), and `REVERSED` is reserved for "mode" everywhere
-    // else — which tab is selected, whether the Fit tab is showing a
-    // scrubbed frame, whether a count is pending. Before this, `Yellow` meant
-    // "selected tab" here *and* "not live data" on the scrub banner *and*
-    // "greedy tail" on the heatmap all at once.
+    // Fit tab, and `REVERSED` for "mode" everywhere else — which tab is
+    // selected, whether the Fit tab is showing a scrubbed frame, whether a
+    // count is pending. Keeping the two channels apart is what stops one hue
+    // from meaning three unrelated things at once.
     let tabs = Tabs::new(titles)
         .select(selected)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
@@ -103,8 +100,8 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 
 /// One `key`/`action` hint, rendered as the key in `BOLD` and the action in
 /// `DarkGray` — weight, not `key:action` punctuation, is what makes the bound
-/// letter scannable (Item 2). `action` empty renders the key alone, which is
-/// how the overflow degrade below drops action words while keeping keys.
+/// letter scannable. `action` empty renders the key alone, which is how the
+/// overflow degrade below drops action words while keeping keys.
 fn hint_spans(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, (key, action)) in pairs.iter().enumerate() {
@@ -134,9 +131,9 @@ fn spans_width(spans: &[Span]) -> usize {
 }
 
 /// Picks the most detailed hint line (tab-local bindings plus the global
-/// ones) that still fits `width`, degrading in the stages Item 2 calls for:
-/// full text with action words, then keys only, then only the global
-/// bindings' keys, then nothing at all. `? keys` is never part of this line —
+/// ones) that still fits `width`, degrading in stages: full text with action
+/// words, then keys only, then only the global bindings' keys, then nothing
+/// at all. `? keys` is never part of this line —
 /// it lives in its own pinned-right column (`draw_status_line`) and so
 /// survives regardless of how far this one degrades.
 fn fit_status_hints(
@@ -173,10 +170,9 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     }
     let mut state_spans = vec![Span::raw(format!(" b{} ", app.batch()))];
     // The pending vim-style count only takes a column when there is one to
-    // show — unlike the line this replaced, which spent six columns
-    // permanently reporting its absence (`cnt:-`). `REVERSED` marks it as a
-    // *mode* (a keystroke is being accumulated), the same signal the tab bar
-    // and the scrub banner use, not a color — see `draw_tab_bar`.
+    // show. `REVERSED` marks it as a *mode* (a keystroke is being
+    // accumulated), the same signal the tab bar and the scrub banner use, not
+    // a color — see `draw_tab_bar`.
     if let Some(n) = app.pending_count() {
         state_spans.push(Span::styled(
             n.to_string(),
@@ -186,10 +182,9 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     }
     let state_w = (spans_width(&state_spans) as u16).min(area.width);
 
-    // ---- per-tab binding sets (Item 2) ----------------------------------
-    // Convergence and Tolerances only ever respond to `n`/`r` — advertising
-    // the Fit tab's frame/overlay/dp keys on them (as the line this replaced
-    // did) is three bindings that do nothing there.
+    // ---- per-tab binding sets --------------------------------------------
+    // Convergence and Tolerances only ever respond to `n`/`r`, so the Fit
+    // tab's frame/overlay/dp keys are not advertised there.
     let tab_local: &[(&str, &str)] = match app.tab() {
         Tab::Fit => &[
             ("n", "next"),
@@ -312,9 +307,7 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
         );
         // `REVERSED`, not a hue — this is a *mode* indicator ("you are not
         // looking at live data"), the same signal `draw_tab_bar`'s selected
-        // tab and the status line's pending count use. Before Item 4, this
-        // was `Yellow`, the same color the heatmap's greedy-tail mark now
-        // also uses — one hue meaning three different things.
+        // tab and the status line's pending count use.
         frame.render_widget(
             Paragraph::new(text)
                 .style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
@@ -337,18 +330,15 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
 
     draw_heatmap(frame, grid_area, app);
     if let Some(dp_area) = dp_area {
-        // The DP pane needs a recording actually fit with `dp_nodes: true`,
-        // which `rec` (`active_recording()`) is not guaranteed to be: the
-        // live batch's own recording is deliberately fit with
-        // `ObserveOpts::NONE` (see `CalibDash::refit_live`'s doc comment) to
-        // keep that cost off the per-batch hot path. While scrubbed, `rec`
-        // already qualifies — `refit_frame` always observes DP nodes — so
-        // only the live case needs the on-demand recording
-        // `CalibDash::sync_dp` maintains. Falling back to `rec` when that is
-        // `None` (pane just switched on and not yet synced, or the batch was
-        // too degenerate to refit) still renders a real recording rather
-        // than nothing — `draw_dp_pane` already says so when its `dp()` is
-        // empty, instead of leaving the pane blank.
+        // The DP pane needs a recording fit with `dp_nodes: true`, which
+        // `rec` (`active_recording()`) is not guaranteed to be: the live
+        // batch's own recording uses `ObserveOpts::NONE` to keep that cost
+        // off the per-batch hot path. While scrubbed, `rec` already qualifies
+        // (`refit_frame` always observes DP nodes), so only the live case
+        // needs `CalibDash::sync_dp`'s on-demand recording. Falling back to
+        // `rec` when that is `None` (pane just switched on, or the batch was
+        // too degenerate to refit) still renders a real recording;
+        // `draw_dp_pane` says so when its `dp()` is empty.
         let dp_rec = if app.scrub_frame().is_some() {
             rec
         } else {
@@ -360,34 +350,29 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
 
 /// What one half of a terminal cell is marked with, for whichever layer
 /// (`crate::Layer`) is currently active. At most one layer ever paints into
-/// `marks` per frame — see `paint_heatmap` — so unlike the priority ladder
-/// this replaced, there is no cross-layer case to resolve: `Region` is the
-/// only mark kind the curve, ridge and suppressed layers ever emit (each is
-/// a single, uniform region of the grid), and `DpNode`/`Tail` are the only
-/// two the path layer emits, mutually exclusive by construction
-/// (`FitRecording::dp_range` partitions `path_indices` into exactly those two
-/// groups — see `mark_path`).
+/// `marks` per frame — see `paint_heatmap` — so there is no cross-layer case
+/// to resolve: `Region` is the only mark kind the curve, ridge and suppressed
+/// layers ever emit (each is a single, uniform region of the grid), and
+/// `DpNode`/`Tail` are the only two the path layer emits, mutually exclusive
+/// by construction (`FitRecording::dp_range` partitions `path_indices` into
+/// exactly those two groups — see `mark_path`).
 ///
-/// **Invariant (superseding the old "every mark is identified by its glyph"
-/// rule this module used to state):** a `Region` mark keeps the density
-/// glyph — `░▒▓█▀▄`, half-occupancy intact — and is identified by
-/// `Modifier::REVERSED`, not by replacing the glyph. Inverting rather than
-/// overwriting is what lets a mark and the distribution it sits on both stay
-/// visible at once: the shape underneath answers "how much weight is here",
-/// and the inversion answers "is this cell marked", and neither question
-/// erases the other's answer. `Modifier::REVERSED` also survives every
-/// condition `mark_style`'s old comment cared about — a colorblind reader, a
-/// monochrome screenshot, any terminal theme — for the same reason
-/// `draw_tab_bar`/the scrub banner/the pending count already lean on it: it
-/// is a swap of whatever foreground/background are already there, not a
-/// specific hue that could fail to contrast or fail to register. Color
-/// remains attached (`region_accent`) as pure redundant reinforcement, same
-/// as before — a colorblind reader loses nothing by losing it.
+/// **Invariant:** a `Region` mark keeps the density glyph — `░▒▓█▀▄`,
+/// half-occupancy intact — and is identified by `Modifier::REVERSED`, not by
+/// replacing the glyph. Inverting rather than overwriting is what lets a mark
+/// and the distribution it sits on both stay visible at once: the shape
+/// underneath answers "how much weight is here", the inversion answers "is
+/// this cell marked", and neither erases the other's answer. `REVERSED` is
+/// also a swap of whatever foreground/background are already there, not a
+/// specific hue, so it survives a colorblind reader, a monochrome screenshot
+/// and any terminal theme — the same reason `draw_tab_bar`, the scrub banner
+/// and the pending count lean on it. Color stays attached (`region_accent`)
+/// as redundant reinforcement only.
 ///
-/// A path-layer node mark is the one exception: `DpNode`/`Tail` still
-/// *replace* the cell with `O`/`X` (Item 3's original marker set), because a
-/// path node is a point estimate — one grid cell chosen by the DP or the
-/// greedy walk — not a region being highlighted against its own density.
+/// A path-layer node mark is the one exception: `DpNode`/`Tail` *replace* the
+/// cell with `O`/`X`, because a path node is a point estimate — one grid cell
+/// chosen by the DP or the greedy walk — not a region being highlighted
+/// against its own density.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Mark {
     #[default]
@@ -426,10 +411,9 @@ fn mark_rank(m: Mark) -> u8 {
 
 /// `O`/`X` and their color/modifier — see `Mark::DpNode`/`Mark::Tail`'s doc
 /// comments for why these replace the cell instead of inverting it.
-/// `Modifier::REVERSED` is deliberately not used here — Item 4 reserves it
-/// for *mode* elsewhere and `Mark::Region` for "this cell is marked" here, so
-/// node glyphs lean on `BOLD` instead for emphasis, exactly as before this
-/// pass.
+/// `Modifier::REVERSED` is deliberately not used here — it is reserved for
+/// *mode* elsewhere and for `Mark::Region`'s "this cell is marked" here — so
+/// node glyphs lean on `BOLD` for emphasis instead.
 fn node_glyph_and_style(m: Mark) -> (&'static str, Color, Modifier) {
     match m {
         Mark::DpNode => ("O", Color::Green, Modifier::BOLD),
@@ -439,9 +423,9 @@ fn node_glyph_and_style(m: Mark) -> (&'static str, Color, Modifier) {
 }
 
 /// The active layer's accent color for a `Region` mark — reinforcement only
-/// (see `Mark`'s doc comment), so, as before, a named ANSI constant rather
-/// than `Rgb` (see `heat_color`'s own doc comment for why) and never one of
-/// indices 9-15 (`Light*`/`White`, invisible on a light background).
+/// (see `Mark`'s doc comment), so a named ANSI constant rather than `Rgb`
+/// (see `heat_color` for why) and never one of indices 9-15 (`Light*`/
+/// `White`, invisible on a light background).
 fn region_accent(layer: Layer) -> Color {
     match layer {
         Layer::Suppressed => Color::DarkGray,
@@ -485,7 +469,7 @@ fn heat_glyph(v: f32, max: f32) -> &'static str {
     }
 }
 
-/// The density field's color (Item 4). `░▒▓█` is already a luminance ramp —
+/// The density field's color. `░▒▓█` is already a luminance ramp —
 /// the glyph alone carries the density — so this only reinforces it with at
 /// most two gray steps, never `Rgb`: an `Rgb` terminal color is not remapped
 /// by a terminal's theme, so on a light background the ramp inverts and the
@@ -541,8 +525,7 @@ impl Half {
 }
 
 /// Flips a display-row index so grid row 0 — the *lowest* observed RT —
-/// lands at the *bottom* of the canvas rather than the top (Item 0: the
-/// y-axis inversion fix).
+/// lands at the *bottom* of the canvas rather than the top.
 ///
 /// `forward_map` alone would place grid row 0 at display row 0, which reads
 /// naturally as an array index but is backwards for a plot: terminal rows
@@ -568,7 +551,7 @@ fn flip_display_row(dr: usize, disp_rows: usize) -> (usize, Half) {
     (flipped / 2, half)
 }
 
-/// Framed heatmap: a `Block` around the painted canvas (Item 1) stating the
+/// Framed heatmap: a `Block` around the painted canvas stating the
 /// axes in its title, a left gutter of y-tick labels, and an x-tick label
 /// row below it, with `┤`/`┴` tick marks written into the border itself.
 /// Falls back to painting straight into `area` with no frame at all when
@@ -618,9 +601,8 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let (block_area, x_label_area) = (rows[0], rows[1]);
 
     let title_left = " Fit \u{2014} observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
-    // `batch` only — the active layer used to share this corner too, but now
-    // has its own dedicated subtitle row (below) and no longer competes with
-    // it for width.
+    // `batch` only — the active layer gets its own subtitle row below rather
+    // than competing for width in this corner.
     let title_right = format!(" b{} ", app.batch());
     let block = Block::bordered()
         .title_top(Line::from(title_left).left_aligned())
@@ -628,15 +610,11 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(block_area);
     frame.render_widget(block, block_area);
 
-    // The active mark layer's dedicated subtitle row — see `fit_subtitle`'s
-    // doc comment for why this can no longer share a line with anything
-    // else. Styled `BOLD` (the file's existing convention for emphasis —
-    // `heading` above, the node glyphs) specifically so it never blends into
-    // one run of text with the unstyled `title_left`/`title_right` above it.
-    // Only skipped when there is not even one row to spare for it beyond the
-    // canvas's own minimum of one row — a heatmap with zero rows would defeat
-    // the tab's entire purpose, so this is the one case the subtitle still
-    // yields to something else, and it is a height, not a width, shortage.
+    // The active mark layer's dedicated subtitle row — see `fit_subtitle`.
+    // Styled `BOLD` (this file's convention for emphasis) so it never blends
+    // into one run of text with the unstyled `title_left`/`title_right` above
+    // it. Skipped only when there is not one row to spare beyond the canvas's
+    // own minimum of one: a zero-row heatmap would defeat the tab's purpose.
     let show_subtitle = inner.height >= 2;
     let canvas = if show_subtitle {
         let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
@@ -696,12 +674,11 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
 
 /// One phrase glossing what an active layer's marks mean, appended to its
 /// name in `fit_subtitle`. Needed because a `Region` mark (`Mark`'s doc
-/// comment) is identified purely by `Modifier::REVERSED` now, not by a
-/// distinct glyph — there is no glyph-coded legend left to read the marks
-/// against, so the subtitle is the only place left to say what an inverted
-/// cell on the active layer actually means. Lives beside `fit_subtitle`
-/// rather than on `Layer` itself (`app.rs`): this is about how `ui.rs`
-/// renders the layer, not a fact about the layer.
+/// comment) is identified purely by `Modifier::REVERSED`, not by a distinct
+/// glyph, so there is no glyph-coded legend to read the marks against and the
+/// subtitle is the only place that can say what an inverted cell means. Lives
+/// beside `fit_subtitle` rather than on `Layer` itself (`app.rs`): this is
+/// about how `ui.rs` renders the layer, not a fact about the layer.
 fn layer_gloss(layer: Layer) -> &'static str {
     match layer {
         Layer::None => "density only",
@@ -763,9 +740,8 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
     // Two mark slots per terminal cell — index `(ty * w + tx) * 2 + half`,
     // `half` 0 for upper, 1 for lower — so a mark on one grid row never
     // clobbers what the *other* grid row sharing that character wanted to
-    // show. Exactly one of these runs per draw — the whole point of Layer
-    // cycling instead of independently toggled overlays — so `marks` only
-    // ever carries one layer's marks at a time.
+    // show. Exactly one arm below runs per draw, so `marks` only ever carries
+    // one layer's marks at a time.
     let layer = app.layer();
     let mut marks = vec![Mark::None; w * h * 2];
     match layer {
@@ -1044,9 +1020,9 @@ fn mark_suppressed(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 
 /// Marks `path[..dp_range.start]` and `path[dp_range.end..]` (Pass 2's
 /// greedily attached tails, `Mark::Tail`) and `path[dp_range]` (the DP's own
-/// chosen chain, `Mark::DpNode`) — the split the brief calls out as the
-/// answer to the first question a user asks about a misbehaving edge of the
-/// fit. The two are disjoint by construction (`dp_range` partitions
+/// chosen chain, `Mark::DpNode`) — the split that answers the first question
+/// a user asks about a misbehaving edge of the fit: DP's choice, or a tail
+/// grafted on after? The two are disjoint by construction (`dp_range` partitions
 /// `path_indices`), so unlike the other three layers this one draws two
 /// distinct marks and relies on `mark_rank` to arbitrate the rare terminal
 /// cell where downsampling rounds one of each into the same slot.
@@ -1088,10 +1064,10 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
         };
         let row = bin_of(y, geom.y_range, bins);
         let dr = forward_map(row, bins, dims.disp_rows);
-        // Item 0: re-derive the flipped row/half from `dr` via
-        // `flip_display_row` rather than computing `Half` from `dr`'s own
-        // parity — `grid_to_screen`'s doc comment explains why the parity
-        // must come from the flipped index, not the pre-flip one.
+        // Re-derive the flipped row/half from `dr` via `flip_display_row`
+        // rather than computing `Half` from `dr`'s own parity —
+        // `grid_to_screen`'s doc comment explains why the parity must come
+        // from the flipped index, not the pre-flip one.
         let (ty, half) = flip_display_row(dr, dims.disp_rows);
         raise_mark(marks, dims, tx, ty, half, Mark::Region);
     }
@@ -1196,8 +1172,8 @@ fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
 /// still gets a real value, never a gap.
 ///
 /// `dr` walks source row ranges in grid order (low to high), but is written
-/// to the *flipped* display position — Item 0's y-axis fix: grid row 0 (the
-/// lowest observed RT) must land at the bottom of the canvas, not the top.
+/// to the *flipped* display position: grid row 0 (the lowest observed RT)
+/// must land at the bottom of the canvas, not the top.
 /// The flip goes through `flip_display_row`, the same helper `grid_to_screen`
 /// routes the overlay marks through, so the density field and the marks
 /// cannot disagree about where a grid row lives.
@@ -1361,11 +1337,10 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     let path_nodes: Vec<u64> = metrics.iter().map(|m| m.path_nodes as u64).collect();
     let ridge_hw: Vec<f64> = metrics.iter().map(|m| m.ridge_half_width).collect();
 
-    // Titles for the four series that pass through `scaled_u64` say what a
-    // flat run actually means now that a NaN sample holds the last finite
-    // value instead of dropping to 0 — see that function's doc comment for
-    // why: a flat run at batch 0, or across a failed batch, must not read
-    // identically to "the curve stopped moving."
+    // The four series that pass through `scaled_u64` are titled "NaN holds"
+    // because a NaN sample repeats the last finite value rather than dropping
+    // to 0 — see `scaled_u64`. Without the title, a flat run at batch 0 or
+    // across a failed batch reads identically to "the curve stopped moving."
     let series: [(&str, Vec<u64>); 5] = [
         ("wrmse (NaN holds)", scaled_u64(&wrmse)),
         ("max_delta (NaN holds)", scaled_u64(&max_delta)),
@@ -1781,15 +1756,12 @@ mod tests {
         }
     }
 
-    /// Guards the degrade order directly: the active layer used to share the
-    /// heatmap block's right-hand title corner with `batch` and was dropped
-    /// first under a narrow DP pane — exactly backwards, since
-    /// a reader who doesn't know the active layer cannot interpret a single
-    /// inverted mark on this tab at all. It now has its own subtitle row
-    /// (`fit_subtitle`) instead, spelled out in full with a gloss of what its
-    /// marks mean, not abbreviated to a key hint. Checked across more than
-    /// one layer so a future change to the degrade order (or to
-    /// `fit_subtitle`/`layer_gloss` themselves) can't silently drop this for
+    /// The active layer's name must survive on screen: a reader who doesn't
+    /// know it cannot interpret a single inverted mark on this tab at all, so
+    /// it gets its own subtitle row (`fit_subtitle`), spelled out in full
+    /// with a gloss, rather than competing for the heatmap block's title
+    /// corner. Checked across more than one layer so a change to the degrade
+    /// order (or to `fit_subtitle`/`layer_gloss`) can't silently drop it for
     /// only some layers.
     #[test]
     fn fit_tab_subtitle_names_and_glosses_the_active_layer() {
@@ -1807,12 +1779,11 @@ mod tests {
         }
     }
 
-    /// No given test toggles `dp_pane`, so nothing pinned the pane's content
-    /// before this — an off-by-one in which node is "selected" or a
-    /// formatting regression in `chose`/`acc_weight`/`considered` could
-    /// silently drift. `fixture_app_with_ridge` already fits with
-    /// `dp_nodes: true`, so `rec.dp()` is populated; this just has to turn
-    /// the pane on and check its content is present and looks right.
+    /// Pins the DP pane's content, so an off-by-one in which node is
+    /// "selected" or a formatting regression in
+    /// `chose`/`acc_weight`/`considered` can't drift silently.
+    /// `fixture_app_with_ridge` already fits with `dp_nodes: true`, so
+    /// `rec.dp()` is populated; this just turns the pane on.
     #[test]
     fn dp_pane_shows_the_selected_nodes_decision_and_considered_list() {
         let mut app = fixture_app_with_ridge();
@@ -1977,14 +1948,13 @@ mod tests {
         }
     }
 
-    /// Item 1 adds several new size guards (the framed heatmap's gutter, its
-    /// x-tick-label row, the `?` overlay's `Clear`) around specific
-    /// thresholds (`area.width < 3`, `block_h < 3`, `gutter_w + 3`,
-    /// `area.height >= 4`). An exhaustive sweep of every width/height up to
-    /// 12 — comfortably past all of those — is cheap and catches an
-    /// off-by-one at any of them that a handful of hand-picked sizes could
-    /// miss. Every tab and both DP-pane states are covered too, since the
-    /// same small area feeds `draw_dp_pane` when it's on.
+    /// The framed heatmap's gutter, its x-tick-label row and the `?`
+    /// overlay's `Clear` each guard on a specific threshold (`area.width < 3`,
+    /// `block_h < 3`, `gutter_w + 3`, `area.height >= 4`). An exhaustive sweep
+    /// of every width/height up to 12 — comfortably past all of them — is
+    /// cheap and catches an off-by-one that hand-picked sizes could miss.
+    /// Every tab and both DP-pane states are covered too, since the same
+    /// small area feeds `draw_dp_pane` when it's on.
     #[test]
     fn every_small_terminal_size_survives_every_tab() {
         let mut app = fixture_app_with_ridge();
@@ -2017,15 +1987,13 @@ mod tests {
         assert_eq!(cells.len(), 40 * 10 * 2);
     }
 
-    /// Item 0 regression: `grid_to_screen` used to map grid row 0 (the
-    /// *lowest* observed RT) to screen row 0, but terminal rows grow
-    /// downward — so a monotonically increasing calibration
-    /// (`fixture_recording`'s ridge is `observed = 2 * library`, unambiguously
-    /// increasing and with lookback 5, so the DP chains every point into one
-    /// `MARK_DP_CHAIN` ('O') path) rendered as a *descending* line instead of
-    /// an ascending one. The fix must make the marked cells' screen-row index
-    /// descend (move toward the top of the canvas, i.e. get smaller) as the
-    /// column index grows, not the reverse.
+    /// The y-flip regression guard: terminal rows grow downward, so mapping
+    /// grid row 0 (the *lowest* observed RT) to screen row 0 renders a
+    /// monotonically increasing calibration as a *descending* line.
+    /// `fixture_recording`'s ridge is `observed = 2 * library` — unambiguously
+    /// increasing, and with lookback 5 the DP chains every point into one `O`
+    /// path — so the marked cells' screen-row index must *descend* (move
+    /// toward the top of the canvas) as the column index grows.
     #[test]
     fn increasing_ridge_renders_ascending_not_descending() {
         let bins = 20;
@@ -2034,8 +2002,8 @@ mod tests {
         goto_layer(&mut app, Layer::Path);
 
         let out = render(&mut app, 100, 30);
-        // `O` is the DP-chain glyph (Item 3); collect the screen (row, col)
-        // of every one, keyed by column, then walk columns left to right.
+        // `O` is the DP-chain glyph; collect the screen (row, col) of every
+        // one, keyed by column, then walk columns left to right.
         // Skips the Fit subtitle row: the Path layer's gloss (`fit_subtitle`/
         // `layer_gloss`) spells out the glyphs it explains ("O chosen, X
         // greedy tail"), so it legitimately contains a literal `O` that a
@@ -2077,14 +2045,10 @@ mod tests {
 
     /// `compose_cell`'s per-cell mark-priority rule, exercised directly
     /// rather than through a fixture engineered to make two grid rows
-    /// collapse into one terminal cell. Before this pass, that fixture
-    /// forced a *suppressed* mark and a *DP-chain* mark into the same cell —
-    /// the one collision reachable back when a single view showed both
-    /// overlays at once. Suppressed and DP-chain can no longer collide:
-    /// they are two different, mutually exclusive `Layer`s now, so the only
-    /// same-layer collision left is a DP node against a tail node within the
-    /// `Path` layer (`mark_path` marks both), and this pins that the DP
-    /// chain wins regardless of which half carried which mark.
+    /// collapse into one terminal cell. Layers are mutually exclusive, so the
+    /// only collision that exists is a DP node against a tail node within the
+    /// `Path` layer (`mark_path` marks both); this pins that the DP chain
+    /// wins regardless of which half carried which mark.
     #[test]
     fn compose_cell_gives_the_dp_chain_mark_priority_over_a_tail_mark_sharing_its_cell() {
         let (glyph, color, modifier) =
@@ -2102,7 +2066,7 @@ mod tests {
         assert_eq!(glyph2, "O");
     }
 
-    /// The empty-cell trap the brief calls out by name: `heat_glyph` returns
+    /// The empty-cell trap: `heat_glyph` returns
     /// a plain space for zero weight, and a *reversed* space renders as a
     /// solid block — the single highest-density glyph this module draws —
     /// which would lie about a zero-weight cell a region mark (curve/ridge/
@@ -2167,8 +2131,8 @@ mod tests {
         );
     }
 
-    /// The path layer's two node kinds (Item 3's `O`/`X` marker set) must
-    /// both still be visible at once — that is the entire reason they are
+    /// The path layer's two node kinds (`O`/`X`) must both be visible at
+    /// once — that is the entire reason they are
     /// glyph-distinguished within one layer rather than folded into a single
     /// "path" mark. `fixture_app_with_ridge`'s dip/stray points (see that
     /// fixture's own doc comment) are built specifically so the DP chain
@@ -2183,17 +2147,16 @@ mod tests {
         assert!(out.contains('X'), "missing the tail glyph:\n{out}");
     }
 
-    /// `mark_suppressed`/`mark_ridge` write `Mark::Region`, which — unlike
-    /// the old glyph-replacing overlay — is invisible in a plain-text
-    /// (`.symbol()`-only) snapshot whenever it lands on a nonzero-weight
-    /// cell. That is actually the *common* case for `mark_suppressed`, since
-    /// it only ever marks cells with `weight > 0.0` to begin with (see its
-    /// own guard), so `fit_layer_Suppressed`'s glyph grid is identical to
-    /// `fit_layer_None`'s and still correct — the density glyph is preserved
-    /// on purpose, and only the `REVERSED` style differs (which
-    /// `render_snapshot`'s trailing section is what records). This pins that
-    /// the two functions actually mark something in the standard fixture,
-    /// directly, at the level of the mark buffer itself.
+    /// `mark_suppressed`/`mark_ridge` write `Mark::Region`, which is
+    /// invisible in a plain-text (`.symbol()`-only) snapshot whenever it
+    /// lands on a nonzero-weight cell — the *common* case for
+    /// `mark_suppressed`, which only ever marks cells with `weight > 0.0`
+    /// (see its own guard). So `fit_layer_Suppressed`'s glyph grid is
+    /// identical to `fit_layer_None`'s and still correct: the density glyph
+    /// is preserved on purpose and only the `REVERSED` style differs, which
+    /// `render_snapshot`'s trailing section is what records. This pins that
+    /// the two functions actually mark something in the standard fixture, at
+    /// the level of the mark buffer itself.
     #[test]
     fn mark_suppressed_and_mark_ridge_mark_at_least_one_cell() {
         let app = fixture_app_with_ridge();
@@ -2258,10 +2221,10 @@ mod tests {
         assert_eq!(scaled, vec![0, 0, 0]);
     }
 
-    // ---- status line (Item 2): weight not punctuation, per-tab bindings,
-    // `cnt` only when pending, `? keys` pinned right, and a degrade sequence
-    // that drops action words, then the tab-local group, before anything
-    // ever overflows `area.width`. -----------------------------------------
+    // ---- status line: weight not punctuation, per-tab bindings, the count
+    // only when pending, `? keys` pinned right, and a degrade sequence that
+    // drops action words, then the tab-local group, before anything ever
+    // overflows `area.width`. ----------------------------------------------
 
     fn long_prefix_app() -> App {
         let mut app = App::new(10);
@@ -2288,15 +2251,15 @@ mod tests {
         let mut app = App::new(10);
         let status = status_line(&mut app, 100);
         assert!(status.contains("b0"), "{status:?}");
-        // The line this replaced spent six columns permanently reporting
-        // `cnt:-`; there is no pending count here, so nothing should.
+        // No pending count, so the count must take no columns at all — not a
+        // permanent `cnt:-` placeholder.
         assert!(!status.contains("cnt"), "{status:?}");
     }
 
     /// `REVERSED` — a mode signal, like the selected tab and the scrub
-    /// banner (Item 4) — not a color, is what makes a pending count
-    /// unmistakable. The plain-text `render` harness can't see style, so
-    /// this reads the `TestBackend` buffer directly.
+    /// banner — not a color, is what makes a pending count unmistakable. The
+    /// plain-text `render` harness can't see style, so this reads the
+    /// `TestBackend` buffer directly.
     #[test]
     fn status_line_pending_count_is_reversed() {
         let mut app = App::new(10);

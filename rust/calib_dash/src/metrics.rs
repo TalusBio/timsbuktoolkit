@@ -105,24 +105,20 @@ mod tests {
     /// Builds a `CalibrationCurve` whose path is exactly `points`.
     ///
     /// `CalibrationCurve::new` is `pub(crate)` in `calibrt`, so this runs a
-    /// tiny real fit (`CalibrationState`) instead. Each pair must be strictly
-    /// increasing in both coordinates (monotone in x and y) and weight must
-    /// be at or above 1.0: `suppress_nonmax` seeds its row/column maxima at
-    /// 1.0 and keeps a node when its weight *equals* that maximum, so a
-    /// fixture strictly below 1.0 gets every node suppressed and produces no
-    /// path. With every point strictly monotone, in its own grid row and
-    /// column, and given equal weight, the DP always prefers chaining through
-    /// every point over skipping any of them: for three monotone points i, j
-    /// (between), k, j sits inside the axis-aligned bounding box of i and k,
-    /// and the box's corner-to-corner diagonal is the longest distance between
-    /// any two points inside it, so `dist(i, j) <= dist(i, k)` and
-    /// `dist(j, k) <= dist(i, k)`. Each two-hop reciprocal term is therefore
-    /// `>= 1/dist(i, k)`, so `1/dist(i,j) + 1/dist(j,k) > 1/dist(i,k)` — the
-    /// two-hop chain strictly beats the direct edge regardless of whether the
-    /// points are collinear. So the fitted path reproduces `points` exactly
-    /// (the weighted-centroid step in `suppress_nonmax` also means grid
-    /// quantization never perturbs the coordinates, since each cell holds
-    /// only one point).
+    /// tiny real fit (`CalibrationState`) instead. Two preconditions on the
+    /// fixture:
+    ///
+    /// - Weight must be at or above 1.0. `suppress_nonmax` seeds its
+    ///   row/column maxima at 1.0 and keeps a node only when its weight
+    ///   *equals* that maximum, so a fixture strictly below 1.0 gets every
+    ///   node suppressed and produces no path at all.
+    /// - Pairs must be strictly increasing in both coordinates and land one
+    ///   per grid cell. That is what makes the fit reproduce `points` exactly:
+    ///   for monotone i, j, k the middle point sits inside i and k's bounding
+    ///   box, so both hops are no longer than the direct edge and their
+    ///   reciprocal-distance scores sum to strictly more than its — the DP
+    ///   never skips a point — and one point per cell means the
+    ///   weighted-centroid step cannot perturb a coordinate.
     fn curve_from(points: &[(f64, f64)]) -> CalibrationCurve {
         let n = points.len();
         let grid_size = (n * 4).max(8);

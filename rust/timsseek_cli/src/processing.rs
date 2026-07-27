@@ -225,10 +225,10 @@ mod calib_dash_hook {
             calib_dash::ToleranceSummary {
                 mz_ppm: calibration.mz_tolerance(),
                 mobility_pct: (mobility.0 as f64, mobility.1 as f64),
-                // `calibrate_from_phase1` only ever derives one scalar RT
-                // tolerance; duplicated into both tuple slots because
-                // `ToleranceSummary::rt_seconds` is deliberately symmetric —
-                // see that field's own doc comment, not a copy-paste bug.
+                // `calibrate_from_phase1` derives a single scalar RT
+                // tolerance, and `ToleranceSummary::rt_seconds` is symmetric
+                // by construction (see that field's doc comment), so the one
+                // value fills both slots.
                 rt_seconds: (rt_tolerance_seconds, rt_tolerance_seconds),
                 n_calibrants: calibration.errors().rt_seconds.n,
             },
@@ -1174,7 +1174,7 @@ fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
                 (false, true) => std::cmp::Ordering::Greater,
                 // Total order: within a shared sequence the target and its
                 // ±decoys have distinct precursor m/z (mono / mono±shift/z),
-                // so this pins the previously order-dependent tie.
+                // so this breaks the tie deterministically.
                 _ => x
                     .scoring
                     .identity

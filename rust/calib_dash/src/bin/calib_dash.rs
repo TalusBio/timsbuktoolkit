@@ -154,10 +154,9 @@ mod tests {
 
     #[test]
     fn a_zero_grid_size_is_rejected_before_it_can_panic() {
-        // Syntactically valid — this is exactly the file this task's binary
-        // must survive: `CalibDash::new`'s `.expect` has no `Result` to
-        // report a zero `bins` through, so `validate_snapshot` must catch it
-        // first.
+        // Syntactically valid, but `CalibDash::new`'s `.expect` has no
+        // `Result` to report a zero `bins` through, so `validate_snapshot`
+        // must catch it first.
         let snapshot = CalibrationSnapshot {
             points: vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]],
             grid_size: 0,

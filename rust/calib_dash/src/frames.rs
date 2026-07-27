@@ -318,8 +318,8 @@ mod tests {
             store.record(chunk, (0..4).map(pt));
         }
         // 20 matches neither the index tail (chunk 8) nor the reserved slot
-        // (chunk 7): a caller bug. The old code would push the stale chunk-7
-        // entry after chunk 8 regardless, producing out-of-order chunks.
+        // (chunk 7): a caller bug. Pushing the stale chunk-7 entry after
+        // chunk 8 anyway would leave the index out of chunk order.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             store.finish(20);
         }));
