@@ -2,6 +2,7 @@
 
 pub mod bitset;
 pub mod frames;
+pub mod metrics;
 pub mod recording;
 
 pub use bitset::BitSet;
@@ -10,6 +11,7 @@ pub use frames::{
     FrameIndex,
     FrameStore,
 };
+pub use metrics::BatchMetrics;
 pub use recording::{
     DpDecision,
     FitRecording,
