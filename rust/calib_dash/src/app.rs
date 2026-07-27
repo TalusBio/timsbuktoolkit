@@ -749,6 +749,11 @@ pub struct CalibDash {
     /// cannot tell the two apart by output alone.
     #[cfg(test)]
     render_pause_calls: u32,
+    /// Counts `dp_refit_current` calls, for the same reason: `sync_dp`'s
+    /// `dp_recording_batch` cache has no other observable — a skipped refit and
+    /// a repeated one leave `live_dp_recording` looking identical.
+    #[cfg(test)]
+    dp_refit_calls: u32,
 }
 
 impl CalibDash {
@@ -787,6 +792,8 @@ impl CalibDash {
             dp_recording_batch: None,
             #[cfg(test)]
             render_pause_calls: 0,
+            #[cfg(test)]
+            dp_refit_calls: 0,
         }
     }
 
@@ -974,6 +981,10 @@ impl CalibDash {
     /// what keeps the per-DP-node observation cost off the per-batch hot path.
     /// `None` on the same degenerate-range skip `refit_live` makes.
     fn dp_refit_current(&mut self) -> Option<&FitRecording> {
+        #[cfg(test)]
+        {
+            self.dp_refit_calls += 1;
+        }
         fit_points(
             &mut self.dp_state,
             &mut self.dp_recording,
@@ -996,7 +1007,13 @@ impl CalibDash {
         if !self.app.dp_pane() || self.app.scrub_frame().is_some() {
             return;
         }
-        if self.dp_recording_batch == Some(self.app.batch()) {
+        // The cache is only good while the recording it names is still around:
+        // closing the pane drops the recording, so a reopen within the same
+        // batch has to refit rather than serve a cache entry pointing at
+        // nothing.
+        if self.dp_recording_batch == Some(self.app.batch())
+            && self.app.live_dp_recording().is_some()
+        {
             return;
         }
         let refit = self.dp_refit_current().cloned();
@@ -1151,6 +1168,23 @@ mod tests {
             .collect()
     }
 
+    /// Points at explicit `speclib_index`es, so a test can choose the two sets
+    /// `churn` diffs independently of how many batches have gone by. On the
+    /// identity line with weights above `suppress_nonmax`'s 1.0 seed, so the fit
+    /// succeeds like `points`'.
+    fn indexed_points(indices: &[usize]) -> Vec<CalibrantPoint> {
+        indices
+            .iter()
+            .enumerate()
+            .map(|(i, &idx)| CalibrantPoint {
+                library_rt: i as f64 + 0.5,
+                observed_rt: i as f64 + 0.5,
+                score: 1.0 + i as f64,
+                speclib_index: idx,
+            })
+            .collect()
+    }
+
     /// `n` retained frames, nothing decimated — what the scrubber tests need
     /// from a `FrameStore` they do not have.
     fn retained(n: usize) -> FrameSummary {
@@ -1174,38 +1208,27 @@ mod tests {
     // ---- count prefix ----
 
     #[test]
-    fn digits_accumulate_into_a_pending_count() {
-        let mut app = App::new(10);
-        app.handle_key(key('1'));
-        app.handle_key(key('5'));
-        assert_eq!(app.pending_count(), Some(15));
-    }
-
-    #[test]
     fn a_motion_consumes_the_count() {
         let mut app = App::new(10);
         assert_eq!(press(&mut app, "15n"), PauseAction::Next(15));
         assert_eq!(app.pending_count(), None, "count lives exactly one motion");
     }
 
+    /// `0` is the one digit whose meaning depends on what came before it: it
+    /// cannot *start* a count (vim keeps `0` free as a motion) but extends one
+    /// like any other digit.
     #[test]
-    fn a_bare_motion_means_one() {
-        let mut app = App::new(10);
-        assert_eq!(press(&mut app, "n"), PauseAction::Next(1));
-    }
-
-    #[test]
-    fn a_leading_zero_does_not_start_a_count() {
+    fn a_leading_zero_does_not_start_a_count_but_a_later_zero_extends_one() {
         let mut app = App::new(10);
         app.handle_key(key('0'));
-        assert_eq!(app.pending_count(), None);
-    }
+        assert_eq!(app.pending_count(), None, "a leading 0 starts nothing");
 
-    #[test]
-    fn zero_continues_an_existing_count() {
-        let mut app = App::new(10);
         press(&mut app, "10");
-        assert_eq!(app.pending_count(), Some(10));
+        assert_eq!(
+            app.pending_count(),
+            Some(10),
+            "0 after a 1 extends the count rather than being swallowed"
+        );
     }
 
     #[test]
@@ -1218,14 +1241,9 @@ mod tests {
         assert_eq!(app.pending_count(), Some(u32::MAX));
     }
 
-    #[test]
-    fn esc_clears_a_pending_count() {
-        let mut app = App::new(10);
-        press(&mut app, "42");
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.pending_count(), None);
-    }
-
+    /// Both halves of "only a motion consumes a count": a bound non-motion
+    /// (`d`, which reaches `handle_plain_char`) and an unbound key (`Esc`,
+    /// which falls through `handle_key`'s catch-all arm) each clear it.
     #[test]
     fn a_non_motion_key_clears_a_pending_count() {
         let mut app = App::new(10);
@@ -1234,6 +1252,15 @@ mod tests {
             app.pending_count(),
             None,
             "`d` toggles the DP pane, not a motion"
+        );
+
+        press(&mut app, "42");
+        assert_eq!(app.pending_count(), Some(42), "sanity: the count is back");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "Esc is unbound, and every unbound key clears the count too"
         );
     }
 
@@ -1292,17 +1319,19 @@ mod tests {
             PauseAction::Stay,
             "the dismissing key must not also perform its usual action"
         );
-    }
 
-    #[test]
-    fn a_pending_count_typed_before_opening_the_overlay_does_not_leak_into_the_dismissing_key() {
-        let mut app = App::new(10);
+        // A digit takes a different route through `handle_plain_char` than a
+        // motion does, so it needs its own case: `5` must not start a pending
+        // count on its way out of the overlay either.
         app.handle_key(key('?'));
-        // `5` would normally start a new pending count; while dismissing the
-        // overlay it must not do that either.
-        app.handle_key(key('5'));
-        assert!(!app.show_keys());
-        assert_eq!(app.pending_count(), None);
+        let action = app.handle_key(key('5'));
+        assert!(!app.show_keys(), "a digit dismisses the overlay too");
+        assert_eq!(action, PauseAction::Stay);
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "the dismissing digit must not start a count"
+        );
     }
 
     #[test]
@@ -1338,18 +1367,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_count_before_l_cycles_that_many_tabs() {
-        let mut app = App::new(10);
-        press(&mut app, "2l");
-        assert_eq!(app.tab(), Tab::Tolerances, "Fit + 2 steps");
-        assert_eq!(
-            app.pending_count(),
-            None,
-            "l is a motion: it consumes the count"
-        );
-    }
-
     // ---- Fit-tab batch scrubber: < / > ----
 
     #[test]
@@ -1374,19 +1391,6 @@ mod tests {
     }
 
     #[test]
-    fn less_than_with_a_count_steps_back_that_many_frames() {
-        let mut app = App::new(10);
-        app.set_frame_summary(retained(5));
-        press(&mut app, "3<");
-        assert_eq!(app.scrub_frame(), Some(2));
-        assert_eq!(
-            app.pending_count(),
-            None,
-            "< is a motion: it consumes the count"
-        );
-    }
-
-    #[test]
     fn less_than_clamps_at_the_first_frame_rather_than_underflowing() {
         let mut app = App::new(10);
         app.set_frame_summary(retained(5));
@@ -1402,13 +1406,31 @@ mod tests {
     fn greater_than_steps_forward_and_returns_to_live_past_the_last_frame() {
         let mut app = App::new(10);
         app.set_frame_summary(retained(5));
-        press(&mut app, "<"); // frame 4 (of 5)
-        assert_eq!(app.scrub_frame(), Some(4));
+        press(&mut app, "3<"); // frame 2 (of 5)
+        assert_eq!(app.scrub_frame(), Some(2));
         press(&mut app, ">");
+        assert_eq!(
+            app.scrub_frame(),
+            Some(3),
+            "a bare > moves forward exactly one retained frame"
+        );
+        press(&mut app, "2>");
         assert_eq!(
             app.scrub_frame(),
             None,
             "> past the last retained frame returns to the live view"
+        );
+
+        // A count large enough to overflow the `+ n` must saturate rather than
+        // wrap into some other index — the same run must also return promptly,
+        // this being arithmetic and not a loop.
+        press(&mut app, "<"); // back to frame 4
+        assert_eq!(app.scrub_frame(), Some(4), "sanity");
+        press(&mut app, "4294967295>");
+        assert_eq!(
+            app.scrub_frame(),
+            None,
+            "a saturated count lands past the end, back to live"
         );
     }
 
@@ -1418,21 +1440,6 @@ mod tests {
         app.set_frame_summary(retained(5));
         press(&mut app, ">");
         assert_eq!(app.scrub_frame(), None);
-    }
-
-    #[test]
-    fn a_huge_count_before_greater_than_does_not_spin() {
-        // Saturating arithmetic, not a loop — this must return promptly
-        // however large the count is.
-        let mut app = App::new(10);
-        app.set_frame_summary(retained(5));
-        press(&mut app, "<"); // frame 4
-        press(&mut app, "999999999>");
-        assert_eq!(
-            app.scrub_frame(),
-            None,
-            "saturates past the end, back to live"
-        );
     }
 
     #[test]
@@ -1482,66 +1489,44 @@ mod tests {
         );
     }
 
+    /// `cycle` reduces the count mod the number of stops before anything moves,
+    /// so a ten-digit count returns promptly rather than driving ~10^9
+    /// iterations on the input thread. Both counts below land two stops from the
+    /// start (`1_000_000_001 % 3 == 2`, `1_000_000_002 % 5 == 2`).
+    ///
+    /// The backward keys are the ones that make the reduction load-bearing
+    /// rather than merely fast: `cycle` walks back by `n - steps`, which
+    /// underflows for any count past the stop list's length — and a count past
+    /// 5 is an ordinary keystroke, not a stress case.
     #[test]
-    fn a_count_before_m_cycles_that_many_layers() {
-        let mut app = App::new(10);
-        press(&mut app, "2m");
-        assert_eq!(app.layer(), Layer::Curve, "None + 2 stops");
-        assert_eq!(
-            app.pending_count(),
-            None,
-            "m is a motion: it consumes the count"
-        );
-    }
-
-    /// `cycle` reduces the count mod the number of stops, so a ten-digit count
-    /// returns promptly rather than driving ~10^9 iterations on the input
-    /// thread. Both counts below land two stops from the start
-    /// (`1_000_000_001 % 3 == 2`, `1_000_000_002 % 5 == 2`).
-    #[test]
-    fn a_huge_count_before_a_cycling_key_does_not_spin() {
+    fn a_huge_count_before_a_cycling_key_does_not_spin_or_underflow() {
         let mut app = App::new(10);
         press(&mut app, "1000000001l");
         assert_eq!(app.tab(), Tab::Tolerances, "Fit + 2 of 3 tab stops");
+        press(&mut app, "1000000001h");
+        assert_eq!(app.tab(), Tab::Fit, "and 2 of 3 stops back again");
 
         let mut app = App::new(10);
         press(&mut app, "1000000002m");
         assert_eq!(app.layer(), Layer::Curve, "None + 2 of 5 layer stops");
+        press(&mut app, "1000000002M");
+        assert_eq!(app.layer(), Layer::None, "and 2 of 5 stops back again");
     }
 
     // ---- the stepper ----
-
-    #[test]
-    fn a_fresh_stepper_renders_every_batch() {
-        let mut s = Stepper::new();
-        assert!(s.should_render());
-        assert!(s.should_render());
-    }
 
     #[test]
     fn next_n_renders_on_the_nth_batch_not_the_n_plus_first() {
         let mut s = Stepper::new();
         // At the chunk-0 pause the user asks for 5.
         s.apply(PauseAction::Next(5));
-        // Chunks 1..=4 are skipped; the 5th call renders.
+        // Chunks 1..=4 are skipped, the 5th call renders, and the skip is spent
+        // once rather than re-armed — so every later chunk renders too.
         let rendered: Vec<usize> = (1..=10).filter(|_| s.should_render()).collect();
         assert_eq!(
-            rendered.first(),
-            Some(&5),
-            "chunks 1-4 skipped, render at 5"
-        );
-    }
-
-    #[test]
-    fn skipping_is_consumed_once_rendered() {
-        let mut s = Stepper::new();
-        s.apply(PauseAction::Next(3));
-        assert!(!s.should_render());
-        assert!(!s.should_render());
-        assert!(s.should_render());
-        assert!(
-            s.should_render(),
-            "back to every batch after the skip is spent"
+            rendered,
+            vec![5, 6, 7, 8, 9, 10],
+            "chunks 1-4 skipped, render at 5, then every batch again"
         );
     }
 
@@ -1556,44 +1541,6 @@ mod tests {
             s.apply(action);
             assert!((0..1000).all(|_| !s.should_render()), "{action:?}");
         }
-    }
-
-    #[test]
-    fn is_stopped_reflects_run_to_end_detach_and_abort() {
-        for action in [
-            PauseAction::RunToEnd,
-            PauseAction::Detach,
-            PauseAction::Abort,
-        ] {
-            let mut s = Stepper::new();
-            assert!(!s.is_stopped(), "a fresh stepper has not stopped");
-            s.apply(action);
-            assert!(s.is_stopped(), "{action:?} must set stopped");
-        }
-    }
-
-    /// `is_stopped` is what `CalibDash::present` consults instead of
-    /// `should_render` — read-only, so asking it must not draw down a pending
-    /// skip count the way `should_render` deliberately does.
-    #[test]
-    fn is_stopped_does_not_consume_a_pending_skip() {
-        let mut s = Stepper::new();
-        s.apply(PauseAction::Next(3));
-        assert!(!s.is_stopped());
-        assert!(!s.is_stopped());
-        // Still the full two skips `Next(3)` asked for, unspent.
-        assert!(!s.should_render());
-        assert!(!s.should_render());
-        assert!(s.should_render());
-    }
-
-    #[test]
-    fn is_stopped_is_false_while_only_stay_or_next_has_been_applied() {
-        let mut s = Stepper::new();
-        s.apply(PauseAction::Stay);
-        assert!(!s.is_stopped());
-        s.apply(PauseAction::Next(5));
-        assert!(!s.is_stopped(), "Next skips batches, it does not stop");
     }
 
     // ---- CalibDash::on_batch ----
@@ -1613,16 +1560,33 @@ mod tests {
         assert!(d.frames.summary().retained < 10, "frames are decimated");
     }
 
+    /// `BatchMetrics.admitted`/`evicted` are the only two fields nothing but
+    /// `refit_live` ever fills, so the wiring needs its own test: `metrics.rs`
+    /// exercises `churn` directly and `ui.rs` hand-builds `BatchMetrics`.
+    ///
+    /// The second batch is deliberately asymmetric (one index in, two out), so
+    /// swapping the two fields at the construction site cannot pass. It also
+    /// fails if the `prev_points` refresh moves above the `churn` call, which
+    /// would diff `current_points` against itself and report `(0, 0)` forever.
     #[test]
-    fn refitting_a_recorded_frame_reproduces_the_live_curve() {
-        // The app's central claim: what you scrub is what ran.
-        let mut d = dash(1, 8, 10, 5);
-        d.on_batch(0, points(8, 1.5, 0).into_iter());
-        d.finish();
+    fn on_batch_reports_this_batchs_admissions_and_evictions() {
+        let mut d = dash(2, 8, 10, 5);
 
-        let live = d.app.recording().curve().to_vec();
-        let refit = d.refit_frame(0).expect("frame 0 exists").curve().to_vec();
-        assert_same_curve(&live, &refit);
+        d.on_batch(0, indexed_points(&[0, 1, 2, 3]).into_iter());
+        let m0 = d.app.metrics()[0];
+        assert_eq!(
+            (m0.admitted, m0.evicted),
+            (4, 0),
+            "the first batch admits all four against an empty baseline: {m0:?}"
+        );
+
+        d.on_batch(1, indexed_points(&[2, 3, 4]).into_iter());
+        let m1 = d.app.metrics()[1];
+        assert_eq!(
+            (m1.admitted, m1.evicted),
+            (1, 2),
+            "index 4 admitted, indices 0 and 1 evicted: {m1:?}"
+        );
     }
 
     /// End-to-end version of the `<` scrubber: moving `App::scrub_frame` with
@@ -1726,16 +1690,57 @@ mod tests {
         );
     }
 
-    /// `present` must still open the pause when nothing has stopped it — the
-    /// baseline the next test's guard is checked against, so a bug that made the
-    /// guard fire unconditionally would not slip past.
+    /// `sync_dp` runs before every draw, i.e. once per keystroke of a pause, but
+    /// must refit at most once per batch — and the cache that makes that true
+    /// must not also serve batch N's DP trace at batch N+1.
     #[test]
-    fn present_renders_when_the_stepper_has_not_stopped() {
-        let mut d = dash(1, 4, 10, 3);
-        d.present();
+    fn sync_dp_refits_once_per_batch_and_never_serves_a_stale_trace() {
+        let mut d = dash(3, 8, 10, 5);
+        d.on_batch(0, points(8, 1.0, 0).into_iter());
+        press(&mut d.app, "d");
+
+        for _ in 0..3 {
+            d.sync_dp();
+        }
         assert_eq!(
-            d.render_pause_calls, 1,
-            "present() must still attempt render_pause when nothing stopped it"
+            d.dp_refit_calls, 1,
+            "three draws within one pause must share one refit"
+        );
+
+        // A new batch invalidates the cache: the pane must show *this* batch's
+        // decisions, which for a different slope is a visibly different curve.
+        d.on_batch(1, points(8, 2.0, 1).into_iter());
+        d.sync_dp();
+        assert_eq!(d.dp_refit_calls, 2, "a new batch must refit again");
+        assert_same_curve(
+            d.app.live_dp_recording().expect("batch 1 refit").curve(),
+            d.app.recording().curve(),
+        );
+
+        // Turning the pane off drops the recording so nothing can read a
+        // recording the pane is no longer showing.
+        press(&mut d.app, "d");
+        assert!(!d.app.dp_pane());
+        assert!(d.app.live_dp_recording().is_none());
+        d.sync_dp();
+        assert_eq!(
+            d.dp_refit_calls, 2,
+            "sync_dp must not refit for a pane that is off"
+        );
+
+        // Reopening within the same batch: the cache still names batch 1, but
+        // the recording it named was dropped on the way out, so serving the
+        // cache would leave the pane on with nothing in it.
+        press(&mut d.app, "d");
+        d.sync_dp();
+        assert_eq!(
+            d.dp_refit_calls, 3,
+            "a reopened pane must refit rather than trust a cache whose \
+             recording was dropped"
+        );
+        assert!(
+            d.app.live_dp_recording().is_some(),
+            "a reopened pane must have a DP trace to show"
         );
     }
 
@@ -1745,19 +1750,27 @@ mod tests {
     /// what makes "did not even attempt to render" provable: under `cargo test`
     /// `render_pause` detaches immediately whether or not the guard fired, so
     /// the return value cannot tell a bypassed guard from a working one.
+    ///
+    /// The `Stay`/`Next` rows are the baseline that keeps an inverted or
+    /// always-firing guard from passing: `present` must still open the pause
+    /// when nothing has asked it not to.
     #[test]
     fn present_does_not_render_once_a_pause_chose_to_stop() {
-        for action in [
-            PauseAction::RunToEnd,
-            PauseAction::Detach,
-            PauseAction::Abort,
-        ] {
+        // (action applied at the last pause, expected render_pause calls)
+        let cases = [
+            (PauseAction::Stay, 1),
+            (PauseAction::Next(5), 1),
+            (PauseAction::RunToEnd, 0),
+            (PauseAction::Detach, 0),
+            (PauseAction::Abort, 0),
+        ];
+        for (action, expected) in cases {
             let mut d = dash(1, 4, 10, 3);
             d.stepper.apply(action);
             d.present();
             assert_eq!(
-                d.render_pause_calls, 0,
-                "{action:?} must stop present() short of render_pause"
+                d.render_pause_calls, expected,
+                "{action:?} must leave present() with {expected} render_pause call(s)"
             );
         }
     }
@@ -1826,36 +1839,32 @@ mod tests {
     // from "reallocated but landed on the same capacity anyway".
 
     #[test]
-    fn current_points_never_reallocates_once_constructed() {
+    fn the_point_buffers_never_reallocate_once_constructed() {
         let n_calibrants = 8;
         let mut d = dash(5, n_calibrants, 10, 5);
-        // `current_points` is pre-sized at construction — unlike `prev_points`
-        // (see the next test), it is stable from before the very first batch.
-        let ptr_before_any_batch = d.current_points.as_ptr();
-        for chunk in 0..5 {
-            d.on_batch(chunk, points(n_calibrants, 1.0, chunk).into_iter());
-            assert_eq!(
-                d.current_points.as_ptr(),
-                ptr_before_any_batch,
-                "current_points must not reallocate on batch {chunk}"
-            );
-        }
-    }
-
-    #[test]
-    fn prev_points_stabilizes_after_growing_once_on_the_first_batch() {
-        let n_calibrants = 8;
-        let mut d = dash(5, n_calibrants, 10, 5);
-        // `prev_points` starts as an empty `Vec` (no allocation at all), so its
-        // first-ever growth happens inside this very call — pointer identity is
-        // only meaningful to compare *after* that first batch.
+        // `current_points` is pre-sized at construction, so it is stable from
+        // before the very first batch. `prev_points` starts as an empty `Vec`
+        // (no allocation at all), so its first-ever growth happens inside
+        // batch 0 and its pointer is only meaningful to compare afterwards.
+        let current_ptr = d.current_points.as_ptr();
         d.on_batch(0, points(n_calibrants, 1.0, 0).into_iter());
-        let ptr_after_first_batch = d.prev_points.as_ptr();
+        assert_eq!(
+            d.current_points.as_ptr(),
+            current_ptr,
+            "current_points must not reallocate on batch 0"
+        );
+        let prev_ptr = d.prev_points.as_ptr();
+
         for chunk in 1..5 {
             d.on_batch(chunk, points(n_calibrants, 1.0, chunk).into_iter());
             assert_eq!(
+                d.current_points.as_ptr(),
+                current_ptr,
+                "current_points must not reallocate on batch {chunk}"
+            );
+            assert_eq!(
                 d.prev_points.as_ptr(),
-                ptr_after_first_batch,
+                prev_ptr,
                 "prev_points must not reallocate again after its first growth (batch {chunk})"
             );
         }

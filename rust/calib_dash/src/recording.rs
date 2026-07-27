@@ -246,16 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn recording_captures_the_suppression_mask() {
-        let mut s = diagonal_state(10);
-        let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        // Every diagonal cell survives; every empty cell is suppressed.
-        assert!(!rec.is_suppressed(4, 4));
-        assert!(rec.is_suppressed(0, 5));
-    }
-
-    #[test]
     fn dp_decisions_are_recorded_only_when_enabled() {
         let mut s = diagonal_state(10);
 
@@ -319,23 +309,66 @@ mod tests {
         );
     }
 
+    /// A recording outlives the geometry it was built for: `CalibDash` reuses
+    /// one `FitRecording` for every refit, and a scrubbed frame or a replayed
+    /// snapshot can arrive at a different `bins`. Two claims, which the
+    /// unchanged-`bins` test above deliberately holds fixed:
+    ///
+    /// - the two grid buffers are reallocated, so `weight`/`is_suppressed` can
+    ///   still reach the far corner. Both bounds-check and answer `0.0`/`false`
+    ///   off the end, so an unresized buffer reads as "empty grid" rather than
+    ///   panicking — the failure mode is a silently blank heatmap.
+    /// - everything a fit *appends* to is cleared first. Without that, the path,
+    ///   the curve and the ridge each carry the previous fit's entries in front
+    ///   of this one's, and the Fit tab draws two fits at once.
     #[test]
-    fn a_failed_suppression_records_an_empty_path() {
-        // All weights below 1.0 trip calibrt's `max_in_row` initialization, so
-        // everything is suppressed and no path exists. The recording must
-        // survive it rather than panic or half-fill.
-        let mut s = CalibrationState::new(4, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
-        s.update((0..4).map(|i| {
+    fn a_refit_at_a_different_bins_resizes_the_grid_and_clears_the_appended_buffers() {
+        // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
+        let mut small = diagonal_state(3);
+        let mut rec = FitRecording::new(3);
+        small.fit_with(&mut rec, ObserveOpts::NONE);
+        small.measure_ridge_width_with(0.5, &mut rec);
+        assert_eq!(
             (
-                LibraryRT(i as f64 + 0.5),
-                ObservedRTSeconds(i as f64 + 0.5),
-                0.1,
-            )
-        }))
-        .unwrap();
-        let mut rec = FitRecording::new(4);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        assert!(rec.path_indices().is_empty());
-        assert!(rec.curve().is_empty());
+                rec.geom().bins,
+                rec.path_indices().len(),
+                rec.curve().len(),
+                rec.ridge().len()
+            ),
+            (3, 3, 3, 3),
+            "sanity: the small fit filled every buffer"
+        );
+
+        // Fit 2, a 10x10 grid through the same recording.
+        let mut big = diagonal_state(10);
+        big.fit_with(&mut rec, ObserveOpts::NONE);
+        big.measure_ridge_width_with(0.5, &mut rec);
+
+        assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
+        // Row 9 exists only in a resized buffer: at 3x3 the flat index 9*10+9
+        // is past the end of a 9-cell grid.
+        assert!(
+            (rec.weight(9, 9) - 10.0).abs() < 1e-6,
+            "the diagonal's last cell carries weight 1 + 9, got {}",
+            rec.weight(9, 9)
+        );
+        assert!(
+            rec.is_suppressed(9, 5),
+            "an empty cell in the resized mask is suppressed"
+        );
+        assert!(
+            !rec.is_suppressed(9, 9),
+            "the diagonal's last cell survives suppression"
+        );
+        assert_eq!(
+            (
+                rec.path_indices().len(),
+                rec.curve().len(),
+                rec.ridge().len()
+            ),
+            (10, 10, 10),
+            "the refit's own entries only — 13 of each would mean the first \
+             fit's were never cleared"
+        );
     }
 }

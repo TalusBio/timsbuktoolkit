@@ -1912,29 +1912,31 @@ mod tests {
         app
     }
 
-    /// One snapshot per stop of the `m`/`M` cycle, each in isolation:
-    /// `Layer::Path` shows only the DP chain/tail, not also the suppressed
-    /// mask. `Layer::None` doubles as the plain Fit-tab render — density field,
-    /// axes and all.
+    /// One snapshot per stop of the `m`/`M` cycle a picture can actually pin,
+    /// each in isolation: `Layer::Path` shows only the DP chain/tail, not also
+    /// the suppressed mask. `Layer::None` doubles as the plain Fit-tab render —
+    /// density field, axes and all.
     ///
-    /// `Layer::Suppressed` is drawn but not pinned: it only marks cells that
-    /// already carry weight, so its glyph grid is byte-identical to
-    /// `Layer::None`'s, and what it marks is asserted at the mark-buffer level
-    /// by `mark_suppressed_and_mark_ridge_mark_at_least_one_cell`.
+    /// `Layer::Suppressed` and `Layer::Ridge` are deliberately not pinned.
+    /// Suppressed only marks cells that already carry weight, so its glyph grid
+    /// is byte-identical to `Layer::None`'s; Ridge's payload is a *structure*
+    /// (sparse `center ± half_width` pairs, not a filled band) that a picture
+    /// pins only by also re-pinning calibrt's blur kernel and
+    /// `DEFAULT_RIDGE_FRACTION` across a crate boundary. Both are asserted at
+    /// the mark-buffer level by
+    /// `mark_suppressed_marks_a_weighted_cell_and_mark_ridge_marks_a_straddling_pair`.
     #[test]
     fn fit_tab_renders_each_layer() {
-        for layer in Layer::ALL {
+        for layer in [Layer::None, Layer::Path, Layer::Curve] {
             let mut app = fixture_app_with_ridge();
             goto_layer(&mut app, layer);
-            // Curve and Ridge mark cells without changing their glyph, so
-            // inversion is the only evidence they drew anything.
-            let out = match layer {
-                Layer::Curve | Layer::Ridge => render_snapshot(&mut app, 100, 30),
-                _ => render(&mut app, 100, 30),
+            // Curve marks cells without changing their glyph, so inversion is
+            // the only evidence it drew anything.
+            let out = if layer == Layer::Curve {
+                render_snapshot(&mut app, 100, 30)
+            } else {
+                render(&mut app, 100, 30)
             };
-            if layer == Layer::Suppressed {
-                continue;
-            }
             insta::assert_snapshot!(format!("fit_layer_{:?}", layer), out);
         }
     }
@@ -1991,9 +1993,11 @@ mod tests {
     /// A Fit-tab body exactly one row tall must still show the banner rather
     /// than spend that one row on a heatmap too short to read anyway: without
     /// it the replayed grid is indistinguishable from live in that one edge
-    /// case.
+    /// case. And clearing the scrub (as `>` past the last retained frame does)
+    /// must take the banner back off — a banner that survives the clear is the
+    /// same lie in the other direction.
     #[test]
-    fn the_scrub_banner_still_shows_when_the_fit_tab_body_is_one_row_tall() {
+    fn the_scrub_banner_wins_the_only_body_row_and_goes_away_when_the_scrub_clears() {
         let mut app = fixture_app_with_ridge();
         app.set_frame_summary(RETAINED_5);
         app.set_scrub_recording(2, Some(17), fixture_recording(8));
@@ -2004,22 +2008,15 @@ mod tests {
             "the banner must win the body's only row rather than leave it \
              looking like an unlabeled (and possibly mistaken-for-live) heatmap:\n{out}"
         );
-    }
 
-    /// Clearing the scrub (as `>` past the last retained frame does) must
-    /// drop the banner and go back to rendering the live recording.
-    #[test]
-    fn clearing_the_scrub_returns_to_the_live_view() {
-        let mut app = fixture_app_with_ridge();
-        app.set_frame_summary(RETAINED_5);
-        app.set_scrub_recording(2, Some(17), fixture_recording(8));
         app.clear_scrub();
-
-        let out = render(&mut app, 100, 30);
-        assert!(
-            !out.contains("SCRUBBED"),
-            "banner must be gone once scrub is cleared:\n{out}"
-        );
+        for (w, h) in [(100, 3), (100, 30)] {
+            let out = render(&mut app, w, h);
+            assert!(
+                !out.contains("SCRUBBED"),
+                "banner must be gone once scrub is cleared, at {w}x{h}:\n{out}"
+            );
+        }
     }
 
     /// Also pins `TABLE_ROWS`' cap: the fixture pushes more batches than the
@@ -2049,13 +2046,21 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
-    /// Rendered short: the panel is a handful of prose lines, and the rest of
-    /// a 30-row terminal is empty border padding this does not need to pin.
+    /// A `contains`, not a snapshot: the panel is literal prose with no
+    /// computed content in it, so a picture of it pins four wrapped lines and
+    /// several rows of border padding to catch one thing — whether the
+    /// explanation reaches the screen at all.
     #[test]
     fn tolerances_tab_explains_itself_during_phase_one() {
         let mut app = fixture_app_with_ridge(); // real_fit is None
         goto_tab(&mut app, Tab::Tolerances);
-        insta::assert_snapshot!(render(&mut app, 100, 12));
+        let out = render(&mut app, 100, 12);
+        assert!(
+            out.contains(
+                "Step B (m/z, mobility and RT-residual tolerance estimation) has not run yet."
+            ),
+            "the Tolerances tab must say why it has nothing to show in Phase 1:\n{out}"
+        );
     }
 
     /// Once `App::set_final` (the same setter `CalibDash::show_final` uses)
@@ -2086,15 +2091,6 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_survives_an_empty_state() {
-        for tab in Tab::ALL {
-            let mut app = App::new(10); // no frames, no metrics, no fit
-            goto_tab(&mut app, tab);
-            render(&mut app, 80, 24); // must not panic
-        }
-    }
-
-    #[test]
     fn heatmap_downsamples_a_large_grid_to_the_area() {
         let rec = fixture_recording(200); // bins far exceeding the area
         let cells = heatmap_cells(&rec, 40, 10);
@@ -2105,11 +2101,49 @@ mod tests {
         );
     }
 
+    /// The half-block parity, end to end and independently derived.
+    /// `fixture_recording(4)`'s four points land one per grid cell on the
+    /// diagonal — `(row, col)` = `(0,0) (1,1) (2,2) (3,3)` with weights 1..4 —
+    /// so a 4x2 canvas is exactly two grid rows per terminal line and the whole
+    /// output can be written out by hand.
+    ///
+    /// Row 0 (the *lowest* observed RT) must land in the bottom line's *lower*
+    /// half and row 3 in the top line's *upper* half. Returning the pre-flip
+    /// parity from `flip_display_row`, or swapping `Half`'s two slots, keeps
+    /// every glyph a valid block character and moves nothing but this.
     #[test]
-    fn heatmap_upsamples_a_small_grid_without_panicking() {
-        let rec = fixture_recording(4); // bins far smaller than the area
-        let cells = heatmap_cells(&rec, 40, 10);
-        assert_eq!(cells.len(), 40 * 10 * 2);
+    fn heatmap_cells_flips_grid_row_zero_into_the_bottom_lines_lower_half() {
+        let rec = fixture_recording(4);
+        for (row, col) in [(0, 0), (1, 1), (2, 2), (3, 3)] {
+            assert_eq!(
+                rec.weight(row, col),
+                1.0 + row as f32,
+                "fixture drifted: expected weight {} at grid ({row}, {col})",
+                1.0 + row as f32
+            );
+        }
+
+        // Written as one line per terminal row, each `(upper, lower)` pair a
+        // cell: line 0 holds grid rows 3 (upper) and 2 (lower), line 1 holds
+        // grid rows 1 (upper) and 0 (lower).
+        #[rustfmt::skip]
+        let expected = [
+            0.0, 0.0,   0.0, 0.0,   0.0, 3.0,   4.0, 0.0,
+            0.0, 1.0,   2.0, 0.0,   0.0, 0.0,   0.0, 0.0,
+        ];
+        assert_eq!(heatmap_cells(&rec, 4, 2), expected);
+    }
+
+    /// The other half of the same parity: `compose_cell` must render a cell
+    /// occupied only in its upper half as `▀` and one occupied only in its lower
+    /// half as `▄`. Without this the only detector of a swapped pair is the
+    /// mixed `▀`/`▄` rows inside `fit_layer_None`'s snapshot.
+    #[test]
+    fn compose_cell_draws_an_upper_only_cell_as_a_top_half_block() {
+        let upper = compose_cell(Mark::None, Mark::None, 1.0, 0.0, 1.0, Layer::None);
+        assert_eq!(upper.0, "\u{2580}", "upper-half-only must draw ▀");
+        let lower = compose_cell(Mark::None, Mark::None, 0.0, 1.0, 1.0, Layer::None);
+        assert_eq!(lower.0, "\u{2584}", "lower-half-only must draw ▄");
     }
 
     /// The y-flip regression guard (`flip_display_row`).
@@ -2203,63 +2237,26 @@ mod tests {
         assert!(modifier_both.contains(Modifier::REVERSED));
     }
 
-    /// End-to-end counterpart of the `compose_cell` unit tests above: the real
-    /// Fit tab must paint no reversed space anywhere, and must reach the
-    /// `\u{b7}` fallback at least once — the curve is evaluated at every display
-    /// column, so with 16 bins across a ~90-column canvas several columns land
-    /// on zero-weight cells.
-    #[test]
-    fn curve_layer_never_renders_a_reversed_space_on_a_zero_weight_cell() {
-        let mut app = fixture_app_with_ridge();
-        goto_layer(&mut app, Layer::Curve);
-        let buf = draw_to_buffer(&mut app, 100, 30);
-
-        let mut saw_reversed_dot = false;
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                if cell.modifier.contains(Modifier::REVERSED) {
-                    assert_ne!(
-                        cell.symbol(),
-                        " ",
-                        "a reversed space at ({x}, {y}) reads as a solid block \
-                         (maximum density), lying about a zero-weight cell the \
-                         curve mark landed on"
-                    );
-                    saw_reversed_dot |= cell.symbol() == "\u{b7}";
-                }
-            }
-        }
-        assert!(
-            saw_reversed_dot,
-            "expected the curve to cross at least one zero-weight column and \
-             render the reversed minimum-ink glyph there"
-        );
-    }
-
-    /// Both node kinds (`O`/`X`) must be visible at once — the whole reason
-    /// they are glyph-distinguished inside one layer. `fixture_app_with_ridge`'s
-    /// dip/stray points guarantee both appear.
-    #[test]
-    fn path_layer_shows_the_dp_chain_and_tail_glyphs_distinctly() {
-        let mut app = fixture_app_with_ridge();
-        goto_layer(&mut app, Layer::Path);
-        let out = render(&mut app, 100, 30);
-        assert!(out.contains('O'), "missing the DP-chain glyph:\n{out}");
-        assert!(out.contains('X'), "missing the tail glyph:\n{out}");
-    }
-
     /// A `Mark::Region` on a weighted cell changes no glyph, so neither
     /// function's output is visible in a `.symbol()`-only snapshot — this is
-    /// what pins that they mark anything at all, at the mark-buffer level.
+    /// what pins what they mark, at the mark-buffer level.
+    ///
+    /// The ridge half carries `Layer::Ridge`'s whole payload, which is *not* a
+    /// picture: its marks are the sparse `center ± half_width` pair per measured
+    /// column, straddling the curve, rather than the filled band between them.
+    /// Asserted structurally — a snapshot of the drawn band would re-pin
+    /// calibrt's blur kernel and `DEFAULT_RIDGE_FRACTION` across a crate
+    /// boundary, regenerating on any calibrt ridge change while catching nothing
+    /// in this module.
     #[test]
-    fn mark_suppressed_and_mark_ridge_mark_at_least_one_cell() {
+    fn mark_suppressed_marks_a_weighted_cell_and_mark_ridge_marks_a_straddling_pair() {
         let app = fixture_app_with_ridge();
         let rec = app.recording();
+        let geom = rec.geom();
         let dims = Dims {
             w: 100,
             h: 15,
-            bins: rec.geom().bins,
+            bins: geom.bins,
             disp_rows: 30,
         };
 
@@ -2272,10 +2269,204 @@ mod tests {
 
         let mut ridge = vec![Mark::None; dims.w * dims.h * 2];
         mark_ridge(&mut ridge, dims, rec);
+
+        // The screen half-rows marked in display column `tx`, top to bottom.
+        // Within a terminal cell slot 0 is the upper half, so half-row `sr`
+        // lives in cell `sr / 2` at slot `sr % 2`.
+        let marked_rows = |tx: usize| -> Vec<usize> {
+            (0..dims.disp_rows)
+                .filter(|sr| ridge[((sr / 2) * dims.w + tx) * 2 + sr % 2] != Mark::None)
+                .collect()
+        };
+        let columns: Vec<(usize, Vec<usize>)> = (0..dims.w)
+            .map(|tx| (tx, marked_rows(tx)))
+            .filter(|(_, rows)| !rows.is_empty())
+            .collect();
+
         assert!(
-            ridge.contains(&Mark::Region),
+            !columns.is_empty(),
             "expected at least one ridge-band cell in the fixture"
         );
+        assert!(
+            columns.len() <= rec.ridge().len(),
+            "the ridge marks at most one display column per measurement — \
+             {} marked columns for {} measurements",
+            columns.len(),
+            rec.ridge().len()
+        );
+        for (tx, rows) in &columns {
+            assert!(
+                rows.len() <= 2,
+                "column {tx} carries {} marks: `center ± half_width` is a pair \
+                 of edges, not the filled interval between them: {rows:?}",
+                rows.len()
+            );
+        }
+
+        // And the pair brackets the curve rather than sitting to one side of
+        // it: dropping either the `+` or the `-` term, or collapsing both to
+        // `center`, leaves every assertion above green.
+        let straddling = rec
+            .ridge()
+            .iter()
+            .filter(|m| {
+                let Some(center) = predict_curve(rec.curve(), m.library.0) else {
+                    return false;
+                };
+                let col = bin_of(m.library.0, geom.x_range, dims.bins);
+                let row = bin_of(center, geom.y_range, dims.bins);
+                let (ty, tx, half) = grid_to_screen(row, col, dims);
+                let center_sr = ty * 2 + half.slot();
+                let rows = marked_rows(tx);
+                rows.iter().any(|&sr| sr < center_sr) && rows.iter().any(|&sr| sr > center_sr)
+            })
+            .count();
+        assert!(
+            straddling > 0,
+            "expected at least one measured column whose marks land both above \
+             and below the curve row they bracket"
+        );
+    }
+
+    /// Below `DP_PANE_MIN` the pane must actually be *hidden* — the heatmap
+    /// keeps the whole body — rather than split anyway into two unreadable
+    /// slivers. Only "does not panic at 39x3" was covered before, so `>=` for
+    /// `>` in either comparison went undetected.
+    #[test]
+    fn a_body_narrower_than_dp_pane_min_hides_the_pane_instead_of_splitting() {
+        let mut app = fixture_app_with_ridge();
+        press(&mut app, 'd');
+        assert!(
+            app.dp_pane(),
+            "the pane must be requested for this to mean anything"
+        );
+
+        // The block borders on the Fit tab's top row: one `┌` when the heatmap
+        // has the body to itself, two once the DP pane is carved out of it.
+        let blocks_at = |app: &mut App, w: u16| -> usize {
+            render(app, w, 30)
+                .lines()
+                .nth(1)
+                .expect("the Fit tab's block starts on the row under the tab bar")
+                .matches('\u{250c}')
+                .count()
+        };
+
+        assert_eq!(
+            blocks_at(&mut app, DP_PANE_MIN.0),
+            2,
+            "at exactly DP_PANE_MIN width the pane must be carved out"
+        );
+        assert_eq!(
+            blocks_at(&mut app, DP_PANE_MIN.0 - 1),
+            1,
+            "one column below DP_PANE_MIN the heatmap must keep the whole body, \
+             not share it with a sliver of a DP pane"
+        );
+    }
+
+    // ---- axis helpers: a plausible-but-wrong axis is a snapshot diff a
+    // reviewer waves through, so every expected value here is derived by hand
+    // rather than from the formula the code runs. ----------------------------
+
+    /// The tick densities, which nothing else here can see: `nice_step` rounds
+    /// so hard that changing `ROWS_PER_TICK` from 5 to 4 leaves every fixture's
+    /// step — and so every snapshot — byte-identical.
+    #[test]
+    fn tick_targets_scale_with_the_canvas_and_stay_inside_their_clamps() {
+        // One y tick per five rows: 20 rows earn four ticks, 25 earn five.
+        assert_eq!(y_tick_target(20), 4);
+        assert_eq!(y_tick_target(25), 5);
+        // Never fewer than two (one tick is not a scale) nor more than eight
+        // (past that, labels land on adjacent rows).
+        assert_eq!(y_tick_target(0), 2);
+        assert_eq!(y_tick_target(9), 2);
+        assert_eq!(y_tick_target(1000), 8);
+        // An x label runs *along* its axis and so needs a label-width of room:
+        // one per twenty columns, clamped to 2..=10.
+        assert_eq!(x_tick_target(40), 2);
+        assert_eq!(x_tick_target(100), 5);
+        assert_eq!(x_tick_target(0), 2);
+        assert_eq!(x_tick_target(1000), 10);
+    }
+
+    #[test]
+    fn nice_step_rounds_to_one_two_or_five_times_a_power_of_ten() {
+        // The doc comment's own example: 37 seconds over 8 ticks is 4.625 a
+        // tick, which must read as 5s rather than as itself.
+        assert_eq!(nice_step(37.0, 8), 5.0);
+        // 100 over 10 is exactly 10 — already a power of ten, left alone.
+        assert_eq!(nice_step(100.0, 10), 10.0);
+        // Sub-unit spans keep the 1/2/5 shape one decade down.
+        assert_eq!(nice_step(0.8, 4), 0.2);
+        assert_eq!(nice_step(0.4, 4), 0.1);
+        // `target` of zero is treated as one rather than dividing by it.
+        assert_eq!(nice_step(5.0, 0), 5.0);
+    }
+
+    #[test]
+    fn axis_ticks_are_step_aligned_and_stop_inside_the_range() {
+        // Step 5 over [0, 16]: 20 would fall outside, so the axis ends at 15.
+        assert_eq!(axis_ticks(0.0, 16.0, 4), vec![0.0, 5.0, 10.0, 15.0]);
+        // Ticks are aligned to multiples of the step, not to `lo`: the first
+        // one is 10, not 7.
+        assert_eq!(axis_ticks(7.0, 25.0, 4), vec![10.0, 15.0, 20.0, 25.0]);
+        // A degenerate range draws nothing rather than looping or dividing by
+        // zero.
+        assert!(axis_ticks(5.0, 5.0, 4).is_empty());
+        assert!(axis_ticks(10.0, 0.0, 4).is_empty());
+        assert!(axis_ticks(0.0, f64::NAN, 4).is_empty());
+    }
+
+    #[test]
+    fn axis_decimals_prints_a_step_at_its_own_precision() {
+        assert_eq!(axis_decimals(5.0), 0, "whole-second steps need no decimals");
+        assert_eq!(axis_decimals(1.0), 0);
+        assert_eq!(axis_decimals(0.5), 1);
+        assert_eq!(axis_decimals(0.05), 2);
+        // Capped: hundredths are the finest this axis ever prints.
+        assert_eq!(axis_decimals(0.0005), 2);
+        assert_eq!(axis_decimals(0.0), 0, "a degenerate step must not panic");
+    }
+
+    #[test]
+    fn axis_scale_pairs_the_step_with_the_precision_its_labels_need() {
+        assert_eq!(axis_scale(0.0, 16.0, 4), (5.0, 0));
+        assert_eq!(axis_scale(0.0, 0.8, 4), (0.2, 1));
+        // Sign-insensitive, and a zero span falls back to `EPS` rather than
+        // producing a NaN step.
+        assert_eq!(axis_scale(16.0, 0.0, 4), (5.0, 0));
+        assert!(axis_scale(3.0, 3.0, 4).0 > 0.0);
+    }
+
+    #[test]
+    fn value_to_row_puts_the_largest_value_at_the_top_of_the_canvas() {
+        // The y flip's two endpoints, the pair an off-by-one in `canvas_h - 1 -
+        // dr` moves: `hi` is screen row 0, `lo` the last row.
+        assert_eq!(value_to_row(10.0, 0.0, 10.0, 10), 0);
+        assert_eq!(value_to_row(0.0, 0.0, 10.0, 10), 9);
+        // Halfway up a ten-row canvas is five rows below the top, so row 4.
+        assert_eq!(value_to_row(5.0, 0.0, 10.0, 10), 4);
+        // Out of range clamps to the ends rather than indexing past them.
+        assert_eq!(value_to_row(99.0, 0.0, 10.0, 10), 0);
+        assert_eq!(value_to_row(-99.0, 0.0, 10.0, 10), 9);
+        // Degenerate inputs answer 0 instead of panicking.
+        assert_eq!(value_to_row(5.0, 0.0, 10.0, 0), 0);
+        assert_eq!(value_to_row(5.0, 10.0, 10.0, 10), 0);
+    }
+
+    #[test]
+    fn value_to_col_runs_left_to_right_with_no_flip() {
+        assert_eq!(value_to_col(0.0, 0.0, 10.0, 10), 0);
+        assert_eq!(
+            value_to_col(10.0, 0.0, 10.0, 10),
+            9,
+            "the last column, not 10"
+        );
+        assert_eq!(value_to_col(5.0, 0.0, 10.0, 10), 5);
+        assert_eq!(value_to_col(99.0, 0.0, 10.0, 10), 9);
+        assert_eq!(value_to_col(5.0, 0.0, 10.0, 0), 0);
+        assert_eq!(value_to_col(5.0, 10.0, 10.0, 10), 0);
     }
 
     // ---- scaled_u64: NaN must not read as convergence ----
@@ -2285,33 +2476,22 @@ mod tests {
         // Batch 0's own delta and any failed batch's metrics are NaN — this
         // must not draw as the scale's `0`, which would look identical to
         // "the curve stopped moving."
-        let values = [10.0, f64::NAN, 10.0];
-        let scaled = scaled_u64(&values);
+        let scaled = scaled_u64(&[10.0, f64::NAN, 10.0]);
         assert_eq!(
             scaled[1], scaled[0],
             "a NaN sample must repeat the prior finite value, not read as 0: {scaled:?}"
         );
         assert_eq!(scaled[2], scaled[0]);
-    }
 
-    #[test]
-    fn scaled_u64_reports_zero_only_before_any_finite_value_is_seen() {
-        // A leading NaN run has nothing to carry forward, the one case where
+        // A *leading* NaN run has nothing to carry forward — the one case where
         // `0` means "nothing to show yet" rather than "converged".
-        let values = [f64::NAN, f64::NAN, 10.0];
-        let scaled = scaled_u64(&values);
-        assert_eq!(scaled[0], 0);
-        assert_eq!(scaled[1], 0);
+        let scaled = scaled_u64(&[f64::NAN, f64::NAN, 10.0]);
+        assert_eq!(scaled[0], 0, "{scaled:?}");
+        assert_eq!(scaled[1], 0, "{scaled:?}");
         assert!(
             scaled[2] > 0,
-            "the first real sample must still scale normally"
+            "the first real sample must still scale normally: {scaled:?}"
         );
-    }
-
-    #[test]
-    fn scaled_u64_of_an_all_nan_series_is_flat_zero_not_a_panic() {
-        let scaled = scaled_u64(&[f64::NAN, f64::NAN, f64::NAN]);
-        assert_eq!(scaled, vec![0, 0, 0]);
     }
 
     // ---- status line: per-tab bindings, the count only when pending, `? keys`
@@ -2335,13 +2515,6 @@ mod tests {
 
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn status_line_shows_the_batch_number() {
-        let mut app = App::new(10);
-        let status = status_line(&mut app, 100);
-        assert!(status.contains("b0"), "{status:?}");
     }
 
     /// Inversion, not a color, is what makes a pending count unmistakable. The
@@ -2393,45 +2566,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_line_never_panics_across_a_range_of_widths() {
-        for width in [10, 20, 30, 44, 60, 78, 90, 100, 120, 150, 200] {
-            let _ = status_line(&mut long_prefix_app(), width);
-        }
-    }
-
     // `fit_status_hints` directly, not through `render`, so the widths each
     // degrade stage kicks in at do not also depend on `draw_status_line`'s
-    // columns. The bindings are the real tables and each width is derived from
-    // the stage above it: renaming a hint cannot leave these green against a
-    // stale copy.
+    // columns. The bindings are the real tables, so renaming a hint cannot
+    // leave this green against a stale copy.
 
-    /// The width of the most detailed line `fit_status_hints` will produce.
-    fn widest_hint_line() -> usize {
-        fit_status_hints(&tab_keys(Tab::Fit), GLOBAL_KEYS, usize::MAX).width()
+    /// What one degrade stage costs, measured off the binding tables rather than
+    /// off `fit_status_hints` itself: `hint_spans` renders `keys` then, when
+    /// `actions` is set, a space and the hint, joining pairs with a
+    /// three-column ` · `. Deriving the widths from the function under test —
+    /// as this module used to — pins the stage *order* but never a boundary:
+    /// every threshold below would still be exact if the comparison were off by
+    /// one in either direction.
+    fn hint_width(bindings: &[Binding], actions: bool) -> usize {
+        let separators = 3 * bindings.len().saturating_sub(1);
+        separators
+            + bindings
+                .iter()
+                .map(|b| {
+                    b.keys.chars().count()
+                        + if actions {
+                            1 + b.hint.chars().count()
+                        } else {
+                            0
+                        }
+                })
+                .sum::<usize>()
     }
 
+    /// The four stages, each at the exact width that produces it and one column
+    /// past the width that produced the stage above: full text, keys only,
+    /// global keys only, nothing.
     #[test]
-    fn fit_status_hints_shows_full_text_with_room() {
+    fn fit_status_hints_degrades_one_stage_per_column_it_runs_out_of() {
         let tab_local = tab_keys(Tab::Fit);
-        let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, usize::MAX));
-        for b in tab_local.iter().chain(GLOBAL_KEYS) {
+        let full: Vec<Binding> = tab_local.iter().chain(GLOBAL_KEYS).copied().collect();
+        let full_w = hint_width(&full, true);
+        let keys_w = hint_width(&full, false);
+        let global_w = hint_width(GLOBAL_KEYS, false);
+        assert!(
+            full_w > keys_w && keys_w > global_w && global_w > 0,
+            "each stage must be strictly narrower than the one above it or the \
+             ladder below asserts nothing: {full_w} / {keys_w} / {global_w}"
+        );
+
+        // Stage 1, at exactly the width the full line needs: every key with its
+        // action word.
+        let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, full_w));
+        for b in &full {
             let pair = format!("{} {}", b.keys, b.hint);
             assert!(text.contains(&pair), "missing {pair:?}: {text:?}");
         }
-    }
 
-    #[test]
-    fn fit_status_hints_drops_action_words_before_the_tab_local_group() {
-        let tab_local = tab_keys(Tab::Fit);
-        // One column short of the full line: the action words go, every key
+        // Stage 2, one column short of that: the action words go, every key
         // stays.
-        let text = line_text(&fit_status_hints(
-            &tab_local,
-            GLOBAL_KEYS,
-            widest_hint_line() - 1,
-        ));
-        for b in tab_local.iter().chain(GLOBAL_KEYS) {
+        let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, full_w - 1));
+        for b in &full {
             assert!(
                 !text.contains(b.hint),
                 "{:?} must be gone: {text:?}",
@@ -2439,15 +2629,10 @@ mod tests {
             );
             assert!(text.contains(b.keys), "{:?} must survive: {text:?}", b.keys);
         }
-    }
 
-    #[test]
-    fn fit_status_hints_drops_the_tab_local_group_before_the_global_one() {
-        let tab_local = tab_keys(Tab::Fit);
-        let keys_only = fit_status_hints(&tab_local, GLOBAL_KEYS, widest_hint_line() - 1).width();
-        // One column short of the keys-only line: the tab-local group goes,
-        // the global keys stay.
-        let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, keys_only - 1));
+        // Stage 3, one column short of the keys-only line: the tab-local group
+        // goes, the global keys stay.
+        let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, keys_w - 1));
         for b in &tab_local {
             assert!(
                 !text.contains(b.keys),
@@ -2462,12 +2647,13 @@ mod tests {
                 b.keys
             );
         }
-    }
 
-    #[test]
-    fn fit_status_hints_is_empty_when_nothing_fits() {
-        let text = line_text(&fit_status_hints(&tab_keys(Tab::Fit), GLOBAL_KEYS, 0));
-        assert!(text.is_empty(), "{text:?}");
+        // Stage 4: below the global keys' own width there is nothing left to
+        // shed, including at zero.
+        for width in [global_w - 1, 0] {
+            let text = line_text(&fit_status_hints(&tab_local, GLOBAL_KEYS, width));
+            assert!(text.is_empty(), "at width {width}: {text:?}");
+        }
     }
 
     /// Reporting `-8.5 .. +9.5` as `±9.5` understates one side by two ppm and
@@ -2486,28 +2672,32 @@ mod tests {
         let title = spark_title("wrmse", &[2.0, 0.5, f64::NAN], true);
         assert!(title.contains("peak 2"), "{title}");
         assert!(title.contains("now 0.5000"), "{title}");
-    }
 
-    /// Batch 0's `max_delta` is NaN, so the plot is flat at the floor, where
-    /// `peak 0  now 0` would read as "converged" rather than "not measured".
-    #[test]
-    fn spark_title_reports_no_number_when_no_sample_is_finite() {
+        // Batch 0's `max_delta` is NaN, so the plot is flat at the floor, where
+        // `peak 0  now 0` would read as "converged" rather than "not measured":
+        // `peak` starts at `NEG_INFINITY` precisely so it prints `—` instead.
         let title = spark_title("max_delta", &[f64::NAN], true);
         assert_eq!(title, "max_delta  peak —  now —  (NaN holds)");
     }
 
-    /// Every tab, every mark layer, both DP-pane states and the keys overlay,
-    /// drawn at every size from 0x0 up.
+    /// Every tab, every mark layer, both DP-pane states, a scrubbed frame, an
+    /// empty app and the keys overlay, drawn at every size the layout branches
+    /// differently at.
     ///
     /// A panic here is not cosmetic: `[profile.release]` sets
     /// `panic = "abort"`, so nothing can save the process and a user who
     /// shrinks their terminal during a pause kills the search. Terminal size is
     /// outside the program's control, so no size may be assumed renderable.
     ///
-    /// Exhaustive to 12x12 — past every threshold the layout branches on
-    /// (`area.width < 3`, `block_h < 3`, `gutter_w + 3`, `area.height >= 4`,
-    /// `DP_PANE_MIN`), leaving an off-by-one nowhere to hide — plus a few larger
-    /// and lopsided terminals.
+    /// The sizes are the layout's own thresholds and their neighbours, not a
+    /// product. This used to sweep 0..=12 x 0..=12 exhaustively, which is ~140
+    /// pairs differing from a neighbour only in how much padding they carry, and
+    /// made this test the whole module's runtime — a `Layout::split` on an area
+    /// the solver has not seen costs about a millisecond in a debug build, so
+    /// the sweep is linear in *distinct sizes* however few combinations visit
+    /// them. Each threshold below is instead crossed with the other dimension
+    /// held past all of its own, plus a tiny-by-tiny block for the
+    /// `width < 3 || block_h < 3` disjunction with both sides true.
     #[test]
     fn every_screen_draws_at_any_terminal_size() {
         // A sweep artifact, not a rendering requirement: ratatui memoizes
@@ -2516,62 +2706,99 @@ mod tests {
         // at a single size and always hits.
         Layout::init_cache(NonZeroUsize::new(20_000).expect("nonzero"));
 
-        let small: Vec<(u16, u16)> = (0..=12u16)
-            .flat_map(|w| (0..=12u16).map(move |h| (w, h)))
+        // Width thresholds and their neighbours: `area.width < 3` (the unframed
+        // fallback), `gutter_w + 3` for the y-tick gutter (`y_gutter_width`
+        // clamps to 4..=8, so 7 and 11 are the only widths that boundary can sit
+        // at), `DP_PANE_MIN.0` and `KEYS_OVERLAY_WIDTH`. Swept at a height past
+        // every height threshold.
+        let by_width = [0, 1, 2, 3, 6, 7, 11, 12, 39, 40, 51, 52].map(|w| (w, 12));
+        // Height thresholds: two chrome rows come off before the body sees
+        // anything, then `area.height >= 4` (the x-tick row), `block_h < 3`,
+        // `inner.height >= 2` (the subtitle row) and `DP_PANE_MIN.1` — one row
+        // later again once the scrub banner takes its own.
+        let by_height = [0, 1, 2, 3, 4, 5, 6].map(|h| (60, h));
+        // Both dimensions inside their own smallest thresholds at once.
+        let tiny = [(0, 0), (1, 1), (2, 2)];
+        // Where a width threshold and a height threshold cross.
+        let crossings = [(3, 4), (7, 4), (39, 3), (40, 3)];
+        // Larger terminals, including two extreme aspect ratios.
+        let oversized = [(1, 40), (40, 1), (60, 16), (100, 30), (200, 60)];
+
+        let thresholds: Vec<(u16, u16)> = by_width
+            .into_iter()
+            .chain(by_height)
+            .chain(tiny)
+            .chain(crossings)
             .collect();
-        // Sizes past the small sweep, including both sides of `DP_PANE_MIN`'s
-        // width and two extreme aspect ratios.
-        let large = [
-            (1, 40),
-            (40, 1),
-            (39, 3),
-            (40, 3),
-            (60, 16),
-            (100, 30),
-            (200, 60),
-        ];
-        let sizes: Vec<(u16, u16)> = small.into_iter().chain(large).collect();
+        // The short list, for the combinations whose body is a single widget:
+        // the degenerate sizes plus one of each shape. Widget layout clips and
+        // needs no size guards (see the module doc) — the manual buffer indexing
+        // the full list exists for is all on the Fit tab.
+        let smoke = [(0, 0), (1, 1), (2, 2), (0, 12), (60, 0), (60, 3), (100, 30)];
+
         // One app per combination, redrawn at every size: drawing changes none
         // of the state set up here, and rebuilding the fixture per size is
         // most of the sweep's cost.
-        let sweep = |app: &mut App| {
+        let draw_all = |app: &mut App, sizes: &[(u16, u16)]| {
             for (w, h) in sizes.iter().copied() {
                 draw_to_buffer(app, w, h);
             }
         };
+        // Everything that paints the heatmap by hand: every threshold, plus the
+        // oversized and lopsided areas its raw indexing is the only thing here
+        // that could walk off.
+        let sweep_painted = |app: &mut App| {
+            draw_all(app, &thresholds);
+            draw_all(app, &oversized);
+        };
 
-        // How the screen is divided up: every tab, both DP-pane states (which
-        // only the Fit tab reads) and the `?` overlay, which draws the same
-        // panel over whatever tab is beneath it.
-        for tab in Tab::ALL {
-            let dp_states: &[bool] = if tab == Tab::Fit {
-                &[false, true]
-            } else {
-                &[false]
-            };
-            for dp in dp_states {
-                for keys in [false, true] {
-                    let mut app = fixture_app_with_metrics();
-                    goto_tab(&mut app, tab);
-                    if *dp {
-                        press(&mut app, 'd');
-                    }
-                    if keys {
-                        press(&mut app, '?');
-                    }
-                    sweep(&mut app);
-                }
+        // How the screen is divided up. The `?` overlay is swept once rather
+        // than per tab: it `Clear`s and redraws the same panel over the whole
+        // `frame.area()` whatever is beneath it, so its size depends on the
+        // terminal and on nothing else here.
+        let mut keys_open = fixture_app_with_metrics();
+        press(&mut keys_open, '?');
+        sweep_painted(&mut keys_open);
+
+        // The Fit tab, with and without the DP pane it splits the body for.
+        for dp in [false, true] {
+            let mut app = fixture_app_with_metrics();
+            if dp {
+                press(&mut app, 'd');
             }
+            sweep_painted(&mut app);
         }
 
+        // A scrubbed frame, which is `draw_fit_tab`'s `Length(1), Min(0)` split
+        // — the one path that deliberately hands the heatmap zero rows, and
+        // unreachable without a scrub recording set.
+        let mut scrubbed = fixture_app_with_ridge();
+        scrubbed.set_frame_summary(RETAINED_5);
+        scrubbed.set_scrub_recording(2, Some(17), fixture_recording(8));
+        sweep_painted(&mut scrubbed);
+
         // What gets painted into the canvas the layout produced. A mark layer
-        // changes the glyphs, never the layout, so it needs the size sweep
-        // once rather than once per layout combination above — and only on the
-        // Fit tab, the only tab that reads `app.layer()` at all.
-        for layer in Layer::ALL {
+        // changes the glyphs, never the layout, so it needs the size sweep once
+        // rather than once per layout combination above — and only on the Fit
+        // tab, the only tab that reads `app.layer()` at all. `Layer::None` is
+        // what the Fit tab above already swept.
+        for layer in Layer::ALL.into_iter().filter(|l| *l != Layer::None) {
             let mut app = fixture_app_with_metrics();
             goto_layer(&mut app, layer);
-            sweep(&mut app);
+            sweep_painted(&mut app);
+        }
+
+        // The other two tabs, populated and empty, and the empty Fit tab, whose
+        // bodies are a `Table`, a `Sparkline` and two `Paragraph`s.
+        for tab in [Tab::Convergence, Tab::Tolerances] {
+            let mut app = fixture_app_with_metrics();
+            goto_tab(&mut app, tab);
+            draw_all(&mut app, &smoke);
+        }
+        for tab in Tab::ALL {
+            let mut app = App::new(10); // no frames, no metrics, no fit
+            goto_tab(&mut app, tab);
+            draw_all(&mut app, &smoke);
         }
     }
 }

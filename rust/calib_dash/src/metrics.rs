@@ -143,31 +143,44 @@ mod tests {
         assert_eq!(churn(&prev, &cur), (2, 1), "4 and 5 admitted, 1 evicted");
     }
 
+    /// Both signs of the same offset. The delta is a *magnitude*, so a curve
+    /// that moved down by 2 must report the same 2 as one that moved up by 2 —
+    /// without the `.abs()`, the downward direction reports `max = 0` (the
+    /// running max never rises above its 0.0 seed) and a negative mean.
     #[test]
-    fn churn_on_an_unchanged_set_is_zero() {
-        let prev = [pt(1), pt(2)];
-        assert_eq!(churn(&prev, &prev), (0, 0));
+    fn a_constant_offset_shows_up_as_that_offset_in_either_direction() {
+        let low = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
+        let high = curve_from(&[(0.0, 2.0), (10.0, 12.0)]);
+
+        let (max, mean) = curve_delta(&low, &high, (0.0, 10.0), 11);
+        assert!((max - 2.0).abs() < 1e-9, "moved up by 2, got max {max}");
+        assert!((mean - 2.0).abs() < 1e-9, "moved up by 2, got mean {mean}");
+
+        let (max, mean) = curve_delta(&high, &low, (0.0, 10.0), 11);
+        assert!((max - 2.0).abs() < 1e-9, "moved down by 2, got max {max}");
+        assert!(
+            (mean - 2.0).abs() < 1e-9,
+            "moved down by 2, got mean {mean}"
+        );
     }
 
+    /// `samples` is clamped to 2 because the sample positions divide by
+    /// `samples - 1`. No production caller passes below `CURVE_DELTA_SAMPLES`,
+    /// so nothing else would notice the clamp going missing — at 1 the position
+    /// arithmetic becomes `0.0 / 0.0` and every sample lands on NaN, and at 0
+    /// the loop never runs at all; both silently degrade to `(NaN, NaN)`.
     #[test]
-    fn churn_from_empty_is_all_admissions() {
-        assert_eq!(churn(&[], &[pt(1), pt(2)]), (2, 0));
-    }
-
-    #[test]
-    fn identical_curves_have_zero_delta() {
-        let c = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
-        let (max, mean) = curve_delta(&c, &c, (0.0, 10.0), 11);
-        assert_eq!((max, mean), (0.0, 0.0));
-    }
-
-    #[test]
-    fn a_constant_offset_shows_up_as_that_offset() {
-        let a = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
-        let b = curve_from(&[(0.0, 2.0), (10.0, 12.0)]);
-        let (max, mean) = curve_delta(&a, &b, (0.0, 10.0), 11);
-        assert!((max - 2.0).abs() < 1e-9);
-        assert!((mean - 2.0).abs() < 1e-9);
+    fn too_few_samples_are_clamped_to_the_two_endpoints() {
+        let low = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
+        let high = curve_from(&[(0.0, 2.0), (10.0, 12.0)]);
+        for samples in [0, 1, 2] {
+            let (max, mean) = curve_delta(&low, &high, (0.0, 10.0), samples);
+            assert!(
+                (max - 2.0).abs() < 1e-9 && (mean - 2.0).abs() < 1e-9,
+                "{samples} samples must still measure the constant offset over \
+                 the two endpoints, got ({max}, {mean})"
+            );
+        }
     }
 
     #[test]
@@ -222,10 +235,8 @@ mod tests {
         ];
         // (10*1 + 20*3) / 4 = 17.5
         assert!((weighted_ridge_half_width(&widths) - 17.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn weighted_ridge_half_width_of_nothing_is_nan() {
+        // Nothing to average is not a number, rather than the 0.0 a bare
+        // `sum / total` would produce out of a 0/0.
         assert!(weighted_ridge_half_width(&[]).is_nan());
     }
 }

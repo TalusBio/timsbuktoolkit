@@ -158,6 +158,15 @@ mod tests {
         }
     }
 
+    /// `pt`, tagged with the chunk that recorded it, so one frame's span cannot
+    /// pass for another's.
+    fn pt_in(chunk: usize, i: usize) -> CalibrantPoint {
+        CalibrantPoint {
+            speclib_index: chunk * 100 + i,
+            ..pt(i)
+        }
+    }
+
     fn budget_for(frames: usize, n_cal: usize) -> usize {
         frames * n_cal * std::mem::size_of::<CalibrantPoint>()
     }
@@ -181,58 +190,84 @@ mod tests {
         }
     }
 
+    /// Retained frames exceed the *stride* budget by exactly one — the reserved
+    /// final span, which is what makes the last chunk always replayable however
+    /// the stride falls. Points are asserted per frame, and made
+    /// chunk-distinguishable to do it: with the same `pt(i)` in every frame the
+    /// whole slab looks alike, so a `record` offset off by a frame would hand
+    /// the scrubber a different frame's points unnoticed.
     #[test]
-    fn retained_frames_never_exceed_the_budget() {
+    fn the_last_frame_is_always_retained_with_its_own_points() {
         let mut store = FrameStore::new(12, 4, budget_for(3, 4));
         for chunk in 0..12 {
-            store.record(chunk, (0..4).map(pt));
+            store.record(chunk, (0..4).map(|i| pt_in(chunk, i)));
         }
         store.finish();
+
         // Hand-computed for this fixture: chunks 0, 4, 8 land on the stride
         // (keep_every = 4), chunk 11 is promoted as the reserved last frame,
         // and the other 8 of the 12 recorded chunks are dropped.
         let summary = store.summary();
         assert_eq!(summary.retained, 4, "3 strided + 1 reserved last");
         assert_eq!(summary.dropped, 8);
-    }
 
-    #[test]
-    fn the_last_frame_is_always_retained() {
-        let mut store = FrameStore::new(10, 4, budget_for(3, 4));
-        for chunk in 0..10 {
-            store.record(chunk, (0..4).map(pt));
+        let chunks: Vec<usize> = (0..summary.retained)
+            .map(|i| store.frame(i).expect("retained frames are readable").0)
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![0, 4, 8, 11],
+            "the final chunk is the last frame"
+        );
+        for i in 0..summary.retained {
+            let (chunk, pts) = store.frame(i).unwrap();
+            let expected: Vec<CalibrantPoint> = (0..4).map(|j| pt_in(chunk, j)).collect();
+            assert_eq!(
+                pts,
+                expected.as_slice(),
+                "frame {i} must replay chunk {chunk}'s own points"
+            );
         }
-        store.finish();
-        let (chunk, _) = store
-            .frame(store.summary().retained - 1)
-            .expect("a last frame must exist");
-        assert_eq!(chunk, 9);
     }
 
+    /// The recorded length is the *iterator's*, clamped to `n_calibrants`:
+    /// early chunks have not filled the heap yet, and an overlong batch must be
+    /// truncated rather than overrun the frame's span.
     #[test]
     fn recorded_points_round_trip() {
-        let mut store = FrameStore::new(1, 4, budget_for(1, 4));
+        // (points offered, expected recorded length)
+        let cases = [(4, 4), (2, 2), (9, 4)];
+        for (offered, expected) in cases {
+            let mut store = FrameStore::new(1, 4, budget_for(1, 4));
+            store.record(0, (0..offered).map(pt));
+            let (chunk, pts) = store.frame(0).unwrap();
+            assert_eq!(chunk, 0);
+            let want: Vec<CalibrantPoint> = (0..expected).map(pt).collect();
+            assert_eq!(
+                pts,
+                want.as_slice(),
+                "{offered} points offered must record as {expected}"
+            );
+        }
+    }
+
+    /// `n_calibrants == 0` is a real shape (`calib_dash <file>` derives it from
+    /// the snapshot's point count, and a snapshot can be empty), and so is a
+    /// zero budget. `n_calibrants.max(1)` is what keeps a frame from being
+    /// zero-width: every frame holds at least one point, and the frame-size
+    /// divisor `new` computes from it stays nonzero.
+    #[test]
+    fn a_store_asked_for_no_calibrant_slots_still_keeps_one() {
+        let mut store = FrameStore::new(4, 0, 0);
         store.record(0, (0..4).map(pt));
-        let (chunk, pts) = store.frame(0).unwrap();
+        store.finish();
+        let (chunk, pts) = store.frame(0).expect("chunk 0 lands on the stride");
         assert_eq!(chunk, 0);
-        assert_eq!(pts, &[pt(0), pt(1), pt(2), pt(3)]);
-    }
-
-    #[test]
-    fn a_short_frame_records_its_real_length() {
-        // Early chunks have not filled the heap yet.
-        let mut store = FrameStore::new(1, 4, budget_for(1, 4));
-        store.record(0, (0..2).map(pt));
-        let (_, pts) = store.frame(0).unwrap();
-        assert_eq!(pts.len(), 2);
-    }
-
-    #[test]
-    fn an_overlong_frame_is_truncated_not_overrun() {
-        let mut store = FrameStore::new(1, 4, budget_for(1, 4));
-        store.record(0, (0..9).map(pt));
-        let (_, pts) = store.frame(0).unwrap();
-        assert_eq!(pts.len(), 4, "clamped to n_calibrants");
+        assert_eq!(
+            pts,
+            &[pt(0)],
+            "a zero-calibrant store still records into one slot per frame"
+        );
     }
 
     /// The dashboard's "allocate once at startup, never during a run"
