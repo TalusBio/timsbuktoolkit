@@ -9,8 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Incremental artifacts are per-run garbage that would bloat the cache below
-  # without ever being reused; CI compiles each crate once.
   CARGO_INCREMENTAL: 0
 
 jobs:
@@ -24,41 +22,28 @@ jobs:
           - "--no-default-features"  # serial
     steps:
       - uses: actions/checkout@v6
-      # This workflow compiled all ~350 dependency crates from scratch on every
-      # run. `cache-key` splits the two matrix legs: they resolve different
-      # feature sets, so one shared entry would thrash.
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          # This action defaults to `-D warnings`. Adding it for caching should
-          # not also change lint policy — that turned a warning into a build
-          # failure the first time. Empty keeps warnings as warnings, which is
-          # what this workflow did before; `task clippy` owns `-D warnings`.
-          rustflags: ''
+          # Per leg: the two resolve different features and would thrash one entry.
           cache-key: ${{ matrix.features }}
+          # This action defaults to `-D warnings`; `task clippy` owns that.
+          rustflags: ''
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests
         run: cargo test --verbose -p timsseek ${{ matrix.features }}
-      # Raw-reader / staging / mzML-ingest coverage. Run once (default matrix
-      # leg): timsseek alone doesn't exercise timscentroid's mzdata ingest,
-      # tims_stage manifest staging, or the timsquery mobility gate.
+      # timsseek alone misses timscentroid's mzdata ingest, tims_stage staging
+      # and the timsquery mobility gate.
       - name: Run reader + staging tests (mzdata)
         if: matrix.features == ''
         run: |
           cargo test -p timscentroid --features mzdata
           cargo test -p tims_stage -p timsquery
 
-  # CLI / simulator / viewer / macro crates, which the timsseek matrix above
-  # never touches: timsseek_cli's config drift guards live in its bin target,
-  # apex_sim's tests in its lib (default features, so the gui-gated modules
-  # compile too), timsseek_macros' in its proc-macro lib.
-  # `--all-targets` so examples are compiled as well — examples going unbuilt
-  # is what let `timsseek_cli/examples/load_bench.rs` rot undetected.
-  # timsquery_viewer is here because no job compiled it at all, which is how it
-  # accumulated 16 unreported `f32: From<f64>` warnings that a future rustc
-  # turns into hard errors.
+  # Crates the timsseek matrix above never compiles. `--all-targets` so examples
+  # are built too — that is what let `timsseek_cli/examples/load_bench.rs` rot.
   cli-and-sim:
     runs-on: ubuntu-latest
     steps:
@@ -67,23 +52,15 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          # Bump when the `-p` list below changes. The cache key is built from
-          # the toolchain, Cargo.lock and the env — NOT from which packages get
-          # built — so widening the build hits the old key exactly, and
-          # rust-cache then reports "Cache up-to-date" and saves nothing. The
-          # new crates would recompile on every run until Cargo.lock next moved.
+          # Bump when the `-p` list changes: the key ignores it, so a widened
+          # build hits the old key and rust-cache saves nothing.
           cache-key: pkgs-cli-sim-viewer
-          # This action defaults to `-D warnings`. Adding it for caching should
-          # not also change lint policy — that turned a warning into a build
-          # failure the first time. Empty keeps warnings as warnings, which is
-          # what this workflow did before; `task clippy` owns `-D warnings`.
+          # This action defaults to `-D warnings`; `task clippy` owns that.
           rustflags: ''
       - name: Build
         run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
       - name: Run tests
         run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
-      # The dashboard is opt-in, so its call sites in `timsseek_cli` compile
-      # under no other leg of this matrix. Without this they rot silently the
-      # next time `FinalResult` or `RescoreFeatureStats` changes.
+      # Opt-in, so these call sites compile under no other leg.
       - name: Type-check (dashboard feature)
         run: cargo check -p timsseek_cli --features dashboard --all-targets
