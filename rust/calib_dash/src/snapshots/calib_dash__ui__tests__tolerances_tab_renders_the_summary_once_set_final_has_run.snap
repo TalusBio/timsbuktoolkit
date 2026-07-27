@@ -5,11 +5,11 @@ expression: out
  Fit │ Convergence │ Tolerances                                                                     
 ┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
 │RT residual: weighted half-width 6.5281s over 12 ridge column(s)                                  │
-│range: 3.0000s .. 9.0000s                                                                         │
+│  range: 3.0000s .. 9.0000s                                                                       │
 │                                                                                                  │
-│m/z tolerance: (-8.5, 9.5) ppm                                                                    │
-│mobility tolerance: (-3.0, 3.0) %                                                                 │
-│RT tolerance (symmetric): ±12.5s across 42 calibrant(s)                                           │
+│m/z tolerance: -8.5 .. +9.5 ppm                                                                   │
+│mobility tolerance: ±3.0 %                                                                        │
+│RT tolerance: ±12.5s across 42 calibrant(s)                                                       │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

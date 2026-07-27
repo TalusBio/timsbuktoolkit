@@ -234,7 +234,7 @@ mod calib_dash_hook {
                 // tolerance, and `ToleranceSummary::rt_seconds` is symmetric
                 // by construction (see that field's doc comment), so the one
                 // value fills both slots.
-                rt_seconds: (rt_tolerance_seconds, rt_tolerance_seconds),
+                rt_seconds: rt_tolerance_seconds,
                 n_calibrants: calibration.errors().rt_seconds.n,
             },
         );

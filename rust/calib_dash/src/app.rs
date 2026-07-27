@@ -783,18 +783,18 @@ fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f6
 /// `CalibDash`) since `ui.rs`'s `draw_tolerances_tab` only ever sees an
 /// `App`.
 ///
-/// `mz_ppm` and `mobility_pct` are genuinely asymmetric `(lo, hi)` pairs —
-/// Step B can derive a different tolerance on either side of a calibrant.
-/// `rt_seconds` is not; see its own doc comment.
+/// `mz_ppm` and `mobility_pct` are signed `(lo, hi)` windows around zero and
+/// are genuinely asymmetric — Step B can derive a different tolerance on
+/// either side of a calibrant. `rt_seconds` is symmetric by construction, and
+/// is a bare half-width rather than a third `(lo, hi)`: a tuple here would
+/// carry the same number twice under a type that says the two sides may
+/// differ, and any renderer reading only `.0` would silently drop the other.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToleranceSummary {
     pub mz_ppm: (f64, f64),
     pub mobility_pct: (f64, f64),
-    /// Symmetric by construction: both elements are always equal (see the
-    /// struct doc comment). Not `f64` alone because the Tolerances tab
-    /// renders all three tolerances the same `(lo, hi)` way; a lone scalar
-    /// here would need its own special-cased rendering for no real benefit.
-    pub rt_seconds: (f64, f64),
+    /// Half-width: the tolerance is `±rt_seconds`.
+    pub rt_seconds: f64,
     pub n_calibrants: usize,
 }
 

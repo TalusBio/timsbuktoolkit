@@ -1190,9 +1190,17 @@ fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
     lines.push(Line::raw(""));
     lines.push(Line::raw("path:"));
     for d in dp {
-        let marker = if d.chose.is_some() { "->" } else { "  " };
+        // The predecessor index itself, not a `->` marker: `chose` is what
+        // the DP actually decided at this node, and rendering it as a
+        // present/absent flag throws away the edge while still spending the
+        // columns. `root` is the absent case — a node the DP reached with no
+        // predecessor, which is the chain's start rather than a failure.
+        let edge = match d.chose {
+            Some(j) => format!("<-{j:<3}"),
+            None => "root ".to_string(),
+        };
         lines.push(Line::raw(format!(
-            "{marker} i={:>3} lib={:.2} obs={:.2}",
+            "i={:>3} lib={:.2} obs={:.2} {edge}",
             d.i, d.library, d.observed
         )));
     }
@@ -1381,22 +1389,38 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let wrmse: Vec<f64> = metrics.iter().map(|m| m.wrmse).collect();
-    let max_delta: Vec<f64> = metrics.iter().map(|m| m.max_delta).collect();
-    let mean_delta: Vec<f64> = metrics.iter().map(|m| m.mean_delta).collect();
-    let path_nodes: Vec<u64> = metrics.iter().map(|m| m.path_nodes as u64).collect();
-    let ridge_hw: Vec<f64> = metrics.iter().map(|m| m.ridge_half_width).collect();
-
-    // The four series that pass through `scaled_u64` are titled "NaN holds"
-    // because a NaN sample repeats the last finite value rather than dropping
-    // to 0 — see `scaled_u64`. Without the title, a flat run at batch 0 or
-    // across a failed batch reads identically to "the curve stopped moving."
-    let series: [(&str, Vec<u64>); 5] = [
-        ("wrmse (NaN holds)", scaled_u64(&wrmse)),
-        ("max_delta (NaN holds)", scaled_u64(&max_delta)),
-        ("mean_delta (NaN holds)", scaled_u64(&mean_delta)),
-        ("path_nodes", path_nodes),
-        ("ridge_half_width (NaN holds)", scaled_u64(&ridge_hw)),
+    // Every series is normalized to its own maximum, and `path_nodes` counts
+    // while the rest are seconds — so nothing about a sparkline's shape or
+    // its height relative to its neighbours carries a magnitude. Each series
+    // is titled with the two numbers that put one back: see `spark_title`.
+    //
+    // `nan_holds` marks the series where a non-finite sample repeats the last
+    // finite value rather than dropping to 0 (see `scaled_u64`). Without the
+    // note, a flat run at batch 0 or across a failed batch reads identically
+    // to "the curve stopped moving." `path_nodes` is a count and cannot be
+    // NaN, so it carries no note.
+    let series: [(&str, Vec<f64>, bool); 5] = [
+        ("wrmse", metrics.iter().map(|m| m.wrmse).collect(), true),
+        (
+            "max_delta",
+            metrics.iter().map(|m| m.max_delta).collect(),
+            true,
+        ),
+        (
+            "mean_delta",
+            metrics.iter().map(|m| m.mean_delta).collect(),
+            true,
+        ),
+        (
+            "path_nodes",
+            metrics.iter().map(|m| m.path_nodes as f64).collect(),
+            false,
+        ),
+        (
+            "ridge_half_width",
+            metrics.iter().map(|m| m.ridge_half_width).collect(),
+            true,
+        ),
     ];
 
     // `Fill(1)` rather than `Ratio(1, 5)`: ratatui distributes leftover space
@@ -1404,14 +1428,59 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     // sparklines come out the same height (or within one row of each other)
     // instead of a few segments silently absorbing all of the remainder.
     let spark_rows = Layout::vertical([Constraint::Fill(1); 5]).split(area);
-    for (i, (label, data)) in series.iter().enumerate() {
+    for (i, (label, values, nan_holds)) in series.iter().enumerate() {
         let Some(row) = spark_rows.get(i).copied() else {
             continue;
         };
+        let data = scaled_u64(values);
         let spark = Sparkline::default()
-            .block(Block::bordered().title(*label))
+            .block(Block::bordered().title(spark_title(label, values, *nan_holds)))
             .data(data.as_slice());
         frame.render_widget(spark, row);
+    }
+}
+
+/// `label  peak <p>  now <n>` — the y-scale and the latest sample.
+///
+/// A sparkline normalized to its own maximum always fills its pane top to
+/// bottom, so a `wrmse` that fell 5.0 → 0.08 draws the same descent to the
+/// same floor as one that fell 5.0 → 4.9. `peak` is the value at the top of
+/// the plot and `now` the value at its right edge; together they turn the
+/// shape back into a measurement.
+///
+/// `now` is the last *finite* sample, not the last one, so it matches the
+/// height actually drawn at the right edge under `scaled_u64`'s hold
+/// semantics. Both read `—` when the series has no finite sample yet.
+fn spark_title(label: &str, values: &[f64], nan_holds: bool) -> String {
+    let peak = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let now = values.iter().copied().rfind(|v| v.is_finite());
+    let holds = if nan_holds { "  (NaN holds)" } else { "" };
+    format!(
+        "{label}  peak {}  now {}{holds}",
+        fmt_metric(peak),
+        fmt_metric(now.unwrap_or(f64::NAN)),
+    )
+}
+
+/// A metric as a short decimal: `—` when non-finite, no fractional part for a
+/// whole number (`path_nodes` is a count), scientific notation only at the
+/// magnitudes where four decimal places would print `0.0000` or overflow the
+/// title.
+fn fmt_metric(v: f64) -> String {
+    if !v.is_finite() {
+        return "—".to_string();
+    }
+    let mag = v.abs();
+    if v == 0.0 || v.fract() == 0.0 && mag < 100_000.0 {
+        format!("{v:.0}")
+    } else if !(0.001..100_000.0).contains(&mag) {
+        format!("{v:.2e}")
+    } else {
+        format!("{v:.4}")
     }
 }
 
@@ -1486,6 +1555,22 @@ fn draw_batch_table(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
 // Tolerances tab
 // ---------------------------------------------------------------------
 
+/// A signed tolerance window around zero: `±9.5` when the two sides match,
+/// `-8.5 .. +9.5` when they do not.
+///
+/// The explicit signs are the point. `(-8.5, 9.5)` reads as a range of
+/// measured *values*; `-8.5 .. +9.5` reads as the window around each
+/// calibrant that it actually is. Collapsing the symmetric case to `±` keeps
+/// the asymmetry visible as a difference in shape rather than something the
+/// reader has to notice by comparing two numbers.
+fn fmt_interval((lo, hi): (f64, f64)) -> String {
+    if lo == -hi {
+        format!("±{hi:.1}")
+    } else {
+        format!("{lo:+.1} .. {hi:+.1}")
+    }
+}
+
 fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1528,21 +1613,16 @@ fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
             match app.tolerances() {
                 Some(t) => {
                     lines.push(Line::raw(format!(
-                        "m/z tolerance: ({:.1}, {:.1}) ppm",
-                        t.mz_ppm.0, t.mz_ppm.1
+                        "m/z tolerance: {} ppm",
+                        fmt_interval(t.mz_ppm)
                     )));
                     lines.push(Line::raw(format!(
-                        "mobility tolerance: ({:.1}, {:.1}) %",
-                        t.mobility_pct.0, t.mobility_pct.1
+                        "mobility tolerance: {} %",
+                        fmt_interval(t.mobility_pct)
                     )));
-                    // `rt_seconds` is symmetric by construction (both tuple
-                    // elements are always equal — see `ToleranceSummary`'s
-                    // doc comment), so this reports it as a single ± value
-                    // rather than a `(lo, hi)` pair that would read as if the
-                    // two sides could differ.
                     lines.push(Line::raw(format!(
-                        "RT tolerance (symmetric): ±{:.1}s across {} calibrant(s)",
-                        t.rt_seconds.0, t.n_calibrants
+                        "RT tolerance: ±{:.1}s across {} calibrant(s)",
+                        t.rt_seconds, t.n_calibrants
                     )));
                 }
                 None => {
@@ -1552,9 +1632,13 @@ fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
                     ));
                 }
             }
+            // `trim: false`, unlike the prose branch above: these lines are a
+            // structure, not a paragraph, and the ridge sub-line is indented
+            // to show it qualifies the RT-residual line over it. `trim: true`
+            // strips exactly that indent.
             frame.render_widget(
                 Paragraph::new(lines)
-                    .wrap(Wrap { trim: true })
+                    .wrap(Wrap { trim: false })
                     .block(Block::bordered().title("Tolerances")),
                 area,
             );
@@ -1968,7 +2052,7 @@ mod tests {
             crate::ToleranceSummary {
                 mz_ppm: (-8.5, 9.5),
                 mobility_pct: (-3.0, 3.0),
-                rt_seconds: (12.5, 12.5),
+                rt_seconds: 12.5,
                 n_calibrants: 42,
             },
         );
@@ -2414,5 +2498,75 @@ mod tests {
         let global: &[(&str, &str)] = &[("h l", "tab")];
         let text = line_text(&fit_status_hints(tab_local, global, 0));
         assert!(text.is_empty(), "{text:?}");
+    }
+
+    /// The asymmetric case has to survive as a visibly different shape.
+    /// Reporting `-8.5 .. +9.5` as `±9.5` would understate one side by two
+    /// ppm, and reporting it as `±8.5` would overstate the other — the whole
+    /// reason `mz_ppm` is a pair rather than a half-width.
+    #[test]
+    fn fmt_interval_collapses_only_the_symmetric_case() {
+        assert_eq!(fmt_interval((-3.0, 3.0)), "±3.0");
+        assert_eq!(fmt_interval((-8.5, 9.5)), "-8.5 .. +9.5");
+    }
+
+    /// `now` reports the value drawn at the sparkline's right edge, which
+    /// under `scaled_u64`'s hold semantics is the last *finite* sample — not
+    /// the last one. A batch whose fit failed leaves a trailing NaN, and
+    /// reporting that as `—` while the plot still shows the held bar would
+    /// contradict the picture directly above it.
+    #[test]
+    fn spark_title_reports_the_value_the_right_edge_actually_draws() {
+        let title = spark_title("wrmse", &[2.0, 0.5, f64::NAN], true);
+        assert!(title.contains("peak 2"), "{title}");
+        assert!(title.contains("now 0.5000"), "{title}");
+    }
+
+    /// Batch 0's `max_delta` is NaN — there is no prior curve to diff
+    /// against. With no finite sample the plot is flat at the floor, and
+    /// `peak 0  now 0` would read as "converged to zero" rather than "nothing
+    /// measured yet."
+    #[test]
+    fn spark_title_reports_no_number_when_no_sample_is_finite() {
+        let title = spark_title("max_delta", &[f64::NAN], true);
+        assert_eq!(title, "max_delta  peak —  now —  (NaN holds)");
+    }
+
+    /// Every tab, every mark layer, both DP-pane states and the keys overlay,
+    /// drawn at sizes down to 1x1.
+    ///
+    /// A panic here is not cosmetic: `[profile.release]` sets
+    /// `panic = "abort"`, so `catch_panics` cannot save the process and a
+    /// user who shrinks their terminal during a pause kills the search. The
+    /// terminal size is entirely outside the program's control, so no size
+    /// may be assumed renderable.
+    #[test]
+    fn every_screen_draws_at_any_terminal_size() {
+        for w in [1u16, 2, 4, 8, 16, 30, 60, 100] {
+            for h in [1u16, 2, 3, 4, 8, 16, 30] {
+                for tab in Tab::ALL {
+                    for layer in Layer::ALL {
+                        for dp in [false, true] {
+                            for keys in [false, true] {
+                                let mut app = fixture_app_with_metrics();
+                                while app.tab() != tab {
+                                    press(&mut app, 'l');
+                                }
+                                while app.layer() != layer {
+                                    press(&mut app, 'm');
+                                }
+                                if dp {
+                                    press(&mut app, 'd');
+                                }
+                                if keys {
+                                    press(&mut app, '?');
+                                }
+                                draw_to_buffer(&mut app, w, h);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
