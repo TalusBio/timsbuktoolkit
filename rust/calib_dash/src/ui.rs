@@ -85,9 +85,15 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "-".to_string());
     // Deliberately terse: at 100 columns the previous, fuller wording clipped
     // before `d:dp-pane`, hiding that key entirely rather than just looking
-    // busy.
+    // busy. `h/l`, `<>` and the overlay letters are the same idea applied to
+    // the keys the key map task added — see `App::handle_key`'s "tabs" /
+    // "Fit-tab batch scrubber" / "Fit-tab overlay toggles" sections for what
+    // each one actually does; the Fit tab's own scrub banner (`draw_fit_tab`)
+    // is what actually says *which* frame is on screen, so this line only
+    // needs to list the keys, not the current scrub position too.
     let text = format!(
-        " b{} {} cnt:{} | n:next r:run q:detach ^C:abort [/]:stage d:dp",
+        " b{} {} cnt:{} | n:next r:run q:detach ^C:abort [/]:stage h/l:tab \
+         <>:frame s/p/c/w:ovl d:dp",
         app.batch(),
         app.stage().label(),
         count,
@@ -103,10 +109,47 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let rec = app.recording();
+    // The recording actually on screen: the scrubbed frame while `<`/`>`
+    // have selected one, the live batch otherwise — see
+    // `App::active_recording`.
+    let rec = app.active_recording();
     if rec.geom().bins == 0 {
         frame.render_widget(Paragraph::new("No grid recorded yet."), area);
         return;
+    }
+
+    // When scrubbing, carve out one banner row so it is never ambiguous that
+    // this is a replayed batch rather than the live one — the whole reason
+    // `<`/`>` exist is to compare an earlier batch against the current one,
+    // which only works if it's always obvious which is which. Skipped
+    // entirely for the live view (the common case) and when there isn't
+    // room, rather than shrinking the heatmap into uselessness.
+    let (banner, area) = match app.scrub_frame() {
+        Some(i) if area.height > 1 => {
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+            (Some((i, rows[0])), rows[1])
+        }
+        _ => (None, area),
+    };
+    if let Some((i, banner_area)) = banner {
+        let total = app.retained_frames().max(1);
+        let batch_note = app
+            .scrub_chunk()
+            .map(|c| format!(", batch {c}"))
+            .unwrap_or_default();
+        let text = format!(
+            " SCRUBBED — retained frame {}/{}{batch_note} (not live; `>` returns to now)",
+            i + 1,
+            total
+        );
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            banner_area,
+        );
     }
 
     // Only carve out a DP pane when there is enough width left for the
@@ -228,7 +271,7 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let rec = app.recording();
+    let rec = app.active_recording();
     let bins = rec.geom().bins;
     if bins == 0 {
         frame.render_widget(Paragraph::new("Grid has zero bins."), area);
@@ -690,12 +733,17 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     let path_nodes: Vec<u64> = metrics.iter().map(|m| m.path_nodes as u64).collect();
     let ridge_hw: Vec<f64> = metrics.iter().map(|m| m.ridge_half_width).collect();
 
+    // Titles for the four series that pass through `scaled_u64` say what a
+    // flat run actually means now that a NaN sample holds the last finite
+    // value instead of dropping to 0 — see that function's doc comment for
+    // why: a flat run at batch 0, or across a failed batch, must not read
+    // identically to "the curve stopped moving."
     let series: [(&str, Vec<u64>); 5] = [
-        ("wrmse", scaled_u64(&wrmse)),
-        ("max_delta", scaled_u64(&max_delta)),
-        ("mean_delta", scaled_u64(&mean_delta)),
+        ("wrmse (NaN holds)", scaled_u64(&wrmse)),
+        ("max_delta (NaN holds)", scaled_u64(&max_delta)),
+        ("mean_delta (NaN holds)", scaled_u64(&mean_delta)),
         ("path_nodes", path_nodes),
-        ("ridge_half_width", scaled_u64(&ridge_hw)),
+        ("ridge_half_width (NaN holds)", scaled_u64(&ridge_hw)),
     ];
 
     // `Fill(1)` rather than `Ratio(1, 5)`: ratatui distributes leftover space
@@ -715,10 +763,19 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
 }
 
 /// Scales a metric series into `0..=1000` for `Sparkline`, which only takes
-/// `u64`. NaN/infinite samples (a real possibility — `weighted_ridge_half_width`
-/// is NaN with no ridge measurements) render as `0` rather than corrupting the
-/// scale; an all-non-finite or all-zero series renders as flat zero rather
-/// than dividing by zero.
+/// `u64` and so cannot mark a sample as "no data" distinctly from `0`.
+/// NaN/infinite samples are a real possibility here — batch 0 always has a
+/// NaN `max_delta`/`mean_delta` (no prior curve to compare against yet), and
+/// so does any batch whose fit fails outright (`wrmse`, `ridge_half_width`
+/// too) — and mapping every one of them to the scale's `0` would draw
+/// identically to "the curve stopped moving," on the one tab whose job is
+/// showing when it actually did.
+///
+/// Instead, each non-finite sample repeats the last finite value seen so far
+/// (holds rather than drops), and only a run of non-finite samples with no
+/// finite value before them yet — only possible at the very start of the
+/// series — reports as `0`, which is genuinely "nothing to show yet," not
+/// "converged." `draw_sparklines`'s titles say a flat run means this.
 fn scaled_u64(values: &[f64]) -> Vec<u64> {
     let max = values
         .iter()
@@ -728,14 +785,14 @@ fn scaled_u64(values: &[f64]) -> Vec<u64> {
     if max <= 0.0 {
         return vec![0; values.len()];
     }
+    let mut last = 0u64;
     values
         .iter()
         .map(|v| {
             if v.is_finite() {
-                ((v / max) * 1000.0).round().clamp(0.0, 1000.0) as u64
-            } else {
-                0
+                last = ((v / max) * 1000.0).round().clamp(0.0, 1000.0) as u64;
             }
+            last
         })
         .collect()
 }
@@ -815,10 +872,33 @@ fn draw_tolerances_tab(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::raw("  (no ridge measurements recorded)"));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::raw(
-                "m/z and mobility distributions are Step B measurements outside this RT \
-                 recording; they render here once the tolerance summary is wired through.",
-            ));
+            match app.tolerances() {
+                Some(t) => {
+                    lines.push(Line::raw(format!(
+                        "m/z tolerance: ({:.1}, {:.1}) ppm",
+                        t.mz_ppm.0, t.mz_ppm.1
+                    )));
+                    lines.push(Line::raw(format!(
+                        "mobility tolerance: ({:.1}, {:.1}) %",
+                        t.mobility_pct.0, t.mobility_pct.1
+                    )));
+                    // `rt_seconds` is symmetric by construction (both tuple
+                    // elements are always equal — see `ToleranceSummary`'s
+                    // doc comment), so this reports it as a single ± value
+                    // rather than a `(lo, hi)` pair that would read as if the
+                    // two sides could differ.
+                    lines.push(Line::raw(format!(
+                        "RT tolerance (symmetric): ±{:.1}s across {} calibrant(s)",
+                        t.rt_seconds.0, t.n_calibrants
+                    )));
+                }
+                None => {
+                    lines.push(Line::raw(
+                        "m/z and mobility distributions are Step B measurements outside this \
+                         RT recording; they have not been wired through for this run.",
+                    ));
+                }
+            }
             frame.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: true })
@@ -1054,6 +1134,50 @@ mod tests {
         insta::assert_snapshot!(out);
     }
 
+    /// `App::set_scrub_recording` is what `CalibDash::sync_scrub` calls once
+    /// `<`/`>` have moved `scrub_frame` — this pins that the Fit tab actually
+    /// switches to that recording (a different, distinguishable grid from
+    /// the live one) and draws the "not live" banner, rather than silently
+    /// continuing to show the live batch.
+    #[test]
+    fn fit_tab_shows_a_banner_and_a_different_grid_when_scrubbing() {
+        let mut app = fixture_app_with_ridge();
+        app.set_frame_summary(5, 1, 0);
+        let scrubbed = fixture_recording(8); // deliberately a different grid
+        app.set_scrub_recording(2, Some(17), scrubbed);
+
+        let out = render(&mut app, 100, 30);
+        assert!(
+            out.contains("SCRUBBED"),
+            "must announce this is a replayed batch:\n{out}"
+        );
+        assert!(
+            out.contains("3/5"),
+            "must show a 1-based frame position out of the retained total:\n{out}"
+        );
+        assert!(
+            out.contains("batch 17"),
+            "must show the scrubbed frame's original batch number:\n{out}"
+        );
+        insta::assert_snapshot!(out);
+    }
+
+    /// Clearing the scrub (as `>` past the last retained frame does) must
+    /// drop the banner and go back to rendering the live recording.
+    #[test]
+    fn clearing_the_scrub_returns_to_the_live_view() {
+        let mut app = fixture_app_with_ridge();
+        app.set_frame_summary(5, 1, 0);
+        app.set_scrub_recording(2, Some(17), fixture_recording(8));
+        app.clear_scrub();
+
+        let out = render(&mut app, 100, 30);
+        assert!(
+            !out.contains("SCRUBBED"),
+            "banner must be gone once scrub is cleared:\n{out}"
+        );
+    }
+
     #[test]
     fn convergence_tab_renders_metrics_and_churn() {
         let mut app = fixture_app_with_metrics();
@@ -1066,6 +1190,50 @@ mod tests {
         let mut app = fixture_app_with_ridge(); // real_fit is None
         app.set_tab(Tab::Tolerances);
         insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    /// Once `App::set_final` (the same setter `CalibDash::show_final` uses)
+    /// has run, the Tolerances tab must actually render the m/z, mobility
+    /// and RT numbers rather than the "not wired through yet" placeholder —
+    /// that placeholder text is exactly what regressed before this fix (the
+    /// summary was computed and thrown away).
+    #[test]
+    fn tolerances_tab_renders_the_summary_once_set_final_has_run() {
+        let mut app = fixture_app_with_ridge();
+        let rec = {
+            let mut state = CalibrationState::new(16, (0.0, 16.0), (0.0, 48.0), 1).unwrap();
+            state.update(ridge_points().into_iter()).unwrap();
+            let mut rec = FitRecording::new(16);
+            state.fit_with(&mut rec, ObserveOpts::NONE);
+            state.measure_ridge_width_with(0.3, &mut rec);
+            rec
+        };
+        app.set_final(
+            rec,
+            crate::ToleranceSummary {
+                mz_ppm: (-8.5, 9.5),
+                mobility_pct: (-3.0, 3.0),
+                rt_seconds: (12.5, 12.5),
+                n_calibrants: 42,
+            },
+        );
+        app.set_tab(Tab::Tolerances);
+        let out = render(&mut app, 100, 30);
+        assert!(
+            out.contains("-8.5") && out.contains("9.5"),
+            "m/z tolerance missing:\n{out}"
+        );
+        assert!(
+            out.contains("-3.0") && out.contains("3.0"),
+            "mobility tolerance missing:\n{out}"
+        );
+        assert!(out.contains("12.5"), "RT tolerance missing:\n{out}");
+        assert!(
+            out.contains('±'),
+            "RT tolerance must read as symmetric:\n{out}"
+        );
+        assert!(out.contains("42"), "n_calibrants missing:\n{out}");
+        insta::assert_snapshot!(out);
     }
 
     #[test]
@@ -1140,5 +1308,43 @@ mod tests {
              sharing its other half, got:\n{out}"
         );
         insta::assert_snapshot!(out);
+    }
+
+    // ---- scaled_u64: NaN must not read as convergence ----
+
+    #[test]
+    fn scaled_u64_carries_the_last_finite_value_across_a_nan() {
+        // Batch 0's own delta and any failed batch's metrics are NaN — this
+        // must not draw as the scale's `0`, which would look identical to
+        // "the curve stopped moving."
+        let values = [10.0, f64::NAN, 10.0];
+        let scaled = scaled_u64(&values);
+        assert_eq!(
+            scaled[1], scaled[0],
+            "a NaN sample must repeat the prior finite value, not read as 0: {scaled:?}"
+        );
+        assert_eq!(scaled[2], scaled[0]);
+    }
+
+    #[test]
+    fn scaled_u64_reports_zero_only_before_any_finite_value_is_seen() {
+        // With no prior finite value to hold, a leading run of NaN (the
+        // series' first samples) has nothing to carry forward — this is the
+        // one case where `0` is the honest answer ("nothing to show yet"),
+        // not a misread of "converged".
+        let values = [f64::NAN, f64::NAN, 10.0];
+        let scaled = scaled_u64(&values);
+        assert_eq!(scaled[0], 0);
+        assert_eq!(scaled[1], 0);
+        assert!(
+            scaled[2] > 0,
+            "the first real sample must still scale normally"
+        );
+    }
+
+    #[test]
+    fn scaled_u64_of_an_all_nan_series_is_flat_zero_not_a_panic() {
+        let scaled = scaled_u64(&[f64::NAN, f64::NAN, f64::NAN]);
+        assert_eq!(scaled, vec![0, 0, 0]);
     }
 }

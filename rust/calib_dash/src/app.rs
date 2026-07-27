@@ -56,6 +56,26 @@ impl Tab {
             Tab::Tolerances => "Tolerances",
         }
     }
+
+    fn index(self) -> usize {
+        Tab::ALL
+            .iter()
+            .position(|t| *t == self)
+            .expect("Tab::ALL lists every variant")
+    }
+
+    /// One tab forward, wrapping — unlike `Stage::next`, which clamps at the
+    /// end of a pipeline that has no "next stage after the last one" to wrap
+    /// to. A tab bar has no natural end, so `l` past `Tolerances` is `Fit`
+    /// again, the same as vim's own `l`/`h` inside a fixed-width line.
+    pub fn next(self) -> Self {
+        Tab::ALL[(self.index() + 1) % Tab::ALL.len()]
+    }
+
+    /// One tab back, wrapping the other direction.
+    pub fn prev(self) -> Self {
+        Tab::ALL[(self.index() + Tab::ALL.len() - 1) % Tab::ALL.len()]
+    }
 }
 
 /// A stage in the fit pipeline the Fit tab steps through with `[` and `]`.
@@ -203,6 +223,12 @@ pub struct App {
     /// decide whether Step B has run yet at all. `CalibDash::show_final`
     /// wires a real value in here once Step B runs; `ui.rs` only reads it.
     real_fit: Option<FitRecording>,
+    /// The Tolerances tab's post-Step-B m/z/mobility/RT summary, set
+    /// alongside `real_fit` by `CalibDash::show_final` — the tab's own
+    /// `None` arm already explains "Step B hasn't run"; this is the payload
+    /// once it has. Lives on `App`, not `CalibDash`, for the same reason
+    /// `real_fit` does: `ui.rs` only ever receives `&App`.
+    tolerances: Option<ToleranceSummary>,
     /// Every batch's metrics, undecimated — see `metrics.rs`'s module doc for
     /// why the series must have no holes. `CalibDash::on_batch` pushes one
     /// entry every batch, rendered or not; `push_metrics` is also called
@@ -235,6 +261,27 @@ pub struct App {
     /// and any other key clears it directly, so a half-typed number never
     /// leaks into the next command.
     count: Option<u32>,
+    /// Which retained frame `<`/`>` have scrubbed the Fit tab to, or `None`
+    /// for the live batch. Bounded by `retained_frames` — see `handle_key`'s
+    /// `<`/`>` arms — the same way `stage` is bounded by `Stage::ALL`. `App`
+    /// only tracks *which* frame; it owns no `FrameStore` to refit from, so
+    /// the actual recording lives in `scrub_recording`, kept in lockstep by
+    /// `CalibDash::sync_scrub` (the one piece of this that needs a
+    /// `FrameStore`).
+    scrub_frame: Option<usize>,
+    /// The original batch/chunk number of `scrub_frame`, purely for display
+    /// (the Fit tab's "you are not looking at the live batch" banner) — a
+    /// retained-frame *index* alone ("frame 2 of 5") means little to a user
+    /// who thinks in batch numbers.
+    scrub_chunk: Option<usize>,
+    /// `CalibDash::refit_frame(scrub_frame)`'s result, cloned in by
+    /// `CalibDash::sync_scrub` so the Fit tab can render it the same way it
+    /// renders the live `recording` — through a plain `&App`, with no
+    /// `CalibDash` in reach. `None` whenever `scrub_frame` is `None`, and
+    /// also `None` momentarily right after `scrub_frame` changes and before
+    /// the next `sync_scrub` call catches up — `active_recording` falls back
+    /// to the live view for that gap rather than showing nothing.
+    scrub_recording: Option<FitRecording>,
 }
 
 impl App {
@@ -246,6 +293,7 @@ impl App {
             batch: 0,
             recording: FitRecording::new(bins),
             real_fit: None,
+            tolerances: None,
             metrics: Vec::new(),
             retained_frames: 0,
             frame_stride: 1,
@@ -255,6 +303,9 @@ impl App {
             show_curve: false,
             show_ridge: false,
             count: None,
+            scrub_frame: None,
+            scrub_chunk: None,
+            scrub_recording: None,
         }
     }
 
@@ -305,6 +356,23 @@ impl App {
     /// than render an empty panel.
     pub fn real_fit(&self) -> Option<&FitRecording> {
         self.real_fit.as_ref()
+    }
+
+    /// The Tolerances tab's post-Step-B summary. `None` exactly when
+    /// `real_fit` is — `CalibDash::show_final` always sets both together.
+    pub fn tolerances(&self) -> Option<&ToleranceSummary> {
+        self.tolerances.as_ref()
+    }
+
+    /// Wires a post-Step-B recording and tolerance summary directly onto
+    /// `App`. `CalibDash::show_final` is the real path that reaches this
+    /// state from a live search; this is the one setter both it and a
+    /// `ui.rs` fixture (there is no live `CalibDash` behind a fixture) go
+    /// through, the same "one setter for the real caller and tests" shape as
+    /// `set_frame_summary`.
+    pub fn set_final(&mut self, recording: FitRecording, tolerances: ToleranceSummary) {
+        self.real_fit = Some(recording);
+        self.tolerances = Some(tolerances);
     }
 
     pub fn metrics(&self) -> &[BatchMetrics] {
@@ -392,6 +460,62 @@ impl App {
         &self.recording
     }
 
+    /// What the Fit tab should actually draw: the scrubbed frame's recording
+    /// while `scrub_frame` is set and `sync_scrub` has already caught up to
+    /// it, the live `recording` otherwise. Never panics and never shows a
+    /// blank tab for the gap between `handle_key` moving `scrub_frame` and
+    /// the next `sync_scrub` — it just falls back to live for that one
+    /// frame.
+    pub fn active_recording(&self) -> &FitRecording {
+        if self.scrub_frame.is_some()
+            && let Some(rec) = self.scrub_recording.as_ref()
+        {
+            rec
+        } else {
+            &self.recording
+        }
+    }
+
+    /// Which retained frame `<`/`>` have scrubbed to, or `None` for the live
+    /// batch. `ui.rs` reads this to decide whether to draw the "not live"
+    /// banner on the Fit tab.
+    pub fn scrub_frame(&self) -> Option<usize> {
+        self.scrub_frame
+    }
+
+    /// The scrubbed frame's original batch/chunk number, for the banner —
+    /// `None` whenever `scrub_frame` is (`CalibDash::sync_scrub` always sets
+    /// both together).
+    pub fn scrub_chunk(&self) -> Option<usize> {
+        self.scrub_chunk
+    }
+
+    /// Wires a freshly refit frame into the scrub view. Only ever called by
+    /// `CalibDash::sync_scrub`, which is the one piece of this with a
+    /// `FrameStore` to refit from — `App` cannot compute this itself.
+    pub fn set_scrub_recording(
+        &mut self,
+        frame: usize,
+        chunk: Option<usize>,
+        recording: FitRecording,
+    ) {
+        self.scrub_frame = Some(frame);
+        self.scrub_chunk = chunk;
+        self.scrub_recording = Some(recording);
+    }
+
+    /// Drops back to the live view — either the user scrubbed past the last
+    /// retained frame back to "now" (`handle_key`'s `>` arm), or
+    /// `CalibDash::sync_scrub` could not refit the frame `scrub_frame` named
+    /// (should not happen in practice, since that index is bounded by the
+    /// same `FrameStore` `sync_scrub` reads, but falling back to live is
+    /// always safe, unlike leaving a stale or absent recording on screen).
+    pub fn clear_scrub(&mut self) {
+        self.scrub_frame = None;
+        self.scrub_chunk = None;
+        self.scrub_recording = None;
+    }
+
     pub fn pending_count(&self) -> Option<u32> {
         self.count
     }
@@ -425,6 +549,62 @@ impl App {
     /// could.
     fn max_stage_steps(&mut self) -> u32 {
         self.take_count().min(Stage::ALL.len() as u32 - 1)
+    }
+
+    /// Consumes the pending count and reduces it mod `Tab::ALL.len()` for
+    /// `h`/`l`'s tab cycling. Unlike `max_stage_steps`'s clamp, `Tab` wraps
+    /// rather than stopping at an end, so the count that actually matters
+    /// isn't "how far can this possibly move" but "where does this land
+    /// after wrapping" — `n % 3` answers that directly with no loop at all,
+    /// which is a stronger anti-spin guarantee than a clamped loop: the cost
+    /// is one division, never proportional to the typed count.
+    fn tab_cycle_steps(&mut self) -> u32 {
+        self.take_count() % Tab::ALL.len() as u32
+    }
+
+    /// Consumes the pending count and reduces it to whether an odd or even
+    /// number of presses was requested. A boolean toggle applied twice is a
+    /// no-op, so `"10s"` and `"2s"` and a bare `"s"` typed once each mean
+    /// exactly one of "flip it" or "leave it" — the count's only observable
+    /// effect on a toggle is its parity. Like `tab_cycle_steps`, this is O(1)
+    /// regardless of how large the typed count is, so no loop-and-clamp is
+    /// needed to keep a huge count from doing proportional work.
+    fn toggle_parity(&mut self) -> bool {
+        self.take_count() % 2 == 1
+    }
+
+    /// Moves the Fit tab's frame-scrub cursor back into history by `n`
+    /// retained frames (`n` from `take_count`), or does nothing if no frames
+    /// have been retained yet. Saturating arithmetic against `retained_frames`
+    /// keeps this O(1) and panic-free for any `n`, including the huge counts
+    /// `push_digit` no longer rejects — there is no loop here to spin at all,
+    /// which is a stronger bound than `max_stage_steps`'s clamped one.
+    /// `CalibDash::sync_scrub` is what actually turns the new `scrub_frame`
+    /// into a recording to render; this only moves the cursor.
+    fn scrub_back(&mut self, n: u32) {
+        let total = self.retained_frames as u32;
+        if total == 0 {
+            return;
+        }
+        let pos = self.scrub_frame.map(|i| i as u32).unwrap_or(total);
+        self.scrub_frame = Some(pos.saturating_sub(n) as usize);
+    }
+
+    /// Moves the cursor forward by `n`. Forward past the last retained frame
+    /// returns to the live view (`scrub_frame = None`) rather than clamping
+    /// at the last index — "keep pressing `>` and you get back to now" is
+    /// the whole point of a cursor that can leave history behind.
+    fn scrub_forward(&mut self, n: u32) {
+        let Some(i) = self.scrub_frame else {
+            return;
+        };
+        let total = self.retained_frames as u32;
+        let new_pos = (i as u32).saturating_add(n);
+        self.scrub_frame = if new_pos >= total {
+            None
+        } else {
+            Some(new_pos as usize)
+        };
     }
 
     /// Routes one keypress: digits build the count prefix, motions consume
@@ -473,6 +653,59 @@ impl App {
             KeyCode::Char('d') if key.modifiers.is_empty() => {
                 self.dp_pane = !self.dp_pane;
                 self.count = None;
+                PauseAction::Stay
+            }
+            // ---- tabs ----
+            KeyCode::Char('l') if key.modifiers.is_empty() => {
+                for _ in 0..self.tab_cycle_steps() {
+                    self.tab = self.tab.next();
+                }
+                PauseAction::Stay
+            }
+            KeyCode::Char('h') if key.modifiers.is_empty() => {
+                for _ in 0..self.tab_cycle_steps() {
+                    self.tab = self.tab.prev();
+                }
+                PauseAction::Stay
+            }
+            // ---- Fit-tab batch scrubber ----
+            KeyCode::Char('<') if key.modifiers.is_empty() => {
+                let n = self.take_count();
+                self.scrub_back(n);
+                PauseAction::Stay
+            }
+            KeyCode::Char('>') if key.modifiers.is_empty() => {
+                let n = self.take_count();
+                self.scrub_forward(n);
+                PauseAction::Stay
+            }
+            // ---- Fit-tab overlay toggles ----
+            // Mnemonic letters chosen to avoid every binding above:
+            // s(uppressed), p(ath), c(urve), w(idth — the ridge overlay is
+            // the ridge *width* measurement everywhere else in this crate,
+            // and `r` was already taken by run-to-end).
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                if self.toggle_parity() {
+                    self.show_suppressed = !self.show_suppressed;
+                }
+                PauseAction::Stay
+            }
+            KeyCode::Char('p') if key.modifiers.is_empty() => {
+                if self.toggle_parity() {
+                    self.show_path = !self.show_path;
+                }
+                PauseAction::Stay
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                if self.toggle_parity() {
+                    self.show_curve = !self.show_curve;
+                }
+                PauseAction::Stay
+            }
+            KeyCode::Char('w') if key.modifiers.is_empty() => {
+                if self.toggle_parity() {
+                    self.show_ridge = !self.show_ridge;
+                }
                 PauseAction::Stay
             }
             KeyCode::Char('r') if key.modifiers.is_empty() => {
@@ -548,11 +781,24 @@ fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f6
 /// Summary the Tolerances tab renders once Step B has run: the derived m/z,
 /// mobility and RT tolerances plus how many calibrants they were estimated
 /// from. `CalibDash::show_final` receives one of these alongside the
-/// post-Phase-2 `FitRecording`.
+/// post-Phase-2 `FitRecording`, and `show_final` sets it on `App` (not
+/// `CalibDash`) since `ui.rs`'s `draw_tolerances_tab` only ever sees an
+/// `App`.
+///
+/// `mz_ppm` and `mobility_pct` are genuinely asymmetric `(lo, hi)` pairs —
+/// Step B can derive a different tolerance on either side of a calibrant.
+/// `rt_seconds` is not: `timsseek_cli::processing::calibrate_from_phase1`
+/// only ever derives one scalar RT tolerance and duplicates it into both
+/// tuple slots so this field's shape matches the other two, not because the
+/// two sides differ — see that field's own doc comment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToleranceSummary {
     pub mz_ppm: (f64, f64),
     pub mobility_pct: (f64, f64),
+    /// Symmetric by construction: both elements are always equal (see the
+    /// struct doc comment). Not `f64` alone because the Tolerances tab
+    /// renders all three tolerances the same `(lo, hi)` way; a lone scalar
+    /// here would need its own special-cased rendering for no real benefit.
     pub rt_seconds: (f64, f64),
     pub n_calibrants: usize,
 }
@@ -615,8 +861,6 @@ pub struct CalibDash {
     /// screen for the *live* batch stays exactly as it was fit.
     refit_state: CalibrationState,
     refit_recording: FitRecording,
-    /// Set once `show_final` runs, alongside `app.real_fit`.
-    tolerances: Option<ToleranceSummary>,
 }
 
 impl CalibDash {
@@ -652,7 +896,6 @@ impl CalibDash {
             refit_state: CalibrationState::new(bins, placeholder, placeholder, lookback)
                 .expect("bins must be nonzero (the placeholder range is always valid)"),
             refit_recording: FitRecording::new(bins),
-            tolerances: None,
         }
     }
 
@@ -687,12 +930,25 @@ impl CalibDash {
             return Flow::Continue;
         }
 
-        let action = render_pause(&mut self.app);
+        let action = render_pause(self);
         self.stepper.apply(action);
         match action {
             PauseAction::Abort => Flow::Abort,
             _ => Flow::Continue,
         }
+    }
+
+    /// Opens the post-Phase-2 pause: the same `render_pause` `on_batch` uses
+    /// for every Phase 1 pause, so the Tolerances tab (and the rest of the
+    /// dashboard) is reachable exactly once more after Step B runs — see the
+    /// module's "two moments" design. There is no batch loop left to steer
+    /// at this point, so every `PauseAction` this can return collapses to
+    /// the same thing: return to the caller. `Abort` in particular is a
+    /// no-op here rather than propagated — `processing.rs` calls this right
+    /// after `show_final`, with nothing left downstream for an abort to
+    /// cancel.
+    pub fn present(&mut self) {
+        render_pause(self);
     }
 
     /// Promotes the reserved final frame (if `finish` hasn't already run for
@@ -705,12 +961,13 @@ impl CalibDash {
     }
 
     /// Wires the post-Phase-2 recording and derived tolerances into the
-    /// dashboard once Step B has run and `calibration.json` is written. The
-    /// Tolerances tab reads `real_fit` as its signal that Step B exists at
-    /// all — see `App::real_fit`'s doc comment.
+    /// dashboard once Step B has run and `calibration.json` is written. Both
+    /// land on `App` (not `CalibDash`) since `ui.rs`'s `draw_tolerances_tab`
+    /// only ever receives a plain `&App`. The Tolerances tab reads `real_fit`
+    /// as its signal that Step B exists at all — see `App::real_fit`'s doc
+    /// comment.
     pub fn show_final(&mut self, recording: FitRecording, tolerances: ToleranceSummary) {
-        self.app.real_fit = Some(recording);
-        self.tolerances = Some(tolerances);
+        self.app.set_final(recording, tolerances);
     }
 
     /// Re-fits a recorded frame's points from scratch, into `refit_state`/
@@ -748,11 +1005,6 @@ impl CalibDash {
     /// distinct from whatever `refit_frame` most recently produced.
     pub fn recording(&self) -> &FitRecording {
         self.app.recording()
-    }
-
-    /// The Tolerances tab's post-Step-B summary, once `show_final` has run.
-    pub fn tolerances(&self) -> Option<&ToleranceSummary> {
-        self.tolerances.as_ref()
     }
 
     /// Only pins the grid-weights buffer, not the per-DP-node `considered`
@@ -878,10 +1130,45 @@ impl CalibDash {
             self.frames.dropped(),
         );
     }
+
+    /// Keeps the Fit tab's scrub view in lockstep with `App::scrub_frame`.
+    /// Called at the top of every `event_loop` iteration, before drawing —
+    /// `App` moves `scrub_frame` on `<`/`>` but has no `FrameStore` to refit
+    /// from, so this is the other half of that key handling, run once the
+    /// dashboard (which does have one) is back in the loop.
+    ///
+    /// A no-op when `scrub_frame` is `None` (the live view — the common
+    /// case, so this costs nothing then). Re-fits and clones unconditionally
+    /// otherwise rather than caching whether the index already matches what
+    /// was last shown: this runs at most once per keypress inside an
+    /// interactive pause, never per batch, so the clone `refit_frame`'s
+    /// result needs to hand `App` an owned copy is not on any path
+    /// `on_batch`'s steady state cares about.
+    fn sync_scrub(&mut self) {
+        let Some(i) = self.app.scrub_frame() else {
+            return;
+        };
+        let chunk = self.frames.frame(i).map(|(idx, _)| idx.chunk);
+        match self.refit_frame(i) {
+            Some(rec) => {
+                let cloned = rec.clone();
+                self.app.set_scrub_recording(i, chunk, cloned);
+            }
+            // The index should always be valid — it is bounded by
+            // `retained_frames`, set from this same `FrameStore` — but if it
+            // ever isn't (or the frame's points are too degenerate to
+            // refit), fall back to the live view rather than leave a stale
+            // or missing recording on screen.
+            None => self.app.clear_scrub(),
+        }
+    }
 }
 
 /// Pauses the batch loop to render one interactive frame and block until the
 /// user's keypress resolves to something other than [`PauseAction::Stay`].
+/// Takes the whole [`CalibDash`], not just its `App` — the batch scrubber
+/// (`<`/`>`) needs `refit_frame`'s `FrameStore` access every time it redraws,
+/// which only `CalibDash` has.
 ///
 /// Never fails the caller: when stdout is not a terminal (e.g. under `cargo
 /// test`, or a piped/redirected run) this returns [`PauseAction::Detach`]
@@ -890,7 +1177,7 @@ impl CalibDash {
 /// terminal that *is* present but fails to initialize (`ratatui::try_init`)
 /// is logged at `warn` and also treated as `Detach`: a dashboard that cannot
 /// draw must not stop a search.
-fn render_pause(app: &mut App) -> PauseAction {
+fn render_pause(dash: &mut CalibDash) -> PauseAction {
     if !std::io::stdout().is_terminal() {
         return PauseAction::Detach;
     }
@@ -906,7 +1193,7 @@ fn render_pause(app: &mut App) -> PauseAction {
             return PauseAction::Detach;
         }
     };
-    let action = catch_panics(|| event_loop(&mut terminal, app));
+    let action = catch_panics(|| event_loop(&mut terminal, dash));
     ratatui::restore();
     action
 }
@@ -941,10 +1228,15 @@ fn catch_panics(f: impl FnOnce() -> PauseAction) -> PauseAction {
 /// detached, never propagated to fail the batch loop.
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
-    app: &mut App,
+    dash: &mut CalibDash,
 ) -> PauseAction {
     loop {
-        if let Err(e) = terminal.draw(|f| crate::ui::draw(f, app)) {
+        // Before every draw, not just after a scrub keypress: simpler than
+        // tracking whether `scrub_frame` actually changed since the last
+        // iteration, and a no-op whenever it's `None` (the common, live
+        // case) — see `sync_scrub`'s own doc comment.
+        dash.sync_scrub();
+        if let Err(e) = terminal.draw(|f| crate::ui::draw(f, &mut dash.app)) {
             tracing::warn!("calib_dash failed to draw a frame: {e}");
             return PauseAction::Detach;
         }
@@ -960,7 +1252,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         if let Event::Key(key) = ev
             && key.kind == KeyEventKind::Press
         {
-            let action = app.handle_key(key);
+            let action = dash.app.handle_key(key);
             if !matches!(action, PauseAction::Stay) {
                 return action;
             }
@@ -1105,6 +1397,188 @@ mod tests {
         assert_eq!(app.stage(), before, "modified keys are not motions");
     }
 
+    // ---- tabs: h/l ----
+
+    #[test]
+    fn l_cycles_forward_through_tab_all() {
+        let mut app = App::new(10);
+        assert_eq!(app.tab(), Tab::Fit);
+        press(&mut app, "l");
+        assert_eq!(app.tab(), Tab::Convergence);
+        press(&mut app, "l");
+        assert_eq!(app.tab(), Tab::Tolerances);
+        press(&mut app, "l");
+        assert_eq!(app.tab(), Tab::Fit, "wraps back to the first tab");
+    }
+
+    #[test]
+    fn h_cycles_backward_and_also_wraps() {
+        let mut app = App::new(10);
+        press(&mut app, "h");
+        assert_eq!(
+            app.tab(),
+            Tab::Tolerances,
+            "one step back from the first tab wraps to the last"
+        );
+    }
+
+    #[test]
+    fn a_count_before_l_cycles_that_many_tabs() {
+        let mut app = App::new(10);
+        press(&mut app, "2l");
+        assert_eq!(app.tab(), Tab::Tolerances, "Fit + 2 steps");
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "l is a motion: it consumes the count"
+        );
+    }
+
+    #[test]
+    fn a_huge_count_before_l_does_not_spin() {
+        // 3 tabs: any count's effect only depends on its value mod 3, and
+        // `tab_cycle_steps` reduces it to that before looping at all, so this
+        // must return promptly rather than looping ~10^9 times.
+        // `1_000_000_001 % 3 == 2`, so this is Fit + 2 steps == Tolerances.
+        let mut app = App::new(10);
+        press(&mut app, "1000000001l");
+        assert_eq!(
+            app.tab(),
+            Tab::Tolerances,
+            "Fit + (1_000_000_001 % 3) steps"
+        );
+    }
+
+    // ---- Fit-tab batch scrubber: < / > ----
+
+    #[test]
+    fn scrub_is_a_no_op_with_no_retained_frames() {
+        let mut app = App::new(10);
+        press(&mut app, "<");
+        assert_eq!(app.scrub_frame(), None, "nothing to scrub back to");
+        press(&mut app, ">");
+        assert_eq!(app.scrub_frame(), None);
+    }
+
+    #[test]
+    fn less_than_steps_back_from_live_into_the_most_recent_retained_frame() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "<");
+        assert_eq!(
+            app.scrub_frame(),
+            Some(4),
+            "one step back from live lands on the last retained frame (index 4 of 5)"
+        );
+    }
+
+    #[test]
+    fn less_than_with_a_count_steps_back_that_many_frames() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "3<");
+        assert_eq!(app.scrub_frame(), Some(2));
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "< is a motion: it consumes the count"
+        );
+    }
+
+    #[test]
+    fn less_than_clamps_at_the_first_frame_rather_than_underflowing() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "999999999<");
+        assert_eq!(
+            app.scrub_frame(),
+            Some(0),
+            "a huge count clamps at the first frame, not a wrapped/underflowed index"
+        );
+    }
+
+    #[test]
+    fn greater_than_steps_forward_and_returns_to_live_past_the_last_frame() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "<"); // frame 4 (of 5)
+        assert_eq!(app.scrub_frame(), Some(4));
+        press(&mut app, ">");
+        assert_eq!(
+            app.scrub_frame(),
+            None,
+            "> past the last retained frame returns to the live view"
+        );
+    }
+
+    #[test]
+    fn greater_than_is_a_no_op_while_already_live() {
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, ">");
+        assert_eq!(app.scrub_frame(), None);
+    }
+
+    #[test]
+    fn a_huge_count_before_greater_than_does_not_spin() {
+        // Saturating arithmetic, not a loop — this must return promptly
+        // however large the count is.
+        let mut app = App::new(10);
+        app.set_frame_summary(5, 1, 0);
+        press(&mut app, "<"); // frame 4
+        press(&mut app, "999999999>");
+        assert_eq!(
+            app.scrub_frame(),
+            None,
+            "saturates past the end, back to live"
+        );
+    }
+
+    // ---- Fit-tab overlay toggles: s / p / c / w ----
+
+    #[test]
+    fn s_p_c_w_toggle_their_own_overlay_independently() {
+        let mut app = App::new(10);
+        assert!(
+            !app.show_suppressed() && !app.show_path() && !app.show_curve() && !app.show_ridge()
+        );
+        press(&mut app, "s");
+        assert!(app.show_suppressed());
+        assert!(!app.show_path(), "s must not touch the other three");
+        press(&mut app, "p");
+        assert!(app.show_path());
+        press(&mut app, "c");
+        assert!(app.show_curve());
+        press(&mut app, "w");
+        assert!(app.show_ridge());
+        assert!(
+            app.show_suppressed() && app.show_path() && app.show_curve(),
+            "each toggle key must leave the others exactly as they were"
+        );
+    }
+
+    #[test]
+    fn an_overlay_toggle_consumes_the_pending_count_by_parity() {
+        // Toggling a boolean twice is a no-op — the count's only observable
+        // effect is odd vs. even, and `toggle_parity` reduces to that before
+        // doing any work at all, so a huge count is not a huge loop either.
+        let mut app = App::new(10);
+        press(&mut app, "2s");
+        assert!(!app.show_suppressed(), "an even count leaves it unchanged");
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "s is a motion: it consumes the count"
+        );
+
+        press(&mut app, "3s");
+        assert!(app.show_suppressed(), "an odd count flips it exactly once");
+
+        // 999_999_999 is odd, so this flips it once more, back to false.
+        press(&mut app, "999999999s");
+        assert!(!app.show_suppressed());
+    }
+
     // ---- the stepper ----
 
     #[test]
@@ -1223,6 +1697,66 @@ mod tests {
         }
     }
 
+    /// End-to-end version of the `<` scrubber: moving `App::scrub_frame`
+    /// with `handle_key` and then letting `CalibDash::sync_scrub` catch up
+    /// must leave the Fit tab looking at the earlier batch's real curve, not
+    /// the live one — `sync_scrub` is the piece that turns `scrub_frame` (an
+    /// index `App` alone cannot refit from) into an actual recording
+    /// `App::active_recording` can render.
+    #[test]
+    fn sync_scrub_reproduces_an_earlier_batchs_curve_on_the_fit_tab() {
+        let mut d = CalibDash::new(3, 8, 10, 5, 1 << 20);
+        for chunk in 0..3 {
+            let pts: Vec<_> = (0..8)
+                .map(|i| CalibrantPoint {
+                    library_rt: i as f64 + 0.5,
+                    observed_rt: (i as f64 + 0.5) * (1.0 + chunk as f64 * 0.1),
+                    score: 1.0 + i as f64,
+                    speclib_index: chunk * 8 + i,
+                })
+                .collect();
+            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+        }
+        d.finish(2);
+
+        // Batch 0's curve, refit independently for comparison against what
+        // scrubbing shows.
+        let batch0_curve: Vec<_> = d.refit_frame(0).expect("frame 0 exists").curve().to_vec();
+
+        // A generous budget retains all 3 batches; scrub 3 back from live
+        // (batch 2) lands on frame index 0 (batch 0).
+        press(&mut d.app, "3<");
+        d.sync_scrub();
+
+        assert_eq!(d.app.scrub_frame(), Some(0));
+        assert_eq!(d.app.scrub_chunk(), Some(0));
+        let shown = d.app.active_recording().curve().to_vec();
+        assert_eq!(shown.len(), batch0_curve.len());
+        for (a, b) in shown.iter().zip(&batch0_curve) {
+            assert!((a.library - b.library).abs() < 1e-12);
+            assert!((a.observed - b.observed).abs() < 1e-12);
+        }
+
+        // The live view is unaffected by scrubbing — `recording()` (not
+        // `active_recording()`) still reflects batch 2's own fit.
+        assert!(
+            !d.recording().curve().is_empty(),
+            "sanity: batch 2 produced a real curve too"
+        );
+    }
+
+    /// `present` reuses `render_pause`, which detaches immediately when
+    /// stdout is not a terminal — always true under `cargo test` — so this
+    /// must return promptly rather than blocking on a keypress that will
+    /// never arrive. Mirrors
+    /// `on_batch_without_a_terminal_never_blocks_and_never_aborts` for the
+    /// post-Phase-2 pause.
+    #[test]
+    fn present_never_blocks_without_a_terminal() {
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        d.present();
+    }
+
     /// This is one of the four tests given verbatim in the task brief, so
     /// its name and body are kept as specified. What it actually pins is
     /// narrower than the name alone suggests: `refit_capacity` only reads
@@ -1308,8 +1842,10 @@ mod tests {
     fn render_pause_detaches_when_stdout_is_not_a_terminal() {
         // Same guarantee `on_batch_without_a_terminal_never_blocks_and_never_aborts`
         // pins end-to-end, exercised directly against `render_pause` itself.
-        let mut app = App::new(10);
-        assert_eq!(render_pause(&mut app), PauseAction::Detach);
+        // `render_pause` takes the whole `CalibDash` (not just `App`) so the
+        // scrubber can reach `refit_frame` on every redraw.
+        let mut d = CalibDash::new(1, 4, 10, 3, 1 << 20);
+        assert_eq!(render_pause(&mut d), PauseAction::Detach);
     }
 
     /// `catch_panics` is what keeps a panic inside the event loop from

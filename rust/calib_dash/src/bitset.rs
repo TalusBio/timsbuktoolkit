@@ -2,6 +2,7 @@
 //! `fixedbitset`: three operations, and the crate's dependency list is a
 //! deliberate constraint.
 
+#[derive(Clone)]
 pub struct BitSet {
     words: Vec<u64>,
     bits: usize,

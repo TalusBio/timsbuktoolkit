@@ -31,4 +31,4 @@ expression: "render(&mut app, 100, 30)"
                                                                                              ░░░░░░░
                                                                                              ▀▀▀▀▀▀▀
                                                                                                     
- b0 Suppressed cnt:- | n:next r:run q:detach ^C:abort [/]:stage d:dp
+ b0 Suppressed cnt:- | n:next r:run q:detach ^C:abort [/]:stage h/l:tab <>:frame s/p/c/w:ovl d:dp

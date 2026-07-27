@@ -1,15 +1,15 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render(&mut app, 100, 30)"
+expression: out
 ---
  Fit │ Convergence │ Tolerances                                                                     
 ┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
-│Step B (m/z, mobility and RT-residual tolerance estimation) has not run yet. This dashboard is    │
-│paused inside Phase 1 batch scoring; those measurements are only made after Phase 2 derives the   │
-│final calibration from every collected calibrant. They do not exist yet — this is not an empty    │
-│panel, there is nothing to show.                                                                  │
+│RT residual: weighted half-width 6.5281s over 12 ridge column(s)                                  │
+│range: 3.0000s .. 9.0000s                                                                         │
 │                                                                                                  │
-│                                                                                                  │
+│m/z tolerance: (-8.5, 9.5) ppm                                                                    │
+│mobility tolerance: (-3.0, 3.0) %                                                                 │
+│RT tolerance (symmetric): ±12.5s across 42 calibrant(s)                                           │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

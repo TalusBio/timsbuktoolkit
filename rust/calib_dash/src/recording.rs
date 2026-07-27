@@ -24,6 +24,13 @@ pub struct DpDecision {
     pub considered: Vec<(usize, f64)>,
 }
 
+/// `Clone` so the batch scrubber (`App::set_scrub_recording`, driven by
+/// `CalibDash::sync_scrub`) can hand the Fit tab its own owned copy of a
+/// replayed frame's recording without fighting `refit_recording`'s
+/// reuse-in-place allocation, which stays live for the *next* scrub — an
+/// extra allocation, but only once per keypress while a user is actively
+/// browsing history, never on the per-batch hot path.
+#[derive(Clone)]
 pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
