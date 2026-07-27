@@ -896,7 +896,7 @@ fn axis_ticks(lo: f64, hi: f64, target: usize) -> Vec<f64> {
 }
 
 /// Decimal places to format an axis tick with, derived from the step size —
-/// a step of `5.0` needs none, a step of `0.25` needs two. Capped at 2: RT
+/// a step of `5.0` needs none, a step of `0.5` needs one. Capped at 2: RT
 /// seconds are never usefully shown finer than hundredths here.
 fn axis_decimals(step: f64) -> usize {
     if !step.is_finite() || step <= 0.0 {

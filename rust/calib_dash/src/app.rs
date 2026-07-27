@@ -459,7 +459,6 @@ impl App {
         // included.
         if self.show_keys {
             self.show_keys = false;
-            self.count = None;
             return PauseAction::Stay;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {

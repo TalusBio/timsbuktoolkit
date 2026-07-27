@@ -69,7 +69,7 @@ impl FrameStore {
     pub fn new(n_frames: usize, n_calibrants: usize, budget_bytes: usize) -> Self {
         let n_calibrants = n_calibrants.max(1);
         let frame_bytes = n_calibrants * std::mem::size_of::<CalibrantPoint>();
-        let max_frames = (budget_bytes / frame_bytes.max(1)).max(1);
+        let max_frames = (budget_bytes / frame_bytes).max(1);
         let keep_every = n_frames.max(1).div_ceil(max_frames).max(1);
         let retained = n_frames.max(1).div_ceil(keep_every);
         // +1 span for the always-kept last frame, which need not land on the
