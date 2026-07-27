@@ -67,6 +67,12 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
+          # Bump when the `-p` list below changes. The cache key is built from
+          # the toolchain, Cargo.lock and the env — NOT from which packages get
+          # built — so widening the build hits the old key exactly, and
+          # rust-cache then reports "Cache up-to-date" and saves nothing. The
+          # new crates would recompile on every run until Cargo.lock next moved.
+          cache-key: pkgs-cli-sim-viewer
           # This action defaults to `-D warnings`. Adding it for caching should
           # not also change lint policy — that turned a warning into a build
           # failure the first time. Empty keeps warnings as warnings, which is
