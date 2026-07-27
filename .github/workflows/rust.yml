@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Incremental artifacts are per-run garbage that would bloat the cache below
+  # without ever being reused; CI compiles each crate once.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   build:
@@ -21,6 +24,14 @@ jobs:
           - "--no-default-features"  # serial
     steps:
       - uses: actions/checkout@v6
+      # This workflow compiled all ~350 dependency crates from scratch on every
+      # run. `cache-key` splits the two matrix legs: they resolve different
+      # feature sets, so one shared entry would thrash.
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-key: ${{ matrix.features }}
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests
@@ -44,6 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
       - name: Build
         run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash
       - name: Run tests
