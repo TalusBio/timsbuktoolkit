@@ -1,23 +1,27 @@
 //! Dashboard state: which tab, which feature, which transforms, and the key
-//! bindings that move between them. Rendering lives in [`crate::ui`].
+//! bindings that move between them.
+//!
+//! [`App`] is a [`Dashboard`] — everything materialized, see
+//! [`crate::precompute`] — plus the handful of fields a keystroke can change.
+//! Nothing here computes over the data; a key press moves an index.
+//! Rendering lives in [`crate::ui`].
 
-use crate::curves;
-use crate::stats::{
-    self,
-    FeatureSummary,
+use crate::cycle;
+use crate::precompute::{
+    DEFAULT_Q_ZOOM,
+    Dashboard,
+    FeatureColumn,
 };
 use crate::transform::{
-    XTransform,
+    Axis,
     YTransform,
 };
-use crate::view::RescoreView;
 use ratatui::crossterm::event::{
     KeyCode,
     KeyEvent,
     KeyModifiers,
 };
 use ratatui::widgets::TableState;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -40,63 +44,41 @@ impl Tab {
     }
 
     fn shift(self, delta: isize) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0) as isize;
-        let n = Self::ALL.len() as isize;
-        Self::ALL[((i + delta).rem_euclid(n)) as usize]
+        cycle::step(&Self::ALL, self, delta)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortKey {
-    Name,
-    TargetMean,
-    DecoyMean,
-    Auc,
-    CohensD,
-    NanFrac,
-    Gain,
-}
-
-impl SortKey {
-    const CYCLE: [SortKey; 7] = [
-        Self::Name,
-        Self::TargetMean,
-        Self::DecoyMean,
-        Self::Auc,
-        Self::CohensD,
-        Self::NanFrac,
-        Self::Gain,
-    ];
-
-    pub fn next(self) -> Self {
-        let i = Self::CYCLE.iter().position(|k| *k == self).unwrap_or(0);
-        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::TargetMean => "target mean",
-            Self::DecoyMean => "decoy mean",
-            Self::Auc => "AUC",
-            Self::CohensD => "|d|",
-            Self::NanFrac => "NaN%",
-            Self::Gain => "gain",
-        }
-    }
-}
+/// The sort key is a table column — see [`FeatureColumn`], which also defines
+/// the column order and how each one's number is read.
+pub type SortKey = FeatureColumn;
 
 pub enum Flow {
     Continue,
     Quit,
 }
 
-pub struct App<'a> {
-    view: &'a RescoreView<'a>,
+/// Per-frame plotting scratch, owned so a redraw allocates nothing.
+///
+/// `ratatui::Dataset::data` borrows a `&[(f64, f64)]`, so the points have to
+/// outlive the widget. Keeping them here (rather than collecting fresh vectors
+/// inside the draw call) is what removes the last per-frame allocation.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    pub(crate) target: Vec<(f64, f64)>,
+    pub(crate) decoy: Vec<(f64, f64)>,
+}
+
+pub struct App {
+    pub(crate) dash: Dashboard,
+    pub(crate) scratch: Scratch,
     tab: Tab,
-    x: XTransform,
+    x: Axis,
     y: YTransform,
     clip: bool,
+    /// Index into the dashboard's FDR zoom levels, not a q-value. Kept as an
+    /// index so `z` is a bounded cycle rather than free-form zooming into a
+    /// range no curve was gridded for.
+    q_zoom: usize,
     sort: SortKey,
     /// Direction, whose "forward" reading differs by key: for `SortKey::Name`
     /// `true` is ascending alphabetical (the natural reading order for text),
@@ -106,60 +88,51 @@ pub struct App<'a> {
     filter: String,
     filter_editing: bool,
     /// Feature indices passing the filter, in sort order.
-    visible: Vec<usize>,
+    pub(crate) visible: Vec<usize>,
     /// Position within `visible`, not a feature index.
-    cursor: usize,
-    cache: HashMap<usize, FeatureSummary>,
-    /// Targets-passing-vs-q-value curve, cached: it depends only on
-    /// `view.qvalue`/`view.is_target`, neither of which ever changes, so it is
-    /// worth computing once rather than re-sorting on every keystroke.
-    qvalue_curve: Option<Vec<(f64, f64)>>,
-    /// Decoy/target PP curve, cached for the same reason.
-    pp_curve: Option<Vec<(f64, f64)>>,
-    /// Exact rank-based AUC of the discriminant score, cached: it depends only
-    /// on `view.score`/`view.is_target` and sorts its input, so it is worth
-    /// computing once rather than on every Overview frame.
-    auc: Option<f64>,
+    pub(crate) cursor: usize,
     /// Scroll/selection state for the features table, kept on `App` rather
     /// than rebuilt per frame: `TableState::offset` is what lets a `Table`
     /// scroll, and a fresh `TableState::default()` every render recomputes it
     /// from `0`, pinning the viewport instead of tracking the cursor.
-    table_state: TableState,
+    ///
+    /// Reachable directly from [`crate::ui`] because the table widget borrows
+    /// `dash` while the state needs `&mut`; a whole-`App` accessor would make
+    /// those two borrows overlap.
+    pub(crate) table_state: TableState,
 }
 
-impl<'a> App<'a> {
-    pub fn new(view: &'a RescoreView<'a>) -> Self {
+impl App {
+    pub fn new(dash: Dashboard) -> Self {
         let mut app = Self {
-            view,
+            dash,
+            scratch: Scratch::default(),
             tab: Tab::Overview,
-            x: XTransform::Linear,
+            x: Axis::ALL[0],
             y: YTransform::Density,
             clip: true,
+            q_zoom: DEFAULT_Q_ZOOM,
             sort: SortKey::Name,
             sort_desc: true,
             filter: String::new(),
             filter_editing: false,
             visible: Vec::new(),
             cursor: 0,
-            cache: HashMap::new(),
-            qvalue_curve: None,
-            pp_curve: None,
-            auc: None,
             table_state: TableState::default(),
         };
         app.refresh_visible();
         app
     }
 
-    pub fn view(&self) -> &'a RescoreView<'a> {
-        self.view
+    pub fn dashboard(&self) -> &Dashboard {
+        &self.dash
     }
 
     pub fn tab(&self) -> Tab {
         self.tab
     }
 
-    pub fn x(&self) -> XTransform {
+    pub fn x(&self) -> Axis {
         self.x
     }
 
@@ -169,6 +142,11 @@ impl<'a> App<'a> {
 
     pub fn clip(&self) -> bool {
         self.clip
+    }
+
+    /// Which of the dashboard's FDR zoom levels the curve panel draws.
+    pub fn q_zoom(&self) -> usize {
+        self.q_zoom
     }
 
     pub fn sort_key(&self) -> SortKey {
@@ -187,76 +165,10 @@ impl<'a> App<'a> {
         &self.visible
     }
 
-    /// Cursor position within [`Self::visible`], for the table widget.
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-
     /// Feature index under the cursor, or `None` when the filter matches
     /// nothing.
     pub fn selected_feature(&self) -> Option<usize> {
         self.visible.get(self.cursor).copied()
-    }
-
-    /// Summary for feature `j`, computed on first access and cached. Filling
-    /// all ~131 up front would cost a full matrix walk before the first frame.
-    ///
-    /// `feature_column` is `Clone` (it is a cheap strided iterator over the
-    /// borrowed matrix), so `summarize` can walk it directly rather than
-    /// paying for an intermediate `Vec` per column.
-    pub fn summary(&mut self, j: usize) -> FeatureSummary {
-        if let Some(s) = self.cache.get(&j) {
-            return *s;
-        }
-        let s = stats::summarize(self.view.feature_column(j), &self.view.is_target);
-        self.cache.insert(j, s);
-        s
-    }
-
-    /// Targets-passing-vs-q-value curve, computed on first access and
-    /// cached, since `curves::qvalue_curve` sorts its input and neither
-    /// `view.qvalue` nor `view.is_target` ever changes. Fixed at 100 points,
-    /// matching the FDR panel's original per-frame call.
-    pub fn qvalue_curve(&mut self) -> Vec<(f64, f64)> {
-        self.qvalue_curve
-            .get_or_insert_with(|| {
-                curves::qvalue_curve(&self.view.qvalue, &self.view.is_target, 100)
-            })
-            .clone()
-    }
-
-    /// Decoy/target PP curve, computed on first access and cached. Fixed at
-    /// 200 points, matching the calibration panel's original per-frame call.
-    pub fn pp_curve(&mut self) -> Vec<(f64, f64)> {
-        self.pp_curve
-            .get_or_insert_with(|| curves::pp_curve(&self.view.score, &self.view.is_target, 200))
-            .clone()
-    }
-
-    /// Exact rank-based AUC of the discriminant score, computed on first
-    /// access and cached: `stats::auc_exact` sorts its input, so recomputing
-    /// it on every Overview frame is a full sort of every row per keystroke.
-    pub fn auc(&mut self) -> f64 {
-        *self.auc.get_or_insert_with(|| {
-            stats::auc_exact(
-                self.view.score.iter().map(|&s| s as f64),
-                &self.view.is_target,
-            )
-        })
-    }
-
-    /// The features table's `TableState`, synced to the current cursor before
-    /// each render. Returning the same stored `TableState` (rather than a
-    /// fresh `TableState::default()`) is what lets ratatui's `Table` keep its
-    /// scroll offset between frames.
-    pub fn table_state(&mut self) -> &mut TableState {
-        let selected = if self.visible.is_empty() {
-            None
-        } else {
-            Some(self.cursor)
-        };
-        self.table_state.select(selected);
-        &mut self.table_state
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Flow {
@@ -297,6 +209,11 @@ impl<'a> App<'a> {
             KeyCode::Char('y') if plain => self.y = self.y.next(),
             KeyCode::Char('Y') if plain => self.y = self.y.prev(),
             KeyCode::Char('c') if plain => self.clip = !self.clip,
+            KeyCode::Char('z') if plain => self.q_zoom = (self.q_zoom + 1) % self.dash.n_q_zooms(),
+            KeyCode::Char('Z') if plain => {
+                let n = self.dash.n_q_zooms();
+                self.q_zoom = (self.q_zoom + n - 1) % n;
+            }
             KeyCode::Char('s') if plain => {
                 self.sort = self.sort.next();
                 self.refresh_visible();
@@ -340,49 +257,37 @@ impl<'a> App<'a> {
         }
     }
 
+    /// The value feature `j` sorts on under the current key. Every one of these
+    /// is a precomputed array read.
+    fn sort_value(&self, j: usize) -> f64 {
+        // `None` is the name column, which the caller sorts as text.
+        self.dash.feature_value(j, self.sort).unwrap_or(0.0)
+    }
+
     /// Rebuild the visible feature list from the filter and sort key, keeping
     /// the cursor on the same feature when it survives.
     fn refresh_visible(&mut self) {
         let previous = self.selected_feature();
         let needle = self.filter.to_lowercase();
-        let mut idx: Vec<usize> = (0..self.view.n_features())
+        let mut idx: Vec<usize> = (0..self.dash.n_features())
             .filter(|&j| {
-                needle.is_empty() || self.view.feature_names[j].to_lowercase().contains(&needle)
+                needle.is_empty() || self.dash.feature_names[j].to_lowercase().contains(&needle)
             })
             .collect();
 
         if self.sort == SortKey::Name {
-            idx.sort_by(|&a, &b| self.view.feature_names[a].cmp(&self.view.feature_names[b]));
+            idx.sort_by(|&a, &b| self.dash.feature_names[a].cmp(&self.dash.feature_names[b]));
             if !self.sort_desc {
                 idx.reverse();
             }
         } else {
-            // Numeric sorts need the summaries; this is the one place the cache
-            // is filled eagerly, and only for the filtered subset. Built as a
-            // plain loop (rather than `.map` inside the closure) because
-            // `self.summary(j)` takes `&mut self` and must not overlap with any
-            // other borrow of `self` in the same expression.
-            let mut keyed: Vec<(usize, f64)> = Vec::with_capacity(idx.len());
-            for &j in &idx {
-                let s = self.summary(j);
-                let k = match self.sort {
-                    SortKey::TargetMean => s.target_mean,
-                    SortKey::DecoyMean => s.decoy_mean,
-                    SortKey::Auc => s.auc,
-                    SortKey::CohensD => s.cohens_d,
-                    SortKey::NanFrac => s.nan_frac,
-                    SortKey::Gain => self.view.mean_gain(&self.view.feature_names[j]) as f64,
-                    SortKey::Name => 0.0,
-                };
-                keyed.push((j, k));
-            }
             // `sort_desc` picks the finite-value order; NaN sorts last either
             // way. That rule has to live in the comparator itself, not in a
-            // value substitution followed by a blanket `idx.reverse()` below
-            // — a later reverse of the whole vector would undo a NaN-last
+            // value substitution followed by a blanket `idx.reverse()` — a
+            // later reverse of the whole vector would undo a NaN-last
             // placement exactly when `sort_desc` is false.
-            keyed.sort_by(|a, b| cmp_nan_last(a.1, b.1, self.sort_desc));
-            idx = keyed.into_iter().map(|(j, _)| j).collect();
+            let desc = self.sort_desc;
+            idx.sort_by(|&a, &b| cmp_nan_last(self.sort_value(a), self.sort_value(b), desc));
         }
 
         self.visible = idx;
@@ -393,35 +298,33 @@ impl<'a> App<'a> {
     }
 }
 
+/// Whether a dashboard could be shown at all.
+///
+/// Worth asking *before* [`Dashboard::build`], not after: building is the
+/// expensive step, and there is no point paying for it to discover that stdout
+/// is a pipe.
+pub fn available() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
 /// Open the dashboard and block until the user quits.
 ///
-/// Skips silently (with a warning) when stdout is not a terminal, so a piped
-/// or containerized run is unaffected. Terminal setup failures are warn-only
-/// too: if `try_init` fails (e.g. no usable controlling terminal even though
-/// stdout is a tty — `setsid`, some container/CI pty setups), the terminal is
-/// restored and `run` returns `Ok(())` rather than propagating the error or
-/// panicking (unlike `ratatui::init`, which is `try_init().expect(...)` and
-/// would unwind through the caller, past a warn-only `if let Err`, after
-/// Phase 6 has already written output).
+/// Takes an already-built [`Dashboard`] rather than a view, so the caller can
+/// drop the feature matrix — gigabytes at a realistic library size — before the
+/// TUI opens and blocks for as long as the user leaves it up.
 ///
-/// A panic inside the event loop is caught by [`catch_panics`] and turned
-/// into a warning too — but see that function's doc comment: this guard is
-/// inert in a release build, so a release-build panic in the loop still
-/// aborts the process. What `run` actually guarantees unconditionally is that
-/// terminal setup never panics or fails the caller, and that the terminal is
-/// restored on every path that returns (a panic that reaches `catch_unwind`
-/// at all triggers `try_init`'s panic hook first, which itself restores the
-/// terminal, so the explicit `ratatui::restore()` below is belt-and-braces —
-/// harmless if the hook already ran, load-bearing if it didn't).
-pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
-    use std::io::IsTerminal;
-
-    if !std::io::stdout().is_terminal() {
+/// Never fails the caller and never panics on setup: a non-terminal stdout or
+/// a failed `try_init` warns, restores the terminal and returns `Ok`. This is
+/// deliberately unlike `ratatui::init`, which is `try_init().expect(..)` and
+/// would unwind past the caller's warn-only `if let Err` — after the results
+/// have already been written to disk.
+///
+/// The terminal is restored on every returning path. [`catch_panics`] covers
+/// the event loop, but only in a debug build; see its doc.
+pub fn run(dash: Dashboard) -> std::io::Result<()> {
+    if !available() {
         tracing::warn!("rescore dashboard requested but stdout is not a terminal; skipping");
-        return Ok(());
-    }
-    if let Err(e) = view.validate() {
-        tracing::warn!("rescore dashboard input rejected: {e}");
         return Ok(());
     }
 
@@ -438,23 +341,18 @@ pub fn run(view: &RescoreView<'_>) -> std::io::Result<()> {
             return Ok(());
         }
     };
-    let result = catch_panics(|| event_loop(&mut terminal, view));
+    let mut app = App::new(dash);
+    let result = catch_panics(|| event_loop(&mut terminal, &mut app));
     ratatui::restore();
     result
 }
 
-/// Runs `f`, converting a panic into a `tracing::warn!` + `Ok(())` rather than
-/// letting it unwind — in builds where panics unwind at all. This workspace's
-/// top-level `Cargo.toml` sets `[profile.release] panic = "abort"`, so in the
-/// shipped release binary a panic inside `f` aborts the process immediately;
-/// `catch_unwind` never gets a chance to run, and this function's recovery
-/// does not apply there. It is real in dev/test builds (`panic = "unwind"`,
-/// the default profile.dev), which is what this module's tests exercise.
-/// Kept anyway because unwinding is strictly better than nothing when it is
-/// available, and because a future decision to drop `panic = "abort"` should
-/// not require re-adding this. Factored out of [`run`] so the recovery
-/// behavior is testable without a real terminal: [`event_loop`] itself needs
-/// one, but this wrapper does not.
+/// Runs `f`, converting a panic into a `tracing::warn!` + `Ok(())`.
+///
+/// Only where panics unwind. The workspace sets `[profile.release] panic =
+/// "abort"`, so in the shipped binary a panic inside `f` aborts before
+/// `catch_unwind` sees it; this recovery is real in dev/test builds only.
+/// Separate from [`run`] because it needs no terminal, so it is testable.
 fn catch_panics(f: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -476,7 +374,7 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
-    view: &RescoreView<'_>,
+    app: &mut App,
 ) -> std::io::Result<()> {
     use ratatui::crossterm::event::{
         self,
@@ -484,9 +382,8 @@ fn event_loop<B: ratatui::backend::Backend>(
         KeyEventKind,
     };
 
-    let mut app = App::new(view);
     loop {
-        terminal.draw(|f| crate::ui::draw(f, &mut app))?;
+        terminal.draw(|f| crate::ui::draw(f, app))?;
         // Only key *presses*: on Windows crossterm also emits releases, which
         // would double every keystroke.
         if let Event::Key(key) = event::read()?
@@ -512,14 +409,13 @@ fn cmp_nan_last(a: f64, b: f64, desc: bool) -> std::cmp::Ordering {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ratatui::crossterm::event::{
         KeyCode,
         KeyEvent,
         KeyModifiers,
     };
-    use std::sync::Arc;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -533,23 +429,23 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    static MATRIX: [f64; 6] = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
+    /// Build a dashboard from column-major data, so a test reads as a list of
+    /// columns rather than an interleaved matrix literal. Shared with the `ui`
+    /// tests.
+    pub(crate) fn dashboard(names: &[&str], columns: &[&[f64]]) -> Dashboard {
+        crate::precompute::tests::fixture_from_columns(names, columns).build()
+    }
 
-    fn view() -> RescoreView<'static> {
-        RescoreView {
-            feature_names: vec![Arc::from("alpha_score"), Arc::from("beta_count")],
-            features: &MATRIX,
-            is_target: vec![true, false, true],
-            score: vec![3.0, 1.0, 2.0],
-            qvalue: vec![0.001, 0.9, 0.02],
-            importance: Vec::new(),
-        }
+    fn app() -> App {
+        App::new(dashboard(
+            &["alpha_score", "beta_count"],
+            &[&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0]],
+        ))
     }
 
     #[test]
     fn h_and_l_move_between_tabs() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         assert_eq!(app.tab(), Tab::Overview);
         app.handle_key(key('l'));
         assert_eq!(app.tab(), Tab::Fdr);
@@ -561,8 +457,7 @@ mod tests {
 
     #[test]
     fn j_and_k_move_the_feature_selection_and_clamp() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         assert_eq!(app.selected_feature(), Some(0));
         app.handle_key(key('j'));
         assert_eq!(app.selected_feature(), Some(1));
@@ -575,8 +470,7 @@ mod tests {
 
     #[test]
     fn x_and_y_cycle_transforms_in_both_directions() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         let x0 = app.x();
         app.handle_key(key('x'));
         assert_ne!(app.x(), x0);
@@ -592,8 +486,7 @@ mod tests {
 
     #[test]
     fn c_toggles_clipping_and_q_quits() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         assert!(app.clip(), "percentile clip is the default");
         app.handle_key(key('c'));
         assert!(!app.clip());
@@ -601,9 +494,41 @@ mod tests {
     }
 
     #[test]
+    fn z_cycles_the_fdr_zoom_in_both_directions() {
+        let mut app = app();
+        let n = app.dashboard().n_q_zooms();
+        assert!(n > 1, "a single zoom level makes the key pointless");
+        assert_ne!(
+            app.dashboard().q_curve(app.q_zoom()).zoom(),
+            1.0,
+            "the default view must be zoomed in; the full (0, 1] curve is the \
+             one that shows the least"
+        );
+
+        let start = app.q_zoom();
+        let mut seen = vec![app.dashboard().q_curve(start).zoom()];
+        for _ in 1..n {
+            app.handle_key(key('z'));
+            seen.push(app.dashboard().q_curve(app.q_zoom()).zoom());
+        }
+        app.handle_key(key('z'));
+        assert_eq!(app.q_zoom(), start, "z must wrap, not run off the end");
+
+        seen.sort_by(f64::total_cmp);
+        seen.dedup();
+        assert_eq!(seen.len(), n, "every zoom level must be reachable by z");
+
+        app.handle_key(key('Z'));
+        assert_eq!(
+            app.q_zoom(),
+            (start + n - 1) % n,
+            "Z must step the other way"
+        );
+    }
+
+    #[test]
     fn ctrl_c_quits_from_normal_mode() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         assert!(
             matches!(app.handle_key(ctrl('c')), Flow::Quit),
             "Ctrl-C must quit rather than toggling clip"
@@ -612,8 +537,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits_while_filter_editing() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         app.handle_key(key('/'));
         assert!(app.filter_editing());
         assert!(
@@ -624,8 +548,7 @@ mod tests {
 
     #[test]
     fn ctrl_x_does_not_cycle_the_x_transform() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         let x0 = app.x();
         assert!(matches!(app.handle_key(ctrl('x')), Flow::Continue));
         assert_eq!(app.x(), x0, "Ctrl-X is reserved, not a transform cycle");
@@ -633,8 +556,7 @@ mod tests {
 
     #[test]
     fn slash_filters_feature_names_and_esc_clears() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         assert_eq!(app.visible().len(), 2);
 
         app.handle_key(key('/'));
@@ -662,8 +584,7 @@ mod tests {
     /// empty query.
     #[test]
     fn reopening_the_filter_refreshes_visible_immediately() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         app.handle_key(key('/'));
         for c in "beta".chars() {
             app.handle_key(key(c));
@@ -682,8 +603,7 @@ mod tests {
 
     #[test]
     fn typing_while_filtering_does_not_trigger_commands() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         let tab0 = app.tab();
         app.handle_key(key('/'));
         app.handle_key(key('l'));
@@ -694,8 +614,7 @@ mod tests {
 
     #[test]
     fn a_filter_matching_nothing_leaves_no_selection() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         app.handle_key(key('/'));
         for c in "zzz".chars() {
             app.handle_key(key(c));
@@ -709,10 +628,10 @@ mod tests {
 
     #[test]
     fn s_cycles_the_sort_key_and_reorders() {
-        let v = view();
-        let mut app = App::new(&v);
+        let mut app = app();
         let first = app.visible().to_vec();
-        // Sort by target mean descending: beta_count (mean 20) before alpha_score (mean 2).
+        // Sort by target mean descending: beta_count (mean 20) before
+        // alpha_score (mean 2).
         while app.sort_key() != SortKey::TargetMean {
             app.handle_key(key('s'));
         }
@@ -720,116 +639,33 @@ mod tests {
         assert_eq!(app.visible()[0], 1);
     }
 
+    /// Gain is a column-aligned array read, so sorting on it must pick up the
+    /// row's own number rather than a neighbour's.
     #[test]
-    fn summary_is_cached_and_correct() {
-        let v = view();
-        let mut app = App::new(&v);
-        let s = app.summary(0);
-        assert_eq!(s.target_mean, 2.0, "rows 0 and 2 are targets: (1+3)/2");
-        assert_eq!(s.decoy_mean, 2.0);
-        assert_eq!(app.summary(0), s, "second call returns the cached value");
+    fn sorting_by_gain_reads_the_column_aligned_array() {
+        let mut app = app();
+        while app.sort_key() != SortKey::Gain {
+            app.handle_key(key('s'));
+        }
+        // The fixture sets gain[j] = j, so descending puts feature 1 first.
+        assert_eq!(app.visible(), &[1, 0]);
     }
 
-    /// The FDR and PP curves sort their inputs, so they must be computed once
-    /// per session rather than once per frame. `qvalue_curve`/`pp_curve` don't
-    /// depend on any transform, clip, filter, or selection state, so a second
-    /// call must both return the same data and leave the cache field filled
-    /// rather than recomputing.
+    /// A wholly NaN column gets a NaN AUC — a real, naturally occurring case,
+    /// not a synthetic key. It must sort last regardless of direction.
     #[test]
-    fn qvalue_curve_is_cached() {
-        let v = view();
-        let mut app = App::new(&v);
-        assert!(
-            app.qvalue_curve.is_none(),
-            "not computed until first access"
-        );
-
-        let first = app.qvalue_curve();
-        assert!(app.qvalue_curve.is_some(), "cached after the first access");
-
-        let second = app.qvalue_curve();
-        assert_eq!(first, second, "cached data is returned, not recomputed");
-    }
-
-    #[test]
-    fn pp_curve_is_cached() {
-        let v = view();
-        let mut app = App::new(&v);
-        assert!(app.pp_curve.is_none(), "not computed until first access");
-
-        let first = app.pp_curve();
-        assert!(app.pp_curve.is_some(), "cached after the first access");
-
-        let second = app.pp_curve();
-        assert_eq!(first, second, "cached data is returned, not recomputed");
-    }
-
-    /// `auc_exact` sorts its input, so it must be computed once per session
-    /// rather than once per Overview frame, exactly like the FDR/PP curves
-    /// above.
-    #[test]
-    fn auc_is_cached() {
-        let v = view();
-        let mut app = App::new(&v);
-        assert!(app.auc.is_none(), "not computed until first access");
-
-        let first = app.auc();
-        assert!(app.auc.is_some(), "cached after the first access");
-
-        let second = app.auc();
-        assert_eq!(first, second, "cached data is returned, not recomputed");
-    }
-
-    /// A fresh `TableState::default()` every frame resets `offset` to `0`, so
-    /// the viewport can never scroll. `table_state()` must hand out the same
-    /// stored state across calls, with `select()` following the cursor.
-    #[test]
-    fn table_state_is_shared_across_accesses_and_tracks_the_cursor() {
-        let v = view();
-        let mut app = App::new(&v);
-        assert_eq!(app.table_state().selected(), Some(0));
-
-        app.handle_key(key('j'));
-        assert_eq!(
-            app.table_state().selected(),
-            Some(1),
-            "table_state's selection follows the cursor"
-        );
-    }
-
-    /// `nan_feat` is NaN in every row, so `stats::summarize` gives it a NaN
-    /// AUC (no finite value contributes to either class): a real, naturally
-    /// occurring case, not a synthetic key. It must sort last regardless of
-    /// direction.
-    #[test]
-    fn nan_summary_keys_sort_last_in_both_directions() {
-        static MATRIX: [f64; 12] = [
-            1.0,
-            10.0,
-            f64::NAN,
-            2.0,
-            20.0,
-            f64::NAN,
-            3.0,
-            30.0,
-            f64::NAN,
-            4.0,
-            40.0,
-            f64::NAN,
-        ];
-        let v = RescoreView {
-            feature_names: vec![Arc::from("low"), Arc::from("high"), Arc::from("nan_feat")],
-            features: &MATRIX,
-            is_target: vec![true, false, true, false],
-            score: vec![0.0; 4],
-            qvalue: vec![0.0; 4],
-            importance: Vec::new(),
-        };
-        let mut app = App::new(&v);
+    fn nan_sort_keys_sort_last_in_both_directions() {
+        let mut app = App::new(dashboard(
+            &["low", "high", "nan_feat"],
+            &[
+                &[1.0, 2.0, 3.0, 4.0],
+                &[10.0, 20.0, 30.0, 40.0],
+                &[f64::NAN; 4],
+            ],
+        ));
         while app.sort_key() != SortKey::Auc {
             app.handle_key(key('s'));
         }
-
         assert_eq!(
             app.visible().last().copied(),
             Some(2),
@@ -849,8 +685,11 @@ mod tests {
     /// than touching a real terminal, and it must return `Ok`, not panic.
     #[test]
     fn run_returns_ok_and_does_not_panic_when_stdout_is_not_a_terminal() {
-        let v = view();
-        assert!(super::run(&v).is_ok());
+        assert!(!available());
+        assert!(
+            super::run(dashboard(&["a"], &[&[1.0, 2.0, 3.0, 4.0]])).is_ok(),
+            "a non-terminal stdout must skip, not fail the run"
+        );
     }
 
     /// `catch_panics` is the piece of `run` that keeps a panic inside the
@@ -867,12 +706,6 @@ mod tests {
         let result = catch_panics(|| panic!("simulated event-loop panic"));
         std::panic::set_hook(prev_hook);
         assert!(result.is_ok(), "a caught panic must not fail the run");
-    }
-
-    #[test]
-    fn catch_panics_passes_through_a_successful_result() {
-        let result = catch_panics(|| Ok(()));
-        assert!(result.is_ok());
     }
 
     #[test]

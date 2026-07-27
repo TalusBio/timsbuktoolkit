@@ -62,28 +62,108 @@ use tracing::{
     warn,
 };
 
-/// Dev-only rescore dashboard, gated on an environment variable rather than a
-/// CLI flag: it is a debugging tool, not part of the documented interface.
+/// Everything the opt-in rescore dashboard needs, kept together so the rest of
+/// this file carries one `#[cfg]` instead of five.
 #[cfg(feature = "dashboard")]
-fn dashboard_enabled() -> bool {
-    std::env::var("TIMSSEEK_RESCORE_DASHBOARD").is_ok_and(|v| v == "1")
-}
+mod dashboard {
+    use super::{
+        RescoreFeatureStats,
+        TimedStep,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use timsseek::scoring::results::FinalResult;
+    use tracing::info;
 
-/// `timsseek`'s per-fold stats -> the dashboard's dependency-free equivalent.
-#[cfg(feature = "dashboard")]
-fn to_fold_importance(stats: &RescoreFeatureStats) -> Vec<rescore_dash::FoldImportance> {
-    stats
-        .iter()
-        .map(|f| rescore_dash::FoldImportance {
-            fold: f.fold,
-            gain: f.feature_importance.clone(),
-            stats: f
-                .feature_stats
-                .iter()
-                .map(|s| (s.name.clone(), s.mean, s.nan_ratio))
-                .collect(),
-        })
-        .collect()
+    /// Dev-only, gated on an environment variable rather than a CLI flag: a
+    /// debugging tool, not part of the documented interface.
+    ///
+    /// Any value except an explicit `0`/`false`. Matching only `"1"` made
+    /// `TIMSSEEK_RESCORE_DASHBOARD=true` a silent no-op.
+    pub fn enabled() -> bool {
+        std::env::var("TIMSSEEK_RESCORE_DASHBOARD")
+            .is_ok_and(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false"))
+    }
+
+    /// Rows the histograms are built from. Overrides `DEFAULT_SAMPLE`; a value
+    /// at or above the row count makes every histogram exact.
+    fn sample_size() -> usize {
+        std::env::var("TIMSSEEK_RESCORE_DASHBOARD_SAMPLE")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(rescore_dash::DEFAULT_SAMPLE)
+    }
+
+    /// Fold-averaged GBM gain, aligned to `feature_names`.
+    ///
+    /// A feature no fold reported gets `0.0`; the LDA path reports coefficients
+    /// for the linear lane only, so that is a normal outcome, not a missing
+    /// value. Averaged here so the dashboard indexes gain by column instead of
+    /// searching the per-fold lists by name.
+    fn mean_gain_per_feature(stats: &RescoreFeatureStats, feature_names: &[Arc<str>]) -> Vec<f32> {
+        let mut sum = vec![0.0f32; feature_names.len()];
+        let mut n = vec![0u32; feature_names.len()];
+        let index: HashMap<&str, usize> = feature_names
+            .iter()
+            .enumerate()
+            .map(|(j, name)| (&**name, j))
+            .collect();
+        for fold in stats {
+            for (name, gain) in &fold.feature_importance {
+                if let Some(&j) = index.get(&**name) {
+                    sum[j] += gain;
+                    n[j] += 1;
+                }
+            }
+        }
+        sum.iter()
+            .zip(&n)
+            .map(|(&s, &k)| if k == 0 { 0.0 } else { s / k as f32 })
+            .collect()
+    }
+
+    /// Sweep `data` into a `Dashboard`, or `None` if the dashboard is off or
+    /// the view is rejected.
+    ///
+    /// The feature matrix is roughly 1 GB at ~1e6 rows x 131 features. It is
+    /// built, swept and dropped inside this function, so nothing matrix-sized
+    /// survives into the arbitrarily long time the TUI sits open. Both gates
+    /// are checked before any of it, so a piped run pays nothing.
+    pub fn build(
+        data: &[FinalResult],
+        feature_stats: &RescoreFeatureStats,
+    ) -> Option<rescore_dash::Dashboard> {
+        if !enabled() || !rescore_dash::available() {
+            return None;
+        }
+        let step = TimedStep::begin("Rescore dashboard precompute");
+        let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(data);
+        let is_target: Vec<bool> = data.iter().map(|r| r.scoring.identity.is_target).collect();
+        let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
+        let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();
+        let gain = mean_gain_per_feature(feature_stats, &feature_names);
+        let matrix_mb = (matrix.len() * size_of::<f64>()) as f64 / (1024.0 * 1024.0);
+        info!(
+            "rescore dashboard: {} rows x {} features ({matrix_mb:.1} MB matrix, freed after precompute)",
+            is_target.len(),
+            feature_names.len()
+        );
+        let built = rescore_dash::Dashboard::build_with_sample(
+            &rescore_dash::RescoreView {
+                feature_names: &feature_names,
+                features: &matrix,
+                is_target: &is_target,
+                score: &score,
+                qvalue: &qvalue,
+                gain: &gain,
+            },
+            sample_size(),
+        );
+        step.finish();
+        built
+            .inspect_err(|e| tracing::warn!("rescore dashboard input rejected: {e}"))
+            .ok()
+    }
 }
 
 /// Lookup from `(precursor m/z * 100, precursor charge)` to the main speclib's
@@ -455,29 +535,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         }
     }
 
-    // Build the dashboard's inputs BEFORE Phase 6 — the writer consumes `data`.
-    // Costs one feature-matrix walk, and only when the dashboard is on.
-    //
-    // The matrix is `n_rows * n_features * 8` bytes (f64) and stays live
-    // alongside `data`/the Parquet write buffers until the user quits the
-    // dashboard (Phase 6 runs first, but the dashboard opens after and blocks
-    // until closed) — at ~1e6 rows x 131 ALL-lane features that is roughly
-    // 1 GB held for as long as the dashboard stays open, so its size is
-    // logged rather than left invisible.
+    // Built BEFORE Phase 6: the writer consumes `data`.
     #[cfg(feature = "dashboard")]
-    let dashboard_input = dashboard_enabled().then(|| {
-        let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(&data);
-        let is_target: Vec<bool> = data.iter().map(|r| r.scoring.identity.is_target).collect();
-        let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
-        let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();
-        let n_rows = is_target.len();
-        let n_features = feature_names.len();
-        let matrix_mb = (matrix.len() * std::mem::size_of::<f64>()) as f64 / (1024.0 * 1024.0);
-        info!(
-            "rescore dashboard feature matrix: {n_rows} rows x {n_features} features ({matrix_mb:.1} MB), held live until the dashboard is closed"
-        );
-        (feature_names, matrix, is_target, score, qvalue)
-    });
+    let dashboard = dashboard::build(&data, &feature_stats);
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
@@ -515,19 +575,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // After Phase 6, so a dashboard left open overnight — or killed — still has
     // its results written.
+    // No `snap!` around this: it blocks until the user quits, so any measurement
+    // taken across it reports how long they looked at the screen.
     #[cfg(feature = "dashboard")]
-    if let Some((feature_names, matrix, is_target, score, qvalue)) = dashboard_input {
-        let view = rescore_dash::RescoreView {
-            feature_names,
-            features: &matrix,
-            is_target,
-            score,
-            qvalue,
-            importance: to_fold_importance(&feature_stats),
-        };
-        if let Err(e) = rescore_dash::run(&view) {
-            tracing::warn!("rescore dashboard exited with an error: {e}");
-        }
+    if let Some(dash) = dashboard
+        && let Err(e) = rescore_dash::run(dash)
+    {
+        tracing::warn!("rescore dashboard exited with an error: {e}");
     }
 
     // Key result to stdout. The final output URI is printed by main.rs

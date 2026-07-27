@@ -2,8 +2,17 @@
 //!
 //! A transform never errors. Values it cannot map (non-positives under a log,
 //! negatives under a square root, anything non-finite) are dropped, and the
-//! caller reports the drop count in the panel title — a silently shrinking
+//! caller reports the drop count in the panel subtitle — a silently shrinking
 //! histogram would misread as "these rows do not exist".
+//!
+//! [`XTransform`] is applied once, at init, over a sorted sample. (`YTransform`
+//! is not: it maps stored counts and runs per bin per frame.) That order is
+//! what [`XTransform::accepts`] and [`XTransform::is_monotone`] exist for: the
+//! survivors of a domain restriction are a *suffix* of a sorted column, so a
+//! `partition_point` finds them, and for a monotone map the p-th percentile of
+//! `T(x)` is `T` of the p-th percentile of `x`.
+
+use crate::cycle;
 
 /// Largest exponent `exp` is allowed to see, guarding against overflow to
 /// `+inf`. Only the upper side needs guarding: `exp` overflows above ~709.78,
@@ -14,6 +23,64 @@
 /// the display cares about.
 const EXP_CLAMP: f64 = 700.0;
 
+/// What a histogram's x axis shows.
+///
+/// Two cases and not seven variants of one, because `RankPercentile` is not a
+/// function of the value: it is the row's sorted position. Folding it into
+/// [`XTransform`] meant `apply` returning the input unchanged, `accepts`
+/// answering for a domain it does not have, and every caller special-casing it
+/// before dispatch anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// A pointwise map of the value.
+    Value(XTransform),
+    /// Sorted position as a percentile in `0..=100`.
+    RankPercentile,
+}
+
+impl Axis {
+    /// Every axis, in cycle order. Stored histograms are indexed by position
+    /// in this array.
+    pub const ALL: [Axis; 7] = [
+        Self::Value(XTransform::Linear),
+        Self::Value(XTransform::Log10),
+        Self::Value(XTransform::SignedLog1p),
+        Self::Value(XTransform::Sqrt),
+        Self::Value(XTransform::Square),
+        Self::Value(XTransform::Exp),
+        Self::RankPercentile,
+    ];
+
+    pub fn next(self) -> Self {
+        cycle::step(&Self::ALL, self, 1)
+    }
+
+    pub fn prev(self) -> Self {
+        cycle::step(&Self::ALL, self, -1)
+    }
+
+    /// Index into [`Self::ALL`], which is how stored histograms are addressed.
+    pub fn index(self) -> usize {
+        cycle::index_of(&Self::ALL, self)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Value(t) => t.label(),
+            Self::RankPercentile => "rank-pct",
+        }
+    }
+
+    /// Whether a *finite* `v` can be plotted on this axis. Every value has a
+    /// rank, so only a value transform can refuse one.
+    pub fn accepts(self, v: f64) -> bool {
+        match self {
+            Self::Value(t) => t.accepts(v),
+            Self::RankPercentile => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XTransform {
     Linear,
@@ -22,29 +89,17 @@ pub enum XTransform {
     Sqrt,
     Square,
     Exp,
-    RankPercentile,
 }
 
 impl XTransform {
-    const CYCLE: [XTransform; 7] = [
+    pub const ALL: [XTransform; 6] = [
         Self::Linear,
         Self::Log10,
         Self::SignedLog1p,
         Self::Sqrt,
         Self::Square,
         Self::Exp,
-        Self::RankPercentile,
     ];
-
-    pub fn next(self) -> Self {
-        let i = Self::CYCLE.iter().position(|t| *t == self).unwrap_or(0);
-        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
-    }
-
-    pub fn prev(self) -> Self {
-        let i = Self::CYCLE.iter().position(|t| *t == self).unwrap_or(0);
-        Self::CYCLE[(i + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
-    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -54,19 +109,41 @@ impl XTransform {
             Self::Sqrt => "sqrt",
             Self::Square => "square",
             Self::Exp => "exp",
-            Self::RankPercentile => "rank-pct",
         }
     }
 
+    /// Whether a *finite* `v` is inside this transform's domain — exactly the
+    /// condition [`Self::apply`] tests, factored out so the sorted-suffix
+    /// search in `precompute` cannot drift from the pointwise map.
+    ///
+    /// The accepted set is an up-set on the value axis for every variant, which
+    /// is what makes the survivors a suffix of a sorted column.
+    pub fn accepts(self, v: f64) -> bool {
+        match self {
+            Self::Log10 => v > 0.0,
+            Self::Sqrt => v >= 0.0,
+            _ => true,
+        }
+    }
+
+    /// Whether this map is non-decreasing over the values it accepts, so that
+    /// the p-th percentile of the output is the transform of the p-th
+    /// percentile of the input.
+    ///
+    /// `Square` is the one that is not: it decreases below zero, so a column
+    /// straddling zero needs its percentiles taken over `|v|`.
+    pub fn is_monotone(self) -> bool {
+        !matches!(self, Self::Square)
+    }
+
     /// Pointwise map. `None` means the value is outside this transform's
-    /// domain and must be dropped. `RankPercentile` is not pointwise — it
-    /// returns `Some(v)` here and is handled in [`transform_column`].
+    /// domain (or maps outside the finite range) and must be dropped.
     pub fn apply(self, v: f64) -> Option<f64> {
         if !v.is_finite() {
             return None;
         }
         let out = match self {
-            Self::Linear | Self::RankPercentile => v,
+            Self::Linear => v,
             Self::Log10 => {
                 if v <= 0.0 {
                     return None;
@@ -87,65 +164,6 @@ impl XTransform {
     }
 }
 
-/// Transform a whole column, returning the surviving values (input order) and
-/// the number dropped.
-pub fn transform_column(t: XTransform, values: &[f64]) -> (Vec<f64>, usize) {
-    if t == XTransform::RankPercentile {
-        return rank_percentile(values);
-    }
-    let mut out = Vec::with_capacity(values.len());
-    let mut dropped = 0;
-    for &v in values {
-        match t.apply(v) {
-            Some(x) => out.push(x),
-            None => dropped += 1,
-        }
-    }
-    (out, dropped)
-}
-
-/// Map finite values onto 0..=100 by rank, preserving input order. Ties share
-/// the mid-rank, so a constant column maps entirely to 50.
-fn rank_percentile(values: &[f64]) -> (Vec<f64>, usize) {
-    let mut idx: Vec<usize> = (0..values.len())
-        .filter(|&i| values[i].is_finite())
-        .collect();
-    let dropped = values.len() - idx.len();
-    if idx.is_empty() {
-        return (Vec::new(), dropped);
-    }
-    if idx.len() == 1 {
-        return (vec![50.0], dropped);
-    }
-    idx.sort_by(|&a, &b| {
-        values[a]
-            .partial_cmp(&values[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let denom = (idx.len() - 1) as f64;
-    let mut pct = vec![0.0f64; values.len()];
-    let mut i = 0usize;
-    while i < idx.len() {
-        let mut j = i;
-        while j + 1 < idx.len() && values[idx[j + 1]] == values[idx[i]] {
-            j += 1;
-        }
-        let mid = (i + j) as f64 / 2.0;
-        let p = 100.0 * mid / denom;
-        for &k in &idx[i..=j] {
-            pct[k] = p;
-        }
-        i = j + 1;
-    }
-
-    let out = (0..values.len())
-        .filter(|&i| values[i].is_finite())
-        .map(|i| pct[i])
-        .collect();
-    (out, dropped)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YTransform {
     /// Fraction of the class's own total. The default: target and decoy counts
@@ -157,16 +175,14 @@ pub enum YTransform {
 }
 
 impl YTransform {
-    const CYCLE: [YTransform; 3] = [Self::Density, Self::Count, Self::Log10Count];
+    pub const ALL: [YTransform; 3] = [Self::Density, Self::Count, Self::Log10Count];
 
     pub fn next(self) -> Self {
-        let i = Self::CYCLE.iter().position(|t| *t == self).unwrap_or(0);
-        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
+        cycle::step(&Self::ALL, self, 1)
     }
 
     pub fn prev(self) -> Self {
-        let i = Self::CYCLE.iter().position(|t| *t == self).unwrap_or(0);
-        Self::CYCLE[(i + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
+        cycle::step(&Self::ALL, self, -1)
     }
 
     pub fn label(self) -> &'static str {
@@ -198,96 +214,159 @@ mod tests {
 
     #[test]
     fn x_cycles_forward_and_back() {
-        let t = XTransform::Linear;
+        let t = Axis::ALL[0];
         assert_eq!(t.next().prev(), t);
-        // The cycle covers every variant and returns to the start.
+        // Stepping `ALL.len()` times must visit every axis exactly once and
+        // land back at the start — a `next` that skipped or repeated one would
+        // make an axis unreachable from the keyboard.
         let mut seen = vec![t];
         let mut cur = t;
-        for _ in 0..6 {
+        for _ in 1..Axis::ALL.len() {
             cur = cur.next();
             seen.push(cur);
         }
-        assert_eq!(cur.next(), XTransform::Linear);
-        assert_eq!(seen.len(), 7, "seven transforms in the cycle");
+        assert_eq!(cur.next(), t, "the cycle must close");
+        seen.sort_by_key(|a| a.index());
+        seen.dedup();
+        assert_eq!(seen.len(), Axis::ALL.len(), "every axis, once");
+    }
+
+    /// `Axis::RankPercentile` is not a value transform, so it must not appear
+    /// among them — the whole point of the split.
+    #[test]
+    fn every_value_transform_is_reachable_as_an_axis() {
+        for t in XTransform::ALL {
+            assert!(
+                Axis::ALL.contains(&Axis::Value(t)),
+                "{t:?} is not on any axis"
+            );
+        }
+        assert_eq!(Axis::ALL.len(), XTransform::ALL.len() + 1);
     }
 
     #[test]
-    fn log10_drops_non_positives() {
-        let (out, dropped) = transform_column(XTransform::Log10, &[100.0, 0.0, -1.0, 10.0]);
-        assert_eq!(dropped, 2);
-        assert_eq!(out, vec![2.0, 1.0]);
+    fn log10_rejects_non_positives() {
+        assert_eq!(XTransform::Log10.apply(100.0), Some(2.0));
+        assert_eq!(XTransform::Log10.apply(0.0), None);
+        assert_eq!(XTransform::Log10.apply(-1.0), None);
     }
 
     #[test]
-    fn sqrt_drops_negatives_and_keeps_zero() {
-        let (out, dropped) = transform_column(XTransform::Sqrt, &[4.0, 0.0, -9.0]);
-        assert_eq!(dropped, 1);
-        assert_eq!(out, vec![2.0, 0.0]);
+    fn sqrt_rejects_negatives_and_keeps_zero() {
+        assert_eq!(XTransform::Sqrt.apply(4.0), Some(2.0));
+        assert_eq!(XTransform::Sqrt.apply(0.0), Some(0.0));
+        assert_eq!(XTransform::Sqrt.apply(-9.0), None);
     }
 
     #[test]
     fn signed_log1p_is_total_and_odd() {
-        let (out, dropped) = transform_column(XTransform::SignedLog1p, &[-9.0, 0.0, 9.0]);
-        assert_eq!(dropped, 0);
-        assert!((out[0] + out[2]).abs() < 1e-12, "odd about zero");
-        assert_eq!(out[1], 0.0);
+        let neg = XTransform::SignedLog1p.apply(-9.0).unwrap();
+        let pos = XTransform::SignedLog1p.apply(9.0).unwrap();
+        assert!((neg + pos).abs() < 1e-12, "odd about zero");
+        assert_eq!(XTransform::SignedLog1p.apply(0.0), Some(0.0));
     }
 
     #[test]
     fn square_is_total() {
-        let (out, dropped) = transform_column(XTransform::Square, &[-3.0, 0.0, 2.0]);
-        assert_eq!(dropped, 0);
-        assert_eq!(out, vec![9.0, 0.0, 4.0]);
+        assert_eq!(XTransform::Square.apply(-3.0), Some(9.0));
+        assert_eq!(XTransform::Square.apply(0.0), Some(0.0));
+        assert_eq!(XTransform::Square.apply(2.0), Some(4.0));
     }
 
     #[test]
     fn exp_clamps_instead_of_overflowing() {
-        let (out, dropped) = transform_column(XTransform::Exp, &[0.0, 1e9, -1e9]);
-        assert_eq!(dropped, 0, "clamped, not dropped");
-        assert_eq!(out[0], 1.0);
-        assert!(out[1].is_finite(), "1e9 must clamp, got {}", out[1]);
-        assert_eq!(out[2], 0.0);
+        assert_eq!(XTransform::Exp.apply(0.0), Some(1.0));
+        let big = XTransform::Exp
+            .apply(1e9)
+            .expect("1e9 must clamp, not drop");
+        assert!(big.is_finite(), "got {big}");
+        assert_eq!(XTransform::Exp.apply(-1e9), Some(0.0));
     }
 
     #[test]
-    fn non_finite_input_is_always_dropped() {
-        for t in [
-            XTransform::Linear,
-            XTransform::Square,
-            XTransform::SignedLog1p,
-            XTransform::RankPercentile,
-        ] {
-            let (out, dropped) = transform_column(t, &[1.0, f64::NAN, f64::INFINITY]);
-            assert_eq!(dropped, 2, "{t:?} must drop non-finite values");
-            assert_eq!(out.len(), 1);
+    fn non_finite_input_is_always_rejected() {
+        for t in XTransform::ALL {
+            assert_eq!(t.apply(f64::NAN), None, "{t:?} must reject NaN");
+            assert_eq!(t.apply(f64::INFINITY), None, "{t:?} must reject +inf");
+            assert_eq!(t.apply(f64::NEG_INFINITY), None, "{t:?} must reject -inf");
         }
     }
 
+    /// `accepts` drives the sorted-suffix search that finds each transform's
+    /// survivors, while `apply` decides what is actually plotted. If they
+    /// disagree on any finite value, the clip range is taken over a different
+    /// set than the one being binned.
     #[test]
-    fn rank_percentile_maps_onto_zero_to_one_hundred() {
-        let (out, dropped) = transform_column(XTransform::RankPercentile, &[50.0, 10.0, 30.0]);
-        assert_eq!(dropped, 0);
-        // Output stays in input order: 50 is the largest, 10 the smallest.
-        assert_eq!(out[1], 0.0);
-        assert_eq!(out[0], 100.0);
-        assert!((out[2] - 50.0).abs() < 1e-9);
+    fn accepts_agrees_with_apply_on_every_finite_value() {
+        let probes = [
+            -1e6,
+            -1.0,
+            -1e-9,
+            -f64::MIN_POSITIVE,
+            0.0,
+            f64::MIN_POSITIVE,
+            1e-9,
+            0.5,
+            1.0,
+            2.0,
+            1e6,
+        ];
+        for t in XTransform::ALL {
+            for v in probes {
+                assert_eq!(
+                    t.accepts(v),
+                    t.apply(v).is_some(),
+                    "{t:?} disagrees on {v:e}"
+                );
+            }
+        }
     }
 
-    /// Documented on `rank_percentile`: "a constant column maps entirely to
-    /// 50". Ties share the mid-rank, and for an all-tied column every value
-    /// shares the single mid-rank of the whole (0-indexed) run, which is
-    /// exactly 50% of the way from 0 to 100 regardless of length — so this
-    /// must hold for any length >= 2, not just the length-3 case above.
+    /// The accepted set must be an up-set: everything at or above the smallest
+    /// accepted value is accepted too. That is what makes the survivors a
+    /// suffix of a sorted column rather than a scattered subset.
     #[test]
-    fn rank_percentile_maps_an_all_tied_column_entirely_to_fifty() {
-        for len in [2, 3, 4, 10, 11] {
-            let values = vec![7.0; len];
-            let (out, dropped) = transform_column(XTransform::RankPercentile, &values);
-            assert_eq!(dropped, 0, "len {len}: nothing should be dropped");
-            assert!(
-                out.iter().all(|&v| (v - 50.0).abs() < 1e-9),
-                "len {len}: an all-tied column must map entirely to 50, got {out:?}"
-            );
+    fn accepted_values_form_a_suffix_of_the_value_axis() {
+        let ascending = [-1e6, -1.0, -1e-9, 0.0, 1e-9, 0.5, 1.0, 1e6];
+        for t in XTransform::ALL {
+            let mut seen_accepted = false;
+            for v in ascending {
+                let ok = t.accepts(v);
+                assert!(
+                    ok || !seen_accepted,
+                    "{t:?} rejects {v:e} after accepting a smaller value"
+                );
+                seen_accepted |= ok;
+            }
+        }
+    }
+
+    /// A monotone claim is load-bearing: the clip range is computed as
+    /// `T(percentile of x)` rather than `percentile of T(x)`, which is only the
+    /// same thing when `T` is non-decreasing over its accepted values.
+    #[test]
+    fn monotone_transforms_really_are_non_decreasing() {
+        let ascending = [-1e3, -1.0, -0.5, 0.0, 1e-9, 0.5, 1.0, 2.0, 1e3];
+        for t in XTransform::ALL.into_iter().filter(|t| t.is_monotone()) {
+            let mut prev = f64::NEG_INFINITY;
+            for v in ascending {
+                let Some(y) = t.apply(v) else { continue };
+                assert!(y >= prev, "{t:?} decreased at {v:e}: {y} < {prev}");
+                prev = y;
+            }
+        }
+        assert!(
+            !XTransform::Square.is_monotone(),
+            "square decreases below zero"
+        );
+    }
+
+    #[test]
+    fn index_round_trips_through_all() {
+        // The stored histograms are addressed by this index, so a mismatch
+        // would silently plot one axis's counts under another's label.
+        for (i, a) in Axis::ALL.into_iter().enumerate() {
+            assert_eq!(a.index(), i);
         }
     }
 

@@ -7,4 +7,14 @@ license.workspace = true
 
 [dependencies]
 ratatui = "0.29"
+rayon = { workspace = true }
 tracing = { workspace = true }
+
+# No `alloc_track` dev-dependency here, deliberately. Cargo unifies a
+# dev-dependency's features into the whole workspace build, so
+# `alloc_track/enabled` in this manifest switches real counters on inside
+# `timsseek_cli` during a plain `cargo test --workspace` — defeating that
+# crate's own `track-alloc` opt-in and printing `[alloc]` lines from counters
+# no installed allocator increments. Churn measurement belongs in a local,
+# untracked harness; the accuracy claim it used to also carry now lives in
+# `precompute`'s `sample_size_holds_its_accuracy_claim` test.

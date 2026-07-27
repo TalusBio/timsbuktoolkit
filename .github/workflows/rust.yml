@@ -45,6 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build
-        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros
+        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash
       - name: Run tests
-        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros --all-targets
+        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash --all-targets
+      # The dashboard is opt-in, so its call sites in `timsseek_cli` compile
+      # under no other leg of this matrix. Without this they rot silently the
+      # next time `FinalResult` or `RescoreFeatureStats` changes.
+      - name: Build tests (dashboard feature)
+        run: cargo test --verbose -p timsseek_cli --features dashboard --all-targets --no-run

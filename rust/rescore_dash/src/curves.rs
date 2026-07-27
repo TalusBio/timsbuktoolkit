@@ -1,48 +1,87 @@
 //! The FDR and calibration curves.
 //!
-//! Both are cumulative counts over a grid, computed once when the panel is
-//! first drawn rather than per frame.
+//! Both are cumulative counts over a grid, built once in `Dashboard::build`.
 
-/// `(threshold, total passing, targets passing, decoys passing)` for each
-/// threshold. Mirrors `timsseek::ml::qvalues::report_qvalues_at_thresholds`, so
-/// the panel and the run log agree.
+/// How many rows pass at one q-value cutoff.
+///
+/// `total == targets + decoys` always: an unlabeled row is not counted at all
+/// rather than counted into the total alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThresholdRow {
+    pub q: f32,
+    pub total: usize,
+    pub targets: usize,
+    pub decoys: usize,
+}
+
+/// [`ThresholdRow`] for each threshold, in the order given.
+///
+/// One pass over the rows for all thresholds, not one pass each: every row is
+/// counted into each threshold it clears, so the cost is independent of how
+/// many cutoffs are asked for.
+///
+/// Deliberately a re-derivation of the same quantity as
+/// `timsseek::ml::qvalues::report_qvalues_at_thresholds` rather than a call to
+/// it — this crate takes no pipeline dependency (see [`crate::view`]). The two
+/// agree because they are both "rows at or below the cutoff, by class".
 ///
 /// `is_target` is row-aligned with `qvalue`; a row with no label (past the end
-/// of `is_target`) is skipped entirely, so `total == targets + decoys` holds
-/// for every threshold by construction.
+/// of `is_target`) is skipped entirely.
 pub fn threshold_table(
     qvalue: &[f32],
     is_target: &[bool],
     thresholds: &[f32],
-) -> Vec<(f32, usize, usize, usize)> {
-    thresholds
-        .iter()
-        .map(|&thresh| {
-            let mut total = 0;
-            let mut targets = 0;
-            let mut decoys = 0;
-            for (i, &q) in qvalue.iter().enumerate() {
-                let Some(&is_t) = is_target.get(i) else {
-                    continue;
-                };
-                if q > thresh || q.is_nan() {
-                    continue;
-                }
-                total += 1;
+) -> Vec<ThresholdRow> {
+    let mut counts = vec![(0usize, 0usize); thresholds.len()];
+    for (i, &row_q) in qvalue.iter().enumerate() {
+        let Some(&is_t) = is_target.get(i) else {
+            continue;
+        };
+        if row_q.is_nan() {
+            continue;
+        }
+        for (&q, c) in thresholds.iter().zip(counts.iter_mut()) {
+            if row_q <= q {
                 if is_t {
-                    targets += 1;
+                    c.0 += 1;
                 } else {
-                    decoys += 1;
+                    c.1 += 1;
                 }
             }
-            (thresh, total, targets, decoys)
+        }
+    }
+    thresholds
+        .iter()
+        .zip(counts)
+        .map(|(&q, (targets, decoys))| ThresholdRow {
+            q,
+            total: targets + decoys,
+            targets,
+            decoys,
         })
         .collect()
 }
 
-/// Targets passing as a function of the q-value threshold, over `n_points`
-/// evenly spaced thresholds in `(0, 1]`.
-pub fn qvalue_curve(qvalue: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
+/// Targets passing as a function of the q-value threshold: one curve per entry
+/// of `zooms`, curve `i` spanning `n_points` evenly spaced thresholds in
+/// `(0, zooms[i]]`.
+///
+/// Several curves rather than one because the full `(0, 1]` view answers the
+/// least: on any run worth looking at, essentially every target has arrived by
+/// q = 0.05, so the shape that matters — how many IDs a tighter cutoff costs —
+/// is squeezed into the leftmost few percent of the panel and reads as a
+/// vertical line. Sub-sampling a `(0, 1]` curve down to `q <= 0.01` would leave
+/// one point in a hundred, so each zoom needs its own grid.
+///
+/// They are computed together because the sort is the expensive part and it is
+/// shared: every zoom is answered by `partition_point` over the same sorted
+/// array, so the extra views cost a scan and no extra pass over the run.
+pub fn qvalue_curves(
+    qvalue: &[f32],
+    is_target: &[bool],
+    n_points: usize,
+    zooms: &[f64],
+) -> Vec<Vec<(f64, f64)>> {
     let n_points = n_points.max(2);
     let mut targets: Vec<f32> = qvalue
         .iter()
@@ -52,12 +91,18 @@ pub fn qvalue_curve(qvalue: &[f32], is_target: &[bool], n_points: usize) -> Vec<
         .collect();
     targets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    (1..=n_points)
-        .map(|k| {
-            let thresh = k as f64 / n_points as f64;
-            // Sorted: partition_point is the count at or below the threshold.
-            let n = targets.partition_point(|&q| (q as f64) <= thresh);
-            (thresh, n as f64)
+    zooms
+        .iter()
+        .map(|&zoom| {
+            (1..=n_points)
+                .map(|k| {
+                    let thresh = zoom * k as f64 / n_points as f64;
+                    // Sorted: partition_point is the count at or below the
+                    // threshold.
+                    let n = targets.partition_point(|&q| (q as f64) <= thresh);
+                    (thresh, n as f64)
+                })
+                .collect()
         })
         .collect()
 }
@@ -111,38 +156,40 @@ pub fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64,
 mod tests {
     use super::*;
 
+    fn row(q: f32, total: usize, targets: usize, decoys: usize) -> ThresholdRow {
+        ThresholdRow {
+            q,
+            total,
+            targets,
+            decoys,
+        }
+    }
+
     #[test]
     fn threshold_table_matches_hand_counts() {
         let q = vec![0.001f32, 0.02, 0.2, 0.9];
         let t = vec![true, true, false, false];
         let got = threshold_table(&q, &t, &[0.01, 0.05, 1.0]);
-        assert_eq!(got[0], (0.01, 1, 1, 0));
-        assert_eq!(got[1], (0.05, 2, 2, 0));
-        assert_eq!(got[2], (1.0, 4, 2, 2));
+        assert_eq!(got[0], row(0.01, 1, 1, 0));
+        assert_eq!(got[1], row(0.05, 2, 2, 0));
+        assert_eq!(got[2], row(1.0, 4, 2, 2));
     }
 
     #[test]
-    fn threshold_table_total_matches_labeled_rows_only() {
+    fn threshold_table_counts_labeled_rows_only() {
         // is_target is shorter than qvalue: rows 3 and 4 have no label and
         // must be skipped entirely, not counted into `total` alone.
         let q = vec![0.001f32, 0.02, 0.2, 0.9, 0.5];
         let t = vec![true, true, false];
         let got = threshold_table(&q, &t, &[0.01, 0.05, 1.0]);
-        for &(_, total, targets, decoys) in &got {
-            assert_eq!(
-                total,
-                targets + decoys,
-                "total must equal targets + decoys at every threshold"
-            );
-        }
-        assert_eq!(got[2], (1.0, 3, 2, 1), "unlabeled rows never counted");
+        assert_eq!(got[2], row(1.0, 3, 2, 1), "unlabeled rows never counted");
     }
 
     #[test]
     fn qvalue_curve_is_monotone_nondecreasing() {
         let q: Vec<f32> = (0..100).map(|i| i as f32 / 100.0).collect();
         let t = vec![true; 100];
-        let curve = qvalue_curve(&q, &t, 20);
+        let curve = qvalue_curves(&q, &t, 20, &[1.0]).remove(0);
         assert_eq!(curve.len(), 20);
         for w in curve.windows(2) {
             assert!(w[1].0 >= w[0].0, "q must ascend");
@@ -158,8 +205,62 @@ mod tests {
     fn qvalue_curve_handles_no_targets() {
         let q = vec![0.5f32, 0.6];
         let t = vec![false, false];
-        let curve = qvalue_curve(&q, &t, 5);
+        let curve = qvalue_curves(&q, &t, 5, &[1.0]).remove(0);
         assert!(curve.iter().all(|p| p.1 == 0.0));
+    }
+
+    /// A zoomed curve must spend all of its points inside its own range and
+    /// agree with the wide curve wherever they overlap — a zoom that merely
+    /// rescaled the axis without re-gridding would be the bug this guards.
+    #[test]
+    fn zoomed_curves_resolve_the_low_q_region() {
+        // 1000 targets, all under q = 0.02: the whole population lands in the
+        // first two points of the (0, 1] curve and nowhere else.
+        let q: Vec<f32> = (0..1000).map(|i| i as f32 * 2e-5).collect();
+        let t = vec![true; 1000];
+        // 100 points puts q = 0.01 exactly on all three grids, so the three
+        // views can be compared at a shared threshold below.
+        let curves = qvalue_curves(&q, &t, 100, &[1.0, 0.05, 0.01]);
+
+        let wide = &curves[0];
+        assert!(
+            wide.iter().filter(|p| p.1 > 0.0 && p.1 < 1000.0).count() <= 1,
+            "the wide view should be saturated, that is why zooms exist"
+        );
+
+        for (curve, zoom) in curves.iter().zip([1.0, 0.05, 0.01]) {
+            assert_eq!(curve.len(), 100);
+            assert!(
+                curve.iter().all(|&(x, _)| x > 0.0 && x <= zoom + 1e-12),
+                "points must stay inside the zoom range"
+            );
+            assert!(
+                (curve.last().unwrap().0 - zoom).abs() < 1e-12,
+                "the last point must sit on the range's edge"
+            );
+        }
+
+        // q = 0.01 is a grid point of every zoom here, so all three must
+        // report the same count there.
+        let at = |c: &Vec<(f64, f64)>| {
+            c.iter()
+                .find(|(x, _)| (x - 0.01).abs() < 1e-9)
+                .map(|&(_, y)| y)
+                .expect("0.01 is on every grid")
+        };
+        assert_eq!(at(&curves[0]), at(&curves[1]));
+        assert_eq!(at(&curves[1]), at(&curves[2]));
+
+        // And the zoom actually resolves: the 0.01 view climbs gradually
+        // instead of jumping from nothing to everything in one step.
+        assert!(
+            curves[2]
+                .iter()
+                .filter(|p| p.1 > 0.0 && p.1 < 500.0)
+                .count()
+                > 10,
+            "zoomed curve should have many intermediate points"
+        );
     }
 
     #[test]

@@ -17,7 +17,10 @@ use super::blocks::{
     ColSink,
     ScoreBlock,
 };
-use super::results::FinalResult;
+use super::results::{
+    FeatureRow,
+    FinalResult,
+};
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult

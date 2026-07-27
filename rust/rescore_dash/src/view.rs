@@ -6,42 +6,28 @@
 
 use std::sync::Arc;
 
-/// Per-fold feature importance and stats, as produced by the rescorer.
+/// One rescoring run's rows: the model's feature matrix plus labels, scores,
+/// q-values and per-feature gain.
 ///
-/// A local plain struct rather than `timsseek`'s `RescoreFeatureStats` so this
-/// crate stays free of a `timsseek` dependency; the caller converts.
-///
-/// `gain` is read (via [`RescoreView::mean_gain`]) for the Features table's
-/// `gain` column; `fold` and `stats` are not read anywhere in this crate. Both
-/// are kept on the struct deliberately: they are part of the boundary for a
-/// deferred standalone viewer that would show per-fold detail this dashboard
-/// does not. In particular, do not read `stats`' NaN ratio for the table's
-/// `NaN%` column — `summarize` recomputes it from the matrix actually on
-/// screen, which is the more truthful source than a stat computed by the CLI
-/// before the dashboard's own filtering/clipping ever sees the data.
-pub struct FoldImportance {
-    pub fold: u8,
-    /// `(feature name, GBM gain)`
-    pub gain: Vec<(Arc<str>, f32)>,
-    /// `(feature name, mean, NaN ratio)`
-    pub stats: Vec<(Arc<str>, f32, f32)>,
-}
-
-/// One rescoring run's rows: the model's feature matrix plus labels, scores and
-/// q-values.
-///
-/// `features` is row-major and borrowed — the caller owns the matrix (it can be
-/// hundreds of MB) and lends it for the dashboard's lifetime.
+/// A pure input struct — six borrowed slices, no owned state and no methods
+/// beyond validation. The caller owns everything (the matrix alone can be
+/// gigabytes) and lends it for the duration of [`crate::precompute::Dashboard`]
+/// construction only. Once the dashboard is built the view is dead, and the
+/// caller is free to drop the matrix before the TUI opens.
 pub struct RescoreView<'a> {
     /// ALL-lane feature names, in model column order.
-    pub feature_names: Vec<Arc<str>>,
+    pub feature_names: &'a [Arc<str>],
     /// Row-major, `n_rows * n_features` long.
     pub features: &'a [f64],
-    pub is_target: Vec<bool>,
+    pub is_target: &'a [bool],
     /// `discriminant_score`, row-aligned.
-    pub score: Vec<f32>,
-    pub qvalue: Vec<f32>,
-    pub importance: Vec<FoldImportance>,
+    pub score: &'a [f32],
+    pub qvalue: &'a [f32],
+    /// Fold-averaged GBM gain, aligned to `feature_names`.
+    ///
+    /// Averaged by the caller: the dashboard wants one number per feature, and
+    /// column-aligned makes reading it an array index rather than a search.
+    pub gain: &'a [f32],
 }
 
 #[derive(Debug)]
@@ -54,6 +40,8 @@ pub enum ViewError {
         expected: usize,
         got: usize,
     },
+    /// `gain` is not aligned to `feature_names`.
+    GainLen { expected: usize, got: usize },
     /// Nothing to show.
     Empty,
 }
@@ -71,6 +59,9 @@ impl std::fmt::Display for ViewError {
             } => {
                 write!(f, "`{field}` has {got} rows, expected {expected}")
             }
+            Self::GainLen { expected, got } => {
+                write!(f, "`gain` has {got} entries, expected {expected} features")
+            }
             Self::Empty => write!(f, "no rows to display"),
         }
     }
@@ -78,7 +69,7 @@ impl std::fmt::Display for ViewError {
 
 impl std::error::Error for ViewError {}
 
-impl<'a> RescoreView<'a> {
+impl RescoreView<'_> {
     pub fn n_rows(&self) -> usize {
         self.is_target.len()
     }
@@ -87,36 +78,10 @@ impl<'a> RescoreView<'a> {
         self.feature_names.len()
     }
 
-    /// Values of feature `j` in row order. Panics only on an out-of-range `j`,
-    /// which is a programming error, not user data.
-    ///
-    /// `+ Clone`: the underlying `Copied<StepBy<Skip<slice::Iter>>>` is cheap
-    /// to clone (it holds only a pointer/len and a stride), which lets callers
-    /// that need two passes over a column (e.g. `stats::summarize`) avoid
-    /// collecting it into a `Vec` first.
-    pub fn feature_column(&self, j: usize) -> impl Iterator<Item = f64> + Clone + '_ {
-        assert!(j < self.n_features(), "feature index out of range");
-        self.features
-            .iter()
-            .skip(j)
-            .step_by(self.n_features())
-            .copied()
-    }
-
-    /// Mean GBM gain for `name` across folds; `0.0` for a feature no fold
-    /// reported (the LDA path reports coefficients for the linear lane only).
-    pub fn mean_gain(&self, name: &str) -> f32 {
-        let mut sum = 0.0f32;
-        let mut n = 0u32;
-        for fold in &self.importance {
-            for (nm, gain) in &fold.gain {
-                if &**nm == name {
-                    sum += gain;
-                    n += 1;
-                }
-            }
-        }
-        if n == 0 { 0.0 } else { sum / n as f32 }
+    /// Row `i`'s feature values.
+    pub fn row(&self, i: usize) -> &[f64] {
+        let nf = self.n_features();
+        &self.features[i * nf..(i + 1) * nf]
     }
 
     pub fn validate(&self) -> Result<(), ViewError> {
@@ -132,6 +97,12 @@ impl<'a> RescoreView<'a> {
                     got,
                 });
             }
+        }
+        if self.gain.len() != self.n_features() {
+            return Err(ViewError::GainLen {
+                expected: self.n_features(),
+                got: self.gain.len(),
+            });
         }
         let expected = rows * self.n_features();
         if self.features.len() != expected {
@@ -155,80 +126,80 @@ mod tests {
     }
 
     #[test]
-    fn feature_column_walks_the_right_stride() {
+    fn row_walks_the_right_stride() {
         // 3 rows x 2 features, row-major.
         let matrix = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
+        let names = names(2);
         let view = RescoreView {
-            feature_names: names(2),
+            feature_names: &names,
             features: &matrix,
-            is_target: vec![true, false, true],
-            score: vec![0.0; 3],
-            qvalue: vec![1.0; 3],
-            importance: Vec::new(),
+            is_target: &[true, false, true],
+            score: &[0.0; 3],
+            qvalue: &[1.0; 3],
+            gain: &[0.0; 2],
         };
         assert_eq!(view.n_rows(), 3);
         assert_eq!(view.n_features(), 2);
-        assert_eq!(
-            view.feature_column(0).collect::<Vec<_>>(),
-            vec![1.0, 2.0, 3.0]
-        );
-        assert_eq!(
-            view.feature_column(1).collect::<Vec<_>>(),
-            vec![10.0, 20.0, 30.0]
-        );
+        assert_eq!(view.row(0), &[1.0, 10.0]);
+        assert_eq!(view.row(2), &[3.0, 30.0]);
+        view.validate().expect("well-formed");
     }
 
     #[test]
     fn validate_rejects_a_ragged_matrix() {
-        let matrix = [1.0, 2.0, 3.0];
+        let names = names(2);
         let view = RescoreView {
-            feature_names: names(2),
-            features: &matrix,
-            is_target: vec![true, false],
-            score: vec![0.0; 2],
-            qvalue: vec![1.0; 2],
-            importance: Vec::new(),
+            feature_names: &names,
+            features: &[1.0, 2.0, 3.0],
+            is_target: &[true, false],
+            score: &[0.0; 2],
+            qvalue: &[1.0; 2],
+            gain: &[0.0; 2],
         };
         assert!(matches!(view.validate(), Err(ViewError::MatrixLen { .. })));
     }
 
     #[test]
     fn validate_rejects_mismatched_row_vectors() {
-        let matrix = [1.0, 2.0, 3.0, 4.0];
+        let names = names(2);
         let view = RescoreView {
-            feature_names: names(2),
-            features: &matrix,
-            is_target: vec![true, false],
-            score: vec![0.0; 1],
-            qvalue: vec![1.0; 2],
-            importance: Vec::new(),
+            feature_names: &names,
+            features: &[1.0, 2.0, 3.0, 4.0],
+            is_target: &[true, false],
+            score: &[0.0; 1],
+            qvalue: &[1.0; 2],
+            gain: &[0.0; 2],
         };
         assert!(matches!(view.validate(), Err(ViewError::RowLen { .. })));
     }
 
+    /// `gain` is indexed by feature column with no name lookup, so a
+    /// misaligned slice would silently attribute one feature's importance to
+    /// another rather than failing.
     #[test]
-    fn mean_gain_averages_folds_and_defaults_to_zero() {
-        let matrix = [1.0, 2.0];
+    fn validate_rejects_gain_that_is_not_column_aligned() {
+        let names = names(2);
         let view = RescoreView {
-            feature_names: names(2),
-            features: &matrix,
-            is_target: vec![true],
-            score: vec![0.0],
-            qvalue: vec![1.0],
-            importance: vec![
-                FoldImportance {
-                    fold: 0,
-                    gain: vec![(Arc::from("f0"), 2.0)],
-                    stats: Vec::new(),
-                },
-                FoldImportance {
-                    fold: 1,
-                    gain: vec![(Arc::from("f0"), 4.0)],
-                    stats: Vec::new(),
-                },
-            ],
+            feature_names: &names,
+            features: &[1.0, 2.0, 3.0, 4.0],
+            is_target: &[true, false],
+            score: &[0.0; 2],
+            qvalue: &[1.0; 2],
+            gain: &[0.0; 1],
         };
-        assert_eq!(view.mean_gain("f0"), 3.0);
-        assert_eq!(view.mean_gain("f1"), 0.0);
+        assert!(matches!(view.validate(), Err(ViewError::GainLen { .. })));
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_view() {
+        let view = RescoreView {
+            feature_names: &[],
+            features: &[],
+            is_target: &[],
+            score: &[],
+            qvalue: &[],
+            gain: &[],
+        };
+        assert!(matches!(view.validate(), Err(ViewError::Empty)));
     }
 }

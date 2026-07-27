@@ -26,6 +26,7 @@ use crate::scoring::blocks::{
 };
 use crate::scoring::results::{
     CompetedCandidate,
+    FeatureRow,
     FinalResult,
     ScoringFields,
 };
@@ -82,22 +83,28 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     scores: &[T],
     thresholds: &[f32],
 ) -> Vec<(f32, usize, usize, usize)> {
-    let mut out = Vec::new();
-
-    for &thresh in thresholds {
-        let n_below_thresh = scores.iter().filter(|s| s.get_qval() <= thresh).count();
-        let n_targets = scores
-            .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Target))
-            .count();
-        let n_decoys = scores
-            .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Decoy))
-            .count();
-        out.push((thresh, n_below_thresh, n_targets, n_decoys));
+    // One pass for all thresholds. Three filter-counts per threshold walked
+    // the whole slice 3N times for N cutoffs and re-derived `n_below` from a
+    // third scan instead of the two class counts.
+    let mut counts = vec![(0usize, 0usize); thresholds.len()];
+    for s in scores {
+        let q = s.get_qval();
+        let is_target = matches!(s.get_label(), TargetDecoy::Target);
+        for (&thresh, c) in thresholds.iter().zip(counts.iter_mut()) {
+            if q <= thresh {
+                if is_target {
+                    c.0 += 1;
+                } else {
+                    c.1 += 1;
+                }
+            }
+        }
     }
-
-    out
+    thresholds
+        .iter()
+        .zip(counts)
+        .map(|(&thresh, (n_targets, n_decoys))| (thresh, n_targets + n_decoys, n_targets, n_decoys))
+        .collect()
 }
 
 /// Fixed shuffle seed used by `rescore`. Makes the pre-rescore shuffle
@@ -658,22 +665,22 @@ fn push_nonlinear_row(
 
 /// The LINEAR-lane matrix for `data` in its CURRENT order (call AFTER any
 /// shuffle, so row `i` aligns with `data[i]`). `LINEAR_NCOLS` wide.
-fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
+fn build_linear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
-    for c in data {
-        let meta = c.result_meta();
-        push_linear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
+    for r in data {
+        let (s, meta) = (r.scoring(), r.result_meta());
+        push_linear_row(s, &meta, &Derived::compute(s), &mut out);
     }
     out
 }
 
 /// The NONLINEAR-lane matrix for `data`, `NONLINEAR_NCOLS` wide (see
 /// [`build_linear_matrix`] for the ordering contract).
-fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
+fn build_nonlinear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
-    for c in data {
-        let meta = c.result_meta();
-        push_nonlinear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
+    for r in data {
+        let (s, meta) = (r.scoring(), r.result_meta());
+        push_nonlinear_row(s, &meta, &Derived::compute(s), &mut out);
     }
     out
 }
@@ -683,33 +690,26 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 ///
 /// ONE pass over `data` with ONE `Derived::compute` per row: the two lanes are
 /// adjacent within a row, so there is nothing to gain from walking twice.
-fn build_all_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
+///
+/// Generic over [`FeatureRow`] so the matrix trained on `CompetedCandidate`s
+/// and the one the dashboard displays for `FinalResult`s are the same code.
+fn build_all_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
-    for c in data {
-        let derived = Derived::compute(&c.scoring);
-        let meta = c.result_meta();
-        push_linear_row(&c.scoring, &meta, &derived, &mut out);
-        push_nonlinear_row(&c.scoring, &meta, &derived, &mut out);
+    for r in data {
+        let (s, meta) = (r.scoring(), r.result_meta());
+        let derived = Derived::compute(s);
+        push_linear_row(s, &meta, &derived, &mut out);
+        push_nonlinear_row(s, &meta, &derived, &mut out);
     }
     out
 }
 
-/// The ALL-lane feature names + matrix for post-rescore rows.
-///
-/// Same builders, same order, same width as [`build_all_matrix`] — this is the
-/// dashboard's entry point, and sharing the builders is what stops the
-/// displayed features from drifting away from the trained ones.
+/// The ALL-lane feature names + matrix for post-rescore rows: the dashboard's
+/// entry point.
 ///
 /// Row-major: value `j` of row `i` is at `matrix[i * names.len() + j]`.
 pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
-    let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
-    for r in data {
-        let derived = Derived::compute(&r.scoring);
-        let meta = r.result_meta();
-        push_linear_row(&r.scoring, &meta, &derived, &mut out);
-        push_nonlinear_row(&r.scoring, &meta, &derived, &mut out);
-    }
-    (all_feature_name_set(), out)
+    (all_feature_name_set(), build_all_matrix(data))
 }
 
 /// LINEAR-lane feature names (LDA), in [`push_linear_row`]'s order.
@@ -879,50 +879,6 @@ mod tests {
                 data.iter().map(|x| x.get_qval()).collect::<Vec<_>>(),
             );
         }
-    }
-
-    #[test]
-    fn feature_frame_matches_competed_matrix() {
-        let competed = CompetedCandidate {
-            scoring: crate::scoring::results::ScoringFields::sample_default(),
-            delta_group: 0.5,
-            delta_group_ratio: 0.25,
-            discriminant_score: 1.5,
-            qvalue: 0.01,
-        };
-        let expected = build_all_matrix(std::slice::from_ref(&competed));
-
-        let final_result = competed.clone().into_final();
-        let (names, got) = feature_frame(std::slice::from_ref(&final_result));
-
-        assert_eq!(names, all_feature_name_set());
-        assert_eq!(got.len(), names.len(), "one row, one value per name");
-        assert_eq!(got.len(), expected.len());
-        for (j, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
-            assert!(
-                a == b || (a.is_nan() && b.is_nan()),
-                "column {j} ({}) differs: competed={a} final={b}",
-                names[j]
-            );
-        }
-    }
-
-    #[test]
-    fn feature_frame_rows_are_contiguous() {
-        let competed = CompetedCandidate {
-            scoring: crate::scoring::results::ScoringFields::sample_default(),
-            delta_group: 0.5,
-            delta_group_ratio: 0.25,
-            discriminant_score: 1.5,
-            qvalue: 0.01,
-        };
-        let rows = vec![
-            competed.clone().into_final(),
-            competed.clone().into_final(),
-            competed.into_final(),
-        ];
-        let (names, got) = feature_frame(&rows);
-        assert_eq!(got.len(), 3 * names.len());
     }
 }
 
@@ -1353,5 +1309,80 @@ mod feature_tests {
             finite_non_mob > 20,
             "non-mobility features must stay finite, got {finite_non_mob}"
         );
+    }
+
+    /// `build_all_matrix` over `CompetedCandidate` and over `FinalResult` must
+    /// produce byte-identical rows. They share the row builders, so what this
+    /// guards is `into_final`: if that conversion ever drops, rounds or
+    /// reorders a value the feature row reads, the dashboard would display a
+    /// matrix the model never trained on, silently.
+    ///
+    /// The candidate is the PARSED one on purpose. `sample_default()` has no
+    /// sequence, so all 22 `sequence_counts` columns come out NaN and the
+    /// NaN-equals-NaN escape below passes them without comparing anything.
+    #[test]
+    fn into_final_preserves_every_feature_value() {
+        let competed = sample_competed_candidate_parsed();
+        let expected = build_all_matrix(std::slice::from_ref(&competed));
+
+        let final_result = competed.clone().into_final();
+        let (names, got) = feature_frame(std::slice::from_ref(&final_result));
+
+        assert_eq!(names, all_feature_name_set());
+        assert_eq!(got.len(), names.len(), "one row, one value per name");
+        let compared = expected
+            .iter()
+            .zip(&got)
+            .filter(|(a, b)| !a.is_nan() && !b.is_nan())
+            .count();
+        assert!(
+            compared > 22,
+            "only {compared} of {} columns were non-NaN; the fixture is not \
+             exercising the sequence_counts block",
+            names.len()
+        );
+        for (j, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                a == b || (a.is_nan() && b.is_nan()),
+                "column {j} ({}) differs: competed={a} final={b}",
+                names[j]
+            );
+        }
+    }
+
+    /// Row-major layout: value `j` of row `i` lives at `matrix[i * nf + j]`.
+    ///
+    /// Every consumer indexes on that contract — `rescore_dash` sweeps the
+    /// matrix a row at a time with every column's accumulator live, so an
+    /// interleaved or transposed write would silently mix features together
+    /// rather than fail. Rows carry distinct `delta_group` values so the
+    /// assertion can tell them apart; a length check alone passes even when
+    /// the layout is wrong.
+    #[test]
+    fn feature_frame_rows_are_contiguous() {
+        let rows: Vec<_> = [1.0f32, 2.0, 3.0]
+            .into_iter()
+            .map(|delta_group| {
+                let mut c = sample_competed_candidate_parsed();
+                c.delta_group = delta_group;
+                c.into_final()
+            })
+            .collect();
+
+        let (names, got) = feature_frame(&rows);
+        let nf = names.len();
+        assert_eq!(got.len(), rows.len() * nf, "one value per name per row");
+
+        let j = names
+            .iter()
+            .position(|n| &**n == "delta_group")
+            .expect("delta_group is an ALL-lane feature");
+        for (i, expected) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
+            assert_eq!(
+                got[i * nf + j],
+                expected,
+                "row {i}'s delta_group is not at matrix[{i} * {nf} + {j}]"
+            );
+        }
     }
 }

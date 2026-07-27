@@ -161,9 +161,24 @@ pub struct CompetedCandidate {
     pub(crate) qvalue: f32,
 }
 
-impl CompetedCandidate {
-    /// The post-model meta block (used for the ML delta-group features).
-    pub(crate) fn result_meta(&self) -> ResultMeta {
+/// A scored row the feature builders can read.
+///
+/// Implemented on both sides of rescoring so one set of builders serves the
+/// trained matrix and the displayed one — that is what keeps the dashboard's
+/// features from drifting away from the model's.
+pub(crate) trait FeatureRow {
+    fn scoring(&self) -> &ScoringFields;
+    /// The post-model meta block: delta-group features for the ML lanes, meta
+    /// columns for Parquet.
+    fn result_meta(&self) -> ResultMeta;
+}
+
+impl FeatureRow for CompetedCandidate {
+    fn scoring(&self) -> &ScoringFields {
+        &self.scoring
+    }
+
+    fn result_meta(&self) -> ResultMeta {
         ResultMeta {
             delta_group: self.delta_group,
             delta_group_ratio: self.delta_group_ratio,
@@ -196,21 +211,26 @@ impl FinalResult {
         }
     }
 
-    /// The post-model meta block (used for the Parquet meta columns).
-    pub(crate) fn result_meta(&self) -> ResultMeta {
+    /// Value-free Parquet schema: scoring blocks (composition order) then the
+    /// post-model meta block — mirrors `emit_row`'s column order exactly.
+    pub fn column_schema(o: &mut SchemaSink) {
+        <ScoringFields as ScoreBlock>::column_schema(o);
+        <ResultMeta as ScoreBlock>::column_schema(o);
+    }
+}
+
+impl FeatureRow for FinalResult {
+    fn scoring(&self) -> &ScoringFields {
+        &self.scoring
+    }
+
+    fn result_meta(&self) -> ResultMeta {
         ResultMeta {
             delta_group: self.delta_group,
             delta_group_ratio: self.delta_group_ratio,
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
-    }
-
-    /// Value-free Parquet schema: scoring blocks (composition order) then the
-    /// post-model meta block — mirrors `emit_row`'s column order exactly.
-    pub fn column_schema(o: &mut SchemaSink) {
-        <ScoringFields as ScoreBlock>::column_schema(o);
-        <ResultMeta as ScoreBlock>::column_schema(o);
     }
 }
 

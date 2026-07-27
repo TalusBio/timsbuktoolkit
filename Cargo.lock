@@ -5241,6 +5241,7 @@ name = "rescore_dash"
 version = "0.32.0"
 dependencies = [
  "ratatui",
+ "rayon",
  "tracing",
 ]
 
