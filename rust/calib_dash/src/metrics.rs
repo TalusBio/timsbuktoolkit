@@ -102,23 +102,11 @@ mod tests {
         }
     }
 
-    /// Builds a `CalibrationCurve` whose path is exactly `points`.
+    /// Builds a `CalibrationCurve` whose path is exactly `points`, by running a
+    /// tiny real fit (`CalibrationCurve::new` is `pub(crate)` in `calibrt`).
     ///
-    /// `CalibrationCurve::new` is `pub(crate)` in `calibrt`, so this runs a
-    /// tiny real fit (`CalibrationState`) instead. Two preconditions on the
-    /// fixture:
-    ///
-    /// - Weight must be at or above 1.0. `suppress_nonmax` seeds its
-    ///   row/column maxima at 1.0 and keeps a node only when its weight
-    ///   *equals* that maximum, so a fixture strictly below 1.0 gets every
-    ///   node suppressed and produces no path at all.
-    /// - Pairs must be strictly increasing in both coordinates and land one
-    ///   per grid cell. That is what makes the fit reproduce `points` exactly:
-    ///   for monotone i, j, k the middle point sits inside i and k's bounding
-    ///   box, so both hops are no longer than the direct edge and their
-    ///   reciprocal-distance scores sum to strictly more than its — the DP
-    ///   never skips a point — and one point per cell means the
-    ///   weighted-centroid step cannot perturb a coordinate.
+    /// Preconditions: every weight at or above 1.0, and pairs strictly
+    /// increasing in both coordinates, one per grid cell.
     fn curve_from(points: &[(f64, f64)]) -> CalibrationCurve {
         let n = points.len();
         let grid_size = (n * 4).max(8);
@@ -142,11 +130,9 @@ mod tests {
             .curve()
             .expect("fixture points are monotone and well-separated, so a path always exists")
             .clone();
-        // Guards the one-point-per-cell precondition the doc comment above
-        // relies on: if a future fixture packs two points into the same grid
-        // cell, this fails loudly instead of silently testing a curve with
-        // fewer, centroid-merged points.
-        debug_assert_eq!(curve.points().len(), points.len());
+        // Guards the one-point-per-cell precondition: two points in one cell
+        // would be centroid-merged into a shorter curve.
+        assert_eq!(curve.points().len(), points.len());
         curve
     }
 

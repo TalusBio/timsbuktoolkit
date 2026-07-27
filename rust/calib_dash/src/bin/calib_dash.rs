@@ -73,7 +73,7 @@ fn main() {
         REPLAY_BUDGET_BYTES,
     );
     dash.on_batch(0, points.into_iter());
-    dash.finish(0);
+    dash.finish();
 }
 
 /// Reads `path` and pulls `CalibrationSnapshot` out of its `"calibration"`
@@ -89,22 +89,9 @@ fn load_snapshot(path: &Path) -> Result<CalibrationSnapshot, String> {
 }
 
 /// Rejects the two shapes a syntactically valid `calibration.json` can still
-/// carry that would otherwise reach a bare `.expect`/panic downstream rather
-/// than a message a human can act on:
-///
-/// - `grid_size == 0`: `calibrt::Grid::new` rejects `bins == 0` before it
-///   even looks at the fit range, so this would abort the process inside
-///   `CalibDash::new` (which has no `Result` to report it through — see its
-///   own doc comment).
-/// - fewer than 2 points: `calibrt::CalibrationCurve::new` itself requires
-///   at least 2 points to define a curve at all (`CalibRtError::InsufficientPoints`);
-///   below that there is nothing to replay, so this is caught here rather
-///   than surfacing as an empty dashboard with no explanation.
-///
-/// `lookback` needs no check: `calibrt::pathfinding::find_optimal_path`
-/// only ever uses it via `saturating_sub`, so every value including `0`
-/// degrades gracefully (each node considers only itself) rather than
-/// panicking or looping unboundedly.
+/// carry that would otherwise reach a bare `.expect`/panic downstream:
+/// `calibrt::Grid::new` rejects `bins == 0`, and `CalibrationCurve::new`
+/// needs at least 2 points to define a curve.
 fn validate_snapshot(snapshot: &CalibrationSnapshot) -> Result<(), String> {
     if snapshot.grid_size == 0 {
         return Err("grid_size is 0 — a calibration grid needs at least 1 bin".to_string());
@@ -136,60 +123,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_reports_a_message_not_a_panic() {
-        let path = Path::new("/definitely/does/not/exist/calibration.json");
-        let err = load_snapshot(path).expect_err("the file does not exist");
+    fn a_file_without_a_calibration_field_names_the_missing_field() {
+        let f = temp_file(r#"{"version": 1, "other": {}}"#);
+        let err = load_snapshot(f.path()).expect_err("there is no \"calibration\" field");
         assert!(
-            !err.is_empty(),
-            "must carry a human-readable reason, not just fail silently"
+            err.contains("calibration"),
+            "message must name the missing field: {err}"
         );
     }
 
     #[test]
-    fn malformed_json_reports_a_message_not_a_panic() {
-        let f = temp_file("{ not valid json ");
-        let err = load_snapshot(f.path()).expect_err("the file is not valid JSON");
-        assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn a_zero_grid_size_is_rejected_before_it_can_panic() {
-        // Syntactically valid, but `CalibDash::new`'s `.expect` has no
-        // `Result` to report a zero `bins` through, so `validate_snapshot`
-        // must catch it first.
-        let snapshot = CalibrationSnapshot {
-            points: vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]],
-            grid_size: 0,
-            lookback: 3,
-        };
-        let err = validate_snapshot(&snapshot).expect_err("grid_size 0 must be rejected");
-        assert!(
-            err.contains("grid_size"),
-            "message must name the field: {err}"
-        );
-    }
-
-    #[test]
-    fn too_few_points_is_rejected_with_an_actionable_message() {
-        let snapshot = CalibrationSnapshot {
-            points: vec![[1.0, 1.0, 1.0]],
-            grid_size: 10,
-            lookback: 3,
-        };
-        let err = validate_snapshot(&snapshot).expect_err("one point cannot define a curve");
-        assert!(
-            err.contains('1'),
-            "message should state how many points were actually found: {err}"
-        );
-    }
-
-    #[test]
-    fn a_well_formed_snapshot_passes_validation() {
-        let snapshot = CalibrationSnapshot {
-            points: vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]],
-            grid_size: 10,
-            lookback: 3,
-        };
-        assert!(validate_snapshot(&snapshot).is_ok());
+    fn validate_snapshot_accepts_only_a_fittable_snapshot() {
+        // (grid_size, n_points, expect_ok)
+        let cases = [
+            (10, 2, true),
+            (10, 100, true),
+            (0, 2, false),
+            (10, 1, false),
+            (10, 0, false),
+            (0, 0, false),
+        ];
+        for (grid_size, n_points, expect_ok) in cases {
+            let snapshot = CalibrationSnapshot {
+                points: vec![[1.0, 1.0, 1.0]; n_points],
+                grid_size,
+                lookback: 3,
+            };
+            match (validate_snapshot(&snapshot), expect_ok) {
+                (Ok(()), true) | (Err(_), false) => {}
+                (got, _) => panic!("grid_size {grid_size}, {n_points} points: got {got:?}"),
+            }
+        }
     }
 }

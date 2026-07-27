@@ -1,6 +1,6 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render_snapshot(&mut app, 100, 30)"
+expression: "render(&mut app, 100, 12)"
 ---
  Fit │ Convergence │ Tolerances                                                                     
 ┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
@@ -12,25 +12,5 @@ expression: "render_snapshot(&mut app, 100, 30)"
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys 
---- REVERSED cells (row: column spans) ---
-  0: 21-30
+ b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys

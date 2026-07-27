@@ -23,12 +23,6 @@ pub struct DpDecision {
     pub considered: Vec<(usize, f64)>,
 }
 
-/// `Clone` so the batch scrubber (`App::set_scrub_recording`, driven by
-/// `CalibDash::sync_scrub`) can hand the Fit tab its own owned copy of a
-/// replayed frame's recording without fighting `refit_recording`'s
-/// reuse-in-place allocation, which stays live for the *next* scrub — an
-/// extra allocation, but only once per keypress while a user is actively
-/// browsing history, never on the per-batch hot path.
 #[derive(Clone)]
 pub struct FitRecording {
     geom: GridGeom,
@@ -67,18 +61,6 @@ impl FitRecording {
             ridge: Vec::with_capacity(bins),
             dp: Vec::with_capacity(bins),
         }
-    }
-
-    /// Clears everything except `weights`/`suppressed` — split out so
-    /// `FitStarted` can reuse it after (conditionally) resizing those two for
-    /// a changed `bins`, without also paying for the fill/clear this helper
-    /// skips.
-    fn reset_body_only(&mut self) {
-        self.path_indices.clear();
-        self.dp_range = 0..0;
-        self.curve.clear();
-        self.ridge.clear();
-        self.dp.clear();
     }
 
     pub(crate) fn geom(&self) -> GridGeom {
@@ -147,19 +129,17 @@ impl FitObserver for FitRecording {
                     self.suppressed = vec![false; geom.bins * geom.bins];
                 }
                 self.geom = geom;
-                // `Suppressed` below only ever sets bits for cells that are
-                // suppressed *this* fit; it never clears a bit for a cell
-                // that used to be suppressed and now survives. Without this,
-                // a re-fit at the same `bins` (the common case — no
-                // reallocation above) would carry forward stale suppression
-                // flags from the previous fit.
+                // `Suppressed` only ever sets bits, never clears them.
                 self.suppressed.fill(false);
-                self.reset_body_only();
+                self.path_indices.clear();
+                self.dp_range = 0..0;
+                self.curve.clear();
+                self.ridge.clear();
+                self.dp.clear();
             }
             FitEvent::GridReady { cells } => {
-                // Every cell is rewritten unconditionally: `cells` always has
-                // length `bins * bins`, so this alone keeps `weights` correct
-                // across re-fits without a separate clear.
+                // `cells` is always `bins * bins` long, so every cell is
+                // rewritten and `weights` needs no separate clear.
                 for (i, n) in cells.iter().enumerate() {
                     self.weights[i] = n.center.weight as f32;
                 }
@@ -216,6 +196,7 @@ mod tests {
         ObservedRTSeconds,
     };
 
+    /// Mirrors `calibrt`'s own `diagonal_state` test fixture, parameterized on `bins`.
     fn diagonal_state(bins: usize) -> CalibrationState {
         let mut s = CalibrationState::new(bins, (0.0, bins as f64), (0.0, bins as f64), 5).unwrap();
         let pts: Vec<_> = (0..bins)
