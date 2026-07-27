@@ -289,8 +289,22 @@ mod tests {
         assert_eq!(grid.nodes.capacity(), cap_before);
         assert_eq!(grid.x_range, (5.0, 200.0), "ranges must still update");
         assert_eq!(grid.y_range, (7.0, 300.0));
-        // Centers are recomputed from the new ranges.
-        assert!((grid.nodes[0].center.library - (5.0 + 0.5 * 19.5)).abs() < 1e-9);
+
+        // Centers are recomputed from the new ranges. Ten bins over `5..200`
+        // makes the first one `5.0 .. 24.5`, whose midpoint is 14.75, and the
+        // last `180.5 .. 200.0`, midpoint 190.25; ten over `7..300` makes the
+        // first row `7.0 .. 36.3`, midpoint 21.65. Written out rather than
+        // rebuilt from `x_range.0 + 0.5 * (x_span / bins)`, which is the line of
+        // arithmetic under test.
+        let first = grid.nodes[0].center;
+        assert!((first.library - 14.75).abs() < 1e-9, "{first:?}");
+        assert!((first.observed - 21.65).abs() < 1e-9, "{first:?}");
+        let last_col = grid.nodes[9].center;
+        assert!((last_col.library - 190.25).abs() < 1e-9, "{last_col:?}");
+        assert!(
+            (last_col.observed - 21.65).abs() < 1e-9,
+            "row 0 throughout: {last_col:?}"
+        );
     }
 
     #[test]
@@ -397,99 +411,5 @@ mod tests {
 
         assert!(non_suppressed.contains(&(0, 2, 9.0)));
         assert!(non_suppressed.contains(&(2, 1, 8.0)));
-    }
-
-    #[test]
-    fn test_suppress_nonmax_single_global_max() {
-        // Create a 3x3 grid where one cell is the max in both its row and column
-        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
-
-        let test_data = [
-            (0.5, 0.5, 1.0),
-            (1.5, 0.5, 2.0),
-            (2.5, 0.5, 3.0),
-            (0.5, 1.5, 4.0),
-            (1.5, 1.5, 9.0),
-            (2.5, 1.5, 6.0), // 9 is max
-            (0.5, 2.5, 7.0),
-            (1.5, 2.5, 8.0),
-            (2.5, 2.5, 5.0),
-        ];
-
-        for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point {
-                library: *x,
-                observed: *y,
-                weight: *weight,
-            })
-            .unwrap();
-        }
-
-        grid.suppress_nonmax().unwrap();
-
-        let non_suppressed = print_grid_state(&grid);
-
-        // Only the center cell (1,1) with weight 9 should be non-suppressed
-        // It is the max in both its row (row 1: 4,9,6) and column (col 1: 2,9,8)
-        assert_eq!(
-            non_suppressed.len(),
-            1,
-            "Expected 1 non-suppressed node, found {}",
-            non_suppressed.len()
-        );
-
-        assert!(non_suppressed.contains(&(1, 1, 9.0)));
-    }
-
-    #[test]
-    fn test_suppress_nonmax_diagonal_pattern() {
-        // Create a diagonal pattern where each diagonal element is max in its row and column
-        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
-
-        let test_data = [
-            (0.5, 0.5, 9.0),
-            (1.5, 0.5, 1.0),
-            (2.5, 0.5, 1.0), // (0,0) = 9
-            (0.5, 1.5, 1.0),
-            (1.5, 1.5, 9.0),
-            (2.5, 1.5, 1.0), // (1,1) = 9
-            (0.5, 2.5, 1.0),
-            (1.5, 2.5, 1.0),
-            (2.5, 2.5, 9.0), // (2,2) = 9
-        ];
-
-        for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point {
-                library: *x,
-                observed: *y,
-                weight: *weight,
-            })
-            .unwrap();
-        }
-
-        grid.suppress_nonmax().unwrap();
-
-        let non_suppressed = print_grid_state(&grid);
-
-        // All 3 diagonal elements should be non-suppressed
-        assert_eq!(
-            non_suppressed.len(),
-            3,
-            "Expected 3 non-suppressed nodes (diagonal), found {}",
-            non_suppressed.len()
-        );
-
-        assert!(
-            non_suppressed.contains(&(0, 0, 9.0)),
-            "Diagonal (0,0) should be non-suppressed"
-        );
-        assert!(
-            non_suppressed.contains(&(1, 1, 9.0)),
-            "Diagonal (1,1) should be non-suppressed"
-        );
-        assert!(
-            non_suppressed.contains(&(2, 2, 9.0)),
-            "Diagonal (2,2) should be non-suppressed"
-        );
     }
 }

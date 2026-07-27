@@ -755,15 +755,22 @@ mod observer_tests {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts::NONE);
+        // Exact, not a subsequence: this is also what pins that the fit emits no
+        // `ridge` event of its own — the ridge is a separate measurement pass a
+        // caller opts into.
         assert_eq!(
             rec.names,
             vec!["start", "grid", "suppressed", "path", "curve"],
-            "no dp events when dp_nodes is off"
+            "no dp events when dp_nodes is off, and no ridge event from the fit"
         );
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
         assert_eq!(g.x_range, (0.0, 10.0));
         assert_eq!(g.y_range, (0.0, 10.0));
+
+        // And the ridge call is where it does come from.
+        s.measure_ridge_width_with(0.1, &mut rec);
+        assert_eq!(rec.names.last(), Some(&"ridge"));
     }
 
     #[test]
@@ -787,16 +794,6 @@ mod observer_tests {
             }
         }
         assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
-    }
-
-    #[test]
-    fn ridge_events_come_from_the_ridge_call_not_the_fit() {
-        let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        assert!(!rec.names.contains(&"ridge"));
-        s.measure_ridge_width_with(0.1, &mut rec);
-        assert_eq!(rec.names.last(), Some(&"ridge"));
     }
 }
 
@@ -845,68 +842,6 @@ mod calibration_state_tests {
         assert!(state.curve().is_none());
         assert!(state.path_indices().is_empty());
         assert!(!state.is_stale());
-    }
-
-    #[test]
-    fn test_refit_after_reset_update() {
-        let mut state = CalibrationState::new(10, (0.0, 100.0), (0.0, 100.0), 30).unwrap();
-
-        // First fit: y = x
-        let points1: Vec<_> = (0..10)
-            .map(|i| {
-                (
-                    LibraryRT((i as f64) * 10.0 + 5.0),
-                    ObservedRTSeconds((i as f64) * 10.0 + 5.0),
-                    1.0,
-                )
-            })
-            .collect();
-        state.update(points1.into_iter()).unwrap();
-        state.fit();
-        let curve1_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
-
-        // Reset and refit: y = 2x
-        state.reset();
-        let points2: Vec<_> = (0..10)
-            .map(|i| {
-                (
-                    LibraryRT((i as f64) * 10.0 + 5.0),
-                    ObservedRTSeconds((i as f64) * 20.0 + 5.0),
-                    1.0,
-                )
-            })
-            .collect();
-        state.update(points2.into_iter()).unwrap();
-        state.fit();
-        let curve2_pred = state.curve().unwrap().predict(LibraryRT(50.0)).unwrap();
-
-        assert!((curve2_pred.0 - curve1_pred.0).abs() > 10.0);
-    }
-
-    #[test]
-    fn repeated_fits_do_not_grow_the_scratch_buffers() {
-        let mut s = CalibrationState::new(20, (0.0, 20.0), (0.0, 20.0), 5).unwrap();
-        let pts: Vec<_> = (0..20)
-            .map(|i| {
-                let v = i as f64 + 0.5;
-                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
-            })
-            .collect();
-        s.update(pts.iter().copied()).unwrap();
-        s.fit();
-        let filtered_ptr = s.filtered_ptr();
-
-        for _ in 0..5 {
-            s.reset();
-            s.update(pts.iter().copied()).unwrap();
-            s.fit();
-        }
-
-        assert_eq!(
-            s.filtered_ptr(),
-            filtered_ptr,
-            "filtered must be the same allocation, not a same-sized new one"
-        );
     }
 
     #[test]

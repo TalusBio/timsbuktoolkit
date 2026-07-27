@@ -222,12 +222,11 @@ mod tests {
     /// (nodes below weight 1.0 with no competing row/column entry are
     /// dropped before ever reaching the DP) that would confound a fixture
     /// aimed at the DP's own accept/decline behavior.
-    fn diag_node(i: usize, weight: f64) -> Node {
-        let v = i as f64 + 0.5;
+    fn node_at(library: f64, observed: f64, weight: f64) -> Node {
         Node {
             center: Point {
-                library: v,
-                observed: v,
+                library,
+                observed,
                 weight,
             },
             suppressed: false,
@@ -235,6 +234,11 @@ mod tests {
             sum_wy: 0.0,
             sum_w: 0.0,
         }
+    }
+
+    fn diag_node(i: usize, weight: f64) -> Node {
+        let v = i as f64 + 0.5;
+        node_at(v, v, weight)
     }
 
     /// Weights `[0.5, 10, 12, 11, 0.4]` on a diagonal: node 0 is a valid
@@ -277,5 +281,61 @@ mod tests {
             "the DP declines node 0, choosing only nodes 1..4"
         );
         assert!(dp_weight > 0.0);
+    }
+
+    /// The suffix mirror of the test above, which `dp_range` needs because
+    /// widening `end` to `out_path.len()` swallows the whole greedy suffix while
+    /// leaving a prefix-only test green.
+    ///
+    /// A trailing node the DP *includes* can never lower `max_weights`, so
+    /// declining one takes a node with no admissible in-window predecessor: with
+    /// `lookback == 1` the dip at `(3.5, 0.1)` fails the monotonic edge back to
+    /// the core chain, and the stray at `(4.5, 4.5)` can only look back one rank
+    /// — at the dip — so it accumulates the dip's 0.4 rather than the chain's,
+    /// and the DP's best path ends at the chain. Pass 2's forward walk re-checks
+    /// monotonicity against the DP's chosen *endpoint* instead, skips the dip
+    /// (its observed RT is below the chain) and grafts the stray on as a suffix.
+    #[test]
+    fn pass_two_attaches_a_dp_declined_trailing_node_as_suffix() {
+        let mut nodes = vec![
+            diag_node(0, 10.0),
+            diag_node(1, 12.0),
+            diag_node(2, 11.0),
+            node_at(3.5, 0.1, 0.4), // the dip
+            node_at(4.5, 4.5, 0.5), // the stray
+        ];
+        let mut scratch = PathfindingScratch::default();
+        let mut path = Vec::new();
+
+        let (dp_range, _) = find_optimal_path(
+            &mut nodes,
+            1,
+            &mut scratch,
+            &mut path,
+            &mut (),
+            ObserveOpts::NONE,
+        );
+
+        assert_eq!(
+            path.len(),
+            4,
+            "the three chain nodes plus the stray; the dip is not monotonic \
+             against the chain and appears nowhere: {path:?}"
+        );
+        assert_eq!(
+            dp_range,
+            0..3,
+            "the DP chooses only the core chain, so the stray is outside its \
+             span: {path:?}"
+        );
+        assert!(
+            dp_range.end < path.len(),
+            "a `dp_range` reaching the end of the path would report the greedy \
+             suffix as DP-chosen"
+        );
+        assert_eq!(
+            path[dp_range.end].library, 4.5,
+            "the one node past the DP's span must be the greedily attached stray"
+        );
     }
 }
