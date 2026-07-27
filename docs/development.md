@@ -36,12 +36,10 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
 | `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek`, built with `--features dashboard` | unset (off) | Any value but `0`/`false` opens the rescore dashboard TUI after the Phase 6 write; without `--features dashboard` the check is compiled out entirely. Warns and skips when stdout is not a terminal. Invocation: `cargo run -r --bin timsseek --features dashboard -- ...`. |
-| `TIMSSEEK_CALIB_DASHBOARD` | `timsseek_cli` | unset | Set to `1` to open the interactive RT-calibration dashboard (see below). |
-| `CALIB_DASH_FRAME_BUDGET_MB` | `timsseek_cli` | `64` | Caps the dashboard's retained-frame slab, in megabytes (see below). |
+| `TIMSSEEK_CALIB_DASHBOARD` | `timsseek_cli` | unset | Set to `1` to open the interactive RT-calibration dashboard. |
+| `CALIB_DASH_FRAME_BUDGET_MB` | `timsseek_cli` | `64` | Caps the dashboard's retained-frame slab, in megabytes. |
 
 ### Calibration dashboard vars
-
-Both are read only when the binary was built with `--features calib-dashboard`; on a plain build neither is ever read.
 
 `TIMSSEEK_CALIB_DASHBOARD=1` opens the dashboard. When stdout is not a terminal the dashboard detaches with a warning and the search runs unattended, so it is also safe under `> file 2>&1` redirection or CI. Full invocation:
 

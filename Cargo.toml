@@ -75,10 +75,6 @@ tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
 smallvec = { version = "1.13", features = ["const_generics", "union"] }
 rustyms = { version = "0.11.0", default-features = false }
 csv = "1.3"
-# Terminal UI for the dev-only dashboards. `crossterm` is not spelled
-# separately: it is re-exported as `ratatui::crossterm`, and pinning a second
-# copy here is how the two drift onto incompatible versions.
-ratatui = "0.29"
 
 tempfile = "3.23.0"
 

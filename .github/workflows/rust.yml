@@ -64,8 +64,9 @@ jobs:
       # Opt-in, so these call sites compile under no other leg.
       - name: Type-check (dashboard feature)
         run: cargo check -p timsseek_cli --features dashboard --all-targets
-      # Every leg here is `-p`-scoped, so calibrt and calib_dash are built by
-      # no other one. The feature leg below keeps both arms of
+      # calibrt compiles in every leg (it is a transitive dep of timsseek and
+      # timsseek_cli), but nothing above runs its tests; calib_dash is built by
+      # no other leg at all. The feature leg below keeps both arms of
       # `calib_dash_hook` compiling — the default build only ever sees the
       # no-op arm.
       - name: Run calibrt / calib_dash tests
