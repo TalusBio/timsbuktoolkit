@@ -5,8 +5,16 @@
 //! is `prefix ++ DP chain ++ suffix` (see `recording.rs`), and a calibration
 //! that misbehaves at the edges of the gradient is often the greedily
 //! attached tail's doing rather than the DP's. So the path overlay paints
-//! `path[dp_range]` in one color and the two tails in another — that split is
-//! the first thing a user reading this tab needs to see.
+//! `path[dp_range]` with one glyph and the two tails with another — that
+//! split is the first thing a user reading this tab needs to see.
+//!
+//! Exactly one mark layer (`crate::Layer`) is drawn on the heatmap at a
+//! time, cycled by `m`/`M`: `none`, `path`, `curve`, `ridge`, `suppressed`.
+//! Each layer is internally overlap-free (the DP chain and greedy tails
+//! partition the path by construction; the other three layers only ever
+//! emit one mark kind), so there is no cross-layer priority to resolve —
+//! unlike the composited overlay this replaced, a layer is a single,
+//! isolated view.
 //!
 //! Every panel here follows one rule: if there is nothing to draw, or the
 //! area is too small to draw it in, render a `Paragraph` saying so. Nothing
@@ -20,6 +28,7 @@ use crate::{
     App,
     BatchMetrics,
     FitRecording,
+    Layer,
     Tab,
 };
 use calibrt::Point;
@@ -189,7 +198,7 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
             ("r", "run"),
             ("[ ]", "stage"),
             ("< >", "frame"),
-            ("s p c w", "overlay"),
+            ("m M", "layer"),
             ("d", "dp"),
         ],
         Tab::Convergence | Tab::Tolerances => &[("n", "next"), ("r", "run")],
@@ -248,7 +257,7 @@ fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
         Line::raw("  r          run to end"),
         Line::raw("  [ ]        step pipeline stage"),
         Line::raw("  < >        scrub retained frames"),
-        Line::raw("  s p c w    toggle suppressed/path/curve/ridge"),
+        Line::raw("  m M        cycle mark layer"),
         Line::raw("  d          toggle DP pane"),
         Line::raw(""),
         heading("Convergence / Tolerances"),
@@ -353,75 +362,116 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Overlay priority for one terminal cell (which represents two grid rows —
-/// see `heatmap_cells`). Higher wins when both grid rows the cell represents
-/// carry different marks, or when a later stage's overlay lands on a cell an
-/// earlier one already marked.
+/// What one half of a terminal cell is marked with, for whichever layer
+/// (`crate::Layer`) is currently active. At most one layer ever paints into
+/// `marks` per frame — see `paint_heatmap` — so unlike the priority ladder
+/// this replaced, there is no cross-layer case to resolve: `Region` is the
+/// only mark kind the curve, ridge and suppressed layers ever emit (each is
+/// a single, uniform region of the grid), and `DpNode`/`Tail` are the only
+/// two the path layer emits, mutually exclusive by construction
+/// (`FitRecording::dp_range` partitions `path_indices` into exactly those two
+/// groups — see `mark_path`).
 ///
-/// Ordered so evidence beats derived fit (Item 3): the curve and ridge are
-/// *computed from* the suppressed grid and the DP/greedy path, so a chain or
-/// tail node must still show through even where the curve or ridge happens
-/// to land on the same cell — the point of showing the DP chain and greedy
-/// tails at all is to let a user see where the fit disagrees with what it
-/// was derived from, which a curve painted on top of them would hide.
+/// **Invariant (superseding the old "every mark is identified by its glyph"
+/// rule this module used to state):** a `Region` mark keeps the density
+/// glyph — `░▒▓█▀▄`, half-occupancy intact — and is identified by
+/// `Modifier::REVERSED`, not by replacing the glyph. Inverting rather than
+/// overwriting is what lets a mark and the distribution it sits on both stay
+/// visible at once: the shape underneath answers "how much weight is here",
+/// and the inversion answers "is this cell marked", and neither question
+/// erases the other's answer. `Modifier::REVERSED` also survives every
+/// condition `mark_style`'s old comment cared about — a colorblind reader, a
+/// monochrome screenshot, any terminal theme — for the same reason
+/// `draw_tab_bar`/the scrub banner/the pending count already lean on it: it
+/// is a swap of whatever foreground/background are already there, not a
+/// specific hue that could fail to contrast or fail to register. Color
+/// remains attached (`region_accent`) as pure redundant reinforcement, same
+/// as before — a colorblind reader loses nothing by losing it.
 ///
-/// This — not a two-tone foreground/background per character — is what
-/// actually carries the Fit tab's information in a way this module's own
-/// tests can see. `TestBackend`'s buffer records a `Style` (colors) per
-/// cell, but the given test harness (`render`, below) only ever reads
-/// `.symbol()`. A `▀` painted with the "upper row in `fg`, lower row in `bg`"
-/// technique the brief describes would satisfy that literally, but every
-/// cell would carry the same glyph regardless of the underlying weights —
-/// the asymmetric ridge fixture exists specifically so a transposed heatmap
-/// is "visible in the snapshot" (a carry-over from Task 4), and a snapshot
-/// that is a uniform block of one glyph regardless of data cannot show that,
-/// or show one stage's overlay differing from another's. So the glyph
-/// itself carries the signal here — heat density, suppression, path/DP-chain
-/// membership, curve and ridge.
-///
-/// **Invariant:** every mark is identified by its glyph; color is redundant
-/// reinforcement only. That is what keeps the panel readable for a
-/// colorblind reader, in a monochrome screenshot, and in this module's own
-/// symbol-only snapshot harness — never make two marks share a glyph and
-/// rely on color alone to tell them apart.
-const MARK_NONE: u8 = 0;
-const MARK_SUPPRESSED: u8 = 1;
-const MARK_CURVE: u8 = 2;
-const MARK_RIDGE: u8 = 3;
-const MARK_TAIL: u8 = 4;
-const MARK_DP_CHAIN: u8 = 5;
+/// A path-layer node mark is the one exception: `DpNode`/`Tail` still
+/// *replace* the cell with `O`/`X` (Item 3's original marker set), because a
+/// path node is a point estimate — one grid cell chosen by the DP or the
+/// greedy walk — not a region being highlighted against its own density.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Mark {
+    #[default]
+    None,
+    /// Curve, ridge, or suppressed layer — a region mark, rendered as the
+    /// underlying density glyph (or `\u{b7}` in place of a space — see
+    /// `marked_glyph`) reversed.
+    Region,
+    /// Path layer, DP's own chosen chain — replaces the cell with `O`.
+    DpNode,
+    /// Path layer, Pass 2's greedily attached tail — replaces the cell with
+    /// `X`, the standard excluded/suspect-point convention: these are the
+    /// nodes a greedy pass grafted on after the DP's own search ended.
+    Tail,
+}
 
-/// The glyph half of the invariant above — matplotlib's own vocabulary for
-/// these, since that is what this tool's user reads daily. All narrow-width
-/// (single-cell) safe.
-fn mark_glyph(m: u8) -> Option<&'static str> {
+/// Resolution order when both halves of one terminal cell carry different
+/// marks (only possible within the path layer, where a DP node and a tail
+/// node can round to the same display cell): a node mark always wins over a
+/// region mark or no mark at all — `mark_glyph`'s doc comment above explains
+/// why a path node replaces the cell rather than composing with it — and
+/// `DpNode` wins over `Tail` between the two node kinds, so evidence (the
+/// DP's own chain) still shows through a tail node sharing its cell. `Region`
+/// only ever contends with `None` in practice (a layer never emits two
+/// different mark kinds at once other than the path layer's two node kinds),
+/// but is ranked above it for the same reason: a mark must never lose to "no
+/// mark" just because it shares a cell with an unmarked half.
+fn mark_rank(m: Mark) -> u8 {
     match m {
-        MARK_SUPPRESSED => Some("\u{b7}"), // ·
-        MARK_CURVE => Some("\u{2500}"),    // ─ — a quarter the ink of a solid
-        // block, and its staircase gaps correctly signal steepness where the
-        // curve is steep, information a filled glyph would destroy.
-        MARK_RIDGE => Some("~"),
-        MARK_TAIL => Some("+"),
-        MARK_DP_CHAIN => Some("O"),
-        _ => None,
+        Mark::None => 0,
+        Mark::Region => 1,
+        Mark::Tail => 2,
+        Mark::DpNode => 3,
     }
 }
 
-/// The color/modifier half — reinforcement only, per the invariant above.
-/// Every value is a named ANSI constant (never `Rgb`, which most terminals
-/// do not remap for a light background — see `heat_color`) and none is one
-/// of indices 9-15 (`Light*`/`White`), which are invisible on a light
-/// background. `Modifier::REVERSED` is deliberately not used here — Item 4
-/// reserves it for *mode* (selected tab, scrub banner, pending count), not
-/// "what a mark is", so tail/DP-chain lean on `BOLD` instead for emphasis.
-fn mark_style(m: u8) -> Option<(Color, Modifier)> {
+/// `O`/`X` and their color/modifier — see `Mark::DpNode`/`Mark::Tail`'s doc
+/// comments for why these replace the cell instead of inverting it.
+/// `Modifier::REVERSED` is deliberately not used here — Item 4 reserves it
+/// for *mode* elsewhere and `Mark::Region` for "this cell is marked" here, so
+/// node glyphs lean on `BOLD` instead for emphasis, exactly as before this
+/// pass.
+fn node_glyph_and_style(m: Mark) -> (&'static str, Color, Modifier) {
     match m {
-        MARK_SUPPRESSED => Some((Color::DarkGray, Modifier::empty())),
-        MARK_CURVE => Some((Color::Cyan, Modifier::empty())),
-        MARK_RIDGE => Some((Color::Magenta, Modifier::empty())),
-        MARK_TAIL => Some((Color::Yellow, Modifier::BOLD)),
-        MARK_DP_CHAIN => Some((Color::Green, Modifier::BOLD)),
-        _ => None,
+        Mark::DpNode => ("O", Color::Green, Modifier::BOLD),
+        Mark::Tail => ("X", Color::Yellow, Modifier::BOLD),
+        _ => (" ", Color::Reset, Modifier::empty()),
+    }
+}
+
+/// The active layer's accent color for a `Region` mark — reinforcement only
+/// (see `Mark`'s doc comment), so, as before, a named ANSI constant rather
+/// than `Rgb` (see `heat_color`'s own doc comment for why) and never one of
+/// indices 9-15 (`Light*`/`White`, invisible on a light background).
+fn region_accent(layer: Layer) -> Color {
+    match layer {
+        Layer::Suppressed => Color::DarkGray,
+        Layer::Curve => Color::Cyan,
+        Layer::Ridge => Color::Magenta,
+        // `Region` is never emitted while the active layer is `None`/`Path`
+        // (see `paint_heatmap`), so this arm is unreachable in practice; it
+        // exists only so the match is exhaustive rather than partial.
+        Layer::None | Layer::Path => Color::Reset,
+    }
+}
+
+/// `heat_glyph`, but a marked cell must never render as a reversed space.
+/// `heat_glyph` returns a plain space for zero weight, and a *reversed*
+/// space is a solid block — the single highest-density glyph this module
+/// has — which would lie about the data wherever a region mark lands on a
+/// zero-weight cell. That happens routinely: the curve is evaluated at every
+/// display column regardless of whether any calibrant actually falls there,
+/// and the ridge's `half_width` band frequently extends past the last real
+/// observation. `\u{b7}` (a single dot — the least ink of any glyph this
+/// module draws) reversed reads instead as "mark here, nothing under it",
+/// which is the truth.
+fn marked_glyph(heat: f32, max: f32) -> &'static str {
+    match heat_glyph(heat, max) {
+        " " => "\u{b7}",
+        g => g,
     }
 }
 
@@ -561,7 +611,17 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let (block_area, x_label_area) = (rows[0], rows[1]);
 
     let title_left = " Fit \u{2014} observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
-    let title_right = format!(" b{} \u{b7} {} ", app.batch(), app.stage().label());
+    // The active mark layer's name lives here, not in the global status
+    // line: a layer is meaningless outside the Fit tab, and this title is
+    // already `ui.rs`'s one Fit-tab-only place that names the pipeline
+    // stage — see `Layer`'s doc comment for why stage and layer are shown
+    // together without one implying the other.
+    let title_right = heatmap_title_right(
+        app.batch(),
+        app.stage().label(),
+        app.layer().label(),
+        (block_area.width as usize).saturating_sub(title_left.chars().count()),
+    );
     let block = Block::bordered()
         .title_top(Line::from(title_left).left_aligned())
         .title_top(Line::from(title_right).right_aligned());
@@ -611,8 +671,35 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Picks the most detailed right-side block title that still fits `avail`
+/// columns, degrading by dropping the pipeline stage label first: `Stage` is
+/// already shown on the global status line (`draw_status_line`) for every
+/// tab, so losing it here under a narrow DP pane (that pane's grid area is
+/// only 65% of the terminal, further reduced by the y-axis gutter — see
+/// `draw_fit_tab`/`y_gutter_width`) costs nothing not already visible
+/// elsewhere. The active layer has no other home at all (`Layer`'s doc
+/// comment), so it is the last thing dropped, not the first.
+///
+/// This exists because `ratatui`'s `Block` draws each of its titles
+/// independently into the border row with no collision detection — two
+/// titles whose combined width exceeds the block's simply overlap and
+/// garble each other rather than one yielding space to the other, which is
+/// exactly what widening this title (to add the layer name) started
+/// triggering in the narrow DP-pane case.
+fn heatmap_title_right(batch: u32, stage: &str, layer: &str, avail: usize) -> String {
+    let full = format!(" b{batch} \u{b7} {stage} \u{b7} {layer} ");
+    if full.chars().count() <= avail {
+        return full;
+    }
+    let no_stage = format!(" b{batch} \u{b7} {layer} ");
+    if no_stage.chars().count() <= avail {
+        return no_stage;
+    }
+    format!(" b{batch} ")
+}
+
 /// Paints the half-block heatmap itself — density field plus the
-/// suppressed/path/curve/ridge overlays — into `area`: the framed canvas's
+/// the active mark layer (`app.layer()`) — into `area`: the framed canvas's
 /// inner rect in the common case, or the whole Fit-tab body on a terminal
 /// too small to frame at all (`draw_heatmap`'s size guard above).
 fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
@@ -637,21 +724,19 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
     let max_w = cells.iter().copied().fold(0.0f32, f32::max).max(1e-9);
 
     // Two mark slots per terminal cell — index `(ty * w + tx) * 2 + half`,
-    // `half` 0 for upper, 1 for lower — so an overlay on one grid row never
+    // `half` 0 for upper, 1 for lower — so a mark on one grid row never
     // clobbers what the *other* grid row sharing that character wanted to
-    // show.
-    let mut marks = vec![MARK_NONE; w * h * 2];
-    if app.show_suppressed() {
-        mark_suppressed(&mut marks, dims, rec);
-    }
-    if app.show_path() {
-        mark_path(&mut marks, dims, rec);
-    }
-    if app.show_curve() {
-        mark_curve(&mut marks, dims, rec);
-    }
-    if app.show_ridge() {
-        mark_ridge(&mut marks, dims, rec);
+    // show. Exactly one of these runs per draw — the whole point of Layer
+    // cycling instead of independently toggled overlays — so `marks` only
+    // ever carries one layer's marks at a time.
+    let layer = app.layer();
+    let mut marks = vec![Mark::None; w * h * 2];
+    match layer {
+        Layer::None => {}
+        Layer::Path => mark_path(&mut marks, dims, rec),
+        Layer::Curve => mark_curve(&mut marks, dims, rec),
+        Layer::Ridge => mark_ridge(&mut marks, dims, rec),
+        Layer::Suppressed => mark_suppressed(&mut marks, dims, rec),
     }
 
     for ty in 0..h {
@@ -663,7 +748,7 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
             let upper_mark = marks[cell * 2];
             let lower_mark = marks[cell * 2 + 1];
             let (symbol, color, modifier) =
-                compose_cell(upper_mark, lower_mark, upper_heat, lower_heat, max_w);
+                compose_cell(upper_mark, lower_mark, upper_heat, lower_heat, max_w, layer);
             if let Some(buf_cell) = frame
                 .buffer_mut()
                 .cell_mut((area.x + tx as u16, area.y + ty as u16))
@@ -814,85 +899,89 @@ fn place_centered(row: &mut [char], col: usize, label: &str) {
 /// Picks one terminal cell's glyph and color from its two independent
 /// half-rows.
 ///
-/// "Occupied" means either half has a nonzero weight or an overlay mark.
-/// Occupancy shape is the primary, `TestBackend`-visible signal (`▀` upper
-/// only, `▄` lower only, `█`/a density glyph when both, ` ` when neither) —
-/// this is what makes `heatmap_cells`'s two-half-rows-per-line resolution
-/// actually show up in a snapshot instead of being silently collapsed to one
-/// glyph per cell.
+/// "Occupied" means either half has a nonzero weight or a mark.  Occupancy
+/// shape is the primary, `TestBackend`-visible signal (`▀` upper only, `▄`
+/// lower only, `█`/a density glyph when both, ` ` when neither) — this is
+/// what makes `heatmap_cells`'s two-half-rows-per-line resolution actually
+/// show up in a snapshot instead of being silently collapsed to one glyph
+/// per cell.
 ///
-/// When only one half is occupied, an overlay mark on that half wins its
-/// glyph/color outright (marks are sparse and meant to stand out); with no
-/// mark, that half's own heat intensity picks the color, and the shape is
-/// plain (there is no standard partial-block character for "the upper half,
-/// at quarter density").
+/// When only one half is occupied, a mark on that half decides the glyph via
+/// `compose_marked` (below); with no mark, that half's own heat intensity
+/// picks the color and the shape is the plain `▀`/`▄` half-block (there is
+/// no standard partial-block character for "the upper half, at quarter
+/// density").
 ///
 /// When *both* halves are occupied, `heatmap_cells` collapsing them to one
-/// glyph is unavoidable — one character cannot show two independent overlay
-/// marks at once — so the placement rule is: the higher-priority mark
-/// between the two halves wins the whole cell (an overlay is never invisible
-/// just because it shares a character with the other half), and only when
-/// *neither* half carries a mark does the cell fall back to a density glyph
-/// over the combined (max) heat, which is exactly the common "both grid rows
-/// on the ridge have real weight" case. `fit_tab_marks_the_higher_priority_half_when_both_are_occupied`
-/// pins this rule with a fixture built so it actually triggers.
+/// glyph is unavoidable — one character cannot show two independent marks at
+/// once — so `winning_mark` (below) picks whichever of the two halves' marks
+/// outranks the other, and the cell falls back to a density glyph over the
+/// combined (max) heat only when *neither* half carries a mark at all.
 fn compose_cell(
-    upper_mark: u8,
-    lower_mark: u8,
+    upper_mark: Mark,
+    lower_mark: Mark,
     upper_heat: f32,
     lower_heat: f32,
     max: f32,
+    layer: Layer,
 ) -> (&'static str, Color, Modifier) {
-    let upper_on = upper_mark != MARK_NONE || upper_heat > 0.0;
-    let lower_on = lower_mark != MARK_NONE || lower_heat > 0.0;
+    let upper_on = upper_mark != Mark::None || upper_heat > 0.0;
+    let lower_on = lower_mark != Mark::None || lower_heat > 0.0;
     match (upper_on, lower_on) {
         (false, false) => (" ", Color::Reset, Modifier::empty()),
-        (true, false) => match (mark_glyph(upper_mark), mark_style(upper_mark)) {
-            (Some(sym), Some((col, m))) => (sym, col, m),
-            _ => (
-                "\u{2580}", // ▀
-                heat_color(upper_heat, max),
-                Modifier::empty(),
-            ),
-        },
-        (false, true) => match (mark_glyph(lower_mark), mark_style(lower_mark)) {
-            (Some(sym), Some((col, m))) => (sym, col, m),
-            _ => (
-                "\u{2584}", // ▄
-                heat_color(lower_heat, max),
-                Modifier::empty(),
-            ),
-        },
+        (true, false) => compose_marked(upper_mark, upper_heat, max, layer, "\u{2580}"), // ▀
+        (false, true) => compose_marked(lower_mark, lower_heat, max, layer, "\u{2584}"), // ▄
         (true, true) => {
-            let winner = upper_mark.max(lower_mark);
-            match (mark_glyph(winner), mark_style(winner)) {
-                (Some(sym), Some((col, m))) => (sym, col, m),
-                _ => {
-                    let heat = upper_heat.max(lower_heat);
-                    (
-                        heat_glyph(heat, max),
-                        heat_color(heat, max),
-                        Modifier::empty(),
-                    )
-                }
-            }
+            let winner = winning_mark(upper_mark, lower_mark);
+            let heat = upper_heat.max(lower_heat);
+            compose_marked(winner, heat, max, layer, heat_glyph(heat, max))
         }
     }
 }
 
-fn raise_mark(marks: &mut [u8], dims: Dims, tx: usize, ty: usize, half: Half, level: u8) {
+/// Resolves one already-occupied half (or, from `compose_cell`'s
+/// both-occupied case, an already-picked winning mark for the whole cell)
+/// into a glyph/color/modifier. `none_glyph` is what to draw when `mark` is
+/// `Mark::None` — the asymmetric `▀`/`▄` half-block for a single occupied
+/// half, or the combined density glyph `compose_cell` passes when both
+/// halves are occupied but neither carries a mark.
+fn compose_marked(
+    mark: Mark,
+    heat: f32,
+    max: f32,
+    layer: Layer,
+    none_glyph: &'static str,
+) -> (&'static str, Color, Modifier) {
+    match mark {
+        Mark::DpNode | Mark::Tail => node_glyph_and_style(mark),
+        Mark::Region => (
+            marked_glyph(heat, max),
+            region_accent(layer),
+            Modifier::REVERSED,
+        ),
+        Mark::None => (none_glyph, heat_color(heat, max), Modifier::empty()),
+    }
+}
+
+/// Which of two marks sharing one terminal cell wins the whole cell — see
+/// `mark_rank`'s doc comment for the ordering rationale.
+fn winning_mark(a: Mark, b: Mark) -> Mark {
+    if mark_rank(b) > mark_rank(a) { b } else { a }
+}
+
+fn raise_mark(marks: &mut [Mark], dims: Dims, tx: usize, ty: usize, half: Half, level: Mark) {
     if tx >= dims.w || ty >= dims.h {
         return;
     }
     let slot_idx = (ty * dims.w + tx) * 2 + if half == Half::Upper { 0 } else { 1 };
     if let Some(slot) = marks.get_mut(slot_idx)
-        && level > *slot
+        && mark_rank(level) > mark_rank(*slot)
     {
         *slot = level;
     }
 }
 
-fn mark_grid_indices(marks: &mut [u8], dims: Dims, indices: &[usize], level: u8) {
+fn mark_grid_indices(marks: &mut [Mark], dims: Dims, indices: &[usize], level: Mark) {
     if dims.bins == 0 {
         return;
     }
@@ -904,24 +993,27 @@ fn mark_grid_indices(marks: &mut [u8], dims: Dims, indices: &[usize], level: u8)
     }
 }
 
-fn mark_suppressed(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
+fn mark_suppressed(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let bins = dims.bins;
     for row in 0..bins {
         for col in 0..bins {
             if rec.is_suppressed(row, col) && rec.weight(row, col) > 0.0 {
                 let (ty, tx, half) = grid_to_screen(row, col, dims);
-                raise_mark(marks, dims, tx, ty, half, MARK_SUPPRESSED);
+                raise_mark(marks, dims, tx, ty, half, Mark::Region);
             }
         }
     }
 }
 
 /// Marks `path[..dp_range.start]` and `path[dp_range.end..]` (Pass 2's
-/// greedily attached tails) at one priority and `path[dp_range]` (the DP's
-/// own chosen chain) at a higher one — the split the brief calls out as the
+/// greedily attached tails, `Mark::Tail`) and `path[dp_range]` (the DP's own
+/// chosen chain, `Mark::DpNode`) — the split the brief calls out as the
 /// answer to the first question a user asks about a misbehaving edge of the
-/// fit.
-fn mark_path(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
+/// fit. The two are disjoint by construction (`dp_range` partitions
+/// `path_indices`), so unlike the other three layers this one draws two
+/// distinct marks and relies on `mark_rank` to arbitrate the rare terminal
+/// cell where downsampling rounds one of each into the same slot.
+fn mark_path(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let path = rec.path_indices();
     if dims.bins == 0 || path.is_empty() {
         return;
@@ -934,14 +1026,14 @@ fn mark_path(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
     let start = dp_range.start.min(path.len());
     let end = dp_range.end.clamp(start, path.len());
 
-    mark_grid_indices(marks, dims, &path[..start], MARK_TAIL);
-    mark_grid_indices(marks, dims, &path[start..end], MARK_DP_CHAIN);
-    mark_grid_indices(marks, dims, &path[end..], MARK_TAIL);
+    mark_grid_indices(marks, dims, &path[..start], Mark::Tail);
+    mark_grid_indices(marks, dims, &path[start..end], Mark::DpNode);
+    mark_grid_indices(marks, dims, &path[end..], Mark::Tail);
 }
 
 /// Marks the fitted curve at every display column (not just at path nodes),
 /// so it renders as a continuous line rather than sparse dots.
-fn mark_curve(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
+fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
     let curve = rec.curve();
@@ -964,11 +1056,11 @@ fn mark_curve(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
         // parity — `grid_to_screen`'s doc comment explains why the parity
         // must come from the flipped index, not the pre-flip one.
         let (ty, half) = flip_display_row(dr, dims.disp_rows);
-        raise_mark(marks, dims, tx, ty, half, MARK_CURVE);
+        raise_mark(marks, dims, tx, ty, half, Mark::Region);
     }
 }
 
-fn mark_ridge(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
+fn mark_ridge(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
     if bins == 0 {
@@ -983,7 +1075,7 @@ fn mark_ridge(marks: &mut [u8], dims: Dims, rec: &FitRecording) {
         for y in [center + m.half_width, center - m.half_width] {
             let row = bin_of(y, geom.y_range, bins);
             let (ty, tx, half) = grid_to_screen(row, col, dims);
-            raise_mark(marks, dims, tx, ty, half, MARK_RIDGE);
+            raise_mark(marks, dims, tx, ty, half, Mark::Region);
         }
     }
 }
@@ -1547,54 +1639,41 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
+    /// One snapshot per stop of the `m`/`M` cycle — the direct replacement
+    /// for the old per-`Stage` snapshots. Unlike those (`Stage::Ridge` used
+    /// to imply every overlay was on at once, via `sync_overlays_to_stage`),
+    /// each of these renders in isolation: `Layer::Path` shows only the DP
+    /// chain/tail, not also the suppressed mask, and so on.
     #[test]
-    fn fit_tab_renders_each_stage() {
-        for stage in [
-            Stage::Grid,
-            Stage::Suppressed,
-            Stage::Path,
-            Stage::Curve,
-            Stage::Ridge,
-        ] {
+    fn fit_tab_renders_each_layer() {
+        for layer in Layer::ALL {
             let mut app = fixture_app_with_ridge();
-            app.set_stage(stage);
-            insta::assert_snapshot!(format!("fit_stage_{:?}", stage), render(&mut app, 100, 30));
+            app.set_layer(layer);
+            insta::assert_snapshot!(format!("fit_layer_{:?}", layer), render(&mut app, 100, 30));
         }
     }
 
-    /// `set_stage(Curve)` implies `suppressed`, `path` and `curve` are all
-    /// on — but each is independently toggleable, not just a byproduct of
-    /// the stage. Overriding `show_path` off afterward must remove the path
-    /// marks (`O`/`+` — DP chain/tail, Item 3's marker set) while
-    /// `show_curve` (untouched) keeps the curve (`─`) rendering, proving the
-    /// two are separate state rather than one stage-derived flag read two
-    /// ways.
+    /// Pins the Fit tab's title-line home for the active layer's name (Layer's
+    /// doc comment: `stage` and `layer` are independent axes now). Stepping
+    /// the pipeline stage must not move the mark layer, and cycling the mark
+    /// layer must not move the pipeline stage — a regression back toward the
+    /// old `sync_overlays_to_stage` coupling would fail this.
     #[test]
-    fn fit_tab_overlay_toggles_are_independent_of_stage() {
+    fn fit_tab_stage_and_layer_are_independent_axes() {
         let mut app = fixture_app_with_ridge();
-        app.set_stage(Stage::Curve);
-        assert!(
-            app.show_path(),
-            "Curve stage implies the path overlay is on"
-        );
-        app.set_show_path(false);
-        assert!(!app.show_path());
-        assert!(
-            app.show_curve(),
-            "turning off `path` must not have touched `curve`"
+        app.set_layer(Layer::Curve);
+        app.set_stage(Stage::Ridge);
+        assert_eq!(
+            app.layer(),
+            Layer::Curve,
+            "changing the pipeline stage must not change the mark layer"
         );
 
         let out = render(&mut app, 100, 30);
         assert!(
-            !out.contains('O') && !out.contains('+'),
-            "path overlay was toggled off, so no DP-chain or tail marks should \
-             remain:\n{out}"
+            out.contains("Ridge") && out.contains("curve"),
+            "the title states both axes independently:\n{out}"
         );
-        assert!(
-            out.contains('\u{2500}'),
-            "curve overlay was left on and should still render:\n{out}"
-        );
-        insta::assert_snapshot!(out);
     }
 
     /// No given test toggles `dp_pane`, so nothing pinned the pane's content
@@ -1832,7 +1911,7 @@ mod tests {
         let bins = 20;
         let mut app = App::new(bins);
         *app.recording_mut() = fixture_recording(bins);
-        app.set_stage(Stage::Path);
+        app.set_layer(Layer::Path);
 
         let out = render(&mut app, 100, 30);
         // `O` is the DP-chain glyph (Item 3); collect the screen (row, col)
@@ -1869,56 +1948,150 @@ mod tests {
         );
     }
 
-    /// A `bins=4` grid rendered into a body exactly 2 rows tall (`disp_rows
-    /// == bins`, one-to-one) with a single display column, so both grid rows
-    /// are known to land in the terminal's one heatmap character: row 0 (a
-    /// point too light to survive `suppress_nonmax`'s 1.0 seed, so it is
-    /// suppressed but still weight > 0 — the suppressed mark), row 1 (the
-    /// sole survivor, so it is trivially the whole DP chain). Item 0's
-    /// y-axis flip puts both of them in the terminal's *second* (bottom)
-    /// heatmap row rather than its first — grid row 0 is the lowest observed
-    /// RT, which now renders at the bottom of the canvas — so this is also a
-    /// regression check for that flip, not just for `compose_cell`'s
-    /// placement rule: the higher-priority mark wins the whole cell when
-    /// both halves are occupied (`MARK_DP_CHAIN > MARK_SUPPRESSED`), so the
-    /// character must be `O` (Item 3's DP-chain glyph), not `\u{b7}`
-    /// (suppressed), and it must be on the *second* heatmap line.
+    /// `compose_cell`'s per-cell mark-priority rule, exercised directly
+    /// rather than through a fixture engineered to make two grid rows
+    /// collapse into one terminal cell. Before this pass, that fixture
+    /// forced a *suppressed* mark and a *DP-chain* mark into the same cell —
+    /// the one collision reachable at all, since `Stage::Path` used to show
+    /// both overlays at once. Suppressed and DP-chain can no longer collide:
+    /// they are two different, mutually exclusive `Layer`s now, so the only
+    /// same-layer collision left is a DP node against a tail node within the
+    /// `Path` layer (`mark_path` marks both), and this pins that the DP
+    /// chain wins regardless of which half carried which mark.
     #[test]
-    fn fit_tab_marks_the_higher_priority_half_when_both_are_occupied() {
-        let bins = 4;
-        let mut app = App::new(bins);
-        let mut state = CalibrationState::new(bins, (0.0, 4.0), (0.0, 4.0), 2).unwrap();
-        state
-            .update(
-                [
-                    (LibraryRT(0.5), ObservedRTSeconds(0.5), 0.5),
-                    (LibraryRT(1.5), ObservedRTSeconds(1.5), 2.0),
-                ]
-                .into_iter(),
-            )
-            .unwrap();
-        state.fit_with(app.recording_mut(), ObserveOpts::NONE);
-        app.set_stage(Stage::Path); // shows both the suppressed mask and the path
+    fn compose_cell_gives_the_dp_chain_mark_priority_over_a_tail_mark_sharing_its_cell() {
+        let (glyph, color, modifier) =
+            compose_cell(Mark::Tail, Mark::DpNode, 0.0, 0.0, 1.0, Layer::Path);
+        assert_eq!(
+            glyph, "O",
+            "the DP chain mark must win over a tail mark sharing the cell"
+        );
+        assert_eq!(color, Color::Green);
+        assert_eq!(modifier, Modifier::BOLD);
 
-        // 1 tab-bar row + 2 heatmap rows + 1 status row; 1 column. Body
-        // width 1 is below `draw_heatmap`'s framing threshold, so this
-        // renders the plain (unframed) heatmap — the same layout the old
-        // assertion assumed.
-        let out = render(&mut app, 1, 4);
-        let heatmap_char = out.lines().nth(2).and_then(|l| l.chars().next());
-        assert_eq!(
-            heatmap_char,
-            Some('O'),
-            "the DP chain mark must win the whole cell over the suppressed mark \
-             sharing its other half, got:\n{out}"
+        // Order-independence: the winner must not depend on which half
+        // happened to carry which mark.
+        let (glyph2, ..) = compose_cell(Mark::DpNode, Mark::Tail, 0.0, 0.0, 1.0, Layer::Path);
+        assert_eq!(glyph2, "O");
+    }
+
+    /// The empty-cell trap the brief calls out by name: `heat_glyph` returns
+    /// a plain space for zero weight, and a *reversed* space renders as a
+    /// solid block — the single highest-density glyph this module draws —
+    /// which would lie about a zero-weight cell a region mark (curve/ridge/
+    /// suppressed) lands on. `compose_cell` must substitute the minimum-ink
+    /// `\u{b7}` glyph instead, still reversed.
+    #[test]
+    fn compose_cell_never_renders_a_marked_zero_weight_cell_as_a_reversed_space() {
+        let (glyph, _color, modifier) =
+            compose_cell(Mark::Region, Mark::None, 0.0, 0.0, 1.0, Layer::Curve);
+        assert_ne!(
+            glyph, " ",
+            "a reversed space reads as maximum density and lies about a \
+             zero-weight cell"
         );
-        assert_eq!(
-            out.lines().nth(1).and_then(|l| l.chars().next()),
-            Some(' '),
-            "grid row 0 is the lowest observed RT, so after the y-axis flip \
-             nothing should land in the *first* heatmap row here:\n{out}"
+        assert_eq!(glyph, "\u{b7}");
+        assert!(modifier.contains(Modifier::REVERSED));
+
+        // Both halves marked and both zero weight must not let the combined
+        // glyph regress to a bare space either.
+        let (glyph_both, _color2, modifier_both) =
+            compose_cell(Mark::Region, Mark::Region, 0.0, 0.0, 1.0, Layer::Ridge);
+        assert_ne!(glyph_both, " ");
+        assert_eq!(glyph_both, "\u{b7}");
+        assert!(modifier_both.contains(Modifier::REVERSED));
+    }
+
+    /// End-to-end counterpart of the two `compose_cell` unit tests above:
+    /// the real Fit tab, with a real fixture and the Curve layer active,
+    /// must not paint any reversed space anywhere on screen, and must
+    /// exercise the `\u{b7}` fallback at least once — the fitted curve is
+    /// evaluated at every display column regardless of whether any
+    /// calibrant actually falls there, so with only 16 bins spread across a
+    /// ~90-column canvas, several columns land on zero-weight grid cells.
+    #[test]
+    fn curve_layer_never_renders_a_reversed_space_on_a_zero_weight_cell() {
+        let mut app = fixture_app_with_ridge();
+        app.set_layer(Layer::Curve);
+        let mut t = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        t.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = t.backend().buffer().clone();
+
+        let mut saw_reversed_dot = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.modifier.contains(Modifier::REVERSED) {
+                    assert_ne!(
+                        cell.symbol(),
+                        " ",
+                        "a reversed space at ({x}, {y}) reads as a solid block \
+                         (maximum density), lying about a zero-weight cell the \
+                         curve mark landed on"
+                    );
+                    saw_reversed_dot |= cell.symbol() == "\u{b7}";
+                }
+            }
+        }
+        assert!(
+            saw_reversed_dot,
+            "expected the curve to cross at least one zero-weight column and \
+             render the reversed minimum-ink glyph there"
         );
-        insta::assert_snapshot!(out);
+    }
+
+    /// The path layer's two node kinds (Item 3's `O`/`X` marker set) must
+    /// both still be visible at once — that is the entire reason they are
+    /// glyph-distinguished within one layer rather than folded into a single
+    /// "path" mark. `fixture_app_with_ridge`'s dip/stray points (see that
+    /// fixture's own doc comment) are built specifically so the DP chain
+    /// stops short and a tail gets greedily attached, so both glyphs are
+    /// guaranteed to appear.
+    #[test]
+    fn path_layer_shows_the_dp_chain_and_tail_glyphs_distinctly() {
+        let mut app = fixture_app_with_ridge();
+        app.set_layer(Layer::Path);
+        let out = render(&mut app, 100, 30);
+        assert!(out.contains('O'), "missing the DP-chain glyph:\n{out}");
+        assert!(out.contains('X'), "missing the tail glyph:\n{out}");
+    }
+
+    /// `mark_suppressed`/`mark_ridge` write `Mark::Region`, which — unlike
+    /// the old glyph-replacing overlay — is invisible in a plain-text
+    /// (`.symbol()`-only) snapshot whenever it lands on a nonzero-weight
+    /// cell. That is actually the *common* case for `mark_suppressed`, since
+    /// it only ever marks cells with `weight > 0.0` to begin with (see its
+    /// own guard), so `fit_layer_Suppressed`'s snapshot can look
+    /// byte-identical to `fit_layer_None`'s in plain text and still be
+    /// correct — the density glyph is preserved on purpose, and only the
+    /// (untested-by-`.symbol()`) `REVERSED` style differs. This pins that
+    /// the two functions actually mark something in the standard fixture,
+    /// directly, rather than relying on a snapshot that cannot see it.
+    #[test]
+    fn mark_suppressed_and_mark_ridge_mark_at_least_one_cell() {
+        let app = fixture_app_with_ridge();
+        let rec = app.recording();
+        let dims = Dims {
+            w: 100,
+            h: 15,
+            bins: rec.geom().bins,
+            disp_rows: 30,
+            disp_cols: 100,
+        };
+
+        let mut suppressed = vec![Mark::None; dims.w * dims.h * 2];
+        mark_suppressed(&mut suppressed, dims, rec);
+        assert!(
+            suppressed.contains(&Mark::Region),
+            "expected at least one suppressed cell in the fixture"
+        );
+
+        let mut ridge = vec![Mark::None; dims.w * dims.h * 2];
+        mark_ridge(&mut ridge, dims, rec);
+        assert!(
+            ridge.contains(&Mark::Region),
+            "expected at least one ridge-band cell in the fixture"
+        );
     }
 
     // ---- scaled_u64: NaN must not read as convergence ----
@@ -2037,7 +2210,7 @@ mod tests {
         let mut app = App::new(10);
         app.set_tab(Tab::Convergence);
         let status = status_line(&mut app, 200);
-        for word in ["stage", "frame", "overlay", "dp"] {
+        for word in ["stage", "frame", "layer", "dp"] {
             assert!(
                 !status.contains(word),
                 "Convergence must not advertise Fit-only bindings that do \

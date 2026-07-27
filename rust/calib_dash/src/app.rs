@@ -138,6 +138,82 @@ impl Stage {
     }
 }
 
+/// Which mark overlay the Fit heatmap draws on top of the density field,
+/// cycled by `m`/`M`. Exactly one is active at a time — unlike the
+/// independent per-overlay toggles this replaced, a layer is a *view*, not a
+/// set of flags, so there is nothing to compose and no priority order to
+/// maintain between marks that can never appear on screen together.
+///
+/// **Relationship to [`Stage`]:** the two are independent axes.
+/// `App::set_stage`/`[`/`]` no longer touch `layer` at all (the coupling
+/// used to run through `sync_overlays_to_stage`, now deleted) — stepping the
+/// pipeline stage only ever changes the `{stage}` label in the block title
+/// and status line. This is a deliberate decoupling, not an oversight:
+/// `Stage` used to imply a *cumulative* overlay set (`Stage::Ridge` meant
+/// "show suppressed AND path AND curve AND ridge, all at once"), which is
+/// exactly the composited-priority design this pass removes. A layer is a
+/// single, isolated view by construction, so re-coupling it to a cumulative
+/// stage would either resurrect the old composition problem or silently
+/// stop being cumulative — neither is coherent. A user reasoning about "what
+/// did the Suppressed stage produce" now does that by cycling to the
+/// `Suppressed` layer explicitly, independent of wherever `[`/`]` happens to
+/// have left `stage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// Bare heatmap, no marks — the only way to see the raw density the fit
+    /// works from, undisturbed by anything derived from it.
+    None,
+    /// The DP chain and the greedily attached tails, glyph-distinguished
+    /// within the layer (`O`/`X` — see `ui::mark_path`) since they answer one
+    /// question together: is a bad edge the DP's own choice or a tail
+    /// grafted on after the fact.
+    Path,
+    Curve,
+    Ridge,
+    Suppressed,
+}
+
+impl Layer {
+    /// Every variant, in cycle order (Item: layer cycling). This is a fixed
+    /// stop list a user steps through, like `Tab::ALL` — not a pipeline with
+    /// a genuine last step like `Stage::ALL` — so `next`/`prev` wrap rather
+    /// than clamp.
+    pub const ALL: [Layer; 5] = [
+        Layer::None,
+        Layer::Path,
+        Layer::Curve,
+        Layer::Ridge,
+        Layer::Suppressed,
+    ];
+
+    fn index(self) -> usize {
+        Layer::ALL
+            .iter()
+            .position(|l| *l == self)
+            .expect("Layer::ALL lists every variant")
+    }
+
+    /// One layer forward, wrapping — mirrors `Tab::next`.
+    pub fn next(self) -> Self {
+        Layer::ALL[(self.index() + 1) % Layer::ALL.len()]
+    }
+
+    /// One layer back, wrapping.
+    pub fn prev(self) -> Self {
+        Layer::ALL[(self.index() + Layer::ALL.len() - 1) % Layer::ALL.len()]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Layer::None => "none",
+            Layer::Path => "path",
+            Layer::Curve => "curve",
+            Layer::Ridge => "ridge",
+            Layer::Suppressed => "suppressed",
+        }
+    }
+}
+
 /// Whether the batch loop driving Phase 1 scoring should keep going after a
 /// pause. Only `Ctrl-C` ever produces `Abort` — a dashboard failure anywhere
 /// else is logged and treated as `Continue`, since a dev tool must never
@@ -257,16 +333,10 @@ pub struct App {
     retained_frames: usize,
     frame_stride: usize,
     dropped_frames: usize,
-    /// Per-overlay visibility on the Fit tab. Each is independently
-    /// toggleable (`set_show_*`), but changing `stage` re-derives all four
-    /// from "the set implied by that stage" first — see
-    /// `sync_overlays_to_stage` — so stepping `[`/`]` alone still tells the
-    /// story, and an independent toggle is a deliberate override on top of
-    /// that default rather than a second, disconnected source of truth.
-    show_suppressed: bool,
-    show_path: bool,
-    show_curve: bool,
-    show_ridge: bool,
+    /// Which mark layer the Fit heatmap draws, cycled by `m`/`M`. See
+    /// [`Layer`]'s doc comment for why this is independent of `stage` rather
+    /// than derived from it.
+    layer: Layer,
     /// The pending count prefix, e.g. the `15` typed before `n` in `15n`.
     /// Lives for exactly one motion: a motion consumes it via `take_count`,
     /// and any other key clears it directly, so a half-typed number never
@@ -324,10 +394,7 @@ impl App {
             retained_frames: 0,
             frame_stride: 1,
             dropped_frames: 0,
-            show_suppressed: false,
-            show_path: false,
-            show_curve: false,
-            show_ridge: false,
+            layer: Layer::None,
             count: None,
             scrub_frame: None,
             scrub_chunk: None,
@@ -345,30 +412,13 @@ impl App {
         self.tab = tab;
     }
 
-    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count,
-    /// and re-derives the four overlay toggles from it (see
-    /// `sync_overlays_to_stage`). Kept separate from `handle_key`'s stepping
-    /// so a test (or a future jump-to-stage key) can land on a specific
-    /// stage in one call.
+    /// Sets the pipeline stage directly, bypassing the `[`/`]` step count.
+    /// Kept separate from `handle_key`'s stepping so a test (or a future
+    /// jump-to-stage key) can land on a specific stage in one call. Does not
+    /// touch `layer` — see [`Layer`]'s doc comment for why the two are
+    /// independent axes.
     pub fn set_stage(&mut self, stage: Stage) {
         self.stage = stage;
-        self.sync_overlays_to_stage();
-    }
-
-    /// Resets all four overlay toggles to the set `self.stage` implies —
-    /// cumulative, so `Stage::Ridge` implies all four are on. Called
-    /// whenever `stage` changes (`set_stage`, and `handle_key`'s `[`/`]`),
-    /// so stepping the stage alone still tells the whole story; an
-    /// independent `set_show_*` call after that is an explicit override,
-    /// not fighting a second default.
-    fn sync_overlays_to_stage(&mut self) {
-        self.show_suppressed = matches!(
-            self.stage,
-            Stage::Suppressed | Stage::Path | Stage::Curve | Stage::Ridge
-        );
-        self.show_path = matches!(self.stage, Stage::Path | Stage::Curve | Stage::Ridge);
-        self.show_curve = matches!(self.stage, Stage::Curve | Stage::Ridge);
-        self.show_ridge = matches!(self.stage, Stage::Ridge);
     }
 
     /// Mutable access to the live recording, so a caller — `CalibDash::on_batch`,
@@ -452,36 +502,16 @@ impl App {
         self.dp_pane
     }
 
-    pub fn show_suppressed(&self) -> bool {
-        self.show_suppressed
+    pub fn layer(&self) -> Layer {
+        self.layer
     }
 
-    pub fn show_path(&self) -> bool {
-        self.show_path
-    }
-
-    pub fn show_curve(&self) -> bool {
-        self.show_curve
-    }
-
-    pub fn show_ridge(&self) -> bool {
-        self.show_ridge
-    }
-
-    pub fn set_show_suppressed(&mut self, on: bool) {
-        self.show_suppressed = on;
-    }
-
-    pub fn set_show_path(&mut self, on: bool) {
-        self.show_path = on;
-    }
-
-    pub fn set_show_curve(&mut self, on: bool) {
-        self.show_curve = on;
-    }
-
-    pub fn set_show_ridge(&mut self, on: bool) {
-        self.show_ridge = on;
+    /// Sets the active mark layer directly, bypassing `m`/`M`'s cycling.
+    /// Kept separate from `handle_key` for the same reason `set_stage` is:
+    /// tests (and any future jump-to-layer key) can land on a specific layer
+    /// in one call.
+    pub fn set_layer(&mut self, layer: Layer) {
+        self.layer = layer;
     }
 
     pub fn recording(&self) -> &FitRecording {
@@ -613,15 +643,13 @@ impl App {
         self.take_count() % Tab::ALL.len() as u32
     }
 
-    /// Consumes the pending count and reduces it to whether an odd or even
-    /// number of presses was requested. A boolean toggle applied twice is a
-    /// no-op, so `"10s"` and `"2s"` and a bare `"s"` typed once each mean
-    /// exactly one of "flip it" or "leave it" — the count's only observable
-    /// effect on a toggle is its parity. Like `tab_cycle_steps`, this is O(1)
-    /// regardless of how large the typed count is, so no loop-and-clamp is
-    /// needed to keep a huge count from doing proportional work.
-    fn toggle_parity(&mut self) -> bool {
-        self.take_count() % 2 == 1
+    /// Consumes the pending count and reduces it mod `Layer::ALL.len()` for
+    /// `m`/`M`'s layer cycling — the same shape as `tab_cycle_steps`, for the
+    /// same reason: cycling through a fixed set of stops with no natural end
+    /// to clamp at, so the count that matters is where it lands after
+    /// wrapping, not how far it could possibly move.
+    fn layer_cycle_steps(&mut self) -> u32 {
+        self.take_count() % Layer::ALL.len() as u32
     }
 
     /// Moves the Fit tab's frame-scrub cursor back into history by `n`
@@ -713,18 +741,17 @@ impl App {
                 // `ALL.len() - 1` steps is wasted work — without this clamp,
                 // a large typed count (reachable now that digit overflow no
                 // longer panics) would loop synchronously for as long as it
-                // takes to freeze the UI.
+                // takes to freeze the UI. Does not touch `layer` — see
+                // `Layer`'s doc comment for why the two axes are independent.
                 for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.next();
                 }
-                self.sync_overlays_to_stage();
                 PauseAction::Stay
             }
             KeyCode::Char('[') if key.modifiers.is_empty() => {
                 for _ in 0..self.max_stage_steps() {
                     self.stage = self.stage.prev();
                 }
-                self.sync_overlays_to_stage();
                 PauseAction::Stay
             }
             KeyCode::Char('d') if key.modifiers.is_empty() => {
@@ -766,32 +793,25 @@ impl App {
                 self.scrub_forward(n);
                 PauseAction::Stay
             }
-            // ---- Fit-tab overlay toggles ----
-            // Mnemonic letters chosen to avoid every binding above:
-            // s(uppressed), p(ath), c(urve), w(idth — the ridge overlay is
-            // the ridge *width* measurement everywhere else in this crate,
-            // and `r` was already taken by run-to-end).
-            KeyCode::Char('s') if key.modifiers.is_empty() => {
-                if self.toggle_parity() {
-                    self.show_suppressed = !self.show_suppressed;
+            // ---- Fit-tab mark layer: m/M ----
+            // `m` for "mark" — the freed `s`/`p`/`c`/`w` per-overlay toggle
+            // letters this replaced no longer make sense once only one layer
+            // can ever be on screen at a time. Lowercase cycles forward,
+            // shifted cycles back, the same forward/reverse pairing `h`/`l`
+            // establishes for tabs.
+            KeyCode::Char('m') if key.modifiers.is_empty() => {
+                for _ in 0..self.layer_cycle_steps() {
+                    self.layer = self.layer.next();
                 }
                 PauseAction::Stay
             }
-            KeyCode::Char('p') if key.modifiers.is_empty() => {
-                if self.toggle_parity() {
-                    self.show_path = !self.show_path;
-                }
-                PauseAction::Stay
-            }
-            KeyCode::Char('c') if key.modifiers.is_empty() => {
-                if self.toggle_parity() {
-                    self.show_curve = !self.show_curve;
-                }
-                PauseAction::Stay
-            }
-            KeyCode::Char('w') if key.modifiers.is_empty() => {
-                if self.toggle_parity() {
-                    self.show_ridge = !self.show_ridge;
+            // Some terminals report Shift on a resulting `Char('M')` and some
+            // do not (the same inconsistency `?`'s own arm below works
+            // around) — this only guards against `Control`, so either
+            // reporting style still cycles backward.
+            KeyCode::Char('M') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                for _ in 0..self.layer_cycle_steps() {
+                    self.layer = self.layer.prev();
                 }
                 PauseAction::Stay
             }
@@ -1838,49 +1858,84 @@ mod tests {
         );
     }
 
-    // ---- Fit-tab overlay toggles: s / p / c / w ----
+    // ---- Fit-tab mark layer: m / M ----
 
     #[test]
-    fn s_p_c_w_toggle_their_own_overlay_independently() {
+    fn m_cycles_the_mark_layer_forward_through_all_five_stops_and_wraps() {
         let mut app = App::new(10);
-        assert!(
-            !app.show_suppressed() && !app.show_path() && !app.show_curve() && !app.show_ridge()
-        );
-        press(&mut app, "s");
-        assert!(app.show_suppressed());
-        assert!(!app.show_path(), "s must not touch the other three");
-        press(&mut app, "p");
-        assert!(app.show_path());
-        press(&mut app, "c");
-        assert!(app.show_curve());
-        press(&mut app, "w");
-        assert!(app.show_ridge());
-        assert!(
-            app.show_suppressed() && app.show_path() && app.show_curve(),
-            "each toggle key must leave the others exactly as they were"
+        assert_eq!(app.layer(), Layer::None);
+        press(&mut app, "m");
+        assert_eq!(app.layer(), Layer::Path);
+        press(&mut app, "m");
+        assert_eq!(app.layer(), Layer::Curve);
+        press(&mut app, "m");
+        assert_eq!(app.layer(), Layer::Ridge);
+        press(&mut app, "m");
+        assert_eq!(app.layer(), Layer::Suppressed);
+        press(&mut app, "m");
+        assert_eq!(app.layer(), Layer::None, "wraps back to the first stop");
+    }
+
+    #[test]
+    fn capital_m_cycles_the_mark_layer_backward_and_wraps() {
+        let mut app = App::new(10);
+        press(&mut app, "M");
+        assert_eq!(
+            app.layer(),
+            Layer::Suppressed,
+            "one step back from the first stop wraps to the last"
         );
     }
 
     #[test]
-    fn an_overlay_toggle_consumes_the_pending_count_by_parity() {
-        // Toggling a boolean twice is a no-op — the count's only observable
-        // effect is odd vs. even, and `toggle_parity` reduces to that before
-        // doing any work at all, so a huge count is not a huge loop either.
+    fn a_count_before_m_cycles_that_many_layers() {
         let mut app = App::new(10);
-        press(&mut app, "2s");
-        assert!(!app.show_suppressed(), "an even count leaves it unchanged");
+        press(&mut app, "2m");
+        assert_eq!(app.layer(), Layer::Curve, "None + 2 stops");
         assert_eq!(
             app.pending_count(),
             None,
-            "s is a motion: it consumes the count"
+            "m is a motion: it consumes the count"
+        );
+    }
+
+    #[test]
+    fn a_huge_count_before_m_does_not_spin() {
+        // 5 stops: any count's effect only depends on its value mod 5, and
+        // `layer_cycle_steps` reduces it to that before looping at all, so
+        // this must return promptly rather than looping ~10^9 times.
+        // `1_000_000_002 % 5 == 2`, so this is None + 2 steps == Curve.
+        let mut app = App::new(10);
+        press(&mut app, "1000000002m");
+        assert_eq!(
+            app.layer(),
+            Layer::Curve,
+            "None + (1_000_000_002 % 5) steps"
+        );
+    }
+
+    /// Pins `Layer`'s doc comment: `stage` and `layer` are independent axes,
+    /// so stepping one must never move the other. Before this pass, `Stage`
+    /// drove a cumulative overlay set (`sync_overlays_to_stage`); this test
+    /// exists to catch a regression back toward that coupling.
+    #[test]
+    fn stage_stepping_and_layer_cycling_are_independent() {
+        let mut app = App::new(10);
+        app.set_layer(Layer::Ridge);
+        press(&mut app, "3]");
+        assert_eq!(
+            app.layer(),
+            Layer::Ridge,
+            "stepping the pipeline stage must not touch the mark layer"
         );
 
-        press(&mut app, "3s");
-        assert!(app.show_suppressed(), "an odd count flips it exactly once");
-
-        // 999_999_999 is odd, so this flips it once more, back to false.
-        press(&mut app, "999999999s");
-        assert!(!app.show_suppressed());
+        app.set_stage(Stage::Grid);
+        press(&mut app, "m");
+        assert_eq!(
+            app.stage(),
+            Stage::Grid,
+            "cycling the mark layer must not touch the pipeline stage"
+        );
     }
 
     // ---- the stepper ----
