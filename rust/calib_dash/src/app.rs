@@ -36,7 +36,6 @@ use ratatui::crossterm::event::{
     KeyModifiers,
 };
 use std::io::IsTerminal;
-use std::ops::Range;
 
 /// Top-level dashboard tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,12 +924,7 @@ impl CalibDash {
     /// not stop a search. `Flow::Abort` is the one path back to the caller
     /// that actually asks the search to stop, and it only happens because
     /// the user pressed Ctrl-C at a pause — see `render_pause`.
-    pub fn on_batch(
-        &mut self,
-        chunk: usize,
-        _range: Range<usize>,
-        points: impl Iterator<Item = CalibrantPoint>,
-    ) -> Flow {
+    pub fn on_batch(&mut self, chunk: usize, points: impl Iterator<Item = CalibrantPoint>) -> Flow {
         self.current_points.clear();
         self.current_points.extend(points.take(self.n_calibrants));
 
@@ -1819,10 +1813,7 @@ mod tests {
                     speclib_index: chunk * 8 + i,
                 })
                 .collect();
-            assert!(matches!(
-                d.on_batch(chunk, chunk..chunk + 1, pts.into_iter()),
-                Flow::Continue
-            ));
+            assert!(matches!(d.on_batch(chunk, pts.into_iter()), Flow::Continue));
         }
         d.finish(3);
         assert_eq!(
@@ -1844,7 +1835,7 @@ mod tests {
                     speclib_index: i,
                 })
                 .collect();
-            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+            d.on_batch(chunk, pts.into_iter());
         }
         d.finish(9);
         assert_eq!(d.app.metrics().len(), 10, "metrics are undecimated");
@@ -1863,7 +1854,7 @@ mod tests {
                 speclib_index: i,
             })
             .collect();
-        d.on_batch(0, 0..1, pts.into_iter());
+        d.on_batch(0, pts.into_iter());
         d.finish(0);
 
         let live: Vec<_> = d.app.recording().curve().to_vec();
@@ -1893,7 +1884,7 @@ mod tests {
                     speclib_index: chunk * 8 + i,
                 })
                 .collect();
-            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+            d.on_batch(chunk, pts.into_iter());
         }
         d.finish(2);
 
@@ -1943,7 +1934,7 @@ mod tests {
                 speclib_index: i,
             })
             .collect();
-        d.on_batch(0, 0..8, pts.into_iter());
+        d.on_batch(0, pts.into_iter());
 
         assert!(
             d.app.recording().dp().is_empty(),
@@ -1989,7 +1980,7 @@ mod tests {
                     speclib_index: chunk * 8 + i,
                 })
                 .collect();
-            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+            d.on_batch(chunk, pts.into_iter());
         }
         d.finish(1);
 
@@ -2105,7 +2096,7 @@ mod tests {
                 speclib_index: i,
             })
             .collect();
-        d.on_batch(0, 0..8, pts.into_iter());
+        d.on_batch(0, pts.into_iter());
         d.finish(0);
 
         let (idx, _) = d.frames.frame(0).expect("frame 0 exists");
@@ -2203,7 +2194,7 @@ mod tests {
                     speclib_index: chunk * n_calibrants + i,
                 })
                 .collect();
-            d.on_batch(chunk, chunk..chunk + 1, pts.into_iter());
+            d.on_batch(chunk, pts.into_iter());
             assert_eq!(
                 d.current_points_ptr(),
                 ptr_before_any_batch,
@@ -2230,10 +2221,10 @@ mod tests {
         // its first-ever growth happens inside this very call — pointer
         // identity is only meaningful to compare *after* that first batch,
         // not before it.
-        d.on_batch(0, 0..n_calibrants, batch(0).into_iter());
+        d.on_batch(0, batch(0).into_iter());
         let ptr_after_first_batch = d.prev_points_ptr();
         for chunk in 1..5 {
-            d.on_batch(chunk, chunk..chunk + 1, batch(chunk).into_iter());
+            d.on_batch(chunk, batch(chunk).into_iter());
             assert_eq!(
                 d.prev_points_ptr(),
                 ptr_after_first_batch,
@@ -2276,13 +2267,13 @@ mod tests {
                 .collect()
         };
 
-        d.on_batch(0, 0..n_calibrants, good_points().into_iter());
+        d.on_batch(0, good_points().into_iter());
         assert!(
             d.app.metrics()[0].wrmse.is_finite(),
             "batch 0 must produce a real curve"
         );
 
-        d.on_batch(1, 0..n_calibrants, failing_points().into_iter());
+        d.on_batch(1, failing_points().into_iter());
         assert!(
             d.app.metrics()[1].wrmse.is_nan(),
             "batch 1's fit must fail outright (every weight is sub-threshold)"
@@ -2292,7 +2283,7 @@ mod tests {
         // batch 1's failure, this fits the same curve again and the delta
         // against it is ~0 — not NaN, which is what a reset-to-None baseline
         // would report instead.
-        d.on_batch(2, 0..n_calibrants, good_points().into_iter());
+        d.on_batch(2, good_points().into_iter());
         let m2 = d.app.metrics()[2];
         assert!(
             !m2.max_delta.is_nan() && !m2.mean_delta.is_nan(),

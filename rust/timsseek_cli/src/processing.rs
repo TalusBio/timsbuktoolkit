@@ -146,7 +146,6 @@ mod calib_dash_hook {
     pub fn on_batch<'a>(
         dash: &mut Dash,
         chunk: usize,
-        range: std::ops::Range<usize>,
         calibrants: impl Iterator<Item = &'a CalibrantCandidate>,
     ) -> bool {
         dash.last_chunk = chunk;
@@ -155,7 +154,6 @@ mod calib_dash_hook {
         };
         let flow = d.on_batch(
             chunk,
-            range,
             calibrants.map(|c| calib_dash::CalibrantPoint {
                 library_rt: c.library_rt.0 as f64,
                 observed_rt: c.apex_rt.0 as f64,
@@ -249,7 +247,6 @@ mod calib_dash_hook {
     pub fn on_batch<'a>(
         _dash: &mut Dash,
         _chunk: usize,
-        _range: std::ops::Range<usize>,
         _calibrants: impl Iterator<Item = &'a CalibrantCandidate>,
     ) -> bool {
         true
@@ -761,12 +758,7 @@ fn phase1_prescore<I: ScorerQueriable>(
         let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
 
-        if !calib_dash_hook::on_batch(
-            dash,
-            chunk_start / chunk_size,
-            chunk_start..end,
-            global_heap.iter(),
-        ) {
+        if !calib_dash_hook::on_batch(dash, chunk_start / chunk_size, global_heap.iter()) {
             break;
         }
     }

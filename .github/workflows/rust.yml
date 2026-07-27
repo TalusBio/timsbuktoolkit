@@ -75,4 +75,4 @@ jobs:
       - name: Run calibrt / calib_dash tests
         run: cargo test --verbose -p calibrt -p calib_dash
       - name: Check timsseek_cli with the calib-dashboard feature
-        run: cargo check --verbose -p timsseek_cli --features calib-dashboard
+        run: cargo test --no-run --verbose -p timsseek_cli --features calib-dashboard --all-targets

@@ -74,7 +74,7 @@ fn main() {
         snapshot.lookback,
         1 << 20,
     );
-    dash.on_batch(0, 0..n_calibrants, points.into_iter());
+    dash.on_batch(0, points.into_iter());
     dash.finish(0);
 }
 
