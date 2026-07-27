@@ -21,6 +21,7 @@ use crate::metrics::{
 };
 use crate::recording::FitRecording;
 use calibrt::{
+    CalibRtError,
     CalibrationCurve,
     CalibrationState,
     LibraryRT,
@@ -715,16 +716,21 @@ const RIDGE_FRACTION: f64 = 0.1;
 /// unlikely to fall between sample points.
 const CURVE_DELTA_SAMPLES: usize = 50;
 
+/// The `(x_range, y_range)` pair `point_ranges` derives and
+/// `CalibrationState::reconfigure` is configured with.
+type GridRanges = ((f64, f64), (f64, f64));
+
 /// The min/max of `library_rt` and `observed_rt` over a point set, exactly
 /// the fold `timsseek_cli::processing` runs over its own `Point` set before
-/// building the real `CalibrationState` for a batch. `on_batch`'s live re-fit
-/// and `refit_frame`'s replay both call this — the same function, not two
-/// copies of the same fold — because a divergence here is exactly what would
-/// make a scrubbed frame's heatmap show a fit that never ran.
+/// building the real `CalibrationState` for a batch. Every re-fit — the live
+/// one, a scrubbed frame's replay, the on-demand DP fit — reaches it through
+/// [`fit_points`], which is its only caller, because a divergence here is
+/// exactly what would make a scrubbed frame's heatmap show a fit that never
+/// ran.
 ///
 /// `None` when every point shares one coordinate (or there are no points at
 /// all): a `CalibrationState` cannot be configured with a zero-width range.
-fn point_ranges(points: &[CalibrantPoint]) -> Option<((f64, f64), (f64, f64))> {
+fn point_ranges(points: &[CalibrantPoint]) -> Option<GridRanges> {
     let (min_x, max_x, min_y, max_y) = points.iter().fold(
         (
             f64::INFINITY,
@@ -743,6 +749,48 @@ fn point_ranges(points: &[CalibrantPoint]) -> Option<((f64, f64), (f64, f64))> {
     );
     let usable = min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite();
     (usable && min_x < max_x && min_y < max_y).then_some(((min_x, max_x), (min_y, max_y)))
+}
+
+/// Why a re-fit produced nothing. Each variant is a stage of [`fit_points`]
+/// that declined to continue; only `refit_live` distinguishes them (it reports
+/// each one differently), the other callers treat any of them as "no
+/// recording".
+#[derive(Debug)]
+enum RefitSkipped {
+    /// The points span a zero-width range on at least one axis, so there is no
+    /// grid to configure — see [`point_ranges`].
+    DegenerateRange,
+    Reconfigure(CalibRtError),
+    Update(CalibRtError),
+}
+
+/// The whole re-fit sequence, in the one place every caller shares:
+/// `reconfigure` → `update` → `fit_with` → `measure_ridge_width_with`, against
+/// whichever `CalibrationState`/`FitRecording` pair the caller owns.
+///
+/// The grid ranges are derived *here*, by [`point_ranges`], rather than passed
+/// in: the live fit and a scrubbed frame's replay agreeing on that fold is
+/// what makes a replayed frame show the fit that actually ran, and a caller
+/// that cannot supply its own ranges cannot break it. The ranges used are
+/// returned for callers that need them afterwards (`refit_live` compares
+/// curves over the x range it just fit).
+fn fit_points(
+    state: &mut CalibrationState,
+    recording: &mut FitRecording,
+    bins: usize,
+    points: &[CalibrantPoint],
+    opts: ObserveOpts,
+) -> Result<GridRanges, RefitSkipped> {
+    let (x_range, y_range) = point_ranges(points).ok_or(RefitSkipped::DegenerateRange)?;
+    state
+        .reconfigure(bins, x_range, y_range)
+        .map_err(RefitSkipped::Reconfigure)?;
+    state
+        .update(points.iter().map(as_calibrt_tuple))
+        .map_err(RefitSkipped::Update)?;
+    state.fit_with(recording, opts);
+    state.measure_ridge_width_with(RIDGE_FRACTION, recording);
+    Ok((x_range, y_range))
 }
 
 /// `CalibrantPoint` as `calibrt::CalibrationState::update`/`CalibrationCurve::wrmse`
@@ -996,25 +1044,21 @@ impl CalibDash {
     }
 
     /// Re-fits a recorded frame's points from scratch, into `refit_state`/
-    /// `refit_recording` rather than the live `state`/`app.recording`, using
-    /// exactly `point_ranges` — the same fold `refit_live` runs — so what
-    /// this reproduces is the batch that actually ran, not an approximation
-    /// of it. `None` if the frame index doesn't exist or its points are too
-    /// degenerate to configure a grid from (mirrors `on_batch`'s own
-    /// skip-the-refit behavior for the live path).
+    /// `refit_recording` rather than the live `state`/`app.recording`, through
+    /// the same `fit_points` sequence `refit_live` runs — so what this
+    /// reproduces is the batch that actually ran, not an approximation of it.
+    /// `None` if the frame index doesn't exist or the re-fit was skipped
+    /// (mirrors `on_batch`'s own skip-the-refit behavior for the live path).
     fn refit_frame(&mut self, i: usize) -> Option<&FitRecording> {
         let (_idx, pts) = self.frames.frame(i)?;
-        let (x_range, y_range) = point_ranges(pts)?;
-        self.refit_state
-            .reconfigure(self.bins, x_range, y_range)
-            .ok()?;
-        self.refit_state
-            .update(pts.iter().map(as_calibrt_tuple))
-            .ok()?;
-        self.refit_state
-            .fit_with(&mut self.refit_recording, ObserveOpts { dp_nodes: true });
-        self.refit_state
-            .measure_ridge_width_with(RIDGE_FRACTION, &mut self.refit_recording);
+        fit_points(
+            &mut self.refit_state,
+            &mut self.refit_recording,
+            self.bins,
+            pts,
+            ObserveOpts { dp_nodes: true },
+        )
+        .ok()?;
         Some(&self.refit_recording)
     }
 
@@ -1050,8 +1094,14 @@ impl CalibDash {
         let mut path_nodes = 0usize;
         let mut ridge_half_width = f64::NAN;
 
-        match point_ranges(&self.current_points) {
-            None => {
+        match fit_points(
+            &mut self.state,
+            self.app.recording_mut(),
+            self.bins,
+            &self.current_points,
+            ObserveOpts::NONE,
+        ) {
+            Err(RefitSkipped::DegenerateRange) => {
                 tracing::warn!(
                     chunk,
                     "calib_dash: this batch's points span a zero-width range on at least \
@@ -1059,51 +1109,44 @@ impl CalibDash {
                      only)"
                 );
             }
-            Some((x_range, y_range)) => {
-                if let Err(e) = self.state.reconfigure(self.bins, x_range, y_range) {
-                    tracing::warn!(
-                        chunk,
-                        error = ?e,
-                        "calib_dash: failed to reconfigure the live calibration state; \
-                         skipping this batch's re-fit"
-                    );
-                } else if let Err(e) = self
-                    .state
-                    .update(self.current_points.iter().map(as_calibrt_tuple))
-                {
-                    tracing::warn!(
-                        chunk,
-                        error = ?e,
-                        "calib_dash: failed to update the live calibration state; skipping \
-                         this batch's re-fit"
-                    );
-                } else {
-                    self.state
-                        .fit_with(self.app.recording_mut(), ObserveOpts::NONE);
-                    self.state
-                        .measure_ridge_width_with(RIDGE_FRACTION, self.app.recording_mut());
-                    path_nodes = self.app.recording().path_indices().len();
-                    ridge_half_width = weighted_ridge_half_width(self.app.recording().ridge());
+            Err(RefitSkipped::Reconfigure(e)) => {
+                tracing::warn!(
+                    chunk,
+                    error = ?e,
+                    "calib_dash: failed to reconfigure the live calibration state; \
+                     skipping this batch's re-fit"
+                );
+            }
+            Err(RefitSkipped::Update(e)) => {
+                tracing::warn!(
+                    chunk,
+                    error = ?e,
+                    "calib_dash: failed to update the live calibration state; skipping \
+                     this batch's re-fit"
+                );
+            }
+            Ok((x_range, _y_range)) => {
+                path_nodes = self.app.recording().path_indices().len();
+                ridge_half_width = weighted_ridge_half_width(self.app.recording().ridge());
 
-                    if let Some(curve) = self.state.curve() {
-                        wrmse = curve.wrmse(self.current_points.iter().map(as_calibrt_tuple));
-                        if let Some(prev) = &self.prev_curve {
-                            let (d_max, d_mean) =
-                                curve_delta(prev, curve, x_range, CURVE_DELTA_SAMPLES);
-                            max_delta = d_max;
-                            mean_delta = d_mean;
-                        }
-                        // Only overwrite the baseline when this batch actually
-                        // produced a curve: a batch whose fit fails (e.g.
-                        // `suppress_nonmax` finds nothing survives) must not
-                        // reset `prev_curve` to `None`, or the *next*
-                        // successful batch would report a NaN delta as if
-                        // there were no prior curve at all, instead of
-                        // comparing against the last real one — a
-                        // discontinuity on the Convergence tab that never
-                        // actually happened.
-                        self.prev_curve = Some(curve.clone());
+                if let Some(curve) = self.state.curve() {
+                    wrmse = curve.wrmse(self.current_points.iter().map(as_calibrt_tuple));
+                    if let Some(prev) = &self.prev_curve {
+                        let (d_max, d_mean) =
+                            curve_delta(prev, curve, x_range, CURVE_DELTA_SAMPLES);
+                        max_delta = d_max;
+                        mean_delta = d_mean;
                     }
+                    // Only overwrite the baseline when this batch actually
+                    // produced a curve: a batch whose fit fails (e.g.
+                    // `suppress_nonmax` finds nothing survives) must not
+                    // reset `prev_curve` to `None`, or the *next*
+                    // successful batch would report a NaN delta as if
+                    // there were no prior curve at all, instead of
+                    // comparing against the last real one — a
+                    // discontinuity on the Convergence tab that never
+                    // actually happened.
+                    self.prev_curve = Some(curve.clone());
                 }
             }
         }
@@ -1185,17 +1228,14 @@ impl CalibDash {
     /// configured with a zero-width range, and there is nothing to show
     /// instead of nothing.
     fn dp_refit_current(&mut self) -> Option<&FitRecording> {
-        let (x_range, y_range) = point_ranges(&self.current_points)?;
-        self.dp_state
-            .reconfigure(self.bins, x_range, y_range)
-            .ok()?;
-        self.dp_state
-            .update(self.current_points.iter().map(as_calibrt_tuple))
-            .ok()?;
-        self.dp_state
-            .fit_with(&mut self.dp_recording, ObserveOpts { dp_nodes: true });
-        self.dp_state
-            .measure_ridge_width_with(RIDGE_FRACTION, &mut self.dp_recording);
+        fit_points(
+            &mut self.dp_state,
+            &mut self.dp_recording,
+            self.bins,
+            &self.current_points,
+            ObserveOpts { dp_nodes: true },
+        )
+        .ok()?;
         Some(&self.dp_recording)
     }
 

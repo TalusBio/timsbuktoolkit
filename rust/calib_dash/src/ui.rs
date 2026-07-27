@@ -529,6 +529,17 @@ enum Half {
     Lower,
 }
 
+impl Half {
+    /// Slot offset within a terminal cell's pair of half-rows: the layout
+    /// `heatmap_cells`'s `out` and `paint_heatmap`'s mark buffer both use.
+    fn slot(self) -> usize {
+        match self {
+            Half::Upper => 0,
+            Half::Lower => 1,
+        }
+    }
+}
+
 /// Flips a display-row index so grid row 0 — the *lowest* observed RT —
 /// lands at the *bottom* of the canvas rather than the top (Item 0: the
 /// y-axis inversion fix).
@@ -999,7 +1010,7 @@ fn raise_mark(marks: &mut [Mark], dims: Dims, tx: usize, ty: usize, half: Half, 
     if tx >= dims.w || ty >= dims.h {
         return;
     }
-    let slot_idx = (ty * dims.w + tx) * 2 + if half == Half::Upper { 0 } else { 1 };
+    let slot_idx = (ty * dims.w + tx) * 2 + half.slot();
     if let Some(slot) = marks.get_mut(slot_idx)
         && mark_rank(level) > mark_rank(*slot)
     {
@@ -1186,9 +1197,10 @@ fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
 ///
 /// `dr` walks source row ranges in grid order (low to high), but is written
 /// to the *flipped* display position — Item 0's y-axis fix: grid row 0 (the
-/// lowest observed RT) must land at the bottom of the canvas, not the top,
-/// the same flip `grid_to_screen` applies to the overlay marks so the two
-/// stay in agreement.
+/// lowest observed RT) must land at the bottom of the canvas, not the top.
+/// The flip goes through `flip_display_row`, the same helper `grid_to_screen`
+/// routes the overlay marks through, so the density field and the marks
+/// cannot disagree about where a grid row lives.
 pub fn heatmap_cells(rec: &FitRecording, area_w: u16, area_h: u16) -> Vec<f32> {
     let area_w = area_w as usize;
     let area_h = area_h as usize;
@@ -1209,10 +1221,8 @@ pub fn heatmap_cells(rec: &FitRecording, area_w: u16, area_h: u16) -> Vec<f32> {
                     m = m.max(rec.weight(row, col));
                 }
             }
-            let flipped = disp_rows - 1 - dr;
-            let cell_index = (flipped / 2) * area_w + dc;
-            let half = flipped % 2;
-            out[cell_index * 2 + half] = m;
+            let (ty, half) = flip_display_row(dr, disp_rows);
+            out[(ty * area_w + dc) * 2 + half.slot()] = m;
         }
     }
     out
