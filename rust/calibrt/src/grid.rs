@@ -77,13 +77,6 @@ impl Grid {
         })
     }
 
-    pub fn extend_points<'a, T>(&mut self, points: T) -> Result<(), CalibRtError>
-    where
-        T: IntoIterator<Item = &'a Point> + 'a,
-    {
-        points.into_iter().try_for_each(|p| self.add_point(p))
-    }
-
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
     pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
         let Point {

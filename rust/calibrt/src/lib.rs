@@ -4,7 +4,6 @@
 
 pub mod grid;
 mod pathfinding;
-pub mod plotting;
 pub mod types;
 pub use grid::Grid;
 use tracing::{
@@ -18,12 +17,6 @@ pub use types::{
 
 /// Minimum denominator for slope calculations to avoid division by zero.
 const MIN_SLOPE_DENOMINATOR: f64 = 1e-9;
-
-/// Default width for calibration curve plots.
-const CALIBRATION_PLOT_WIDTH: usize = 40;
-
-/// Default height for calibration curve plots.
-const CALIBRATION_PLOT_HEIGHT: usize = 20;
 
 /// Custom error types for the Calib-RT library.
 #[derive(Debug, Clone)]
@@ -276,7 +269,6 @@ pub struct CalibrationState {
     filtered: Vec<grid::Node>,
     scratch: pathfinding::PathfindingScratch,
     curve: Option<CalibrationCurve>,
-    stale: bool,
     lookback: usize,
 }
 
@@ -293,7 +285,6 @@ impl CalibrationState {
             filtered: Vec::with_capacity(grid_size),
             scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
-            stale: false,
             lookback,
         })
     }
@@ -311,7 +302,6 @@ impl CalibrationState {
                 weight: w,
             })?;
         }
-        self.stale = true;
         Ok(())
     }
 
@@ -376,7 +366,6 @@ impl CalibrationState {
         });
 
         self.curve = CalibrationCurve::new(path_points).ok();
-        self.stale = false;
 
         if let Some(c) = self.curve.as_ref() {
             obs.on_event(FitEvent::CurveFit { curve: c });
@@ -387,7 +376,6 @@ impl CalibrationState {
     fn clear_fit(&mut self) {
         self.curve = None;
         self.path_indices.clear();
-        self.stale = false;
     }
 
     pub fn reset(&mut self) {
@@ -555,10 +543,6 @@ impl CalibrationState {
         Ok(state)
     }
 
-    pub fn is_stale(&self) -> bool {
-        self.stale
-    }
-
     #[cfg(test)]
     pub fn filtered_ptr(&self) -> *const grid::Node {
         self.filtered.as_ptr()
@@ -620,7 +604,6 @@ pub fn calibrate_with_ranges(
     }))?;
 
     state.fit();
-    state.grid.display_heatmap();
 
     // No path at all — including the suppression short-circuit, which never
     // builds one — is `NoPoints`; a path too short to interpolate is not.
@@ -642,19 +625,6 @@ pub fn calibrate_with_ranges(
                 )
             }));
             info!("Calibration successful, WRMSE: {}", wrmse);
-            plotting::plot_function(
-                |x| {
-                    c.predict(LibraryRT(x))
-                        .map(|obs| obs.0)
-                        .map_err(|e| match e {
-                            CalibRtError::OutOfBounds(y) => y,
-                            _ => panic!("Unexpected error during plotting"),
-                        })
-                },
-                (x_range.0, x_range.1),
-                CALIBRATION_PLOT_WIDTH,
-                CALIBRATION_PLOT_HEIGHT,
-            );
         }
         Err(e) => {
             warn!("Calibration failed: {:?}", e);
@@ -812,10 +782,8 @@ mod calibration_state_tests {
             .collect();
 
         state.update(points.into_iter()).unwrap();
-        assert!(state.is_stale());
 
         state.fit();
-        assert!(!state.is_stale());
         assert!(state.curve().is_some());
 
         let curve = state.curve().unwrap();
@@ -841,7 +809,6 @@ mod calibration_state_tests {
         state.reset();
         assert!(state.curve().is_none());
         assert!(state.path_indices().is_empty());
-        assert!(!state.is_stale());
     }
 
     #[test]

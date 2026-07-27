@@ -1375,7 +1375,6 @@ name = "calibrt"
 version = "0.32.0"
 dependencies = [
  "array2d",
- "insta",
  "rand 0.8.5",
  "serde",
  "serde_json",
