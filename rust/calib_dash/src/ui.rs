@@ -1837,24 +1837,7 @@ mod tests {
         press(&mut app, 'd');
         assert!(app.dp_pane());
 
-        let out = render_snapshot(&mut app, 100, 30);
-        assert!(
-            out.contains("chose="),
-            "missing the selected node's chose:\n{out}"
-        );
-        assert!(
-            out.contains("acc_w="),
-            "missing the selected node's acc_weight:\n{out}"
-        );
-        assert!(
-            out.contains("considered"),
-            "missing the considered list:\n{out}"
-        );
-        assert!(
-            out.contains("edge_w="),
-            "missing a considered edge weight:\n{out}"
-        );
-        insta::assert_snapshot!(out);
+        insta::assert_snapshot!(render_snapshot(&mut app, 100, 30));
     }
 
     /// `App::set_scrub_recording` is what `CalibDash::sync_scrub` calls once
@@ -1871,16 +1854,9 @@ mod tests {
 
         let out = render_snapshot(&mut app, 100, 30);
         assert!(
-            out.contains("SCRUBBED"),
-            "must announce this is a replayed batch:\n{out}"
-        );
-        assert!(
             out.contains("3/5"),
-            "must show a 1-based frame position out of the retained total:\n{out}"
-        );
-        assert!(
-            out.contains("batch 17"),
-            "must show the scrubbed frame's original batch number:\n{out}"
+            "the banner counts frames 1-based out of the retained total, so \
+             scrub index 2 of 5 reads as 3/5:\n{out}"
         );
         insta::assert_snapshot!(out);
     }
@@ -1962,19 +1938,10 @@ mod tests {
         goto_tab(&mut app, Tab::Tolerances);
         let out = render_snapshot(&mut app, 100, 30);
         assert!(
-            out.contains("-8.5") && out.contains("9.5"),
-            "m/z tolerance missing:\n{out}"
-        );
-        assert!(
-            out.contains("-3.0") && out.contains("3.0"),
-            "mobility tolerance missing:\n{out}"
-        );
-        assert!(out.contains("12.5"), "RT tolerance missing:\n{out}");
-        assert!(
             out.contains('±'),
-            "RT tolerance must read as symmetric:\n{out}"
+            "an rt_seconds of (12.5, 12.5) must collapse to one ±-prefixed \
+             number rather than print both bounds:\n{out}"
         );
-        assert!(out.contains("42"), "n_calibrants missing:\n{out}");
         insta::assert_snapshot!(out);
     }
 

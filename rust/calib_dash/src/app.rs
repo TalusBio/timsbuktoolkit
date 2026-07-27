@@ -1511,21 +1511,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_huge_count_before_l_does_not_spin() {
-        // 3 tabs: any count's effect only depends on its value mod 3, and
-        // `tab_cycle_steps` reduces it to that before looping at all, so this
-        // must return promptly rather than looping ~10^9 times.
-        // `1_000_000_001 % 3 == 2`, so this is Fit + 2 steps == Tolerances.
-        let mut app = App::new(10);
-        press(&mut app, "1000000001l");
-        assert_eq!(
-            app.tab(),
-            Tab::Tolerances,
-            "Fit + (1_000_000_001 % 3) steps"
-        );
-    }
-
     // ---- Fit-tab batch scrubber: < / > ----
 
     #[test]
@@ -1670,19 +1655,21 @@ mod tests {
         );
     }
 
+    /// `l` (3 tabs) and `m` (5 layers) both cycle a fixed set of stops with
+    /// no end to clamp at, so `tab_cycle_steps`/`layer_cycle_steps` reduce the
+    /// count mod the number of stops *before* looping at all: a ten-digit
+    /// count must return promptly rather than driving ~10^9 iterations on the
+    /// input thread. Both counts below land two stops from the start
+    /// (`1_000_000_001 % 3 == 2`, `1_000_000_002 % 5 == 2`).
     #[test]
-    fn a_huge_count_before_m_does_not_spin() {
-        // 5 stops: any count's effect only depends on its value mod 5, and
-        // `layer_cycle_steps` reduces it to that before looping at all, so
-        // this must return promptly rather than looping ~10^9 times.
-        // `1_000_000_002 % 5 == 2`, so this is None + 2 steps == Curve.
+    fn a_huge_count_before_a_cycling_key_does_not_spin() {
+        let mut app = App::new(10);
+        press(&mut app, "1000000001l");
+        assert_eq!(app.tab(), Tab::Tolerances, "Fit + 2 of 3 tab stops");
+
         let mut app = App::new(10);
         press(&mut app, "1000000002m");
-        assert_eq!(
-            app.layer(),
-            Layer::Curve,
-            "None + (1_000_000_002 % 5) steps"
-        );
+        assert_eq!(app.layer(), Layer::Curve, "None + 2 of 5 layer stops");
     }
 
     // ---- the stepper ----
