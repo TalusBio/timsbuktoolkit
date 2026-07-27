@@ -749,28 +749,27 @@ pub(crate) mod tests {
         fixture_from_columns(&names, &refs)
     }
 
-    /// One named column with explicit labels, for the cases that need a
-    /// specific target/decoy split rather than the alternating default.
-    pub(crate) fn fixture_one_column(name: &str, values: &[f64], is_target: &[bool]) -> Fixture {
-        assert_eq!(values.len(), is_target.len());
-        fixture_from_rows(&[name], values.to_vec(), is_target.to_vec())
+    /// Columns given literally, on the alternating target/decoy default.
+    pub(crate) fn fixture_from_columns(names: &[&str], columns: &[&[f64]]) -> Fixture {
+        let is_target: Vec<bool> = (0..columns[0].len()).map(|i| i % 2 == 0).collect();
+        fixture_with_labels(names, columns, &is_target)
     }
 
-    /// The same rows, from columns given literally rather than generated.
-    pub(crate) fn fixture_from_columns(names: &[&str], columns: &[&[f64]]) -> Fixture {
-        let n_rows = columns[0].len();
-        assert!(columns.iter().all(|c| c.len() == n_rows));
-        let mut matrix = Vec::with_capacity(n_rows * columns.len());
-        for i in 0..n_rows {
+    /// The one constructor. Columns given literally with an explicit
+    /// target/decoy split, for the cases the alternating default cannot express.
+    pub(crate) fn fixture_with_labels(
+        names: &[&str],
+        columns: &[&[f64]],
+        is_target: &[bool],
+    ) -> Fixture {
+        assert!(columns.iter().all(|c| c.len() == is_target.len()));
+        let mut matrix = Vec::with_capacity(is_target.len() * columns.len());
+        for i in 0..is_target.len() {
             for c in columns {
                 matrix.push(c[i]);
             }
         }
-        let is_target = (0..n_rows).map(|i| i % 2 == 0).collect();
-        fixture_from_rows(names, matrix, is_target)
-    }
-
-    fn fixture_from_rows(names: &[&str], matrix: Vec<f64>, is_target: Vec<bool>) -> Fixture {
+        let is_target = is_target.to_vec();
         let qvalue: Vec<f32> = is_target
             .iter()
             .map(|&t| if t { 0.001 } else { 0.9 })
@@ -828,13 +827,18 @@ pub(crate) mod tests {
     }
 
     /// What [`DEFAULT_SAMPLE`]'s doc comment promises, checked rather than
-    /// asserted: at the shipped sample size, every stored histogram is within
-    /// a KS distance of 0.02 of the whole-data one and every feature AUC
-    /// within 0.01.
+    /// asserted: at the shipped sample size, every stored histogram is within a
+    /// KS distance of 0.02 of the whole-data one and every feature AUC within
+    /// 0.01. Measured worst case is 0.0099 / 0.0009, so the bounds have ~2x
+    /// headroom and a real regression trips them.
     ///
-    /// Two million-row builds, so it is ~3 s where the rest of the suite is
-    /// 0.2 s. Not `#[ignore]`d for that: nothing in CI or the Taskfile passes
-    /// `--ignored`, so ignoring it would mean the claim above is never checked.
+    /// Two million-row builds, ~3.4 s of the suite's 3.5. That buys the only
+    /// numbers here that mean anything: the error scales as 1/sqrt(sample), so
+    /// re-running this at, say, 200k rows and a 50k sample measures 0.0246 KS
+    /// and would need its bound loosened past 0.03 — which no longer rules out a
+    /// 3x degradation at the size actually shipped. Cheap and uninformative.
+    /// Not `#[ignore]`d either: nothing in CI or the Taskfile passes
+    /// `--ignored`, so ignoring it would mean the claim is never checked.
     #[test]
     fn sample_size_holds_its_accuracy_claim() {
         const N_ROWS: usize = 1_000_000;
@@ -913,7 +917,6 @@ pub(crate) mod tests {
                 }
             }
         }
-
         assert!(
             worst_ks < 0.02,
             "worst KS {worst_ks:.4} at {ks_at} exceeds the sample-size claim"
@@ -1013,95 +1016,80 @@ pub(crate) mod tests {
         }
     }
 
-    /// A sample at least as large as the run takes every row in order, which is
-    /// what makes small runs — and these tests — exact rather than approximate.
+    /// Both sampling regimes, on a column whose value *is* its row index.
+    ///
+    /// At or above the run size every row is taken in order, which is what makes
+    /// small runs — and most of these tests — exact rather than approximate.
+    /// Below it the draw must be random: the pipeline hands the dashboard rows
+    /// sorted descending by score, so a prefix or a stride would be all
+    /// high-scoring targets.
     #[test]
-    fn a_sample_larger_than_the_run_takes_every_row_once() {
-        let f = fixture(40, &[("a", &|i, _| i as f64)]);
-        let view = f.view();
-        let (matrix, labels) = gather_sample(&view, 1000);
-        assert_eq!(labels.len(), 40);
-        assert_eq!(labels, view.is_target);
-        let col: Vec<f64> = matrix.iter().step_by(2).copied().collect();
-        assert_eq!(col, (0..40).map(|i| i as f64).collect::<Vec<_>>());
-    }
-
-    /// The pipeline hands the dashboard rows sorted descending by score, so a
-    /// prefix or a stride would be all high-scoring targets. Random indices
-    /// must reach across the whole run and must not arrive in order.
-    #[test]
-    fn a_smaller_sample_is_a_random_draw_across_the_whole_run() {
+    fn gather_sample_takes_every_row_or_a_random_draw_across_the_whole_run() {
         let f = fixture(10_000, &[("a", &|i, _| i as f64)]);
         let view = f.view();
-        let (matrix, labels) = gather_sample(&view, 500);
-        assert_eq!(labels.len(), 500);
+        let stride = view.n_features() + 1;
+        let sampled_rows = |sample: usize| -> Vec<f64> {
+            let (matrix, labels) = gather_sample(&view, sample);
+            assert_eq!(labels.len(), sample.min(view.n_rows()));
+            matrix.iter().step_by(stride).copied().collect()
+        };
 
-        // The column is `i`, so a sampled value IS its row index.
-        let rows: Vec<f64> = matrix
-            .iter()
-            .step_by(view.n_features() + 1)
-            .copied()
-            .collect();
-        let max = rows.iter().copied().fold(0.0f64, f64::max);
+        let all = sampled_rows(20_000);
+        assert_eq!(
+            all,
+            (0..10_000).map(|i| i as f64).collect::<Vec<_>>(),
+            "a sample at least as large as the run must take every row in order"
+        );
+
+        let drawn = sampled_rows(500);
+        let max = drawn.iter().copied().fold(0.0f64, f64::max);
         assert!(
             max > 9_000.0,
             "sample never reached the tail of the run; largest row index {max}"
         );
         assert!(
-            rows.iter().any(|&v| v < 1_000.0),
+            drawn.iter().any(|&v| v < 1_000.0),
             "sample never reached the head of the run"
         );
         assert!(
-            !rows.windows(2).all(|w| w[0] <= w[1]),
+            !drawn.windows(2).all(|w| w[0] <= w[1]),
             "sample is a prefix or a stride, not a random draw"
         );
     }
 
-    /// The bug this design exists to kill. One decoy row at 1e6 in a perfectly
-    /// separated column reported an AUC of 0.5 under value binning, because the
-    /// histogram it was read off binned uniformly over min..max.
+    /// The bug this design exists to kill, and the fix's two halves, on one
+    /// fixture: a perfectly separated column plus one decoy at 1e6.
+    ///
+    /// Under value binning that outlier stretched the axis until all 1000 real
+    /// rows landed in bin 0, where ties count as half and the AUC read 0.5. So
+    /// the AUC must come off the sort and not the bins; the clipped axis must
+    /// trim the outlier; and the unclipped axis must still stretch to it,
+    /// because showing the spike is what that view is *for*.
     #[test]
-    fn a_single_outlier_does_not_collapse_the_auc() {
-        let mut values: Vec<f64> = Vec::new();
-        let mut is_target = Vec::new();
-        for i in 0..100 {
-            values.push(i as f64);
-            is_target.push(false);
-        }
-        for i in 100..200 {
-            values.push(i as f64);
-            is_target.push(true);
-        }
+    fn a_single_outlier_neither_collapses_the_auc_nor_the_clipped_axis() {
+        let mut values: Vec<f64> = (0..1000).map(|i| i as f64 / 1000.0).collect();
+        let mut is_target: Vec<bool> = (0..1000).map(|i| i >= 500).collect();
         values.push(1e6);
         is_target.push(false);
-
-        let dash = fixture_one_column("outlier_feature", &values, &is_target).build();
+        let dash = fixture_with_labels(&["spiky_separator"], &[&values], &is_target).build();
 
         let auc = dash.feature_value(0, FeatureColumn::Auc).unwrap();
         assert!(
             auc > 0.98,
             "one outlier must not collapse the AUC, got {auc}"
         );
-        // And the fixture still is what defeated value binning: on the
-        // unclipped axis all 200 real rows sit in bin 0, where ties count as
-        // half and separation is invisible.
-        let h = dash.hist(0, Axis::Value(XTransform::Linear), false);
+
+        let unclipped = dash.hist(0, Axis::Value(XTransform::Linear), false);
+        assert!(
+            unclipped.hi >= 1e6,
+            "unclipped axis is supposed to show the spike, got hi = {}",
+            unclipped.hi
+        );
         assert_eq!(
-            h.target[0] + h.decoy[0],
-            200,
+            unclipped.target[0] + unclipped.decoy[0],
+            1000,
             "fixture no longer crushes the bulk into one bin"
         );
-    }
-
-    /// The other half of the same fix: the clipped axis must exclude the
-    /// outlier, while the unclipped axis must still stretch to it. Two views of
-    /// the same column, and both are wanted.
-    #[test]
-    fn clipping_excludes_an_outlier_that_the_unclipped_axis_still_shows() {
-        let mut values: Vec<f64> = (0..1000).map(|i| i as f64 / 1000.0).collect();
-        values.push(1e6);
-        let is_target: Vec<bool> = (0..values.len()).map(|i| i % 2 == 0).collect();
-        let dash = fixture_one_column("spiky", &values, &is_target).build();
 
         let clipped = dash.hist(0, Axis::Value(XTransform::Linear), true);
         assert!(
@@ -1109,15 +1097,11 @@ pub(crate) mod tests {
             "clipped axis must trim the 1e6 row, got hi = {}",
             clipped.hi
         );
-        let unclipped = dash.hist(0, Axis::Value(XTransform::Linear), false);
+        // The bulk survives clipping, where the unclipped view flattened it.
         assert!(
-            unclipped.hi >= 1e6,
-            "unclipped axis is supposed to show the spike, got hi = {}",
-            unclipped.hi
+            clipped.target.iter().filter(|&&c| c > 0).count() > 100,
+            "clipping must spread the bulk back across the axis"
         );
-        // The bulk survives clipping; the unclipped view crushes it into bin 0.
-        assert!(clipped.target.iter().filter(|&&c| c > 0).count() > 100);
-        assert_eq!(unclipped.target[0] + unclipped.decoy[0], 1000);
     }
 
     /// The unclipped lower bound is the smallest *all-rows* value the transform
@@ -1125,10 +1109,10 @@ pub(crate) mod tests {
     /// exactly why pass A tracks it.
     #[test]
     fn the_unclipped_log10_axis_starts_at_the_smallest_positive_value() {
-        let values = vec![-5.0, 0.0, 1e-6, 1.0, 100.0, 42.0];
-        let dash = fixture_one_column(
-            "mixed_sign",
-            &values,
+        let values = [-5.0, 0.0, 1e-6, 1.0, 100.0, 42.0];
+        let dash = fixture_with_labels(
+            &["mixed_sign"],
+            &[&values],
             &[true, false, true, false, true, false],
         )
         .build();
@@ -1144,9 +1128,10 @@ pub(crate) mod tests {
     /// closest to zero, not at the square of an endpoint.
     #[test]
     fn the_square_axis_bottoms_out_at_the_value_nearest_zero() {
-        let values = vec![-8.0, -0.5, 0.25, 3.0];
+        let values = [-8.0, -0.5, 0.25, 3.0];
         let dash =
-            fixture_one_column("straddles_zero", &values, &[true, false, true, false]).build();
+            fixture_with_labels(&["straddles_zero"], &[&values], &[true, false, true, false])
+                .build();
         let h = dash.hist(0, Axis::Value(XTransform::Square), false);
         assert!((h.lo - 0.0625).abs() < 1e-9, "0.25^2, got {}", h.lo);
         assert!((h.hi - 64.0).abs() < 1e-9, "(-8)^2, got {}", h.hi);
