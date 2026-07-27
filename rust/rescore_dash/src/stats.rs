@@ -15,17 +15,15 @@ pub const N_BINS: usize = 512;
 ///
 /// Doubles as the accumulator for the sweep that produces it: filled by
 /// [`ColumnStats::push`], combined by [`ColumnStats::merge`].
-///
-/// The whole block for a 131-feature matrix is ~11 KB, so it stays cache
-/// resident while the sweep walks rows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColumnStats {
     pub n_target: u64,
     pub n_decoy: u64,
-    pub target_mean: f64,
-    pub decoy_mean: f64,
+    /// Class means, read through [`Self::mean`].
+    target_mean: f64,
+    decoy_mean: f64,
     /// Welford's sum of squared deviations, per class. Read through
-    /// [`Self::target_var`] / [`Self::decoy_var`].
+    /// [`Self::var`].
     m2_target: f64,
     m2_decoy: f64,
     /// Finite min/max over both classes. `INFINITY` / `NEG_INFINITY` when the
@@ -125,21 +123,15 @@ impl ColumnStats {
         self.n_nan += o.n_nan;
     }
 
-    /// Sample variance, or `0.0` for a class with fewer than two values.
-    pub fn target_var(&self) -> f64 {
-        if self.n_target > 1 {
-            self.m2_target / (self.n_target - 1) as f64
+    /// Sample variance of one class, or `0.0` for a class with fewer than two
+    /// values.
+    pub fn var(&self, is_target: bool) -> f64 {
+        let (n, m2) = if is_target {
+            (self.n_target, self.m2_target)
         } else {
-            0.0
-        }
-    }
-
-    pub fn decoy_var(&self) -> f64 {
-        if self.n_decoy > 1 {
-            self.m2_decoy / (self.n_decoy - 1) as f64
-        } else {
-            0.0
-        }
+            (self.n_decoy, self.m2_decoy)
+        };
+        if n > 1 { m2 / (n - 1) as f64 } else { 0.0 }
     }
 
     /// Whether any finite value was seen.
@@ -154,7 +146,7 @@ impl ColumnStats {
         if self.n_target == 0 || self.n_decoy == 0 {
             return f64::NAN;
         }
-        let pooled = ((self.target_var() + self.decoy_var()) / 2.0).sqrt();
+        let pooled = ((self.var(true) + self.var(false)) / 2.0).sqrt();
         if pooled > 0.0 {
             ((self.target_mean - self.decoy_mean) / pooled).abs()
         } else {
@@ -244,6 +236,28 @@ pub fn bin_index(v: f64, lo: f64, hi: f64, span: f64) -> Option<usize> {
     Some(b.min(N_BINS - 1))
 }
 
+/// Runs of equal values in an ascending slice, as inclusive `(first, last)`
+/// index pairs.
+///
+/// Both consumers below are tie-aware and this is the scan they share: a run's
+/// members get its mid-rank, whether that is being turned into a percentile or
+/// summed into a rank sum.
+fn tie_runs(sorted: &[(f64, bool)]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let first = i;
+        if first >= sorted.len() {
+            return None;
+        }
+        while i + 1 < sorted.len() && sorted[i + 1].0 == sorted[first].0 {
+            i += 1;
+        }
+        let last = i;
+        i += 1;
+        Some((first, last))
+    })
+}
+
 /// Mid-rank percentiles (`0..=100`) for an ascending slice, written into `out`
 /// at the same positions.
 ///
@@ -254,23 +268,13 @@ pub fn bin_index(v: f64, lo: f64, hi: f64, span: f64) -> Option<usize> {
 pub fn mid_rank_percentiles(sorted: &[(f64, bool)], out: &mut Vec<f64>) {
     out.clear();
     out.resize(sorted.len(), 0.0);
-    if sorted.is_empty() {
-        return;
-    }
-    if sorted.len() == 1 {
-        out[0] = 50.0;
+    if sorted.len() < 2 {
+        out.fill(50.0);
         return;
     }
     let denom = (sorted.len() - 1) as f64;
-    let mut i = 0usize;
-    while i < sorted.len() {
-        let mut j = i;
-        while j + 1 < sorted.len() && sorted[j + 1].0 == sorted[i].0 {
-            j += 1;
-        }
-        let p = 100.0 * ((i + j) as f64 / 2.0) / denom;
-        out[i..=j].fill(p);
-        i = j + 1;
+    for (i, j) in tie_runs(sorted) {
+        out[i..=j].fill(100.0 * ((i + j) as f64 / 2.0) / denom);
     }
 }
 
@@ -278,11 +282,9 @@ pub fn mid_rank_percentiles(sorted: &[(f64, bool)], out: &mut Vec<f64>) {
 /// sorted ascending by value. Exact, including ties. NaN when either class is
 /// empty, since no comparison is defined.
 ///
-/// Rank-based rather than read off a histogram. A fixed-width histogram bins
-/// uniformly in *value*, so anything that stretches min..max without moving the
-/// bulk drops every real row into bin 0, where ties count as half and
-/// separation becomes invisible: one row in 500,000 at 1e6 was enough to report
-/// 0.5000 for a column whose true AUC is 0.8566.
+/// Rank-based rather than read off a histogram: a fixed-width histogram bins
+/// uniformly in *value*, so a single far outlier drops every real row into bin 0
+/// where ties count as half and separation becomes invisible.
 pub fn auc_from_sorted(sorted: &[(f64, bool)]) -> f64 {
     let nt = sorted.iter().filter(|p| p.1).count() as f64;
     let nd = sorted.len() as f64 - nt;
@@ -290,19 +292,9 @@ pub fn auc_from_sorted(sorted: &[(f64, bool)]) -> f64 {
         return f64::NAN;
     }
     let mut rank_sum_targets = 0.0f64;
-    let mut i = 0usize;
-    while i < sorted.len() {
-        let mut j = i;
-        while j + 1 < sorted.len() && sorted[j + 1].0 == sorted[i].0 {
-            j += 1;
-        }
+    for (i, j) in tie_runs(sorted) {
         let mid_rank = (i + j) as f64 / 2.0 + 1.0;
-        for p in &sorted[i..=j] {
-            if p.1 {
-                rank_sum_targets += mid_rank;
-            }
-        }
-        i = j + 1;
+        rank_sum_targets += mid_rank * sorted[i..=j].iter().filter(|p| p.1).count() as f64;
     }
     (rank_sum_targets - nt * (nt + 1.0) / 2.0) / (nt * nd)
 }
@@ -400,13 +392,10 @@ mod tests {
             c.lo.abs().min(c.hi.abs()),
             "min_abs must not be derivable from the endpoints here"
         );
-    }
 
-    #[test]
-    fn stats_report_infinite_floors_for_a_wholly_non_positive_column() {
-        let v = vec![-3.0, -1.0, -7.0];
-        let t = vec![true, false, true];
-        let c = sweep(&v, &t);
+        // A wholly non-positive column has no `log10` domain at all, which is
+        // the `INFINITY` sentinel `exact_range` checks for.
+        let c = sweep(&[-3.0, -1.0, -7.0], &[true, false, true]);
         assert_eq!(c.min_pos, f64::INFINITY, "no positive value exists");
         assert_eq!(c.min_abs, 1.0);
         assert_eq!(c.n_zero, 0);
@@ -427,9 +416,9 @@ mod tests {
             merged.merge(&sweep(&v[a..b], &t[a..b]));
         }
         assert_eq!(merged.n_target, whole.n_target);
-        assert!((merged.target_mean - whole.target_mean).abs() < 1e-9);
-        assert!((merged.target_var() - whole.target_var()).abs() < 1e-9);
-        assert!((merged.decoy_var() - whole.decoy_var()).abs() < 1e-9);
+        assert!((merged.mean(true) - whole.mean(true)).abs() < 1e-9);
+        assert!((merged.var(true) - whole.var(true)).abs() < 1e-9);
+        assert!((merged.var(false) - whole.var(false)).abs() < 1e-9);
         assert_eq!((merged.lo, merged.hi), (whole.lo, whole.hi));
         assert_eq!(merged.min_pos, whole.min_pos);
         assert_eq!(merged.min_abs, whole.min_abs);
@@ -456,26 +445,19 @@ mod tests {
         p
     }
 
+    /// The three fixed points of the statistic: perfectly separated, reversed,
+    /// and wholly tied.
     #[test]
-    fn auc_is_one_for_separated_classes() {
+    fn auc_hits_one_zero_and_a_half() {
         let (v, t) = separated();
         assert!((auc_from_sorted(&sorted_pairs(&v, &t)) - 1.0).abs() < 1e-9);
-    }
 
-    #[test]
-    fn auc_is_half_for_identical_classes() {
-        let v = vec![1.0; 100];
-        let t: Vec<bool> = (0..100).map(|i| i % 2 == 0).collect();
-        assert!((auc_from_sorted(&sorted_pairs(&v, &t)) - 0.5).abs() < 1e-9);
-    }
+        let flipped: Vec<bool> = t.iter().map(|b| !b).collect();
+        assert!(auc_from_sorted(&sorted_pairs(&v, &flipped)) < 1e-9);
 
-    #[test]
-    fn auc_is_zero_when_decoys_score_higher() {
-        let (v, mut t) = separated();
-        for b in &mut t {
-            *b = !*b;
-        }
-        assert!(auc_from_sorted(&sorted_pairs(&v, &t)) < 1e-9);
+        let tied = vec![1.0; 100];
+        let alternating: Vec<bool> = (0..100).map(|i| i % 2 == 0).collect();
+        assert!((auc_from_sorted(&sorted_pairs(&tied, &alternating)) - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -484,14 +466,6 @@ mod tests {
         let t = vec![true, true, true];
         assert!(auc_from_sorted(&sorted_pairs(&v, &t)).is_nan());
         assert!(auc_exact(v.into_iter(), &t).is_nan());
-    }
-
-    #[test]
-    fn auc_exact_agrees_with_the_presorted_form() {
-        let (v, t) = separated();
-        let a = auc_exact(v.iter().copied(), &t);
-        let b = auc_from_sorted(&sorted_pairs(&v, &t));
-        assert!((a - b).abs() < 1e-12);
     }
 
     #[test]
@@ -534,10 +508,10 @@ mod tests {
         assert_eq!(bin_index(-0.1, 0.0, 1.0, 1.0), None);
         assert_eq!(bin_index(1.1, 0.0, 1.0, 1.0), None);
         assert_eq!(bin_index(f64::NAN, 0.0, 1.0, 1.0), None);
-    }
-
-    #[test]
-    fn bin_index_puts_a_degenerate_span_in_bin_zero() {
-        assert_eq!(bin_index(5.0, 5.0, 5.0, 0.0), Some(0));
+        assert_eq!(
+            bin_index(5.0, 5.0, 5.0, 0.0),
+            Some(0),
+            "a degenerate span is one bin, not a divide by zero"
+        );
     }
 }

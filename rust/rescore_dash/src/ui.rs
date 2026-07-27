@@ -4,17 +4,21 @@
 //! histogram bins, axis ranges, curves, threshold tables, panel titles and
 //! table cells were all computed before the TUI opened. A frame indexes arrays,
 //! fills two reused point buffers, and draws — a keystroke costs a redraw and
-//! not a re-scan. It is not allocation-free: ratatui's widget model allocates,
-//! and [`draw_hist`] formats three axis labels.
+//! not a re-scan.
 
 use crate::app::{
     App,
     Scratch,
     Tab,
 };
-use crate::precompute::FeatureColumn;
-use crate::stats::HistView;
-use crate::transform::YTransform;
+use crate::precompute::{
+    Dashboard,
+    FeatureColumn,
+};
+use crate::transform::{
+    Axis,
+    YTransform,
+};
 use ratatui::layout::{
     Constraint,
     Direction,
@@ -27,8 +31,10 @@ use ratatui::style::{
     Style,
 };
 use ratatui::text::Line;
+// Aliased: `Axis` in this crate is a histogram's x transform, which every panel
+// below also passes around.
 use ratatui::widgets::{
-    Axis,
+    Axis as PlotAxis,
     Block,
     Borders,
     Chart,
@@ -47,6 +53,45 @@ use ratatui::{
 const TARGET_COLOR: Color = Color::Cyan;
 const DECOY_COLOR: Color = Color::Magenta;
 
+/// One line series. Every plot on every tab is drawn with these settings.
+fn series<'a>(name: &'a str, color: Color, data: &'a [(f64, f64)]) -> Dataset<'a> {
+    Dataset::default()
+        .name(name)
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(color))
+        .data(data)
+}
+
+/// The axis settings a histogram panel reads off `App`.
+///
+/// Gathered before the `App` is destructured for disjoint field borrows, which
+/// is why they travel as one value rather than as `&App`.
+#[derive(Clone, Copy)]
+struct HistAxes {
+    x: Axis,
+    y: YTransform,
+    clip: bool,
+}
+
+impl HistAxes {
+    fn of(app: &App) -> Self {
+        Self {
+            x: app.x(),
+            y: app.y(),
+            clip: app.clip(),
+        }
+    }
+}
+
+/// A bordered panel carrying a message instead of a plot.
+fn empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+    frame.render_widget(
+        Paragraph::new(message).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
 /// Top-level: tab bar, body, help line.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -60,10 +105,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
     let selected = Tab::ALL.iter().position(|t| *t == app.tab()).unwrap_or(0);
-    // The sampling basis goes here, on the full-width border, rather than into
-    // each histogram's subtitle: it is a fact about the whole dashboard, and
-    // the panel that would otherwise carry it is under half this wide.
-    let banner = format!("rescore — {}", app.dashboard().basis());
+    // Full width, which is why the run-level basis goes here and not into a
+    // histogram subtitle that the panel border would truncate.
+    let banner = format!("rescore — {}", app.dash.basis());
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
@@ -99,83 +143,79 @@ fn help_line(app: &App) -> String {
             if app.clip() { "on" } else { "off" },
         )
     };
+    // `None` rather than an empty string: an empty tail leaves the separators on
+    // either side of it doubled up.
     let tail = match app.tab() {
-        Tab::Overview => hist(),
-        Tab::Fdr => format!("z/Z q<={}", app.dashboard().q_curve(app.q_zoom()).zoom),
-        Tab::Calibration => String::new(),
-        Tab::Features => format!(
-            "j/k rows  {}  s sort:{}  / filter",
+        Tab::Overview => Some(hist()),
+        Tab::Fdr => Some(format!("z/Z q<={}", app.dash.q_curve(app.q_zoom()).zoom)),
+        Tab::Calibration => None,
+        Tab::Features => Some(format!(
+            "j/k rows  {}  s/S sort:{}  / filter",
             hist(),
-            app.sort_key().label()
-        ),
+            app.sort_summary()
+        )),
     };
-    format!("h/l tabs  {tail}  q quit")
+    match tail {
+        Some(tail) => format!("h/l tabs  {tail}  q quit"),
+        None => "h/l tabs  q quit".to_string(),
+    }
 }
 
-/// Render a stored target/decoy histogram as a `Chart`.
+/// Render column `column`'s stored histogram.
+///
+/// Takes the column rather than the looked-up pieces: the title, the subtitle
+/// and the bins are three lookups keyed the same way, and having each caller do
+/// them was three chances to draw one panel's title over another's counts.
 ///
 /// Tolerates an empty or all-zero histogram: the y bound falls back to `1.0`
 /// rather than degenerating to `[0.0, 0.0]`.
 ///
-/// `title` goes on the top border, `subtitle` on the bottom. Separate borders
-/// because the two counts are disjoint: `dropped` is what the transform
-/// excluded, the out-of-range count is what survived it and then fell outside
-/// the axis.
-///
-/// `scratch` holds the two point series — `Dataset` borrows its data, so the
-/// points must outlive the widget.
+/// Title on the top border, subtitle on the bottom, because the counts they
+/// carry are disjoint: `dropped` is what the transform excluded, the
+/// out-of-range count is what survived it and then fell outside the axis.
 fn draw_hist(
     frame: &mut Frame,
     area: Rect,
-    title: &str,
-    subtitle: &str,
-    hist: &HistView<'_>,
-    y: YTransform,
+    dash: &Dashboard,
+    column: usize,
+    axes: HistAxes,
     scratch: &mut Scratch,
 ) {
+    let HistAxes { x, y, clip } = axes;
+    let hist = dash.hist(column, x, clip);
     scratch.target.clear();
     scratch.decoy.clear();
     let mut ymax = 0.0f64;
     for (i, (&t, &d)) in hist.target.iter().zip(hist.decoy).enumerate() {
-        let x = hist.bin_center(i);
+        let px = hist.bin_center(i);
         let (ty, dy) = (y.apply(t, hist.n_target), y.apply(d, hist.n_decoy));
         ymax = ymax.max(ty).max(dy);
-        scratch.target.push((x, ty));
-        scratch.decoy.push((x, dy));
+        scratch.target.push((px, ty));
+        scratch.decoy.push((px, dy));
     }
     let ymax = if ymax > 0.0 { ymax } else { 1.0 };
 
     let datasets = vec![
-        Dataset::default()
-            .name("target")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(TARGET_COLOR))
-            .data(&scratch.target),
-        Dataset::default()
-            .name("decoy")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(DECOY_COLOR))
-            .data(&scratch.decoy),
+        series("target", TARGET_COLOR, &scratch.target),
+        series("decoy", DECOY_COLOR, &scratch.decoy),
     ];
 
-    // No axis title here: it would duplicate the block title passed in above
-    // and get drawn inline over the last row of plot data.
+    // Axis meanings go on the block's borders, not into `PlotAxis::title`, which
+    // ratatui draws inline over the plot's last row and column.
     let mid = (hist.lo + hist.hi) / 2.0;
     let chart = Chart::new(datasets)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
-                .title_bottom(subtitle),
+                .title(dash.title(column, x))
+                .title_bottom(dash.subtitle(column, x, clip)),
         )
-        .x_axis(Axis::default().bounds([hist.lo, hist.hi]).labels([
+        .x_axis(PlotAxis::default().bounds([hist.lo, hist.hi]).labels([
             format!("{:.3}", hist.lo),
             format!("{mid:.3}"),
             format!("{:.3}", hist.hi),
         ]))
-        .y_axis(Axis::default().bounds([0.0, ymax]));
+        .y_axis(PlotAxis::default().bounds([0.0, ymax]));
     frame.render_widget(chart, area);
 }
 
@@ -186,23 +226,15 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    let (x, y, clip) = (app.x(), app.y(), app.clip());
+    let axes = HistAxes::of(app);
     // Disjoint field borrows: the dashboard is read while the scratch buffers
     // are written. Going through `&mut self` accessors would borrow the whole
     // `App` twice over.
     let App { dash, scratch, .. } = app;
 
-    frame.render_widget(Paragraph::new(dash.overview_header.as_str()), chunks[0]);
-
-    draw_hist(
-        frame,
-        chunks[1],
-        dash.title(dash.score_column(), x),
-        dash.subtitle(dash.score_column(), x, clip),
-        &dash.hist(dash.score_column(), x, clip),
-        y,
-        scratch,
-    );
+    frame.render_widget(Paragraph::new(dash.overview_header()), chunks[0]);
+    let score = dash.score_column();
+    draw_hist(frame, chunks[1], dash, score, axes, scratch);
 }
 
 /// Targets-passing-vs-q-value curve, plus a threshold table at fixed FDR
@@ -213,21 +245,13 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    let dash = app.dashboard();
+    let dash = &app.dash;
     let curve = dash.q_curve(app.q_zoom());
 
-    let dataset = Dataset::default()
-        .name("targets")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(TARGET_COLOR))
-        .data(&curve.points);
     // Both axes are labelled here where the histogram panel labels only x: the
     // zoom changes both bounds at once, and an unlabelled curve gives no way to
     // tell which zoom is on screen.
-    // Axis meanings go on the bottom border rather than into `Axis::title`,
-    // which ratatui draws inline over the plot's last row and column.
-    let chart = Chart::new(vec![dataset])
+    let chart = Chart::new(vec![series("targets", TARGET_COLOR, &curve.points)])
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -235,19 +259,19 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
                 .title_bottom("x: q-value   y: targets passing   z/Z zoom"),
         )
         .x_axis(
-            Axis::default()
+            PlotAxis::default()
                 .bounds([0.0, curve.zoom])
                 .labels(curve.x_labels.iter().map(String::as_str)),
         )
         .y_axis(
-            Axis::default()
+            PlotAxis::default()
                 .bounds([0.0, curve.ymax])
                 .labels(curve.y_labels.iter().map(String::as_str)),
         );
     frame.render_widget(chart, chunks[0]);
 
     let rows: Vec<Row> = dash
-        .fdr_rows
+        .fdr_rows()
         .iter()
         .map(|r| Row::new(r.iter().map(String::as_str)))
         .collect();
@@ -268,42 +292,27 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Target-vs-decoy PP plot (empirical CDF of one against the other) with the
 /// y = x reference line.
 fn draw_calibration(frame: &mut Frame, app: &mut App, area: Rect) {
-    // The plot's axes are (decoy CDF, target CDF): good target/decoy
-    // separation pulls the curve BELOW the y = x diagonal (targets need a
-    // higher score threshold before as many of them have "arrived" as
-    // decoys have), so the title carries that reading hint rather than
-    // leaving it to the viewer to work out from two bare axis labels.
+    // The plot's axes are (decoy CDF, target CDF): good target/decoy separation
+    // pulls the curve BELOW the y = x diagonal (targets need a higher score
+    // threshold before as many of them have "arrived" as decoys have), so the
+    // title carries that reading hint.
     let title = "Calibration (below y=x = separation)";
 
-    let curve = &app.dashboard().pp_curve;
+    let curve = &app.dash.pp_curve;
     if curve.is_empty() {
-        frame.render_widget(
-            Paragraph::new("PP plot needs both targets and decoys")
-                .block(Block::default().borders(Borders::ALL).title(title)),
-            area,
-        );
+        empty_panel(frame, area, title, "PP plot needs both targets and decoys");
         return;
     }
 
     let reference = [(0.0, 0.0), (1.0, 1.0)];
     let datasets = vec![
-        Dataset::default()
-            .name("PP")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(TARGET_COLOR))
-            .data(curve),
-        Dataset::default()
-            .name("y = x")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::DarkGray))
-            .data(&reference),
+        series("PP", TARGET_COLOR, curve),
+        series("y = x", Color::DarkGray, &reference),
     ];
     let chart = Chart::new(datasets)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .x_axis(Axis::default().title("decoy CDF").bounds([0.0, 1.0]))
-        .y_axis(Axis::default().title("target CDF").bounds([0.0, 1.0]));
+        .x_axis(PlotAxis::default().title("decoy CDF").bounds([0.0, 1.0]))
+        .y_axis(PlotAxis::default().title("target CDF").bounds([0.0, 1.0]));
     frame.render_widget(chart, area);
 }
 
@@ -314,11 +323,11 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
 
-    let (x, y, clip) = (app.x(), app.y(), app.clip());
-    let sort_label = app.sort_key().label();
-    // Three disjoint borrows at once here: the table widget holds `dash`'s
-    // cells, the table state needs `&mut`, and the histogram panel writes
-    // `scratch`.
+    let axes = HistAxes::of(app);
+    let sort = app.sort_summary();
+    // Destructured for the same reason as `draw_overview`, but three ways: the
+    // table widget holds `dash`'s cells, the table state needs `&mut`, and the
+    // histogram panel writes `scratch`.
     let App {
         dash,
         scratch,
@@ -345,7 +354,7 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(9),
     ];
     let title = format!(
-        "Features ({}/{}) sort:{sort_label}",
+        "Features ({}/{}) sort:{sort}",
         visible.len(),
         dash.n_features()
     );
@@ -354,56 +363,38 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
     // copies no strings.
     let rows: Vec<Row> = visible
         .iter()
-        .map(|&j| Row::new(dash.cells[j].iter().map(String::as_str)))
+        .map(|&j| Row::new(dash.cells()[j].iter().map(String::as_str)))
         .collect();
     let table = Table::new(rows, widths)
         .header(Row::new(FeatureColumn::ALL.map(FeatureColumn::label)))
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title(title));
 
-    // The stored `TableState` carries the scroll offset between frames; a
-    // fresh one each frame would pin the viewport at row 0.
     table_state.select(selected.is_some().then_some(*cursor));
     frame.render_stateful_widget(table, chunks[0], table_state);
 
     match selected {
-        Some(j) => draw_hist(
-            frame,
-            chunks[1],
-            dash.title(j, x),
-            dash.subtitle(j, x, clip),
-            &dash.hist(j, x, clip),
-            y,
-            scratch,
-        ),
-        None => {
-            frame.render_widget(
-                Paragraph::new("no feature selected")
-                    .block(Block::default().borders(Borders::ALL).title("Features")),
-                chunks[1],
-            );
-        }
+        Some(j) => draw_hist(frame, chunks[1], dash, j, axes, scratch),
+        None => empty_panel(frame, chunks[1], "Features", "no feature selected"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::dashboard;
+    use crate::app::tests::{
+        code,
+        dashboard,
+        key,
+    };
     use crate::app::{
         App,
         Tab,
     };
-    use crate::precompute::Dashboard;
-    use crate::view::RescoreView;
+    use crate::precompute::tests::fixture_from_columns;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{
-        KeyCode,
-        KeyEvent,
-        KeyModifiers,
-    };
-    use std::sync::Arc;
+    use ratatui::crossterm::event::KeyCode;
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
@@ -420,7 +411,7 @@ mod tests {
 
     fn go_to(app: &mut App, tab: Tab) {
         while app.tab() != tab {
-            app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            app.handle_key(key('l'));
         }
     }
 
@@ -437,20 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_renders_with_its_title() {
-        for tab in Tab::ALL {
-            let mut app = fixture_app();
-            go_to(&mut app, tab);
-            let text = render(&mut app, 120, 40);
-            assert!(
-                text.contains(tab.title()),
-                "{} missing from render",
-                tab.title()
-            );
-        }
-    }
-
-    #[test]
     fn features_tab_shows_feature_names() {
         let mut app = fixture_app();
         go_to(&mut app, Tab::Features);
@@ -458,10 +435,11 @@ mod tests {
     }
 
     /// A smoke test over the whole lookup surface — every axis and both clip
-    /// settings on every tab. It asserts only that a frame draws, which is the
-    /// point: a slot the precompute left unplottable or an axis range it could
-    /// not derive panics on index here instead of in front of a user. What is
-    /// *on* the frame is each panel's own test.
+    /// settings on every tab. It asserts only that a frame draws, and that the
+    /// tab that drew it says which one it is: a slot the precompute left
+    /// unplottable or an axis range it could not derive panics on index here
+    /// instead of in front of a user. What is *on* the frame is each panel's own
+    /// test.
     #[test]
     fn no_axis_or_clip_setting_panics_on_any_tab() {
         for tab in Tab::ALL {
@@ -470,10 +448,10 @@ mod tests {
             for _ in 0..crate::transform::Axis::ALL.len() {
                 for _ in 0..2 {
                     let text = render(&mut app, 120, 40);
-                    assert!(!text.trim().is_empty(), "{tab:?} rendered an empty frame");
-                    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+                    assert!(text.contains(tab.title()), "{tab:?} did not name itself");
+                    app.handle_key(key('c'));
                 }
-                app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+                app.handle_key(key('x'));
             }
         }
     }
@@ -485,12 +463,39 @@ mod tests {
     fn every_fdr_zoom_renders_and_names_its_range() {
         let mut app = fixture_app();
         go_to(&mut app, Tab::Fdr);
-        for _ in 0..app.dashboard().n_q_zooms() {
-            let want = format!("q <= {}", app.dashboard().q_curve(app.q_zoom()).zoom);
+        for _ in 0..app.dash.n_q_zooms() {
+            let want = format!("q <= {}", app.dash.q_curve(app.q_zoom()).zoom);
             let text = render(&mut app, 120, 40);
             assert!(text.contains(&want), "expected {want:?} in: {text}");
-            app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+            app.handle_key(key('z'));
         }
+    }
+
+    /// The features tab is the only one with a sort, and `S` only flips the
+    /// direction — which has to appear on screen, or the key silently changes
+    /// what the table means.
+    #[test]
+    fn the_features_tab_names_its_sort_key_and_direction() {
+        let mut app = fixture_app();
+        go_to(&mut app, Tab::Features);
+        let text = render(&mut app, 160, 30);
+        assert!(text.contains("name a-z"), "sort direction missing: {text}");
+
+        app.handle_key(key('S'));
+        let flipped = render(&mut app, 160, 30);
+        assert!(
+            flipped.contains("name z-a"),
+            "S must change what is shown: {flipped}"
+        );
+    }
+
+    /// The calibration tab has no per-tab keys, so its help line has no tail.
+    /// It must not leave a hole where one would go.
+    #[test]
+    fn a_tab_without_its_own_keys_has_no_doubled_separator() {
+        let mut app = fixture_app();
+        go_to(&mut app, Tab::Calibration);
+        assert_eq!(help_line(&app), "h/l tabs  q quit");
     }
 
     /// Selecting the wholly-NaN feature must draw the panel and say why it is
@@ -502,7 +507,7 @@ mod tests {
         // The table is name-sorted, so walk to the feature rather than
         // assuming where the default sort put it.
         while app.selected_feature() != Some(1) {
-            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+            app.handle_key(key('j'));
         }
         let text = render(&mut app, 160, 40);
         assert!(
@@ -517,11 +522,11 @@ mod tests {
     fn rendering_survives_a_filter_that_matches_nothing() {
         let mut app = fixture_app();
         go_to(&mut app, Tab::Features);
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(key('/'));
         for c in "zzz".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            app.handle_key(key(c));
         }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(code(KeyCode::Enter));
         assert!(render(&mut app, 120, 40).contains("no feature selected"));
     }
 
@@ -529,8 +534,7 @@ mod tests {
     /// scenario where `TableState::default()` every frame pinned the
     /// selected row to the bottom edge instead of letting the viewport
     /// scroll. The offset must persist (and advance) across renders as the
-    /// cursor moves, since `TableState::offset` is what makes a `Table`
-    /// widget scroll at all.
+    /// cursor moves.
     #[test]
     fn features_table_offset_persists_and_advances_across_renders() {
         let n_features = 40;
@@ -550,7 +554,7 @@ mod tests {
         let offset_before = app.table_state.offset();
 
         for _ in 0..30 {
-            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+            app.handle_key(key('j'));
         }
         terminal.draw(|f| draw(f, &mut app)).expect("second draw");
         let offset_after = app.table_state.offset();
@@ -600,23 +604,7 @@ mod tests {
     #[test]
     fn a_sampled_dashboard_says_so_on_every_tab() {
         let column: Vec<f64> = (0..2_000).map(|i| i as f64).collect();
-        let names: Vec<Arc<str>> = vec![Arc::from("a")];
-        let is_target: Vec<bool> = (0..2_000).map(|i| i % 2 == 0).collect();
-        let score: Vec<f32> = (0..2_000).map(|i| i as f32).collect();
-        let qvalue = vec![0.01f32; 2_000];
-        let dash = Dashboard::build(
-            &RescoreView {
-                feature_names: &names,
-                features: &column,
-                is_target: &is_target,
-                score: &score,
-                qvalue: &qvalue,
-                thresholds: &[],
-                gain: &[0.0],
-            },
-            500,
-        )
-        .expect("well-formed");
+        let dash = fixture_from_columns(&["a"], &[&column]).build_with(500);
         let mut app = App::new(dash);
         for tab in Tab::ALL {
             go_to(&mut app, tab);

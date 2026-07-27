@@ -24,11 +24,9 @@ const EXP_CLAMP: f64 = 700.0;
 
 /// What a histogram's x axis shows.
 ///
-/// Two cases and not seven variants of one: `RankPercentile` is the row's
-/// sorted position, not a function of its value, so it has no pointwise map
-/// and no domain to accept or refuse. Splitting it out is what lets
-/// [`XTransform::apply`] be total over its variants — `precompute` still
-/// matches the two cases apart, but now the type says why.
+/// `RankPercentile` is the row's sorted position, not a function of its value,
+/// so it has no pointwise map and no domain to accept or refuse. Keeping it out
+/// of [`XTransform`] is what lets [`XTransform::apply`] be total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     /// A pointwise map of the value.
@@ -202,9 +200,7 @@ impl YTransform {
 mod tests {
     use super::*;
 
-    /// The value transforms, derived from [`Axis::ALL`] rather than listed
-    /// again — a second hand-maintained list is a second thing to forget to
-    /// extend.
+    /// The value transforms, derived from [`Axis::ALL`] rather than listed again.
     fn value_transforms() -> Vec<XTransform> {
         Axis::ALL
             .into_iter()
@@ -234,31 +230,24 @@ mod tests {
         assert_eq!(seen.len(), Axis::ALL.len(), "every axis, once");
     }
 
-    /// `Axis::RankPercentile` is not a value transform, so it must not appear
-    /// among them — the whole point of the split.
+    /// Each map on a value it accepts, and on the values just outside its
+    /// domain.
     #[test]
-    fn every_value_transform_is_reachable_as_an_axis() {
-        for t in value_transforms() {
-            assert!(
-                Axis::ALL.contains(&Axis::Value(t)),
-                "{t:?} is not on any axis"
-            );
+    fn each_transform_maps_its_domain_and_refuses_the_rest() {
+        let cases = [
+            (XTransform::Linear, 3.0, Some(3.0)),
+            (XTransform::Log10, 100.0, Some(2.0)),
+            (XTransform::Log10, 0.0, None),
+            (XTransform::Log10, -1.0, None),
+            (XTransform::Sqrt, 4.0, Some(2.0)),
+            (XTransform::Sqrt, 0.0, Some(0.0)),
+            (XTransform::Sqrt, -9.0, None),
+            (XTransform::Square, -3.0, Some(9.0)),
+            (XTransform::Square, 2.0, Some(4.0)),
+        ];
+        for (t, v, want) in cases {
+            assert_eq!(t.apply(v), want, "{t:?} on {v}");
         }
-        assert_eq!(Axis::ALL.len(), value_transforms().len() + 1);
-    }
-
-    #[test]
-    fn log10_rejects_non_positives() {
-        assert_eq!(XTransform::Log10.apply(100.0), Some(2.0));
-        assert_eq!(XTransform::Log10.apply(0.0), None);
-        assert_eq!(XTransform::Log10.apply(-1.0), None);
-    }
-
-    #[test]
-    fn sqrt_rejects_negatives_and_keeps_zero() {
-        assert_eq!(XTransform::Sqrt.apply(4.0), Some(2.0));
-        assert_eq!(XTransform::Sqrt.apply(0.0), Some(0.0));
-        assert_eq!(XTransform::Sqrt.apply(-9.0), None);
     }
 
     #[test]
@@ -267,13 +256,6 @@ mod tests {
         let pos = XTransform::SignedLog1p.apply(9.0).unwrap();
         assert!((neg + pos).abs() < 1e-12, "odd about zero");
         assert_eq!(XTransform::SignedLog1p.apply(0.0), Some(0.0));
-    }
-
-    #[test]
-    fn square_is_total() {
-        assert_eq!(XTransform::Square.apply(-3.0), Some(9.0));
-        assert_eq!(XTransform::Square.apply(0.0), Some(0.0));
-        assert_eq!(XTransform::Square.apply(2.0), Some(4.0));
     }
 
     #[test]

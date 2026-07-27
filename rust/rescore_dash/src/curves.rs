@@ -1,18 +1,5 @@
-//! The FDR and calibration curves.
-//!
-//! Both are cumulative counts over a grid, built once in `Dashboard::build`.
-
-/// How many rows pass at one q-value cutoff.
-///
-/// `total == targets + decoys` always: an unlabeled row is not counted at all
-/// rather than counted into the total alone.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ThresholdRow {
-    pub q: f32,
-    pub total: usize,
-    pub targets: usize,
-    pub decoys: usize,
-}
+//! The FDR and calibration curves: cumulative counts over a grid, built once in
+//! `Dashboard::build`.
 
 /// Targets passing as a function of the q-value threshold: one curve per entry
 /// of `zooms`, curve `i` spanning `n_points` evenly spaced thresholds in
@@ -28,7 +15,7 @@ pub struct ThresholdRow {
 /// They are computed together because the sort is the expensive part and it is
 /// shared: every zoom is answered by `partition_point` over the same sorted
 /// array, so the extra views cost a scan and no extra pass over the run.
-pub fn qvalue_curves(
+pub(crate) fn qvalue_curves(
     qvalue: &[f32],
     is_target: &[bool],
     n_points: usize,
@@ -49,8 +36,6 @@ pub fn qvalue_curves(
             (1..=n_points)
                 .map(|k| {
                     let thresh = zoom * k as f64 / n_points as f64;
-                    // Sorted: partition_point is the count at or below the
-                    // threshold.
                     let n = targets.partition_point(|&q| (q as f64) <= thresh);
                     (thresh, n as f64)
                 })
@@ -69,7 +54,7 @@ pub fn qvalue_curves(
 /// than starting at `(0,0)`.
 ///
 /// Empty when either class is absent — a PP plot of one class says nothing.
-pub fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
+pub(crate) fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
     let n_points = n_points.max(2);
     let mut targets: Vec<f32> = Vec::new();
     let mut decoys: Vec<f32> = Vec::new();
@@ -122,14 +107,10 @@ mod tests {
             );
         }
         assert_eq!(curve.last().unwrap().1, 100.0);
-    }
 
-    #[test]
-    fn qvalue_curve_handles_no_targets() {
-        let q = vec![0.5f32, 0.6];
-        let t = vec![false, false];
-        let curve = qvalue_curves(&q, &t, 5, &[1.0]).remove(0);
-        assert!(curve.iter().all(|p| p.1 == 0.0));
+        // Decoys alone contribute nothing: the curve counts targets.
+        let decoys_only = qvalue_curves(&[0.5, 0.6], &[false, false], 5, &[1.0]).remove(0);
+        assert!(decoys_only.iter().all(|p| p.1 == 0.0));
     }
 
     /// A zoomed curve must spend all of its points inside its own range and

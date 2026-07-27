@@ -1,12 +1,9 @@
 //! Wrapping movement through a fixed list of variants.
-//!
-//! Four enums are keyboard-cycled and stored by position in their own `ALL`
-//! array. This is the step they share.
 
-/// Position of `cur` in `all`, or `0` if it is somehow absent.
+/// Position of `cur` in `all`, or `0` if it is absent.
 ///
-/// Absent is unreachable for the `ALL` arrays this is used with, and falling
-/// back to `0` keeps callers total: a panic here would take down a redraw.
+/// Falling back to `0` keeps callers total: a panic here would take down a
+/// redraw.
 pub(crate) fn index_of<T: Copy + PartialEq>(all: &[T], cur: T) -> usize {
     all.iter().position(|x| *x == cur).unwrap_or(0)
 }
@@ -30,11 +27,11 @@ mod tests {
         for &c in &all {
             assert_eq!(step(&all, step(&all, c, 1), -1), c);
         }
-    }
-
-    #[test]
-    fn an_absent_item_restarts_from_the_front() {
-        assert_eq!(index_of(&['a', 'b'], 'z'), 0);
-        assert_eq!(step(&['a', 'b'], 'z', 1), 'b');
+        assert_eq!(
+            index_of(&all, 'z'),
+            0,
+            "an absent item restarts at the front"
+        );
+        assert_eq!(step(&all, 'z', 1), 'b');
     }
 }

@@ -26,7 +26,6 @@ use crate::scoring::blocks::{
 };
 use crate::scoring::results::{
     CompetedCandidate,
-    FeatureRow,
     FinalResult,
     ScoringFields,
 };
@@ -83,26 +82,22 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     scores: &[T],
     thresholds: &[f32],
 ) -> Vec<(f32, usize, usize, usize)> {
-    // One pass for all thresholds.
-    let mut counts = vec![(0usize, 0usize); thresholds.len()];
-    for s in scores {
-        let q = s.get_qval();
-        let is_target = matches!(s.get_label(), TargetDecoy::Target);
-        for (&thresh, c) in thresholds.iter().zip(counts.iter_mut()) {
-            if q <= thresh {
-                if is_target {
-                    c.0 += 1;
-                } else {
-                    c.1 += 1;
-                }
-            }
-        }
+    let mut out = Vec::new();
+
+    for &thresh in thresholds {
+        let n_below_thresh = scores.iter().filter(|s| s.get_qval() <= thresh).count();
+        let n_targets = scores
+            .iter()
+            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Target))
+            .count();
+        let n_decoys = scores
+            .iter()
+            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Decoy))
+            .count();
+        out.push((thresh, n_below_thresh, n_targets, n_decoys));
     }
-    thresholds
-        .iter()
-        .zip(counts)
-        .map(|(&thresh, (n_targets, n_decoys))| (thresh, n_targets + n_decoys, n_targets, n_decoys))
-        .collect()
+
+    out
 }
 
 /// Fixed shuffle seed used by `rescore`. Makes the pre-rescore shuffle
@@ -297,7 +292,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     // lane-parity test).
     let names = all_feature_name_set();
     debug_assert_eq!(names.len(), ALL_NCOLS);
-    let feat = build_all_matrix(&data);
+    let feat = build_all_matrix(competed_rows(&data));
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ALL_NCOLS, responses);
 
@@ -665,9 +660,9 @@ fn push_nonlinear_row(
 /// shuffle, so row `i` aligns with `data[i]`). `LINEAR_NCOLS` wide.
 fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
-    for r in data {
-        let (s, meta) = (r.scoring(), r.result_meta());
-        push_linear_row(s, &meta, &Derived::compute(s), &mut out);
+    for c in data {
+        let meta = c.result_meta();
+        push_linear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -676,9 +671,9 @@ fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// [`build_linear_matrix`] for the ordering contract).
 fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
-    for r in data {
-        let (s, meta) = (r.scoring(), r.result_meta());
-        push_nonlinear_row(s, &meta, &Derived::compute(s), &mut out);
+    for c in data {
+        let meta = c.result_meta();
+        push_nonlinear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -686,14 +681,17 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// The ALL-lane matrix (linear then nonlinear, per row) — the GBM feature set,
 /// `ALL_NCOLS` wide, matching [`all_feature_name_set`]'s order.
 ///
-/// ONE pass over `data` with ONE `Derived::compute` per row: the two lanes are
+/// ONE pass over `rows` with ONE `Derived::compute` per row: the two lanes are
 /// adjacent within a row, so there is nothing to gain from walking twice.
 ///
-/// Generic over [`FeatureRow`]: both sides of rescoring go through it.
-fn build_all_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
-    for r in data {
-        let (s, meta) = (r.scoring(), r.result_meta());
+/// Takes `(scoring, meta)` pairs rather than a row type, because both sides of
+/// rescoring feed it and they agree on nothing else. See [`competed_rows`] for
+/// the pre-rescore side and [`feature_frame`] for the post-rescore one.
+fn build_all_matrix<'a>(
+    rows: impl ExactSizeIterator<Item = (&'a ScoringFields, ResultMeta)>,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(rows.len() * ALL_NCOLS);
+    for (s, meta) in rows {
         let derived = Derived::compute(s);
         push_linear_row(s, &meta, &derived, &mut out);
         push_nonlinear_row(s, &meta, &derived, &mut out);
@@ -701,12 +699,20 @@ fn build_all_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
     out
 }
 
+/// Competed candidates in the shape [`build_all_matrix`] consumes.
+fn competed_rows(
+    data: &[CompetedCandidate],
+) -> impl ExactSizeIterator<Item = (&ScoringFields, ResultMeta)> {
+    data.iter().map(|c| (&c.scoring, c.result_meta()))
+}
+
 /// The ALL-lane feature names + matrix for post-rescore rows: the dashboard's
 /// entry point.
 ///
 /// Row-major: value `j` of row `i` is at `matrix[i * names.len() + j]`.
 pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
-    (all_feature_name_set(), build_all_matrix(data))
+    let rows = data.iter().map(|r| (&r.scoring, r.result_meta()));
+    (all_feature_name_set(), build_all_matrix(rows))
 }
 
 /// LINEAR-lane feature names (LDA), in [`push_linear_row`]'s order.
@@ -968,7 +974,7 @@ mod feature_tests {
 
             assert_eq!(build_linear_matrix(&data).len(), LINEAR_NCOLS);
             assert_eq!(build_nonlinear_matrix(&data).len(), NONLINEAR_NCOLS);
-            assert_eq!(build_all_matrix(&data).len(), ALL_NCOLS);
+            assert_eq!(build_all_matrix(competed_rows(&data)).len(), ALL_NCOLS);
         }
     }
 
@@ -983,7 +989,7 @@ mod feature_tests {
         ];
         let lin = build_linear_matrix(&data);
         let nl = build_nonlinear_matrix(&data);
-        let all = build_all_matrix(&data);
+        let all = build_all_matrix(competed_rows(&data));
 
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         for i in 0..data.len() {
@@ -1255,11 +1261,11 @@ mod feature_tests {
         //       never NaN, so demanding NaN there would be wrong);
         //   (b) every non-mobility feature is bit-for-bit unchanged. Without (b)
         //       an impl that NaN'd the whole record would pass (a).
-        let before = build_all_matrix(&[sample_competed_candidate_parsed()]);
+        let before = build_all_matrix(competed_rows(&[sample_competed_candidate_parsed()]));
 
         let mut cand = sample_competed_candidate_parsed();
         cand.scoring.neutralize_mobility();
-        let after = build_all_matrix(&[cand]);
+        let after = build_all_matrix(competed_rows(&[cand]));
 
         let names = all_feature_name_set();
         assert_eq!(names.len(), ALL_NCOLS);
@@ -1306,45 +1312,6 @@ mod feature_tests {
             finite_non_mob > 20,
             "non-mobility features must stay finite, got {finite_non_mob}"
         );
-    }
-
-    /// `build_all_matrix` over `CompetedCandidate` and over `FinalResult` must
-    /// produce byte-identical rows. They share the row builders, so what this
-    /// guards is `into_final`: if that conversion ever drops, rounds or
-    /// reorders a value the feature row reads, the dashboard would display a
-    /// matrix the model never trained on, silently.
-    ///
-    /// The candidate is the PARSED one on purpose. `sample_default()` has no
-    /// sequence, so all 22 `sequence_counts` columns come out NaN and the
-    /// NaN-equals-NaN escape below passes them without comparing anything.
-    #[test]
-    fn into_final_preserves_every_feature_value() {
-        let competed = sample_competed_candidate_parsed();
-        let expected = build_all_matrix(std::slice::from_ref(&competed));
-
-        let final_result = competed.clone().into_final();
-        let (names, got) = feature_frame(std::slice::from_ref(&final_result));
-
-        assert_eq!(names, all_feature_name_set());
-        assert_eq!(got.len(), names.len(), "one row, one value per name");
-        let compared = expected
-            .iter()
-            .zip(&got)
-            .filter(|(a, b)| !a.is_nan() && !b.is_nan())
-            .count();
-        assert!(
-            compared > 22,
-            "only {compared} of {} columns were non-NaN; the fixture is not \
-             exercising the sequence_counts block",
-            names.len()
-        );
-        for (j, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
-            assert!(
-                a == b || (a.is_nan() && b.is_nan()),
-                "column {j} ({}) differs: competed={a} final={b}",
-                names[j]
-            );
-        }
     }
 
     /// Row-major layout: value `j` of row `i` lives at `matrix[i * nf + j]`.

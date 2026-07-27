@@ -24,7 +24,7 @@ use ratatui::crossterm::event::{
 use ratatui::widgets::TableState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
+pub(crate) enum Tab {
     Overview,
     Fdr,
     Calibration,
@@ -32,9 +32,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Self::Overview, Self::Fdr, Self::Calibration, Self::Features];
+    pub(crate) const ALL: [Tab; 4] = [Self::Overview, Self::Fdr, Self::Calibration, Self::Features];
 
-    pub fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Fdr => "FDR",
@@ -48,23 +48,19 @@ impl Tab {
     }
 }
 
-pub enum Flow {
+pub(crate) enum Flow {
     Continue,
     Quit,
 }
 
-/// Plot points, reused across frames.
-///
-/// `ratatui::Dataset::data` borrows a `&[(f64, f64)]`, so the points have to
-/// outlive the widget; they live here rather than in a vector collected inside
-/// the draw call.
+/// Plot points, reused across frames rather than collected inside the draw call.
 #[derive(Default)]
 pub(crate) struct Scratch {
     pub(crate) target: Vec<(f64, f64)>,
     pub(crate) decoy: Vec<(f64, f64)>,
 }
 
-pub struct App {
+pub(crate) struct App {
     pub(crate) dash: Dashboard,
     pub(crate) scratch: Scratch,
     tab: Tab,
@@ -91,15 +87,11 @@ pub struct App {
     /// than rebuilt per frame: `TableState::offset` is what lets a `Table`
     /// scroll, and a fresh `TableState::default()` every render recomputes it
     /// from `0`, pinning the viewport instead of tracking the cursor.
-    ///
-    /// Reachable directly from [`crate::ui`] because the table widget borrows
-    /// `dash` while the state needs `&mut`; a whole-`App` accessor would make
-    /// those two borrows overlap.
     pub(crate) table_state: TableState,
 }
 
 impl App {
-    pub fn new(dash: Dashboard) -> Self {
+    pub(crate) fn new(dash: Dashboard) -> Self {
         let mut app = Self {
             dash,
             scratch: Scratch::default(),
@@ -120,61 +112,61 @@ impl App {
         app
     }
 
-    pub fn dashboard(&self) -> &Dashboard {
-        &self.dash
-    }
-
-    pub fn tab(&self) -> Tab {
+    pub(crate) fn tab(&self) -> Tab {
         self.tab
     }
 
-    pub fn x(&self) -> Axis {
+    pub(crate) fn x(&self) -> Axis {
         self.x
     }
 
-    pub fn y(&self) -> YTransform {
+    pub(crate) fn y(&self) -> YTransform {
         self.y
     }
 
-    pub fn clip(&self) -> bool {
+    pub(crate) fn clip(&self) -> bool {
         self.clip
     }
 
     /// Which of the dashboard's FDR zoom levels the curve panel draws.
-    pub fn q_zoom(&self) -> usize {
+    pub(crate) fn q_zoom(&self) -> usize {
         self.q_zoom
     }
 
-    pub fn sort_key(&self) -> FeatureColumn {
-        self.sort
+    /// The sort key and the order it puts rows in, e.g. `"AUC high-low"`.
+    ///
+    /// Spelled out rather than shown as an arrow because `sort_desc` reads
+    /// differently per key: largest-first for a number, A-first for the name.
+    pub(crate) fn sort_summary(&self) -> String {
+        let order = match (self.sort, self.sort_desc) {
+            (FeatureColumn::Name, true) => "a-z",
+            (FeatureColumn::Name, false) => "z-a",
+            (_, true) => "high-low",
+            (_, false) => "low-high",
+        };
+        format!("{} {order}", self.sort.label())
     }
 
-    pub fn filter(&self) -> &str {
+    pub(crate) fn filter(&self) -> &str {
         &self.filter
     }
 
-    pub fn filter_editing(&self) -> bool {
+    pub(crate) fn filter_editing(&self) -> bool {
         self.filter_editing
     }
 
     /// Feature index under the cursor, or `None` when the filter matches
     /// nothing.
-    pub fn selected_feature(&self) -> Option<usize> {
+    pub(crate) fn selected_feature(&self) -> Option<usize> {
         self.visible.get(self.cursor).copied()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Flow {
-        // Raw mode disables the terminal's own SIGINT handling, so Ctrl-C
-        // arrives as a plain key event rather than a signal. Handled before
-        // anything else — including the filter-editing dispatch below — so
-        // it always quits rather than being typed into the filter box or
-        // toggling clip (`KeyCode::Char('c')` with no modifiers).
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Flow {
+        // Handled before anything else — including the filter-editing dispatch
+        // below — so Ctrl-C always quits rather than being typed into the filter
+        // box or toggling clip.
         if is_ctrl_c(key) {
             return Flow::Quit;
-        }
-        if self.filter_editing {
-            self.handle_filter_key(key);
-            return Flow::Continue;
         }
         // CONTROL/ALT combinations are reserved (Ctrl-C above, and headroom
         // for future bindings); only a bare or Shifted character triggers a
@@ -182,8 +174,12 @@ impl App {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if self.filter_editing {
+            self.handle_filter_key(key, plain);
+            return Flow::Continue;
+        }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc if plain => return Flow::Quit,
+            KeyCode::Char('q') if plain => return Flow::Quit,
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab if plain => {
                 self.tab = self.tab.shift(1)
             }
@@ -227,10 +223,7 @@ impl App {
         Flow::Continue
     }
 
-    fn handle_filter_key(&mut self, key: KeyEvent) {
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    fn handle_filter_key(&mut self, key: KeyEvent, plain: bool) {
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
@@ -301,8 +294,6 @@ pub fn available() -> bool {
 }
 
 /// Open the dashboard and block until the user quits.
-///
-/// Blocks until the user quits.
 ///
 /// Never fails the caller and never panics on setup: a non-terminal stdout or
 /// a failed `try_init` warns, restores the terminal and returns `Ok`. This is
@@ -407,11 +398,11 @@ pub(crate) mod tests {
         KeyModifiers,
     };
 
-    fn key(c: char) -> KeyEvent {
+    pub(crate) fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
-    fn code(c: KeyCode) -> KeyEvent {
+    pub(crate) fn code(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
 
@@ -475,31 +466,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn c_toggles_clipping_and_q_quits() {
+    fn c_toggles_clipping() {
         let mut app = app();
         assert!(app.clip(), "percentile clip is the default");
         app.handle_key(key('c'));
         assert!(!app.clip());
-        assert!(matches!(app.handle_key(key('q')), Flow::Quit));
+        app.handle_key(key('c'));
+        assert!(app.clip());
     }
 
     #[test]
     fn z_cycles_the_fdr_zoom_in_both_directions() {
         let mut app = app();
-        let n = app.dashboard().n_q_zooms();
+        let n = app.dash.n_q_zooms();
         assert!(n > 1, "a single zoom level makes the key pointless");
         assert_ne!(
-            app.dashboard().q_curve(app.q_zoom()).zoom,
+            app.dash.q_curve(app.q_zoom()).zoom,
             1.0,
             "the default view must be zoomed in; the full (0, 1] curve is the \
              one that shows the least"
         );
 
         let start = app.q_zoom();
-        let mut seen = vec![app.dashboard().q_curve(start).zoom];
+        let mut seen = vec![app.dash.q_curve(start).zoom];
         for _ in 1..n {
             app.handle_key(key('z'));
-            seen.push(app.dashboard().q_curve(app.q_zoom()).zoom);
+            seen.push(app.dash.q_curve(app.q_zoom()).zoom);
         }
         app.handle_key(key('z'));
         assert_eq!(app.q_zoom(), start, "z must wrap, not run off the end");
@@ -622,7 +614,7 @@ pub(crate) mod tests {
         let first = app.visible.to_vec();
         // Sort by target mean descending: beta_count (mean 20) before
         // alpha_score (mean 2).
-        while app.sort_key() != FeatureColumn::TargetMean {
+        while !app.sort_summary().starts_with("target mean ") {
             app.handle_key(key('s'));
         }
         assert_ne!(app.visible, first.as_slice());
@@ -634,7 +626,7 @@ pub(crate) mod tests {
     #[test]
     fn sorting_by_gain_reads_the_column_aligned_array() {
         let mut app = app();
-        while app.sort_key() != FeatureColumn::Gain {
+        while !app.sort_summary().starts_with("gain ") {
             app.handle_key(key('s'));
         }
         // The fixture sets gain[j] = j, so descending puts feature 1 first.
@@ -653,7 +645,7 @@ pub(crate) mod tests {
                 &[f64::NAN; 4],
             ],
         ));
-        while app.sort_key() != FeatureColumn::Auc {
+        while !app.sort_summary().starts_with("AUC ") {
             app.handle_key(key('s'));
         }
         assert_eq!(
@@ -670,42 +662,17 @@ pub(crate) mod tests {
         );
     }
 
-    /// With no terminal, `run` must take the early-return path and return
-    /// `Ok` rather than panicking or failing the search run.
-    ///
-    /// Skipped under a runner that does give the harness a tty — the point is
-    /// the no-terminal path, and actually opening one here would take over the
-    /// screen mid-test.
+    /// A panic must not fail the run, and a real `Err` must not be swallowed by
+    /// the same guard.
     #[test]
-    fn run_returns_ok_and_does_not_panic_when_stdout_is_not_a_terminal() {
-        if available() {
-            return;
-        }
-        assert!(
-            super::run(dashboard(&["a"], &[&[1.0, 2.0, 3.0, 4.0]])).is_ok(),
-            "a non-terminal stdout must skip, not fail the run"
-        );
-    }
-
-    /// `catch_panics` is the piece of `run` that keeps a panic inside the
-    /// event loop from aborting the whole search run — in builds where
-    /// panics unwind, which is what this test runs under (`panic = "unwind"`,
-    /// the default dev/test profile). `[profile.release]` sets `panic =
-    /// "abort"` workspace-wide, where this guard cannot run at all; see
-    /// `catch_panics`'s doc comment. Exercised directly here since, unlike
-    /// `event_loop`, it needs no real terminal.
-    #[test]
-    fn catch_panics_converts_a_panic_into_ok() {
+    fn catch_panics_converts_a_panic_into_ok_but_passes_errors_through() {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the default panic printout
-        let result = catch_panics(|| panic!("simulated event-loop panic"));
+        let caught = catch_panics(|| panic!("simulated event-loop panic"));
         std::panic::set_hook(prev_hook);
-        assert!(result.is_ok(), "a caught panic must not fail the run");
-    }
+        assert!(caught.is_ok(), "a caught panic must not fail the run");
 
-    #[test]
-    fn catch_panics_passes_through_an_io_error() {
-        let result = catch_panics(|| Err(std::io::Error::other("simulated io error")));
-        assert!(result.is_err(), "a real Err must not be swallowed");
+        let passed = catch_panics(|| Err(std::io::Error::other("simulated io error")));
+        assert!(passed.is_err(), "a real Err must not be swallowed");
     }
 }

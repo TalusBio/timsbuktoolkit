@@ -1,23 +1,13 @@
 //! Everything the dashboard shows, computed once before the TUI opens.
 //!
-//! The matrix is touched exactly twice and is then dead:
-//!
-//! **Pass A** is one row-major sweep with every column's [`ColumnStats`]
-//! accumulator live. It is exact over all rows, O(1) per value, and
-//! bandwidth-bound. It is the only thing here that is linear in rows.
-//!
-//! **Pass B** gathers `min(n_rows, `[`DEFAULT_SAMPLE`]`)` rows *by random
-//! index* and, per column, sorts once. That one sort answers three questions
-//! that would otherwise each need their own: the Mann-Whitney AUC (a
-//! mid-rank walk), every transform's clip range (a `partition_point` for the
-//! domain suffix, then two order statistics), and `RankPercentile` (sorted
-//! position *is* the percentile). Binning is order-independent, so it reads the
-//! sorted array directly. Pass B is flat in rows.
-//!
-//! What comes out is a lookup table: `(column, transform, clip)` indexes a
-//! stored 512-bin histogram with a stored axis range and a pre-formatted title
-//! and subtitle. A frame computes nothing over the data. It still allocates:
-//! ratatui's own widget model, plus three axis-label strings per plotted panel.
+//! The matrix is touched exactly twice. **Pass A** is one row-major sweep with
+//! every column's [`ColumnStats`] accumulator live; it is the only thing here
+//! that is linear in rows. **Pass B** gathers `min(n_rows,
+//! `[`DEFAULT_SAMPLE`]`)` rows *by random index* and sorts each column once.
+//! That one sort answers three questions that would otherwise each need their
+//! own: the Mann-Whitney AUC (a mid-rank walk), every transform's clip range (a
+//! `partition_point` for the domain suffix, then two order statistics), and
+//! `RankPercentile` (sorted position *is* the percentile).
 //!
 //! Random indices are load-bearing. The rescoring pipeline hands the dashboard
 //! rows sorted descending by main score, so a contiguous or strided sample
@@ -34,6 +24,10 @@
 //! the per-feature AUC. Sample size is the only accuracy knob; the
 //! `sample_size_holds_its_accuracy_claim` test measures the error it buys.
 
+use crate::labels::{
+    Labels,
+    QCurve,
+};
 use crate::stats::{
     self,
     ColumnStats,
@@ -75,9 +69,15 @@ const N_CLIPS: usize = 2;
 const BINS_PER_SLOT: usize = 2 * N_BINS;
 const SLOTS_PER_COLUMN: usize = N_AXES * N_CLIPS;
 
-/// How many of the caller's thresholds, from the front, the Overview header
-/// summarizes. The FDR tab tabulates all of them.
-const OVERVIEW_SHOWN: usize = 3;
+/// A `(transform, clip)` slot within one column's slab.
+///
+/// The one definition of the store's layout: both [`Dashboard::slot_index`] and
+/// the fill loop go through it, so a lookup cannot address a slot the fill wrote
+/// somewhere else.
+const fn local_slot(axis_i: usize, clip_i: usize) -> usize {
+    axis_i * N_CLIPS + clip_i
+}
+
 const Q_CURVE_POINTS: usize = 100;
 const PP_CURVE_POINTS: usize = 200;
 
@@ -86,30 +86,31 @@ const PP_CURVE_POINTS: usize = 200;
 /// Every one of these gets its own `Q_CURVE_POINTS` grid — see
 /// [`curves::qvalue_curves`] for why a zoom cannot just be a slice of the wide
 /// curve — which is affordable because they share one sort.
-pub const Q_ZOOMS: [f64; 4] = [1.0, 0.1, 0.05, 0.01];
+const Q_ZOOMS: [f64; 4] = [1.0, 0.1, 0.05, 0.01];
 
 /// Which of [`Q_ZOOMS`] the FDR tab opens on.
 ///
 /// Not the widest. `q <= 1` is the view that says the least: past the FDR
 /// cutoffs anyone reports, the curve is flat, so the default is the tightest
 /// range that still contains all of the usual reporting thresholds.
-pub const DEFAULT_Q_ZOOM: usize = 1;
+pub(crate) const DEFAULT_Q_ZOOM: usize = 1;
 
 /// One stored histogram's axis and totals. The counts themselves live in a
 /// single flat `Vec<u32>` so the whole store is one allocation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Slot {
-    lo: f64,
-    hi: f64,
-    n_target: u32,
-    n_decoy: u32,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Slot {
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    pub(crate) n_target: u32,
+    pub(crate) n_decoy: u32,
     /// Sampled values this transform refused (non-finite, or out of domain).
-    dropped: u32,
+    /// A property of the transform, so both of a transform's clips report it.
+    pub(crate) dropped: u32,
     /// Sampled survivors that landed outside `[lo, hi]`.
-    n_out: u32,
+    pub(crate) n_out: u32,
     /// False when the column has no value this transform can plot, in which
     /// case `lo`/`hi` are placeholders and every count is zero.
-    plottable: bool,
+    pub(crate) plottable: bool,
 }
 
 impl Slot {
@@ -126,11 +127,11 @@ impl Slot {
 
 /// A column of the features table.
 ///
-/// [`Self::ALL`] is the table's column order, the cycle `s` steps through, and
-/// the order cells are built in — one definition, so the header, the numbers
-/// under it and the sort key cannot disagree about what column 4 is.
+/// [`Self::ALL`] is at once the table's column order, the cycle `s` steps
+/// through, and the order cells are built in, so the header, the numbers under
+/// it and the sort key cannot disagree about what column 4 is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeatureColumn {
+pub(crate) enum FeatureColumn {
     Name,
     TargetMean,
     DecoyMean,
@@ -140,10 +141,10 @@ pub enum FeatureColumn {
     Gain,
 }
 
-pub const N_FEATURE_COLUMNS: usize = FeatureColumn::ALL.len();
+pub(crate) const N_FEATURE_COLUMNS: usize = FeatureColumn::ALL.len();
 
 impl FeatureColumn {
-    pub const ALL: [FeatureColumn; 7] = [
+    pub(crate) const ALL: [FeatureColumn; 7] = [
         Self::Name,
         Self::TargetMean,
         Self::DecoyMean,
@@ -153,11 +154,17 @@ impl FeatureColumn {
         Self::Gain,
     ];
 
-    pub fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         cycle::step(&Self::ALL, self, 1)
     }
 
-    pub fn label(self) -> &'static str {
+    /// Position in [`Self::ALL`], which is how a row's cells and values are
+    /// addressed.
+    fn index(self) -> usize {
+        cycle::index_of(&Self::ALL, self)
+    }
+
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Name => "name",
             Self::TargetMean => "target mean",
@@ -170,90 +177,22 @@ impl FeatureColumn {
     }
 }
 
-/// One zoom level of the FDR curve, with its axes resolved at init.
-///
-/// The labels are formatted here rather than in the panel because they depend
-/// only on the zoom and the target count, both of which are fixed once the run
-/// is loaded; a redraw borrows these strings.
-pub struct QCurve {
-    pub points: Vec<(f64, f64)>,
-    /// Upper q-value bound of this view.
-    pub zoom: f64,
-    /// Targets passing at the loosest threshold shown, floored at 1 so the
-    /// axis never degenerates to `[0, 0]`.
-    pub ymax: f64,
-    pub title: String,
-    pub x_labels: [String; 3],
-    pub y_labels: [String; 3],
-}
-
-impl QCurve {
-    fn new(points: Vec<(f64, f64)>, zoom: f64) -> Self {
-        // The curve is non-decreasing in y, so its last point is its maximum.
-        // Scaling to that rather than to the run's total target count is the
-        // other half of zooming: a `q <= 0.01` panel scaled to the q = 1 count
-        // would still draw the interesting part flat against the axis.
-        let ymax = points.last().map_or(0.0, |&(_, y)| y).max(1.0);
-        Self {
-            points,
-            zoom,
-            ymax,
-            // `{zoom}` and not a fixed precision: f64's `Display` is the
-            // shortest round-tripping form, so 1.0 prints "1" and 0.05 prints
-            // "0.05" without a trailing-zero rule per level.
-            title: format!("q-value curve (q <= {zoom})"),
-            x_labels: [
-                "0".to_string(),
-                format!("{}", zoom / 2.0),
-                format!("{zoom}"),
-            ],
-            y_labels: [
-                "0".to_string(),
-                fmt_count((ymax / 2.0) as usize),
-                fmt_count(ymax as usize),
-            ],
-        }
-    }
-}
-
 /// The materialized dashboard. Owns everything on screen; borrows nothing.
 pub struct Dashboard {
     pub(crate) feature_names: Vec<Arc<str>>,
-
-    /// Pass A output, one per column (features, then the score).
-    pub(crate) stats: Vec<ColumnStats>,
-    /// Per-feature Mann-Whitney AUC over the sample; the score's entry is
-    /// replaced by the exact all-rows value.
-    pub(crate) auc: Vec<f64>,
-    pub(crate) gain: Vec<f32>,
 
     /// `[column][transform][clip]` -> `2 * N_BINS` counts, target then decoy.
     counts: Vec<u32>,
     /// Aligned with `counts`' slot index.
     slots: Vec<Slot>,
-    /// `[column][transform]` panel titles.
-    titles: Vec<String>,
-    /// `[column][transform][clip]` diagnostics lines.
-    subtitles: Vec<String>,
-    /// What everything on screen was computed over, drawn once across the full
-    /// terminal width rather than repeated in every panel's subtitle.
-    basis: String,
-
-    /// Exact, all-rows AUC of the discriminant score. The headline separation
-    /// number, so it is not sampled: it is one column and one sort, run
-    /// alongside pass A rather than after it.
-
     /// The FDR curve at every zoom in [`Q_ZOOMS`], same order.
     q_curves: Vec<QCurve>,
     pub(crate) pp_curve: Vec<(f64, f64)>,
-    /// Overview header, formatted once.
-    pub(crate) overview_header: String,
-    /// FDR threshold table cells, `[q, total, targets, decoys]` per row.
-    pub(crate) fdr_rows: Vec<[String; 4]>,
-
-    /// Pre-formatted feature-table cells, one row of seven per feature. Table
-    /// rows borrow these, so a frame formats nothing.
-    pub(crate) cells: Vec<[String; N_FEATURE_COLUMNS]>,
+    labels: Labels,
+    /// The same rows as [`Labels::cells`], unformatted, for sorting. Keeping the
+    /// numbers is what lets the pass-A stats, the per-feature AUCs and the gain
+    /// vector all be dropped at the end of `build`.
+    values: Vec<[f64; N_FEATURE_COLUMNS]>,
 }
 
 impl Dashboard {
@@ -265,8 +204,7 @@ impl Dashboard {
     /// rather than sampled.
     pub fn build(view: &RescoreView<'_>, sample: usize) -> Result<Self, ViewError> {
         view.validate()?;
-        let n_features = view.n_features();
-        let n_cols = n_features + 1;
+        let n_cols = view.n_features() + 1;
         let n_rows = view.n_rows();
 
         // Pass A and the all-rows curve work are independent, and both are
@@ -303,13 +241,9 @@ impl Dashboard {
                 );
             });
 
-        // The score is the column past the last feature, and its AUC is the
-        // exact all-rows one rather than the sampled sweep's.
-        auc[n_features] = all_rows.score_auc;
-
-        // Pass A is linear in rows and pass B is flat, so which one dominates
-        // is a property of the run, not a constant. Logged so that stays
-        // visible without a profiler.
+        // Which pass dominates is a property of the run, not a constant: pass A
+        // is linear in rows and pass B is flat. Logged so that stays visible
+        // without a profiler.
         tracing::debug!(
             "rescore dashboard precompute: pass A (all {n_rows} rows) {:.3} s, \
              pass B ({n_sampled} sampled) {:.3} s",
@@ -317,28 +251,12 @@ impl Dashboard {
             t0.elapsed().as_secs_f64(),
         );
 
-        let n_targets = view.is_target.iter().filter(|&&t| t).count();
-        let names: Vec<&str> = view
-            .feature_names
-            .iter()
-            .map(|n| &**n)
-            .chain(std::iter::once("discriminant_score"))
-            .collect();
-        let titles = build_titles(&names);
-        let subtitles = build_subtitles(&slots, n_sampled);
-        let basis = build_basis(n_sampled, n_rows);
-        let cells = build_cells(view, &stats, &auc);
-
+        let values = build_values(view, &stats, &auc);
         Ok(Self {
             feature_names: view.feature_names.to_vec(),
-            stats,
-            auc,
-            gain: view.gain.to_vec(),
+            labels: Labels::build(view, &slots, &values, all_rows.score_auc, n_sampled),
             counts,
             slots,
-            titles,
-            subtitles,
-            basis,
             q_curves: all_rows
                 .qvalue_curves
                 .into_iter()
@@ -346,53 +264,56 @@ impl Dashboard {
                 .map(|(points, zoom)| QCurve::new(points, zoom))
                 .collect(),
             pp_curve: all_rows.pp_curve,
-            overview_header: build_overview_header(
-                n_targets,
-                n_rows - n_targets,
-                all_rows.score_auc,
-                view.thresholds
-                    .get(..OVERVIEW_SHOWN)
-                    .unwrap_or(view.thresholds),
-            ),
-            fdr_rows: build_fdr_rows(view.thresholds),
-            cells,
+            values,
         })
     }
 
-    pub fn n_features(&self) -> usize {
+    pub(crate) fn n_features(&self) -> usize {
         self.feature_names.len()
     }
 
     /// What everything on screen was computed over, e.g. `"2.01M rows,
     /// histograms from a 250k sample"`.
-    pub fn basis(&self) -> &str {
-        &self.basis
+    pub(crate) fn basis(&self) -> &str {
+        &self.labels.basis
+    }
+
+    pub(crate) fn overview_header(&self) -> &str {
+        &self.labels.overview_header
+    }
+
+    pub(crate) fn fdr_rows(&self) -> &[[String; 4]] {
+        &self.labels.fdr_rows
+    }
+
+    pub(crate) fn cells(&self) -> &[[String; N_FEATURE_COLUMNS]] {
+        &self.labels.cells
     }
 
     /// How many zoom levels the FDR curve offers.
-    pub fn n_q_zooms(&self) -> usize {
+    pub(crate) fn n_q_zooms(&self) -> usize {
         self.q_curves.len()
     }
 
     /// The FDR curve at zoom level `i`, wrapping so the caller can hold a bare
     /// counter and never bounds-check.
-    pub fn q_curve(&self, i: usize) -> &QCurve {
+    pub(crate) fn q_curve(&self, i: usize) -> &QCurve {
         &self.q_curves[i % self.q_curves.len()]
     }
 
     /// The discriminant score's column. It is stored and queried exactly like
     /// a feature, one past the last of them.
-    pub fn score_column(&self) -> usize {
+    pub(crate) fn score_column(&self) -> usize {
         self.n_features()
     }
 
     fn slot_index(&self, column: usize, t: Axis, clip: bool) -> usize {
-        (column * N_AXES + t.index()) * N_CLIPS + usize::from(clip)
+        column * SLOTS_PER_COLUMN + local_slot(t.index(), usize::from(clip))
     }
 
     /// The stored histogram for a column. Pure indexing — this is the whole of
     /// what a redraw does.
-    pub fn hist(&self, column: usize, t: Axis, clip: bool) -> HistView<'_> {
+    pub(crate) fn hist(&self, column: usize, t: Axis, clip: bool) -> HistView<'_> {
         let slot = self.slot_index(column, t, clip);
         let s = &self.slots[slot];
         let base = slot * BINS_PER_SLOT;
@@ -407,32 +328,31 @@ impl Dashboard {
         }
     }
 
-    pub fn title(&self, column: usize, t: Axis) -> &str {
-        &self.titles[column * N_AXES + t.index()]
+    pub(crate) fn title(&self, column: usize, t: Axis) -> &str {
+        &self.labels.titles[column * N_AXES + t.index()]
     }
 
-    pub fn subtitle(&self, column: usize, t: Axis, clip: bool) -> &str {
-        &self.subtitles[self.slot_index(column, t, clip)]
+    pub(crate) fn subtitle(&self, column: usize, t: Axis, clip: bool) -> &str {
+        &self.labels.subtitles[self.slot_index(column, t, clip)]
     }
 
-    /// A column's AUC: sampled for a feature, exact for the score.
-    pub fn auc(&self, column: usize) -> f64 {
-        self.auc[column]
-    }
-
-    /// Feature `j`'s value under `col`, or `None` for the name column.
-    pub fn feature_value(&self, j: usize, col: FeatureColumn) -> Option<f64> {
-        column_value(col, &self.stats[j], self.auc[j], self.gain[j])
+    /// Feature `j`'s value under `col`, or `None` for the name column, which
+    /// has no numeric value and sorts as text.
+    pub(crate) fn feature_value(&self, j: usize, col: FeatureColumn) -> Option<f64> {
+        match col {
+            FeatureColumn::Name => None,
+            _ => Some(self.values[j][col.index()]),
+        }
     }
 }
 
 /// Pass A: one row-major sweep per thread over a contiguous row range, then a
 /// Chan-combination merge.
 ///
-/// Row-major rather than one strided sweep per column. A strided read of
-/// `feature_column(j)` pulls a 64-byte line for every 8-byte value and discards
-/// 7/8 of it; this reads every line once and uses all of it, with the whole
-/// accumulator block (~11 KB at 131 features) resident the whole time.
+/// Row-major rather than one strided sweep per column: a strided read pulls a
+/// 64-byte line for every 8-byte value and discards 7/8 of it, while this reads
+/// every line once and uses all of it, with the whole accumulator block (~11 KB
+/// at 131 features) resident throughout.
 fn pass_a(view: &RescoreView<'_>) -> Vec<ColumnStats> {
     let n_features = view.n_features();
     let n_cols = n_features + 1;
@@ -554,37 +474,6 @@ impl ColumnBuf {
     }
 }
 
-/// Accumulator for one `(transform, clip)` histogram while the sorted column is
-/// walked once for all of them.
-struct Fill<'a> {
-    lo: f64,
-    hi: f64,
-    span: f64,
-    target: &'a mut [u32],
-    decoy: &'a mut [u32],
-    n_out: u32,
-    plottable: bool,
-}
-
-impl Fill<'_> {
-    #[inline]
-    fn push(&mut self, y: f64, is_target: bool) {
-        if !self.plottable {
-            return;
-        }
-        match stats::bin_index(y, self.lo, self.hi, self.span) {
-            Some(b) => {
-                if is_target {
-                    self.target[b] += 1;
-                } else {
-                    self.decoy[b] += 1;
-                }
-            }
-            None => self.n_out += 1,
-        }
-    }
-}
-
 /// Fill one column's `N_AXES * N_CLIPS` histograms and return its
 /// Mann-Whitney AUC. One sort, then one walk per transform.
 fn precompute_column(
@@ -602,9 +491,9 @@ fn precompute_column(
             .filter(|(v, _)| v.is_finite())
             .map(|(v, &t)| (v, t)),
     );
-    // `total_cmp` rather than `partial_cmp(..).unwrap_or(Equal)`: NaNs are
-    // already filtered out, and a total order lets `sort_unstable_by` keep its
-    // guarantees instead of relying on a comparator that could be inconsistent.
+    // `total_cmp` so the comparator is a total order; `partial_cmp` with a NaN
+    // fallback is not one, and `sort_unstable_by` only guarantees its behaviour
+    // for total orders.
     buf.pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let auc = stats::auc_from_sorted(&buf.pairs);
     stats::mid_rank_percentiles(&buf.pairs, &mut buf.pct);
@@ -615,16 +504,13 @@ fn precompute_column(
         let start = buf.pairs.partition_point(|p| !t.accepts(p.0));
         let survivors = &buf.pairs[start..];
         let pct = &buf.pct[start..];
-        let ranges = [exact_range(t, exact), clip_range(t, survivors, pct)];
+        // `(lo, hi, span)` per clip, resolved before the walk; `None` is a slot
+        // with nothing to plot. `span` is hoisted because `bin_index` wants it
+        // on every one of the `m * N_AXES * N_CLIPS` pushes below.
+        let axes = [exact_range(t, exact), clip_range(t, survivors, pct)]
+            .map(|r| r.map(|(lo, hi)| (lo, hi, hi - lo)));
 
-        let slab_base = axis_i * N_CLIPS * BINS_PER_SLOT;
-        let (unclipped, clipped) =
-            counts[slab_base..slab_base + N_CLIPS * BINS_PER_SLOT].split_at_mut(BINS_PER_SLOT);
-        let (ut, ud) = unclipped.split_at_mut(N_BINS);
-        let (ct, cd) = clipped.split_at_mut(N_BINS);
-
-        let mut fills = [new_fill(ranges[0], ut, ud), new_fill(ranges[1], ct, cd)];
-
+        let mut n_out = [0u32; N_CLIPS];
         let mut dropped = n_non_finite + start as u32;
         for (k, &(v, is_t)) in survivors.iter().enumerate() {
             let y = match t {
@@ -641,58 +527,42 @@ fn precompute_column(
                     }
                 },
             };
-            for f in &mut fills {
-                f.push(y, is_t);
+            for (clip_i, axis) in axes.iter().enumerate() {
+                let Some((lo, hi, span)) = *axis else {
+                    continue;
+                };
+                match stats::bin_index(y, lo, hi, span) {
+                    // Target bins then decoy bins, within this slot's slab.
+                    Some(b) => {
+                        let class = usize::from(!is_t) * N_BINS;
+                        counts[local_slot(axis_i, clip_i) * BINS_PER_SLOT + class + b] += 1;
+                    }
+                    None => n_out[clip_i] += 1,
+                }
             }
         }
 
-        for (clip_i, f) in fills.iter().enumerate() {
-            let slot = axis_i * N_CLIPS + clip_i;
+        for (clip_i, axis) in axes.iter().enumerate() {
+            let slot = local_slot(axis_i, clip_i);
+            let base = slot * BINS_PER_SLOT;
+            let (target, decoy) = counts[base..base + BINS_PER_SLOT].split_at(N_BINS);
+            let (lo, hi) = axis.map_or((Slot::EMPTY.lo, Slot::EMPTY.hi), |(lo, hi, _)| (lo, hi));
             slots[slot] = Slot {
-                lo: f.lo,
-                hi: f.hi,
-                n_target: f.target.iter().sum(),
-                n_decoy: f.decoy.iter().sum(),
+                lo,
+                hi,
+                n_target: target.iter().sum(),
+                n_decoy: decoy.iter().sum(),
                 dropped,
-                n_out: f.n_out,
-                plottable: f.plottable,
+                n_out: n_out[clip_i],
+                plottable: axis.is_some(),
             };
         }
     }
     auc
 }
 
-fn new_fill<'a>(
-    range: Option<(f64, f64)>,
-    target: &'a mut [u32],
-    decoy: &'a mut [u32],
-) -> Fill<'a> {
-    match range {
-        Some((lo, hi)) => Fill {
-            lo,
-            hi,
-            span: hi - lo,
-            target,
-            decoy,
-            n_out: 0,
-            plottable: true,
-        },
-        None => Fill {
-            lo: Slot::EMPTY.lo,
-            hi: Slot::EMPTY.hi,
-            span: 1.0,
-            target,
-            decoy,
-            n_out: 0,
-            plottable: false,
-        },
-    }
-}
-
-/// Clipped axis bounds, from the sample's own percentiles.
-///
-/// This is why the outlier failure cannot recur: a lone 1e6 row is outside
-/// `p99.5` by construction, so it cannot stretch the range until the
+/// Clipped axis bounds, from the sample's own percentiles: a lone outlier is
+/// outside `p99.5` by construction, so it cannot stretch the range until the
 /// bulk collapses into bin 0.
 fn clip_range(t: Axis, survivors: &[(f64, bool)], pct: &[f64]) -> Option<(f64, f64)> {
     let k = survivors.len();
@@ -727,9 +597,8 @@ fn clip_range(t: Axis, survivors: &[(f64, bool)], pct: &[f64]) -> Option<(f64, f
 /// bound is the smallest all-rows value it accepts, which is why pass A tracks
 /// the positive and absolute floors rather than only min/max.
 fn exact_range(t: Axis, c: &ColumnStats) -> Option<(f64, f64)> {
-    // Checked before the `RankPercentile` arm: a wholly non-finite column has
-    // no rank axis either, and handing one back would mark the slot plottable
-    // when there is nothing to plot.
+    // Before the `RankPercentile` arm: a wholly non-finite column has no rank
+    // axis either, and one would mark the slot plottable with nothing to plot.
     if !c.has_finite() {
         return None;
     }
@@ -738,11 +607,14 @@ fn exact_range(t: Axis, c: &ColumnStats) -> Option<(f64, f64)> {
         Axis::RankPercentile => return Some((0.0, 100.0)),
         Axis::Value(t) => t,
     };
+    // Every variant spelled out: a new restricted-domain transform falling into
+    // a catch-all would silently get linear bounds, the exact mistake `min_pos`
+    // and `min_abs` are tracked to prevent.
     let (x_lo, x_hi) = match t {
         XTransform::Log10 => (c.min_pos, c.hi),
         XTransform::Sqrt => (if c.n_zero > 0 { 0.0 } else { c.min_pos }, c.hi),
         XTransform::Square => (c.min_abs, c.lo.abs().max(c.hi.abs())),
-        _ => (c.lo, c.hi),
+        XTransform::Linear | XTransform::SignedLog1p | XTransform::Exp => (c.lo, c.hi),
     };
     // An infinite floor means the transform accepts nothing in this column.
     if !x_lo.is_finite() || !x_hi.is_finite() || x_lo > x_hi {
@@ -758,11 +630,10 @@ fn widen(a: f64, b: f64) -> (f64, f64) {
     if hi > lo { (lo, hi) } else { (lo, lo + 1.0) }
 }
 
-/// The `r_lo`-th and `r_hi`-th smallest `|v|` over an ascending slice.
-///
-/// One outward walk from the sign change: negatives run left in increasing
-/// magnitude, non-negatives run right, and merging the two enumerates `|v|` in
-/// ascending order in `O(r_hi)` without allocating or sorting again.
+/// The `r_lo`-th and `r_hi`-th smallest `|v|` over an ascending slice, by one
+/// outward walk from the sign change: negatives run left in increasing
+/// magnitude, non-negatives run right, so merging the two enumerates `|v|`
+/// ascending in `O(r_hi)` without allocating or sorting again.
 fn abs_order_stats(sorted: &[(f64, bool)], r_lo: usize, r_hi: usize) -> (f64, f64) {
     debug_assert!(r_lo <= r_hi && r_hi < sorted.len());
     let split = sorted.partition_point(|p| p.0 < 0.0);
@@ -792,182 +663,35 @@ fn abs_order_stats(sorted: &[(f64, bool)], r_lo: usize, r_hi: usize) -> (f64, f6
     (lo, hi)
 }
 
-fn build_titles(names: &[&str]) -> Vec<String> {
-    let mut out = Vec::with_capacity(names.len() * N_AXES);
-    for name in names {
-        for t in Axis::ALL {
-            out.push(format!("{name} [{}]", t.label()));
-        }
-    }
-    out
-}
-
-/// One diagnostics line per stored histogram, as a fraction of the sample.
+/// The one place a [`FeatureColumn`] turns into a number, run once per cell.
 ///
-/// Two different exclusions at two different steps, so they are worded as
-/// separate clauses rather than nested in one parenthetical: `dropped` counts
-/// values the transform refused (including non-finite ones), while `outside
-/// range` counts values that survived the transform and were then excluded at
-/// binning time. Neither is a subset of the other.
-///
-/// Kept short on purpose. The histogram panel is under half the terminal width,
-/// so anything longer is truncated by the border it is drawn on. Facts about
-/// the run as a whole — the row count, whether the histograms are sampled —
-/// belong to [`Dashboard::basis`], which is drawn once across the full width;
-/// the non-finite fraction is already the table's `NaN%` column.
-fn build_subtitles(slots: &[Slot], n_sampled: usize) -> Vec<String> {
-    let pct = |n: u32| {
-        if n_sampled == 0 {
-            0.0
-        } else {
-            100.0 * n as f64 / n_sampled as f64
-        }
-    };
-    slots
-        .iter()
-        .map(|s| {
-            if !s.plottable {
-                return "nothing this transform can plot".to_string();
-            }
-            format!(
-                "dropped {:.1}% by transform | {:.1}% outside range",
-                pct(s.dropped),
-                pct(s.n_out),
-            )
-        })
-        .collect()
-}
-
-fn build_overview_header(
-    n_targets: usize,
-    n_decoys: usize,
-    score_auc: f64,
-    shown: &[curves::ThresholdRow],
-) -> String {
-    let counts = shown
-        .iter()
-        .map(|r| {
-            format!(
-                "q<={:.0}%: {} (t{}/d{})",
-                r.q * 100.0,
-                r.total,
-                r.targets,
-                r.decoys
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("   ");
-    format!("{n_targets} targets   {n_decoys} decoys   AUC {score_auc:.4}\n{counts}")
-}
-
-fn build_fdr_rows(thresholds: &[curves::ThresholdRow]) -> Vec<[String; 4]> {
-    thresholds
-        .iter()
-        .map(|r| {
-            [
-                format!("{:.2}", r.q),
-                r.total.to_string(),
-                r.targets.to_string(),
-                r.decoys.to_string(),
-            ]
-        })
-        .collect()
-}
-
-/// What every panel on screen was computed over, for the frame's top border.
-fn build_basis(n_sampled: usize, n_rows: usize) -> String {
-    if n_sampled < n_rows {
-        format!(
-            "{} rows, histograms from a {} sample",
-            fmt_count(n_rows),
-            fmt_count(n_sampled)
-        )
-    } else {
-        format!("all {} rows", fmt_count(n_rows))
-    }
-}
-
-/// The feature table's cells, formatted once. Table rows borrow these `String`s
-/// so a frame allocates none.
-fn build_cells(
+/// The `Name` slot holds `NaN`: it is never read (the accessor short-circuits on
+/// the variant), and a uniform array beats an `Option` per cell.
+fn build_values(
     view: &RescoreView<'_>,
     stats: &[ColumnStats],
     auc: &[f64],
-) -> Vec<[String; N_FEATURE_COLUMNS]> {
+) -> Vec<[f64; N_FEATURE_COLUMNS]> {
     (0..view.n_features())
         .map(|j| {
-            FeatureColumn::ALL.map(|col| {
-                match column_value(col, &stats[j], auc[j], view.gain[j]) {
-                    Some(v) => fmt_stat(v),
-                    // The name column, the one that is not a number.
-                    None => view.feature_names[j].to_string(),
-                }
+            let c = &stats[j];
+            FeatureColumn::ALL.map(|col| match col {
+                FeatureColumn::Name => f64::NAN,
+                FeatureColumn::TargetMean => c.mean(true),
+                FeatureColumn::DecoyMean => c.mean(false),
+                FeatureColumn::Auc => auc[j],
+                FeatureColumn::CohensD => c.cohens_d(),
+                FeatureColumn::NanFrac => c.nan_frac(),
+                FeatureColumn::Gain => view.gain[j] as f64,
             })
         })
         .collect()
 }
 
-/// The one place a [`FeatureColumn`] turns into a number. `None` is the name
-/// column, which has no numeric value and sorts as text.
-fn column_value(col: FeatureColumn, c: &ColumnStats, auc: f64, gain: f32) -> Option<f64> {
-    Some(match col {
-        FeatureColumn::Name => return None,
-        FeatureColumn::TargetMean => c.mean(true),
-        FeatureColumn::DecoyMean => c.mean(false),
-        FeatureColumn::Auc => auc,
-        FeatureColumn::CohensD => c.cohens_d(),
-        FeatureColumn::NanFrac => c.nan_frac(),
-        FeatureColumn::Gain => gain as f64,
-    })
-}
-
-/// `{:.4}`, with `NaN` printed as `-` rather than the literal text `NaN`.
-fn fmt_stat(v: f64) -> String {
-    if v.is_nan() {
-        "-".to_string()
-    } else {
-        format!("{v:.4}")
-    }
-}
-
-fn fmt_count(n: usize) -> String {
-    match n {
-        0..=9_999 => n.to_string(),
-        10_000..=999_999 => format!("{:.0}k", n as f64 / 1e3),
-        _ => format!("{:.2}M", n as f64 / 1e6),
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    /// AUC read off a value-binned histogram — the shape that produced the
-    /// bug the fixtures below cover. Test-only, and deliberately not reachable
-    /// from anything that ships.
-    fn binned_auc(values: &[f64], is_target: &[bool]) -> f64 {
-        let (lo, hi) = values
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite())
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
-                (l.min(v), h.max(v))
-            });
-        let (mut t, mut d) = (vec![0.0f64; N_BINS], vec![0.0f64; N_BINS]);
-        for (i, &v) in values.iter().enumerate() {
-            if let Some(b) = stats::bin_index(v, lo, hi, hi - lo) {
-                let side = if is_target[i] { &mut t } else { &mut d };
-                side[b] += 1.0;
-            }
-        }
-        let (nt, nd) = (t.iter().sum::<f64>(), d.iter().sum::<f64>());
-        let (mut below, mut acc) = (0.0f64, 0.0f64);
-        for i in 0..N_BINS {
-            acc += t[i] * (below + 0.5 * d[i]);
-            below += d[i];
-        }
-        acc / (nt * nd)
-    }
+    use crate::view::ThresholdRow;
 
     /// A synthetic run. THE definition of what test rows look like — the
     /// alternating labels, the perfectly-separating score and the
@@ -980,11 +704,11 @@ pub(crate) mod tests {
         score: Vec<f32>,
         qvalue: Vec<f32>,
         gain: Vec<f32>,
-        thresholds: Vec<curves::ThresholdRow>,
+        thresholds: Vec<ThresholdRow>,
     }
 
     impl Fixture {
-        pub(crate) fn view(&self) -> RescoreView<'_> {
+        fn view(&self) -> RescoreView<'_> {
             RescoreView {
                 feature_names: &self.names,
                 features: &self.matrix,
@@ -996,41 +720,40 @@ pub(crate) mod tests {
             }
         }
 
+        fn n_rows(&self) -> usize {
+            self.is_target.len()
+        }
+
         pub(crate) fn build(&self) -> Dashboard {
-            Dashboard::build(&self.view(), DEFAULT_SAMPLE).expect("well-formed fixture")
+            self.build_with(DEFAULT_SAMPLE)
+        }
+
+        /// Built from a `sample`-row draw rather than every row, which is what
+        /// makes the histograms sampled instead of exact.
+        pub(crate) fn build_with(&self, sample: usize) -> Dashboard {
+            Dashboard::build(&self.view(), sample).expect("well-formed fixture")
         }
     }
 
     /// A named column, generated from `(row index, is_target)`.
-    type Column<'a> = (&'a str, &'a dyn Fn(usize, bool) -> f64);
+    pub(crate) type Column<'a> = (&'a str, &'a dyn Fn(usize, bool) -> f64);
 
     /// `n_rows` rows of `columns.len()` features.
-    fn fixture(n_rows: usize, columns: &[Column<'_>]) -> Fixture {
-        let is_target: Vec<bool> = (0..n_rows).map(|i| i % 2 == 0).collect();
-        let mut matrix = Vec::with_capacity(n_rows * columns.len());
-        for (i, &is_t) in is_target.iter().enumerate() {
-            for (_, f) in columns {
-                matrix.push(f(i, is_t));
-            }
-        }
-        fixture_from_matrix(
-            columns.iter().map(|(n, _)| *n),
-            matrix,
-            is_target,
-            columns.len(),
-        )
+    pub(crate) fn fixture(n_rows: usize, columns: &[Column<'_>]) -> Fixture {
+        let generated: Vec<Vec<f64>> = columns
+            .iter()
+            .map(|(_, f)| (0..n_rows).map(|i| f(i, i % 2 == 0)).collect())
+            .collect();
+        let names: Vec<&str> = columns.iter().map(|(n, _)| *n).collect();
+        let refs: Vec<&[f64]> = generated.iter().map(Vec::as_slice).collect();
+        fixture_from_columns(&names, &refs)
     }
 
     /// One named column with explicit labels, for the cases that need a
     /// specific target/decoy split rather than the alternating default.
     pub(crate) fn fixture_one_column(name: &str, values: &[f64], is_target: &[bool]) -> Fixture {
         assert_eq!(values.len(), is_target.len());
-        fixture_from_matrix(
-            std::iter::once(name),
-            values.to_vec(),
-            is_target.to_vec(),
-            1,
-        )
+        fixture_from_rows(&[name], values.to_vec(), is_target.to_vec())
     }
 
     /// The same rows, from columns given literally rather than generated.
@@ -1044,15 +767,10 @@ pub(crate) mod tests {
             }
         }
         let is_target = (0..n_rows).map(|i| i % 2 == 0).collect();
-        fixture_from_matrix(names.iter().copied(), matrix, is_target, columns.len())
+        fixture_from_rows(names, matrix, is_target)
     }
 
-    fn fixture_from_matrix<'a>(
-        names: impl Iterator<Item = &'a str>,
-        matrix: Vec<f64>,
-        is_target: Vec<bool>,
-        n_features: usize,
-    ) -> Fixture {
+    fn fixture_from_rows(names: &[&str], matrix: Vec<f64>, is_target: Vec<bool>) -> Fixture {
         let qvalue: Vec<f32> = is_target
             .iter()
             .map(|&t| if t { 0.001 } else { 0.9 })
@@ -1068,16 +786,11 @@ pub(crate) mod tests {
                         (0, 0),
                         |(t, d), (_, &is_t)| if is_t { (t + 1, d) } else { (t, d + 1) },
                     );
-                curves::ThresholdRow {
-                    q,
-                    total: targets + decoys,
-                    targets,
-                    decoys,
-                }
+                ThresholdRow { q, targets, decoys }
             })
             .collect();
         Fixture {
-            names: names.map(Arc::from).collect(),
+            names: names.iter().map(|n| Arc::from(*n)).collect(),
             matrix,
             score: is_target
                 .iter()
@@ -1089,7 +802,7 @@ pub(crate) mod tests {
             thresholds,
             // Distinct per column, so a test sorting on gain can tell which
             // feature it landed on.
-            gain: (0..n_features).map(|j| j as f32).collect(),
+            gain: (0..names.len()).map(|j| j as f32).collect(),
         }
     }
 
@@ -1099,12 +812,11 @@ pub(crate) mod tests {
 
     /// Largest gap between two histograms' CDFs, bin by bin.
     ///
-    /// KS and not bin-by-bin total variation, which is the wrong instrument
-    /// here: a column taking few distinct values plots as a handful of sharp
-    /// spikes, and a hair's difference in the axis bounds slides whole spikes
-    /// into neighbouring bins. TV scores that as though all the mass moved,
-    /// while the two plots are indistinguishable on screen. KS compares
-    /// cumulative mass, so a sub-bin shift costs a sub-bin amount.
+    /// Not bin-by-bin total variation: a discrete column plots as sharp spikes,
+    /// and a hair's difference in the axis bounds slides whole spikes into
+    /// neighbouring bins. TV scores that as though all the mass moved while the
+    /// plots are indistinguishable on screen; KS charges a sub-bin shift a
+    /// sub-bin amount.
     fn ks_distance(a: &[u32], b: &[u32], na: f64, nb: f64) -> f64 {
         let (mut ca, mut cb, mut worst) = (0.0f64, 0.0f64, 0.0f64);
         for (&x, &y) in a.iter().zip(b) {
@@ -1120,11 +832,10 @@ pub(crate) mod tests {
     /// a KS distance of 0.02 of the whole-data one and every feature AUC
     /// within 0.01.
     ///
-    /// `#[ignore]`d on cost alone: two million-row builds, 3.7 s in debug
-    /// against 0.2 s for the rest of the suite (0.2 s in release). Run with
-    /// `cargo test -p rescore_dash --release -- --ignored`.
+    /// Two million-row builds, so it is ~3 s where the rest of the suite is
+    /// 0.2 s. Not `#[ignore]`d for that: nothing in CI or the Taskfile passes
+    /// `--ignored`, so ignoring it would mean the claim above is never checked.
     #[test]
-    #[ignore = "two million-row builds; run explicitly with --ignored"]
     fn sample_size_holds_its_accuracy_claim() {
         const N_ROWS: usize = 1_000_000;
         let mut rng = Lcg(0xDEAD_BEEF);
@@ -1178,7 +889,8 @@ pub(crate) mod tests {
         let (mut worst_ks, mut worst_auc) = (0.0f64, 0.0f64);
         let (mut ks_at, mut auc_at) = (String::new(), String::new());
         for j in 0..columns.len() {
-            let (a, b) = (sampled.auc(j), exact.auc(j));
+            let auc = |d: &Dashboard| d.feature_value(j, FeatureColumn::Auc).unwrap();
+            let (a, b) = (auc(&sampled), auc(&exact));
             if a.is_finite() && b.is_finite() && (a - b).abs() > worst_auc {
                 worst_auc = (a - b).abs();
                 auc_at = format!("f{j}");
@@ -1268,6 +980,9 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every column of the parallel sweep, including the score, which rides
+    /// along as one more column and must agree with a sweep of the score vector
+    /// on its own.
     #[test]
     fn pass_a_matches_a_naive_per_column_sweep() {
         let f = fixture(
@@ -1280,40 +995,22 @@ pub(crate) mod tests {
         );
         let view = f.view();
         let got = pass_a(&view);
-        for (j, g) in got.iter().enumerate().take(3) {
+        assert_eq!(got.len(), view.n_features() + 1, "features plus the score");
+        for (j, g) in got.iter().enumerate() {
             let mut want = ColumnStats::IDENTITY;
             for i in 0..view.n_rows() {
-                want.push(view.row(i)[j], view.is_target[i]);
+                let v = match view.n_features() == j {
+                    true => view.score[i] as f64,
+                    false => view.row(i)[j],
+                };
+                want.push(v, view.is_target[i]);
             }
             assert_eq!(g.n_target, want.n_target, "column {j}");
             assert_eq!(g.n_nan, want.n_nan, "column {j}");
-            assert!(
-                (g.target_mean - want.target_mean).abs() < 1e-9,
-                "column {j}"
-            );
-            assert!(
-                (g.target_var() - want.target_var()).abs() < 1e-9,
-                "column {j}"
-            );
+            assert!((g.mean(true) - want.mean(true)).abs() < 1e-9, "column {j}");
+            assert!((g.var(true) - want.var(true)).abs() < 1e-9, "column {j}");
             assert_eq!((g.lo, g.hi), (want.lo, want.hi), "column {j}");
         }
-    }
-
-    /// The score rides along as one more column of the same sweep, so it must
-    /// agree with a sweep of the score vector on its own.
-    #[test]
-    fn pass_a_folds_the_score_in_as_the_last_column() {
-        let f = fixture(200, &[("a", &|i, _| i as f64)]);
-        let view = f.view();
-        let got = pass_a(&view);
-        let mut want = ColumnStats::IDENTITY;
-        for i in 0..view.n_rows() {
-            want.push(view.score[i] as f64, view.is_target[i]);
-        }
-        let s = &got[view.n_features()];
-        assert_eq!(s.n_target, want.n_target);
-        assert!((s.target_mean - want.target_mean).abs() < 1e-9);
-        assert_eq!((s.lo, s.hi), (want.lo, want.hi));
     }
 
     /// A sample at least as large as the run takes every row in order, which is
@@ -1330,36 +1027,16 @@ pub(crate) mod tests {
     }
 
     /// The pipeline hands the dashboard rows sorted descending by score, so a
-    /// contiguous sample would be all high-scoring targets. Random indices must
-    /// reach across the whole run.
+    /// prefix or a stride would be all high-scoring targets. Random indices
+    /// must reach across the whole run and must not arrive in order.
     #[test]
-    fn a_smaller_sample_draws_from_the_whole_run_not_a_prefix() {
+    fn a_smaller_sample_is_a_random_draw_across_the_whole_run() {
         let f = fixture(10_000, &[("a", &|i, _| i as f64)]);
         let view = f.view();
         let (matrix, labels) = gather_sample(&view, 500);
         assert_eq!(labels.len(), 500);
-        let col: Vec<f64> = matrix.iter().step_by(2).copied().collect();
-        let max = col.iter().cloned().fold(f64::MIN, f64::max);
-        assert!(
-            max > 9_000.0,
-            "sample never reached the tail of the run, max was {max}"
-        );
-        assert!(
-            col.iter().any(|&v| v < 1_000.0),
-            "sample never reached the head of the run"
-        );
-    }
 
-    #[test]
-    fn the_sample_is_drawn_by_random_index_not_off_the_front() {
-        let f = fixture(5_000, &[("a", &|i, _| i as f64)]);
-        let view = f.view();
-        let (matrix, labels) = gather_sample(&view, 300);
-        assert_eq!(labels.len(), 300);
-
-        // The column is `i`, so a sampled value IS its row index. The rows
-        // arrive sorted by score, so a contiguous or strided draw would be all
-        // high-scoring targets — the reason this is by random index at all.
+        // The column is `i`, so a sampled value IS its row index.
         let rows: Vec<f64> = matrix
             .iter()
             .step_by(view.n_features() + 1)
@@ -1367,12 +1044,15 @@ pub(crate) mod tests {
             .collect();
         let max = rows.iter().copied().fold(0.0f64, f64::max);
         assert!(
-            max > 4_000.0,
+            max > 9_000.0,
             "sample never reached the tail of the run; largest row index {max}"
         );
-        let ascending = rows.windows(2).all(|w| w[0] <= w[1]);
         assert!(
-            !ascending,
+            rows.iter().any(|&v| v < 1_000.0),
+            "sample never reached the head of the run"
+        );
+        assert!(
+            !rows.windows(2).all(|w| w[0] <= w[1]),
             "sample is a prefix or a stride, not a random draw"
         );
     }
@@ -1397,16 +1077,19 @@ pub(crate) mod tests {
 
         let dash = fixture_one_column("outlier_feature", &values, &is_target).build();
 
+        let auc = dash.feature_value(0, FeatureColumn::Auc).unwrap();
         assert!(
-            dash.auc(0) > 0.98,
-            "one outlier must not collapse the AUC, got {}",
-            dash.auc(0)
+            auc > 0.98,
+            "one outlier must not collapse the AUC, got {auc}"
         );
-        // And the fixture really does still defeat the old value-binned path,
-        // so this keeps covering the bug rather than becoming a tautology.
-        assert!(
-            binned_auc(&values, &is_target) < 0.6,
-            "fixture no longer reproduces the binning failure"
+        // And the fixture still is what defeated value binning: on the
+        // unclipped axis all 200 real rows sit in bin 0, where ties count as
+        // half and separation is invisible.
+        let h = dash.hist(0, Axis::Value(XTransform::Linear), false);
+        assert_eq!(
+            h.target[0] + h.decoy[0],
+            200,
+            "fixture no longer crushes the bulk into one bin"
         );
     }
 
@@ -1483,12 +1166,11 @@ pub(crate) mod tests {
             assert_eq!(hi, w, "rank {r}");
         }
         assert_eq!(abs_order_stats(&sorted, 1, 4), (0.5, 8.0));
-    }
 
-    #[test]
-    fn abs_order_stats_handles_an_all_negative_slice() {
-        let sorted: Vec<(f64, bool)> = [-9.0, -4.0, -1.0].into_iter().map(|v| (v, true)).collect();
-        assert_eq!(abs_order_stats(&sorted, 0, 2), (1.0, 9.0));
+        // No sign change to walk out from: the whole slice runs leftward.
+        let negatives: Vec<(f64, bool)> =
+            [-9.0, -4.0, -1.0].into_iter().map(|v| (v, true)).collect();
+        assert_eq!(abs_order_stats(&negatives, 0, 2), (1.0, 9.0));
     }
 
     /// Every stored histogram must account for the sample exactly: binned plus
@@ -1509,7 +1191,7 @@ pub(crate) mod tests {
             ],
         );
         let dash = f.build();
-        let m = f.view().n_rows().min(DEFAULT_SAMPLE);
+        let m = f.n_rows().min(DEFAULT_SAMPLE);
         for column in 0..=dash.n_features() {
             for t in Axis::ALL {
                 for clip in [false, true] {
@@ -1561,7 +1243,7 @@ pub(crate) mod tests {
                 ("huge", &|i, _| i as f64 * 1e12),
             ],
         );
-        let dash = Dashboard::build(&f.view(), 500).expect("well formed");
+        let dash = f.build_with(500);
         for column in 0..=dash.n_features() {
             for t in Axis::ALL {
                 let slot = dash.slot_index(column, t, false);
@@ -1595,7 +1277,7 @@ pub(crate) mod tests {
                 );
             }
         }
-        assert!(dash.auc(1).is_nan());
+        assert!(dash.feature_value(1, FeatureColumn::Auc).unwrap().is_nan());
         // The neighbouring real column is unaffected.
         assert!(total(&dash.hist(0, Axis::Value(XTransform::Linear), true)) > 0);
     }
@@ -1633,81 +1315,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// The score's AUC is the one number on screen that is exact over all rows;
+    /// the header is where it is shown, so that is where it is checked.
     #[test]
     fn the_score_auc_is_exact_and_the_score_gets_its_own_histograms() {
         // The fixture's score separates the classes perfectly, so the exact
         // AUC is 1 by definition. A sampled AUC could only reach it by luck.
         let f = fixture(400, &[("a", &|i, _| i as f64)]);
         let dash = f.build();
-        assert_eq!(
-            dash.auc(dash.score_column()),
-            1.0,
-            "the score AUC is not sampled"
+        assert!(
+            dash.overview_header().contains("AUC 1.0000"),
+            "{}",
+            dash.overview_header()
         );
-        let tiny = Dashboard::build(&f.view(), 20).expect("well-formed");
-        assert_eq!(
-            tiny.auc(tiny.score_column()),
-            1.0,
-            "a small sample must not reach the score's AUC"
+        assert!(
+            f.build_with(20).overview_header().contains("AUC 1.0000"),
+            "a 20-row sample could only reach 1.0 by luck; it is not sampled"
         );
         assert!(total(&dash.hist(dash.score_column(), Axis::Value(XTransform::Linear), true)) > 0);
         assert!(
             dash.title(dash.score_column(), Axis::Value(XTransform::Linear))
                 .contains("discriminant_score")
         );
-    }
-
-    #[test]
-    fn table_cells_are_formatted_once_per_feature() {
-        let f = fixture(
-            80,
-            &[("alpha", &|i, _| i as f64), ("beta", &|_, _| f64::NAN)],
-        );
-        let dash = f.build();
-        assert_eq!(dash.cells.len(), 2);
-        assert_eq!(dash.cells[0][0], "alpha");
-        assert_eq!(dash.cells[1][3], "-", "a NaN AUC prints as a dash");
-        assert_eq!(dash.cells[1][5], "1.0000", "the NaN fraction is 1");
-    }
-
-    /// A reader has to be able to tell an all-rows histogram from a sampled
-    /// one. It is a fact about the run, so it lives on the dashboard rather
-    /// than being repeated in every panel's subtitle.
-    #[test]
-    fn the_basis_says_whether_the_histograms_were_sampled() {
-        let f = fixture(80, &[("a", &|i, _| i as f64)]);
-        let dash = f.build();
-        assert_eq!(dash.basis(), "all 80 rows");
-
-        let big = fixture(2_000, &[("a", &|i, _| i as f64)]);
-        let dash = Dashboard::build(&big.view(), 500).expect("well formed");
-        assert_eq!(dash.basis(), "2000 rows, histograms from a 500 sample");
-    }
-
-    /// The subtitle has to fit the histogram panel, which is under half of a
-    /// terminal's width. Anything longer is silently cut off by the border it
-    /// is drawn on, which is how the run-level facts ended up on the banner.
-    #[test]
-    fn subtitles_fit_a_narrow_panel() {
-        let f = fixture(200, &[("a", &|i, _| i as f64 - 100.0)]);
-        let dash = f.build();
-        for t in Axis::ALL {
-            for clip in [false, true] {
-                let s = dash.subtitle(0, t, clip);
-                assert!(s.len() <= 60, "{t:?} clip={clip}: {} chars: {s}", s.len());
-            }
-        }
-    }
-
-    /// `log10` rejects the non-positive half, and the subtitle is the only
-    /// place that says so — a histogram that silently shrank would read as
-    /// "those rows do not exist".
-    #[test]
-    fn the_subtitle_reports_what_a_transform_refused() {
-        let f = fixture(100, &[("half_negative", &|i, _| i as f64 - 50.0)]);
-        let dash = f.build();
-        let sub = dash.subtitle(0, Axis::Value(XTransform::Log10), true);
-        assert!(sub.contains("dropped 51.0% by transform"), "{sub}");
     }
 
     #[test]
@@ -1726,13 +1355,5 @@ pub(crate) mod tests {
             Dashboard::build(&view, DEFAULT_SAMPLE),
             Err(ViewError::RowLen { .. })
         ));
-    }
-
-    #[test]
-    fn fmt_count_scales_its_unit() {
-        assert_eq!(fmt_count(42), "42");
-        assert_eq!(fmt_count(9_999), "9999");
-        assert_eq!(fmt_count(250_000), "250k");
-        assert_eq!(fmt_count(2_013_441), "2.01M");
     }
 }

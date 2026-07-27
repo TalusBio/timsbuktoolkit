@@ -47,8 +47,6 @@ sh*/
 # Working notes and design docs
 dev/
 debug_*.md
-baseline.txt
-local.txt
 
 docs/superpowers/
 

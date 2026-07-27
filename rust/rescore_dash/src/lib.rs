@@ -35,6 +35,7 @@
 mod app;
 mod curves;
 mod cycle;
+mod labels;
 mod precompute;
 mod stats;
 mod transform;
@@ -45,12 +46,12 @@ pub use app::{
     available,
     run,
 };
-pub use curves::ThresholdRow;
 pub use precompute::{
     DEFAULT_SAMPLE,
     Dashboard,
 };
 pub use view::{
     RescoreView,
+    ThresholdRow,
     ViewError,
 };

@@ -4,8 +4,24 @@
 //! [`RescoreView`] can drive the TUI, which is what keeps a future standalone
 //! viewer a new constructor rather than a new dashboard.
 
-use crate::curves::ThresholdRow;
 use std::sync::Arc;
+
+/// How many rows pass at one q-value cutoff.
+///
+/// An unlabeled row is not counted at all, rather than counted into a total
+/// alone, which is why there is no separate total to pass in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThresholdRow {
+    pub q: f32,
+    pub targets: usize,
+    pub decoys: usize,
+}
+
+impl ThresholdRow {
+    pub(crate) fn total(&self) -> usize {
+        self.targets + self.decoys
+    }
+}
 
 /// One rescoring run's rows: the model's feature matrix plus labels, scores,
 /// q-values and per-feature gain.
@@ -24,9 +40,9 @@ pub struct RescoreView<'a> {
     pub qvalue: &'a [f32],
     /// Rows passing at each q-value cutoff, tightest first.
     ///
-    /// Passed in rather than derived here. The caller computes this for its
-    /// own run log, and a second implementation in this crate is a second FDR
-    /// count in the same binary, kept in agreement by nothing but prose.
+    /// Passed in rather than counted here: these are the numbers the caller
+    /// already put in its run log, and a panel that disagreed with the log
+    /// about the headline ID count would be worse than no panel.
     pub thresholds: &'a [ThresholdRow],
     /// Fold-averaged GBM gain, aligned to `feature_names`.
     ///

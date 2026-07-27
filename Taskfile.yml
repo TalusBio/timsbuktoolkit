@@ -28,6 +28,9 @@ tasks:
   clippy:
     cmds:
       - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
+      # Not a default member, so the line above never reaches it. Same reason
+      # `test` has its own `-p rescore_dash`.
+      - cargo clippy -p rescore_dash --all-targets -- -D warnings
 
   todos:
     cmds:

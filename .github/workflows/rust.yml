@@ -51,5 +51,5 @@ jobs:
       # The dashboard is opt-in, so its call sites in `timsseek_cli` compile
       # under no other leg of this matrix. Without this they rot silently the
       # next time `FinalResult` or `RescoreFeatureStats` changes.
-      - name: Build tests (dashboard feature)
-        run: cargo test --verbose -p timsseek_cli --features dashboard --all-targets --no-run
+      - name: Type-check (dashboard feature)
+        run: cargo check -p timsseek_cli --features dashboard --all-targets
