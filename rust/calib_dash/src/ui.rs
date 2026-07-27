@@ -279,19 +279,6 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
 /// on any key (`App::handle_key`'s first check), so nothing here needs to
 /// render a "press any key" footer.
 fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
-    let w = 52.min(area.width);
-    let h = 16.min(area.height);
-    if w == 0 || h == 0 {
-        return;
-    }
-    let popup = Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    };
-    frame.render_widget(Clear, popup);
-
     let heading = |s: &'static str| Line::styled(s, Style::default().add_modifier(Modifier::BOLD));
     let mut lines = vec![heading("Every tab")];
     lines.extend(GLOBAL_KEYS.iter().map(Binding::help_line));
@@ -302,6 +289,22 @@ fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(heading("Convergence / Tolerances"));
     lines.extend(FIT_KEYS[..SHARED_KEYS].iter().map(Binding::help_line));
+
+    // Sized from the rows themselves, plus the two border rows: a literal
+    // height silently clips whichever group is last whenever a binding is
+    // added.
+    let w = 52.min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let popup = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Keys ")),
         popup,
@@ -1901,6 +1904,40 @@ mod tests {
         let mut app = fixture_app_with_metrics();
         goto_tab(&mut app, Tab::Convergence);
         insta::assert_snapshot!(render_snapshot(&mut app, 100, 30));
+    }
+
+    /// The `?` overlay is the only place a key's spelled-out meaning appears,
+    /// so a binding dropped from the table is invisible everywhere else. It
+    /// also draws over the tab underneath via `Clear`, which this pins: the
+    /// Fit tab's heatmap must not bleed through the overlay's own rows.
+    #[test]
+    fn the_keys_overlay_lists_every_binding_over_the_tab_beneath_it() {
+        let mut app = fixture_app_with_ridge();
+        press(&mut app, '?');
+        insta::assert_snapshot!(render_snapshot(&mut app, 100, 30));
+    }
+
+    /// The overlay is sized from its own rows. A literal height silently
+    /// clips whichever group is last, which is how the two bindings under
+    /// "Convergence / Tolerances" once rendered as a heading over nothing.
+    #[test]
+    fn the_keys_overlay_shows_every_binding_including_the_last_group() {
+        let mut app = fixture_app_with_ridge();
+        press(&mut app, '?');
+        let out = render(&mut app, 100, 30);
+        for b in GLOBAL_KEYS
+            .iter()
+            .chain(FIT_KEYS)
+            .chain(std::iter::once(&KEYS_OVERLAY_KEY))
+        {
+            assert!(
+                out.contains(b.help),
+                "the `?` overlay dropped {:?} ({:?}); it is the only place a key's \
+                 meaning is spelled out:\n{out}",
+                b.keys,
+                b.help,
+            );
+        }
     }
 
     #[test]

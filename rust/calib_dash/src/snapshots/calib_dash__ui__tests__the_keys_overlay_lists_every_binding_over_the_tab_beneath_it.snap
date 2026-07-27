@@ -1,0 +1,36 @@
+---
+source: rust/calib_dash/src/ui.rs
+expression: "render_snapshot(&mut app, 100, 30)"
+---
+ Fit │ Convergence │ Tolerances                                                                     
+    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
+    │ Showing: none — density only                                                                 │
+    │                                                                                              │
+    │                                                                                        ▄▄▄▄▄▄│
+    │                                                                                        ░░░░░░│
+  40┤                   ┌ Keys ────────────────────────────────────────────┐                       │
+    │                   │Every tab                                         │     ▄▄▄▄▄▄▄           │
+    │                   │  h l        switch tab                           │     ███████           │
+    │                   │  q          detach                               │                       │
+    │                   │  ^C         abort                                │▄▄▄▄▄▄                 │
+  30┤                   │  ?          this screen                          │██████                 │
+    │                   │                                                  │                       │
+    │                   │Fit tab                                           │                       │
+    │                   │  n          next batch                           │                       │
+    │                   │  r          run to end                           │           ░░░░░░░     │
+  20┤                   │  < >        scrub retained frames                │           ▀▀▀▀▀▀▀     │
+    │                   │  m M        cycle mark layer                     │                       │
+    │                   │  d          toggle DP pane                       │                       │
+    │                   │                                                  │                       │
+    │                   │Convergence / Tolerances                          │                       │
+  10┤                   │  n          next batch                           │                       │
+    │                 ▄▄│  r          run to end                           │                       │
+    │                 ▒▒└──────────────────────────────────────────────────┘                       │
+    │           ▒▒▒▒▒▒▒                                                                            │
+    │     ▄▄▄▄▄▄▒▀▀▀▀▀▀                                                                            │
+   0┤     ▒▒▒▒▒▒▒                                                                                  │
+    └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
+     0                            5                           10                            15      
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys 
+--- REVERSED cells (row: column spans) ---
+  0: 1-3
