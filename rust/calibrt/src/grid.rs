@@ -199,8 +199,8 @@ impl Grid {
 
     /// Reset the grid with new dimensions and ranges. Reallocates only if the
     /// bin count changes; otherwise reuses the node buffer and recomputes cell
-    /// centers from the new ranges. Batch re-fits change ranges constantly and
-    /// never change `bins`, so this is the hot path.
+    /// centers from the new ranges. Re-fitting at a fixed `bins` over moving
+    /// ranges therefore keeps its node buffer for the life of the grid.
     pub fn reconfigure(
         &mut self,
         bins: usize,

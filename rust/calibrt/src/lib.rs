@@ -251,7 +251,9 @@ pub trait FitObserver {
 }
 
 /// The no-op observer. Because `fit_with` is generic, this monomorphizes away
-/// entirely — an unobserved fit pays nothing, not even a branch in the DP loop.
+/// entirely — the callback itself costs an unobserved fit nothing. The
+/// `ObserveOpts` flags are separate: they are plain runtime `bool`s and are
+/// still tested at their call sites either way (see `ObserveOpts::dp_nodes`).
 impl FitObserver for () {
     fn on_event(&mut self, _: FitEvent<'_>) {}
 }
@@ -259,7 +261,13 @@ impl FitObserver for () {
 #[derive(Debug, Clone, Copy)]
 pub struct ObserveOpts {
     /// Emit `DpNode` from inside the `O(n * lookback)` loop. Off by default:
-    /// it is the one callback in a hot path.
+    /// it is the one callback in a hot path. A runtime flag, so the DP still
+    /// tests it when unset, at three sites: twice around the inner loop and
+    /// once per accepted candidate edge. None of those tests guard the
+    /// distance and edge-weight arithmetic, and all of them predict perfectly,
+    /// so an unset `dp_nodes` costs a negligible amount rather than nothing. A
+    /// const generic would erase the tests at the price of monomorphizing the
+    /// entire DP twice, which is not worth it for a predicted branch.
     pub dp_nodes: bool,
 }
 
@@ -447,10 +455,10 @@ impl CalibrationState {
     /// Re-point `self` at a new geometry, reusing the grid's node buffer when
     /// `bins` is unchanged (see [`grid::Grid::reconfigure`]) and clearing the
     /// previous fit's `curve`/`path_indices`/`stale` the same way `reset`
-    /// does. A caller that re-fits every batch against that batch's own
-    /// point-derived ranges (constant `bins`, ever-changing `x_range`/
-    /// `y_range`) uses this instead of `reset` so the hot path never
-    /// reallocates.
+    /// does. Use it in place of `reset` when re-fitting at a constant `bins`
+    /// against fresh `x_range`/`y_range` — the point-derived ranges of a new
+    /// batch, say — which is the one way to move the geometry without
+    /// discarding the allocations.
     pub fn reconfigure(
         &mut self,
         bins: usize,
@@ -1101,8 +1109,8 @@ mod calibration_state_tests {
             s.dp_max_weights_cap(),
         );
 
-        // Same bins, a completely different (shifted, wider) range — the hot
-        // path a per-batch re-fit exercises every call.
+        // Same bins, a completely different (shifted, wider) range — the case
+        // `reconfigure` exists to keep allocation-free.
         s.reconfigure(10, (100.0, 200.0), (100.0, 200.0)).unwrap();
         let pts2: Vec<_> = (0..10)
             .map(|i| {
