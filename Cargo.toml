@@ -32,8 +32,7 @@ default-members = [
     "rust/apex_sim",
     "rust/speclib_build_cli",
     "rust/tims_stage",
-    "rust/timsseek_macros",
-    "rust/rescore_dash"
+    "rust/timsseek_macros"
 ]
 
 [workspace.package]

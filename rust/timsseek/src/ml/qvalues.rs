@@ -83,9 +83,7 @@ pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     scores: &[T],
     thresholds: &[f32],
 ) -> Vec<(f32, usize, usize, usize)> {
-    // One pass for all thresholds. Three filter-counts per threshold walked
-    // the whole slice 3N times for N cutoffs and re-derived `n_below` from a
-    // third scan instead of the two class counts.
+    // One pass for all thresholds.
     let mut counts = vec![(0usize, 0usize); thresholds.len()];
     for s in scores {
         let q = s.get_qval();
@@ -665,7 +663,7 @@ fn push_nonlinear_row(
 
 /// The LINEAR-lane matrix for `data` in its CURRENT order (call AFTER any
 /// shuffle, so row `i` aligns with `data[i]`). `LINEAR_NCOLS` wide.
-fn build_linear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
+fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
     for r in data {
         let (s, meta) = (r.scoring(), r.result_meta());
@@ -676,7 +674,7 @@ fn build_linear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
 
 /// The NONLINEAR-lane matrix for `data`, `NONLINEAR_NCOLS` wide (see
 /// [`build_linear_matrix`] for the ordering contract).
-fn build_nonlinear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
+fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
     for r in data {
         let (s, meta) = (r.scoring(), r.result_meta());
@@ -691,8 +689,7 @@ fn build_nonlinear_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
 /// ONE pass over `data` with ONE `Derived::compute` per row: the two lanes are
 /// adjacent within a row, so there is nothing to gain from walking twice.
 ///
-/// Generic over [`FeatureRow`] so the matrix trained on `CompetedCandidate`s
-/// and the one the dashboard displays for `FinalResult`s are the same code.
+/// Generic over [`FeatureRow`]: both sides of rescoring go through it.
 fn build_all_matrix<R: FeatureRow>(data: &[R]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
     for r in data {

@@ -4,16 +4,15 @@
 //! [`RescoreView`] can drive the TUI, which is what keeps a future standalone
 //! viewer a new constructor rather than a new dashboard.
 
+use crate::curves::ThresholdRow;
 use std::sync::Arc;
 
 /// One rescoring run's rows: the model's feature matrix plus labels, scores,
 /// q-values and per-feature gain.
 ///
-/// A pure input struct — six borrowed slices, no owned state and no methods
-/// beyond validation. The caller owns everything (the matrix alone can be
-/// gigabytes) and lends it for the duration of [`crate::precompute::Dashboard`]
-/// construction only. Once the dashboard is built the view is dead, and the
-/// caller is free to drop the matrix before the TUI opens.
+/// Borrowed slices and no owned state: the caller keeps the data and lends it
+/// for the duration of [`crate::precompute::Dashboard`] construction. After
+/// that the view is dead and the matrix can go.
 pub struct RescoreView<'a> {
     /// ALL-lane feature names, in model column order.
     pub feature_names: &'a [Arc<str>],
@@ -23,6 +22,12 @@ pub struct RescoreView<'a> {
     /// `discriminant_score`, row-aligned.
     pub score: &'a [f32],
     pub qvalue: &'a [f32],
+    /// Rows passing at each q-value cutoff, tightest first.
+    ///
+    /// Passed in rather than derived here. The caller computes this for its
+    /// own run log, and a second implementation in this crate is a second FDR
+    /// count in the same binary, kept in agreement by nothing but prose.
+    pub thresholds: &'a [ThresholdRow],
     /// Fold-averaged GBM gain, aligned to `feature_names`.
     ///
     /// Averaged by the caller: the dashboard wants one number per feature, and
@@ -136,6 +141,7 @@ mod tests {
             is_target: &[true, false, true],
             score: &[0.0; 3],
             qvalue: &[1.0; 3],
+            thresholds: &[],
             gain: &[0.0; 2],
         };
         assert_eq!(view.n_rows(), 3);
@@ -154,6 +160,7 @@ mod tests {
             is_target: &[true, false],
             score: &[0.0; 2],
             qvalue: &[1.0; 2],
+            thresholds: &[],
             gain: &[0.0; 2],
         };
         assert!(matches!(view.validate(), Err(ViewError::MatrixLen { .. })));
@@ -168,6 +175,7 @@ mod tests {
             is_target: &[true, false],
             score: &[0.0; 1],
             qvalue: &[1.0; 2],
+            thresholds: &[],
             gain: &[0.0; 2],
         };
         assert!(matches!(view.validate(), Err(ViewError::RowLen { .. })));
@@ -185,6 +193,7 @@ mod tests {
             is_target: &[true, false],
             score: &[0.0; 2],
             qvalue: &[1.0; 2],
+            thresholds: &[],
             gain: &[0.0; 1],
         };
         assert!(matches!(view.validate(), Err(ViewError::GainLen { .. })));
@@ -198,6 +207,7 @@ mod tests {
             is_target: &[],
             score: &[],
             qvalue: &[],
+            thresholds: &[],
             gain: &[],
         };
         assert!(matches!(view.validate(), Err(ViewError::Empty)));

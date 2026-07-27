@@ -125,13 +125,13 @@ mod dashboard {
     /// Sweep `data` into a `Dashboard`, or `None` if the dashboard is off or
     /// the view is rejected.
     ///
-    /// The feature matrix is roughly 1 GB at ~1e6 rows x 131 features. It is
-    /// built, swept and dropped inside this function, so nothing matrix-sized
-    /// survives into the arbitrarily long time the TUI sits open. Both gates
-    /// are checked before any of it, so a piped run pays nothing.
+    /// The ~1 GB feature matrix is built and dropped inside this function, so
+    /// nothing matrix-sized outlives it. Both gates are checked first, so a
+    /// piped run pays nothing.
     pub fn build(
         data: &[FinalResult],
         feature_stats: &RescoreFeatureStats,
+        qval_report: &[(f32, usize, usize, usize)],
     ) -> Option<rescore_dash::Dashboard> {
         if !enabled() || !rescore_dash::available() {
             return None;
@@ -142,19 +142,31 @@ mod dashboard {
         let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
         let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();
         let gain = mean_gain_per_feature(feature_stats, &feature_names);
+        // The same counts already in the run log, so the panel and the log
+        // cannot disagree and the dashboard does not re-scan for them.
+        let thresholds: Vec<rescore_dash::ThresholdRow> = qval_report
+            .iter()
+            .map(|&(q, total, targets, decoys)| rescore_dash::ThresholdRow {
+                q,
+                total,
+                targets,
+                decoys,
+            })
+            .collect();
         let matrix_mb = (matrix.len() * size_of::<f64>()) as f64 / (1024.0 * 1024.0);
         info!(
             "rescore dashboard: {} rows x {} features ({matrix_mb:.1} MB matrix, freed after precompute)",
             is_target.len(),
             feature_names.len()
         );
-        let built = rescore_dash::Dashboard::build_with_sample(
+        let built = rescore_dash::Dashboard::build(
             &rescore_dash::RescoreView {
                 feature_names: &feature_names,
                 features: &matrix,
                 is_target: &is_target,
                 score: &score,
                 qvalue: &qvalue,
+                thresholds: &thresholds,
                 gain: &gain,
             },
             sample_size(),
@@ -537,7 +549,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // Built BEFORE Phase 6: the writer consumes `data`.
     #[cfg(feature = "dashboard")]
-    let dashboard = dashboard::build(&data, &feature_stats);
+    let dashboard = dashboard::build(&data, &feature_stats, &qval_report);
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");

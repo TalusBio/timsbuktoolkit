@@ -14,6 +14,10 @@ tasks:
   test:
     cmds:
       - cargo test -- --nocapture
+      # Not a default member: it is only reachable through `timsseek_cli`'s
+      # opt-in `dashboard` feature, and being in the default build would put
+      # ratatui + crossterm in every plain `cargo build`.
+      - cargo test -p rescore_dash -- --nocapture
       - uv run python -m pytest
 
   fmt:

@@ -10,9 +10,9 @@
 use crate::app::{
     App,
     Scratch,
-    SortKey,
     Tab,
 };
+use crate::precompute::FeatureColumn;
 use crate::stats::HistView;
 use crate::transform::YTransform;
 use ratatui::layout::{
@@ -101,7 +101,7 @@ fn help_line(app: &App) -> String {
     };
     let tail = match app.tab() {
         Tab::Overview => hist(),
-        Tab::Fdr => format!("z/Z q<={}", app.dashboard().q_curve(app.q_zoom()).zoom()),
+        Tab::Fdr => format!("z/Z q<={}", app.dashboard().q_curve(app.q_zoom()).zoom),
         Tab::Calibration => String::new(),
         Tab::Features => format!(
             "j/k rows  {}  s sort:{}  / filter",
@@ -197,9 +197,9 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_hist(
         frame,
         chunks[1],
-        dash.score_title(x),
-        dash.score_subtitle(x, clip),
-        &dash.score_hist(x, clip),
+        dash.title(dash.score_column(), x),
+        dash.subtitle(dash.score_column(), x, clip),
+        &dash.hist(dash.score_column(), x, clip),
         y,
         scratch,
     );
@@ -221,7 +221,7 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
         .marker(symbols::Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(TARGET_COLOR))
-        .data(curve.points());
+        .data(&curve.points);
     // Both axes are labelled here where the histogram panel labels only x: the
     // zoom changes both bounds at once, and an unlabelled curve gives no way to
     // tell which zoom is on screen.
@@ -231,18 +231,18 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(curve.title())
+                .title(curve.title.as_str())
                 .title_bottom("x: q-value   y: targets passing   z/Z zoom"),
         )
         .x_axis(
             Axis::default()
-                .bounds([0.0, curve.zoom()])
-                .labels(curve.x_labels().iter().map(String::as_str)),
+                .bounds([0.0, curve.zoom])
+                .labels(curve.x_labels.iter().map(String::as_str)),
         )
         .y_axis(
             Axis::default()
-                .bounds([0.0, curve.ymax()])
-                .labels(curve.y_labels().iter().map(String::as_str)),
+                .bounds([0.0, curve.ymax])
+                .labels(curve.y_labels.iter().map(String::as_str)),
         );
     frame.render_widget(chart, chunks[0]);
 
@@ -316,10 +316,9 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let (x, y, clip) = (app.x(), app.y(), app.clip());
     let sort_label = app.sort_key().label();
-    // Disjoint field borrows: the table widget borrows `dash`'s cells for as
-    // long as it is alive, the table state needs `&mut`, and the histogram
-    // panel writes `scratch`. Whole-`App` accessors would make all three
-    // overlap, so this is the one place that reaches for the fields directly.
+    // Three disjoint borrows at once here: the table widget holds `dash`'s
+    // cells, the table state needs `&mut`, and the histogram panel writes
+    // `scratch`.
     let App {
         dash,
         scratch,
@@ -358,7 +357,7 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|&j| Row::new(dash.cells[j].iter().map(String::as_str)))
         .collect();
     let table = Table::new(rows, widths)
-        .header(Row::new(SortKey::ALL.map(SortKey::label)))
+        .header(Row::new(FeatureColumn::ALL.map(FeatureColumn::label)))
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title(title));
 
@@ -487,7 +486,7 @@ mod tests {
         let mut app = fixture_app();
         go_to(&mut app, Tab::Fdr);
         for _ in 0..app.dashboard().n_q_zooms() {
-            let want = format!("q <= {}", app.dashboard().q_curve(app.q_zoom()).zoom());
+            let want = format!("q <= {}", app.dashboard().q_curve(app.q_zoom()).zoom);
             let text = render(&mut app, 120, 40);
             assert!(text.contains(&want), "expected {want:?} in: {text}");
             app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
@@ -605,13 +604,14 @@ mod tests {
         let is_target: Vec<bool> = (0..2_000).map(|i| i % 2 == 0).collect();
         let score: Vec<f32> = (0..2_000).map(|i| i as f32).collect();
         let qvalue = vec![0.01f32; 2_000];
-        let dash = Dashboard::build_with_sample(
+        let dash = Dashboard::build(
             &RescoreView {
                 feature_names: &names,
                 features: &column,
                 is_target: &is_target,
                 score: &score,
                 qvalue: &qvalue,
+                thresholds: &[],
                 gain: &[0.0],
             },
             500,

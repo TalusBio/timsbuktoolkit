@@ -1,7 +1,7 @@
 //! Wrapping movement through a fixed list of variants.
 //!
-//! Four enums here are keyboard-cycled and stored by position in their own
-//! `ALL` array. Each used to spell the same `position` + modular step by hand.
+//! Four enums are keyboard-cycled and stored by position in their own `ALL`
+//! array. This is the step they share.
 
 /// Position of `cur` in `all`, or `0` if it is somehow absent.
 ///

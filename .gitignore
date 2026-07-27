@@ -44,16 +44,11 @@ docs/superpowers/*
 .scratch/
 sh*/
 *plan*.md
-# Working notes and design docs. Named ones like `*plan*.md` above slip through
-# whenever the file is called something else, so ignore the directory outright.
+# Working notes and design docs
 dev/
 debug_*.md
 baseline.txt
 local.txt
-# Local measurement harness: timing and allocation churn, neither of which is
-# a claim the test suite can defend. Its accuracy sweep lives in
-# `rescore_dash`'s test module instead.
-rust/rescore_dash/examples/
 
 docs/superpowers/
 

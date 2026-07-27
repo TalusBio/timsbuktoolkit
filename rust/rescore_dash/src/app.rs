@@ -48,20 +48,16 @@ impl Tab {
     }
 }
 
-/// The sort key is a table column — see [`FeatureColumn`], which also defines
-/// the column order and how each one's number is read.
-pub type SortKey = FeatureColumn;
-
 pub enum Flow {
     Continue,
     Quit,
 }
 
-/// Per-frame plotting scratch, owned so a redraw allocates nothing.
+/// Plot points, reused across frames.
 ///
 /// `ratatui::Dataset::data` borrows a `&[(f64, f64)]`, so the points have to
-/// outlive the widget. Keeping them here (rather than collecting fresh vectors
-/// inside the draw call) is what removes the last per-frame allocation.
+/// outlive the widget; they live here rather than in a vector collected inside
+/// the draw call.
 #[derive(Default)]
 pub(crate) struct Scratch {
     pub(crate) target: Vec<(f64, f64)>,
@@ -79,8 +75,8 @@ pub struct App {
     /// index so `z` is a bounded cycle rather than free-form zooming into a
     /// range no curve was gridded for.
     q_zoom: usize,
-    sort: SortKey,
-    /// Direction, whose "forward" reading differs by key: for `SortKey::Name`
+    sort: FeatureColumn,
+    /// Direction, whose "forward" reading differs by key: for `FeatureColumn::Name`
     /// `true` is ascending alphabetical (the natural reading order for text),
     /// while for every numeric key `true` is largest-first (the natural
     /// reading order for "what stands out"). `false` reverses either one.
@@ -112,7 +108,7 @@ impl App {
             y: YTransform::Density,
             clip: true,
             q_zoom: DEFAULT_Q_ZOOM,
-            sort: SortKey::Name,
+            sort: FeatureColumn::Name,
             sort_desc: true,
             filter: String::new(),
             filter_editing: false,
@@ -149,7 +145,7 @@ impl App {
         self.q_zoom
     }
 
-    pub fn sort_key(&self) -> SortKey {
+    pub fn sort_key(&self) -> FeatureColumn {
         self.sort
     }
 
@@ -159,10 +155,6 @@ impl App {
 
     pub fn filter_editing(&self) -> bool {
         self.filter_editing
-    }
-
-    pub fn visible(&self) -> &[usize] {
-        &self.visible
     }
 
     /// Feature index under the cursor, or `None` when the filter matches
@@ -275,7 +267,7 @@ impl App {
             })
             .collect();
 
-        if self.sort == SortKey::Name {
+        if self.sort == FeatureColumn::Name {
             idx.sort_by(|&a, &b| self.dash.feature_names[a].cmp(&self.dash.feature_names[b]));
             if !self.sort_desc {
                 idx.reverse();
@@ -310,9 +302,7 @@ pub fn available() -> bool {
 
 /// Open the dashboard and block until the user quits.
 ///
-/// Takes an already-built [`Dashboard`] rather than a view, so the caller can
-/// drop the feature matrix — gigabytes at a realistic library size — before the
-/// TUI opens and blocks for as long as the user leaves it up.
+/// Blocks until the user quits.
 ///
 /// Never fails the caller and never panics on setup: a non-terminal stdout or
 /// a failed `try_init` warns, restores the terminal and returns `Ok`. This is
@@ -499,17 +489,17 @@ pub(crate) mod tests {
         let n = app.dashboard().n_q_zooms();
         assert!(n > 1, "a single zoom level makes the key pointless");
         assert_ne!(
-            app.dashboard().q_curve(app.q_zoom()).zoom(),
+            app.dashboard().q_curve(app.q_zoom()).zoom,
             1.0,
             "the default view must be zoomed in; the full (0, 1] curve is the \
              one that shows the least"
         );
 
         let start = app.q_zoom();
-        let mut seen = vec![app.dashboard().q_curve(start).zoom()];
+        let mut seen = vec![app.dashboard().q_curve(start).zoom];
         for _ in 1..n {
             app.handle_key(key('z'));
-            seen.push(app.dashboard().q_curve(app.q_zoom()).zoom());
+            seen.push(app.dashboard().q_curve(app.q_zoom()).zoom);
         }
         app.handle_key(key('z'));
         assert_eq!(app.q_zoom(), start, "z must wrap, not run off the end");
@@ -557,7 +547,7 @@ pub(crate) mod tests {
     #[test]
     fn slash_filters_feature_names_and_esc_clears() {
         let mut app = app();
-        assert_eq!(app.visible().len(), 2);
+        assert_eq!(app.visible.len(), 2);
 
         app.handle_key(key('/'));
         assert!(app.filter_editing());
@@ -566,7 +556,7 @@ pub(crate) mod tests {
         }
         app.handle_key(code(KeyCode::Enter));
         assert!(!app.filter_editing());
-        assert_eq!(app.visible(), &[1], "only beta_count matches");
+        assert_eq!(app.visible, &[1], "only beta_count matches");
         assert_eq!(
             app.selected_feature(),
             Some(1),
@@ -575,7 +565,7 @@ pub(crate) mod tests {
 
         app.handle_key(key('/'));
         app.handle_key(code(KeyCode::Esc));
-        assert_eq!(app.visible().len(), 2, "esc clears the filter");
+        assert_eq!(app.visible.len(), 2, "esc clears the filter");
     }
 
     /// Reopening the filter box clears `self.filter` immediately; `visible`
@@ -590,12 +580,12 @@ pub(crate) mod tests {
             app.handle_key(key(c));
         }
         app.handle_key(code(KeyCode::Enter));
-        assert_eq!(app.visible(), &[1], "filtered down to beta_count");
+        assert_eq!(app.visible, &[1], "filtered down to beta_count");
 
         app.handle_key(key('/'));
         assert_eq!(app.filter(), "", "filter text cleared on reopen");
         assert_eq!(
-            app.visible().len(),
+            app.visible.len(),
             2,
             "visible must refresh to match the cleared filter, not stay stale"
         );
@@ -620,7 +610,7 @@ pub(crate) mod tests {
             app.handle_key(key(c));
         }
         app.handle_key(code(KeyCode::Enter));
-        assert!(app.visible().is_empty());
+        assert!(app.visible.is_empty());
         assert_eq!(app.selected_feature(), None);
         // Must not panic.
         app.handle_key(key('j'));
@@ -629,14 +619,14 @@ pub(crate) mod tests {
     #[test]
     fn s_cycles_the_sort_key_and_reorders() {
         let mut app = app();
-        let first = app.visible().to_vec();
+        let first = app.visible.to_vec();
         // Sort by target mean descending: beta_count (mean 20) before
         // alpha_score (mean 2).
-        while app.sort_key() != SortKey::TargetMean {
+        while app.sort_key() != FeatureColumn::TargetMean {
             app.handle_key(key('s'));
         }
-        assert_ne!(app.visible(), first.as_slice());
-        assert_eq!(app.visible()[0], 1);
+        assert_ne!(app.visible, first.as_slice());
+        assert_eq!(app.visible[0], 1);
     }
 
     /// Gain is a column-aligned array read, so sorting on it must pick up the
@@ -644,11 +634,11 @@ pub(crate) mod tests {
     #[test]
     fn sorting_by_gain_reads_the_column_aligned_array() {
         let mut app = app();
-        while app.sort_key() != SortKey::Gain {
+        while app.sort_key() != FeatureColumn::Gain {
             app.handle_key(key('s'));
         }
         // The fixture sets gain[j] = j, so descending puts feature 1 first.
-        assert_eq!(app.visible(), &[1, 0]);
+        assert_eq!(app.visible, &[1, 0]);
     }
 
     /// A wholly NaN column gets a NaN AUC — a real, naturally occurring case,
@@ -663,29 +653,34 @@ pub(crate) mod tests {
                 &[f64::NAN; 4],
             ],
         ));
-        while app.sort_key() != SortKey::Auc {
+        while app.sort_key() != FeatureColumn::Auc {
             app.handle_key(key('s'));
         }
         assert_eq!(
-            app.visible().last().copied(),
+            app.visible.last().copied(),
             Some(2),
             "descending: NaN AUC still sorts last"
         );
 
         app.handle_key(key('S'));
         assert_eq!(
-            app.visible().last().copied(),
+            app.visible.last().copied(),
             Some(2),
             "ascending: NaN AUC still sorts last"
         );
     }
 
-    /// The test harness's stdout is not a terminal (captured, or at least not
-    /// a real tty in CI), so `run` must take the early-return path rather
-    /// than touching a real terminal, and it must return `Ok`, not panic.
+    /// With no terminal, `run` must take the early-return path and return
+    /// `Ok` rather than panicking or failing the search run.
+    ///
+    /// Skipped under a runner that does give the harness a tty — the point is
+    /// the no-terminal path, and actually opening one here would take over the
+    /// screen mid-test.
     #[test]
     fn run_returns_ok_and_does_not_panic_when_stdout_is_not_a_terminal() {
-        assert!(!available());
+        if available() {
+            return;
+        }
         assert!(
             super::run(dashboard(&["a"], &[&[1.0, 2.0, 3.0, 4.0]])).is_ok(),
             "a non-terminal stdout must skip, not fail the run"

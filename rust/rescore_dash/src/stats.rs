@@ -13,10 +13,8 @@ pub const N_BINS: usize = 512;
 
 /// Exact, all-rows statistics for one column.
 ///
-/// Doubles as the accumulator for the row-major sweep that produces it: there
-/// is one representation, filled by [`ColumnStats::push`] and combined by
-/// [`ColumnStats::merge`], rather than an accumulator type plus a finished
-/// type that could drift apart.
+/// Doubles as the accumulator for the sweep that produces it: filled by
+/// [`ColumnStats::push`], combined by [`ColumnStats::merge`].
 ///
 /// The whole block for a 131-feature matrix is ~11 KB, so it stays cache
 /// resident while the sweep walks rows.
@@ -70,11 +68,10 @@ impl ColumnStats {
 
     /// Fold one value in.
     ///
-    /// Deliberately branchless past the finite check. `0 < v` and `v == 0` are
-    /// both unpredictable on real feature data, and writing them as an
-    /// `if`/`else if` chain measured ~2x on the whole sweep. A select plus a
-    /// `min` against `INFINITY` (the identity for `min`) costs a fraction of
-    /// that, because the compiler emits `minsd` rather than a branch.
+    /// Branchless past the finite check, and worth keeping that way: `0 < v`
+    /// and `v == 0` are both unpredictable on real feature data. A select plus
+    /// a `min` against `INFINITY` (the identity for `min`) compiles to `minsd`
+    /// instead of a mispredicting branch on every value of every column.
     #[inline]
     pub fn push(&mut self, v: f64, is_target: bool) {
         if !v.is_finite() {

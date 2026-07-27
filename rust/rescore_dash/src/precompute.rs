@@ -7,8 +7,8 @@
 //! bandwidth-bound. It is the only thing here that is linear in rows.
 //!
 //! **Pass B** gathers `min(n_rows, `[`DEFAULT_SAMPLE`]`)` rows *by random
-//! index* and, per column, sorts once. That single sort answers three
-//! questions that each used to cost their own sort: the Mann-Whitney AUC (a
+//! index* and, per column, sorts once. That one sort answers three questions
+//! that would otherwise each need their own: the Mann-Whitney AUC (a
 //! mid-rank walk), every transform's clip range (a `partition_point` for the
 //! domain suffix, then two order statistics), and `RankPercentile` (sorted
 //! position *is* the percentile). Binning is order-independent, so it reads the
@@ -75,10 +75,8 @@ const N_CLIPS: usize = 2;
 const BINS_PER_SLOT: usize = 2 * N_BINS;
 const SLOTS_PER_COLUMN: usize = N_AXES * N_CLIPS;
 
-/// q-value thresholds tabulated on the FDR tab, tightest first.
-const FDR_THRESHOLDS: [f32; 5] = [0.01, 0.05, 0.1, 0.5, 1.0];
-/// How many of `FDR_THRESHOLDS`, from the front, the Overview header shows.
-/// A prefix, so the two panels cannot disagree and one pass serves both.
+/// How many of the caller's thresholds, from the front, the Overview header
+/// summarizes. The FDR tab tabulates all of them.
 const OVERVIEW_SHOWN: usize = 3;
 const Q_CURVE_POINTS: usize = 100;
 const PP_CURVE_POINTS: usize = 200;
@@ -96,13 +94,6 @@ pub const Q_ZOOMS: [f64; 4] = [1.0, 0.1, 0.05, 0.01];
 /// cutoffs anyone reports, the curve is flat, so the default is the tightest
 /// range that still contains all of the usual reporting thresholds.
 pub const DEFAULT_Q_ZOOM: usize = 1;
-
-/// Columns in the histogram store: the feature columns, then one more for the
-/// discriminant score, which gets exactly the same treatment so the Overview
-/// panel is a lookup too.
-fn score_column(n_features: usize) -> usize {
-    n_features
-}
 
 /// One stored histogram's axis and totals. The counts themselves live in a
 /// single flat `Vec<u32>` so the whole store is one allocation.
@@ -162,10 +153,6 @@ impl FeatureColumn {
         Self::Gain,
     ];
 
-    pub fn index(self) -> usize {
-        cycle::index_of(&Self::ALL, self)
-    }
-
     pub fn next(self) -> Self {
         cycle::step(&Self::ALL, self, 1)
     }
@@ -189,12 +176,15 @@ impl FeatureColumn {
 /// only on the zoom and the target count, both of which are fixed once the run
 /// is loaded; a redraw borrows these strings.
 pub struct QCurve {
-    points: Vec<(f64, f64)>,
-    zoom: f64,
-    ymax: f64,
-    title: String,
-    x_labels: [String; 3],
-    y_labels: [String; 3],
+    pub points: Vec<(f64, f64)>,
+    /// Upper q-value bound of this view.
+    pub zoom: f64,
+    /// Targets passing at the loosest threshold shown, floored at 1 so the
+    /// axis never degenerates to `[0, 0]`.
+    pub ymax: f64,
+    pub title: String,
+    pub x_labels: [String; 3],
+    pub y_labels: [String; 3],
 }
 
 impl QCurve {
@@ -224,42 +214,11 @@ impl QCurve {
             ],
         }
     }
-
-    pub fn points(&self) -> &[(f64, f64)] {
-        &self.points
-    }
-
-    /// Upper q-value bound of this view.
-    pub fn zoom(&self) -> f64 {
-        self.zoom
-    }
-
-    /// Targets passing at the loosest threshold shown, floored at 1 so the
-    /// axis never degenerates to `[0, 0]`.
-    pub fn ymax(&self) -> f64 {
-        self.ymax
-    }
-
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    pub fn x_labels(&self) -> &[String; 3] {
-        &self.x_labels
-    }
-
-    pub fn y_labels(&self) -> &[String; 3] {
-        &self.y_labels
-    }
 }
 
 /// The materialized dashboard. Owns everything on screen; borrows nothing.
 pub struct Dashboard {
     pub(crate) feature_names: Vec<Arc<str>>,
-    pub(crate) n_rows: usize,
-    /// Rows actually drawn for the histograms. Equal to `n_rows` when the run
-    /// was small enough to take whole.
-    pub(crate) n_sampled: usize,
 
     /// Pass A output, one per column (features, then the score).
     pub(crate) stats: Vec<ColumnStats>,
@@ -283,7 +242,6 @@ pub struct Dashboard {
     /// Exact, all-rows AUC of the discriminant score. The headline separation
     /// number, so it is not sampled: it is one column and one sort, run
     /// alongside pass A rather than after it.
-    pub(crate) score_auc: f64,
 
     /// The FDR curve at every zoom in [`Q_ZOOMS`], same order.
     q_curves: Vec<QCurve>,
@@ -299,16 +257,13 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
-    /// Materialize everything from `view`, at the default sample size.
-    pub fn build(view: &RescoreView<'_>) -> Result<Self, ViewError> {
-        Self::build_with_sample(view, DEFAULT_SAMPLE)
-    }
-
-    /// As [`Self::build`], with an explicit pass-B sample size.
+    /// Materialize everything the TUI shows.
     ///
-    /// `sample >= n_rows` takes every row in order and makes the histograms,
-    /// clip ranges and per-feature AUCs exact rather than sampled.
-    pub fn build_with_sample(view: &RescoreView<'_>, sample: usize) -> Result<Self, ViewError> {
+    /// `sample` is the pass-B row count — [`DEFAULT_SAMPLE`] unless the caller
+    /// has a reason. At or above `view.n_rows()` every row is taken in order,
+    /// which makes the histograms, clip ranges and per-feature AUCs exact
+    /// rather than sampled.
+    pub fn build(view: &RescoreView<'_>, sample: usize) -> Result<Self, ViewError> {
         view.validate()?;
         let n_features = view.n_features();
         let n_cols = n_features + 1;
@@ -348,8 +303,9 @@ impl Dashboard {
                 );
             });
 
-        // The score's AUC is exact, not sampled — see `score_auc`.
-        auc[score_column(n_features)] = all_rows.score_auc;
+        // The score is the column past the last feature, and its AUC is the
+        // exact all-rows one rather than the sampled sweep's.
+        auc[n_features] = all_rows.score_auc;
 
         // Pass A is linear in rows and pass B is flat, so which one dominates
         // is a property of the run, not a constant. Logged so that stays
@@ -375,8 +331,6 @@ impl Dashboard {
 
         Ok(Self {
             feature_names: view.feature_names.to_vec(),
-            n_rows,
-            n_sampled,
             stats,
             auc,
             gain: view.gain.to_vec(),
@@ -385,7 +339,6 @@ impl Dashboard {
             titles,
             subtitles,
             basis,
-            score_auc: all_rows.score_auc,
             q_curves: all_rows
                 .qvalue_curves
                 .into_iter()
@@ -397,20 +350,17 @@ impl Dashboard {
                 n_targets,
                 n_rows - n_targets,
                 all_rows.score_auc,
-                &all_rows.thresholds[..OVERVIEW_SHOWN],
+                view.thresholds
+                    .get(..OVERVIEW_SHOWN)
+                    .unwrap_or(view.thresholds),
             ),
-            fdr_rows: build_fdr_rows(&all_rows.thresholds),
+            fdr_rows: build_fdr_rows(view.thresholds),
             cells,
         })
     }
 
     pub fn n_features(&self) -> usize {
         self.feature_names.len()
-    }
-
-    /// Whether the histograms came from a strict subset of the rows.
-    pub fn is_sampled(&self) -> bool {
-        self.n_sampled < self.n_rows
     }
 
     /// What everything on screen was computed over, e.g. `"2.01M rows,
@@ -430,22 +380,19 @@ impl Dashboard {
         &self.q_curves[i % self.q_curves.len()]
     }
 
+    /// The discriminant score's column. It is stored and queried exactly like
+    /// a feature, one past the last of them.
+    pub fn score_column(&self) -> usize {
+        self.n_features()
+    }
+
     fn slot_index(&self, column: usize, t: Axis, clip: bool) -> usize {
         (column * N_AXES + t.index()) * N_CLIPS + usize::from(clip)
     }
 
-    /// The stored histogram for a feature column. Pure indexing — this is the
-    /// whole of what a redraw does.
-    pub fn hist(&self, feature: usize, t: Axis, clip: bool) -> HistView<'_> {
-        self.column_hist(feature, t, clip)
-    }
-
-    /// The stored histogram for the discriminant score.
-    pub fn score_hist(&self, t: Axis, clip: bool) -> HistView<'_> {
-        self.column_hist(score_column(self.n_features()), t, clip)
-    }
-
-    fn column_hist(&self, column: usize, t: Axis, clip: bool) -> HistView<'_> {
+    /// The stored histogram for a column. Pure indexing — this is the whole of
+    /// what a redraw does.
+    pub fn hist(&self, column: usize, t: Axis, clip: bool) -> HistView<'_> {
         let slot = self.slot_index(column, t, clip);
         let s = &self.slots[slot];
         let base = slot * BINS_PER_SLOT;
@@ -460,30 +407,17 @@ impl Dashboard {
         }
     }
 
-    pub fn title(&self, feature: usize, t: Axis) -> &str {
-        &self.titles[feature * N_AXES + t.index()]
+    pub fn title(&self, column: usize, t: Axis) -> &str {
+        &self.titles[column * N_AXES + t.index()]
     }
 
-    pub fn score_title(&self, t: Axis) -> &str {
-        &self.titles[score_column(self.n_features()) * N_AXES + t.index()]
+    pub fn subtitle(&self, column: usize, t: Axis, clip: bool) -> &str {
+        &self.subtitles[self.slot_index(column, t, clip)]
     }
 
-    pub fn subtitle(&self, feature: usize, t: Axis, clip: bool) -> &str {
-        &self.subtitles[self.slot_index(feature, t, clip)]
-    }
-
-    pub fn score_subtitle(&self, t: Axis, clip: bool) -> &str {
-        &self.subtitles[self.slot_index(score_column(self.n_features()), t, clip)]
-    }
-
-    /// Sampled AUC for a feature column.
-    pub fn feature_auc(&self, feature: usize) -> f64 {
-        self.auc[feature]
-    }
-
-    /// Exact, all-rows AUC of the discriminant score.
-    pub fn score_auc(&self) -> f64 {
-        self.score_auc
+    /// A column's AUC: sampled for a feature, exact for the score.
+    pub fn auc(&self, column: usize) -> f64 {
+        self.auc[column]
     }
 
     /// Feature `j`'s value under `col`, or `None` for the name column.
@@ -536,29 +470,22 @@ fn pass_a(view: &RescoreView<'_>) -> Vec<ColumnStats> {
 struct AllRows {
     qvalue_curves: Vec<Vec<(f64, f64)>>,
     pp_curve: Vec<(f64, f64)>,
-    thresholds: Vec<curves::ThresholdRow>,
     score_auc: f64,
 }
 
 fn all_rows_tables(view: &RescoreView<'_>) -> AllRows {
-    let ((qvalue_curves, pp_curve), (thresholds, score_auc)) = rayon::join(
+    let ((qvalue_curves, pp_curve), score_auc) = rayon::join(
         || {
             rayon::join(
                 || curves::qvalue_curves(view.qvalue, view.is_target, Q_CURVE_POINTS, &Q_ZOOMS),
                 || curves::pp_curve(view.score, view.is_target, PP_CURVE_POINTS),
             )
         },
-        || {
-            rayon::join(
-                || curves::threshold_table(view.qvalue, view.is_target, &FDR_THRESHOLDS),
-                || stats::auc_exact(view.score.iter().map(|&s| s as f64), view.is_target),
-            )
-        },
+        || stats::auc_exact(view.score.iter().map(|&s| s as f64), view.is_target),
     );
     AllRows {
         qvalue_curves,
         pp_curve,
-        thresholds,
         score_auc,
     }
 }
@@ -1015,9 +942,9 @@ fn fmt_count(n: usize) -> String {
 pub(crate) mod tests {
     use super::*;
 
-    /// The value-binned AUC the dashboard used to report, kept here and only
-    /// here: it exists to prove the regression fixtures still reproduce the
-    /// bug, not as a code path anything can reach.
+    /// AUC read off a value-binned histogram — the shape that produced the
+    /// bug the fixtures below cover. Test-only, and deliberately not reachable
+    /// from anything that ships.
     fn binned_auc(values: &[f64], is_target: &[bool]) -> f64 {
         let (lo, hi) = values
             .iter()
@@ -1053,6 +980,7 @@ pub(crate) mod tests {
         score: Vec<f32>,
         qvalue: Vec<f32>,
         gain: Vec<f32>,
+        thresholds: Vec<curves::ThresholdRow>,
     }
 
     impl Fixture {
@@ -1063,12 +991,13 @@ pub(crate) mod tests {
                 is_target: &self.is_target,
                 score: &self.score,
                 qvalue: &self.qvalue,
+                thresholds: &self.thresholds,
                 gain: &self.gain,
             }
         }
 
         pub(crate) fn build(&self) -> Dashboard {
-            Dashboard::build(&self.view()).expect("well-formed fixture")
+            Dashboard::build(&self.view(), DEFAULT_SAMPLE).expect("well-formed fixture")
         }
     }
 
@@ -1092,6 +1021,18 @@ pub(crate) mod tests {
         )
     }
 
+    /// One named column with explicit labels, for the cases that need a
+    /// specific target/decoy split rather than the alternating default.
+    pub(crate) fn fixture_one_column(name: &str, values: &[f64], is_target: &[bool]) -> Fixture {
+        assert_eq!(values.len(), is_target.len());
+        fixture_from_matrix(
+            std::iter::once(name),
+            values.to_vec(),
+            is_target.to_vec(),
+            1,
+        )
+    }
+
     /// The same rows, from columns given literally rather than generated.
     pub(crate) fn fixture_from_columns(names: &[&str], columns: &[&[f64]]) -> Fixture {
         let n_rows = columns[0].len();
@@ -1112,19 +1053,40 @@ pub(crate) mod tests {
         is_target: Vec<bool>,
         n_features: usize,
     ) -> Fixture {
+        let qvalue: Vec<f32> = is_target
+            .iter()
+            .map(|&t| if t { 0.001 } else { 0.9 })
+            .collect();
+        let thresholds = [0.01f32, 0.05, 0.1, 0.5, 1.0]
+            .into_iter()
+            .map(|q| {
+                let (targets, decoys) = qvalue
+                    .iter()
+                    .zip(&is_target)
+                    .filter(|(v, _)| **v <= q)
+                    .fold(
+                        (0, 0),
+                        |(t, d), (_, &is_t)| if is_t { (t + 1, d) } else { (t, d + 1) },
+                    );
+                curves::ThresholdRow {
+                    q,
+                    total: targets + decoys,
+                    targets,
+                    decoys,
+                }
+            })
+            .collect();
         Fixture {
             names: names.map(Arc::from).collect(),
             matrix,
-            is_target: is_target.clone(),
             score: is_target
                 .iter()
                 .enumerate()
                 .map(|(i, &t)| if t { i as f32 } else { -(i as f32) })
                 .collect(),
-            qvalue: is_target
-                .iter()
-                .map(|&t| if t { 0.001 } else { 0.9 })
-                .collect(),
+            is_target,
+            qvalue,
+            thresholds,
             // Distinct per column, so a test sorting on gain can tell which
             // feature it landed on.
             gain: (0..n_features).map(|j| j as f32).collect(),
@@ -1206,16 +1168,17 @@ pub(crate) mod tests {
             is_target: &is_target,
             score: &score,
             qvalue: &qvalue,
+            thresholds: &[],
             gain: &gain,
         };
 
-        let exact = Dashboard::build_with_sample(&view, usize::MAX).expect("well-formed");
-        let sampled = Dashboard::build_with_sample(&view, DEFAULT_SAMPLE).expect("well-formed");
+        let exact = Dashboard::build(&view, usize::MAX).expect("well-formed");
+        let sampled = Dashboard::build(&view, DEFAULT_SAMPLE).expect("well-formed");
 
         let (mut worst_ks, mut worst_auc) = (0.0f64, 0.0f64);
         let (mut ks_at, mut auc_at) = (String::new(), String::new());
         for j in 0..columns.len() {
-            let (a, b) = (sampled.feature_auc(j), exact.feature_auc(j));
+            let (a, b) = (sampled.auc(j), exact.auc(j));
             if a.is_finite() && b.is_finite() && (a - b).abs() > worst_auc {
                 worst_auc = (a - b).abs();
                 auc_at = format!("f{j}");
@@ -1267,25 +1230,25 @@ pub(crate) mod tests {
         let mut prev_ymax = f64::INFINITY;
         for (i, &zoom) in Q_ZOOMS.iter().enumerate() {
             let c = dash.q_curve(i);
-            assert_eq!(c.zoom(), zoom);
+            assert_eq!(c.zoom, zoom);
             assert_eq!(
-                c.points().len(),
+                c.points.len(),
                 Q_CURVE_POINTS,
                 "zoom {zoom} must keep a full grid, not a slice of the wide one"
             );
             assert!(
-                (c.points().last().unwrap().0 - zoom).abs() < 1e-12,
+                (c.points.last().unwrap().0 - zoom).abs() < 1e-12,
                 "zoom {zoom} must reach its own bound"
             );
             assert!(
-                c.ymax() <= prev_ymax,
+                c.ymax <= prev_ymax,
                 "zoom {zoom} y bound {} exceeds the wider view's {prev_ymax}",
-                c.ymax()
+                c.ymax
             );
-            prev_ymax = c.ymax();
+            prev_ymax = c.ymax;
         }
         assert!(
-            dash.q_curve(Q_ZOOMS.len() - 1).ymax() < dash.q_curve(0).ymax(),
+            dash.q_curve(Q_ZOOMS.len() - 1).ymax < dash.q_curve(0).ymax,
             "the tightest zoom must actually rescale y, not just x"
         );
 
@@ -1294,14 +1257,14 @@ pub(crate) mod tests {
         let tightest = *Q_ZOOMS.last().unwrap();
         let sliced = dash
             .q_curve(0)
-            .points()
+            .points
             .iter()
             .filter(|&&(x, _)| x <= tightest)
             .count();
         assert!(
-            sliced * 10 < dash.q_curve(Q_ZOOMS.len() - 1).points().len(),
+            sliced * 10 < dash.q_curve(Q_ZOOMS.len() - 1).points.len(),
             "a slice would give {sliced} points where the zoom gives {}",
-            dash.q_curve(Q_ZOOMS.len() - 1).points().len()
+            dash.q_curve(Q_ZOOMS.len() - 1).points.len()
         );
     }
 
@@ -1347,7 +1310,7 @@ pub(crate) mod tests {
         for i in 0..view.n_rows() {
             want.push(view.score[i] as f64, view.is_target[i]);
         }
-        let s = &got[score_column(view.n_features())];
+        let s = &got[view.n_features()];
         assert_eq!(s.n_target, want.n_target);
         assert!((s.target_mean - want.target_mean).abs() < 1e-9);
         assert_eq!((s.lo, s.hi), (want.lo, want.hi));
@@ -1388,14 +1351,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_sample_is_reproducible() {
+    fn the_sample_is_drawn_by_random_index_not_off_the_front() {
         let f = fixture(5_000, &[("a", &|i, _| i as f64)]);
         let view = f.view();
-        assert_eq!(gather_sample(&view, 300), gather_sample(&view, 300));
+        let (matrix, labels) = gather_sample(&view, 300);
+        assert_eq!(labels.len(), 300);
+
+        // The column is `i`, so a sampled value IS its row index. The rows
+        // arrive sorted by score, so a contiguous or strided draw would be all
+        // high-scoring targets — the reason this is by random index at all.
+        let rows: Vec<f64> = matrix
+            .iter()
+            .step_by(view.n_features() + 1)
+            .copied()
+            .collect();
+        let max = rows.iter().copied().fold(0.0f64, f64::max);
+        assert!(
+            max > 4_000.0,
+            "sample never reached the tail of the run; largest row index {max}"
+        );
+        let ascending = rows.windows(2).all(|w| w[0] <= w[1]);
+        assert!(
+            !ascending,
+            "sample is a prefix or a stride, not a random draw"
+        );
     }
 
     /// The bug this design exists to kill. One decoy row at 1e6 in a perfectly
-    /// separated column used to drag the reported AUC to 0.5, because the
+    /// separated column reported an AUC of 0.5 under value binning, because the
     /// histogram it was read off binned uniformly over min..max.
     #[test]
     fn a_single_outlier_does_not_collapse_the_auc() {
@@ -1412,22 +1395,12 @@ pub(crate) mod tests {
         values.push(1e6);
         is_target.push(false);
 
-        let n = values.len();
-        let names: Vec<Arc<str>> = vec![Arc::from("outlier_feature")];
-        let f = Fixture {
-            names,
-            matrix: values.clone(),
-            is_target: is_target.clone(),
-            score: vec![0.0; n],
-            qvalue: vec![0.5; n],
-            gain: vec![0.0; 1],
-        };
-        let dash = f.build();
+        let dash = fixture_one_column("outlier_feature", &values, &is_target).build();
 
         assert!(
-            dash.feature_auc(0) > 0.98,
+            dash.auc(0) > 0.98,
             "one outlier must not collapse the AUC, got {}",
-            dash.feature_auc(0)
+            dash.auc(0)
         );
         // And the fixture really does still defeat the old value-binned path,
         // so this keeps covering the bug rather than becoming a tautology.
@@ -1444,17 +1417,8 @@ pub(crate) mod tests {
     fn clipping_excludes_an_outlier_that_the_unclipped_axis_still_shows() {
         let mut values: Vec<f64> = (0..1000).map(|i| i as f64 / 1000.0).collect();
         values.push(1e6);
-        let n = values.len();
-        let is_target: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
-        let f = Fixture {
-            names: vec![Arc::from("spiky")],
-            matrix: values,
-            is_target,
-            score: vec![0.0; n],
-            qvalue: vec![0.5; n],
-            gain: vec![0.0; 1],
-        };
-        let dash = f.build();
+        let is_target: Vec<bool> = (0..values.len()).map(|i| i % 2 == 0).collect();
+        let dash = fixture_one_column("spiky", &values, &is_target).build();
 
         let clipped = dash.hist(0, Axis::Value(XTransform::Linear), true);
         assert!(
@@ -1479,16 +1443,12 @@ pub(crate) mod tests {
     #[test]
     fn the_unclipped_log10_axis_starts_at_the_smallest_positive_value() {
         let values = vec![-5.0, 0.0, 1e-6, 1.0, 100.0, 42.0];
-        let n = values.len();
-        let f = Fixture {
-            names: vec![Arc::from("mixed_sign")],
-            matrix: values,
-            is_target: vec![true, false, true, false, true, false],
-            score: vec![0.0; n],
-            qvalue: vec![0.5; n],
-            gain: vec![0.0; 1],
-        };
-        let dash = f.build();
+        let dash = fixture_one_column(
+            "mixed_sign",
+            &values,
+            &[true, false, true, false, true, false],
+        )
+        .build();
         let h = dash.hist(0, Axis::Value(XTransform::Log10), false);
         assert!((h.lo - (-6.0)).abs() < 1e-9, "log10(1e-6), got {}", h.lo);
         assert!((h.hi - 2.0).abs() < 1e-9, "log10(100), got {}", h.hi);
@@ -1502,15 +1462,8 @@ pub(crate) mod tests {
     #[test]
     fn the_square_axis_bottoms_out_at_the_value_nearest_zero() {
         let values = vec![-8.0, -0.5, 0.25, 3.0];
-        let f = Fixture {
-            names: vec![Arc::from("straddles_zero")],
-            matrix: values,
-            is_target: vec![true, false, true, false],
-            score: vec![0.0; 4],
-            qvalue: vec![0.5; 4],
-            gain: vec![0.0; 1],
-        };
-        let dash = f.build();
+        let dash =
+            fixture_one_column("straddles_zero", &values, &[true, false, true, false]).build();
         let h = dash.hist(0, Axis::Value(XTransform::Square), false);
         assert!((h.lo - 0.0625).abs() < 1e-9, "0.25^2, got {}", h.lo);
         assert!((h.hi - 64.0).abs() < 1e-9, "(-8)^2, got {}", h.hi);
@@ -1556,13 +1509,13 @@ pub(crate) mod tests {
             ],
         );
         let dash = f.build();
-        let m = dash.n_sampled;
+        let m = f.view().n_rows().min(DEFAULT_SAMPLE);
         for column in 0..=dash.n_features() {
             for t in Axis::ALL {
                 for clip in [false, true] {
                     let slot = dash.slot_index(column, t, clip);
                     let s = &dash.slots[slot];
-                    let h = dash.column_hist(column, t, clip);
+                    let h = dash.hist(column, t, clip);
                     let binned = total(&h);
                     assert_eq!(
                         binned as usize + s.dropped as usize + s.n_out as usize,
@@ -1608,8 +1561,7 @@ pub(crate) mod tests {
                 ("huge", &|i, _| i as f64 * 1e12),
             ],
         );
-        let dash = Dashboard::build_with_sample(&f.view(), 500).expect("well formed");
-        assert!(dash.is_sampled(), "the point is a strict subset");
+        let dash = Dashboard::build(&f.view(), 500).expect("well formed");
         for column in 0..=dash.n_features() {
             for t in Axis::ALL {
                 let slot = dash.slot_index(column, t, false);
@@ -1643,7 +1595,7 @@ pub(crate) mod tests {
                 );
             }
         }
-        assert!(dash.feature_auc(1).is_nan());
+        assert!(dash.auc(1).is_nan());
         // The neighbouring real column is unaffected.
         assert!(total(&dash.hist(0, Axis::Value(XTransform::Linear), true)) > 0);
     }
@@ -1687,15 +1639,20 @@ pub(crate) mod tests {
         // AUC is 1 by definition. A sampled AUC could only reach it by luck.
         let f = fixture(400, &[("a", &|i, _| i as f64)]);
         let dash = f.build();
-        assert_eq!(dash.score_auc, 1.0, "the score AUC is not sampled");
-        let tiny = Dashboard::build_with_sample(&f.view(), 20).expect("well-formed");
         assert_eq!(
-            tiny.score_auc, 1.0,
+            dash.auc(dash.score_column()),
+            1.0,
+            "the score AUC is not sampled"
+        );
+        let tiny = Dashboard::build(&f.view(), 20).expect("well-formed");
+        assert_eq!(
+            tiny.auc(tiny.score_column()),
+            1.0,
             "a small sample must not reach the score's AUC"
         );
-        assert!(total(&dash.score_hist(Axis::Value(XTransform::Linear), true)) > 0);
+        assert!(total(&dash.hist(dash.score_column(), Axis::Value(XTransform::Linear), true)) > 0);
         assert!(
-            dash.score_title(Axis::Value(XTransform::Linear))
+            dash.title(dash.score_column(), Axis::Value(XTransform::Linear))
                 .contains("discriminant_score")
         );
     }
@@ -1720,12 +1677,10 @@ pub(crate) mod tests {
     fn the_basis_says_whether_the_histograms_were_sampled() {
         let f = fixture(80, &[("a", &|i, _| i as f64)]);
         let dash = f.build();
-        assert!(!dash.is_sampled());
         assert_eq!(dash.basis(), "all 80 rows");
 
         let big = fixture(2_000, &[("a", &|i, _| i as f64)]);
-        let dash = Dashboard::build_with_sample(&big.view(), 500).expect("well formed");
-        assert!(dash.is_sampled());
+        let dash = Dashboard::build(&big.view(), 500).expect("well formed");
         assert_eq!(dash.basis(), "2000 rows, histograms from a 500 sample");
     }
 
@@ -1764,10 +1719,11 @@ pub(crate) mod tests {
             is_target: &[true, false],
             score: &[0.0],
             qvalue: &[0.0, 0.0],
+            thresholds: &[],
             gain: &[0.0],
         };
         assert!(matches!(
-            Dashboard::build(&view),
+            Dashboard::build(&view, DEFAULT_SAMPLE),
             Err(ViewError::RowLen { .. })
         ));
     }

@@ -15,21 +15,20 @@
 use crate::cycle;
 
 /// Largest exponent `exp` is allowed to see, guarding against overflow to
-/// `+inf`. Only the upper side needs guarding: `exp` overflows above ~709.78,
-/// but very negative inputs already underflow to exactly `0.0` on their own
-/// well before that. Deliberately unclamped below — do not "restore the
-/// symmetry" by adding a lower bound: `exp(-EXP_CLAMP)` is `9.86e-305`, a
-/// manufactured nonzero value where the true answer is zero to any precision
-/// the display cares about.
+/// `+inf` above ~709.78.
+///
+/// Upper side only. Very negative inputs already underflow to exactly `0.0`,
+/// which is the right answer; a symmetric lower clamp would replace it with
+/// `exp(-700)` = `9.86e-305`, a manufactured nonzero.
 const EXP_CLAMP: f64 = 700.0;
 
 /// What a histogram's x axis shows.
 ///
-/// Two cases and not seven variants of one, because `RankPercentile` is not a
-/// function of the value: it is the row's sorted position. Folding it into
-/// [`XTransform`] meant `apply` returning the input unchanged, `accepts`
-/// answering for a domain it does not have, and every caller special-casing it
-/// before dispatch anyway.
+/// Two cases and not seven variants of one: `RankPercentile` is the row's
+/// sorted position, not a function of its value, so it has no pointwise map
+/// and no domain to accept or refuse. Splitting it out is what lets
+/// [`XTransform::apply`] be total over its variants — `precompute` still
+/// matches the two cases apart, but now the type says why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     /// A pointwise map of the value.
@@ -92,15 +91,6 @@ pub enum XTransform {
 }
 
 impl XTransform {
-    pub const ALL: [XTransform; 6] = [
-        Self::Linear,
-        Self::Log10,
-        Self::SignedLog1p,
-        Self::Sqrt,
-        Self::Square,
-        Self::Exp,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Linear => "linear",
@@ -212,6 +202,19 @@ impl YTransform {
 mod tests {
     use super::*;
 
+    /// The value transforms, derived from [`Axis::ALL`] rather than listed
+    /// again — a second hand-maintained list is a second thing to forget to
+    /// extend.
+    fn value_transforms() -> Vec<XTransform> {
+        Axis::ALL
+            .into_iter()
+            .filter_map(|a| match a {
+                Axis::Value(t) => Some(t),
+                Axis::RankPercentile => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn x_cycles_forward_and_back() {
         let t = Axis::ALL[0];
@@ -235,13 +238,13 @@ mod tests {
     /// among them — the whole point of the split.
     #[test]
     fn every_value_transform_is_reachable_as_an_axis() {
-        for t in XTransform::ALL {
+        for t in value_transforms() {
             assert!(
                 Axis::ALL.contains(&Axis::Value(t)),
                 "{t:?} is not on any axis"
             );
         }
-        assert_eq!(Axis::ALL.len(), XTransform::ALL.len() + 1);
+        assert_eq!(Axis::ALL.len(), value_transforms().len() + 1);
     }
 
     #[test]
@@ -285,7 +288,7 @@ mod tests {
 
     #[test]
     fn non_finite_input_is_always_rejected() {
-        for t in XTransform::ALL {
+        for t in value_transforms() {
             assert_eq!(t.apply(f64::NAN), None, "{t:?} must reject NaN");
             assert_eq!(t.apply(f64::INFINITY), None, "{t:?} must reject +inf");
             assert_eq!(t.apply(f64::NEG_INFINITY), None, "{t:?} must reject -inf");
@@ -311,7 +314,7 @@ mod tests {
             2.0,
             1e6,
         ];
-        for t in XTransform::ALL {
+        for t in value_transforms() {
             for v in probes {
                 assert_eq!(
                     t.accepts(v),
@@ -328,7 +331,7 @@ mod tests {
     #[test]
     fn accepted_values_form_a_suffix_of_the_value_axis() {
         let ascending = [-1e6, -1.0, -1e-9, 0.0, 1e-9, 0.5, 1.0, 1e6];
-        for t in XTransform::ALL {
+        for t in value_transforms() {
             let mut seen_accepted = false;
             for v in ascending {
                 let ok = t.accepts(v);
@@ -347,7 +350,7 @@ mod tests {
     #[test]
     fn monotone_transforms_really_are_non_decreasing() {
         let ascending = [-1e3, -1.0, -0.5, 0.0, 1e-9, 0.5, 1.0, 2.0, 1e3];
-        for t in XTransform::ALL.into_iter().filter(|t| t.is_monotone()) {
+        for t in value_transforms().into_iter().filter(|t| t.is_monotone()) {
             let mut prev = f64::NEG_INFINITY;
             for v in ascending {
                 let Some(y) = t.apply(v) else { continue };
@@ -359,15 +362,6 @@ mod tests {
             !XTransform::Square.is_monotone(),
             "square decreases below zero"
         );
-    }
-
-    #[test]
-    fn index_round_trips_through_all() {
-        // The stored histograms are addressed by this index, so a mismatch
-        // would silently plot one axis's counts under another's label.
-        for (i, a) in Axis::ALL.into_iter().enumerate() {
-            assert_eq!(a.index(), i);
-        }
     }
 
     #[test]

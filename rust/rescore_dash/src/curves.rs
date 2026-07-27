@@ -14,54 +14,6 @@ pub struct ThresholdRow {
     pub decoys: usize,
 }
 
-/// [`ThresholdRow`] for each threshold, in the order given.
-///
-/// One pass over the rows for all thresholds, not one pass each: every row is
-/// counted into each threshold it clears, so the cost is independent of how
-/// many cutoffs are asked for.
-///
-/// Deliberately a re-derivation of the same quantity as
-/// `timsseek::ml::qvalues::report_qvalues_at_thresholds` rather than a call to
-/// it — this crate takes no pipeline dependency (see [`crate::view`]). The two
-/// agree because they are both "rows at or below the cutoff, by class".
-///
-/// `is_target` is row-aligned with `qvalue`; a row with no label (past the end
-/// of `is_target`) is skipped entirely.
-pub fn threshold_table(
-    qvalue: &[f32],
-    is_target: &[bool],
-    thresholds: &[f32],
-) -> Vec<ThresholdRow> {
-    let mut counts = vec![(0usize, 0usize); thresholds.len()];
-    for (i, &row_q) in qvalue.iter().enumerate() {
-        let Some(&is_t) = is_target.get(i) else {
-            continue;
-        };
-        if row_q.is_nan() {
-            continue;
-        }
-        for (&q, c) in thresholds.iter().zip(counts.iter_mut()) {
-            if row_q <= q {
-                if is_t {
-                    c.0 += 1;
-                } else {
-                    c.1 += 1;
-                }
-            }
-        }
-    }
-    thresholds
-        .iter()
-        .zip(counts)
-        .map(|(&q, (targets, decoys))| ThresholdRow {
-            q,
-            total: targets + decoys,
-            targets,
-            decoys,
-        })
-        .collect()
-}
-
 /// Targets passing as a function of the q-value threshold: one curve per entry
 /// of `zooms`, curve `i` spanning `n_points` evenly spaced thresholds in
 /// `(0, zooms[i]]`.
@@ -155,35 +107,6 @@ pub fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(q: f32, total: usize, targets: usize, decoys: usize) -> ThresholdRow {
-        ThresholdRow {
-            q,
-            total,
-            targets,
-            decoys,
-        }
-    }
-
-    #[test]
-    fn threshold_table_matches_hand_counts() {
-        let q = vec![0.001f32, 0.02, 0.2, 0.9];
-        let t = vec![true, true, false, false];
-        let got = threshold_table(&q, &t, &[0.01, 0.05, 1.0]);
-        assert_eq!(got[0], row(0.01, 1, 1, 0));
-        assert_eq!(got[1], row(0.05, 2, 2, 0));
-        assert_eq!(got[2], row(1.0, 4, 2, 2));
-    }
-
-    #[test]
-    fn threshold_table_counts_labeled_rows_only() {
-        // is_target is shorter than qvalue: rows 3 and 4 have no label and
-        // must be skipped entirely, not counted into `total` alone.
-        let q = vec![0.001f32, 0.02, 0.2, 0.9, 0.5];
-        let t = vec![true, true, false];
-        let got = threshold_table(&q, &t, &[0.01, 0.05, 1.0]);
-        assert_eq!(got[2], row(1.0, 3, 2, 1), "unlabeled rows never counted");
-    }
 
     #[test]
     fn qvalue_curve_is_monotone_nondecreasing() {
