@@ -162,6 +162,12 @@ impl CalibrationCurve {
     }
 }
 
+/// Default `fraction` for [`CalibrationState::measure_ridge_width`]: expand
+/// away from the path cell until the weight drops below 10% of it (FW@10%max).
+/// Lives here because calibrt owns the measurement — every consumer that wants
+/// "the" ridge width must read this rather than spell `0.1` again.
+pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
+
 /// Measurement of the evidence ridge width at one grid column.
 #[derive(Debug, Clone)]
 pub struct RidgeMeasurement {
