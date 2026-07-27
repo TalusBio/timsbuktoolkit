@@ -98,6 +98,68 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(tabs, area);
 }
 
+/// One binding, spelled once for both places it is advertised: `hint` is the
+/// status line's terse label (which has to fit beside four others on a narrow
+/// terminal), `help` the `?` overlay's spelled-out one. `App::handle_key` is
+/// the third place a binding appears and stays a `match` — its arms differ in
+/// what they do, not only in which key they answer to — so the tables below
+/// keep the two *renderers* from drifting apart, not the router.
+struct Binding {
+    keys: &'static str,
+    hint: &'static str,
+    help: &'static str,
+}
+
+impl Binding {
+    const fn new(keys: &'static str, hint: &'static str, help: &'static str) -> Self {
+        Self { keys, hint, help }
+    }
+
+    fn status_pair(&self) -> (&'static str, &'static str) {
+        (self.keys, self.hint)
+    }
+
+    /// One `?`-overlay row: the keys in a fixed-width column so the
+    /// descriptions line up across all three groups.
+    fn help_line(&self) -> Line<'static> {
+        Line::raw(format!("  {:<11}{}", self.keys, self.help))
+    }
+}
+
+/// Bindings every tab answers to.
+const GLOBAL_KEYS: &[Binding] = &[
+    Binding::new("h l", "tab", "switch tab"),
+    Binding::new("q", "detach", "detach"),
+    Binding::new("^C", "abort", "abort"),
+];
+
+/// `?` itself, listed apart from `GLOBAL_KEYS` because the status line pins it
+/// to its own right-hand column instead of putting it in the middle one that
+/// degrades — see `fit_status_hints`.
+const KEYS_OVERLAY_KEY: Binding = Binding::new("?", "keys", "this screen");
+
+/// The Fit tab's bindings. Convergence and Tolerances only respond to the
+/// first `SHARED_KEYS` of them — see `tab_keys`.
+const FIT_KEYS: &[Binding] = &[
+    Binding::new("n", "next", "next batch"),
+    Binding::new("r", "run", "run to end"),
+    Binding::new("< >", "frame", "scrub retained frames"),
+    Binding::new("m M", "layer", "cycle mark layer"),
+    Binding::new("d", "dp", "toggle DP pane"),
+];
+
+/// How many of `FIT_KEYS` (from the front) every tab answers to.
+const SHARED_KEYS: usize = 2;
+
+/// The tab-local bindings to advertise on `tab`: the Fit tab's frame/layer/dp
+/// keys do nothing on the other two, so those are not offered there.
+fn tab_keys(tab: Tab) -> &'static [Binding] {
+    match tab {
+        Tab::Fit => FIT_KEYS,
+        Tab::Convergence | Tab::Tolerances => &FIT_KEYS[..SHARED_KEYS],
+    }
+}
+
 /// One `key`/`action` hint, rendered as the key in `BOLD` and the action in
 /// `DarkGray` — weight, not `key:action` punctuation, is what makes the bound
 /// letter scannable. `action` empty renders the key alone, which is how the
@@ -182,24 +244,15 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     }
     let state_w = (spans_width(&state_spans) as u16).min(area.width);
 
-    // ---- per-tab binding sets --------------------------------------------
-    // Convergence and Tolerances only ever respond to `n`/`r`, so the Fit
-    // tab's frame/overlay/dp keys are not advertised there.
-    let tab_local: &[(&str, &str)] = match app.tab() {
-        Tab::Fit => &[
-            ("n", "next"),
-            ("r", "run"),
-            ("< >", "frame"),
-            ("m M", "layer"),
-            ("d", "dp"),
-        ],
-        Tab::Convergence | Tab::Tolerances => &[("n", "next"), ("r", "run")],
-    };
-    let global: &[(&str, &str)] = &[("h l", "tab"), ("q", "detach"), ("^C", "abort")];
+    let tab_local: Vec<(&str, &str)> = tab_keys(app.tab())
+        .iter()
+        .map(Binding::status_pair)
+        .collect();
+    let global: Vec<(&str, &str)> = GLOBAL_KEYS.iter().map(Binding::status_pair).collect();
 
     let right_w = 7u16.min(area.width);
     let mid_w = area.width.saturating_sub(state_w).saturating_sub(right_w) as usize;
-    let mid_line = fit_status_hints(tab_local, global, mid_w);
+    let mid_line = fit_status_hints(&tab_local, &global, mid_w);
 
     let cols = Layout::horizontal([
         Constraint::Length(state_w),
@@ -211,7 +264,7 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(state_spans)), cols[0]);
     frame.render_widget(Paragraph::new(mid_line), cols[1]);
     frame.render_widget(
-        Paragraph::new(Line::from(hint_spans(&[("?", "keys")]))),
+        Paragraph::new(Line::from(hint_spans(&[KEYS_OVERLAY_KEY.status_pair()]))),
         cols[2],
     );
 }
@@ -237,24 +290,15 @@ fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
 
     let heading = |s: &'static str| Line::styled(s, Style::default().add_modifier(Modifier::BOLD));
-    let lines = vec![
-        heading("Every tab"),
-        Line::raw("  h l        switch tab"),
-        Line::raw("  q          detach"),
-        Line::raw("  ^C         abort"),
-        Line::raw("  ?          this screen"),
-        Line::raw(""),
-        heading("Fit tab"),
-        Line::raw("  n          next batch"),
-        Line::raw("  r          run to end"),
-        Line::raw("  < >        scrub retained frames"),
-        Line::raw("  m M        cycle mark layer"),
-        Line::raw("  d          toggle DP pane"),
-        Line::raw(""),
-        heading("Convergence / Tolerances"),
-        Line::raw("  n          next batch"),
-        Line::raw("  r          run to end"),
-    ];
+    let mut lines = vec![heading("Every tab")];
+    lines.extend(GLOBAL_KEYS.iter().map(Binding::help_line));
+    lines.push(KEYS_OVERLAY_KEY.help_line());
+    lines.push(Line::raw(""));
+    lines.push(heading("Fit tab"));
+    lines.extend(FIT_KEYS.iter().map(Binding::help_line));
+    lines.push(Line::raw(""));
+    lines.push(heading("Convergence / Tolerances"));
+    lines.extend(FIT_KEYS[..SHARED_KEYS].iter().map(Binding::help_line));
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Keys ")),
         popup,
