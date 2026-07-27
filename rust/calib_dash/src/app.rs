@@ -303,6 +303,11 @@ pub struct App {
     /// in sync with `dp_pane` and the current batch without ever touching
     /// the per-batch hot-path fit.
     live_dp_recording: Option<FitRecording>,
+    /// Whether the `?` key-map overlay is open. Modal in the simplest sense:
+    /// while it is showing, `handle_key` routes every keypress (including
+    /// digits and `Ctrl-C`) to dismissing it rather than to whatever that
+    /// key would otherwise do — see `handle_key`'s first check.
+    show_keys: bool,
 }
 
 impl App {
@@ -328,6 +333,7 @@ impl App {
             scrub_chunk: None,
             scrub_recording: None,
             live_dp_recording: None,
+            show_keys: false,
         }
     }
 
@@ -559,6 +565,12 @@ impl App {
         self.count
     }
 
+    /// Whether the `?` key-map overlay is open. `ui.rs`'s `draw` reads this
+    /// to decide whether to paint the overlay on top of everything else.
+    pub fn show_keys(&self) -> bool {
+        self.show_keys
+    }
+
     /// Consumes the pending count, defaulting to 1 for a bare motion.
     pub fn take_count(&mut self) -> u32 {
         self.count.take().unwrap_or(1)
@@ -651,6 +663,19 @@ impl App {
     /// arms are guarded on `key.modifiers.is_empty()` so a modified key —
     /// `Ctrl-C` above all — never falls into a bare-letter arm by accident.
     pub fn handle_key(&mut self, key: KeyEvent) -> PauseAction {
+        // The `?` overlay is modal: it exists only to show the key map, so
+        // any keypress dismisses it rather than also being routed to
+        // whatever that key would otherwise do — a user who presses `n` to
+        // dismiss it must not also skip a batch. This must come before the
+        // `Ctrl-C` check below so the overlay does not eat an abort silently
+        // — it still does, by design (dismiss is the whole of what a
+        // keypress does while the overlay is up), but it does so via this
+        // one guard rather than by accident.
+        if self.show_keys {
+            self.show_keys = false;
+            self.count = None;
+            return PauseAction::Stay;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.count = None;
             return PauseAction::Abort;
@@ -777,6 +802,16 @@ impl App {
             KeyCode::Char('q') if key.modifiers.is_empty() => {
                 self.count = None;
                 PauseAction::Detach
+            }
+            // `?` is a shifted character on most keyboards, and some
+            // terminals report `Shift` as a modifier on the resulting
+            // `Char('?')` and some do not — unlike the plain-letter arms
+            // above, this only guards against `Control`, so either
+            // reporting style still opens the overlay.
+            KeyCode::Char('?') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_keys = true;
+                self.count = None;
+                PauseAction::Stay
             }
             _ => {
                 self.count = None;
@@ -1587,6 +1622,59 @@ mod tests {
         let before = app.stage();
         app.handle_key(ctrl(']'));
         assert_eq!(app.stage(), before, "modified keys are not motions");
+    }
+
+    // ---- the `?` key-map overlay ----
+
+    #[test]
+    fn question_mark_opens_the_overlay_and_clears_a_pending_count() {
+        let mut app = App::new(10);
+        press(&mut app, "15");
+        assert_eq!(app.pending_count(), Some(15));
+        let action = app.handle_key(key('?'));
+        assert!(app.show_keys());
+        assert_eq!(action, PauseAction::Stay);
+        assert_eq!(
+            app.pending_count(),
+            None,
+            "`?` is a non-motion key, like `d`/`r`/`q`, so it clears a pending count"
+        );
+    }
+
+    #[test]
+    fn any_key_dismisses_the_overlay_without_also_acting_on_it() {
+        let mut app = App::new(10);
+        app.handle_key(key('?'));
+        assert!(app.show_keys());
+
+        // `n` would normally advance the batch loop; while the overlay is
+        // open it must only dismiss the overlay.
+        let action = app.handle_key(key('n'));
+        assert!(!app.show_keys(), "the overlay must close on the next key");
+        assert_eq!(
+            action,
+            PauseAction::Stay,
+            "the dismissing key must not also perform its usual action"
+        );
+    }
+
+    #[test]
+    fn a_pending_count_typed_before_opening_the_overlay_does_not_leak_into_the_dismissing_key() {
+        let mut app = App::new(10);
+        app.handle_key(key('?'));
+        // `5` would normally start a new pending count; while dismissing the
+        // overlay it must not do that either.
+        app.handle_key(key('5'));
+        assert!(!app.show_keys());
+        assert_eq!(app.pending_count(), None);
+    }
+
+    #[test]
+    fn ctrl_c_while_the_overlay_is_open_only_dismisses_it() {
+        let mut app = App::new(10);
+        app.handle_key(key('?'));
+        assert_eq!(app.handle_key(ctrl('c')), PauseAction::Stay);
+        assert!(!app.show_keys());
     }
 
     // ---- tabs: h/l ----
