@@ -1,6 +1,6 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render_snapshot(&mut app, 100, 30)"
+expression: out
 ---
  Fit │ Convergence │ Tolerances                                                                     
     ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
@@ -28,7 +28,7 @@ expression: "render_snapshot(&mut app, 100, 30)"
     │                 ▒▒▒▒▒▒▒▒▒▒▒▒▒                                                                │
     │           ▒▒▒▒▒▒▒                                                                            │
     │     ▄▒▒▒▒▒▒▒▒▒▒▒▒                                                                            │
-   0┤·····▒▒▒▒▒▒▒                                                                                  │
+   0┤     ▒▒▒▒▒▒▒                                                                                  │
     └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
      0                            5                           10                            15      
  b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys 
@@ -47,4 +47,3 @@ expression: "render_snapshot(&mut app, 100, 30)"
  22: 29-40
  23: 23-28
  25: 11-22
- 26: 5-10

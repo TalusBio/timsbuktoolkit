@@ -38,15 +38,15 @@ use crate::app::{
     Layer,
     Tab,
 };
-use crate::metrics::{
-    BatchMetrics,
-    weighted_ridge_half_width,
-};
+use crate::metrics::BatchMetrics;
 use crate::recording::{
     FitRecording,
     bin_index,
 };
-use calibrt::Point;
+use calibrt::{
+    LibraryRT,
+    RidgeSummary,
+};
 use ratatui::Frame;
 use ratatui::layout::{
     Constraint,
@@ -1104,13 +1104,19 @@ fn mark_path(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 
 /// Marks the fitted curve at every display column (not just at path nodes),
 /// so it renders as a continuous line rather than sparse dots.
+///
+/// The sweep covers the whole grid x-range, wider than the curve's own span
+/// (whose ends are path *cell centers*), so the outermost columns fall out of
+/// bounds. They stay unmarked: extrapolating on the terminal slope — what
+/// `predict` reports through `Err` — or clamping flat, as this used to, both put
+/// ink where the fit has no calibrant, and an overlay on the evidence heatmap is
+/// exactly a claim about where the evidence is.
 fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
-    let curve = rec.curve();
-    if curve.is_empty() {
+    let Some(curve) = rec.curve() else {
         return;
-    }
+    };
     let (x_lo, x_hi) = geom.x_range;
     let span = (x_hi - x_lo).max(EPS);
     for tx in 0..dims.w {
@@ -1118,26 +1124,32 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
         // the range this display column covers is evaluated.
         let col = tx * bins / dims.w;
         let x = x_lo + (col as f64 + 0.5) / bins as f64 * span;
-        let Some(y) = predict_curve(curve, x) else {
+        let Ok(y) = curve.predict(LibraryRT(x)) else {
             continue;
         };
-        let row = bin_of(y, geom.y_range, bins);
+        let row = bin_of(y.0, geom.y_range, bins);
         let dr = forward_map(row, bins, dims.disp_rows);
         let (ty, half) = flip_display_row(dr, dims.disp_rows);
         raise_mark(marks, dims, tx, ty, half, Mark::Region);
     }
 }
 
+/// Brackets each measured column at `curve ± half_width`. Every measurement's
+/// `library` is a path cell center, so it is one of the curve's own points and
+/// never out of bounds — the `Err` arm is unreachable in practice, not a
+/// clamped fallback.
 fn mark_ridge(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
-    let curve = rec.curve();
+    let Some(curve) = rec.curve() else {
+        return;
+    };
     for m in rec.ridge() {
-        let Some(center) = predict_curve(curve, m.library.0) else {
+        let Ok(center) = curve.predict(m.library) else {
             continue;
         };
         let col = bin_of(m.library.0, geom.x_range, bins);
-        for y in [center + m.half_width, center - m.half_width] {
+        for y in [center.0 + m.half_width, center.0 - m.half_width] {
             let row = bin_of(y, geom.y_range, bins);
             let (ty, tx, half) = grid_to_screen(row, col, dims);
             raise_mark(marks, dims, tx, ty, half, Mark::Region);
@@ -1314,28 +1326,6 @@ fn bin_of(v: f64, range: (f64, f64), bins: usize) -> usize {
         return 0;
     }
     bin_index(v, range, bins)
-}
-
-/// Linear interpolation over a (library-sorted) curve, clamped at the
-/// endpoints rather than erroring — this only feeds a visual overlay, not a
-/// prediction API. `None` only when the curve is empty.
-fn predict_curve(curve: &[Point], x: f64) -> Option<f64> {
-    if curve.len() < 2 {
-        return curve.first().map(|p| p.observed);
-    }
-    let last = curve.len() - 1;
-    if x <= curve[0].library {
-        return Some(curve[0].observed);
-    }
-    if x >= curve[last].library {
-        return Some(curve[last].observed);
-    }
-    let i = curve.partition_point(|p| p.library < x).clamp(1, last);
-    let a = curve[i - 1];
-    let b = curve[i];
-    let span = (b.library - a.library).max(EPS);
-    let t = (x - a.library) / span;
-    Some(a.observed + t * (b.observed - a.observed))
 }
 
 // ---------------------------------------------------------------------
@@ -1650,23 +1640,19 @@ fn tolerance_lines(
     rec: &FitRecording,
     tolerances: Option<&ToleranceSummary>,
 ) -> Vec<Line<'static>> {
-    let ridge = rec.ridge();
-    let rt_half_width = weighted_ridge_half_width(ridge);
+    let summary = RidgeSummary::of(rec.ridge());
     let mut lines = vec![Line::raw(format!(
-        "RT residual: weighted half-width {rt_half_width:.4}s over {} ridge column(s)",
-        ridge.len()
+        "RT residual: weighted half-width {:.4}s over {} ridge column(s)",
+        summary.map_or(f64::NAN, |s| s.weighted_half_width),
+        summary.map_or(0, |s| s.n_columns),
     ))];
-    if ridge.is_empty() {
-        lines.push(Line::raw("  (no ridge measurements recorded)"));
-    } else {
-        let (min_hw, max_hw) = ridge
-            .iter()
-            .map(|m| m.half_width)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), hw| {
-                (lo.min(hw), hi.max(hw))
-            });
-        lines.push(Line::raw(format!("  range: {min_hw:.4}s .. {max_hw:.4}s")));
-    }
+    lines.push(match summary {
+        None => Line::raw("  (no ridge measurements recorded)"),
+        Some(s) => Line::raw(format!(
+            "  range: {:.4}s .. {:.4}s",
+            s.min_half_width, s.max_half_width
+        )),
+    });
     lines.push(Line::raw(""));
     match tolerances {
         Some(t) => {
@@ -1697,7 +1683,6 @@ mod tests {
     use crate::frames::FrameSummary;
     use calibrt::{
         CalibrationState,
-        LibraryRT,
         ObserveOpts,
         ObservedRTSeconds,
     };
@@ -2310,11 +2295,11 @@ mod tests {
             .ridge()
             .iter()
             .filter(|m| {
-                let Some(center) = predict_curve(rec.curve(), m.library.0) else {
+                let Ok(center) = rec.curve().unwrap().predict(m.library) else {
                     return false;
                 };
                 let col = bin_of(m.library.0, geom.x_range, dims.bins);
-                let row = bin_of(center, geom.y_range, dims.bins);
+                let row = bin_of(center.0, geom.y_range, dims.bins);
                 let (ty, tx, half) = grid_to_screen(row, col, dims);
                 let center_sr = ty * 2 + half.slot();
                 let rows = marked_rows(tx);

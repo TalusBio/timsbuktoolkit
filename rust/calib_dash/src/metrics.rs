@@ -9,7 +9,6 @@ use crate::CalibrantPoint;
 use calibrt::{
     CalibrationCurve,
     LibraryRT,
-    RidgeMeasurement,
 };
 use std::collections::HashSet;
 
@@ -68,21 +67,6 @@ pub fn churn(prev: &[CalibrantPoint], cur: &[CalibrantPoint]) -> (usize, usize) 
     let admitted = cur_set.difference(&prev_set).count();
     let evicted = prev_set.difference(&cur_set).count();
     (admitted, evicted)
-}
-
-/// Ridge half-width, weighted by each column's in-ridge weight. NaN when there
-/// are no measurements — heavier columns should carry more authority, and an
-/// unweighted mean over an empty set is not a number.
-pub fn weighted_ridge_half_width(widths: &[RidgeMeasurement]) -> f64 {
-    let total: f64 = widths.iter().map(|m| m.ridge_weight).sum();
-    if widths.is_empty() || total <= 0.0 {
-        return f64::NAN;
-    }
-    widths
-        .iter()
-        .map(|m| m.half_width * m.ridge_weight)
-        .sum::<f64>()
-        / total
 }
 
 #[cfg(test)]
@@ -214,28 +198,5 @@ mod tests {
         let (max, mean) = curve_delta(&a, &b, (0.0, 5.0), 11);
         assert!(max.is_nan(), "max should be NaN, got {max}");
         assert!(mean.is_nan(), "mean should be NaN, got {mean}");
-    }
-
-    #[test]
-    fn weighted_ridge_half_width_weights_by_ridge_weight() {
-        let widths = vec![
-            RidgeMeasurement {
-                library: LibraryRT(1.0),
-                half_width: 10.0,
-                ridge_weight: 1.0,
-                column_weight: 1.0,
-            },
-            RidgeMeasurement {
-                library: LibraryRT(2.0),
-                half_width: 20.0,
-                ridge_weight: 3.0,
-                column_weight: 3.0,
-            },
-        ];
-        // (10*1 + 20*3) / 4 = 17.5
-        assert!((weighted_ridge_half_width(&widths) - 17.5).abs() < 1e-9);
-        // Nothing to average is not a number, rather than the 0.0 a bare
-        // `sum / total` would produce out of a 0/0.
-        assert!(weighted_ridge_half_width(&[]).is_nan());
     }
 }

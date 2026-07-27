@@ -13,7 +13,9 @@ pub use calibrt::{
     ObservedRTSeconds,
     Point,
     RidgeMeasurement,
+    RidgeSummary,
     calibrate_with_ranges,
+    point_ranges,
 };
 use serde::{
     Deserialize,
@@ -230,40 +232,8 @@ impl CalibrationResult {
     }
 
     /// Summary of ridge width measurements for reporting.
-    pub fn ridge_width_summary(&self) -> Option<RidgeWidthSummary> {
-        if self.ridge_widths.is_empty() {
-            return None;
-        }
-        let total_weight: f64 = self.ridge_widths.iter().map(|m| m.ridge_weight).sum();
-        let weighted_avg = self
-            .ridge_widths
-            .iter()
-            .map(|m| m.half_width * m.ridge_weight)
-            .sum::<f64>()
-            / total_weight.max(1.0);
-        let min = self
-            .ridge_widths
-            .iter()
-            .map(|m| m.half_width)
-            .fold(f64::MAX, f64::min);
-        let max = self
-            .ridge_widths
-            .iter()
-            .map(|m| m.half_width)
-            .fold(0.0f64, f64::max);
-        let total_column_weight: f64 = self.ridge_widths.iter().map(|m| m.column_weight).sum();
-        let in_ridge_ratio = if total_column_weight > 0.0 {
-            total_weight / total_column_weight
-        } else {
-            0.0
-        };
-        Some(RidgeWidthSummary {
-            weighted_avg,
-            min,
-            max,
-            n_columns: self.ridge_widths.len(),
-            in_ridge_ratio,
-        })
+    pub fn ridge_width_summary(&self) -> Option<RidgeSummary> {
+        RidgeSummary::of(&self.ridge_widths)
     }
 
     /// Tolerance for the secondary spectral query at a detected apex.
@@ -394,17 +364,6 @@ impl CalibrationResult {
             derivation: None,
         }
     }
-}
-
-/// Summary of ridge width measurements for reporting.
-pub struct RidgeWidthSummary {
-    pub weighted_avg: f64,
-    pub min: f64,
-    pub max: f64,
-    pub n_columns: usize,
-    /// Fraction of total column weight that falls inside the ridge bounds (0.0–1.0).
-    /// Higher = better fit between spectral library and raw file.
-    pub in_ridge_ratio: f64,
 }
 
 /// JSON v2 calibration file format — shared between CLI and viewer.

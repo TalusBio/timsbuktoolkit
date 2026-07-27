@@ -174,6 +174,56 @@ pub struct RidgeMeasurement {
     pub column_weight: f64,
 }
 
+/// Everything a consumer reports about a fit's [`RidgeMeasurement`]s, folded in
+/// the one place the arithmetic is written — the dashboard, the search's derived
+/// tolerances and the CLI's log line all read this rather than each summing the
+/// slice their own way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RidgeSummary {
+    /// Mean half-width with each column weighted by its `ridge_weight`, so a
+    /// heavy column carries more authority than a lonely one. NaN when the
+    /// total weight is not positive: a weighted mean over no weight is not a
+    /// number, and 0.0 would read as "the ridge is infinitely tight".
+    pub weighted_half_width: f64,
+    pub min_half_width: f64,
+    pub max_half_width: f64,
+    pub n_columns: usize,
+    /// Fraction of the columns' total weight that falls inside the ridge bounds
+    /// (0.0–1.0). Higher = better agreement between library and raw file.
+    pub in_ridge_ratio: f64,
+}
+
+impl RidgeSummary {
+    /// `None` for an empty slice: there is no column count, minimum or maximum
+    /// to report, and no fold over nothing produces one.
+    ///
+    /// The mean divides by the total ridge weight itself, never by
+    /// `total.max(1.0)` as two of the folded-in callers used to: that clamp
+    /// shrinks the mean by an arbitrary factor whenever the total lands below 1
+    /// — reachable, since these are blurred cell weights and freely fractional
+    /// — and nothing about a weighted mean asks for it. A zero total divides
+    /// 0.0 by 0.0 (every term carries the same weight) and lands on the NaN the
+    /// field documents.
+    pub fn of(widths: &[RidgeMeasurement]) -> Option<Self> {
+        widths.first()?;
+        let sum = |f: fn(&RidgeMeasurement) -> f64| widths.iter().map(f).sum::<f64>();
+        let ridge_weight = sum(|m| m.ridge_weight);
+        let column_weight = sum(|m| m.column_weight);
+        let hw = || widths.iter().map(|m| m.half_width);
+        Some(Self {
+            weighted_half_width: sum(|m| m.half_width * m.ridge_weight) / ridge_weight,
+            min_half_width: hw().fold(f64::INFINITY, f64::min),
+            max_half_width: hw().fold(f64::NEG_INFINITY, f64::max),
+            n_columns: widths.len(),
+            in_ridge_ratio: if column_weight > 0.0 {
+                ridge_weight / column_weight
+            } else {
+                0.0
+            },
+        })
+    }
+}
+
 /// Serializable snapshot of calibration data — points + config.
 /// Used for save/load. Does not include the fitted curve (reconstructed on load).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -529,9 +579,7 @@ impl CalibrationState {
         if snapshot.points.is_empty() {
             return Err(CalibRtError::NoPoints);
         }
-        let x_range = compute_range(snapshot.points.iter().map(|p| p[0]))?;
-        let y_range = compute_range(snapshot.points.iter().map(|p| p[1]))?;
-
+        let (x_range, y_range) = point_ranges(snapshot.points.iter().map(|p| (p[0], p[1])))?;
         let mut state = Self::new(snapshot.grid_size, x_range, y_range, snapshot.lookback)?;
         state.update(
             snapshot
@@ -549,29 +597,36 @@ impl CalibrationState {
     }
 }
 
-/// Computes the min and max values from an iterator of f64 values.
+/// A grid geometry's extents: `(x_range, y_range)`, each a `(min, max)`, in the
+/// order [`CalibrationState::new`] and [`CalibrationState::reconfigure`] take.
+pub type GridRanges = ((f64, f64), (f64, f64));
+
+/// The [`GridRanges`] a set of `(library, observed)` pairs spans.
 ///
-/// # Returns
-/// - `Ok((min, max))` if at least one valid value exists
-/// - `Err(CalibRtError::NoPoints)` if no valid values exist
-fn compute_range(values: impl Iterator<Item = f64>) -> Result<(f64, f64), CalibRtError> {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut count = 0;
-
-    for val in values {
-        if val.is_finite() {
-            min = min.min(val);
-            max = max.max(val);
-            count += 1;
+/// A point with a non-finite coordinate contributes to neither axis (it would
+/// poison both bounds); `Err(NoPoints)` when that leaves nothing. A range that
+/// comes out empty or inverted on either axis is `Err(ZeroRange)` here rather
+/// than later out of [`Grid::new`], so a caller that only wants to know whether
+/// a grid is configurable never has to build one.
+pub fn point_ranges(
+    points: impl IntoIterator<Item = (f64, f64)>,
+) -> Result<GridRanges, CalibRtError> {
+    let mut x = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut y = x;
+    for (px, py) in points {
+        if !px.is_finite() || !py.is_finite() {
+            continue;
         }
+        x = (x.0.min(px), x.1.max(px));
+        y = (y.0.min(py), y.1.max(py));
     }
-
-    if count == 0 || !min.is_finite() || !max.is_finite() {
+    if !x.0.is_finite() {
         return Err(CalibRtError::NoPoints);
     }
-
-    Ok((min, max))
+    if x.0 >= x.1 || y.0 >= y.1 {
+        return Err(CalibRtError::ZeroRange);
+    }
+    Ok((x, y))
 }
 
 /// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
@@ -659,13 +714,7 @@ pub fn calibrate_with_ranges(
 /// let curve = calibrate(&points, 100).expect("Calibration failed");
 /// ```
 pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve, CalibRtError> {
-    if points.is_empty() {
-        return Err(CalibRtError::NoPoints);
-    }
-
-    let x_range = compute_range(points.iter().map(|p| p.library))?;
-    let y_range = compute_range(points.iter().map(|p| p.observed))?;
-
+    let (x_range, y_range) = point_ranges(points.iter().map(|p| (p.library, p.observed)))?;
     calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
 }
 
@@ -764,6 +813,73 @@ mod observer_tests {
             }
         }
         assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
+    }
+}
+
+#[cfg(test)]
+mod ridge_summary_tests {
+    use super::*;
+
+    /// A column carrying twice its ridge weight in total, so `in_ridge_ratio`
+    /// is 0.5 for any mix of these.
+    fn m(half_width: f64, ridge_weight: f64) -> RidgeMeasurement {
+        RidgeMeasurement {
+            library: LibraryRT(1.0),
+            half_width,
+            ridge_weight,
+            column_weight: ridge_weight * 2.0,
+        }
+    }
+
+    #[test]
+    fn the_mean_is_weighted_by_ridge_weight_and_the_spread_is_not() {
+        let s = RidgeSummary::of(&[m(10.0, 1.0), m(20.0, 3.0)]).unwrap();
+        // (10*1 + 20*3) / 4 = 17.5, not the unweighted 15.0.
+        assert!((s.weighted_half_width - 17.5).abs() < 1e-9);
+        assert_eq!((s.min_half_width, s.max_half_width), (10.0, 20.0));
+        assert_eq!(s.n_columns, 2);
+        assert!((s.in_ridge_ratio - 0.5).abs() < 1e-9);
+        assert!(RidgeSummary::of(&[]).is_none(), "nothing to count or bound");
+    }
+
+    /// The `.max(1.0)` divisor this consolidated away: a total ridge weight of
+    /// 0.25 must report the half-width it measured, not a quarter of it. And a
+    /// weightless column keeps its count and bounds — only the mean goes NaN,
+    /// where a 0.0 would read as a perfectly tight ridge.
+    #[test]
+    fn a_total_weight_below_one_does_not_shrink_the_mean() {
+        let s = RidgeSummary::of(&[m(30.0, 0.25)]).unwrap();
+        assert!(
+            (s.weighted_half_width - 30.0).abs() < 1e-9,
+            "got {}, the pre-consolidation clamp would say 7.5",
+            s.weighted_half_width
+        );
+        let zero = RidgeSummary::of(&[m(5.0, 0.0)]).unwrap();
+        assert!(zero.weighted_half_width.is_nan());
+        assert_eq!((zero.n_columns, zero.min_half_width), (1, 5.0));
+    }
+
+    /// The two axes are bounded independently, a non-finite point drops out of
+    /// both, and the three refusals are distinguishable: nothing left to bound
+    /// is `NoPoints`, while a single collapsed axis is `ZeroRange` — which is
+    /// what a grid built from these ranges would have said anyway.
+    #[test]
+    fn point_ranges_bounds_both_axes_and_names_each_refusal() {
+        let pts = [(2.0, 30.0), (1.0, 10.0), (f64::NAN, 99.0), (3.0, 20.0)];
+        assert_eq!(
+            point_ranges(pts).unwrap(),
+            ((1.0, 3.0), (10.0, 30.0)),
+            "the NaN point must not reach the observed axis either"
+        );
+        for (pts, want) in [
+            (vec![], "NoPoints"),
+            (vec![(f64::INFINITY, 1.0)], "NoPoints"),
+            (vec![(1.0, 1.0), (1.0, 2.0)], "ZeroRange"),
+            (vec![(1.0, 1.0), (2.0, 1.0)], "ZeroRange"),
+        ] {
+            let got = format!("{:?}", point_ranges(pts).unwrap_err());
+            assert_eq!(got, want);
+        }
     }
 }
 

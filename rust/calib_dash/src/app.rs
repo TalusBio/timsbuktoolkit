@@ -15,16 +15,17 @@ use crate::metrics::{
     BatchMetrics,
     churn,
     curve_delta,
-    weighted_ridge_half_width,
 };
 use crate::recording::FitRecording;
 use calibrt::{
     CalibRtError,
     CalibrationCurve,
     CalibrationState,
+    GridRanges,
     LibraryRT,
     ObserveOpts,
     ObservedRTSeconds,
+    RidgeSummary,
 };
 use ratatui::crossterm::event::{
     self,
@@ -575,61 +576,19 @@ const CALIBRANT_WEIGHT: f64 = 1.0;
 /// unlikely to fall between sample points.
 const CURVE_DELTA_SAMPLES: usize = 50;
 
-/// The `(x_range, y_range)` pair `point_ranges` derives and
-/// `CalibrationState::reconfigure` is configured with.
-type GridRanges = ((f64, f64), (f64, f64));
-
-/// The min/max of `library_rt` and `observed_rt` over a point set, the same fold
-/// `timsseek_cli::processing` runs before building the real `CalibrationState`.
-///
-/// `None` when every point shares one coordinate (or there are no points at
-/// all): a `CalibrationState` cannot be configured with a zero-width range.
-fn point_ranges(points: &[CalibrantPoint]) -> Option<GridRanges> {
-    let (min_x, max_x, min_y, max_y) = points.iter().fold(
-        (
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        ),
-        |(mnx, mxx, mny, mxy), p| {
-            (
-                mnx.min(p.library_rt),
-                mxx.max(p.library_rt),
-                mny.min(p.observed_rt),
-                mxy.max(p.observed_rt),
-            )
-        },
-    );
-    let usable = min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite();
-    (usable && min_x < max_x && min_y < max_y).then_some(((min_x, max_x), (min_y, max_y)))
-}
-
-/// Why a re-fit produced nothing. Only `refit_live` reports these (through
-/// `Display`); the other callers treat any of them as "no recording".
+/// Why a re-fit produced nothing: the named [`fit_points`] stage was refused by
+/// `calibrt`. Only `refit_live` reports these (through `Display`); the other
+/// callers treat any of them as "no recording".
 #[derive(Debug)]
-enum RefitSkipped {
-    /// The points span a zero-width range on at least one axis, so there is no
-    /// grid to configure — see [`point_ranges`].
-    DegenerateRange,
-    /// The named [`fit_points`] stage was refused by `calibrt`.
-    Failed {
-        stage: &'static str,
-        error: CalibRtError,
-    },
+struct RefitSkipped {
+    stage: &'static str,
+    error: CalibRtError,
 }
 
 impl std::fmt::Display for RefitSkipped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RefitSkipped::DegenerateRange => {
-                f.write_str("the points span a zero-width range on at least one axis")
-            }
-            // `CalibRtError` has no `Display`.
-            RefitSkipped::Failed { stage, error } => {
-                write!(f, "{stage} failed: {error:?}")
-            }
-        }
+        // `CalibRtError` has no `Display`.
+        write!(f, "{} failed: {:?}", self.stage, self.error)
     }
 }
 
@@ -637,11 +596,11 @@ impl std::fmt::Display for RefitSkipped {
 /// `reconfigure` → `update` → `fit_with` → `measure_ridge_width_with`, against
 /// whichever `CalibrationState`/`FitRecording` pair the caller owns.
 ///
-/// The grid ranges are derived *here*, by [`point_ranges`], rather than passed
-/// in: the live fit and a scrubbed frame's replay agreeing on that fold is what
-/// makes a replayed frame show the fit that actually ran. They are returned for
-/// callers that need them afterwards (`refit_live` compares curves over the x
-/// range it just fit).
+/// The grid ranges are derived *here*, by [`calibrt::point_ranges`], rather than
+/// passed in: the live fit and a scrubbed frame's replay agreeing on that fold is
+/// what makes a replayed frame show the fit that actually ran. They are returned
+/// for callers that need them afterwards (`refit_live` compares curves over the
+/// x range it just fit).
 fn fit_points(
     state: &mut CalibrationState,
     recording: &mut FitRecording,
@@ -649,16 +608,20 @@ fn fit_points(
     points: &[CalibrantPoint],
     opts: ObserveOpts,
 ) -> Result<GridRanges, RefitSkipped> {
-    let (x_range, y_range) = point_ranges(points).ok_or(RefitSkipped::DegenerateRange)?;
+    let ranges = calibrt::point_ranges(points.iter().map(|p| (p.library_rt, p.observed_rt)));
+    let (x_range, y_range) = ranges.map_err(|error| RefitSkipped {
+        stage: "deriving the grid ranges from the points",
+        error,
+    })?;
     state
         .reconfigure(bins, x_range, y_range)
-        .map_err(|error| RefitSkipped::Failed {
+        .map_err(|error| RefitSkipped {
             stage: "reconfiguring the calibration state",
             error,
         })?;
     state
         .update(points.iter().map(as_calibrt_tuple))
-        .map_err(|error| RefitSkipped::Failed {
+        .map_err(|error| RefitSkipped {
             stage: "updating the calibration state",
             error,
         })?;
@@ -921,7 +884,8 @@ impl CalibDash {
             }
             Ok((x_range, _y_range)) => {
                 path_nodes = self.app.recording().path_indices().len();
-                ridge_half_width = weighted_ridge_half_width(self.app.recording().ridge());
+                ridge_half_width = RidgeSummary::of(self.app.recording().ridge())
+                    .map_or(f64::NAN, |s| s.weighted_half_width);
 
                 if let Some(curve) = self.state.curve() {
                     wrmse = curve.wrmse(self.current_points.iter().map(as_calibrt_tuple));
@@ -1197,6 +1161,11 @@ mod tests {
             keep_every: 1,
             dropped: 0,
         }
+    }
+
+    /// A recording's curve points, empty when it holds no curve.
+    fn curve_of(rec: &FitRecording) -> Vec<Point> {
+        rec.curve().map_or_else(Vec::new, |c| c.points().to_vec())
     }
 
     /// Pointwise curve equality — the assertion behind every "what you scrub is
@@ -1607,7 +1576,7 @@ mod tests {
 
         // Batch 0's curve, refit independently for comparison against what
         // scrubbing shows.
-        let batch0_curve = d.refit_frame(0).expect("frame 0 exists").curve().to_vec();
+        let batch0_curve = curve_of(d.refit_frame(0).expect("frame 0 exists"));
 
         // A generous budget retains all 3 batches; scrub 3 back from live
         // (batch 2) lands on frame index 0 (batch 0).
@@ -1616,12 +1585,12 @@ mod tests {
 
         assert_eq!(d.app.scrub_frame(), Some(0));
         assert_eq!(d.app.scrub_chunk(), Some(0));
-        assert_same_curve(d.app.active_recording().curve(), &batch0_curve);
+        assert_same_curve(&curve_of(d.app.active_recording()), &batch0_curve);
 
         // The live view is unaffected by scrubbing — `recording()` (not
         // `active_recording()`) still reflects batch 2's own fit.
         assert!(
-            !d.app.recording().curve().is_empty(),
+            !curve_of(d.app.recording()).is_empty(),
             "sanity: batch 2 produced a real curve too"
         );
     }
@@ -1717,8 +1686,8 @@ mod tests {
         d.sync_dp();
         assert_eq!(d.dp_refit_calls, 2, "a new batch must refit again");
         assert_same_curve(
-            d.app.live_dp_recording().expect("batch 1 refit").curve(),
-            d.app.recording().curve(),
+            &curve_of(d.app.live_dp_recording().expect("batch 1 refit")),
+            &curve_of(d.app.recording()),
         );
 
         // Turning the pane off drops the recording so nothing can read a
@@ -1797,8 +1766,8 @@ mod tests {
             "the slab truncates to n_calibrants"
         );
 
-        let live = d.app.recording().curve().to_vec();
-        let refit = d.refit_frame(0).expect("frame 0 exists").curve().to_vec();
+        let live = curve_of(d.app.recording());
+        let refit = curve_of(d.refit_frame(0).expect("frame 0 exists"));
         assert_eq!(
             live.len(),
             n_calibrants,

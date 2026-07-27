@@ -44,6 +44,8 @@ use timsseek::rt_calibration::{
     ObservedRTSeconds,
     Point,
     RidgeMeasurement,
+    RidgeSummary,
+    point_ranges,
     ridge_half_width_interp,
 };
 use timsseek::scoring::offsets::MzMobilityOffsets;
@@ -555,9 +557,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     if let Some(summary) = calibration.ridge_width_summary() {
         println!(
             "  RT tolerance (ridge): avg {:.0}s, min {:.0}s, max {:.0}s ({} cols, {:.0}% in-ridge)",
-            summary.weighted_avg,
-            summary.min,
-            summary.max,
+            summary.weighted_half_width,
+            summary.min_half_width,
+            summary.max_half_width,
             summary.n_columns,
             summary.in_ridge_ratio * 100.0,
         );
@@ -913,30 +915,11 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         }
     }
 
-    let (min_x, max_x, min_y, max_y) = points.iter().fold(
-        (
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        ),
-        |(mnx, mxx, mny, mxy), p| {
-            (
-                mnx.min(p.library),
-                mxx.max(p.library),
-                mny.min(p.observed),
-                mxy.max(p.observed),
-            )
-        },
-    );
+    let (x_range, y_range) = point_ranges(points.iter().map(|p| (p.library, p.observed)))?;
 
     // Use CalibrationState for fitting + ridge width measurement
-    let mut cal_state = CalibratedGrid::new(
-        config.grid_size,
-        (min_x, max_x),
-        (min_y, max_y),
-        config.dp_lookback,
-    )?;
+    let mut cal_state =
+        CalibratedGrid::new(config.grid_size, x_range, y_range, config.dp_lookback)?;
     cal_state.update(points.iter().map(|p| {
         (
             LibraryRT(p.library),
@@ -953,25 +936,10 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         DEFAULT_RIDGE_FRACTION,
         dash_recording,
     );
-    if !ridge_widths.is_empty() {
-        let total_weight: f64 = ridge_widths.iter().map(|m| m.ridge_weight).sum();
-        let weighted_hw: f64 = ridge_widths
-            .iter()
-            .map(|m| m.half_width * m.ridge_weight)
-            .sum::<f64>()
-            / total_weight.max(1.0);
+    if let Some(s) = RidgeSummary::of(&ridge_widths) {
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",
-            weighted_hw,
-            ridge_widths.len(),
-            ridge_widths
-                .iter()
-                .map(|m| m.half_width)
-                .fold(f64::MAX, f64::min),
-            ridge_widths
-                .iter()
-                .map(|m| m.half_width)
-                .fold(0.0f64, f64::max),
+            s.weighted_half_width, s.n_columns, s.min_half_width, s.max_half_width,
         );
     }
 

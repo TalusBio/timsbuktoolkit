@@ -6,10 +6,10 @@
 //! ~40 bytes per cell, so this is roughly a tenth of what the fit itself spends.
 
 use calibrt::{
+    CalibrationCurve,
     FitEvent,
     FitObserver,
     GridGeom,
-    Point,
     RidgeMeasurement,
 };
 
@@ -37,7 +37,11 @@ pub struct FitRecording {
     /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
     /// not scored by the DP recurrence.
     dp_range: std::ops::Range<usize>,
-    curve: Vec<Point>,
+    /// The fit's curve itself, not a copy of its points, so the overlay can
+    /// predict through it instead of re-deriving calibrt's interpolation.
+    /// `None` until a `CurveFit` arrives — a path too short to interpolate
+    /// emits none.
+    curve: Option<CalibrationCurve>,
     ridge: Vec<RidgeMeasurement>,
     /// One entry per DP node visited. Same `bins`-capacity hint as
     /// `path_indices` above.
@@ -57,7 +61,7 @@ impl FitRecording {
             // Capacity hint only — see the field doc comment.
             path_indices: Vec::with_capacity(bins),
             dp_range: 0..0,
-            curve: Vec::with_capacity(bins),
+            curve: None,
             ridge: Vec::with_capacity(bins),
             dp: Vec::with_capacity(bins),
         }
@@ -77,8 +81,8 @@ impl FitRecording {
         self.dp_range.clone()
     }
 
-    pub(crate) fn curve(&self) -> &[Point] {
-        &self.curve
+    pub(crate) fn curve(&self) -> Option<&CalibrationCurve> {
+        self.curve.as_ref()
     }
 
     pub(crate) fn ridge(&self) -> &[RidgeMeasurement] {
@@ -133,7 +137,7 @@ impl FitObserver for FitRecording {
                 self.suppressed.fill(false);
                 self.path_indices.clear();
                 self.dp_range = 0..0;
-                self.curve.clear();
+                self.curve = None;
                 self.ridge.clear();
                 self.dp.clear();
             }
@@ -180,7 +184,7 @@ impl FitObserver for FitRecording {
                     self.path_indices.push(row * self.geom.bins + col);
                 }
             }
-            FitEvent::CurveFit { curve } => self.curve.extend_from_slice(curve.points()),
+            FitEvent::CurveFit { curve } => self.curve = Some(curve.clone()),
             FitEvent::RidgeMeasured { widths } => self.ridge.extend_from_slice(widths),
         }
     }
@@ -242,7 +246,7 @@ mod tests {
             "a row/col swap would put the extra point here instead"
         );
         assert_eq!(rec.path_indices().len(), 10);
-        assert_eq!(rec.curve().len(), 10);
+        assert_eq!(rec.curve().unwrap().points().len(), 10);
     }
 
     #[test]
@@ -332,7 +336,7 @@ mod tests {
             (
                 rec.geom().bins,
                 rec.path_indices().len(),
-                rec.curve().len(),
+                rec.curve().unwrap().points().len(),
                 rec.ridge().len()
             ),
             (3, 3, 3, 3),
@@ -363,7 +367,7 @@ mod tests {
         assert_eq!(
             (
                 rec.path_indices().len(),
-                rec.curve().len(),
+                rec.curve().unwrap().points().len(),
                 rec.ridge().len()
             ),
             (10, 10, 10),
