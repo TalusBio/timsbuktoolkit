@@ -8,12 +8,19 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 
 /// The scratch and output buffers `find_optimal_path` reuses across calls,
 /// grouped so the function itself doesn't take one parameter per buffer.
-/// Callers own these; nothing here allocates.
+/// Callers own every buffer the function needs: each one is cleared and
+/// refilled, so repeated calls at a stable problem size allocate nothing.
 pub(crate) struct PathfindingScratch<'a> {
     pub max_weights: &'a mut Vec<f64>,
     pub prev_node_indices: &'a mut Vec<Option<usize>>,
     pub out_path: &'a mut Vec<crate::Point>,
+    /// Filled only when `ObserveOpts::dp_nodes` is set.
     pub considered: &'a mut Vec<(usize, f64)>,
+    /// The DP chain and the two greedy tails Pass 2 attaches, drained into
+    /// `out_path` at the end of the call.
+    pub dp_path: &'a mut Vec<crate::Point>,
+    pub prefix: &'a mut Vec<crate::Point>,
+    pub suffix: &'a mut Vec<crate::Point>,
 }
 
 /// Finds the highest-weight path through the nodes that satisfies the monotonic constraint.
@@ -40,8 +47,14 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
         prev_node_indices,
         out_path,
         considered,
+        dp_path: path,
+        prefix,
+        suffix,
     } = scratch;
     out_path.clear();
+    path.clear();
+    prefix.clear();
+    suffix.clear();
     if nodes.is_empty() {
         return (0..0, 0.0);
     }
@@ -122,7 +135,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     }
 
     // Reconstruct the DP path
-    let mut path = Vec::new();
     let mut current_idx_opt = Some(end_of_path_idx);
     while let Some(current_idx) = current_idx_opt {
         path.push(nodes[current_idx].center);
@@ -144,7 +156,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     // Nodes are sorted by (library, observed), so candidates are before the path's
     // first node in the sorted order.
     let first = path[0];
-    let mut prefix = Vec::new();
     // Walk backward through sorted nodes, greedily picking the nearest monotonic predecessor
     let first_sorted_idx = nodes.iter().position(|n| {
         (n.center.library - first.library).abs() < 1e-9
@@ -171,7 +182,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
         (n.center.library - last.library).abs() < 1e-9
             && (n.center.observed - last.observed).abs() < 1e-9
     });
-    let mut suffix = Vec::new();
     if let Some(end_idx) = last_sorted_idx {
         let mut cursor = last;
         for node in nodes.iter().skip(end_idx + 1) {
@@ -191,9 +201,9 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     let dp_range = prefix.len()..(prefix.len() + dp_len);
 
     // Assemble into the caller-owned buffer: prefix + DP path + suffix.
-    out_path.append(&mut prefix);
-    out_path.append(&mut path);
-    out_path.append(&mut suffix);
+    out_path.append(prefix);
+    out_path.append(path);
+    out_path.append(suffix);
     (dp_range, max_path_weight)
 }
 
@@ -248,6 +258,9 @@ mod tests {
         let mut prev_indices = Vec::new();
         let mut considered = Vec::new();
         let mut path = Vec::new();
+        let mut dp_path = Vec::new();
+        let mut prefix = Vec::new();
+        let mut suffix = Vec::new();
 
         let (dp_range, dp_weight) = find_optimal_path(
             &mut nodes,
@@ -257,6 +270,9 @@ mod tests {
                 prev_node_indices: &mut prev_indices,
                 out_path: &mut path,
                 considered: &mut considered,
+                dp_path: &mut dp_path,
+                prefix: &mut prefix,
+                suffix: &mut suffix,
             },
             &mut (),
             ObserveOpts::NONE,

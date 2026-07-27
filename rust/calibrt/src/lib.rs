@@ -284,6 +284,10 @@ pub struct CalibrationState {
     filtered: Vec<grid::Node>,
     /// The path, refilled per fit.
     path_points: Vec<Point>,
+    /// The DP chain and Pass 2's greedy tails, assembled into `path_points`.
+    dp_path: Vec<Point>,
+    dp_prefix: Vec<Point>,
+    dp_suffix: Vec<Point>,
     curve: Option<CalibrationCurve>,
     stale: bool,
     lookback: usize,
@@ -304,6 +308,9 @@ impl CalibrationState {
             dp_considered: Vec::with_capacity(lookback),
             filtered: Vec::with_capacity(grid_size),
             path_points: Vec::new(),
+            dp_path: Vec::new(),
+            dp_prefix: Vec::new(),
+            dp_suffix: Vec::new(),
             curve: None,
             stale: false,
             lookback,
@@ -344,9 +351,7 @@ impl CalibrationState {
         });
 
         if self.grid.suppress_nonmax().is_err() {
-            self.curve = None;
-            self.path_indices.clear();
-            self.stale = false;
+            self.clear_fit();
             obs.on_event(FitEvent::Suppressed {
                 cells: self.grid.grid_cells(),
             });
@@ -388,6 +393,9 @@ impl CalibrationState {
                 prev_node_indices: &mut self.dp_prev_indices,
                 out_path: &mut path_points,
                 considered: &mut self.dp_considered,
+                dp_path: &mut self.dp_path,
+                prefix: &mut self.dp_prefix,
+                suffix: &mut self.dp_suffix,
             },
             obs,
             opts,
@@ -424,17 +432,22 @@ impl CalibrationState {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.grid.reset();
+    /// Drop the previous fit's results, keeping the grid and the buffers.
+    fn clear_fit(&mut self) {
         self.curve = None;
         self.path_indices.clear();
         self.stale = false;
     }
 
+    pub fn reset(&mut self) {
+        self.grid.reset();
+        self.clear_fit();
+    }
+
     /// Re-point `self` at a new geometry, reusing the grid's node buffer when
     /// `bins` is unchanged (see [`grid::Grid::reconfigure`]) and clearing the
-    /// previous fit's `curve`/`path_indices`/`stale` the same way `reset`
-    /// does. Use it in place of `reset` when re-fitting at a constant `bins`
+    /// previous fit the same way `reset` does. Use it in place of `reset` when
+    /// re-fitting at a constant `bins`
     /// against fresh `x_range`/`y_range` — the point-derived ranges of a new
     /// batch, say — which is the one way to move the geometry without
     /// discarding the allocations.
@@ -445,9 +458,7 @@ impl CalibrationState {
         y_range: (f64, f64),
     ) -> Result<(), CalibRtError> {
         self.grid.reconfigure(bins, x_range, y_range)?;
-        self.curve = None;
-        self.path_indices.clear();
-        self.stale = false;
+        self.clear_fit();
         Ok(())
     }
 
@@ -653,6 +664,20 @@ fn compute_range(values: impl Iterator<Item = f64>) -> Result<(f64, f64), CalibR
     Ok((min, max))
 }
 
+/// Length of the assembled path, or `None` if the fit never got that far.
+#[derive(Default)]
+struct FitOutcome {
+    path_len: Option<usize>,
+}
+
+impl FitObserver for FitOutcome {
+    fn on_event(&mut self, ev: FitEvent<'_>) {
+        if let FitEvent::PathFound { path, .. } = ev {
+            self.path_len = Some(path.len());
+        }
+    }
+}
+
 /// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
 ///
 /// This is the lower-level API that requires you to specify the x and y ranges explicitly.
@@ -673,38 +698,30 @@ pub fn calibrate_with_ranges(
     grid_size: usize,
     lookback: usize,
 ) -> Result<CalibrationCurve, CalibRtError> {
-    // Module 1: Grid data and apply nonmaximal suppression
-    let mut grid = Grid::new(grid_size, x_range, y_range)?;
+    let mut state = CalibrationState::new(grid_size, x_range, y_range, lookback)?;
+    state.update(points.iter().map(|p| {
+        (
+            LibraryRT(p.library),
+            ObservedRTSeconds(p.observed),
+            p.weight,
+        )
+    }))?;
 
-    grid.extend_points(points)?;
-    grid.suppress_nonmax()?;
-    grid.display_heatmap();
+    let mut outcome = FitOutcome::default();
+    state.fit_with(&mut outcome, ObserveOpts::NONE);
 
-    let mut filtered_nodes: Vec<grid::Node> = grid
-        .nodes
-        .into_iter()
-        .filter(|n| !n.suppressed && n.center.weight > 0.0)
-        .collect();
+    // Suppression wiping out the whole grid short-circuits the fit before a
+    // path exists, and is reported as an error rather than a failed fit.
+    let Some(path_len) = outcome.path_len else {
+        return Err(CalibRtError::NoPoints);
+    };
+    state.grid.display_heatmap();
 
-    // Module 2: Find the optimal ascending path
-    let mut max_weights = Vec::new();
-    let mut prev_indices = Vec::new();
-    let mut considered = Vec::new();
-    let mut optimal_path_points = Vec::new();
-    let (_dp_range, _dp_weight) = pathfinding::find_optimal_path(
-        &mut filtered_nodes,
-        lookback,
-        pathfinding::PathfindingScratch {
-            max_weights: &mut max_weights,
-            prev_node_indices: &mut prev_indices,
-            out_path: &mut optimal_path_points,
-            considered: &mut considered,
-        },
-        &mut (),
-        ObserveOpts::NONE,
-    );
-    // Module 3: Fit the final points and prepare for extrapolation
-    let calcurve = CalibrationCurve::new(optimal_path_points);
+    let calcurve = state.curve().cloned().ok_or(if path_len == 0 {
+        CalibRtError::NoPoints
+    } else {
+        CalibRtError::InsufficientPoints
+    });
     match &calcurve {
         Ok(c) => {
             let wrmse = c.wrmse(points.iter().map(|p| {
