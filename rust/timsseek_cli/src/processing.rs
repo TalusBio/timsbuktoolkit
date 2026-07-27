@@ -442,10 +442,20 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             calib_dash::ToleranceSummary {
                 mz_ppm: calibration.mz_tolerance(),
                 mobility_pct: (mobility.0 as f64, mobility.1 as f64),
+                // `calibrate_from_phase1` only ever derives one scalar RT
+                // tolerance; duplicated into both tuple slots because
+                // `ToleranceSummary::rt_seconds` is deliberately symmetric —
+                // see that field's own doc comment, not a copy-paste bug.
                 rt_seconds: (rt_tolerance_seconds, rt_tolerance_seconds),
                 n_calibrants: calibration.errors().rt_seconds.n,
             },
         );
+        // The post-Phase-2 pause: the dashboard's other moment, alongside
+        // every Phase 1 batch pause `on_batch` already opens. Without this
+        // call the Tolerances/Convergence tabs and the batch scrubber were
+        // reachable in principle but the process moved straight on to Phase
+        // 3 before a user could ever see them.
+        d.present();
     }
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
@@ -680,7 +690,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-    #[cfg(feature = "calib-dashboard")] dash_recording: Option<&mut calib_dash::FitRecording>,
+    #[cfg(feature = "calib-dashboard")] mut dash_recording: Option<&mut calib_dash::FitRecording>,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
@@ -801,7 +811,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         )
     }))?;
     #[cfg(feature = "calib-dashboard")]
-    match dash_recording {
+    match dash_recording.as_deref_mut() {
         Some(recording) => cal_state.fit_with(recording, calibrt::ObserveOpts::NONE),
         None => cal_state.fit(),
     }
@@ -809,7 +819,19 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     cal_state.fit();
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
-    // Measure ridge width for position-dependent RT tolerance
+    // Measure ridge width for position-dependent RT tolerance. When the
+    // dashboard is recording this fit, route the measurement through the
+    // same recording (`measure_ridge_width_with`) rather than the plain
+    // `measure_ridge_width` — otherwise `recording.ridge()` stays empty and
+    // the Tolerances tab's ridge overlay has nothing to show even though the
+    // real Step B measurement did run. No cost when the dashboard isn't
+    // recording (`dash_recording` is `None` on an ordinary run).
+    #[cfg(feature = "calib-dashboard")]
+    let ridge_widths = match dash_recording {
+        Some(recording) => cal_state.measure_ridge_width_with(0.1, recording),
+        None => cal_state.measure_ridge_width(0.1),
+    };
+    #[cfg(not(feature = "calib-dashboard"))]
     let ridge_widths = cal_state.measure_ridge_width(0.1);
     if !ridge_widths.is_empty() {
         let total_weight: f64 = ridge_widths.iter().map(|m| m.ridge_weight).sum();
