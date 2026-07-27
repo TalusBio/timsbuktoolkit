@@ -611,15 +611,13 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
     let (block_area, x_label_area) = (rows[0], rows[1]);
 
     let title_left = " Fit \u{2014} observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
-    // The active mark layer's name lives here, not in the global status
-    // line: a layer is meaningless outside the Fit tab, and this title is
-    // already `ui.rs`'s one Fit-tab-only place that names the pipeline
-    // stage — see `Layer`'s doc comment for why stage and layer are shown
-    // together without one implying the other.
+    // `batch`/`stage` only — the active layer used to share this corner too,
+    // but now has its own dedicated subtitle row (below) and no longer
+    // competes with these for width. See `heatmap_title_right`'s doc comment
+    // for why `stage` is still the one dropped here under a narrow DP pane.
     let title_right = heatmap_title_right(
         app.batch(),
         app.stage().label(),
-        app.layer().label(),
         (block_area.width as usize).saturating_sub(title_left.chars().count()),
     );
     let block = Block::bordered()
@@ -627,14 +625,37 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
         .title_top(Line::from(title_right).right_aligned());
     let inner = block.inner(block_area);
     frame.render_widget(block, block_area);
-    paint_heatmap(frame, inner, rec, app);
 
-    if show_y_axis && inner.height > 0 {
+    // The active mark layer's dedicated subtitle row — see `fit_subtitle`'s
+    // doc comment for why this can no longer share a line with anything
+    // else. Styled `BOLD` (the file's existing convention for emphasis —
+    // `heading` above, the node glyphs) specifically so it never blends into
+    // one run of text with the unstyled `title_left`/`title_right` above it.
+    // Only skipped when there is not even one row to spare for it beyond the
+    // canvas's own minimum of one row — a heatmap with zero rows would defeat
+    // the tab's entire purpose, so this is the one case the subtitle still
+    // yields to something else, and it is a height, not a width, shortage.
+    let show_subtitle = inner.height >= 2;
+    let canvas = if show_subtitle {
+        let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+        let subtitle_area = rows[0];
+        let subtitle = fit_subtitle(app.layer(), subtitle_area.width as usize);
+        frame.render_widget(
+            Paragraph::new(subtitle).style(Style::default().add_modifier(Modifier::BOLD)),
+            subtitle_area,
+        );
+        rows[1]
+    } else {
+        inner
+    };
+    paint_heatmap(frame, canvas, rec, app);
+
+    if show_y_axis && canvas.height > 0 {
         let y_step = nice_step((y_hi - y_lo).abs().max(1e-9), y_target);
         let y_decimals = axis_decimals(y_step);
         for v in axis_ticks(y_lo, y_hi, y_target) {
-            let row = value_to_row(v, y_lo, y_hi, inner.height as usize);
-            let abs_y = inner.y + row as u16;
+            let row = value_to_row(v, y_lo, y_hi, canvas.height as usize);
+            let abs_y = canvas.y + row as u16;
             let label = format!(
                 "{:>width$}",
                 fmt_axis_value(v, y_decimals),
@@ -672,30 +693,73 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Picks the most detailed right-side block title that still fits `avail`
-/// columns, degrading by dropping the pipeline stage label first: `Stage` is
+/// columns, degrading by dropping the pipeline stage label: `Stage` is
 /// already shown on the global status line (`draw_status_line`) for every
 /// tab, so losing it here under a narrow DP pane (that pane's grid area is
 /// only 65% of the terminal, further reduced by the y-axis gutter — see
 /// `draw_fit_tab`/`y_gutter_width`) costs nothing not already visible
-/// elsewhere. The active layer has no other home at all (`Layer`'s doc
-/// comment), so it is the last thing dropped, not the first.
+/// elsewhere.
+///
+/// The active layer used to be a third field crammed into this same corner,
+/// dropped first of the three when space ran out — exactly backwards, since
+/// it has no other home on screen at all. It now has its own dedicated
+/// subtitle row (`fit_subtitle`, rendered just below this title) that never
+/// competes with `batch`/`stage` for width, so there is nothing left here to
+/// rank it against.
 ///
 /// This exists because `ratatui`'s `Block` draws each of its titles
 /// independently into the border row with no collision detection — two
 /// titles whose combined width exceeds the block's simply overlap and
-/// garble each other rather than one yielding space to the other, which is
-/// exactly what widening this title (to add the layer name) started
-/// triggering in the narrow DP-pane case.
-fn heatmap_title_right(batch: u32, stage: &str, layer: &str, avail: usize) -> String {
-    let full = format!(" b{batch} \u{b7} {stage} \u{b7} {layer} ");
+/// garble each other rather than one yielding space to the other.
+fn heatmap_title_right(batch: u32, stage: &str, avail: usize) -> String {
+    let full = format!(" b{batch} \u{b7} {stage} ");
     if full.chars().count() <= avail {
         return full;
     }
-    let no_stage = format!(" b{batch} \u{b7} {layer} ");
-    if no_stage.chars().count() <= avail {
-        return no_stage;
-    }
     format!(" b{batch} ")
+}
+
+/// One phrase glossing what an active layer's marks mean, appended to its
+/// name in `fit_subtitle`. Needed because a `Region` mark (`Mark`'s doc
+/// comment) is identified purely by `Modifier::REVERSED` now, not by a
+/// distinct glyph — there is no glyph-coded legend left to read the marks
+/// against, so the subtitle is the only place left to say what an inverted
+/// cell on the active layer actually means. Lives beside `heatmap_title_right`/
+/// `fit_subtitle` rather than on `Layer` itself (`app.rs`): this is about how
+/// `ui.rs` renders the layer, not a fact about the layer.
+fn layer_gloss(layer: Layer) -> &'static str {
+    match layer {
+        Layer::None => "density only",
+        Layer::Path => "O chosen, X greedy tail",
+        Layer::Curve => "fitted calibration",
+        Layer::Ridge => "tolerance band",
+        Layer::Suppressed => "discarded by non-max suppression",
+    }
+}
+
+/// The Fit heatmap's dedicated subtitle: which mark layer is active, spelled
+/// out as a label ("Showing: ridge — tolerance band") rather than a key hint
+/// ("L: path") — a reader who does not know the active layer cannot
+/// interpret a single inverted cell on this tab at all, so this states it in
+/// full rather than abbreviating.
+///
+/// Degrades in the same fits-or-drops style as `heatmap_title_right`, but
+/// with the gloss as the one thing shed first and the layer name itself
+/// truncated (never wrapped) only as the last resort, character by
+/// character, so this can never wrap or panic — including at `avail == 0`,
+/// where it renders as an empty line rather than nothing at all crashing.
+fn fit_subtitle(layer: Layer, avail: usize) -> String {
+    let label = layer.label();
+    let gloss = layer_gloss(layer);
+    let full = format!(" Showing: {label} \u{2014} {gloss} ");
+    if full.chars().count() <= avail {
+        return full;
+    }
+    let no_gloss = format!(" Showing: {label} ");
+    if no_gloss.chars().count() <= avail {
+        return no_gloss;
+    }
+    label.chars().take(avail).collect()
 }
 
 /// Paints the half-block heatmap itself — density field plus the
@@ -1676,6 +1740,32 @@ mod tests {
         );
     }
 
+    /// Guards the degrade order directly: the active layer used to share
+    /// `heatmap_title_right`'s corner with `batch`/`stage` and was the first
+    /// of the three dropped under a narrow DP pane — exactly backwards, since
+    /// a reader who doesn't know the active layer cannot interpret a single
+    /// inverted mark on this tab at all. It now has its own subtitle row
+    /// (`fit_subtitle`) instead, spelled out in full with a gloss of what its
+    /// marks mean, not abbreviated to a key hint. Checked across more than
+    /// one layer so a future change to the degrade order (or to
+    /// `fit_subtitle`/`layer_gloss` themselves) can't silently drop this for
+    /// only some layers.
+    #[test]
+    fn fit_tab_subtitle_names_and_glosses_the_active_layer() {
+        for (layer, gloss) in [
+            (Layer::Ridge, "tolerance band"),
+            (Layer::Suppressed, "discarded by non-max suppression"),
+        ] {
+            let mut app = fixture_app_with_ridge();
+            app.set_layer(layer);
+            let out = render(&mut app, 100, 30);
+            assert!(
+                out.contains("Showing:") && out.contains(layer.label()) && out.contains(gloss),
+                "expected the {layer:?} layer's subtitle to name and gloss it:\n{out}"
+            );
+        }
+    }
+
     /// No given test toggles `dp_pane`, so nothing pinned the pane's content
     /// before this — an off-by-one in which node is "selected" or a
     /// formatting regression in `chose`/`acc_weight`/`considered` could
@@ -1916,9 +2006,16 @@ mod tests {
         let out = render(&mut app, 100, 30);
         // `O` is the DP-chain glyph (Item 3); collect the screen (row, col)
         // of every one, keyed by column, then walk columns left to right.
+        // Skips the Fit subtitle row: the Path layer's gloss (`fit_subtitle`/
+        // `layer_gloss`) spells out the glyphs it explains ("O chosen, X
+        // greedy tail"), so it legitimately contains a literal `O` that a
+        // whole-output scan can't tell apart from an actual marked cell.
         let mut by_col: std::collections::BTreeMap<usize, usize> =
             std::collections::BTreeMap::new();
         for (row, line) in out.lines().enumerate() {
+            if line.contains("Showing:") {
+                continue;
+            }
             for (col, ch) in line.chars().enumerate() {
                 if ch == 'O' {
                     by_col.entry(col).or_insert(row);
