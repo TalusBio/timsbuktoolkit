@@ -31,4 +31,4 @@ expression: out
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 Grid cnt:- | n:next r:run q:detach ^C:abort [/]:stage h/l:tab <>:frame s/p/c/w:ovl d:dp
+ b0 Grid n next · r run · h l tab · q detach · ^C abort                                      ? keys
