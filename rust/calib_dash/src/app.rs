@@ -1854,6 +1854,15 @@ mod tests {
     /// profile). `[profile.release]` sets `panic = "abort"` workspace-wide,
     /// where this guard cannot run at all; see its doc comment. Exercised
     /// directly here since, unlike `event_loop`, it needs no real terminal.
+    ///
+    /// `#[cfg(debug_assertions)]`: this deliberately panics-and-catches,
+    /// which only unwinds when `panic = "unwind"` (`profile.dev`/`test`'s
+    /// default). A CI leg that runs tests against a release-profile build
+    /// (`panic = "abort"`, set workspace-wide) would abort the whole test
+    /// process on the `panic!` below instead of letting `catch_unwind`
+    /// recover it — this guard is what keeps that leg green rather than
+    /// weakening what the test proves under a normal dev/test build.
+    #[cfg(debug_assertions)]
     #[test]
     fn catch_panics_converts_a_panic_into_detach() {
         let prev_hook = std::panic::take_hook();

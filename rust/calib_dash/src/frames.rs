@@ -308,6 +308,16 @@ mod tests {
         );
     }
 
+    /// `#[cfg(debug_assertions)]`: this relies on `finish`'s internal
+    /// `debug_assert!` actually firing and unwinding (`panic =
+    /// "unwind"`, `profile.dev`/`test`'s default). A CI leg that runs tests
+    /// against a release-profile build has `debug_assert!` compiled out
+    /// entirely (so nothing panics to catch) and `panic = "abort"` set
+    /// workspace-wide besides (so even a real panic would abort the test
+    /// process rather than unwind into `catch_unwind`) — this guard keeps
+    /// that leg green rather than weakening what the test proves under a
+    /// normal dev/test build.
+    #[cfg(debug_assertions)]
     #[test]
     fn finish_drops_a_mismatched_stale_entry_without_corrupting_order() {
         // keep_every = 4, retained = 3: chunks 0, 4, 8 land on stride and
