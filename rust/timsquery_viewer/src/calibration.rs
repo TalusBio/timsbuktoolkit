@@ -21,8 +21,10 @@ use eframe::egui;
 
 use calibrt::{
     CalibrationState,
+    DEFAULT_RIDGE_FRACTION,
     LibraryRT,
     ObservedRTSeconds,
+    RidgeSummary,
 };
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
@@ -73,9 +75,7 @@ const DEFAULT_GRID_SIZE: usize = 100;
 const DEFAULT_LOOKBACK: usize = 30;
 
 /// Grid weight every calibrant gets, matching Step A in
-/// `timsseek_cli::processing`: weight decides which nodes survive
-/// `suppress_nonmax` and scales every DP edge, and Step A weighs every
-/// calibrant equally rather than by score.
+/// `timsseek_cli::processing`, which weighs calibrants equally rather than by score.
 const CALIBRANT_WEIGHT: f64 = 1.0;
 
 // ---------------------------------------------------------------------------
@@ -107,8 +107,8 @@ pub enum CalibrationMessage {
     Snapshot {
         n_scored: usize,
         heap_len: usize,
-        /// (library_rt, apex_rt, score)
-        points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
+        /// (library_rt, apex_rt)
+        points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)>,
     },
     /// Thread completed (all elution groups scored or stopped).
     Done { n_scored: usize },
@@ -145,8 +145,8 @@ pub struct ViewerCalibrationState {
     thread_control: Arc<AtomicU8>,
     receiver: Option<Receiver<CalibrationMessage>>,
 
-    /// Latest calibrant points: (library_rt, apex_rt, score).
-    pub snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
+    /// Latest calibrant points: (library_rt, apex_rt).
+    pub snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)>,
 }
 
 impl Default for ViewerCalibrationState {
@@ -178,10 +178,10 @@ impl ViewerCalibrationState {
             return Self::default();
         }
 
-        let snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = snapshot
+        let snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)> = snapshot
             .points
             .iter()
-            .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2]))
+            .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
             .collect();
         let n_calibrants = snapshot_points.len();
 
@@ -212,27 +212,27 @@ impl ViewerCalibrationState {
         if self.snapshot_points.is_empty() {
             return None;
         }
-        Some(calibrt::CalibrationSnapshot {
+        Some(self.snapshot())
+    }
+
+    /// The calibration as a snapshot stores it: points plus grid config.
+    fn snapshot(&self) -> calibrt::CalibrationSnapshot {
+        calibrt::CalibrationSnapshot {
             points: self.persisted_points(),
             grid_size: self
                 .calibration_state
                 .as_ref()
                 .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins),
             lookback: DEFAULT_LOOKBACK,
-        })
+        }
     }
 
     /// The calibrant points as a snapshot stores them: `[library_rt,
     /// observed_rt, weight]`.
-    ///
-    /// The third column is the *grid weight*, not the calibrant's score — both
-    /// load paths feed it straight back in as the weight — so it is
-    /// [`CALIBRANT_WEIGHT`], which is also the only value production writes
-    /// there (`timsseek_cli::processing`, `calibrant_points`).
     fn persisted_points(&self) -> Vec<[f64; 3]> {
         self.snapshot_points
             .iter()
-            .map(|&(lib, obs, _score)| [lib.0, obs.0, CALIBRANT_WEIGHT])
+            .map(|&(lib, obs)| [lib.0, obs.0, CALIBRANT_WEIGHT])
             .collect()
     }
 
@@ -405,7 +405,7 @@ impl ViewerCalibrationState {
         let ranges = calibrt::point_ranges(
             self.snapshot_points
                 .iter()
-                .map(|&(lib_rt, apex_rt, _score)| (lib_rt.0, apex_rt.0)),
+                .map(|&(lib_rt, apex_rt)| (lib_rt.0, apex_rt.0)),
         );
         let (x_range, y_range) = match ranges {
             Ok(ranges) => ranges,
@@ -439,7 +439,7 @@ impl ViewerCalibrationState {
         if let Err(e) = cs.update(
             self.snapshot_points
                 .iter()
-                .map(|&(lib_rt, apex_rt, _score)| (lib_rt, apex_rt, CALIBRANT_WEIGHT)),
+                .map(|&(lib_rt, apex_rt)| (lib_rt, apex_rt, CALIBRANT_WEIGHT)),
         ) {
             tracing::warn!("Calibration update rejected points: {e:?}");
         }
@@ -576,13 +576,12 @@ impl ViewerCalibrationState {
             n_scored += chunk.len();
 
             // Send snapshot.
-            let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>, f64)> = heap
+            let points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)> = heap
                 .iter()
                 .map(|c| {
                     (
                         LibraryRT(c.library_rt.0 as f64),
                         ObservedRTSeconds(c.apex_rt.0 as f64),
-                        c.score as f64,
                     )
                 })
                 .collect();
@@ -610,7 +609,6 @@ impl ViewerCalibrationState {
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
-        use calibrt::CalibrationSnapshot;
         use timsseek::rt_calibration::{
             DerivationParams,
             DimensionErrors,
@@ -622,11 +620,7 @@ impl ViewerCalibrationState {
         let saved = SavedCalibration {
             version: "v2".to_string(),
             rt_range_seconds,
-            calibration: CalibrationSnapshot {
-                points: self.persisted_points(),
-                grid_size: DEFAULT_GRID_SIZE,
-                lookback: DEFAULT_LOOKBACK,
-            },
+            calibration: self.snapshot(),
             errors: DimensionErrors::default(),
             derivation: DerivationParams::default(),
             tolerances: SavedTolerances {
@@ -658,7 +652,7 @@ impl ViewerCalibrationState {
                 .snapshot
                 .points
                 .iter()
-                .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1]), p[2]))
+                .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
                 .collect();
             self.calibration_state = Some(cal);
         }
@@ -968,7 +962,7 @@ impl ViewerCalibrationState {
                         }
 
                         // Ridge envelope: upper and lower boundary lines showing tolerance width
-                        let ridge = cs.measure_ridge_width(0.1);
+                        let ridge = cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
                         if ridge.len() >= 2 {
                             let ridge_color =
                                 egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
@@ -1055,7 +1049,7 @@ impl ViewerCalibrationState {
                 let raw_pts: Vec<[f64; 2]> = self
                     .snapshot_points
                     .iter()
-                    .map(|&(lib_rt, apex_rt, _)| [lib_rt.0, apex_rt.0])
+                    .map(|&(lib_rt, apex_rt)| [lib_rt.0, apex_rt.0])
                     .collect();
 
                 plot_ui.points(
@@ -1069,79 +1063,46 @@ impl ViewerCalibrationState {
 
     /// Render tolerance suggestion and Apply button.
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
-        // Measure ridge width: expand from path cells into adjacent cells
-        // with weight above 10% of the path cell's weight. Weight-averaged
-        // half-width gives the global tolerance — heavy columns count more.
+        // The weight-averaged half-width gives the global tolerance — heavy
+        // columns count more.
         let ridge_stats = self.calibration_state.as_mut().and_then(|cs| {
             cs.curve()?; // ensure curve is fitted
-            let measurements = cs.measure_ridge_width(0.1);
-            if measurements.is_empty() {
-                return None;
-            }
-
-            // Weighted average half-width (seconds)
-            let total_weight: f64 = measurements.iter().map(|m| m.ridge_weight).sum();
-            if total_weight <= 0.0 {
-                return None;
-            }
-            let weighted_hw: f64 = measurements
-                .iter()
-                .map(|m| m.half_width * m.ridge_weight)
-                .sum::<f64>()
-                / total_weight;
-
-            // Also report min/max for context
-            let min_hw = measurements
-                .iter()
-                .map(|m| m.half_width)
-                .fold(f64::MAX, f64::min);
-            let max_hw = measurements
-                .iter()
-                .map(|m| m.half_width)
-                .fold(0.0f64, f64::max);
-
-            let total_column_weight: f64 = measurements.iter().map(|m| m.column_weight).sum();
-            let in_ridge_pct = if total_column_weight > 0.0 {
-                total_weight / total_column_weight * 100.0
-            } else {
-                0.0
-            };
-
-            Some((
-                weighted_hw,
-                min_hw,
-                max_hw,
-                measurements.len(),
-                in_ridge_pct,
-            ))
+            let summary = RidgeSummary::of(&cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION))?;
+            summary.weighted_half_width.is_finite().then_some(summary)
         });
 
         // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
-        let suggested = ridge_stats.map(|(hw_s, min_s, max_s, n_cols, in_ridge_pct)| {
-            let rt_min = (hw_s / 60.0).max(0.5);
-            (rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct)
-        });
+        let suggested =
+            ridge_stats.map(|stats| ((stats.weighted_half_width / 60.0).max(0.5), stats));
 
-        if let Some((rt_min, _, _, _, _, _)) = suggested {
+        if let Some((rt_min, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
                 rt_tolerance_minutes: rt_min as f32,
             });
         }
 
         ui.vertical(|ui| {
-            if let Some((rt_min, hw_s, min_s, max_s, n_cols, in_ridge_pct)) = suggested {
+            if let Some((rt_min, stats)) = suggested {
                 ui.horizontal(|ui| {
                     ui.label(format!(
                         "RT tol (fallback): \u{00B1}{rt_min:.2} min, uniform over all queries",
                     ));
-                    // Applying the ridge half-width at each query's own library
-                    // RT — what `timsseek::rt_calibration::get_tolerance` does —
-                    // is issue #83; this button only writes the uniform scalar.
+                    // This button only writes the uniform scalar, not the ridge
+                    // half-width at each query's own library RT — what
+                    // `timsseek::rt_calibration::get_tolerance` does.
                     if ui.button("Apply").clicked() {
                         let rt_tol = rt_min as f32;
                         tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
                     }
                 });
+                let RidgeSummary {
+                    weighted_half_width: hw_s,
+                    min_half_width: min_s,
+                    max_half_width: max_s,
+                    n_columns: n_cols,
+                    in_ridge_ratio,
+                } = stats;
+                let in_ridge_pct = in_ridge_ratio * 100.0;
                 ui.label(
                     egui::RichText::new(format!(
                         "A real search interpolates it per query instead: ridge half-width {hw_s:.0} s weighted mean, {min_s:.0}-{max_s:.0} s over {n_cols} cols, {in_ridge_pct:.0}% in-ridge.",

@@ -11,6 +11,7 @@ Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flag
 | `timsquery_cli` | `timsquery_cli` | Low-level timsTOF query |
 | `speclib_build` | `speclib_build_cli` | Build speclib from FASTA via Koina |
 | `timsquery_viewer` | `timsquery_viewer` | GUI viewer for query results |
+| `calib_dash` | `calib_dash` | `cargo run -p calib_dash -- calibration.json` replays a saved `calibrt::CalibrationSnapshot` in the RT-calibration dashboard — no cargo feature, no env var (it ignores `CALIB_DASH_FRAME_BUDGET_MB` and uses a fixed `REPLAY_BUDGET_BYTES`) |
 
 Run any with `--help` for the full flag list.
 
@@ -36,18 +37,8 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
 | `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek`, built with `--features dashboard` | unset (off) | Any value but `0`/`false` opens the rescore dashboard TUI after the Phase 6 write; without `--features dashboard` the check is compiled out entirely. Warns and skips when stdout is not a terminal. Invocation: `cargo run -r --bin timsseek --features dashboard -- ...`. |
-| `TIMSSEEK_CALIB_DASHBOARD` | `timsseek_cli` | unset | Set to `1` to open the interactive RT-calibration dashboard. |
+| `TIMSSEEK_CALIB_DASHBOARD` | `timsseek_cli` | unset | Set to `1`, `true` or `yes` to open the interactive RT-calibration dashboard. |
 | `CALIB_DASH_FRAME_BUDGET_MB` | `timsseek_cli` | `64` | Caps the dashboard's retained-frame slab, in megabytes. |
-
-### Calibration dashboard vars
-
-`TIMSSEEK_CALIB_DASHBOARD=1` opens the dashboard. When stdout is not a terminal the dashboard detaches with a warning and the search runs unattended, so it is also safe under `> file 2>&1` redirection or CI. Full invocation:
-
-```bash
-TIMSSEEK_CALIB_DASHBOARD=1 cargo run -r --bin timsseek --features calib-dashboard -- <args>
-```
-
-`CALIB_DASH_FRAME_BUDGET_MB` is read only when the dashboard is actually running. The slab it caps holds the Phase 1 calibrant snapshots kept for scrubbing and replay; a longer search or a larger `n_calibrants` decimates more aggressively to stay under budget rather than growing unbounded.
 
 ## Taskfile
 

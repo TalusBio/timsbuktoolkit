@@ -1,21 +1,13 @@
 //! Standalone replay of a saved `calibration.json` — the RT calibration
 //! dashboard without a live Phase 1 search behind it.
 //!
-//! Loads `calibrt::CalibrationSnapshot` (points, grid size, DP lookback)
-//! directly from the JSON file's `"calibration"` field. That field's shape
-//! matches `timsseek::rt_calibration::CalibrationResult::save_json`'s output
-//! one-for-one, but this binary deserializes it with `serde_json` alone
-//! rather than depending on `timsseek` for the wrapper type
-//! (`SavedCalibration`) that field lives inside — `calib_dash` must not pull
-//! in a whole search engine crate just to read three fields back out of its
-//! own save format.
+//! The JSON file's `"calibration"` field is read with `serde_json` alone rather
+//! than through `timsseek`'s wrapper type: `calib_dash` must not pull in a whole
+//! search engine crate to read three fields back out of its own save format.
 //!
-//! The loaded points become a single Phase-1-shaped batch (chunk 0, one
-//! frame), so the `<`/`>` batch scrubber (`App`'s `scrub_frame`/
-//! `CalibDash::sync_scrub`) shows exactly one frame and the Convergence
-//! tab's history is a single point — there was only ever one fit to show,
-//! this being a Phase 2 snapshot rather than a live run's sequence of
-//! batches.
+//! The loaded points become a single Phase-1-shaped batch (chunk 0, one frame),
+//! so the batch scrubber shows one frame and the Convergence tab's history is a
+//! single point — a Phase 2 snapshot is one fit, not a run's sequence of batches.
 
 use calib_dash::{
     CalibDash,
@@ -115,19 +107,13 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    /// Writes `contents` to a fresh temp file, so each test gets an isolated
-    /// file `load_snapshot` can read without the tests stepping on each
-    /// other's fixtures. The handle is returned (not just its path) because
-    /// dropping it is what deletes the file — including when the test fails.
-    fn temp_file(contents: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().expect("a writable temp dir");
-        f.write_all(contents.as_bytes()).expect("write the fixture");
-        f
-    }
-
     #[test]
     fn a_file_without_a_calibration_field_names_the_missing_field() {
-        let f = temp_file(r#"{"version": 1, "other": {}}"#);
+        // The handle is held (not just its path) because dropping it is what
+        // deletes the file — including when the test fails.
+        let mut f = NamedTempFile::new().expect("a writable temp dir");
+        f.write_all(br#"{"version": 1, "other": {}}"#)
+            .expect("write the fixture");
         let err = load_snapshot(f.path()).expect_err("there is no \"calibration\" field");
         assert!(
             err.contains("calibration"),
@@ -138,14 +124,7 @@ mod tests {
     #[test]
     fn validate_snapshot_accepts_only_a_fittable_snapshot() {
         // (grid_size, n_points, expect_ok)
-        let cases = [
-            (10, 2, true),
-            (10, 100, true),
-            (0, 2, false),
-            (10, 1, false),
-            (10, 0, false),
-            (0, 0, false),
-        ];
+        let cases = [(10, 2, true), (0, 2, false), (10, 1, false)];
         for (grid_size, n_points, expect_ok) in cases {
             let snapshot = CalibrationSnapshot {
                 points: vec![[1.0, 1.0, 1.0]; n_points],

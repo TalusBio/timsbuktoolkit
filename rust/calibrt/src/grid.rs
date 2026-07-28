@@ -15,7 +15,7 @@ fn spans(x_range: (f64, f64), y_range: (f64, f64)) -> Result<(f64, f64), CalibRt
     Ok((x_span, y_span))
 }
 
-pub struct Grid {
+pub(crate) struct Grid {
     pub(crate) nodes: Vec<Node>,
     pub(crate) x_range: (f64, f64),
     pub(crate) y_range: (f64, f64),
@@ -30,7 +30,7 @@ pub struct Grid {
 impl Grid {
     /// Creates a new, empty grid with a fixed geometry.
     /// The center of each node is constant based on the grid resolution.
-    pub fn new(
+    pub(crate) fn new(
         bins: usize,
         x_range: (f64, f64),
         y_range: (f64, f64),
@@ -40,32 +40,13 @@ impl Grid {
         };
         let (x_span, y_span) = spans(x_range, y_range)?;
 
-        let mut nodes = Vec::with_capacity(bins * bins);
-        for r in 0..bins {
-            for c in 0..bins {
-                // Add 0.5 to place node center at the midpoint of each bin
-                let center_x = x_range.0 + (c as f64 + 0.5) * (x_span / bins as f64);
-                let center_y = y_range.0 + (r as f64 + 0.5) * (y_span / bins as f64);
-                nodes.push(Node {
-                    center: Point {
-                        library: center_x,
-                        observed: center_y,
-                        weight: 0.0,
-                    },
-                    suppressed: false,
-                    sum_wx: 0.0,
-                    sum_wy: 0.0,
-                    sum_w: 0.0,
-                });
-            }
-        }
-
+        let nodes = vec![Node::default(); bins * bins];
         let weights_a = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
             .expect("Grid dimensions are valid");
         let weights_b = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
             .expect("Grid dimensions are valid");
 
-        Ok(Self {
+        let mut grid = Self {
             nodes,
             x_range,
             y_range,
@@ -74,11 +55,13 @@ impl Grid {
             bins,
             weights_a,
             weights_b,
-        })
+        };
+        grid.reset();
+        Ok(grid)
     }
 
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
-    pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
+    pub(crate) fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
         let Point {
             library,
             observed,
@@ -115,7 +98,7 @@ impl Grid {
     /// # Returns
     /// - `Ok(())` if at least one node remains non-suppressed
     /// - `Err(CalibRtError::NoPoints)` if all nodes have zero weight
-    pub fn suppress_nonmax(&mut self) -> Result<(), CalibRtError> {
+    pub(crate) fn suppress_nonmax(&mut self) -> Result<(), CalibRtError> {
         // Initialize with 1.0 to handle empty grids gracefully
         let mut max_in_row = vec![1.; self.bins];
         let mut max_in_col = vec![1.; self.bins];
@@ -177,7 +160,7 @@ impl Grid {
 
     /// Zero all node weights and suppression flags, preserving bin geometry.
     /// Restores each node center to the midpoint of its bin.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         for (i, node) in self.nodes.iter_mut().enumerate() {
             let r = i / self.bins;
             let c = i % self.bins;
@@ -198,7 +181,7 @@ impl Grid {
     /// Reset the grid with new dimensions and ranges. Reallocates only if the
     /// bin count changes; otherwise reuses the node buffer and recomputes cell
     /// centers from the new ranges.
-    pub fn reconfigure(
+    pub(crate) fn reconfigure(
         &mut self,
         bins: usize,
         x_range: (f64, f64),
@@ -218,7 +201,7 @@ impl Grid {
     }
 
     /// Read access to all grid cells.
-    pub fn grid_cells(&self) -> &[Node] {
+    pub(crate) fn grid_cells(&self) -> &[Node] {
         &self.nodes
     }
 
@@ -286,9 +269,7 @@ mod tests {
         // Centers are recomputed from the new ranges. Ten bins over `5..200`
         // makes the first one `5.0 .. 24.5`, whose midpoint is 14.75, and the
         // last `180.5 .. 200.0`, midpoint 190.25; ten over `7..300` makes the
-        // first row `7.0 .. 36.3`, midpoint 21.65. Written out rather than
-        // rebuilt from `x_range.0 + 0.5 * (x_span / bins)`, which is the line of
-        // arithmetic under test.
+        // first row `7.0 .. 36.3`, midpoint 21.65.
         let first = grid.nodes[0].center;
         assert!((first.library - 14.75).abs() < 1e-9, "{first:?}");
         assert!((first.observed - 21.65).abs() < 1e-9, "{first:?}");

@@ -2,9 +2,7 @@
 //! pause action a keypress resolves to. [`CalibDash`] ties all of it to a
 //! running search, one [`CalibDash::on_batch`] call per Phase 1 scoring chunk.
 //!
-//! Counts use the vim prefix idiom so there is no modal input: `15n` advances
-//! fifteen batches, off one `Option<u32>` that serves every motion, rather than
-//! a second text-entry mode with its own key routing and escape handling.
+//! Counts use the vim prefix idiom: `15n` advances fifteen batches.
 
 use crate::frames::{
     CalibrantPoint,
@@ -39,16 +37,16 @@ use std::io::IsTerminal;
 
 /// Top-level dashboard tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
+pub(crate) enum Tab {
     Fit,
     Convergence,
     Tolerances,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Fit, Tab::Convergence, Tab::Tolerances];
+    pub(crate) const ALL: [Tab; 3] = [Tab::Fit, Tab::Convergence, Tab::Tolerances];
 
-    pub fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Tab::Fit => "Fit",
             Tab::Convergence => "Convergence",
@@ -58,17 +56,13 @@ impl Tab {
 }
 
 /// Which mark overlay the Fit heatmap draws on top of the density field,
-/// cycled by `m`/`M`. Exactly one is active at a time: a layer is a *view*,
-/// not a set of flags, so there is no priority order to maintain between
-/// marks that can never appear on screen together.
+/// cycled by `m`/`M`. Exactly one is active at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layer {
-    /// Bare heatmap — the raw density the fit works from, undisturbed by
-    /// anything derived from it.
+pub(crate) enum Layer {
+    /// Bare heatmap — the raw density the fit works from.
     None,
-    /// The DP chain and the greedily attached tails, glyph-distinguished within
-    /// the layer (`O`/`X` — see `ui::mark_path`) since they answer one question
-    /// together: is a bad edge the DP's own choice or a tail grafted on after.
+    /// The DP chain and the greedily attached tails, glyph-distinguished within the
+    /// layer (`O`/`X`): is a bad edge the DP's choice or a tail grafted on after?
     Path,
     Curve,
     Ridge,
@@ -76,7 +70,7 @@ pub enum Layer {
 }
 
 impl Layer {
-    pub const ALL: [Layer; 5] = [
+    pub(crate) const ALL: [Layer; 5] = [
         Layer::None,
         Layer::Path,
         Layer::Curve,
@@ -84,7 +78,7 @@ impl Layer {
         Layer::Suppressed,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Layer::None => "none",
             Layer::Path => "path",
@@ -95,13 +89,9 @@ impl Layer {
     }
 }
 
-/// Steps `cur` through `all` by `steps` stops, wrapping. `Tab` and `Layer` are
-/// both fixed stop lists with no natural end to clamp at, so `l` past the last
-/// tab is the first again, like vim's own `l`/`h` inside a fixed-width line.
-///
-/// `steps` is reduced mod the stop count before anything moves, so the count a
-/// user can type (`push_digit` saturates at `u32::MAX`) costs one division
-/// rather than that many iterations.
+/// Steps `cur` through `all` by `steps` stops, wrapping. `Tab` and `Layer` are both
+/// fixed stop lists with no natural end to clamp at, so `l` past the last tab is the
+/// first again.
 fn cycle<T: PartialEq + Copy, const N: usize>(
     all: &[T; N],
     cur: T,
@@ -118,10 +108,9 @@ fn cycle<T: PartialEq + Copy, const N: usize>(
     all[((at + offset) % n) as usize]
 }
 
-/// Whether the batch loop driving Phase 1 scoring should keep going after a
-/// pause. Only `Ctrl-C` ever produces `Abort` — a dashboard failure anywhere
-/// else is logged and treated as `Continue`, since a dev tool must never
-/// fail a search.
+/// Whether the batch loop driving Phase 1 scoring should keep going after a pause.
+/// Only `Ctrl-C` ever produces `Abort` — a dashboard failure anywhere else is
+/// logged and treated as `Continue`, since a dev tool must never fail a search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Continue,
@@ -130,7 +119,7 @@ pub enum Flow {
 
 /// What the user asked for on leaving a pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PauseAction {
+pub(crate) enum PauseAction {
     /// Stay in the pause — the key changed the view, not the flow.
     Stay,
     /// Advance this many batches before pausing again.
@@ -140,8 +129,7 @@ pub enum PauseAction {
     Abort,
 }
 
-/// Skip bookkeeping, so the render-or-skip decision is testable without a
-/// terminal.
+/// Skip bookkeeping, so the render-or-skip decision is testable without a terminal.
 struct Stepper {
     /// Batches still to skip before the next pause.
     remaining: u32,
@@ -156,10 +144,8 @@ impl Stepper {
         }
     }
 
-    /// Consulted by `on_batch` exactly once per chunk. Takes `&mut self`
-    /// because asking the question is what draws down the skip counter —
-    /// splitting the query from the decrement is how a caller forgets one of
-    /// them and the skip never expires.
+    /// Consulted by `on_batch` exactly once per chunk: asking the question is
+    /// what draws down the skip counter.
     fn should_render(&mut self) -> bool {
         if self.stopped {
             return false;
@@ -171,11 +157,8 @@ impl Stepper {
         true
     }
 
-    /// Whether a prior pause resolved to `RunToEnd`, `Detach`, or `Abort` —
-    /// the user has already asked to stop seeing the dashboard, and nothing
-    /// later should reopen it. Read-only, unlike `should_render`: the question
-    /// is "has the user opted out of every future pause", not "should I render
-    /// *this* batch", so it must not draw down the skip counter.
+    /// Whether a prior pause resolved to `RunToEnd`, `Detach`, or `Abort` — the user
+    /// has already asked to stop seeing the dashboard, and nothing should reopen it.
     fn is_stopped(&self) -> bool {
         self.stopped
     }
@@ -184,67 +167,53 @@ impl Stepper {
     fn apply(&mut self, action: PauseAction) {
         match action {
             PauseAction::Stay => {}
-            // `Next(5)` at the chunk-0 pause means "render at chunk 5", so
-            // four chunks are skipped, not five.
+            // `Next(5)` at the chunk-0 pause means "render at chunk 5": four skipped.
             PauseAction::Next(n) => self.remaining = n.saturating_sub(1),
             PauseAction::RunToEnd | PauseAction::Detach | PauseAction::Abort => self.stopped = true,
         }
     }
 }
 
-/// Dashboard state for one pause: which tab is showing, the DP pane toggle,
-/// the current batch number, the recording of the fit that ran at this
-/// batch, and the pending vim-style count prefix.
-pub struct App {
+/// Dashboard state for one pause: the tab, the DP pane toggle, the batch number,
+/// the recording of the fit that ran at it, and the pending count prefix.
+pub(crate) struct App {
     tab: Tab,
     dp_pane: bool,
     batch: u32,
     recording: FitRecording,
-    /// The post-Phase-2 recording, set once `calibration.json` is written.
-    /// `None` for the whole of Phase 1: the Tolerances tab reads this to
-    /// decide whether Step B has run yet at all.
+    /// The post-Phase-2 recording, `None` for the whole of Phase 1: the Tolerances
+    /// tab reads this to decide whether Step B has run yet at all.
     real_fit: Option<FitRecording>,
     /// The Tolerances tab's post-Step-B m/z/mobility/RT summary, set alongside
-    /// `real_fit`. Lives on `App`, not `CalibDash`, for the same reason
-    /// `real_fit` does: `ui.rs` only ever receives `&App`.
+    /// `real_fit`. Lives on `App` because `ui.rs` only ever receives `&App`.
     tolerances: Option<ToleranceSummary>,
-    /// Every batch's metrics, undecimated — see `metrics.rs`'s module doc for
-    /// why the series must have no holes.
+    /// Every batch's metrics, undecimated — `metrics.rs`'s module doc says why.
     metrics: Vec<BatchMetrics>,
-    /// The three numbers the Convergence tab's header states about the frame
-    /// slab's decimation. `App` owns no `FrameStore` — `CalibDash` does — so
-    /// these are plain fields defaulting to "nothing decimated" and refreshed
-    /// from the store through `set_frame_summary`.
-    retained_frames: usize,
-    frame_stride: usize,
-    dropped_frames: usize,
+    /// What the Convergence tab's header states about the frame slab's decimation.
+    /// `CalibDash` owns the `FrameStore`, so this is a plain field defaulting to
+    /// "nothing decimated" and refreshed through `set_frame_summary`.
+    frames: FrameSummary,
     layer: Layer,
-    /// The pending count prefix, e.g. the `15` typed before `n` in `15n`.
-    /// Lives for exactly one motion: a motion consumes it via `take_count`,
-    /// and any other key clears it directly, so a half-typed number never
-    /// leaks into the next command.
+    /// The pending count prefix, e.g. the `15` typed before `n` in `15n`. Lives for
+    /// exactly one motion: a motion consumes it via `take_count` and any other key
+    /// clears it, so a half-typed number never leaks into the next command.
     count: Option<u32>,
-    /// Which retained frame `<`/`>` have scrubbed the Fit tab to, or `None`
-    /// for the live batch. Bounded by `retained_frames`. `App` tracks only
-    /// *which* frame; the recording itself lives in `scrub_recording`.
+    /// Which retained frame `<`/`>` have scrubbed the Fit tab to, `None` for live.
+    /// Bounded by `frames.retained`; the recording lives in `scrub_recording`.
     scrub_frame: Option<usize>,
-    /// The original batch/chunk number of `scrub_frame`, purely for the Fit
-    /// tab's "not live" banner — a retained-frame *index* alone ("frame 2 of
-    /// 5") means little to a user who thinks in batch numbers.
+    /// The original batch/chunk number of `scrub_frame`, for the Fit tab's "not live"
+    /// banner — "frame 2 of 5" alone means little to a user who thinks in batches.
     scrub_chunk: Option<usize>,
-    /// The scrubbed frame's refit recording. `None` whenever `scrub_frame` is,
-    /// and also `None` momentarily after `scrub_frame` moves and before the
-    /// next `sync_scrub` catches up — `active_recording` falls back to the live
-    /// view for that gap rather than showing nothing.
+    /// The scrubbed frame's refit recording. `None` whenever `scrub_frame` is, and
+    /// also momentarily after `scrub_frame` moves and before the next `sync_scrub`
+    /// catches up — `active_recording` falls back to the live view for that gap.
     scrub_recording: Option<FitRecording>,
-    /// The live batch's on-demand, `dp_nodes`-observed recording — what the DP
-    /// pane reads while the Fit tab is showing the live batch. `None` when the
-    /// pane is off, when the Fit tab is scrubbed, or when the live batch's
-    /// points were too degenerate to refit at all.
+    /// The live batch's on-demand, `dp_nodes`-observed recording — what the DP pane
+    /// reads while the Fit tab shows the live batch. `None` when the pane is off, the
+    /// tab is scrubbed, or the batch's points were too degenerate to refit.
     live_dp_recording: Option<FitRecording>,
-    /// Whether the `?` key-map overlay is open. Modal in the simplest sense:
-    /// while it is showing, every keypress (digits and `Ctrl-C` included) only
-    /// dismisses it.
+    /// Whether the `?` key-map overlay is open. Modal: while it shows, every keypress
+    /// (digits and `Ctrl-C` included) only dismisses it.
     show_keys: bool,
 }
 
@@ -258,9 +227,11 @@ impl App {
             real_fit: None,
             tolerances: None,
             metrics: Vec::new(),
-            retained_frames: 0,
-            frame_stride: 1,
-            dropped_frames: 0,
+            frames: FrameSummary {
+                retained: 0,
+                keep_every: 1,
+                dropped: 0,
+            },
             layer: Layer::None,
             count: None,
             scrub_frame: None,
@@ -271,19 +242,18 @@ impl App {
         }
     }
 
-    /// Mutable access to the live recording, so a caller can fit directly into
-    /// the allocation `App` already owns rather than building a `FitRecording`
-    /// elsewhere and having nowhere to put it.
+    /// Mutable access to the live recording, so a caller can fit directly into the
+    /// allocation `App` already owns.
     pub(crate) fn recording_mut(&mut self) -> &mut FitRecording {
         &mut self.recording
     }
 
-    pub fn real_fit(&self) -> Option<&FitRecording> {
+    pub(crate) fn real_fit(&self) -> Option<&FitRecording> {
         self.real_fit.as_ref()
     }
 
     /// `None` exactly when `real_fit` is — `set_final` sets both together.
-    pub fn tolerances(&self) -> Option<&ToleranceSummary> {
+    pub(crate) fn tolerances(&self) -> Option<&ToleranceSummary> {
         self.tolerances.as_ref()
     }
 
@@ -292,7 +262,7 @@ impl App {
         self.tolerances = Some(tolerances);
     }
 
-    pub fn metrics(&self) -> &[BatchMetrics] {
+    pub(crate) fn metrics(&self) -> &[BatchMetrics] {
         &self.metrics
     }
 
@@ -301,39 +271,28 @@ impl App {
         self.metrics.push(m);
     }
 
-    pub fn retained_frames(&self) -> usize {
-        self.retained_frames
+    pub(crate) fn frames(&self) -> FrameSummary {
+        self.frames
     }
 
-    pub fn frame_stride(&self) -> usize {
-        self.frame_stride
-    }
-
-    pub fn dropped_frames(&self) -> usize {
-        self.dropped_frames
-    }
-
-    /// Refreshes what the Convergence tab's header states about the frame
-    /// slab's decimation, from the `FrameStore`'s own numbers.
+    /// Refreshes the Convergence header's decimation numbers from the `FrameStore`.
     pub(crate) fn set_frame_summary(&mut self, summary: FrameSummary) {
-        self.retained_frames = summary.retained;
-        self.frame_stride = summary.keep_every;
-        self.dropped_frames = summary.dropped;
+        self.frames = summary;
     }
 
-    pub fn tab(&self) -> Tab {
+    pub(crate) fn tab(&self) -> Tab {
         self.tab
     }
 
-    pub fn batch(&self) -> u32 {
+    pub(crate) fn batch(&self) -> u32 {
         self.batch
     }
 
-    pub fn dp_pane(&self) -> bool {
+    pub(crate) fn dp_pane(&self) -> bool {
         self.dp_pane
     }
 
-    pub fn layer(&self) -> Layer {
+    pub(crate) fn layer(&self) -> Layer {
         self.layer
     }
 
@@ -341,11 +300,10 @@ impl App {
         &self.recording
     }
 
-    /// What the Fit tab should actually draw: the scrubbed frame's recording
-    /// while `scrub_frame` is set and `sync_scrub` has already caught up to it,
-    /// the live `recording` otherwise. Never shows a blank tab for the gap
-    /// between `scrub_frame` moving and the next `sync_scrub`.
-    pub fn active_recording(&self) -> &FitRecording {
+    /// What the Fit tab should actually draw: the scrubbed frame's recording while
+    /// `scrub_frame` is set and `sync_scrub` has caught up to it, the live `recording`
+    /// otherwise — never a blank tab for the gap between the two.
+    pub(crate) fn active_recording(&self) -> &FitRecording {
         if self.scrub_frame.is_some()
             && let Some(rec) = self.scrub_recording.as_ref()
         {
@@ -355,48 +313,45 @@ impl App {
         }
     }
 
-    pub fn scrub_frame(&self) -> Option<usize> {
+    pub(crate) fn scrub_frame(&self) -> Option<usize> {
         self.scrub_frame
     }
 
-    pub fn scrub_chunk(&self) -> Option<usize> {
+    pub(crate) fn scrub_chunk(&self) -> Option<usize> {
         self.scrub_chunk
     }
 
-    /// Wires a freshly refit frame into the scrub view. The caller needs a
-    /// `FrameStore` to refit from, which `App` does not have.
+    /// Wires a freshly refit frame into the scrub view (`App` has no `FrameStore`).
     pub(crate) fn set_scrub_recording(
         &mut self,
         frame: usize,
-        chunk: Option<usize>,
+        chunk: usize,
         recording: FitRecording,
     ) {
         self.scrub_frame = Some(frame);
-        self.scrub_chunk = chunk;
+        self.scrub_chunk = Some(chunk);
         self.scrub_recording = Some(recording);
     }
 
-    /// Drops back to the live view — either the user scrubbed forward past the
-    /// last retained frame, or a frame could not be refit and falling back to
-    /// live beats leaving a stale or absent recording on screen.
+    /// Drops back to the live view — the user scrubbed past the last retained frame,
+    /// or a frame could not be refit and live beats a stale or absent recording.
     pub(crate) fn clear_scrub(&mut self) {
         self.scrub_frame = None;
         self.scrub_chunk = None;
         self.scrub_recording = None;
     }
 
-    /// The Fit tab falls back to `active_recording()` (which renders "no DP
-    /// trace" on its own) when this is `None`, rather than needing a
-    /// special-cased blank pane.
-    pub fn live_dp_recording(&self) -> Option<&FitRecording> {
+    /// The Fit tab falls back to `active_recording()` (which renders "no DP trace" on
+    /// its own) when this is `None`.
+    pub(crate) fn live_dp_recording(&self) -> Option<&FitRecording> {
         self.live_dp_recording.as_ref()
     }
 
-    pub fn pending_count(&self) -> Option<u32> {
+    pub(crate) fn pending_count(&self) -> Option<u32> {
         self.count
     }
 
-    pub fn show_keys(&self) -> bool {
+    pub(crate) fn show_keys(&self) -> bool {
         self.show_keys
     }
 
@@ -405,13 +360,8 @@ impl App {
         self.count.take().unwrap_or(1)
     }
 
-    /// Folds one more digit into the pending count. A leading `0` does not
-    /// start a count — matching vim, which keeps `0` free as a motion later —
-    /// but `0` extends an already-started count like any other digit.
-    ///
-    /// Saturating, not checked: a held-down digit key is ordinary user input,
-    /// so a long run must not panic (overflow checks are on in dev/test) or
-    /// wrap into some other, unrelated number of batches.
+    /// Folds one more digit into the pending count. A leading `0` does not start a
+    /// count — matching vim, which keeps `0` free as a motion — but extends one.
     fn push_digit(&mut self, d: u32) {
         if d == 0 && self.count.is_none() {
             return;
@@ -419,12 +369,10 @@ impl App {
         self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
     }
 
-    /// Moves the Fit tab's frame-scrub cursor back into history by `n` retained
-    /// frames, or does nothing if no frames have been retained yet. Saturating
-    /// arithmetic keeps this O(1) and panic-free for any `n`, including the
-    /// saturated counts `push_digit` can produce.
+    /// Moves the Fit tab's frame-scrub cursor back by `n` retained frames, or does
+    /// nothing if none have been retained. Saturating, so any `n` is safe.
     fn scrub_back(&mut self, n: u32) {
-        let total = self.retained_frames as u32;
+        let total = self.frames.retained as u32;
         if total == 0 {
             return;
         }
@@ -432,14 +380,13 @@ impl App {
         self.scrub_frame = Some(pos.saturating_sub(n) as usize);
     }
 
-    /// Moves the cursor forward by `n`. Forward past the last retained frame
-    /// returns to the live view rather than clamping at the last index — "keep
-    /// pressing `>` and you get back to now".
+    /// Moves the cursor forward by `n`. Past the last retained frame this returns to
+    /// the live view rather than clamping — "keep pressing `>` and you get to now".
     fn scrub_forward(&mut self, n: u32) {
         let Some(i) = self.scrub_frame else {
             return;
         };
-        let total = self.retained_frames as u32;
+        let total = self.frames.retained as u32;
         let new_pos = (i as u32).saturating_add(n);
         self.scrub_frame = if new_pos >= total {
             None
@@ -450,14 +397,11 @@ impl App {
 
     /// Routes one keypress. Every bare-character binding lives in
     /// `handle_plain_char`, behind a single `modifiers.is_empty()` guard, so a
-    /// modified key can never fall into a bare-letter arm by accident. Only the
-    /// three deliberately lax bindings stay here.
+    /// modified key can never fall into a bare-letter arm. Three lax ones stay here.
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PauseAction {
-        // The `?` overlay is modal: any keypress only dismisses it, so a user
-        // who presses `n` to dismiss it does not also skip a batch.
-        // Deliberately ahead of the `Ctrl-C` check below: while the overlay is
-        // up, dismissing it is the whole of what *any* key does, abort
-        // included.
+        // The `?` overlay is modal: any keypress only dismisses it, so `n` to dismiss
+        // does not also skip a batch. Deliberately ahead of the `Ctrl-C` check: while
+        // the overlay is up, dismissing it is the whole of what *any* key does.
         if self.show_keys {
             self.show_keys = false;
             return PauseAction::Stay;
@@ -468,10 +412,9 @@ impl App {
         }
 
         match key.code {
-            // `?` and `M` are shifted characters and terminals disagree on
-            // whether they report `Shift` on the resulting `Char`, so these two
-            // guard only against `Control`. They precede the plain-character
-            // arm so an unshifted-looking `?`/`M` still lands here.
+            // `?` and `M` are shifted characters and terminals disagree on whether
+            // they report `Shift` on the resulting `Char`, so these two guard only
+            // against `Control`. They precede the plain-character arm.
             KeyCode::Char('?') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.show_keys = true;
                 self.count = None;
@@ -482,9 +425,8 @@ impl App {
                 PauseAction::Stay
             }
             KeyCode::Char(c) if key.modifiers.is_empty() => self.handle_plain_char(c),
-            // Esc lands here, and needs no modifier guard of its own: it
-            // clears the count and stays either way, exactly what every other
-            // unbound key does.
+            // Esc lands here, and needs no modifier guard: it clears the count and
+            // stays either way, exactly what every other unbound key does.
             _ => {
                 self.count = None;
                 PauseAction::Stay
@@ -502,19 +444,16 @@ impl App {
         match c {
             'n' => {
                 let n = self.take_count();
-                // `n` advances the *live* batch loop, so a scrub cursor left
-                // over from browsing history at this pause must not still be
-                // showing at the next one: reopening on a replayed frame right
-                // after the user asked to advance reads as confusing.
+                // `n` advances the *live* batch loop, so a scrub cursor left over from
+                // browsing history must not still be showing at the next pause.
                 self.clear_scrub();
                 PauseAction::Next(n)
             }
             'd' => {
                 self.dp_pane = !self.dp_pane;
                 if !self.dp_pane {
-                    // Closing the pane leaves the last recording with no
-                    // reader; drop it rather than let `sync_dp` see a stale one
-                    // if the pane is reopened on a later batch.
+                    // Closing the pane leaves the last recording with no reader; drop
+                    // it so `sync_dp` cannot serve a stale one on a reopen.
                     self.live_dp_recording = None;
                 }
                 self.count = None;
@@ -528,8 +467,7 @@ impl App {
                 self.tab = cycle(&Tab::ALL, self.tab, self.take_count(), false);
                 PauseAction::Stay
             }
-            // `m` for "mark", cycling forward; shifted (`M`, in `handle_key`)
-            // cycles back, the same pairing `l`/`h` uses for tabs.
+            // `m` for "mark"; shifted `M` (in `handle_key`) cycles back, as `h` does.
             'm' => {
                 self.layer = cycle(&Layer::ALL, self.layer, self.take_count(), true);
                 PauseAction::Stay
@@ -560,85 +498,60 @@ impl App {
     }
 }
 
-/// A batch's ridge overlay is the same computation Phase 2 runs, not a
-/// dashboard-only approximation, so the threshold comes from calibrt rather
-/// than being spelled here.
-const RIDGE_FRACTION: f64 = calibrt::DEFAULT_RIDGE_FRACTION;
-
 /// The grid weight every calibrant carries, matching Step A in
-/// `timsseek_cli::processing`: the grid's own accumulation is what makes a busy
-/// cell outweigh a lonely one, so a per-point score would double-count evidence
-/// the fit deliberately measures by density.
+/// `timsseek_cli::processing`: the grid's own accumulation is what makes a busy cell
+/// outweigh a lonely one, so a per-point score would double-count evidence.
 const CALIBRANT_WEIGHT: f64 = 1.0;
 
 /// How many library-RT samples `curve_delta` draws between batches' curves. Any
-/// `>= 2` produces a defined delta; this is high enough that a local kink is
-/// unlikely to fall between sample points.
+/// `>= 2` is defined; this is high enough that a local kink is unlikely to hide.
 const CURVE_DELTA_SAMPLES: usize = 50;
-
-/// Why a re-fit produced nothing: the named [`fit_points`] stage was refused by
-/// `calibrt`. Only `refit_live` reports these (through `Display`); the other
-/// callers treat any of them as "no recording".
-#[derive(Debug)]
-struct RefitSkipped {
-    stage: &'static str,
-    error: CalibRtError,
-}
-
-impl std::fmt::Display for RefitSkipped {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `CalibRtError` has no `Display`.
-        write!(f, "{} failed: {:?}", self.stage, self.error)
-    }
-}
 
 /// The whole re-fit sequence, in the one place every caller shares:
 /// `reconfigure` → `update` → `fit_with` → `measure_ridge_width_with`, against
 /// whichever `CalibrationState`/`FitRecording` pair the caller owns.
 ///
-/// The grid ranges are derived *here*, by [`calibrt::point_ranges`], rather than
-/// passed in: the live fit and a scrubbed frame's replay agreeing on that fold is
-/// what makes a replayed frame show the fit that actually ran. They are returned
-/// for callers that need them afterwards (`refit_live` compares curves over the
-/// x range it just fit).
+/// The grid ranges are derived *here*, by [`calibrt::point_ranges`], not passed in:
+/// the live fit and a scrubbed frame's replay agreeing on that fold is what makes a
+/// replayed frame show the fit that actually ran. They are returned for callers that
+/// need them afterwards.
+///
+/// `None` when `calibrt` refuses a stage, logged at `warn` here: every caller treats
+/// a refusal the same way, as "no recording".
 fn fit_points(
     state: &mut CalibrationState,
     recording: &mut FitRecording,
     bins: usize,
     points: &[CalibrantPoint],
     opts: ObserveOpts,
-) -> Result<GridRanges, RefitSkipped> {
-    let ranges = calibrt::point_ranges(points.iter().map(|p| (p.library_rt, p.observed_rt)));
-    let (x_range, y_range) = ranges.map_err(|error| RefitSkipped {
-        stage: "deriving the grid ranges from the points",
-        error,
-    })?;
+) -> Option<GridRanges> {
+    let warn = |stage: &str, error: &CalibRtError| {
+        // `CalibRtError` has no `Display`.
+        tracing::warn!("calib_dash: skipping this re-fit, {stage} failed: {error:?}");
+    };
+    let (x_range, y_range) =
+        calibrt::point_ranges(points.iter().map(|p| (p.library_rt, p.observed_rt)))
+            .inspect_err(|e| warn("deriving the grid ranges from the points", e))
+            .ok()?;
     state
         .reconfigure(bins, x_range, y_range)
-        .map_err(|error| RefitSkipped {
-            stage: "reconfiguring the calibration state",
-            error,
-        })?;
+        .inspect_err(|e| warn("reconfiguring the calibration state", e))
+        .ok()?;
     state
         .update(points.iter().map(as_calibrt_tuple))
-        .map_err(|error| RefitSkipped {
-            stage: "updating the calibration state",
-            error,
-        })?;
+        .inspect_err(|e| warn("updating the calibration state", e))
+        .ok()?;
     state.fit_with(recording, opts);
-    state.measure_ridge_width_with(RIDGE_FRACTION, recording);
-    Ok((x_range, y_range))
+    state.measure_ridge_width_with(calibrt::DEFAULT_RIDGE_FRACTION, recording);
+    Some((x_range, y_range))
 }
 
 /// `CalibrantPoint` as `calibrt::CalibrationState::update`/`CalibrationCurve::wrmse`
 /// want it.
 ///
-/// The weight is [`CALIBRANT_WEIGHT`] for every calibrant, matching what Step A
-/// passes in `timsseek_cli::processing`. Weight decides which nodes survive
-/// `suppress_nonmax` and scales every DP edge, so any per-point weight here
-/// would show a fit the real calibration never computes, which is the one thing
-/// this dashboard exists not to do — hence `CalibrantPoint` carries no such
-/// field to reach for.
+/// The weight is [`CALIBRANT_WEIGHT`] for every calibrant. Weight decides which nodes
+/// survive `suppress_nonmax` and scales every DP edge, so a per-point weight here
+/// would show a fit the real calibration never computes.
 fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f64>, f64) {
     (
         LibraryRT(p.library_rt),
@@ -647,91 +560,64 @@ fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f6
     )
 }
 
-/// Summary the Tolerances tab renders once Step B has run: the derived m/z,
-/// mobility and RT tolerances plus how many calibrants they were estimated
-/// from.
+/// Summary the Tolerances tab renders once Step B has run: the derived m/z, mobility
+/// and RT tolerances plus how many calibrants they came from.
 ///
 /// `mz_ppm` and `mobility_pct` are signed `(lo, hi)` windows around zero and are
-/// genuinely asymmetric — Step B can derive a different tolerance on either side
-/// of a calibrant. `rt_seconds` is symmetric by construction, and is a bare
-/// half-width rather than a third `(lo, hi)`: a tuple would carry the same number
-/// twice under a type that says the two sides may differ, and any renderer
-/// reading only `.0` would silently drop the other.
+/// genuinely asymmetric — Step B can derive a different tolerance on either side of a
+/// calibrant. `rt_seconds` is symmetric by construction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToleranceSummary {
     pub mz_ppm: (f64, f64),
     pub mobility_pct: (f64, f64),
     /// Half-width: the tolerance is `±rt_seconds`.
     ///
-    /// A *fallback*, which is why the tab labels it one: Phase 3 prefers the
-    /// ridge half-width interpolated at each query's own library RT
-    /// (`CalibrationResult::get_tolerance`) and only falls back to this
-    /// MAD-derived scalar where the ridge has no measurement to interpolate.
+    /// A *fallback*: Phase 3 prefers the ridge half-width interpolated at each
+    /// query's own library RT (`CalibrationResult::get_tolerance`) and only falls
+    /// back to this MAD-derived scalar where the ridge has no measurement.
     pub rt_seconds: f64,
     pub n_calibrants: usize,
 }
 
-/// Ties the dashboard to a running Phase 1 batch loop, through `on_batch` once
-/// per scoring chunk.
+/// Ties the dashboard to a running Phase 1 batch loop, through `on_batch` once per
+/// scoring chunk.
 ///
-/// Every buffer here — the `CalibrationState`s (reused via `reconfigure`, since
-/// `bins` never changes), their `FitRecording`s, the frame slab,
-/// `current_points`, `prev_points` — is allocated at startup and reused, so
-/// steady state adds nothing per batch beyond the one `CalibrationCurve`
-/// `calibrt` allocates for every fit anyway (plus the `prev_curve` clone
-/// `curve_delta` compares against).
+/// Every buffer here is allocated at startup and reused, so steady state adds nothing
+/// per batch beyond the `CalibrationCurve` `calibrt` allocates for every fit anyway
+/// (plus the `prev_curve` clone `curve_delta` compares against).
 pub struct CalibDash {
     app: App,
     frames: FrameStore,
     stepper: Stepper,
     /// The live re-fit's `CalibrationState`, reused every batch.
     state: CalibrationState,
-    /// This batch's points, buffered once so recording, re-fitting and churn all
-    /// read the same materialized slice rather than each consuming a fresh copy
-    /// of the caller's iterator. Clamped to `n_calibrants` exactly the way
-    /// `FrameStore::record` clamps its own copy: without matching clamps, an
-    /// overlong batch would fit the live curve against points the frame slab
-    /// never recorded, so replaying that frame would disagree with what was
-    /// shown live.
+    /// This batch's points, buffered once so recording, re-fitting and churn all read
+    /// the same materialized slice. Clamped to `n_calibrants` exactly the way
+    /// `FrameStore::record` clamps its own copy: without matching clamps, an overlong
+    /// batch would fit the live curve against points the frame slab never recorded, so
+    /// replaying that frame would disagree with what was shown live.
     current_points: Vec<CalibrantPoint>,
     n_calibrants: usize,
     /// The previous batch's points, for `churn`. Empty before the first batch —
     /// `churn`'s own "everything admitted, nothing evicted" case.
     prev_points: Vec<CalibrantPoint>,
-    /// The previous batch's fitted curve, for `curve_delta`. `None` before the
-    /// first *successful* fit: a batch whose fit fails must not reset this, or
-    /// the next successful batch would report a NaN delta as though there had
-    /// never been a curve at all.
+    /// The previous batch's fitted curve, for `curve_delta`. `None` before the first
+    /// *successful* fit: a failed batch must not reset this, or the next success would
+    /// report a NaN delta as though there had never been a curve at all.
     prev_curve: Option<CalibrationCurve>,
-    /// Held so `refit_frame` can reconfigure `refit_state` to the same grid
-    /// resolution the live fit used.
+    /// Held so `refit_frame` can reconfigure `refit_state` to the live grid size.
     bins: usize,
-    /// A separate `CalibrationState`/`FitRecording` pair for replaying a
-    /// recorded frame on demand (scrubbing), so stepping through history never
-    /// perturbs the live recording.
+    /// A separate `CalibrationState`/`FitRecording` pair for the on-demand re-fits —
+    /// a scrubbed frame's replay and the DP pane's `dp_nodes` fit of the live batch —
+    /// so neither perturbs the live recording. `sync_scrub` and `sync_dp` each
+    /// early-return when the other applies, so they never share the buffer at once.
     refit_state: CalibrationState,
     refit_recording: FitRecording,
-    /// A third pair, for the on-demand `dp_nodes: true` re-fit of the *live*
-    /// batch that pressing `d` triggers. Kept separate from the scrubber's
-    /// `refit_state`/`refit_recording` so the two features cannot clobber each
-    /// other's buffer within one draw: `sync_dp` already skips while scrubbing,
-    /// so today they never overlap, and the separate buffer is what keeps that a
-    /// property of the code rather than of call order.
-    dp_state: CalibrationState,
-    dp_recording: FitRecording,
-    /// Which batch `dp_recording` was last computed for, so `sync_dp` can skip
-    /// the refit on every keystroke of the same pause.
+    /// Which batch the DP pane's recording was last computed for, so `sync_dp`
+    /// can skip the refit on every keystroke of the same pause.
     dp_recording_batch: Option<u32>,
-    /// Counts calls into `render_pause` — test-only instrumentation so
-    /// `present`'s stepper guard is provable without a real terminal: under
-    /// `cargo test`, `render_pause` detaches immediately whether or not the
-    /// guard let it through, so a test asserting `present()` "did nothing"
-    /// cannot tell the two apart by output alone.
-    #[cfg(test)]
-    render_pause_calls: u32,
-    /// Counts `dp_refit_current` calls, for the same reason: `sync_dp`'s
-    /// `dp_recording_batch` cache has no other observable — a skipped refit and
-    /// a repeated one leave `live_dp_recording` looking identical.
+    /// Counts `dp_refit_current` calls — test-only, since `sync_dp`'s
+    /// `dp_recording_batch` cache has no other observable.
     #[cfg(test)]
     dp_refit_calls: u32,
 }
@@ -744,12 +630,8 @@ impl CalibDash {
         lookback: usize,
         budget_bytes: usize,
     ) -> Self {
-        // The unit range is only ever a placeholder: the first `on_batch`
-        // reconfigures every state to the batch's own point-derived ranges
-        // before anything is fit against them. Being fixed and nonzero-width, it
-        // leaves `bins == 0` as the only way `CalibrationState::new` can fail
-        // here. This constructor has no `Result` to report that through; the
-        // standalone binary's `validate_snapshot` catches it first.
+        // The unit range is only ever a placeholder: the first `on_batch` reconfigures
+        // every state to the batch's own point-derived ranges before any fit.
         let placeholder = (0.0, 1.0);
         let new_state = || {
             CalibrationState::new(bins, placeholder, placeholder, lookback)
@@ -767,23 +649,18 @@ impl CalibDash {
             bins,
             refit_state: new_state(),
             refit_recording: FitRecording::new(bins),
-            dp_state: new_state(),
-            dp_recording: FitRecording::new(bins),
             dp_recording_batch: None,
-            #[cfg(test)]
-            render_pause_calls: 0,
             #[cfg(test)]
             dp_refit_calls: 0,
         }
     }
 
-    /// In order: record the frame, re-fit the live curve from those same points,
-    /// push this batch's metrics (every batch, rendered or not — see
-    /// `metrics.rs`'s module doc), then either continue or pause to render.
+    /// In order: record the frame, re-fit the live curve from those same points, push
+    /// this batch's metrics (every batch, rendered or not — see `metrics.rs`), then
+    /// either continue or pause to render.
     ///
-    /// `Flow::Abort` is the one path that asks the search to stop, and it happens
-    /// only because the user pressed Ctrl-C at a pause: a dashboard that cannot
-    /// fit or cannot draw never fails a search.
+    /// `Flow::Abort` happens only because the user pressed Ctrl-C at a pause: a
+    /// dashboard that cannot fit or cannot draw never fails a search.
     pub fn on_batch(&mut self, chunk: usize, points: impl Iterator<Item = CalibrantPoint>) -> Flow {
         self.current_points.clear();
         self.current_points.extend(points.take(self.n_calibrants));
@@ -808,14 +685,14 @@ impl CalibDash {
         }
     }
 
-    /// Opens the post-Phase-2 pause, so the Tolerances tab is reachable once
-    /// more after Step B runs. There is no batch loop left to steer, so every
-    /// `PauseAction` collapses to "return to the caller" — `Abort` included.
+    /// Opens the post-Phase-2 pause, so the Tolerances tab is reachable once Step B
+    /// runs. There is no batch loop left to steer, so every `PauseAction` collapses to
+    /// "return to the caller", `Abort` included.
     ///
-    /// Guarded on `stepper.is_stopped()`: a user who chose `r`/`q`/Ctrl-C at any
-    /// Phase 1 pause has already asked to stop seeing the dashboard, and the
-    /// caller reaches this call regardless of `Flow::Abort`. Unguarded, it would
-    /// reopen the alternate screen and block on a keypress that never comes.
+    /// Guarded on `stepper.is_stopped()`: a user who chose `r`/`q`/Ctrl-C at any Phase
+    /// 1 pause has already asked to stop seeing the dashboard, and the caller reaches
+    /// this call regardless of `Flow::Abort`. Unguarded, it would reopen the alternate
+    /// screen and block on a keypress that never comes.
     pub fn present(&mut self) {
         if self.stepper.is_stopped() {
             return;
@@ -824,42 +701,36 @@ impl CalibDash {
     }
 
     /// Promotes the reserved final frame and refreshes the Convergence header's
-    /// decimation numbers one last time — the promotion can change them with no
-    /// further batch left to call `sync_frame_summary`.
+    /// decimation numbers one last time — the promotion can change them.
     pub fn finish(&mut self) {
         self.frames.finish();
         self.sync_frame_summary();
     }
 
-    /// Wires the post-Phase-2 recording and derived tolerances into the
-    /// dashboard once Step B has run. Both land on `App` (not `CalibDash`) since
-    /// `ui.rs` only ever receives a plain `&App`.
+    /// Wires the post-Phase-2 recording and derived tolerances in once Step B ran.
     pub fn show_final(&mut self, recording: FitRecording, tolerances: ToleranceSummary) {
         self.app.set_final(recording, tolerances);
     }
 
     /// Re-fits a recorded frame's points from scratch, into `refit_state`/
-    /// `refit_recording` rather than the live pair, through the same
-    /// `fit_points` sequence `refit_live` runs — so what this reproduces is the
-    /// batch that actually ran, not an approximation of it. `None` if the frame
-    /// index doesn't exist or the re-fit was skipped.
-    fn refit_frame(&mut self, i: usize) -> Option<&FitRecording> {
-        let (_chunk, pts) = self.frames.frame(i)?;
+    /// `refit_recording` rather than the live pair, through the same `fit_points`
+    /// sequence `refit_live` runs — so this reproduces the batch that actually ran.
+    /// `None` if the frame index doesn't exist or the re-fit was skipped.
+    fn refit_frame(&mut self, i: usize) -> Option<(usize, &FitRecording)> {
+        let (chunk, pts) = self.frames.frame(i)?;
         fit_points(
             &mut self.refit_state,
             &mut self.refit_recording,
             self.bins,
             pts,
             ObserveOpts { dp_nodes: true },
-        )
-        .ok()?;
-        Some(&self.refit_recording)
+        )?;
+        Some((chunk, &self.refit_recording))
     }
 
-    /// Re-fits the live `CalibrationState` from `current_points` and returns
-    /// this batch's `BatchMetrics`. The re-fit and the metrics live together
-    /// because the metrics *are* a comparison of this re-fit against the last
-    /// one.
+    /// Re-fits the live `CalibrationState` from `current_points` and returns this
+    /// batch's `BatchMetrics`. The two live together because the metrics *are* a
+    /// comparison of this re-fit against the last one.
     fn refit_live(&mut self, chunk: usize) -> BatchMetrics {
         let n_points = self.current_points.len();
         let mut wrmse = f64::NAN;
@@ -868,41 +739,25 @@ impl CalibDash {
         let mut path_nodes = 0usize;
         let mut ridge_half_width = f64::NAN;
 
-        match fit_points(
+        if let Some((x_range, _y_range)) = fit_points(
             &mut self.state,
             self.app.recording_mut(),
             self.bins,
             &self.current_points,
             ObserveOpts::NONE,
         ) {
-            Err(skipped) => {
-                tracing::warn!(
-                    chunk,
-                    "calib_dash: skipping this batch's re-fit ({skipped}); its metrics \
-                     report n_points only"
-                );
-            }
-            Ok((x_range, _y_range)) => {
-                path_nodes = self.app.recording().path_indices().len();
-                ridge_half_width = RidgeSummary::of(self.app.recording().ridge())
-                    .map_or(f64::NAN, |s| s.weighted_half_width);
+            path_nodes = self.app.recording().path_indices().len();
+            ridge_half_width = RidgeSummary::of(self.app.recording().ridge())
+                .map_or(f64::NAN, |s| s.weighted_half_width);
 
-                if let Some(curve) = self.state.curve() {
-                    wrmse = curve.wrmse(self.current_points.iter().map(as_calibrt_tuple));
-                    if let Some(prev) = &self.prev_curve {
-                        let (d_max, d_mean) =
-                            curve_delta(prev, curve, x_range, CURVE_DELTA_SAMPLES);
-                        max_delta = d_max;
-                        mean_delta = d_mean;
-                    }
-                    // Only overwrite the baseline when this batch actually
-                    // produced a curve: a failed fit must not reset
-                    // `prev_curve` to `None`, or the *next* successful batch
-                    // would report a NaN delta as if there were no prior curve
-                    // at all — a discontinuity on the Convergence tab that
-                    // never actually happened.
-                    self.prev_curve = Some(curve.clone());
+            if let Some(curve) = self.state.curve() {
+                wrmse = curve.wrmse(self.current_points.iter().map(as_calibrt_tuple));
+                if let Some(prev) = &self.prev_curve {
+                    let (d_max, d_mean) = curve_delta(prev, curve, x_range, CURVE_DELTA_SAMPLES);
+                    max_delta = d_max;
+                    mean_delta = d_mean;
                 }
+                self.prev_curve = Some(curve.clone());
             }
         }
 
@@ -923,75 +778,61 @@ impl CalibDash {
         }
     }
 
-    /// Pushes `frames`' real decimation numbers into `app`, so
-    /// `retained_frames`/`frame_stride`/`dropped_frames` have one source
-    /// (`FrameStore`) rather than a second tracker duplicating it.
+    /// Pushes `frames`' real decimation numbers into `app`.
     fn sync_frame_summary(&mut self) {
         self.app.set_frame_summary(self.frames.summary());
     }
 
-    /// Keeps the Fit tab's scrub view in lockstep with `App::scrub_frame`.
-    /// `App` moves `scrub_frame` on `<`/`>` but has no `FrameStore` to refit
-    /// from, so this is the other half of that key handling.
+    /// Keeps the Fit tab's scrub view in lockstep with `App::scrub_frame`. `App` moves
+    /// `scrub_frame` on `<`/`>` but has no `FrameStore` to refit from, so this is the
+    /// other half of that key handling. A no-op when `scrub_frame` is `None`.
     ///
-    /// A no-op when `scrub_frame` is `None` (the live view, the common case).
-    /// Otherwise re-fits and clones unconditionally rather than caching whether
-    /// the index already matches what was last shown: this runs at most once per
-    /// keypress inside an interactive pause, never per batch, so the clone is
-    /// off `on_batch`'s steady-state path entirely.
+    /// Otherwise re-fits and clones unconditionally: this runs at most once per
+    /// keypress inside an interactive pause, never per batch, so the clone is off
+    /// `on_batch`'s steady-state path entirely.
     fn sync_scrub(&mut self) {
         let Some(i) = self.app.scrub_frame() else {
             return;
         };
-        let chunk = self.frames.frame(i).map(|(chunk, _)| chunk);
         match self.refit_frame(i) {
-            Some(rec) => {
+            Some((chunk, rec)) => {
                 let cloned = rec.clone();
                 self.app.set_scrub_recording(i, chunk, cloned);
             }
-            // The index is bounded by `retained_frames`, set from this same
-            // `FrameStore`, so this only fires on a frame too degenerate to
-            // refit — fall back to live rather than leave a stale recording up.
+            // The index is bounded by `frames.retained`, set from this same
+            // `FrameStore`, so this only fires on a frame too degenerate to refit.
             None => self.app.clear_scrub(),
         }
     }
 
-    /// Re-fits `current_points` into `dp_state`/`dp_recording` with
-    /// `ObserveOpts { dp_nodes: true }`, so the DP pane has decisions to show.
-    /// Only ever called from `sync_dp`, never from `on_batch`: that separation is
-    /// what keeps the per-DP-node observation cost off the per-batch hot path.
-    /// `None` on the same degenerate-range skip `refit_live` makes.
+    /// Re-fits `current_points` into `refit_state`/`refit_recording` with
+    /// `ObserveOpts { dp_nodes: true }`, so the DP pane has decisions to show. Only
+    /// ever called from `sync_dp`, never from `on_batch`: that keeps the per-node
+    /// observation cost off the per-batch hot path.
     fn dp_refit_current(&mut self) -> Option<&FitRecording> {
         #[cfg(test)]
         {
             self.dp_refit_calls += 1;
         }
         fit_points(
-            &mut self.dp_state,
-            &mut self.dp_recording,
+            &mut self.refit_state,
+            &mut self.refit_recording,
             self.bins,
             &self.current_points,
             ObserveOpts { dp_nodes: true },
-        )
-        .ok()?;
-        Some(&self.dp_recording)
+        )?;
+        Some(&self.refit_recording)
     }
 
-    /// Keeps `App::live_dp_recording` in sync with `App::dp_pane`. A no-op
-    /// whenever the pane is off, or the Fit tab is showing a scrubbed frame:
-    /// `refit_frame` already observes DP nodes for every scrubbed frame, so
-    /// recomputing here would at best duplicate that work and at worst show the
-    /// *live* batch's DP trace on a Fit tab showing an older, scrubbed one.
-    ///
-    /// Otherwise re-fits once per batch, not once per draw.
+    /// Keeps `App::live_dp_recording` in sync with `App::dp_pane`, re-fitting once per
+    /// batch rather than once per draw. A no-op whenever the pane is off, or the Fit
+    /// tab shows a scrubbed frame — `refit_frame` already observes DP nodes.
     fn sync_dp(&mut self) {
         if !self.app.dp_pane() || self.app.scrub_frame().is_some() {
             return;
         }
-        // The cache is only good while the recording it names is still around:
-        // closing the pane drops the recording, so a reopen within the same
-        // batch has to refit rather than serve a cache entry pointing at
-        // nothing.
+        // Closing the pane drops the recording the cache names, so a reopen within
+        // the same batch has to refit rather than serve an entry pointing at nothing.
         if self.dp_recording_batch == Some(self.app.batch())
             && self.app.live_dp_recording().is_some()
         {
@@ -1003,20 +844,15 @@ impl CalibDash {
     }
 }
 
-/// Pauses the batch loop to render one interactive frame and block until the
-/// user's keypress resolves to something other than [`PauseAction::Stay`]. Takes
-/// the whole [`CalibDash`] because the batch scrubber needs `refit_frame`'s
-/// `FrameStore` access on every redraw.
+/// Pauses the batch loop to render one interactive frame and block until the user's
+/// keypress resolves to something other than [`PauseAction::Stay`]. Takes the whole
+/// [`CalibDash`] because the batch scrubber needs `refit_frame`'s `FrameStore` access
+/// on every redraw.
 ///
-/// Never fails the caller: with stdout not a terminal (under `cargo test`, or a
-/// piped run) this returns [`PauseAction::Detach`] immediately rather than block
-/// on a keypress that never arrives, and a terminal that fails to initialize is
-/// logged at `warn` and treated the same way.
+/// Never fails the caller: with stdout not a terminal (under `cargo test`, or a piped
+/// run) this returns [`PauseAction::Detach`] immediately, and a terminal that fails to
+/// initialize is logged at `warn` and treated the same way.
 fn render_pause(dash: &mut CalibDash) -> PauseAction {
-    #[cfg(test)]
-    {
-        dash.render_pause_calls += 1;
-    }
     if !std::io::stdout().is_terminal() {
         return PauseAction::Detach;
     }
@@ -1024,48 +860,27 @@ fn render_pause(dash: &mut CalibDash) -> PauseAction {
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(e) => {
-            // `try_init` can fail after partially succeeding (raw mode
-            // enabled, then entering the alternate screen fails), so restore
-            // unconditionally rather than assuming there is nothing to undo.
+            // `try_init` can fail after partially succeeding (raw mode enabled, then
+            // entering the alternate screen fails), so restore unconditionally.
             tracing::warn!("calib_dash failed to initialize the terminal: {e}");
             ratatui::restore();
             return PauseAction::Detach;
         }
     };
-    let action = catch_panics(|| event_loop(&mut terminal, dash));
+    let action = event_loop(&mut terminal, dash);
     ratatui::restore();
     action
 }
 
-/// Runs `f`, converting a panic into `PauseAction::Detach` rather than letting
-/// it unwind into the search — in builds where panics unwind at all. This
-/// workspace's `[profile.release]` sets `panic = "abort"`, so the shipped binary
-/// aborts before `catch_unwind` gets a chance; the recovery is real in dev/test.
-/// Factored out of `render_pause` so it is testable without a real terminal.
-fn catch_panics(f: impl FnOnce() -> PauseAction) -> PauseAction {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(action) => action,
-        Err(_) => {
-            tracing::warn!(
-                "calib_dash dashboard panicked while rendering a pause; detaching so the \
-                 search is not aborted"
-            );
-            PauseAction::Detach
-        }
-    }
-}
-
-/// Draws and reads key events in the alternate screen until a keypress resolves
-/// to something other than `Stay`. A draw or read failure is treated the same as
-/// `render_pause`'s terminal-setup failure: logged and detached, never propagated
-/// to fail the batch loop.
+/// Draws and reads key events in the alternate screen until a keypress resolves to
+/// something other than `Stay`. A draw or read failure is logged and detached, never
+/// propagated to fail the batch loop.
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     dash: &mut CalibDash,
 ) -> PauseAction {
     loop {
-        // Before every draw, not just after a scrub keypress: simpler than
-        // tracking whether `scrub_frame` changed, and a no-op when it's `None`.
+        // Before every draw, not just after a scrub keypress: a no-op when `None`.
         dash.sync_scrub();
         dash.sync_dp();
         if let Err(e) = terminal.draw(|f| crate::ui::draw(f, &mut dash.app)) {
@@ -1079,8 +894,8 @@ fn event_loop<B: ratatui::backend::Backend>(
                 return PauseAction::Detach;
             }
         };
-        // Only key *presses*: on Windows crossterm also emits releases,
-        // which would double every keystroke.
+        // Only key *presses*: on Windows crossterm also emits releases, which would
+        // double every keystroke.
         if let Event::Key(key) = ev
             && key.kind == KeyEventKind::Press
         {
@@ -1118,16 +933,14 @@ mod tests {
         last
     }
 
-    /// A dashboard with a budget generous enough to retain every frame. Tests
-    /// that want decimation spell `CalibDash::new` out with a tiny budget.
+    /// A dashboard with a budget generous enough to retain every frame.
     fn dash(n_frames: usize, n_calibrants: usize, bins: usize, lookback: usize) -> CalibDash {
         CalibDash::new(n_frames, n_calibrants, bins, lookback, 1 << 20)
     }
 
-    /// `n` points on the line `observed_rt = library_rt * slope`. A negative
-    /// slope is how a test asks for a fit that fails: the DP only chains pairs
-    /// that increase in both axes, so an anti-correlated batch yields a
-    /// one-node path and no curve.
+    /// `n` points on the line `observed_rt = library_rt * slope`. A negative slope is
+    /// how a test asks for a fit that fails: the DP only chains pairs that increase in
+    /// both axes, so an anti-correlated batch yields a one-node path and no curve.
     fn points(n: usize, slope: f64, chunk: usize) -> Vec<CalibrantPoint> {
         (0..n)
             .map(|i| CalibrantPoint {
@@ -1138,9 +951,8 @@ mod tests {
             .collect()
     }
 
-    /// Points at explicit `speclib_index`es, so a test can choose the two sets
-    /// `churn` diffs independently of how many batches have gone by. On the
-    /// identity line, so the fit succeeds like `points`'.
+    /// Points at explicit `speclib_index`es, so a test can choose the two sets `churn`
+    /// diffs. On the identity line, so the fit succeeds.
     fn indexed_points(indices: &[usize]) -> Vec<CalibrantPoint> {
         indices
             .iter()
@@ -1153,8 +965,7 @@ mod tests {
             .collect()
     }
 
-    /// `n` retained frames, nothing decimated — what the scrubber tests need
-    /// from a `FrameStore` they do not have.
+    /// `n` retained frames, nothing decimated — what the scrubber tests need.
     fn retained(n: usize) -> FrameSummary {
         FrameSummary {
             retained: n,
@@ -1168,8 +979,7 @@ mod tests {
         rec.curve().map_or_else(Vec::new, |c| c.points().to_vec())
     }
 
-    /// Pointwise curve equality — the assertion behind every "what you scrub is
-    /// what ran" test.
+    /// Pointwise curve equality — behind every "what you scrub is what ran" test.
     fn assert_same_curve(live: &[Point], refit: &[Point]) {
         assert_eq!(live.len(), refit.len(), "curve lengths differ");
         for (a, b) in live.iter().zip(refit) {
@@ -1187,9 +997,8 @@ mod tests {
         assert_eq!(app.pending_count(), None, "count lives exactly one motion");
     }
 
-    /// `0` is the one digit whose meaning depends on what came before it: it
-    /// cannot *start* a count (vim keeps `0` free as a motion) but extends one
-    /// like any other digit.
+    /// `0` is the one digit whose meaning depends on what came before it: it cannot
+    /// *start* a count (vim keeps `0` free as a motion) but extends one.
     #[test]
     fn a_leading_zero_does_not_start_a_count_but_a_later_zero_extends_one() {
         let mut app = App::new(10);
@@ -1207,16 +1016,14 @@ mod tests {
     #[test]
     fn a_long_digit_run_saturates_instead_of_overflowing() {
         let mut app = App::new(10);
-        // 16 nines: `9_999_999_999 * 10 + 9` overflows a u32 well before the
-        // end of this run, so this both must not panic (overflow checks are
-        // on in dev/test builds) and must land on a sane clamped value.
+        // 16 nines: `9_999_999_999 * 10 + 9` overflows a u32 well before the end of
+        // this run, so this must not panic (dev/test builds check overflow).
         press(&mut app, "9999999999999999");
         assert_eq!(app.pending_count(), Some(u32::MAX));
     }
 
-    /// Both halves of "only a motion consumes a count": a bound non-motion
-    /// (`d`, which reaches `handle_plain_char`) and an unbound key (`Esc`,
-    /// which falls through `handle_key`'s catch-all arm) each clear it.
+    /// Both halves of "only a motion consumes a count": a bound non-motion (`d`) and
+    /// an unbound key (`Esc`, `handle_key`'s catch-all arm) each clear it.
     #[test]
     fn a_non_motion_key_clears_a_pending_count() {
         let mut app = App::new(10);
@@ -1283,8 +1090,6 @@ mod tests {
         app.handle_key(key('?'));
         assert!(app.show_keys());
 
-        // `n` would normally advance the batch loop; while the overlay is
-        // open it must only dismiss the overlay.
         let action = app.handle_key(key('n'));
         assert!(!app.show_keys(), "the overlay must close on the next key");
         assert_eq!(
@@ -1293,9 +1098,8 @@ mod tests {
             "the dismissing key must not also perform its usual action"
         );
 
-        // A digit takes a different route through `handle_plain_char` than a
-        // motion does, so it needs its own case: `5` must not start a pending
-        // count on its way out of the overlay either.
+        // A digit takes a different route through `handle_plain_char` than a motion,
+        // so it needs its own case.
         app.handle_key(key('?'));
         let action = app.handle_key(key('5'));
         assert!(!app.show_keys(), "a digit dismisses the overlay too");
@@ -1394,9 +1198,8 @@ mod tests {
             "> past the last retained frame returns to the live view"
         );
 
-        // A count large enough to overflow the `+ n` must saturate rather than
-        // wrap into some other index — the same run must also return promptly,
-        // this being arithmetic and not a loop.
+        // A count large enough to overflow the `+ n` must saturate rather than wrap
+        // into some other index.
         press(&mut app, "<"); // back to frame 4
         assert_eq!(app.scrub_frame(), Some(4), "sanity");
         press(&mut app, "4294967295>");
@@ -1462,15 +1265,14 @@ mod tests {
         );
     }
 
-    /// `cycle` reduces the count mod the number of stops before anything moves,
-    /// so a ten-digit count returns promptly rather than driving ~10^9
-    /// iterations on the input thread. Both counts below land two stops from the
-    /// start (`1_000_000_001 % 3 == 2`, `1_000_000_002 % 5 == 2`).
+    /// `cycle` reduces the count mod the number of stops before anything moves, so a
+    /// ten-digit count returns promptly rather than driving ~10^9 iterations on the
+    /// input thread. Both counts below land two stops from the start
+    /// (`1_000_000_001 % 3 == 2`, `1_000_000_002 % 5 == 2`).
     ///
-    /// The backward keys are the ones that make the reduction load-bearing
-    /// rather than merely fast: `cycle` walks back by `n - steps`, which
-    /// underflows for any count past the stop list's length — and a count past
-    /// 5 is an ordinary keystroke, not a stress case.
+    /// The backward keys make the reduction load-bearing rather than merely fast:
+    /// `cycle` walks back by `n - steps`, which underflows for any count past the stop
+    /// list's length — and a count past 5 is an ordinary keystroke.
     #[test]
     fn a_huge_count_before_a_cycling_key_does_not_spin_or_underflow() {
         let mut app = App::new(10);
@@ -1493,8 +1295,6 @@ mod tests {
         let mut s = Stepper::new();
         // At the chunk-0 pause the user asks for 5.
         s.apply(PauseAction::Next(5));
-        // Chunks 1..=4 are skipped, the 5th call renders, and the skip is spent
-        // once rather than re-armed — so every later chunk renders too.
         let rendered: Vec<usize> = (1..=10).filter(|_| s.should_render()).collect();
         assert_eq!(
             rendered,
@@ -1523,8 +1323,7 @@ mod tests {
         let mut d = CalibDash::new(10, 8, 10, 5, 64); // tiny budget: heavy decimation
         for chunk in 0..10 {
             // stdout is not a tty under `cargo test`, so the render path must
-            // short-circuit rather than wait for a keypress — and must never
-            // abort the search on its own.
+            // short-circuit rather than wait for a keypress.
             let flow = d.on_batch(chunk, points(8, 1.0, chunk).into_iter());
             assert!(matches!(flow, Flow::Continue), "chunk {chunk}");
         }
@@ -1534,13 +1333,12 @@ mod tests {
     }
 
     /// `BatchMetrics.admitted`/`evicted` are the only two fields nothing but
-    /// `refit_live` ever fills, so the wiring needs its own test: `metrics.rs`
-    /// exercises `churn` directly and `ui.rs` hand-builds `BatchMetrics`.
+    /// `refit_live` ever fills, so the wiring needs its own test.
     ///
     /// The second batch is deliberately asymmetric (one index in, two out), so
-    /// swapping the two fields at the construction site cannot pass. It also
-    /// fails if the `prev_points` refresh moves above the `churn` call, which
-    /// would diff `current_points` against itself and report `(0, 0)` forever.
+    /// swapping the two fields at the construction site cannot pass. It also fails if
+    /// the `prev_points` refresh moves above the `churn` call, which would diff
+    /// `current_points` against itself and report `(0, 0)` forever.
     #[test]
     fn on_batch_reports_this_batchs_admissions_and_evictions() {
         let mut d = dash(2, 8, 10, 5);
@@ -1562,9 +1360,8 @@ mod tests {
         );
     }
 
-    /// End-to-end version of the `<` scrubber: moving `App::scrub_frame` with
-    /// `handle_key` and then letting `CalibDash::sync_scrub` catch up must leave
-    /// the Fit tab looking at the earlier batch's real curve, not the live one.
+    /// End-to-end version of the `<` scrubber: moving `App::scrub_frame` and letting
+    /// `sync_scrub` catch up must leave the Fit tab on the earlier batch's real curve.
     #[test]
     fn sync_scrub_reproduces_an_earlier_batchs_curve_on_the_fit_tab() {
         let mut d = dash(3, 8, 10, 5);
@@ -1574,9 +1371,8 @@ mod tests {
         }
         d.finish();
 
-        // Batch 0's curve, refit independently for comparison against what
-        // scrubbing shows.
-        let batch0_curve = curve_of(d.refit_frame(0).expect("frame 0 exists"));
+        // Batch 0's curve, refit independently for comparison.
+        let batch0_curve = curve_of(d.refit_frame(0).expect("frame 0 exists").1);
 
         // A generous budget retains all 3 batches; scrub 3 back from live
         // (batch 2) lands on frame index 0 (batch 0).
@@ -1587,19 +1383,17 @@ mod tests {
         assert_eq!(d.app.scrub_chunk(), Some(0));
         assert_same_curve(&curve_of(d.app.active_recording()), &batch0_curve);
 
-        // The live view is unaffected by scrubbing — `recording()` (not
-        // `active_recording()`) still reflects batch 2's own fit.
+        // `recording()`, unlike `active_recording()`, still reflects batch 2's fit.
         assert!(
             !curve_of(d.app.recording()).is_empty(),
             "sanity: batch 2 produced a real curve too"
         );
     }
 
-    /// A *live* `on_batch` followed by pressing `d` must leave the pane with
-    /// decisions to show. The live re-fit deliberately uses `ObserveOpts::NONE`,
-    /// so `recording().dp()` staying empty is expected; the DP data has to come
-    /// from `sync_dp`'s separate refit, called directly here since there is no
-    /// terminal to run `event_loop` under `cargo test`.
+    /// A *live* `on_batch` followed by pressing `d` must leave the pane with decisions
+    /// to show. The live re-fit uses `ObserveOpts::NONE`, so `recording().dp()` staying
+    /// empty is expected; the DP data comes from `sync_dp`'s separate refit, called
+    /// directly since there is no terminal to run `event_loop` under `cargo test`.
     #[test]
     fn d_on_a_live_batch_refits_with_dp_nodes_so_the_pane_has_decisions() {
         let mut d = dash(2, 8, 10, 5);
@@ -1630,11 +1424,10 @@ mod tests {
         );
     }
 
-    /// Pressing `d` while scrubbed to an earlier frame must not trigger the
-    /// on-demand live refit at all — `active_recording()` already carries DP
-    /// data in that case, and `sync_dp` recomputing it from `current_points`
-    /// would show the *live* batch's decisions on a Fit tab that is actually
-    /// showing a different, scrubbed one.
+    /// Pressing `d` while scrubbed to an earlier frame must not trigger the on-demand
+    /// live refit at all — `active_recording()` already carries DP data, and `sync_dp`
+    /// recomputing from `current_points` would show the *live* batch's decisions on a
+    /// Fit tab showing a different, scrubbed one.
     #[test]
     fn d_while_scrubbed_does_not_touch_the_live_on_demand_recording() {
         let mut d = dash(2, 8, 10, 5);
@@ -1651,8 +1444,7 @@ mod tests {
             Some(1),
             "sanity: one step back from live lands on the last retained frame (index 1 of 2)"
         );
-        // `active_recording()` already has DP data (`refit_frame` always
-        // observes it) without anyone pressing `d` at all.
+        // `active_recording()` already has DP data (`refit_frame` always observes it).
         assert!(!d.app.active_recording().dp().is_empty());
 
         press(&mut d.app, "d");
@@ -1663,9 +1455,8 @@ mod tests {
         );
     }
 
-    /// `sync_dp` runs before every draw, i.e. once per keystroke of a pause, but
-    /// must refit at most once per batch — and the cache that makes that true
-    /// must not also serve batch N's DP trace at batch N+1.
+    /// `sync_dp` runs once per keystroke of a pause but must refit at most once per
+    /// batch — and that cache must not serve batch N's DP trace at batch N+1.
     #[test]
     fn sync_dp_refits_once_per_batch_and_never_serves_a_stale_trace() {
         let mut d = dash(3, 8, 10, 5);
@@ -1680,8 +1471,8 @@ mod tests {
             "three draws within one pause must share one refit"
         );
 
-        // A new batch invalidates the cache: the pane must show *this* batch's
-        // decisions, which for a different slope is a visibly different curve.
+        // A new batch invalidates the cache: for a different slope the pane's curve is
+        // visibly different.
         d.on_batch(1, points(8, 2.0, 1).into_iter());
         d.sync_dp();
         assert_eq!(d.dp_refit_calls, 2, "a new batch must refit again");
@@ -1690,8 +1481,6 @@ mod tests {
             &curve_of(d.app.recording()),
         );
 
-        // Turning the pane off drops the recording so nothing can read a
-        // recording the pane is no longer showing.
         press(&mut d.app, "d");
         assert!(!d.app.dp_pane());
         assert!(d.app.live_dp_recording().is_none());
@@ -1701,9 +1490,8 @@ mod tests {
             "sync_dp must not refit for a pane that is off"
         );
 
-        // Reopening within the same batch: the cache still names batch 1, but
-        // the recording it named was dropped on the way out, so serving the
-        // cache would leave the pane on with nothing in it.
+        // Reopening within the same batch: the cache still names batch 1, but the
+        // recording it named was dropped on the way out.
         press(&mut d.app, "d");
         d.sync_dp();
         assert_eq!(
@@ -1717,41 +1505,33 @@ mod tests {
         );
     }
 
-    /// A user who pressed `r`/`q`/Ctrl-C at a Phase 1 pause has already asked to
-    /// stop seeing the dashboard — see `present`'s doc comment for why an
-    /// unguarded post-Phase-2 pause would stall the run. `render_pause_calls` is
-    /// what makes "did not even attempt to render" provable: under `cargo test`
-    /// `render_pause` detaches immediately whether or not the guard fired, so
-    /// the return value cannot tell a bypassed guard from a working one.
-    ///
-    /// The `Stay`/`Next` rows are the baseline that keeps an inverted or
-    /// always-firing guard from passing: `present` must still open the pause
-    /// when nothing has asked it not to.
+    /// A user who pressed `r`/`q`/Ctrl-C at a Phase 1 pause has already asked to stop
+    /// seeing the dashboard — see `present`'s doc for why an unguarded pause would
+    /// stall the run. The `Stay`/`Next` rows keep an always-firing guard from passing.
     #[test]
     fn present_does_not_render_once_a_pause_chose_to_stop() {
-        // (action applied at the last pause, expected render_pause calls)
+        // (action applied at the last pause, whether present() must skip)
         let cases = [
-            (PauseAction::Stay, 1),
-            (PauseAction::Next(5), 1),
-            (PauseAction::RunToEnd, 0),
-            (PauseAction::Detach, 0),
-            (PauseAction::Abort, 0),
+            (PauseAction::Stay, false),
+            (PauseAction::Next(5), false),
+            (PauseAction::RunToEnd, true),
+            (PauseAction::Detach, true),
+            (PauseAction::Abort, true),
         ];
         for (action, expected) in cases {
             let mut d = dash(1, 4, 10, 3);
             d.stepper.apply(action);
-            d.present();
             assert_eq!(
-                d.render_pause_calls, expected,
-                "{action:?} must leave present() with {expected} render_pause call(s)"
+                d.stepper.is_stopped(),
+                expected,
+                "{action:?} must leave present()'s guard {expected}"
             );
         }
     }
 
-    /// An overlong batch (more points than `n_calibrants`) must not let the live
-    /// re-fit see points the frame slab never recorded — `FrameStore` truncates
-    /// its own copy, and `on_batch` must clamp identically so a later
-    /// `refit_frame` reproduces what was actually fit live.
+    /// An overlong batch (more points than `n_calibrants`) must not let the live re-fit
+    /// see points the frame slab never recorded — `FrameStore` truncates its own copy,
+    /// and `on_batch` must clamp identically.
     #[test]
     fn an_overlong_batch_is_clamped_the_same_way_the_frame_slab_clamps_it() {
         let n_calibrants = 4;
@@ -1767,7 +1547,7 @@ mod tests {
         );
 
         let live = curve_of(d.app.recording());
-        let refit = curve_of(d.refit_frame(0).expect("frame 0 exists"));
+        let refit = curve_of(d.refit_frame(0).expect("frame 0 exists").1);
         assert_eq!(
             live.len(),
             n_calibrants,
@@ -1785,40 +1565,15 @@ mod tests {
         assert_eq!(render_pause(&mut d), PauseAction::Detach);
     }
 
-    /// `catch_panics` is what keeps a panic inside the event loop from unwinding
-    /// into the search. `#[cfg(debug_assertions)]` because catching only works
-    /// under `panic = "unwind"` (`profile.dev`/`test`'s default): a CI leg
-    /// running tests against a release-profile build has `panic = "abort"` set
-    /// workspace-wide and would abort the whole test process below.
-    #[cfg(debug_assertions)]
-    #[test]
-    fn catch_panics_converts_a_panic_into_detach() {
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the default panic printout
-        let action = catch_panics(|| panic!("simulated event-loop panic"));
-        std::panic::set_hook(prev_hook);
-        assert_eq!(
-            action,
-            PauseAction::Detach,
-            "a caught panic must not fail the batch loop"
-        );
-    }
-
     // ---- no-reallocation, pinned by pointer identity ----
-    //
-    // The convention this codebase uses for every "does not reallocate" claim
-    // (`frames.rs`'s `the_slab_is_allocated_once`, `calibrt`'s `filtered_ptr`):
-    // capacity equality alone cannot distinguish "reused the same allocation"
-    // from "reallocated but landed on the same capacity anyway".
 
     #[test]
     fn the_point_buffers_never_reallocate_once_constructed() {
         let n_calibrants = 8;
         let mut d = dash(5, n_calibrants, 10, 5);
-        // `current_points` is pre-sized at construction, so it is stable from
-        // before the very first batch. `prev_points` starts as an empty `Vec`
-        // (no allocation at all), so its first-ever growth happens inside
-        // batch 0 and its pointer is only meaningful to compare afterwards.
+        // `current_points` is pre-sized at construction, so it is stable from before
+        // the first batch. `prev_points` starts as an empty `Vec`, so its first growth
+        // happens inside batch 0 and its pointer only compares meaningfully after.
         let current_ptr = d.current_points.as_ptr();
         d.on_batch(0, points(n_calibrants, 1.0, 0).into_iter());
         assert_eq!(
@@ -1847,11 +1602,7 @@ mod tests {
 
     #[test]
     fn a_failed_fit_does_not_reset_the_delta_baseline() {
-        // A batch whose fit fails (anti-correlated calibrants, so the DP finds
-        // no monotonic chain and `curve()` stays `None`) must not wipe out the
-        // last real curve as the comparison point for the *next* successful
-        // batch's `curve_delta` — otherwise the Convergence tab would show a
-        // NaN-to-real discontinuity that never actually happened.
+        // Anti-correlated calibrants fail the fit: no monotonic chain, no curve.
         let n = 4;
         let mut d = dash(3, n, 10, 3);
         let good_points = || points(n, 1.0, 0);
@@ -1869,10 +1620,8 @@ mod tests {
             "batch 1's fit must fail outright (every weight is sub-threshold)"
         );
 
-        // Identical points to batch 0: if `prev_curve` correctly survived
-        // batch 1's failure, this fits the same curve again and the delta
-        // against it is ~0 — not NaN, which is what a reset-to-None baseline
-        // would report instead.
+        // Identical points to batch 0: if `prev_curve` survived batch 1's failure this
+        // fits the same curve again, and the delta against it is ~0.
         d.on_batch(2, good_points().into_iter());
         let m2 = d.app.metrics()[2];
         assert!(

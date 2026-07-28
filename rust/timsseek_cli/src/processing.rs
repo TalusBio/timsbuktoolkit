@@ -43,7 +43,6 @@ use timsseek::rt_calibration::{
     ObserveOpts,
     ObservedRTSeconds,
     Point,
-    RidgeMeasurement,
     RidgeSummary,
     point_ranges,
     ridge_half_width_interp,
@@ -79,39 +78,17 @@ type PrecursorFragmentLookup = std::collections::HashMap<(i64, u8), Vec<(f32, Ve
 
 /// Everything the pipeline below needs from the dev-only calibration fit
 /// dashboard. `arm` is the only `#[cfg]`ed part: it has a real and a no-op
-/// version, exposing the same items with the same signatures, and anything both
-/// versions can share is written once out here. Every call site therefore calls
-/// unconditionally and `#[cfg]` stays off the search path.
+/// version, exposing the same items with the same signatures. Every call site
+/// therefore calls unconditionally and `#[cfg]` stays off the search path.
 mod calib_dash_hook {
     use super::{
         CalibrantCandidate,
-        CalibratedGrid,
         CalibrationConfig,
         CalibrationResult,
         FitObserver,
-        ObserveOpts,
-        RidgeMeasurement,
     };
 
     pub use arm::*;
-
-    /// Step A's fit. Shared by both arms: each arm's `Recording` is a
-    /// `FitObserver` (the real one records, the no-op one drops every event)
-    /// and neither the trait nor `ObserveOpts` is feature-gated.
-    pub fn fit(grid: &mut CalibratedGrid, recording: &mut Recording) {
-        grid.fit_with(recording, ObserveOpts::NONE);
-    }
-
-    /// Step B's ridge measurement, routed through the recording — otherwise
-    /// `recording.ridge()` stays empty and the Tolerances tab's ridge overlay
-    /// has nothing to show even though Step B did run.
-    pub fn measure_ridge_width(
-        grid: &mut CalibratedGrid,
-        fraction: f64,
-        recording: &mut Recording,
-    ) -> Vec<RidgeMeasurement> {
-        grid.measure_ridge_width_with(fraction, recording)
-    }
 
     #[cfg(feature = "calib-dashboard")]
     mod arm {
@@ -122,9 +99,10 @@ mod calib_dash_hook {
             FitObserver,
         };
         use std::io::IsTerminal;
+        use timsseek::rt_calibration::FitEvent;
 
         /// The dashboard for a whole run. Stays `None` inside unless
-        /// `TIMSSEEK_CALIB_DASHBOARD=1`, so an ordinary run of a
+        /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
         /// dashboard-enabled binary allocates nothing — and neither does
         /// anything else in this module that keys off it.
         pub struct Dash {
@@ -135,12 +113,28 @@ mod calib_dash_hook {
         /// the dashboard is running.
         pub struct Recording(Option<calib_dash::FitRecording>);
 
-        /// Lets the `Option` be an observer in its own right, so the shared
-        /// fit calls don't have to branch on it.
         impl FitObserver for Recording {
-            fn on_event(&mut self, ev: calib_dash::FitEvent<'_>) {
+            fn on_event(&mut self, ev: FitEvent<'_>) {
                 if let Some(rec) = self.0.as_mut() {
                     rec.on_event(ev);
+                }
+            }
+        }
+
+        fn dashboard_requested() -> bool {
+            let Some(raw) = std::env::var_os("TIMSSEEK_CALIB_DASHBOARD") else {
+                return false;
+            };
+            match raw.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "" => false,
+                "1" | "true" | "yes" => true,
+                _ => {
+                    tracing::warn!(
+                        value = ?raw,
+                        "TIMSSEEK_CALIB_DASHBOARD is not one of 1/true/yes; leaving the \
+                         calibration dashboard off"
+                    );
+                    false
                 }
             }
         }
@@ -149,49 +143,39 @@ mod calib_dash_hook {
         /// walks, which under `--calib-lib` is not the library the rest of the
         /// pipeline scores.
         pub fn attach(n_chunks: usize, config: &CalibrationConfig) -> Dash {
-            let inner = std::env::var("TIMSSEEK_CALIB_DASHBOARD")
-                .is_ok_and(|v| v == "1")
-                .then(|| {
-                    // The dashboard's own pause (`render_pause`) checks this
-                    // again every batch and silently detaches without logging
-                    // anything — it must stay silent there so a normal
-                    // interactive TTY session isn't spammed once per pause.
-                    // Logging it once, here, up front, is what tells a
-                    // redirected/piped run (e.g. `> file 2>&1`, CI) that the
-                    // dashboard is skipping every pause rather than pretending
-                    // it never ran.
-                    if !std::io::stdout().is_terminal() {
-                        tracing::warn!(
-                            "TIMSSEEK_CALIB_DASHBOARD=1 but stdout is not a terminal; the \
-                             dashboard will skip every pause and Phase 1 will run unattended"
-                        );
-                    }
-                    let budget_bytes = match std::env::var_os("CALIB_DASH_FRAME_BUDGET_MB") {
-                        None => calib_dash::DEFAULT_RUN_BUDGET_BYTES,
-                        Some(raw) => match raw
-                            .to_str()
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .filter(|mb| *mb > 0)
-                        {
-                            Some(mb) => mb.saturating_mul(1024 * 1024),
-                            None => {
-                                tracing::warn!(
-                                    value = ?raw,
-                                    "CALIB_DASH_FRAME_BUDGET_MB is not a positive whole number \
-                                     of megabytes; falling back to the default budget"
-                                );
-                                calib_dash::DEFAULT_RUN_BUDGET_BYTES
-                            }
-                        },
-                    };
-                    calib_dash::CalibDash::new(
-                        n_chunks,
-                        config.n_calibrants,
-                        config.grid_size,
-                        config.dp_lookback,
-                        budget_bytes,
-                    )
-                });
+            let inner = dashboard_requested().then(|| {
+                if !std::io::stdout().is_terminal() {
+                    tracing::warn!(
+                        "TIMSSEEK_CALIB_DASHBOARD is set but stdout is not a terminal; the \
+                         dashboard will skip every pause and Phase 1 will run unattended"
+                    );
+                }
+                let budget_bytes = match std::env::var_os("CALIB_DASH_FRAME_BUDGET_MB") {
+                    None => calib_dash::DEFAULT_RUN_BUDGET_BYTES,
+                    Some(raw) => match raw
+                        .to_str()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|mb| *mb > 0)
+                    {
+                        Some(mb) => mb.saturating_mul(1024 * 1024),
+                        None => {
+                            tracing::warn!(
+                                value = ?raw,
+                                "CALIB_DASH_FRAME_BUDGET_MB is not a positive whole number \
+                                 of megabytes; falling back to the default budget"
+                            );
+                            calib_dash::DEFAULT_RUN_BUDGET_BYTES
+                        }
+                    },
+                };
+                calib_dash::CalibDash::new(
+                    n_chunks,
+                    config.n_calibrants,
+                    config.grid_size,
+                    config.dp_lookback,
+                    budget_bytes,
+                )
+            });
             Dash { inner }
         }
 
@@ -203,14 +187,16 @@ mod calib_dash_hook {
             )
         }
 
-        /// Returns `false` when the user asked the dashboard to stop Phase 1.
+        /// Exits the process on `Ctrl-C` at a pause: raw mode swallows `SIGINT`,
+        /// and returning to the pipeline would only run Phases 2 and 3 against a
+        /// truncated calibrant heap.
         pub fn on_batch<'a>(
             dash: &mut Dash,
             chunk: usize,
             calibrants: impl Iterator<Item = &'a CalibrantCandidate>,
-        ) -> bool {
+        ) {
             let Some(d) = dash.inner.as_mut() else {
-                return true;
+                return;
             };
             let flow = d.on_batch(
                 chunk,
@@ -221,10 +207,9 @@ mod calib_dash_hook {
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
-                tracing::warn!("calibration dashboard aborted Phase 1 at chunk {chunk}");
-                return false;
+                tracing::warn!("calibration dashboard aborted Phase 1 at chunk {chunk}; exiting");
+                std::process::exit(130);
             }
-            true
         }
 
         pub fn finish(dash: &mut Dash) {
@@ -233,11 +218,8 @@ mod calib_dash_hook {
             }
         }
 
-        /// Wires the real Phase 2 fit into the Tolerances tab, then opens the
-        /// post-Phase-2 pause — the dashboard's other moment, alongside every
-        /// Phase 1 batch pause `on_batch` opens. Without the pause those tabs
-        /// and the batch scrubber are reachable in principle but the process
-        /// moves straight on to Phase 3 before a user can see them.
+        /// Wires the Phase 2 fit into the Tolerances tab, then pauses so the
+        /// tabs and the batch scrubber are reachable before Phase 3 starts.
         pub fn show_final(dash: &mut Dash, recording: Recording, calibration: &CalibrationResult) {
             let (Some(d), Some(recording)) = (dash.inner.as_mut(), recording.0) else {
                 return;
@@ -249,10 +231,6 @@ mod calib_dash_hook {
                 calib_dash::ToleranceSummary {
                     mz_ppm: calibration.mz_tolerance(),
                     mobility_pct: (mobility.0 as f64, mobility.1 as f64),
-                    // `calibrate_from_phase1` derives a single scalar RT
-                    // tolerance, and `ToleranceSummary::rt_seconds` is
-                    // symmetric by construction (see that field's doc
-                    // comment), so the one value fills both slots.
                     rt_seconds: rt_tolerance_seconds,
                     n_calibrants: calibration.errors().rt_seconds.n,
                 },
@@ -274,8 +252,6 @@ mod calib_dash_hook {
         pub struct Dash;
         pub struct Recording;
 
-        /// Drops every event, which is what lets the shared `fit` /
-        /// `measure_ridge_width` above be spelled once for both arms.
         impl FitObserver for Recording {
             fn on_event(&mut self, _: FitEvent<'_>) {}
         }
@@ -292,8 +268,7 @@ mod calib_dash_hook {
             _dash: &mut Dash,
             _chunk: usize,
             _calibrants: impl Iterator<Item = &'a CalibrantCandidate>,
-        ) -> bool {
-            true
+        ) {
         }
 
         pub fn finish(_dash: &mut Dash) {}
@@ -785,9 +760,7 @@ fn phase1_prescore<I: ScorerQueriable>(
         let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
 
-        if !calib_dash_hook::on_batch(&mut dash, chunk_start / chunk_size, global_heap.iter()) {
-            break;
-        }
+        calib_dash_hook::on_batch(&mut dash, chunk_start / chunk_size, global_heap.iter());
     }
     calib_dash_hook::finish(&mut dash);
 
@@ -927,15 +900,11 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             p.weight,
         )
     }))?;
-    calib_dash_hook::fit(&mut cal_state, dash_recording);
+    cal_state.fit_with(dash_recording, ObserveOpts::NONE);
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
     // Measure ridge width for position-dependent RT tolerance.
-    let ridge_widths = calib_dash_hook::measure_ridge_width(
-        &mut cal_state,
-        DEFAULT_RIDGE_FRACTION,
-        dash_recording,
-    );
+    let ridge_widths = cal_state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, dash_recording);
     if let Some(s) = RidgeSummary::of(&ridge_widths) {
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",

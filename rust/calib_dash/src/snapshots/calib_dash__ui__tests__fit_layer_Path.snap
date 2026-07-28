@@ -2,7 +2,6 @@
 source: rust/calib_dash/src/ui.rs
 expression: out
 ---
- Fit │ Convergence │ Tolerances                                                                     
     ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
     │ Showing: path — O chosen, X greedy tail                                                      │
     │                                                                                              │
@@ -30,5 +29,4 @@ expression: out
     │     ▄▄▄▄▄▄O▀▀▀▀▀▀                                                                            │
    0┤     O▒▒▒▒▒▒                                                                                  │
     └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
-     0                            5                           10                            15      
- b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys
+     0                            5                           10                            15

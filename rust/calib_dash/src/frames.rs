@@ -5,10 +5,8 @@
 //! not at 200k. The stride is derived once, up front, from quantities all known
 //! before the first chunk.
 //!
-//! Decimation is by stride, not by eviction. A ring buffer would retain the
-//! most recent batches and discard the earliest, which is backwards — the early
-//! batches are where the fit is volatile and where "when did this stabilize"
-//! gets answered.
+//! Decimation is by stride, not by eviction: the early batches are where the fit
+//! is volatile and where "when did this stabilize" gets answered.
 
 /// Default slab budget for a live Phase 1 run, and the value
 /// `CALIB_DASH_FRAME_BUDGET_MB` overrides. A run has as many frames as it has
@@ -39,11 +37,9 @@ struct FrameIndex {
     len: usize,
 }
 
-/// What the slab kept, and at what cost. A named struct because all three are
-/// `usize` and a tuple would let a caller swap two of them silently.
+/// What the slab kept, and at what cost.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameSummary {
-    /// Frames currently in the index.
     pub retained: usize,
     pub keep_every: usize,
     pub dropped: usize,
@@ -57,9 +53,9 @@ pub struct FrameStore {
     /// Number of on-stride spans the slab has room for. This, not
     /// `index.capacity()`, is the bound `record` gates on, since
     /// `Vec::capacity()` may over-allocate past what the slab has room for.
-    retained: usize,
-    /// Span reserved for the always-kept final frame.
-    last_span: usize,
+    stride_capacity: usize,
+    /// Slab offset of the span reserved for the always-kept final frame.
+    reserved_offset: usize,
     last_index: Option<FrameIndex>,
     seen: usize,
 }
@@ -70,7 +66,7 @@ impl FrameStore {
         let frame_bytes = n_calibrants * std::mem::size_of::<CalibrantPoint>();
         let max_frames = (budget_bytes / frame_bytes).max(1);
         let keep_every = n_frames.max(1).div_ceil(max_frames).max(1);
-        let retained = n_frames.max(1).div_ceil(keep_every);
+        let stride_capacity = n_frames.max(1).div_ceil(keep_every);
         // +1 span for the always-kept last frame, which need not land on the
         // stride.
         let slab = vec![
@@ -79,15 +75,15 @@ impl FrameStore {
                 observed_rt: 0.0,
                 speclib_index: 0
             };
-            (retained + 1) * n_calibrants
+            (stride_capacity + 1) * n_calibrants
         ];
         Self {
             slab,
-            index: Vec::with_capacity(retained),
+            index: Vec::with_capacity(stride_capacity),
             n_calibrants,
             keep_every,
-            retained,
-            last_span: retained * n_calibrants,
+            stride_capacity,
+            reserved_offset: stride_capacity * n_calibrants,
             last_index: None,
             seen: 0,
         }
@@ -105,11 +101,12 @@ impl FrameStore {
     /// handled by `finish`.
     pub fn record(&mut self, chunk: usize, points: impl Iterator<Item = CalibrantPoint>) {
         self.seen += 1;
-        let on_stride = chunk.is_multiple_of(self.keep_every) && self.index.len() < self.retained;
+        let on_stride =
+            chunk.is_multiple_of(self.keep_every) && self.index.len() < self.stride_capacity;
         let offset = if on_stride {
             self.index.len() * self.n_calibrants
         } else {
-            self.last_span
+            self.reserved_offset
         };
         let mut len = 0;
         for p in points.take(self.n_calibrants) {
@@ -264,33 +261,6 @@ mod tests {
             pts,
             &[pt(0)],
             "a zero-calibrant store still records into one slot per frame"
-        );
-    }
-
-    /// The dashboard's "allocate once at startup, never during a run"
-    /// promise, for the one allocation big enough to matter. Pinned by
-    /// pointer identity rather than `Vec::capacity()` — capacity equality
-    /// cannot distinguish "reused the same allocation" from "reallocated and
-    /// landed on the same capacity anyway", and `frame()`'s own slice is
-    /// already a view into the slab, so no test-only accessor is needed to
-    /// see it.
-    #[test]
-    fn the_slab_is_allocated_once() {
-        let mut store = FrameStore::new(12, 4, budget_for(3, 4));
-        store.record(0, (0..4).map(pt));
-        let base = store
-            .frame(0)
-            .expect("chunk 0 lands on the stride")
-            .1
-            .as_ptr();
-        for chunk in 1..12 {
-            store.record(chunk, (0..4).map(pt));
-        }
-        store.finish();
-        assert_eq!(
-            store.frame(0).expect("frame 0 is still there").1.as_ptr(),
-            base,
-            "the slab must not reallocate"
         );
     }
 

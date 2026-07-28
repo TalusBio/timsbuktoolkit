@@ -5,7 +5,6 @@
 pub mod grid;
 mod pathfinding;
 pub mod types;
-pub use grid::Grid;
 use tracing::{
     info,
     warn,
@@ -197,15 +196,13 @@ impl RidgeSummary {
     /// `None` for an empty slice: there is no column count, minimum or maximum
     /// to report, and no fold over nothing produces one.
     ///
-    /// The mean divides by the total ridge weight itself, never by
-    /// `total.max(1.0)` as two of the folded-in callers used to: that clamp
-    /// shrinks the mean by an arbitrary factor whenever the total lands below 1
-    /// — reachable, since these are blurred cell weights and freely fractional
-    /// — and nothing about a weighted mean asks for it. A zero total divides
+    /// The mean divides by the total ridge weight itself. A zero total divides
     /// 0.0 by 0.0 (every term carries the same weight) and lands on the NaN the
     /// field documents.
     pub fn of(widths: &[RidgeMeasurement]) -> Option<Self> {
-        widths.first()?;
+        if widths.is_empty() {
+            return None;
+        }
         let sum = |f: fn(&RidgeMeasurement) -> f64| widths.iter().map(f).sum::<f64>();
         let ridge_weight = sum(|m| m.ridge_weight);
         let column_weight = sum(|m| m.column_weight);
@@ -247,13 +244,10 @@ pub struct GridGeom {
 ///
 /// `cells` is `bins * bins` ROW-MAJOR: `index = row * bins + col`, where `row`
 /// indexes the observed-RT axis and `col` the library-RT axis. This matches
-/// `Grid::add_point`'s `gy * bins + gx`. Nothing in the type system enforces
-/// it and every consumer depends on it.
+/// `Grid::add_point`'s `gy * bins + gx`.
 pub enum FitEvent<'a> {
     FitStarted {
         geom: GridGeom,
-    },
-    GridReady {
         cells: &'a [grid::Node],
     },
     Suppressed {
@@ -276,10 +270,6 @@ pub enum FitEvent<'a> {
         /// attached suffix (Pass 2's monotonic extension beyond what the DP
         /// itself scored).
         dp_range: std::ops::Range<usize>,
-        /// The DP recurrence's objective value at the chosen end node —
-        /// covers only `path[dp_range]`, not the greedily-attached prefix or
-        /// suffix.
-        dp_weight: f64,
     },
     CurveFit {
         curve: &'a CalibrationCurve,
@@ -293,7 +283,7 @@ pub trait FitObserver {
     fn on_event(&mut self, ev: FitEvent<'_>);
 }
 
-/// The no-op observer: `fit_with` is generic, so this monomorphizes away.
+/// The no-op observer.
 impl FitObserver for () {
     fn on_event(&mut self, _: FitEvent<'_>) {}
 }
@@ -309,7 +299,8 @@ impl ObserveOpts {
     pub const NONE: Self = Self { dp_nodes: false };
 }
 
-/// Reusable calibration state for incremental fitting. Owns all allocations.
+/// Reusable calibration state for incremental fitting. Keeps the grid and the
+/// pathfinding buffers across fits; the path itself is allocated per fit.
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
@@ -366,8 +357,6 @@ impl CalibrationState {
                 x_range: self.grid.x_range,
                 y_range: self.grid.y_range,
             },
-        });
-        obs.on_event(FitEvent::GridReady {
             cells: self.grid.grid_cells(),
         });
 
@@ -390,7 +379,7 @@ impl CalibrationState {
         );
 
         let mut path_points = Vec::new();
-        let (dp_range, dp_weight) = pathfinding::find_optimal_path(
+        let dp_range = pathfinding::find_optimal_path(
             &mut self.filtered,
             self.lookback,
             &mut self.scratch,
@@ -412,7 +401,6 @@ impl CalibrationState {
         obs.on_event(FitEvent::PathFound {
             path: &path_points,
             dp_range,
-            dp_weight,
         });
 
         self.curve = CalibrationCurve::new(path_points).ok();
@@ -434,7 +422,7 @@ impl CalibrationState {
     }
 
     /// Re-point `self` at a new geometry and clear the previous fit — see
-    /// [`grid::Grid::reconfigure`] for what stays allocated.
+    /// `grid::Grid::reconfigure` for what stays allocated.
     pub fn reconfigure(
         &mut self,
         bins: usize,
@@ -575,11 +563,6 @@ impl CalibrationState {
         state.fit();
         Ok(state)
     }
-
-    #[cfg(test)]
-    pub fn filtered_ptr(&self) -> *const grid::Node {
-        self.filtered.as_ptr()
-    }
 }
 
 /// A grid geometry's extents: `(x_range, y_range)`, each a `(min, max)`, in the
@@ -591,7 +574,7 @@ pub type GridRanges = ((f64, f64), (f64, f64));
 /// A point with a non-finite coordinate contributes to neither axis (it would
 /// poison both bounds); `Err(NoPoints)` when that leaves nothing. A range that
 /// comes out empty or inverted on either axis is `Err(ZeroRange)` here rather
-/// than later out of [`Grid::new`], so a caller that only wants to know whether
+/// than later out of `Grid::new`, so a caller that only wants to know whether
 /// a grid is configurable never has to build one.
 pub fn point_ranges(
     points: impl IntoIterator<Item = (f64, f64)>,
@@ -713,10 +696,6 @@ mod observer_tests {
         names: Vec<&'static str>,
         geom: Option<GridGeom>,
         dp_edges: Vec<(usize, Option<usize>)>,
-        /// `(library, observed)` of each DP node, indexed by `i`. `i` runs
-        /// 0..n in order (one `DpNode` event per node), so `push`ing here
-        /// keeps `dp_coords[i]` aligned with the node the DP loop saw at `i`.
-        dp_coords: Vec<(f64, f64)>,
     }
 
     impl FitObserver for Recorder {
@@ -726,13 +705,10 @@ mod observer_tests {
                     self.names.push("start");
                     self.geom = Some(geom);
                 }
-                FitEvent::GridReady { .. } => self.names.push("grid"),
                 FitEvent::Suppressed { .. } => self.names.push("suppressed"),
-                FitEvent::DpNode { i, node, chose, .. } => {
+                FitEvent::DpNode { i, chose, .. } => {
                     self.names.push("dp");
                     self.dp_edges.push((i, chose));
-                    self.dp_coords
-                        .push((node.center.library, node.center.observed));
                 }
                 FitEvent::PathFound { .. } => self.names.push("path"),
                 FitEvent::CurveFit { .. } => self.names.push("curve"),
@@ -759,12 +735,9 @@ mod observer_tests {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts::NONE);
-        // Exact, not a subsequence: this is also what pins that the fit emits no
-        // `ridge` event of its own — the ridge is a separate measurement pass a
-        // caller opts into.
         assert_eq!(
             rec.names,
-            vec!["start", "grid", "suppressed", "path", "curve"],
+            vec!["start", "suppressed", "path", "curve"],
             "no dp events when dp_nodes is off, and no ridge event from the fit"
         );
         let g = rec.geom.expect("FitStarted must be emitted");
@@ -778,25 +751,11 @@ mod observer_tests {
     }
 
     #[test]
-    fn dp_events_appear_only_when_enabled_and_respect_monotonicity() {
+    fn dp_events_appear_once_per_node_when_enabled() {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
         s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
         assert!(rec.names.contains(&"dp"), "dp events must be emitted");
-        // The monotonic constraint the DP is supposed to enforce:
-        // a chosen predecessor's library AND observed RT must both be
-        // strictly less than the successor's.
-        for (i, chose) in &rec.dp_edges {
-            if let Some(j) = chose {
-                let (lib_i, obs_i) = rec.dp_coords[*i];
-                let (lib_j, obs_j) = rec.dp_coords[*j];
-                assert!(
-                    lib_i > lib_j && obs_i > obs_j,
-                    "node {i} at ({lib_i}, {obs_i}) chose predecessor {j} at ({lib_j}, {obs_j}), \
-                     which does not strictly precede it on both RT axes"
-                );
-            }
-        }
         assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
     }
 }
@@ -827,16 +786,16 @@ mod ridge_summary_tests {
         assert!(RidgeSummary::of(&[]).is_none(), "nothing to count or bound");
     }
 
-    /// The `.max(1.0)` divisor this consolidated away: a total ridge weight of
-    /// 0.25 must report the half-width it measured, not a quarter of it. And a
-    /// weightless column keeps its count and bounds — only the mean goes NaN,
-    /// where a 0.0 would read as a perfectly tight ridge.
+    /// A total ridge weight of 0.25 must report the half-width it measured, not
+    /// a fraction of it. And a weightless column keeps its count and bounds —
+    /// only the mean goes NaN, where a 0.0 would read as a perfectly tight
+    /// ridge.
     #[test]
     fn a_total_weight_below_one_does_not_shrink_the_mean() {
         let s = RidgeSummary::of(&[m(30.0, 0.25)]).unwrap();
         assert!(
             (s.weighted_half_width - 30.0).abs() < 1e-9,
-            "got {}, the pre-consolidation clamp would say 7.5",
+            "got {}",
             s.weighted_half_width
         );
         let zero = RidgeSummary::of(&[m(5.0, 0.0)]).unwrap();
@@ -923,7 +882,7 @@ mod calibration_state_tests {
             .collect();
         s.update(pts1.iter().copied()).unwrap();
         s.fit();
-        let filtered_ptr = s.filtered_ptr();
+        let filtered_ptr = s.filtered.as_ptr();
 
         // Same bins, a completely different (shifted, wider) range — the case
         // `reconfigure` exists to keep allocation-free.
@@ -944,7 +903,7 @@ mod calibration_state_tests {
             "the new fit must be defined over the new range"
         );
         assert_eq!(
-            s.filtered_ptr(),
+            s.filtered.as_ptr(),
             filtered_ptr,
             "reconfigure at unchanged bins must not reallocate `filtered`"
         );

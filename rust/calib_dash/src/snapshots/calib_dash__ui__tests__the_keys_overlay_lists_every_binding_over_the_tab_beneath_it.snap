@@ -8,24 +8,24 @@ expression: "render(&mut app, 100, 30)"
     │                                                                                              │
     │                                                                                        ▄▄▄▄▄▄│
     │                                                                                        ░░░░░░│
-  40┤                   ┌ Keys ────────────────────────────────────────────┐                       │
-    │                   │Every tab                                         │     ▄▄▄▄▄▄▄           │
-    │                   │  h l        switch tab                           │     ███████           │
+  40┤                                                                                              │
+    │                                                                            ▄▄▄▄▄▄▄           │
+    │                   ┌ Keys ────────────────────────────────────────────┐     ███████           │
+    │                   │Every tab                                         │                       │
+    │                   │  n          next batch                           │▄▄▄▄▄▄                 │
+  30┤                   │  r          run to end                           │██████                 │
+    │                   │  h l        switch tab                           │                       │
     │                   │  q          detach                               │                       │
-    │                   │  ^C         abort                                │▄▄▄▄▄▄                 │
-  30┤                   │  ?          this screen                          │██████                 │
-    │                   │                                                  │                       │
+    │                   │  ^C         abort                                │                       │
+    │                   │  ?          this screen                          │           ░░░░░░░     │
+  20┤                   │                                                  │           ▀▀▀▀▀▀▀     │
     │                   │Fit tab                                           │                       │
-    │                   │  n          next batch                           │                       │
-    │                   │  r          run to end                           │           ░░░░░░░     │
-  20┤                   │  < >        scrub retained frames                │           ▀▀▀▀▀▀▀     │
+    │                   │  < >        scrub retained frames                │                       │
     │                   │  m M        cycle mark layer                     │                       │
     │                   │  d          toggle DP pane                       │                       │
-    │                   │                                                  │                       │
-    │                   │Convergence / Tolerances                          │                       │
-  10┤                   │  n          next batch                           │                       │
-    │                 ▄▄│  r          run to end                           │                       │
-    │                 ▒▒└──────────────────────────────────────────────────┘                       │
+  10┤                   └──────────────────────────────────────────────────┘                       │
+    │                 ▄▄▄▄▄▄▄▄▄▄▄▄▓▀▀▀▀▀▀                                                          │
+    │                 ▒▒▒▒▒▒▒▒▒▒▒▒▒                                                                │
     │           ▒▒▒▒▒▒▒                                                                            │
     │     ▄▄▄▄▄▄▒▀▀▀▀▀▀                                                                            │
    0┤     ▒▒▒▒▒▒▒                                                                                  │

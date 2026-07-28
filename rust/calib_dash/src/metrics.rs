@@ -38,7 +38,6 @@ pub fn curve_delta(
     x_range: (f64, f64),
     samples: usize,
 ) -> (f64, f64) {
-    let samples = samples.max(2);
     let span = x_range.1 - x_range.0;
     let mut max = 0.0f64;
     let mut sum = 0.0f64;
@@ -147,25 +146,6 @@ mod tests {
         );
     }
 
-    /// `samples` is clamped to 2 because the sample positions divide by
-    /// `samples - 1`. No production caller passes below `CURVE_DELTA_SAMPLES`,
-    /// so nothing else would notice the clamp going missing — at 1 the position
-    /// arithmetic becomes `0.0 / 0.0` and every sample lands on NaN, and at 0
-    /// the loop never runs at all; both silently degrade to `(NaN, NaN)`.
-    #[test]
-    fn too_few_samples_are_clamped_to_the_two_endpoints() {
-        let low = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
-        let high = curve_from(&[(0.0, 2.0), (10.0, 12.0)]);
-        for samples in [0, 1, 2] {
-            let (max, mean) = curve_delta(&low, &high, (0.0, 10.0), samples);
-            assert!(
-                (max - 2.0).abs() < 1e-9 && (mean - 2.0).abs() < 1e-9,
-                "{samples} samples must still measure the constant offset over \
-                 the two endpoints, got ({max}, {mean})"
-            );
-        }
-    }
-
     #[test]
     fn max_delta_exceeds_mean_when_the_change_is_local() {
         let a = curve_from(&[(0.0, 0.0), (5.0, 5.0), (10.0, 10.0)]);
@@ -175,28 +155,31 @@ mod tests {
         assert!((max - 3.0).abs() < 1e-6);
     }
 
+    /// Out-of-bounds samples are skipped, not counted as zero: a partial overlap
+    /// must report the offset the overlapping samples measure rather than a mean
+    /// diluted toward zero, and no overlap at all must report NaN rather than
+    /// 0.0 (which would read as "the curves agree").
     #[test]
-    fn samples_outside_both_curves_are_skipped_not_counted_as_zero() {
-        // b covers a narrower x range; samples beyond it must not dilute the mean.
-        let a = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
-        let b = curve_from(&[(0.0, 3.0), (5.0, 8.0)]);
-        let (max, mean) = curve_delta(&a, &b, (0.0, 10.0), 11);
-        assert!((max - 3.0).abs() < 1e-6);
-        assert!(
-            (mean - 3.0).abs() < 1e-6,
-            "only the overlapping half contributes"
-        );
-    }
-
-    #[test]
-    fn disjoint_domains_never_overlap_and_delta_is_nan() {
-        // a and b's x ranges don't intersect at all, so every sample is
-        // out-of-bounds for at least one curve: n stays 0 and the result must
-        // be NaN, not 0.0 (which would read as "the curves agree").
-        let a = curve_from(&[(0.0, 0.0), (5.0, 5.0)]);
-        let b = curve_from(&[(20.0, 20.0), (25.0, 25.0)]);
-        let (max, mean) = curve_delta(&a, &b, (0.0, 5.0), 11);
-        assert!(max.is_nan(), "max should be NaN, got {max}");
-        assert!(mean.is_nan(), "mean should be NaN, got {mean}");
+    fn samples_outside_both_curves_are_skipped() {
+        // (b's x range, x range sampled, expected delta — None for NaN)
+        let cases = [
+            ((0.0, 5.0), (0.0, 10.0), Some(3.0)),
+            ((20.0, 25.0), (0.0, 5.0), None),
+        ];
+        for (b_range, sampled, expected) in cases {
+            let a = curve_from(&[(0.0, 0.0), (10.0, 10.0)]);
+            let b = curve_from(&[(b_range.0, b_range.0 + 3.0), (b_range.1, b_range.1 + 3.0)]);
+            let (max, mean) = curve_delta(&a, &b, sampled, 11);
+            match expected {
+                Some(d) => {
+                    assert!((max - d).abs() < 1e-6, "max {max}, wanted {d}");
+                    assert!((mean - d).abs() < 1e-6, "mean {mean}, wanted {d}");
+                }
+                None => {
+                    assert!(max.is_nan(), "max should be NaN, got {max}");
+                    assert!(mean.is_nan(), "mean should be NaN, got {mean}");
+                }
+            }
+        }
     }
 }

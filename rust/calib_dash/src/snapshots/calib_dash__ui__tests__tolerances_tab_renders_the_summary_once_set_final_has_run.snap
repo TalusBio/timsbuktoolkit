@@ -1,8 +1,7 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render(&mut app, 100, 12)"
+expression: "render_body(&mut app, 100, 12)"
 ---
- Fit │ Convergence │ Tolerances                                                                     
 ┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
 │RT residual: weighted half-width 6.5281s over 12 ridge column(s)                                  │
 │  range: 3.0000s .. 9.0000s                                                                       │
@@ -13,4 +12,3 @@ expression: "render(&mut app, 100, 12)"
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys

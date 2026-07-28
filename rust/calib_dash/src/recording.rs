@@ -125,7 +125,7 @@ pub(crate) fn bin_index(v: f64, range: (f64, f64), bins: usize) -> usize {
 impl FitObserver for FitRecording {
     fn on_event(&mut self, ev: FitEvent<'_>) {
         match ev {
-            FitEvent::FitStarted { geom } => {
+            FitEvent::FitStarted { geom, cells } => {
                 // A geometry change means the caller re-fit at a different
                 // `bins`; resize rather than silently mis-indexing.
                 if geom.bins != self.geom.bins {
@@ -140,8 +140,6 @@ impl FitObserver for FitRecording {
                 self.curve = None;
                 self.ridge.clear();
                 self.dp.clear();
-            }
-            FitEvent::GridReady { cells } => {
                 // `cells` is always `bins * bins` long, so every cell is
                 // rewritten and `weights` needs no separate clear.
                 for (i, n) in cells.iter().enumerate() {

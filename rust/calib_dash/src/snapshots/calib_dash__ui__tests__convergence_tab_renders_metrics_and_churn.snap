@@ -1,8 +1,7 @@
 ---
 source: rust/calib_dash/src/ui.rs
-expression: "render(&mut app, 100, 30)"
+expression: "render_body(&mut app, 100, 30)"
 ---
- Fit │ Convergence │ Tolerances                                                                     
  10 batches  |  retained frames: 6  stride: every 2  dropped: 4                                     
 ┌wrmse  peak 5  now 0.5000  (NaN holds)────────────────────────────────────────────────────────────┐
 │█▄▂▂▁▁▁▁                                                                                          │
@@ -31,4 +30,3 @@ expression: "render(&mut app, 100, 30)"
 │8        28       0.5556   1.1111   14       1.1111   2        0                                  │
 │9        29       0.5000   1        12       1.1000   0        1                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- b0 n next · r run · h l tab · q detach · ^C abort                                           ? keys

@@ -8,18 +8,29 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 
 /// The scratch buffers `find_optimal_path` reuses across calls, grouped so the
 /// function itself doesn't take one parameter per buffer. Each one is cleared
-/// and refilled, so repeated calls at a stable problem size allocate nothing.
+/// and refilled, so these buffers stop reallocating once the problem size
+/// settles — the caller's `out_path` is a separate allocation.
 #[derive(Default)]
 pub(crate) struct PathfindingScratch {
     pub max_weights: Vec<f64>,
     pub prev_node_indices: Vec<Option<usize>>,
     /// Filled only when `ObserveOpts::dp_nodes` is set.
     pub considered: Vec<(usize, f64)>,
-    /// The DP chain and the two greedy tails Pass 2 attaches, drained into the
-    /// caller's `out_path` at the end of the call.
+    /// The DP chain, drained into the caller's `out_path` once Pass 2 has laid
+    /// the greedy prefix down ahead of it.
     pub path: Vec<crate::Point>,
-    pub prefix: Vec<crate::Point>,
-    pub suffix: Vec<crate::Point>,
+}
+
+impl PathfindingScratch {
+    /// Clear every buffer and size the per-node ones for an `n`-node problem.
+    fn begin(&mut self, n: usize) {
+        self.max_weights.clear();
+        self.max_weights.resize(n, 0.0);
+        self.prev_node_indices.clear();
+        self.prev_node_indices.resize(n, None);
+        self.considered.clear();
+        self.path.clear();
+    }
 }
 
 /// Finds the highest-weight path through the nodes that satisfies the monotonic constraint.
@@ -32,8 +43,7 @@ pub(crate) struct PathfindingScratch {
 /// Writes the assembled path (DP chain plus any greedily-attached prefix/suffix,
 /// see Pass 2 below) into `out_path`, clearing it first. Returns the
 /// index range within that path the DP itself chose (`path[..range.start]`
-/// and `path[range.end..]` are the greedy tails), and the DP recurrence's
-/// objective value at the chosen end node (covers only `path[range]`).
+/// and `path[range.end..]` are the greedy tails).
 pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
@@ -41,21 +51,17 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     out_path: &mut Vec<crate::Point>,
     obs: &mut O,
     opts: crate::ObserveOpts,
-) -> (std::ops::Range<usize>, f64) {
+) -> std::ops::Range<usize> {
+    out_path.clear();
+    scratch.begin(nodes.len());
     let PathfindingScratch {
         max_weights,
         prev_node_indices,
         considered,
         path,
-        prefix,
-        suffix,
     } = scratch;
-    out_path.clear();
-    path.clear();
-    prefix.clear();
-    suffix.clear();
     if nodes.is_empty() {
-        return (0..0, 0.0);
+        return 0..0;
     }
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
@@ -70,11 +76,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     });
 
     let n = nodes.len();
-    max_weights.clear();
-    max_weights.resize(n, 0.0);
-    prev_node_indices.clear();
-    prev_node_indices.resize(n, None);
-
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
         if opts.dp_nodes {
@@ -142,7 +143,7 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     path.reverse();
 
     if path.is_empty() {
-        return (0..0, max_path_weight);
+        return 0..0;
     }
     let dp_len = path.len();
 
@@ -168,15 +169,20 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
                 && candidate.library < cursor.library
                 && candidate.observed < cursor.observed
             {
-                prefix.push(candidate);
+                out_path.push(candidate);
                 cursor = candidate;
             }
         }
-        prefix.reverse();
+        out_path.reverse();
     }
 
+    // The DP's own span sits after the greedy prefix and before the greedy
+    // suffix in the assembled path.
+    let dp_range = out_path.len()..(out_path.len() + dp_len);
+    out_path.append(path);
+
     // Extend forward: find nodes after the path end that satisfy monotonicity.
-    let last = *path.last().unwrap();
+    let last = *out_path.last().unwrap();
     let last_sorted_idx = nodes.iter().rposition(|n| {
         (n.center.library - last.library).abs() < 1e-9
             && (n.center.observed - last.observed).abs() < 1e-9
@@ -189,21 +195,13 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
                 && candidate.library > cursor.library
                 && candidate.observed > cursor.observed
             {
-                suffix.push(candidate);
+                out_path.push(candidate);
                 cursor = candidate;
             }
         }
     }
 
-    // The DP's own span sits after `prefix` and before `suffix` in the
-    // assembled path below.
-    let dp_range = prefix.len()..(prefix.len() + dp_len);
-
-    // Assemble into the caller-owned buffer: prefix + DP path + suffix.
-    out_path.append(prefix);
-    out_path.append(path);
-    out_path.append(suffix);
-    (dp_range, max_path_weight)
+    dp_range
 }
 
 #[cfg(test)]
@@ -215,13 +213,9 @@ mod tests {
         Point,
     };
 
-    /// A `Node` at diagonal position `i` (library = observed = i + 0.5) with
-    /// the given weight. `find_optimal_path` never reads `suppressed` or the
-    /// `sum_*` accumulators, so this bypasses `Grid`/`suppress_nonmax`
-    /// entirely — deliberately, since `suppress_nonmax` has its own floor
-    /// (nodes below weight 1.0 with no competing row/column entry are
-    /// dropped before ever reaching the DP) that would confound a fixture
-    /// aimed at the DP's own accept/decline behavior.
+    /// A `Node` at the given position and weight. `find_optimal_path` never
+    /// reads `suppressed` or the `sum_*` accumulators, so this bypasses
+    /// `Grid`/`suppress_nonmax` entirely.
     fn node_at(library: f64, observed: f64, weight: f64) -> Node {
         Node {
             center: Point {
@@ -260,7 +254,7 @@ mod tests {
         let mut scratch = PathfindingScratch::default();
         let mut path = Vec::new();
 
-        let (dp_range, dp_weight) = find_optimal_path(
+        let dp_range = find_optimal_path(
             &mut nodes,
             5,
             &mut scratch,
@@ -280,12 +274,9 @@ mod tests {
             1..5,
             "the DP declines node 0, choosing only nodes 1..4"
         );
-        assert!(dp_weight > 0.0);
     }
 
-    /// The suffix mirror of the test above, which `dp_range` needs because
-    /// widening `end` to `out_path.len()` swallows the whole greedy suffix while
-    /// leaving a prefix-only test green.
+    /// The suffix mirror of the test above.
     ///
     /// A trailing node the DP *includes* can never lower `max_weights`, so
     /// declining one takes a node with no admissible in-window predecessor: with
@@ -307,7 +298,7 @@ mod tests {
         let mut scratch = PathfindingScratch::default();
         let mut path = Vec::new();
 
-        let (dp_range, _) = find_optimal_path(
+        let dp_range = find_optimal_path(
             &mut nodes,
             1,
             &mut scratch,
