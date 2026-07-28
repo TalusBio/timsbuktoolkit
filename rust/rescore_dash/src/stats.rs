@@ -1,24 +1,18 @@
-//! Per-column statistics and the binning primitives the precompute shares.
+//! Per-column statistics and rank statistics.
 //!
-//! Everything that scans data runs at init. [`HistView`]'s accessors are the
-//! exception — pure indexing into stored counts, called per frame.
+//! Everything here scans data and runs at init.
 //!
 //! Non-finite values (NaN, +-Inf) are missing everywhere: they are counted, not
 //! propagated into a mean, a range or a rank.
-
-/// Bin count for every stored histogram. The panel renders into roughly
-/// 60-120 terminal columns, so ratatui already downsamples this ~5x; 512 is
-/// chosen to keep shape under that downsampling, not to be resolvable itself.
-pub const N_BINS: usize = 512;
 
 /// Exact, all-rows statistics for one column.
 ///
 /// Doubles as the accumulator for the sweep that produces it: filled by
 /// [`ColumnStats::push`], combined by [`ColumnStats::merge`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ColumnStats {
-    pub n_target: u64,
-    pub n_decoy: u64,
+pub(crate) struct ColumnStats {
+    pub(crate) n_target: u64,
+    pub(crate) n_decoy: u64,
     /// Class means, read through [`Self::mean`].
     target_mean: f64,
     decoy_mean: f64,
@@ -29,27 +23,22 @@ pub struct ColumnStats {
     /// Finite min/max over both classes. `INFINITY` / `NEG_INFINITY` when the
     /// column holds no finite value at all, which is the sentinel every
     /// consumer checks with `hi >= lo`.
-    pub lo: f64,
-    pub hi: f64,
-    /// Smallest strictly positive value, or `INFINITY` if there is none.
-    ///
-    /// Two jobs. It is the exact lower bound of `log10`'s domain over all rows,
-    /// which is what lets the unclipped log10 axis be exact rather than
-    /// sample-derived. It is also the resolution-floor diagnostic: a column
-    /// whose smallest positive entry is 1e-12 is reporting a pseudo-count or a
-    /// denormal, and `INFINITY` means the column is wholly non-positive.
-    pub min_pos: f64,
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    /// Exact lower bound of `log10`'s domain over all rows, or `INFINITY` if
+    /// the column is wholly non-positive.
+    pub(crate) min_pos: f64,
     /// Smallest `|v|` over the finite values, or `INFINITY` if there are none.
     /// The exact lower bound of `square`'s output over all rows, which is not
     /// `min(|lo|, |hi|)` for a column that straddles zero.
-    pub min_abs: f64,
+    pub(crate) min_abs: f64,
     /// Exact zeros, which `min_pos` deliberately skips.
-    pub n_zero: u64,
-    pub n_nan: u64,
+    pub(crate) n_zero: u64,
+    pub(crate) n_nan: u64,
 }
 
 impl ColumnStats {
-    pub const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         n_target: 0,
         n_decoy: 0,
         target_mean: 0.0,
@@ -65,13 +54,8 @@ impl ColumnStats {
     };
 
     /// Fold one value in.
-    ///
-    /// Branchless past the finite check, and worth keeping that way: `0 < v`
-    /// and `v == 0` are both unpredictable on real feature data. A select plus
-    /// a `min` against `INFINITY` (the identity for `min`) compiles to `minsd`
-    /// instead of a mispredicting branch on every value of every column.
     #[inline]
-    pub fn push(&mut self, v: f64, is_target: bool) {
+    pub(crate) fn push(&mut self, v: f64, is_target: bool) {
         if !v.is_finite() {
             self.n_nan += 1;
             return;
@@ -98,7 +82,7 @@ impl ColumnStats {
     /// Combine a partial sweep into this one. Chan et al.'s parallel variance
     /// combination, per class: plain summation of `m2` would drop the term for
     /// the shift between the two partial means.
-    pub fn merge(&mut self, o: &Self) {
+    pub(crate) fn merge(&mut self, o: &Self) {
         merge_class(
             &mut self.n_target,
             &mut self.target_mean,
@@ -125,7 +109,7 @@ impl ColumnStats {
 
     /// Sample variance of one class, or `0.0` for a class with fewer than two
     /// values.
-    pub fn var(&self, is_target: bool) -> f64 {
+    pub(crate) fn var(&self, is_target: bool) -> f64 {
         let (n, m2) = if is_target {
             (self.n_target, self.m2_target)
         } else {
@@ -135,14 +119,14 @@ impl ColumnStats {
     }
 
     /// Whether any finite value was seen.
-    pub fn has_finite(&self) -> bool {
+    pub(crate) fn has_finite(&self) -> bool {
         self.hi >= self.lo
     }
 
     /// `|Cohen's d|` — pooled-SD standardized mean difference. NaN when either
     /// class contributed no finite value; `0.0` for a constant column, where
     /// there is no difference to standardize.
-    pub fn cohens_d(&self) -> f64 {
+    pub(crate) fn cohens_d(&self) -> f64 {
         if self.n_target == 0 || self.n_decoy == 0 {
             return f64::NAN;
         }
@@ -155,7 +139,7 @@ impl ColumnStats {
     }
 
     /// Fraction of rows whose value was non-finite.
-    pub fn nan_frac(&self) -> f64 {
+    pub(crate) fn nan_frac(&self) -> f64 {
         let seen = self.n_target + self.n_decoy + self.n_nan;
         if seen == 0 {
             0.0
@@ -165,7 +149,7 @@ impl ColumnStats {
     }
 
     /// Class mean, or NaN when that class contributed no finite value.
-    pub fn mean(&self, is_target: bool) -> f64 {
+    pub(crate) fn mean(&self, is_target: bool) -> f64 {
         let (n, m) = if is_target {
             (self.n_target, self.target_mean)
         } else {
@@ -189,51 +173,6 @@ fn merge_class(n_a: &mut u64, mean_a: &mut f64, m2_a: &mut f64, n_b: u64, mean_b
     *mean_a += delta * nb / n;
     *m2_a += m2_b + delta * delta * na * nb / n;
     *n_a += n_b;
-}
-
-/// One stored histogram, borrowed from the dashboard's count store.
-///
-/// The panel never owns or builds one of these — [`crate::precompute`] fills
-/// the counts at init and rendering slices into them.
-#[derive(Debug, Clone, Copy)]
-pub struct HistView<'a> {
-    pub lo: f64,
-    pub hi: f64,
-    pub target: &'a [u32],
-    pub decoy: &'a [u32],
-    /// Class totals, stored rather than summed per frame.
-    pub n_target: u32,
-    pub n_decoy: u32,
-}
-
-impl HistView<'_> {
-    /// Center of bin `i` on the value axis.
-    pub fn bin_center(&self, i: usize) -> f64 {
-        // `N_BINS` and not `self.target.len()`: `bin_index` fills using the
-        // constant, so deriving the width from the slice would let the two
-        // disagree if a slot were ever built at another size.
-        debug_assert_eq!(self.target.len(), N_BINS);
-        let w = (self.hi - self.lo) / N_BINS as f64;
-        self.lo + w * (i as f64 + 0.5)
-    }
-}
-
-/// Bin index for `v` in `[lo, hi]`, or `None` if it falls outside.
-///
-/// `span` is `hi - lo`, passed in because callers hoist it out of their loop. A
-/// degenerate span puts every in-range value in bin 0, matching a column with a
-/// single distinct value.
-#[inline]
-pub fn bin_index(v: f64, lo: f64, hi: f64, span: f64) -> Option<usize> {
-    if !v.is_finite() || v < lo || v > hi {
-        return None;
-    }
-    let b = if span > 0.0 {
-        (((v - lo) / span) * N_BINS as f64) as usize
-    } else {
-        0
-    };
-    Some(b.min(N_BINS - 1))
 }
 
 /// Runs of equal values in an ascending slice, as inclusive `(first, last)`
@@ -265,7 +204,7 @@ fn tie_runs(sorted: &[(f64, bool)]) -> impl Iterator<Item = (usize, usize)> + '_
 /// entirely to 50. This is the `RankPercentile` transform: because the input is
 /// already sorted, the transform is a single linear pass rather than the sort
 /// it costs on unordered data.
-pub fn mid_rank_percentiles(sorted: &[(f64, bool)], out: &mut Vec<f64>) {
+pub(crate) fn mid_rank_percentiles(sorted: &[(f64, bool)], out: &mut Vec<f64>) {
     out.clear();
     out.resize(sorted.len(), 0.0);
     if sorted.len() < 2 {
@@ -281,11 +220,7 @@ pub fn mid_rank_percentiles(sorted: &[(f64, bool)], out: &mut Vec<f64>) {
 /// Mann-Whitney AUC = P(target > decoy) + 0.5 * P(tie) over pairs already
 /// sorted ascending by value. Exact, including ties. NaN when either class is
 /// empty, since no comparison is defined.
-///
-/// Rank-based rather than read off a histogram: a fixed-width histogram bins
-/// uniformly in *value*, so a single far outlier drops every real row into bin 0
-/// where ties count as half and separation becomes invisible.
-pub fn auc_from_sorted(sorted: &[(f64, bool)]) -> f64 {
+pub(crate) fn auc_from_sorted(sorted: &[(f64, bool)]) -> f64 {
     let nt = sorted.iter().filter(|p| p.1).count() as f64;
     let nd = sorted.len() as f64 - nt;
     if nt == 0.0 || nd == 0.0 {
@@ -302,13 +237,11 @@ pub fn auc_from_sorted(sorted: &[(f64, bool)]) -> f64 {
 /// [`auc_from_sorted`] over an unsorted column, paying the sort. Used for the
 /// discriminant score, which is one column and is therefore reported exactly
 /// over all rows rather than from the sample.
-pub fn auc_exact(values: impl Iterator<Item = f64>, is_target: &[bool]) -> f64 {
+pub(crate) fn auc_exact(values: impl Iterator<Item = f64>, is_target: &[bool]) -> f64 {
     let mut pairs: Vec<(f64, bool)> = values
-        .enumerate()
-        .filter_map(|(i, v)| {
-            let &is_t = is_target.get(i)?;
-            v.is_finite().then_some((v, is_t))
-        })
+        .zip(is_target)
+        .filter(|(v, _)| v.is_finite())
+        .map(|(v, &t)| (v, t))
         .collect();
     pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     auc_from_sorted(&pairs)
@@ -373,10 +306,7 @@ mod tests {
         assert_eq!(c.cohens_d(), 0.0, "zero variance, zero difference");
     }
 
-    /// `min_pos` is the exact lower bound of `log10`'s domain and `min_abs` of
-    /// `square`'s output. Neither is `min(|lo|, |hi|)` for a column that
-    /// straddles zero, which is exactly when the unclipped axis would otherwise
-    /// be wrong.
+    /// Neither floor is `min(|lo|, |hi|)` for a column that straddles zero.
     #[test]
     fn stats_track_the_positive_and_absolute_floors_across_zero() {
         let v = vec![-5.0, -0.25, 0.0, 0.5, 8.0];
@@ -422,16 +352,12 @@ mod tests {
         assert_eq!((merged.lo, merged.hi), (whole.lo, whole.hi));
         assert_eq!(merged.min_pos, whole.min_pos);
         assert_eq!(merged.min_abs, whole.min_abs);
-    }
 
-    #[test]
-    fn merging_an_empty_partial_changes_nothing() {
-        let v = vec![1.0, 2.0, 3.0];
-        let t = vec![true, false, true];
-        let base = sweep(&v, &t);
-        let mut merged = base;
-        merged.merge(&ColumnStats::IDENTITY);
-        assert_eq!(merged, base);
+        // IDENTITY's `INFINITY`/`NEG_INFINITY` sentinels must be neutral under
+        // the min/max folds, not poison them.
+        let mut with_empty = whole;
+        with_empty.merge(&ColumnStats::IDENTITY);
+        assert_eq!(with_empty, whole);
     }
 
     fn sorted_pairs(values: &[f64], is_target: &[bool]) -> Vec<(f64, bool)> {
@@ -499,19 +425,5 @@ mod tests {
         let mut pct = vec![1.0, 2.0];
         mid_rank_percentiles(&[], &mut pct);
         assert!(pct.is_empty(), "stale contents must be cleared");
-    }
-
-    #[test]
-    fn bin_index_clamps_the_top_edge_and_rejects_outsiders() {
-        assert_eq!(bin_index(0.0, 0.0, 1.0, 1.0), Some(0));
-        assert_eq!(bin_index(1.0, 0.0, 1.0, 1.0), Some(N_BINS - 1));
-        assert_eq!(bin_index(-0.1, 0.0, 1.0, 1.0), None);
-        assert_eq!(bin_index(1.1, 0.0, 1.0, 1.0), None);
-        assert_eq!(bin_index(f64::NAN, 0.0, 1.0, 1.0), None);
-        assert_eq!(
-            bin_index(5.0, 5.0, 5.0, 0.0),
-            Some(0),
-            "a degenerate span is one bin, not a divide by zero"
-        );
     }
 }

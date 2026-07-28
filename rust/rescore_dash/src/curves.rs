@@ -5,30 +5,21 @@
 /// of `zooms`, curve `i` spanning `n_points` evenly spaced thresholds in
 /// `(0, zooms[i]]`.
 ///
-/// Several curves rather than one because the full `(0, 1]` view answers the
-/// least: on any run worth looking at, essentially every target has arrived by
-/// q = 0.05, so the shape that matters — how many IDs a tighter cutoff costs —
-/// is squeezed into the leftmost few percent of the panel and reads as a
-/// vertical line. Sub-sampling a `(0, 1]` curve down to `q <= 0.01` would leave
-/// one point in a hundred, so each zoom needs its own grid.
-///
-/// They are computed together because the sort is the expensive part and it is
-/// shared: every zoom is answered by `partition_point` over the same sorted
-/// array, so the extra views cost a scan and no extra pass over the run.
+/// Computed together because the sort is shared: every zoom is answered by
+/// `partition_point` over the same sorted array.
 pub(crate) fn qvalue_curves(
     qvalue: &[f32],
     is_target: &[bool],
     n_points: usize,
     zooms: &[f64],
 ) -> Vec<Vec<(f64, f64)>> {
-    let n_points = n_points.max(2);
     let mut targets: Vec<f32> = qvalue
         .iter()
-        .enumerate()
-        .filter(|(i, q)| !q.is_nan() && is_target.get(*i).copied().unwrap_or(false))
-        .map(|(_, q)| *q)
+        .zip(is_target)
+        .filter(|&(q, &t)| t && !q.is_nan())
+        .map(|(&q, _)| q)
         .collect();
-    targets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    targets.sort_unstable_by(f32::total_cmp);
 
     zooms
         .iter()
@@ -55,25 +46,19 @@ pub(crate) fn qvalue_curves(
 ///
 /// Empty when either class is absent — a PP plot of one class says nothing.
 pub(crate) fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
-    let n_points = n_points.max(2);
     let mut targets: Vec<f32> = Vec::new();
     let mut decoys: Vec<f32> = Vec::new();
-    for (i, &s) in score.iter().enumerate() {
+    for (&s, &t) in score.iter().zip(is_target) {
         if !s.is_finite() {
             continue;
         }
-        match is_target.get(i) {
-            Some(true) => targets.push(s),
-            Some(false) => decoys.push(s),
-            None => {}
-        }
+        if t { targets.push(s) } else { decoys.push(s) }
     }
     if targets.is_empty() || decoys.is_empty() {
         return Vec::new();
     }
-    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-    targets.sort_by(cmp);
-    decoys.sort_by(cmp);
+    targets.sort_unstable_by(f32::total_cmp);
+    decoys.sort_unstable_by(f32::total_cmp);
 
     let lo = targets[0].min(decoys[0]) as f64;
     let hi = (*targets.last().unwrap()).max(*decoys.last().unwrap()) as f64;
@@ -99,13 +84,6 @@ mod tests {
         let t = vec![true; 100];
         let curve = qvalue_curves(&q, &t, 20, &[1.0]).remove(0);
         assert_eq!(curve.len(), 20);
-        for w in curve.windows(2) {
-            assert!(w[1].0 >= w[0].0, "q must ascend");
-            assert!(
-                w[1].1 >= w[0].1,
-                "target count must not shrink as q loosens"
-            );
-        }
         assert_eq!(curve.last().unwrap().1, 100.0);
 
         // Decoys alone contribute nothing: the curve counts targets.

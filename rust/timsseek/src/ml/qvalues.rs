@@ -78,23 +78,32 @@ fn assign_qval<T: LabelledScore>(scores: &mut [T], key: impl Fn(&T) -> f32) {
     }
 }
 
+/// How many targets and decoys pass at one q-value cutoff.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThresholdCounts {
+    pub q: f32,
+    pub targets: usize,
+    pub decoys: usize,
+}
+
+/// Count the targets and decoys at or below each q-value threshold, one
+/// [`ThresholdCounts`] per threshold in the order given.
 pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     scores: &[T],
     thresholds: &[f32],
-) -> Vec<(f32, usize, usize, usize)> {
+) -> Vec<ThresholdCounts> {
     let mut out = Vec::new();
 
-    for &thresh in thresholds {
-        let n_below_thresh = scores.iter().filter(|s| s.get_qval() <= thresh).count();
-        let n_targets = scores
+    for &q in thresholds {
+        let targets = scores
             .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Target))
+            .filter(|s| s.get_qval() <= q && matches!(s.get_label(), TargetDecoy::Target))
             .count();
-        let n_decoys = scores
+        let decoys = scores
             .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Decoy))
+            .filter(|s| s.get_qval() <= q && matches!(s.get_label(), TargetDecoy::Decoy))
             .count();
-        out.push((thresh, n_below_thresh, n_targets, n_decoys));
+        out.push(ThresholdCounts { q, targets, decoys });
     }
 
     out

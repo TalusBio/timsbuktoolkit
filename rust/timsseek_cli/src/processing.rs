@@ -21,7 +21,10 @@ use timsquery::{
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::ml::qvalues::report_qvalues_at_thresholds;
+use timsseek::ml::qvalues::{
+    ThresholdCounts,
+    report_qvalues_at_thresholds,
+};
 use timsseek::ml::{
     RescoreFeatureStats,
     RescoreModel,
@@ -417,17 +420,20 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let mut targets_at_1pct_qval = 0usize;
     let mut targets_at_5pct_qval = 0usize;
     let mut targets_at_10pct_qval = 0usize;
-    for &(thresh, n_below_thresh, n_targets, n_decoys) in &qval_report {
+    for &ThresholdCounts { q, targets, decoys } in &qval_report {
         info!(
             "q-value threshold {:.2}: {} targets, {} decoys ({} total)",
-            thresh, n_targets, n_decoys, n_below_thresh
+            q,
+            targets,
+            decoys,
+            targets + decoys
         );
-        if (thresh - 0.01).abs() < 1e-6 {
-            targets_at_1pct_qval = n_targets;
-        } else if (thresh - 0.05).abs() < 1e-6 {
-            targets_at_5pct_qval = n_targets;
-        } else if (thresh - 0.10).abs() < 1e-6 {
-            targets_at_10pct_qval = n_targets;
+        if (q - 0.01).abs() < 1e-6 {
+            targets_at_1pct_qval = targets;
+        } else if (q - 0.05).abs() < 1e-6 {
+            targets_at_5pct_qval = targets;
+        } else if (q - 0.10).abs() < 1e-6 {
+            targets_at_10pct_qval = targets;
         }
     }
 

@@ -243,19 +243,28 @@ mod tests {
     #[test]
     fn the_basis_says_whether_the_histograms_were_sampled() {
         let f = fixture(80, &[("a", &|i, _| i as f64)]);
-        assert_eq!(f.build().basis(), "all 80 rows");
+        assert_eq!(f.build().labels.basis, "all 80 rows");
 
         let big = fixture(2_000, &[("a", &|i, _| i as f64)]);
         assert_eq!(
-            big.build_with(500).basis(),
+            big.build_with(500).labels.basis,
             "2000 rows, histograms from a 500 sample"
         );
         // `fmt_count`'s unit thresholds, on the path that uses them.
         let huge = fixture(10_500, &[("a", &|i, _| i as f64)]);
         assert_eq!(
-            huge.build_with(500).basis(),
+            huge.build_with(500).labels.basis,
             "10k rows, histograms from a 500 sample"
         );
+    }
+
+    /// The discriminant score is titled like a feature because it is stored and
+    /// queried like one.
+    #[test]
+    fn the_score_column_is_titled_like_a_feature() {
+        let dash = fixture(80, &[("a", &|i, _| i as f64)]).build();
+        let title = dash.title(dash.score_column(), Axis::Value(XTransform::Linear));
+        assert!(title.contains("discriminant_score"), "{title}");
     }
 
     /// The subtitle has to fit the histogram panel, which is under half of a
@@ -274,6 +283,12 @@ mod tests {
         }
         let sub = dash.subtitle(0, Axis::Value(XTransform::Log10), true);
         assert!(sub.contains("dropped 51.0% by transform"), "{sub}");
+
+        // An unplottable slot says so instead of reporting percentages of
+        // nothing.
+        let nan = fixture(50, &[("all_nan", &|_, _| f64::NAN)]).build();
+        let sub = nan.subtitle(0, Axis::Value(XTransform::Linear), true);
+        assert!(sub.contains("nothing this transform"), "{sub}");
     }
 
     #[test]
@@ -283,9 +298,18 @@ mod tests {
             &[("alpha", &|i, _| i as f64), ("beta", &|_, _| f64::NAN)],
         )
         .build();
-        assert_eq!(dash.cells().len(), 2);
-        assert_eq!(dash.cells()[0][0], "alpha");
-        assert_eq!(dash.cells()[1][3], "-", "a NaN AUC prints as a dash");
-        assert_eq!(dash.cells()[1][5], "1.0000", "the NaN fraction is 1");
+        let cells = &dash.labels.cells;
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0][FeatureColumn::Name as usize], "alpha");
+        assert_eq!(
+            cells[1][FeatureColumn::Auc as usize],
+            "-",
+            "a NaN AUC prints as a dash"
+        );
+        assert_eq!(
+            cells[1][FeatureColumn::NanFrac as usize],
+            "1.0000",
+            "the NaN fraction is 1"
+        );
     }
 }

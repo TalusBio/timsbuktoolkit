@@ -6,10 +6,7 @@
 
 use std::sync::Arc;
 
-/// How many rows pass at one q-value cutoff.
-///
-/// An unlabeled row is not counted at all, rather than counted into a total
-/// alone, which is why there is no separate total to pass in.
+/// How many targets and decoys pass at one q-value cutoff.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThresholdRow {
     pub q: f32,
@@ -146,6 +143,25 @@ mod tests {
             .collect()
     }
 
+    /// A well-formed 2-row x 2-feature view for the rejection cases to break
+    /// one field at a time.
+    fn view<'a>(
+        feature_names: &'a [Arc<str>],
+        features: &'a [f64],
+        score: &'a [f32],
+        gain: &'a [f32],
+    ) -> RescoreView<'a> {
+        RescoreView {
+            feature_names,
+            features,
+            is_target: &[true, false],
+            score,
+            qvalue: &[1.0; 2],
+            thresholds: &[],
+            gain,
+        }
+    }
+
     #[test]
     fn row_walks_the_right_stride() {
         // 3 rows x 2 features, row-major.
@@ -164,68 +180,40 @@ mod tests {
         assert_eq!(view.n_features(), 2);
         assert_eq!(view.row(0), &[1.0, 10.0]);
         assert_eq!(view.row(2), &[3.0, 30.0]);
-        view.validate().expect("well-formed");
     }
 
     #[test]
-    fn validate_rejects_a_ragged_matrix() {
+    fn validate_rejects_every_misalignment() {
         let names = names(2);
-        let view = RescoreView {
-            feature_names: &names,
-            features: &[1.0, 2.0, 3.0],
-            is_target: &[true, false],
-            score: &[0.0; 2],
-            qvalue: &[1.0; 2],
-            thresholds: &[],
-            gain: &[0.0; 2],
-        };
-        assert!(matches!(view.validate(), Err(ViewError::MatrixLen { .. })));
-    }
+        let (features, score, gain) = ([1.0, 2.0, 3.0, 4.0], [0.0f32; 2], [0.0f32; 2]);
+        view(&names, &features, &score, &gain)
+            .validate()
+            .expect("well-formed");
 
-    #[test]
-    fn validate_rejects_mismatched_row_vectors() {
-        let names = names(2);
-        let view = RescoreView {
-            feature_names: &names,
-            features: &[1.0, 2.0, 3.0, 4.0],
-            is_target: &[true, false],
-            score: &[0.0; 1],
-            qvalue: &[1.0; 2],
-            thresholds: &[],
-            gain: &[0.0; 2],
-        };
-        assert!(matches!(view.validate(), Err(ViewError::RowLen { .. })));
-    }
-
-    /// `gain` is indexed by feature column with no name lookup, so a
-    /// misaligned slice would silently attribute one feature's importance to
-    /// another rather than failing.
-    #[test]
-    fn validate_rejects_gain_that_is_not_column_aligned() {
-        let names = names(2);
-        let view = RescoreView {
-            feature_names: &names,
-            features: &[1.0, 2.0, 3.0, 4.0],
-            is_target: &[true, false],
-            score: &[0.0; 2],
-            qvalue: &[1.0; 2],
-            thresholds: &[],
-            gain: &[0.0; 1],
-        };
-        assert!(matches!(view.validate(), Err(ViewError::GainLen { .. })));
-    }
-
-    #[test]
-    fn validate_rejects_an_empty_view() {
-        let view = RescoreView {
-            feature_names: &[],
-            features: &[],
-            is_target: &[],
-            score: &[],
-            qvalue: &[],
-            thresholds: &[],
-            gain: &[],
-        };
-        assert!(matches!(view.validate(), Err(ViewError::Empty)));
+        /// One field broken, and the variant `validate` must answer with.
+        type Case = (fn(&mut RescoreView<'_>), fn(&ViewError) -> bool);
+        let cases: [Case; 4] = [
+            (
+                |v| v.features = &[1.0, 2.0, 3.0],
+                |e| matches!(e, ViewError::MatrixLen { .. }),
+            ),
+            (
+                |v| v.score = &[0.0; 1],
+                |e| matches!(e, ViewError::RowLen { .. }),
+            ),
+            // `gain` is indexed by feature column with no name lookup, so a
+            // misaligned slice would mis-attribute importance rather than fail.
+            (
+                |v| v.gain = &[0.0; 1],
+                |e| matches!(e, ViewError::GainLen { .. }),
+            ),
+            (|v| v.feature_names = &[], |e| matches!(e, ViewError::Empty)),
+        ];
+        for (mutate, want) in cases {
+            let mut v = view(&names, &features, &score, &gain);
+            mutate(&mut v);
+            let err = v.validate().expect_err("must be rejected");
+            assert!(want(&err), "wrong variant: {err:?}");
+        }
     }
 }

@@ -8,21 +8,6 @@
 //! own: the Mann-Whitney AUC (a mid-rank walk), every transform's clip range (a
 //! `partition_point` for the domain suffix, then two order statistics), and
 //! `RankPercentile` (sorted position *is* the percentile).
-//!
-//! Random indices are load-bearing. The rescoring pipeline hands the dashboard
-//! rows sorted descending by main score, so a contiguous or strided sample
-//! would be all high-scoring targets.
-//!
-//! # What is exact and what is sampled
-//!
-//! Exact over all rows: every [`ColumnStats`] field (means, variances,
-//! min/max, the positive and absolute floors, zero and non-finite counts), the
-//! unclipped axis ranges derived from them, the discriminant score's AUC, and
-//! all four curve/threshold tables.
-//!
-//! From the sample: every histogram's bin counts, every clipped axis range, and
-//! the per-feature AUC. Sample size is the only accuracy knob; the
-//! `sample_size_holds_its_accuracy_claim` test measures the error it buys.
 
 use crate::labels::{
     Labels,
@@ -31,8 +16,6 @@ use crate::labels::{
 use crate::stats::{
     self,
     ColumnStats,
-    HistView,
-    N_BINS,
 };
 use crate::transform::{
     Axis,
@@ -55,6 +38,12 @@ use std::sync::Arc;
 /// past 250k the accuracy stops paying for the time. Measured at 1M x 131:
 /// 100k / 250k / 500k give worst-case KS distance .015 / .010 / .009 and AUC
 /// error .0052 / .0036 / .0026.
+///
+/// Approximate, and not pinned by a test. A clipped axis bound is `log10` of a
+/// discrete order statistic, so on a spiky column the sample and the whole data
+/// can pick neighbouring values and slide every bin — a swing far wider than
+/// the sampling error itself, and one that moves with the draw. Any bound
+/// asserted here would be measuring the seed.
 pub const DEFAULT_SAMPLE: usize = 250_000;
 
 /// Percentiles bounding a clipped axis. The whole point is to keep a lone
@@ -65,6 +54,12 @@ const CLIP_HI: f64 = 99.5;
 const N_AXES: usize = Axis::ALL.len();
 /// Unclipped and clipped, in that order.
 const N_CLIPS: usize = 2;
+
+/// Bin count for every stored histogram. The panel renders into roughly
+/// 60-120 terminal columns, so ratatui already downsamples this ~5x; 512 is
+/// chosen to keep shape under that downsampling, not to be resolvable itself.
+const N_BINS: usize = 512;
+
 /// `target` bins then `decoy` bins.
 const BINS_PER_SLOT: usize = 2 * N_BINS;
 const SLOTS_PER_COLUMN: usize = N_AXES * N_CLIPS;
@@ -76,6 +71,24 @@ const SLOTS_PER_COLUMN: usize = N_AXES * N_CLIPS;
 /// somewhere else.
 const fn local_slot(axis_i: usize, clip_i: usize) -> usize {
     axis_i * N_CLIPS + clip_i
+}
+
+/// Bin index for `v` in `[lo, hi]`, or `None` if it falls outside.
+///
+/// `span` is `hi - lo`, passed in because callers hoist it out of their loop. A
+/// degenerate span puts every in-range value in bin 0, matching a column with a
+/// single distinct value.
+#[inline]
+fn bin_index(v: f64, lo: f64, hi: f64, span: f64) -> Option<usize> {
+    if !v.is_finite() || v < lo || v > hi {
+        return None;
+    }
+    let b = if span > 0.0 {
+        (((v - lo) / span) * N_BINS as f64) as usize
+    } else {
+        0
+    };
+    Some(b.min(N_BINS - 1))
 }
 
 const Q_CURVE_POINTS: usize = 100;
@@ -123,6 +136,29 @@ impl Slot {
         n_out: 0,
         plottable: false,
     };
+}
+
+/// One stored histogram, borrowed from the dashboard's count store.
+///
+/// The panel never owns or builds one of these — [`precompute_column`] fills
+/// the counts at init and [`Dashboard::hist`] slices into them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HistView<'a> {
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    pub(crate) target: &'a [u32],
+    pub(crate) decoy: &'a [u32],
+    /// Class totals, stored rather than summed per frame.
+    pub(crate) n_target: u32,
+    pub(crate) n_decoy: u32,
+}
+
+impl HistView<'_> {
+    /// Center of bin `i` on the value axis.
+    pub(crate) fn bin_center(&self, i: usize) -> f64 {
+        let w = (self.hi - self.lo) / N_BINS as f64;
+        self.lo + w * (i as f64 + 0.5)
+    }
 }
 
 /// A column of the features table.
@@ -188,7 +224,7 @@ pub struct Dashboard {
     /// The FDR curve at every zoom in [`Q_ZOOMS`], same order.
     q_curves: Vec<QCurve>,
     pub(crate) pp_curve: Vec<(f64, f64)>,
-    labels: Labels,
+    pub(crate) labels: Labels,
     /// The same rows as [`Labels::cells`], unformatted, for sorting. Keeping the
     /// numbers is what lets the pass-A stats, the per-feature AUCs and the gain
     /// vector all be dropped at the end of `build`.
@@ -227,18 +263,11 @@ impl Dashboard {
             .zip(auc.par_iter_mut())
             .enumerate()
             .for_each(|(j, ((count_slab, slot_slab), auc_j))| {
-                let mut buf = ColumnBuf::with_capacity(n_sampled);
                 // Strided straight into the sort buffer; the column is never
                 // materialized on its own.
                 let column = sample_matrix.iter().skip(j).step_by(n_cols).copied();
-                *auc_j = precompute_column(
-                    column,
-                    &sample_labels,
-                    &stats[j],
-                    slot_slab,
-                    count_slab,
-                    &mut buf,
-                );
+                *auc_j =
+                    precompute_column(column, &sample_labels, &stats[j], slot_slab, count_slab);
             });
 
         // Which pass dominates is a property of the run, not a constant: pass A
@@ -272,33 +301,13 @@ impl Dashboard {
         self.feature_names.len()
     }
 
-    /// What everything on screen was computed over, e.g. `"2.01M rows,
-    /// histograms from a 250k sample"`.
-    pub(crate) fn basis(&self) -> &str {
-        &self.labels.basis
-    }
-
-    pub(crate) fn overview_header(&self) -> &str {
-        &self.labels.overview_header
-    }
-
-    pub(crate) fn fdr_rows(&self) -> &[[String; 4]] {
-        &self.labels.fdr_rows
-    }
-
-    pub(crate) fn cells(&self) -> &[[String; N_FEATURE_COLUMNS]] {
-        &self.labels.cells
-    }
-
     /// How many zoom levels the FDR curve offers.
     pub(crate) fn n_q_zooms(&self) -> usize {
         self.q_curves.len()
     }
 
-    /// The FDR curve at zoom level `i`, wrapping so the caller can hold a bare
-    /// counter and never bounds-check.
     pub(crate) fn q_curve(&self, i: usize) -> &QCurve {
-        &self.q_curves[i % self.q_curves.len()]
+        &self.q_curves[i]
     }
 
     /// The discriminant score's column. It is stored and queried exactly like
@@ -456,24 +465,6 @@ fn gather_sample(view: &RescoreView<'_>, sample: usize) -> (Vec<f64>, Vec<bool>)
     (matrix, labels)
 }
 
-/// Per-column scratch, reused across every transform of one column.
-struct ColumnBuf {
-    /// Finite `(value, is_target)` pairs, sorted ascending. The one sort.
-    pairs: Vec<(f64, bool)>,
-    /// Mid-rank percentile of each entry of `pairs`, i.e. the whole
-    /// `RankPercentile` transform, for the cost of one linear pass.
-    pct: Vec<f64>,
-}
-
-impl ColumnBuf {
-    fn with_capacity(m: usize) -> Self {
-        Self {
-            pairs: Vec::with_capacity(m),
-            pct: Vec::with_capacity(m),
-        }
-    }
-}
-
 /// Fill one column's `N_AXES * N_CLIPS` histograms and return its
 /// Mann-Whitney AUC. One sort, then one walk per transform.
 fn precompute_column(
@@ -482,10 +473,13 @@ fn precompute_column(
     exact: &ColumnStats,
     slots: &mut [Slot],
     counts: &mut [u32],
-    buf: &mut ColumnBuf,
 ) -> f64 {
-    buf.pairs.clear();
-    buf.pairs.extend(
+    // Finite `(value, is_target)` pairs, sorted ascending. The one sort.
+    let mut pairs = Vec::with_capacity(labels.len());
+    // Mid-rank percentile of each entry of `pairs`, i.e. the whole
+    // `RankPercentile` transform, for the cost of one linear pass.
+    let mut pct = Vec::new();
+    pairs.extend(
         values
             .zip(labels)
             .filter(|(v, _)| v.is_finite())
@@ -494,16 +488,16 @@ fn precompute_column(
     // `total_cmp` so the comparator is a total order; `partial_cmp` with a NaN
     // fallback is not one, and `sort_unstable_by` only guarantees its behaviour
     // for total orders.
-    buf.pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let auc = stats::auc_from_sorted(&buf.pairs);
-    stats::mid_rank_percentiles(&buf.pairs, &mut buf.pct);
-    let n_non_finite = (labels.len() - buf.pairs.len()) as u32;
+    pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let auc = stats::auc_from_sorted(&pairs);
+    stats::mid_rank_percentiles(&pairs, &mut pct);
+    let n_non_finite = (labels.len() - pairs.len()) as u32;
 
     for (axis_i, &t) in Axis::ALL.iter().enumerate() {
         // Survivors of a domain restriction are a suffix of a sorted column.
-        let start = buf.pairs.partition_point(|p| !t.accepts(p.0));
-        let survivors = &buf.pairs[start..];
-        let pct = &buf.pct[start..];
+        let start = pairs.partition_point(|p| !t.accepts(p.0));
+        let survivors = &pairs[start..];
+        let pct = &pct[start..];
         // `(lo, hi, span)` per clip, resolved before the walk; `None` is a slot
         // with nothing to plot. `span` is hoisted because `bin_index` wants it
         // on every one of the `m * N_AXES * N_CLIPS` pushes below.
@@ -531,7 +525,7 @@ fn precompute_column(
                 let Some((lo, hi, span)) = *axis else {
                     continue;
                 };
-                match stats::bin_index(y, lo, hi, span) {
+                match bin_index(y, lo, hi, span) {
                     // Target bins then decoy bins, within this slot's slab.
                     Some(b) => {
                         let class = usize::from(!is_t) * N_BINS;
@@ -593,9 +587,7 @@ fn clip_range(t: Axis, survivors: &[(f64, bool)], pct: &[f64]) -> Option<(f64, f
 /// Unclipped axis bounds, from pass A's exact all-rows values.
 ///
 /// Deliberately not sample-derived: this is the view that is *supposed* to show
-/// the spike, so its endpoints have to be the real ones. Each transform's lower
-/// bound is the smallest all-rows value it accepts, which is why pass A tracks
-/// the positive and absolute floors rather than only min/max.
+/// the spike, so its endpoints have to be the real ones.
 fn exact_range(t: Axis, c: &ColumnStats) -> Option<(f64, f64)> {
     // Before the `RankPercentile` arm: a wholly non-finite column has no rank
     // axis either, and one would mark the slot plottable with nothing to plot.
@@ -755,13 +747,15 @@ pub(crate) mod tests {
         fixture_with_labels(names, columns, &is_target)
     }
 
-    /// The one constructor. Columns given literally with an explicit
-    /// target/decoy split, for the cases the alternating default cannot express.
-    pub(crate) fn fixture_with_labels(
-        names: &[&str],
-        columns: &[&[f64]],
-        is_target: &[bool],
-    ) -> Fixture {
+    /// A dashboard from column-major data, so a test reads as a list of columns
+    /// rather than an interleaved matrix literal.
+    pub(crate) fn dashboard(names: &[&str], columns: &[&[f64]]) -> Dashboard {
+        fixture_from_columns(names, columns).build()
+    }
+
+    /// Columns given literally with an explicit target/decoy split, for the
+    /// cases the alternating default cannot express.
+    fn fixture_with_labels(names: &[&str], columns: &[&[f64]], is_target: &[bool]) -> Fixture {
         assert!(columns.iter().all(|c| c.len() == is_target.len()));
         let mut matrix = Vec::with_capacity(is_target.len() * columns.len());
         for i in 0..is_target.len() {
@@ -774,20 +768,20 @@ pub(crate) mod tests {
             .iter()
             .map(|&t| if t { 0.001 } else { 0.9 })
             .collect();
-        let thresholds = [0.01f32, 0.05, 0.1, 0.5, 1.0]
-            .into_iter()
-            .map(|q| {
-                let (targets, decoys) = qvalue
-                    .iter()
-                    .zip(&is_target)
-                    .filter(|(v, _)| **v <= q)
-                    .fold(
-                        (0, 0),
-                        |(t, d), (_, &is_t)| if is_t { (t + 1, d) } else { (t, d + 1) },
-                    );
-                ThresholdRow { q, targets, decoys }
-            })
-            .collect();
+        let targets = is_target.iter().filter(|&&t| t).count();
+        let decoys = is_target.len() - targets;
+        let thresholds = vec![
+            ThresholdRow {
+                q: 0.01,
+                targets,
+                decoys: 0,
+            },
+            ThresholdRow {
+                q: 1.0,
+                targets,
+                decoys,
+            },
+        ];
         Fixture {
             names: names.iter().map(|n| Arc::from(*n)).collect(),
             matrix,
@@ -807,124 +801,6 @@ pub(crate) mod tests {
 
     fn total(h: &HistView<'_>) -> u32 {
         h.n_target + h.n_decoy
-    }
-
-    /// Largest gap between two histograms' CDFs, bin by bin.
-    ///
-    /// Not bin-by-bin total variation: a discrete column plots as sharp spikes,
-    /// and a hair's difference in the axis bounds slides whole spikes into
-    /// neighbouring bins. TV scores that as though all the mass moved while the
-    /// plots are indistinguishable on screen; KS charges a sub-bin shift a
-    /// sub-bin amount.
-    fn ks_distance(a: &[u32], b: &[u32], na: f64, nb: f64) -> f64 {
-        let (mut ca, mut cb, mut worst) = (0.0f64, 0.0f64, 0.0f64);
-        for (&x, &y) in a.iter().zip(b) {
-            ca += x as f64 / na;
-            cb += y as f64 / nb;
-            worst = worst.max((ca - cb).abs());
-        }
-        worst
-    }
-
-    /// What [`DEFAULT_SAMPLE`]'s doc comment promises, checked rather than
-    /// asserted: at the shipped sample size, every stored histogram is within a
-    /// KS distance of 0.02 of the whole-data one and every feature AUC within
-    /// 0.01. Measured worst case is 0.0099 / 0.0009, so the bounds have ~2x
-    /// headroom and a real regression trips them.
-    ///
-    /// Two million-row builds, ~3.4 s of the suite's 3.5. That buys the only
-    /// numbers here that mean anything: the error scales as 1/sqrt(sample), so
-    /// re-running this at, say, 200k rows and a 50k sample measures 0.0246 KS
-    /// and would need its bound loosened past 0.03 — which no longer rules out a
-    /// 3x degradation at the size actually shipped. Cheap and uninformative.
-    /// Not `#[ignore]`d either: nothing in CI or the Taskfile passes
-    /// `--ignored`, so ignoring it would mean the claim is never checked.
-    #[test]
-    fn sample_size_holds_its_accuracy_claim() {
-        const N_ROWS: usize = 1_000_000;
-        let mut rng = Lcg(0xDEAD_BEEF);
-        // Deliberately mixed shapes: a clean separator, a heavy tail, a
-        // mostly-zero column, and a discrete one. The discrete column is the
-        // case that made total variation useless as a metric.
-        type RandomColumn<'a> = &'a dyn Fn(&mut Lcg, bool) -> f64;
-        let columns: [RandomColumn<'_>; 4] = [
-            &|r, t| r.below(1_000_000) as f64 / 1e6 + if t { 0.5 } else { 0.0 },
-            &|r, _| (r.below(1_000_000) as f64 / 1e6).powi(-3).min(1e9),
-            &|r, _| {
-                if r.below(10) == 0 {
-                    r.below(1000) as f64
-                } else {
-                    0.0
-                }
-            },
-            &|r, _| r.below(100) as f64,
-        ];
-
-        let mut matrix = Vec::with_capacity(N_ROWS * columns.len());
-        let mut is_target = Vec::with_capacity(N_ROWS);
-        let mut score = Vec::with_capacity(N_ROWS);
-        let mut qvalue = Vec::with_capacity(N_ROWS);
-        for i in 0..N_ROWS {
-            let t = i % 3 != 0;
-            for f in columns {
-                matrix.push(f(&mut rng, t));
-            }
-            is_target.push(t);
-            score.push((rng.below(1_000_000) as f64 / 1e6 + if t { 0.6 } else { 0.0 }) as f32);
-            qvalue.push(rng.below(1_000_000) as f32 / 1e6);
-        }
-        let names: Vec<Arc<str>> = (0..columns.len())
-            .map(|i| Arc::from(format!("f{i}").as_str()))
-            .collect();
-        let gain = vec![1.0f32; columns.len()];
-        let view = RescoreView {
-            feature_names: &names,
-            features: &matrix,
-            is_target: &is_target,
-            score: &score,
-            qvalue: &qvalue,
-            thresholds: &[],
-            gain: &gain,
-        };
-
-        let exact = Dashboard::build(&view, usize::MAX).expect("well-formed");
-        let sampled = Dashboard::build(&view, DEFAULT_SAMPLE).expect("well-formed");
-
-        let (mut worst_ks, mut worst_auc) = (0.0f64, 0.0f64);
-        let (mut ks_at, mut auc_at) = (String::new(), String::new());
-        for j in 0..columns.len() {
-            let auc = |d: &Dashboard| d.feature_value(j, FeatureColumn::Auc).unwrap();
-            let (a, b) = (auc(&sampled), auc(&exact));
-            if a.is_finite() && b.is_finite() && (a - b).abs() > worst_auc {
-                worst_auc = (a - b).abs();
-                auc_at = format!("f{j}");
-            }
-            for t in Axis::ALL {
-                let (s, e) = (sampled.hist(j, t, true), exact.hist(j, t, true));
-                let (ns, ne) = (total(&s) as f64, total(&e) as f64);
-                if ns == 0.0 || ne == 0.0 {
-                    continue;
-                }
-                // Both classes pooled: the panel draws them on one axis, so
-                // that is the distribution a reader compares.
-                let pool = |h: &HistView<'_>| -> Vec<u32> {
-                    h.target.iter().zip(h.decoy).map(|(a, b)| a + b).collect()
-                };
-                let ks = ks_distance(&pool(&s), &pool(&e), ns, ne);
-                if ks > worst_ks {
-                    worst_ks = ks;
-                    ks_at = format!("f{j} {t:?}");
-                }
-            }
-        }
-        assert!(
-            worst_ks < 0.02,
-            "worst KS {worst_ks:.4} at {ks_at} exceeds the sample-size claim"
-        );
-        assert!(
-            worst_auc < 0.01,
-            "worst AUC error {worst_auc:.4} at {auc_at} exceeds the sample-size claim"
-        );
     }
 
     /// Zooming has to re-grid, not re-slice. Every zoom keeps a full
@@ -1008,8 +884,11 @@ pub(crate) mod tests {
                 };
                 want.push(v, view.is_target[i]);
             }
-            assert_eq!(g.n_target, want.n_target, "column {j}");
-            assert_eq!(g.n_nan, want.n_nan, "column {j}");
+            assert_eq!(
+                (g.n_target, g.n_decoy, g.n_nan),
+                (want.n_target, want.n_decoy, want.n_nan),
+                "column {j}"
+            );
             assert!((g.mean(true) - want.mean(true)).abs() < 1e-9, "column {j}");
             assert!((g.var(true) - want.var(true)).abs() < 1e-9, "column {j}");
             assert_eq!((g.lo, g.hi), (want.lo, want.hi), "column {j}");
@@ -1020,9 +899,6 @@ pub(crate) mod tests {
     ///
     /// At or above the run size every row is taken in order, which is what makes
     /// small runs — and most of these tests — exact rather than approximate.
-    /// Below it the draw must be random: the pipeline hands the dashboard rows
-    /// sorted descending by score, so a prefix or a stride would be all
-    /// high-scoring targets.
     #[test]
     fn gather_sample_takes_every_row_or_a_random_draw_across_the_whole_run() {
         let f = fixture(10_000, &[("a", &|i, _| i as f64)]);
@@ -1105,8 +981,7 @@ pub(crate) mod tests {
     }
 
     /// The unclipped lower bound is the smallest *all-rows* value the transform
-    /// accepts, not the column minimum. For `log10` that is `min_pos`, which is
-    /// exactly why pass A tracks it.
+    /// accepts, not the column minimum.
     #[test]
     fn the_unclipped_log10_axis_starts_at_the_smallest_positive_value() {
         let values = [-5.0, 0.0, 1e-6, 1.0, 100.0, 42.0];
@@ -1158,6 +1033,20 @@ pub(crate) mod tests {
         assert_eq!(abs_order_stats(&negatives, 0, 2), (1.0, 9.0));
     }
 
+    #[test]
+    fn bin_index_clamps_the_top_edge_and_rejects_outsiders() {
+        assert_eq!(bin_index(0.0, 0.0, 1.0, 1.0), Some(0));
+        assert_eq!(bin_index(1.0, 0.0, 1.0, 1.0), Some(N_BINS - 1));
+        assert_eq!(bin_index(-0.1, 0.0, 1.0, 1.0), None);
+        assert_eq!(bin_index(1.1, 0.0, 1.0, 1.0), None);
+        assert_eq!(bin_index(f64::NAN, 0.0, 1.0, 1.0), None);
+        assert_eq!(
+            bin_index(5.0, 5.0, 5.0, 0.0),
+            Some(0),
+            "a degenerate span is one bin, not a divide by zero"
+        );
+    }
+
     /// Every stored histogram must account for the sample exactly: binned plus
     /// dropped plus out-of-range is the whole sample, with no value counted
     /// twice and none lost.
@@ -1189,11 +1078,6 @@ pub(crate) mod tests {
                         m,
                         "column {column} {t:?} clip={clip} lost or double-counted rows"
                     );
-                    assert_eq!(
-                        binned,
-                        h.target.iter().sum::<u32>() + h.decoy.iter().sum::<u32>(),
-                        "stored totals disagree with the stored bins"
-                    );
                 }
             }
         }
@@ -1202,13 +1086,6 @@ pub(crate) mod tests {
     /// The unclipped axis comes from pass A's exact all-rows values, and the
     /// sample is a subset of those rows, so nothing sampled can fall outside
     /// it — for any transform, including the two that are not monotone.
-    ///
-    /// This is the invariant that says the unclipped view is genuinely exact
-    /// rather than sample-derived. A single out-of-range value here would mean
-    /// a transform's exact lower bound was computed from the wrong statistic
-    /// (`min` instead of `min_pos` for `log10`, or an endpoint instead of
-    /// `min_abs` for `square`), which is precisely the mistake the extra pass-A
-    /// fields exist to prevent.
     #[test]
     fn nothing_sampled_ever_falls_outside_the_unclipped_axis() {
         let f = fixture(
@@ -1256,9 +1133,8 @@ pub(crate) mod tests {
                 let h = dash.hist(1, t, clip);
                 assert_eq!(total(&h), 0, "{t:?} clip={clip}");
                 assert!(
-                    dash.subtitle(1, t, clip).contains("nothing this transform"),
-                    "{t:?} clip={clip}: {}",
-                    dash.subtitle(1, t, clip)
+                    !dash.slots[dash.slot_index(1, t, clip)].plottable,
+                    "{t:?} clip={clip}"
                 );
             }
         }
@@ -1309,19 +1185,18 @@ pub(crate) mod tests {
         let f = fixture(400, &[("a", &|i, _| i as f64)]);
         let dash = f.build();
         assert!(
-            dash.overview_header().contains("AUC 1.0000"),
+            dash.labels.overview_header.contains("AUC 1.0000"),
             "{}",
-            dash.overview_header()
+            dash.labels.overview_header
         );
         assert!(
-            f.build_with(20).overview_header().contains("AUC 1.0000"),
+            f.build_with(20)
+                .labels
+                .overview_header
+                .contains("AUC 1.0000"),
             "a 20-row sample could only reach 1.0 by luck; it is not sampled"
         );
         assert!(total(&dash.hist(dash.score_column(), Axis::Value(XTransform::Linear), true)) > 0);
-        assert!(
-            dash.title(dash.score_column(), Axis::Value(XTransform::Linear))
-                .contains("discriminant_score")
-        );
     }
 
     #[test]

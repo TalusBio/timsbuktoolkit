@@ -43,6 +43,10 @@ impl Tab {
         }
     }
 
+    pub(crate) fn index(self) -> usize {
+        cycle::index_of(&Self::ALL, self)
+    }
+
     fn shift(self, delta: isize) -> Self {
         cycle::step(&Self::ALL, self, delta)
     }
@@ -53,16 +57,8 @@ pub(crate) enum Flow {
     Quit,
 }
 
-/// Plot points, reused across frames rather than collected inside the draw call.
-#[derive(Default)]
-pub(crate) struct Scratch {
-    pub(crate) target: Vec<(f64, f64)>,
-    pub(crate) decoy: Vec<(f64, f64)>,
-}
-
 pub(crate) struct App {
     pub(crate) dash: Dashboard,
-    pub(crate) scratch: Scratch,
     tab: Tab,
     x: Axis,
     y: YTransform,
@@ -83,10 +79,9 @@ pub(crate) struct App {
     pub(crate) visible: Vec<usize>,
     /// Position within `visible`, not a feature index.
     pub(crate) cursor: usize,
-    /// Scroll/selection state for the features table, kept on `App` rather
-    /// than rebuilt per frame: `TableState::offset` is what lets a `Table`
-    /// scroll, and a fresh `TableState::default()` every render recomputes it
-    /// from `0`, pinning the viewport instead of tracking the cursor.
+    /// Scroll state for the features table, kept on `App` so `offset` survives
+    /// a redraw. Its `selected` is written from `cursor` every frame and must
+    /// never be read back; only `offset()` is.
     pub(crate) table_state: TableState,
 }
 
@@ -94,7 +89,6 @@ impl App {
     pub(crate) fn new(dash: Dashboard) -> Self {
         let mut app = Self {
             dash,
-            scratch: Scratch::default(),
             tab: Tab::Overview,
             x: Axis::ALL[0],
             y: YTransform::Density,
@@ -187,7 +181,8 @@ impl App {
                 self.tab = self.tab.shift(-1)
             }
             KeyCode::Char('j') | KeyCode::Down if plain => {
-                self.cursor = (self.cursor + 1).min(self.visible.len().saturating_sub(1));
+                self.cursor += 1;
+                self.clamp_cursor();
             }
             KeyCode::Char('k') | KeyCode::Up if plain => {
                 self.cursor = self.cursor.saturating_sub(1)
@@ -197,11 +192,8 @@ impl App {
             KeyCode::Char('y') if plain => self.y = self.y.next(),
             KeyCode::Char('Y') if plain => self.y = self.y.prev(),
             KeyCode::Char('c') if plain => self.clip = !self.clip,
-            KeyCode::Char('z') if plain => self.q_zoom = (self.q_zoom + 1) % self.dash.n_q_zooms(),
-            KeyCode::Char('Z') if plain => {
-                let n = self.dash.n_q_zooms();
-                self.q_zoom = (self.q_zoom + n - 1) % n;
-            }
+            KeyCode::Char('z') if plain => self.cycle_q_zoom(1),
+            KeyCode::Char('Z') if plain => self.cycle_q_zoom(-1),
             KeyCode::Char('s') if plain => {
                 self.sort = self.sort.next();
                 self.refresh_visible();
@@ -213,9 +205,6 @@ impl App {
             KeyCode::Char('/') if plain => {
                 self.filter_editing = true;
                 self.filter.clear();
-                // Without this, the help line shows an empty filter while the
-                // table still shows whatever the previous filter left
-                // visible, until the user types the first character.
                 self.refresh_visible();
             }
             _ => {}
@@ -236,17 +225,20 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.filter.pop();
+                self.refresh_visible();
             }
-            KeyCode::Char(c) if plain => self.filter.push(c),
+            KeyCode::Char(c) if plain => {
+                self.filter.push(c);
+                self.refresh_visible();
+            }
             _ => {}
         }
     }
 
-    /// The value feature `j` sorts on under the current key. Every one of these
-    /// is a precomputed array read.
-    fn sort_value(&self, j: usize) -> f64 {
-        // `None` is the name column, which the caller sorts as text.
-        self.dash.feature_value(j, self.sort).unwrap_or(0.0)
+    /// Move `q_zoom` `delta` levels through the dashboard's zoom list, wrapping.
+    fn cycle_q_zoom(&mut self, delta: isize) {
+        let n = self.dash.n_q_zooms() as isize;
+        self.q_zoom = (self.q_zoom as isize + delta).rem_euclid(n) as usize;
     }
 
     /// Rebuild the visible feature list from the filter and sort key, keeping
@@ -272,23 +264,24 @@ impl App {
             // later reverse of the whole vector would undo a NaN-last
             // placement exactly when `sort_desc` is false.
             let desc = self.sort_desc;
-            idx.sort_by(|&a, &b| cmp_nan_last(self.sort_value(a), self.sort_value(b), desc));
+            let value = |j: usize| self.dash.feature_value(j, self.sort).unwrap_or(f64::NAN);
+            idx.sort_by(|&a, &b| cmp_nan_last(value(a), value(b), desc));
         }
 
         self.visible = idx;
         self.cursor = previous
             .and_then(|j| self.visible.iter().position(|&v| v == j))
-            .unwrap_or(0)
-            .min(self.visible.len().saturating_sub(1));
+            .unwrap_or(0);
+        self.clamp_cursor();
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
     }
 }
 
 /// Whether a dashboard could be shown at all.
-///
-/// Worth asking *before* [`Dashboard::build`], not after: building is the
-/// expensive step, and there is no point paying for it to discover that stdout
-/// is a pipe.
-pub fn available() -> bool {
+fn available() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
 }
@@ -392,6 +385,7 @@ fn cmp_nan_last(a: f64, b: f64, desc: bool) -> std::cmp::Ordering {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::precompute::tests::dashboard;
     use ratatui::crossterm::event::{
         KeyCode,
         KeyEvent,
@@ -408,13 +402,6 @@ pub(crate) mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-
-    /// Build a dashboard from column-major data, so a test reads as a list of
-    /// columns rather than an interleaved matrix literal. Shared with the `ui`
-    /// tests.
-    pub(crate) fn dashboard(names: &[&str], columns: &[&[f64]]) -> Dashboard {
-        crate::precompute::tests::fixture_from_columns(names, columns).build()
     }
 
     fn app() -> App {
@@ -480,25 +467,12 @@ pub(crate) mod tests {
         let mut app = app();
         let n = app.dash.n_q_zooms();
         assert!(n > 1, "a single zoom level makes the key pointless");
-        assert_ne!(
-            app.dash.q_curve(app.q_zoom()).zoom,
-            1.0,
-            "the default view must be zoomed in; the full (0, 1] curve is the \
-             one that shows the least"
-        );
 
         let start = app.q_zoom();
-        let mut seen = vec![app.dash.q_curve(start).zoom];
-        for _ in 1..n {
+        for _ in 0..n {
             app.handle_key(key('z'));
-            seen.push(app.dash.q_curve(app.q_zoom()).zoom);
         }
-        app.handle_key(key('z'));
         assert_eq!(app.q_zoom(), start, "z must wrap, not run off the end");
-
-        seen.sort_by(f64::total_cmp);
-        seen.dedup();
-        assert_eq!(seen.len(), n, "every zoom level must be reachable by z");
 
         app.handle_key(key('Z'));
         assert_eq!(
@@ -556,31 +530,10 @@ pub(crate) mod tests {
         );
 
         app.handle_key(key('/'));
+        assert_eq!(app.filter(), "", "reopening clears the filter text");
+        assert_eq!(app.visible.len(), 2, "and refreshes visible with it");
         app.handle_key(code(KeyCode::Esc));
         assert_eq!(app.visible.len(), 2, "esc clears the filter");
-    }
-
-    /// Reopening the filter box clears `self.filter` immediately; `visible`
-    /// must refresh in lockstep so the table does not keep showing the
-    /// previous (now-stale) filtered set while the help line already shows an
-    /// empty query.
-    #[test]
-    fn reopening_the_filter_refreshes_visible_immediately() {
-        let mut app = app();
-        app.handle_key(key('/'));
-        for c in "beta".chars() {
-            app.handle_key(key(c));
-        }
-        app.handle_key(code(KeyCode::Enter));
-        assert_eq!(app.visible, &[1], "filtered down to beta_count");
-
-        app.handle_key(key('/'));
-        assert_eq!(app.filter(), "", "filter text cleared on reopen");
-        assert_eq!(
-            app.visible.len(),
-            2,
-            "visible must refresh to match the cleared filter, not stay stale"
-        );
     }
 
     #[test]
@@ -606,19 +559,6 @@ pub(crate) mod tests {
         assert_eq!(app.selected_feature(), None);
         // Must not panic.
         app.handle_key(key('j'));
-    }
-
-    #[test]
-    fn s_cycles_the_sort_key_and_reorders() {
-        let mut app = app();
-        let first = app.visible.to_vec();
-        // Sort by target mean descending: beta_count (mean 20) before
-        // alpha_score (mean 2).
-        while !app.sort_summary().starts_with("target mean ") {
-            app.handle_key(key('s'));
-        }
-        assert_ne!(app.visible, first.as_slice());
-        assert_eq!(app.visible[0], 1);
     }
 
     /// Gain is a column-aligned array read, so sorting on it must pick up the

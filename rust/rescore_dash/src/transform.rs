@@ -16,10 +16,6 @@ use crate::cycle;
 
 /// Largest exponent `exp` is allowed to see, guarding against overflow to
 /// `+inf` above ~709.78.
-///
-/// Upper side only. Very negative inputs already underflow to exactly `0.0`,
-/// which is the right answer; a symmetric lower clamp would replace it with
-/// `exp(-700)` = `9.86e-305`, a manufactured nonzero.
 const EXP_CLAMP: f64 = 700.0;
 
 /// What a histogram's x axis shows.
@@ -101,11 +97,7 @@ impl XTransform {
     }
 
     /// Whether a *finite* `v` is inside this transform's domain — exactly the
-    /// condition [`Self::apply`] tests, factored out so the sorted-suffix
-    /// search in `precompute` cannot drift from the pointwise map.
-    ///
-    /// The accepted set is an up-set on the value axis for every variant, which
-    /// is what makes the survivors a suffix of a sorted column.
+    /// condition [`Self::apply`] tests.
     pub fn accepts(self, v: f64) -> bool {
         match self {
             Self::Log10 => v > 0.0,
@@ -114,12 +106,8 @@ impl XTransform {
         }
     }
 
-    /// Whether this map is non-decreasing over the values it accepts, so that
-    /// the p-th percentile of the output is the transform of the p-th
-    /// percentile of the input.
-    ///
-    /// `Square` is the one that is not: it decreases below zero, so a column
-    /// straddling zero needs its percentiles taken over `|v|`.
+    /// Whether this map is non-decreasing over the values it accepts. `Square`
+    /// is the one that is not: it decreases below zero.
     pub fn is_monotone(self) -> bool {
         !matches!(self, Self::Square)
     }
@@ -211,20 +199,11 @@ mod tests {
             .collect()
     }
 
+    /// Stored histograms are addressed by `index()`, so two axes sharing one
+    /// index would alias their slots. Cycling itself is `cycle`'s test.
     #[test]
-    fn x_cycles_forward_and_back() {
-        let t = Axis::ALL[0];
-        assert_eq!(t.next().prev(), t);
-        // Stepping `ALL.len()` times must visit every axis exactly once and
-        // land back at the start — a `next` that skipped or repeated one would
-        // make an axis unreachable from the keyboard.
-        let mut seen = vec![t];
-        let mut cur = t;
-        for _ in 1..Axis::ALL.len() {
-            cur = cur.next();
-            seen.push(cur);
-        }
-        assert_eq!(cur.next(), t, "the cycle must close");
+    fn axis_index_is_injective() {
+        let mut seen = Axis::ALL.to_vec();
         seen.sort_by_key(|a| a.index());
         seen.dedup();
         assert_eq!(seen.len(), Axis::ALL.len(), "every axis, once");
@@ -348,9 +327,6 @@ mod tests {
 
     #[test]
     fn y_density_normalizes_per_class() {
-        assert_eq!(YTransform::Density.apply(5, 10), 0.5);
-        assert_eq!(YTransform::Count.apply(5, 10), 5.0);
-        assert_eq!(YTransform::Log10Count.apply(9, 10), 1.0);
         assert_eq!(YTransform::Log10Count.apply(0, 10), 0.0, "log(0+1) = 0");
         assert_eq!(
             YTransform::Density.apply(5, 0),

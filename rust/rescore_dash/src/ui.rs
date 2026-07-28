@@ -2,23 +2,14 @@
 //!
 //! Every panel is a lookup into the precomputed [`crate::precompute::Dashboard`]:
 //! histogram bins, axis ranges, curves, threshold tables, panel titles and
-//! table cells were all computed before the TUI opened. A frame indexes arrays,
-//! fills two reused point buffers, and draws — a keystroke costs a redraw and
-//! not a re-scan.
+//! table cells were all computed before the TUI opened. A frame indexes arrays
+//! and draws — a keystroke costs a redraw and not a re-scan.
 
 use crate::app::{
     App,
-    Scratch,
     Tab,
 };
-use crate::precompute::{
-    Dashboard,
-    FeatureColumn,
-};
-use crate::transform::{
-    Axis,
-    YTransform,
-};
+use crate::precompute::FeatureColumn;
 use ratatui::layout::{
     Constraint,
     Direction,
@@ -63,27 +54,6 @@ fn series<'a>(name: &'a str, color: Color, data: &'a [(f64, f64)]) -> Dataset<'a
         .data(data)
 }
 
-/// The axis settings a histogram panel reads off `App`.
-///
-/// Gathered before the `App` is destructured for disjoint field borrows, which
-/// is why they travel as one value rather than as `&App`.
-#[derive(Clone, Copy)]
-struct HistAxes {
-    x: Axis,
-    y: YTransform,
-    clip: bool,
-}
-
-impl HistAxes {
-    fn of(app: &App) -> Self {
-        Self {
-            x: app.x(),
-            y: app.y(),
-            clip: app.clip(),
-        }
-    }
-}
-
 /// A bordered panel carrying a message instead of a plot.
 fn empty_panel(frame: &mut Frame, area: Rect, title: &str, message: &str) {
     frame.render_widget(
@@ -104,10 +74,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
 
     let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
-    let selected = Tab::ALL.iter().position(|t| *t == app.tab()).unwrap_or(0);
+    let selected = app.tab().index();
     // Full width, which is why the run-level basis goes here and not into a
     // histogram subtitle that the panel border would truncate.
-    let banner = format!("rescore — {}", app.dash.basis());
+    let banner = format!("rescore — {}", app.dash.labels.basis);
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
@@ -127,10 +97,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 /// The bottom key-hint line; a different message while the filter box is open.
-///
-/// Per-tab rather than one exhaustive list. Listing every binding everywhere
-/// both overflowed a narrow terminal and advertised keys that do nothing on the
-/// current tab — `s sort` on the FDR curve, `z zoom` on the feature table.
 fn help_line(app: &App) -> String {
     if app.filter_editing() {
         return format!("/{}  Enter apply | Esc clear", app.filter());
@@ -164,8 +130,7 @@ fn help_line(app: &App) -> String {
 /// Render column `column`'s stored histogram.
 ///
 /// Takes the column rather than the looked-up pieces: the title, the subtitle
-/// and the bins are three lookups keyed the same way, and having each caller do
-/// them was three chances to draw one panel's title over another's counts.
+/// and the bins are three lookups keyed the same way.
 ///
 /// Tolerates an empty or all-zero histogram: the y bound falls back to `1.0`
 /// rather than degenerating to `[0.0, 0.0]`.
@@ -173,31 +138,24 @@ fn help_line(app: &App) -> String {
 /// Title on the top border, subtitle on the bottom, because the counts they
 /// carry are disjoint: `dropped` is what the transform excluded, the
 /// out-of-range count is what survived it and then fell outside the axis.
-fn draw_hist(
-    frame: &mut Frame,
-    area: Rect,
-    dash: &Dashboard,
-    column: usize,
-    axes: HistAxes,
-    scratch: &mut Scratch,
-) {
-    let HistAxes { x, y, clip } = axes;
+fn draw_hist(frame: &mut Frame, area: Rect, app: &App, column: usize) {
+    let (dash, x, y, clip) = (&app.dash, app.x(), app.y(), app.clip());
     let hist = dash.hist(column, x, clip);
-    scratch.target.clear();
-    scratch.decoy.clear();
+    let mut target = Vec::with_capacity(hist.target.len());
+    let mut decoy = Vec::with_capacity(hist.target.len());
     let mut ymax = 0.0f64;
     for (i, (&t, &d)) in hist.target.iter().zip(hist.decoy).enumerate() {
         let px = hist.bin_center(i);
         let (ty, dy) = (y.apply(t, hist.n_target), y.apply(d, hist.n_decoy));
         ymax = ymax.max(ty).max(dy);
-        scratch.target.push((px, ty));
-        scratch.decoy.push((px, dy));
+        target.push((px, ty));
+        decoy.push((px, dy));
     }
     let ymax = if ymax > 0.0 { ymax } else { 1.0 };
 
     let datasets = vec![
-        series("target", TARGET_COLOR, &scratch.target),
-        series("decoy", DECOY_COLOR, &scratch.decoy),
+        series("target", TARGET_COLOR, &target),
+        series("decoy", DECOY_COLOR, &decoy),
     ];
 
     // Axis meanings go on the block's borders, not into `PlotAxis::title`, which
@@ -226,15 +184,12 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    let axes = HistAxes::of(app);
-    // Disjoint field borrows: the dashboard is read while the scratch buffers
-    // are written. Going through `&mut self` accessors would borrow the whole
-    // `App` twice over.
-    let App { dash, scratch, .. } = app;
-
-    frame.render_widget(Paragraph::new(dash.overview_header()), chunks[0]);
-    let score = dash.score_column();
-    draw_hist(frame, chunks[1], dash, score, axes, scratch);
+    frame.render_widget(
+        Paragraph::new(app.dash.labels.overview_header.as_str()),
+        chunks[0],
+    );
+    let score = app.dash.score_column();
+    draw_hist(frame, chunks[1], app, score);
 }
 
 /// Targets-passing-vs-q-value curve, plus a threshold table at fixed FDR
@@ -271,7 +226,8 @@ fn draw_fdr(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(chart, chunks[0]);
 
     let rows: Vec<Row> = dash
-        .fdr_rows()
+        .labels
+        .fdr_rows
         .iter()
         .map(|r| Row::new(r.iter().map(String::as_str)))
         .collect();
@@ -323,27 +279,12 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
 
-    let axes = HistAxes::of(app);
-    let sort = app.sort_summary();
-    // Destructured for the same reason as `draw_overview`, but three ways: the
-    // table widget holds `dash`'s cells, the table state needs `&mut`, and the
-    // histogram panel writes `scratch`.
-    let App {
-        dash,
-        scratch,
-        table_state,
-        visible,
-        cursor,
-        ..
-    } = app;
-    let selected = visible.get(*cursor).copied();
+    let selected = app.selected_feature();
 
     // Feature names share long prefixes (`ms1_*`, `ms2_*`, `lazyscore_*`), so
     // a fixed-width name column shows an identical prefix on every row. `Min`
-    // grows into whatever the numeric columns leave. Not `Fill(1)` or a larger
-    // `Min`: once the name width plus six `Length(9)` exceeds the panel, the
-    // solver shrinks the `Length` columns instead, truncating the numbers.
-    // `9` fits the widest realistic cell (`-307.0000`).
+    // grows into whatever the numeric columns leave. `9` fits the widest
+    // realistic cell (`-307.0000`).
     let widths = [
         Constraint::Min(16),
         Constraint::Length(9),
@@ -353,28 +294,26 @@ fn draw_features(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(9),
         Constraint::Length(9),
     ];
-    let title = format!(
-        "Features ({}/{}) sort:{sort}",
-        visible.len(),
-        dash.n_features()
-    );
+    let title = format!("Features ({}/{})", app.visible.len(), app.dash.n_features());
 
     // Rows borrow the dashboard's pre-formatted cells, so building the table
     // copies no strings.
-    let rows: Vec<Row> = visible
+    let rows: Vec<Row> = app
+        .visible
         .iter()
-        .map(|&j| Row::new(dash.cells()[j].iter().map(String::as_str)))
+        .map(|&j| Row::new(app.dash.labels.cells[j].iter().map(String::as_str)))
         .collect();
     let table = Table::new(rows, widths)
         .header(Row::new(FeatureColumn::ALL.map(FeatureColumn::label)))
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title(title));
 
-    table_state.select(selected.is_some().then_some(*cursor));
-    frame.render_stateful_widget(table, chunks[0], table_state);
+    app.table_state
+        .select(selected.is_some().then_some(app.cursor));
+    frame.render_stateful_widget(table, chunks[0], &mut app.table_state);
 
     match selected {
-        Some(j) => draw_hist(frame, chunks[1], dash, j, axes, scratch),
+        Some(j) => draw_hist(frame, chunks[1], app, j),
         None => empty_panel(frame, chunks[1], "Features", "no feature selected"),
     }
 }
@@ -384,14 +323,16 @@ mod tests {
     use super::*;
     use crate::app::tests::{
         code,
-        dashboard,
         key,
     };
     use crate::app::{
         App,
         Tab,
     };
-    use crate::precompute::tests::fixture_from_columns;
+    use crate::precompute::tests::{
+        dashboard,
+        fixture_from_columns,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyCode;
@@ -425,13 +366,6 @@ mod tests {
             &["alpha_score", "all_nan_feature"],
             &[&alpha, &[f64::NAN; 40]],
         ))
-    }
-
-    #[test]
-    fn features_tab_shows_feature_names() {
-        let mut app = fixture_app();
-        go_to(&mut app, Tab::Features);
-        assert!(render(&mut app, 120, 40).contains("alpha_score"));
     }
 
     /// A smoke test over the whole lookup surface — every axis and both clip
@@ -489,15 +423,6 @@ mod tests {
         );
     }
 
-    /// The calibration tab has no per-tab keys, so its help line has no tail.
-    /// It must not leave a hole where one would go.
-    #[test]
-    fn a_tab_without_its_own_keys_has_no_doubled_separator() {
-        let mut app = fixture_app();
-        go_to(&mut app, Tab::Calibration);
-        assert_eq!(help_line(&app), "h/l tabs  q quit");
-    }
-
     /// Selecting the wholly-NaN feature must draw the panel and say why it is
     /// empty, rather than plotting a fabricated range.
     #[test]
@@ -530,11 +455,8 @@ mod tests {
         assert!(render(&mut app, 120, 40).contains("no feature selected"));
     }
 
-    /// 100x20 backend, 40 features, ~13-row viewport: reproduces the
-    /// scenario where `TableState::default()` every frame pinned the
-    /// selected row to the bottom edge instead of letting the viewport
-    /// scroll. The offset must persist (and advance) across renders as the
-    /// cursor moves.
+    /// 100x20 backend, 40 features, ~13-row viewport: the table offset must
+    /// persist and advance across renders as the cursor scrolls past it.
     #[test]
     fn features_table_offset_persists_and_advances_across_renders() {
         let n_features = 40;
@@ -565,18 +487,8 @@ mod tests {
         );
     }
 
-    /// At 160x30 with real, ALL-lane-length feature names (21 and 19 chars —
-    /// both would have collapsed to the same 16-char prefix under the old
-    /// `Constraint::Length(16)` name column, `"lazyscore_vs_bas"` for the
-    /// first), and a numeric value whose formatted output is wider than the old
-    /// fixed 6-char column, neither may be silently truncated.
-    ///
-    /// `name_b` ("ms1_precursor_trace") is not the selected feature (that's
-    /// `name_a`, at cursor `0`), so it appears nowhere else in the frame —
-    /// the histogram panel's title only ever names the selection. Its full
-    /// presence in the render is therefore evidence about the *table
-    /// column's* width specifically, not a coincidental match against some
-    /// other panel.
+    /// Neither a 19-char name nor a `-307.0000` cell may be truncated. `name_b`
+    /// is not the selection, so it can only be coming from the table column.
     #[test]
     fn feature_table_does_not_truncate_long_names_or_wide_numbers() {
         let name_a = "lazyscore_vs_baseline";

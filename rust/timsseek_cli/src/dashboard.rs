@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use timsseek::ml::RescoreFeatureStats;
+use timsseek::ml::qvalues::ThresholdCounts;
 use timsseek::scoring::results::FinalResult;
 use timsseek::scoring::timings::TimedStep;
 use tracing::info;
@@ -58,7 +59,7 @@ fn mean_gain_per_feature(stats: &RescoreFeatureStats, feature_names: &[Arc<str>]
 pub fn build(
     data: &[FinalResult],
     feature_stats: &RescoreFeatureStats,
-    qval_report: &[(f32, usize, usize, usize)],
+    qval_report: &[ThresholdCounts],
 ) -> Option<rescore_dash::Dashboard> {
     if !enabled() {
         return None;
@@ -73,7 +74,11 @@ pub fn build(
     // disagree and the dashboard does not re-scan for them.
     let thresholds: Vec<rescore_dash::ThresholdRow> = qval_report
         .iter()
-        .map(|&(q, _total, targets, decoys)| rescore_dash::ThresholdRow { q, targets, decoys })
+        .map(|c| rescore_dash::ThresholdRow {
+            q: c.q,
+            targets: c.targets,
+            decoys: c.decoys,
+        })
         .collect();
     let matrix_mb = (matrix.len() * size_of::<f64>()) as f64 / (1024.0 * 1024.0);
     info!(
