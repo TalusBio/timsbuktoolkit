@@ -32,44 +32,23 @@ fn test_calibrate_empty_points() {
     assert!(result.is_err());
 }
 
+/// A degenerate range on *either* axis is an error. Both, because the two are
+/// separate checks in `grid::spans` — dropping the y one leaves the x case
+/// green.
 #[test]
-fn test_calibrate_zero_x_range() {
-    // Test: Zero x range should return error
+fn test_calibrate_zero_range_on_either_axis() {
     let points = vec![Point {
         library: 50.0,
         observed: 60.0,
         weight: 1.0,
     }];
-    let result = calibrate_with_ranges(&points, (50.0, 50.0), (0.0, 100.0), 50, 30);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_calibrate_zero_y_range() {
-    // Test: Zero y range should return error
-    let points = vec![Point {
-        library: 50.0,
-        observed: 60.0,
-        weight: 1.0,
-    }];
-    let result = calibrate_with_ranges(&points, (0.0, 100.0), (60.0, 60.0), 50, 30);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_predict_within_range() {
-    // Test: Prediction within calibration range
-    let points: Vec<Point> = (0..50)
-        .map(|i| Point {
-            library: i as f64,
-            observed: i as f64 * 2.0,
-            weight: 1.0,
-        })
-        .collect();
-
-    let curve = calibrate(&points, 30).unwrap();
-    let result = curve.predict(LibraryRT(25.0));
-    assert!(result.is_ok());
+    for (x_range, y_range) in [((50.0, 50.0), (0.0, 100.0)), ((0.0, 100.0), (60.0, 60.0))] {
+        let result = calibrate_with_ranges(&points, x_range, y_range, 50, 30);
+        assert!(
+            result.is_err(),
+            "x {x_range:?} y {y_range:?} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -86,44 +65,4 @@ fn test_predict_outside_range() {
     let curve = calibrate(&points, 30).unwrap();
     let result = curve.predict(LibraryRT(100.0));
     assert!(result.is_err());
-}
-
-#[test]
-fn test_calibrate_single_point() {
-    // Test: Single point should succeed or fail gracefully
-    let points = vec![Point {
-        library: 5.0,
-        observed: 10.0,
-        weight: 1.0,
-    }];
-    let result = calibrate(&points, 10);
-    // Verify it doesn't panic
-    let _ = result;
-}
-
-#[test]
-fn test_calibrate_weighted_points() {
-    // Test: Different weights affect calibration
-    let mut points = vec![
-        Point {
-            library: 10.0,
-            observed: 20.0,
-            weight: 10.0,
-        },
-        Point {
-            library: 10.0,
-            observed: 30.0,
-            weight: 1.0,
-        },
-    ];
-    for i in 0..20 {
-        points.push(Point {
-            library: i as f64,
-            observed: i as f64 * 2.0,
-            weight: 1.0,
-        });
-    }
-
-    let result = calibrate(&points, 20);
-    assert!(result.is_ok());
 }

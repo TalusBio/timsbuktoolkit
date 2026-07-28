@@ -11,6 +11,7 @@ Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flag
 | `timsquery_cli` | `timsquery_cli` | Low-level timsTOF query |
 | `speclib_build` | `speclib_build_cli` | Build speclib from FASTA via Koina |
 | `timsquery_viewer` | `timsquery_viewer` | GUI viewer for query results |
+| `calib_dash` | `calib_dash` | Replay a saved `calibration.json` in the RT-calibration dashboard |
 
 Run any with `--help` for the full flag list.
 
@@ -22,12 +23,13 @@ Run any with `--help` for the full flag list.
 | `instrumentation` | `timsseek_cli` / `timsseek` | `tracing-profile` perfetto spans | Perf tracing. **Requires `--no-default-features`** — the perfetto backend captures only the main thread, so rayon worker spans are dropped entirely. Run serial or traces for the hot path are empty. | `--features instrumentation --no-default-features` |
 | `track-alloc` | `timsseek_cli` | Global allocator tracking via `alloc_track` | Binary prints per-phase allocation deltas to stderr: `[alloc] <phase> d_bytes=... d_live=... churn=... peak=... hist=...`. Detect churn + memory regressions. Dev-only; do not ship. | `--features track-alloc` |
 | `dashboard` | `timsseek_cli` / `rescore_dash` | Ratatui TUI of a rescoring run: score separation, per-feature histograms, FDR and calibration curves | Interactive dev inspection. Dev-only; also needs `TIMSSEEK_RESCORE_DASHBOARD` at runtime (below). | `--features dashboard` |
+| `calib-dashboard` | `timsseek_cli` | Pulls in `calib_dash`, wiring an interactive terminal dashboard into Phase 1/2 of RT calibration | Step through Phase 1 prescore batches, watch the calibration curve/DP path converge, inspect the Phase 2 fit and derived tolerances. Does nothing on its own — also requires `TIMSSEEK_CALIB_DASHBOARD=1` at runtime (see Env vars). Dev-only; do not ship. | `--features calib-dashboard` |
 | `query-instr` | `timscentroid` | Per-peak atomic counters in `IndexedPeakGroup::for_each_peak` | Filter-funnel shape + pass rates. ~10× wall-time inflation — funnel counts only, not timing. | `-p timscentroid --features query-instr` |
 | `aws` / `gcp` / `azure` | `timscentroid` | `object_store` cloud backends | Read `.d` / speclib from cloud | `--features aws` (etc.) |
 
 ## Env vars
 
-Not shown by `--help`. Read directly via `std::env::var`.
+Not shown by `--help`. Read directly via `std::env::var` / `var_os`.
 
 | Env var | Binaries | Default | Purpose |
 |---------|----------|---------|---------|
@@ -35,6 +37,8 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
 | `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek`, built with `--features dashboard` | unset (off) | Any value but `0`/`false` opens the rescore dashboard TUI after the Phase 6 write; without `--features dashboard` the check is compiled out entirely. Warns and skips when stdout is not a terminal. Invocation: `cargo run -r --bin timsseek --features dashboard -- ...`. |
+| `TIMSSEEK_CALIB_DASHBOARD` | `timsseek_cli` | unset | Set to `1`, `true` or `yes` to open the interactive RT-calibration dashboard. Inert unless the binary was built `--features calib-dashboard`. |
+| `CALIB_DASH_FRAME_BUDGET_MB` | `timsseek_cli` | `64` | Caps the dashboard's retained-frame slab, in megabytes. |
 
 ## Taskfile
 
