@@ -1,0 +1,15 @@
+[package]
+name = "rescore_dash"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui = "0.29"
+rayon = { workspace = true }
+tracing = { workspace = true }
+
+# Do not add `alloc_track` as a dev-dependency: Cargo unifies dev-dependency
+# features workspace-wide, which turns its counters on inside `timsseek_cli`
+# and defeats that crate's `track-alloc` opt-in.

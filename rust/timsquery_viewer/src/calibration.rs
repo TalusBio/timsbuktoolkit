@@ -826,7 +826,7 @@ impl ViewerCalibrationState {
                     plot_ui.polygon(
                         Polygon::new(format!("cell_{i}"), PlotPoints::new(rect))
                             .fill_color(color)
-                            .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)),
+                            .stroke(egui::Stroke::new(0.0_f32, egui::Color32::TRANSPARENT)),
                     );
                 }
 
@@ -841,7 +841,7 @@ impl ViewerCalibrationState {
                     plot_ui.points(
                         Points::new("path", PlotPoints::new(path_pts))
                             .color(egui::Color32::from_rgb(50, 255, 50))
-                            .radius(5.0),
+                            .radius(5.0_f32),
                     );
                 }
 
@@ -868,7 +868,7 @@ impl ViewerCalibrationState {
                             plot_ui.line(
                                 Line::new("fitted curve", PlotPoints::new(interp_pts))
                                     .color(egui::Color32::from_rgb(0, 220, 220))
-                                    .width(2.0),
+                                    .width(2.0_f32),
                             );
                         }
 
@@ -896,7 +896,7 @@ impl ViewerCalibrationState {
                             plot_ui.line(
                                 Line::new("extrapolation (left)", PlotPoints::new(left_pts))
                                     .color(extrap_color)
-                                    .width(1.5)
+                                    .width(1.5_f32)
                                     .style(egui_plot::LineStyle::dashed_dense()),
                             );
                         }
@@ -912,7 +912,7 @@ impl ViewerCalibrationState {
                             plot_ui.line(
                                 Line::new("extrapolation (right)", PlotPoints::new(right_pts))
                                     .color(extrap_color)
-                                    .width(1.5)
+                                    .width(1.5_f32)
                                     .style(egui_plot::LineStyle::dashed_dense()),
                             );
                         }
@@ -950,7 +950,7 @@ impl ViewerCalibrationState {
                                 plot_ui.line(
                                     Line::new("ridge upper", PlotPoints::new(upper))
                                         .color(ridge_color)
-                                        .width(1.5)
+                                        .width(1.5_f32)
                                         .style(egui_plot::LineStyle::dashed_dense()),
                                 );
                             }
@@ -958,7 +958,7 @@ impl ViewerCalibrationState {
                                 plot_ui.line(
                                     Line::new("ridge lower", PlotPoints::new(lower))
                                         .color(ridge_color)
-                                        .width(1.5)
+                                        .width(1.5_f32)
                                         .style(egui_plot::LineStyle::dashed_dense()),
                                 );
                             }
@@ -973,7 +973,7 @@ impl ViewerCalibrationState {
                     plot_ui.vline(
                         VLine::new("library RT", lib_rt)
                             .color(egui::Color32::from_rgba_unmultiplied(255, 100, 100, 160))
-                            .width(1.5),
+                            .width(1.5_f32),
                     );
 
                     // If curve is fitted, show predicted RT + tolerance band
@@ -988,14 +988,14 @@ impl ViewerCalibrationState {
                         plot_ui.hline(
                             HLine::new("predicted RT", predicted_rt)
                                 .color(egui::Color32::from_rgba_unmultiplied(255, 100, 100, 160))
-                                .width(1.5),
+                                .width(1.5_f32),
                         );
 
                         // Crosshair point at (lib_rt, predicted_rt)
                         plot_ui.points(
                             Points::new("query", PlotPoints::new(vec![[lib_rt, predicted_rt]]))
                                 .color(egui::Color32::from_rgb(255, 80, 80))
-                                .radius(6.0),
+                                .radius(6.0_f32),
                         );
                     }
                 }
@@ -1011,7 +1011,7 @@ impl ViewerCalibrationState {
                 plot_ui.points(
                     Points::new("calibrants", PlotPoints::new(raw_pts))
                         .color(egui::Color32::from_rgb(70, 130, 230))
-                        .radius(3.0),
+                        .radius(3.0_f32),
                 );
             }
         });

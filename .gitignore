@@ -44,6 +44,9 @@ docs/superpowers/*
 .scratch/
 sh*/
 *plan*.md
+# Working notes and design docs
+dev/
+debug_*.md
 
 docs/superpowers/
 

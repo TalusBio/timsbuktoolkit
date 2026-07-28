@@ -2,7 +2,6 @@ version: "3"
 
 interval: 100ms
 
-# Include child Taskfiles
 includes:
   timsseek: ./rust/timsseek
 
@@ -14,6 +13,8 @@ tasks:
   test:
     cmds:
       - cargo test -- --nocapture
+      # Not a default member — that keeps ratatui out of a plain `cargo build`.
+      - cargo test -p rescore_dash -- --nocapture
       - uv run python -m pytest
 
   fmt:
@@ -24,6 +25,10 @@ tasks:
   clippy:
     cmds:
       - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
+      # Same: not a default member, so the line above never reaches it.
+      - cargo clippy -p rescore_dash --all-targets -- -D warnings
+      # dashboard.rs only exists under the opt-in feature; CI only `cargo check`s it.
+      - cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
 
   todos:
     cmds:

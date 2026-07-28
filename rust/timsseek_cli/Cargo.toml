@@ -10,6 +10,7 @@ timsquery = { path = "../timsquery" }
 timscentroid = { path = "../timscentroid" }
 tims_stage = { path = "../tims_stage" }
 alloc_track = { path = "../alloc_track" }
+rescore_dash = { path = "../rescore_dash", optional = true }
 tempfile = { workspace = true }
 
 regex = "1.11.1"
@@ -51,3 +52,8 @@ azure = ["tims_stage/azure", "timscentroid/azure"]
 # mzML/mzdata ingest (open-format raw input). On by default; drop with
 # `--no-default-features`.
 mzdata = ["timsseek/mzdata"]
+# Dev-only rescore dashboard (TIMSSEEK_RESCORE_DASHBOARD=1). Opt-in, like
+# `track-alloc`: enable explicitly with `--features dashboard` to pull in
+# `rescore_dash`/`ratatui`. Without this feature, `TIMSSEEK_RESCORE_DASHBOARD`
+# does nothing.
+dashboard = ["dep:rescore_dash"]

@@ -21,7 +21,10 @@ use timsquery::{
 };
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::errors::TimsSeekError;
-use timsseek::ml::qvalues::report_qvalues_at_thresholds;
+use timsseek::ml::qvalues::{
+    ThresholdCounts,
+    report_qvalues_at_thresholds,
+};
 use timsseek::ml::{
     RescoreFeatureStats,
     RescoreModel,
@@ -417,19 +420,28 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let mut targets_at_1pct_qval = 0usize;
     let mut targets_at_5pct_qval = 0usize;
     let mut targets_at_10pct_qval = 0usize;
-    for &(thresh, n_below_thresh, n_targets, n_decoys) in &qval_report {
+    for &ThresholdCounts { q, targets, decoys } in &qval_report {
         info!(
             "q-value threshold {:.2}: {} targets, {} decoys ({} total)",
-            thresh, n_targets, n_decoys, n_below_thresh
+            q,
+            targets,
+            decoys,
+            targets + decoys
         );
-        if (thresh - 0.01).abs() < 1e-6 {
-            targets_at_1pct_qval = n_targets;
-        } else if (thresh - 0.05).abs() < 1e-6 {
-            targets_at_5pct_qval = n_targets;
-        } else if (thresh - 0.10).abs() < 1e-6 {
-            targets_at_10pct_qval = n_targets;
+        if (q - 0.01).abs() < 1e-6 {
+            targets_at_1pct_qval = targets;
+        } else if (q - 0.05).abs() < 1e-6 {
+            targets_at_5pct_qval = targets;
+        } else if (q - 0.10).abs() < 1e-6 {
+            targets_at_10pct_qval = targets;
         }
     }
+
+    // Built BEFORE Phase 6, because the writer below consumes `data`. So the
+    // precompute — including its ~1 GB feature matrix — runs while nothing is
+    // on disk yet; only the blocking TUI is after the write.
+    #[cfg(feature = "dashboard")]
+    let dashboard = crate::dashboard::build(&data, &feature_stats, &qval_report);
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
@@ -463,6 +475,17 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     if !no_feature_stats && let Err(e) = write_feature_stats_sidecar(&feature_stats, &out_path_pq) {
         // Non-fatal: log and continue.
         tracing::warn!("Failed to write feature_stats sidecar: {}", e);
+    }
+
+    // After Phase 6, so a dashboard left open overnight — or killed — still has
+    // its results written.
+    // No `snap!` around this: it blocks until the user quits, so any measurement
+    // taken across it reports how long they looked at the screen.
+    #[cfg(feature = "dashboard")]
+    if let Some(dash) = dashboard
+        && let Err(e) = rescore_dash::run(dash)
+    {
+        tracing::warn!("rescore dashboard exited with an error: {e}");
     }
 
     // Key result to stdout. The final output URI is printed by main.rs

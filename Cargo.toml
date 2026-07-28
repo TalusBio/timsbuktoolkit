@@ -15,6 +15,7 @@ members = [
     "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros",
+    "rust/rescore_dash",
     "python/timsquery_pyo3"
 ]
 default-members = [
@@ -57,10 +58,8 @@ memmap2 = "0.9"
 clap = { version = "4.5.27", features = ["derive"] }
 indicatif = { version = "0.18.0", features = ["rayon"] }
 
-# Parquet and arrow usually need to be kept in sync.
-# arrow: drop csv/ipc/json default features — we don't read/write those formats.
-# parquet: keep default compression codecs (zstd/snap/lz4/brotli/flate2) so we can
-# read speclibs written with any of them.
+# Keep versions in sync. arrow drops csv/ipc/json; parquet keeps every codec so
+# any speclib reads.
 parquet_derive = { version = "57.1" }
 parquet = { version = "57.1" }
 arrow = { version = "57.1", default-features = false }
@@ -78,6 +77,11 @@ tempfile = "3.23.0"
 
 [workspace.lints.clippy]
 len_without_is_empty = "allow"
+
+[profile.dev]
+# Keeps `file:line` in backtraces at ~half the size of full debuginfo, which put
+# `target/debug` at 36 GB. Set `debug = true` for an lldb session.
+debug = "line-tables-only"
 
 [profile.release]
 lto = 'thin'

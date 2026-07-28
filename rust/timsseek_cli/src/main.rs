@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 mod errors;
 mod processing;
 

@@ -78,23 +78,32 @@ fn assign_qval<T: LabelledScore>(scores: &mut [T], key: impl Fn(&T) -> f32) {
     }
 }
 
+/// How many targets and decoys pass at one q-value cutoff.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThresholdCounts {
+    pub q: f32,
+    pub targets: usize,
+    pub decoys: usize,
+}
+
+/// Count the targets and decoys at or below each q-value threshold, one
+/// [`ThresholdCounts`] per threshold in the order given.
 pub fn report_qvalues_at_thresholds<T: LabelledScore + std::fmt::Debug>(
     scores: &[T],
     thresholds: &[f32],
-) -> Vec<(f32, usize, usize, usize)> {
+) -> Vec<ThresholdCounts> {
     let mut out = Vec::new();
 
-    for &thresh in thresholds {
-        let n_below_thresh = scores.iter().filter(|s| s.get_qval() <= thresh).count();
-        let n_targets = scores
+    for &q in thresholds {
+        let targets = scores
             .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Target))
+            .filter(|s| s.get_qval() <= q && matches!(s.get_label(), TargetDecoy::Target))
             .count();
-        let n_decoys = scores
+        let decoys = scores
             .iter()
-            .filter(|s| s.get_qval() <= thresh && matches!(s.get_label(), TargetDecoy::Decoy))
+            .filter(|s| s.get_qval() <= q && matches!(s.get_label(), TargetDecoy::Decoy))
             .count();
-        out.push((thresh, n_below_thresh, n_targets, n_decoys));
+        out.push(ThresholdCounts { q, targets, decoys });
     }
 
     out
@@ -292,7 +301,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     // lane-parity test).
     let names = all_feature_name_set();
     debug_assert_eq!(names.len(), ALL_NCOLS);
-    let feat = build_all_matrix(&data);
+    let feat = build_all_matrix(competed_rows(&data));
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ALL_NCOLS, responses);
 
@@ -624,22 +633,35 @@ const ALL_NCOLS: usize = LINEAR_NCOLS + NONLINEAR_NCOLS;
 const _: () = assert!(LINEAR_NCOLS > 0, "linear lane collapsed");
 const _: () = assert!(NONLINEAR_NCOLS > 0, "nonlinear lane collapsed");
 
-/// Append one candidate's LINEAR-lane row. `derived` is passed in rather than
+/// Append one row's LINEAR-lane values. `derived` is passed in rather than
 /// recomputed so the all-lane walk pays for `Derived::compute` once per row.
-fn push_linear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f64>) {
-    out.extend_from_slice(&c.scoring.linear_feature_array());
-    out.extend_from_slice(&c.result_meta().linear_feature_array());
+/// Takes the blocks rather than a candidate so that both `CompetedCandidate`
+/// (pre-rescore) and `FinalResult` (post-rescore) feed the SAME builder —
+/// there is exactly one definition of a feature row.
+fn push_linear_row(
+    scoring: &ScoringFields,
+    meta: &ResultMeta,
+    derived: &Derived,
+    out: &mut Vec<f64>,
+) {
+    out.extend_from_slice(&scoring.linear_feature_array());
+    out.extend_from_slice(&meta.linear_feature_array());
     out.extend_from_slice(&derived.linear_feature_array());
     // sequence_counts has NO linear lane (context features).
 }
 
-/// Append one candidate's NONLINEAR-lane row (see [`push_linear_row`]).
-fn push_nonlinear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f64>) {
-    out.extend_from_slice(&c.scoring.nonlinear_feature_array());
-    out.extend_from_slice(&c.result_meta().nonlinear_feature_array());
+/// Append one row's NONLINEAR-lane values (see [`push_linear_row`]).
+fn push_nonlinear_row(
+    scoring: &ScoringFields,
+    meta: &ResultMeta,
+    derived: &Derived,
+    out: &mut Vec<f64>,
+) {
+    out.extend_from_slice(&scoring.nonlinear_feature_array());
+    out.extend_from_slice(&meta.nonlinear_feature_array());
     out.extend_from_slice(&derived.nonlinear_feature_array());
     out.extend_from_slice(&sequence_counts::nonlinear_feature_array(
-        &c.scoring.identity.peptide,
+        &scoring.identity.peptide,
     ));
 }
 
@@ -648,7 +670,8 @@ fn push_nonlinear_row(c: &CompetedCandidate, derived: &Derived, out: &mut Vec<f6
 fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
     for c in data {
-        push_linear_row(c, &Derived::compute(&c.scoring), &mut out);
+        let meta = c.result_meta();
+        push_linear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -658,7 +681,8 @@ fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
     for c in data {
-        push_nonlinear_row(c, &Derived::compute(&c.scoring), &mut out);
+        let meta = c.result_meta();
+        push_nonlinear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
     }
     out
 }
@@ -666,16 +690,38 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// The ALL-lane matrix (linear then nonlinear, per row) — the GBM feature set,
 /// `ALL_NCOLS` wide, matching [`all_feature_name_set`]'s order.
 ///
-/// ONE pass over `data` with ONE `Derived::compute` per row: the two lanes are
+/// ONE pass over `rows` with ONE `Derived::compute` per row: the two lanes are
 /// adjacent within a row, so there is nothing to gain from walking twice.
-fn build_all_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(data.len() * ALL_NCOLS);
-    for c in data {
-        let derived = Derived::compute(&c.scoring);
-        push_linear_row(c, &derived, &mut out);
-        push_nonlinear_row(c, &derived, &mut out);
+///
+/// Takes `(scoring, meta)` pairs rather than a row type, because both sides of
+/// rescoring feed it and they agree on nothing else. See [`competed_rows`] for
+/// the pre-rescore side and [`feature_frame`] for the post-rescore one.
+fn build_all_matrix<'a>(
+    rows: impl ExactSizeIterator<Item = (&'a ScoringFields, ResultMeta)>,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(rows.len() * ALL_NCOLS);
+    for (s, meta) in rows {
+        let derived = Derived::compute(s);
+        push_linear_row(s, &meta, &derived, &mut out);
+        push_nonlinear_row(s, &meta, &derived, &mut out);
     }
     out
+}
+
+/// Competed candidates in the shape [`build_all_matrix`] consumes.
+fn competed_rows(
+    data: &[CompetedCandidate],
+) -> impl ExactSizeIterator<Item = (&ScoringFields, ResultMeta)> {
+    data.iter().map(|c| (&c.scoring, c.result_meta()))
+}
+
+/// The ALL-lane feature names + matrix for post-rescore rows: the dashboard's
+/// entry point.
+///
+/// Row-major: value `j` of row `i` is at `matrix[i * names.len() + j]`.
+pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
+    let rows = data.iter().map(|r| (&r.scoring, r.result_meta()));
+    (all_feature_name_set(), build_all_matrix(rows))
 }
 
 /// LINEAR-lane feature names (LDA), in [`push_linear_row`]'s order.
@@ -937,7 +983,7 @@ mod feature_tests {
 
             assert_eq!(build_linear_matrix(&data).len(), LINEAR_NCOLS);
             assert_eq!(build_nonlinear_matrix(&data).len(), NONLINEAR_NCOLS);
-            assert_eq!(build_all_matrix(&data).len(), ALL_NCOLS);
+            assert_eq!(build_all_matrix(competed_rows(&data)).len(), ALL_NCOLS);
         }
     }
 
@@ -952,7 +998,7 @@ mod feature_tests {
         ];
         let lin = build_linear_matrix(&data);
         let nl = build_nonlinear_matrix(&data);
-        let all = build_all_matrix(&data);
+        let all = build_all_matrix(competed_rows(&data));
 
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         for i in 0..data.len() {
@@ -1224,11 +1270,11 @@ mod feature_tests {
         //       never NaN, so demanding NaN there would be wrong);
         //   (b) every non-mobility feature is bit-for-bit unchanged. Without (b)
         //       an impl that NaN'd the whole record would pass (a).
-        let before = build_all_matrix(&[sample_competed_candidate_parsed()]);
+        let before = build_all_matrix(competed_rows(&[sample_competed_candidate_parsed()]));
 
         let mut cand = sample_competed_candidate_parsed();
         cand.scoring.neutralize_mobility();
-        let after = build_all_matrix(&[cand]);
+        let after = build_all_matrix(competed_rows(&[cand]));
 
         let names = all_feature_name_set();
         assert_eq!(names.len(), ALL_NCOLS);
@@ -1275,5 +1321,41 @@ mod feature_tests {
             finite_non_mob > 20,
             "non-mobility features must stay finite, got {finite_non_mob}"
         );
+    }
+
+    /// Row-major layout: value `j` of row `i` lives at `matrix[i * nf + j]`.
+    ///
+    /// Every consumer indexes on that contract — `rescore_dash` sweeps the
+    /// matrix a row at a time with every column's accumulator live, so an
+    /// interleaved or transposed write would silently mix features together
+    /// rather than fail. Rows carry distinct `delta_group` values so the
+    /// assertion can tell them apart; a length check alone passes even when
+    /// the layout is wrong.
+    #[test]
+    fn feature_frame_rows_are_contiguous() {
+        let rows: Vec<_> = [1.0f32, 2.0, 3.0]
+            .into_iter()
+            .map(|delta_group| {
+                let mut c = sample_competed_candidate_parsed();
+                c.delta_group = delta_group;
+                c.into_final()
+            })
+            .collect();
+
+        let (names, got) = feature_frame(&rows);
+        let nf = names.len();
+        assert_eq!(got.len(), rows.len() * nf, "one value per name per row");
+
+        let j = names
+            .iter()
+            .position(|n| &**n == "delta_group")
+            .expect("delta_group is an ALL-lane feature");
+        for (i, expected) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
+            assert_eq!(
+                got[i * nf + j],
+                expected,
+                "row {i}'s delta_group is not at matrix[{i} * {nf} + {j}]"
+            );
+        }
     }
 }

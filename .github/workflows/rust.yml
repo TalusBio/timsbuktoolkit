@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
 
 jobs:
   build:
@@ -21,30 +22,45 @@ jobs:
           - "--no-default-features"  # serial
     steps:
       - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          # Per leg: the two resolve different features and would thrash one entry.
+          cache-key: ${{ matrix.features }}
+          # This action defaults to `-D warnings`; `task clippy` owns that.
+          rustflags: ''
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests
         run: cargo test --verbose -p timsseek ${{ matrix.features }}
-      # Raw-reader / staging / mzML-ingest coverage. Run once (default matrix
-      # leg): timsseek alone doesn't exercise timscentroid's mzdata ingest,
-      # tims_stage manifest staging, or the timsquery mobility gate.
+      # timsseek alone misses timscentroid's mzdata ingest, tims_stage staging
+      # and the timsquery mobility gate.
       - name: Run reader + staging tests (mzdata)
         if: matrix.features == ''
         run: |
           cargo test -p timscentroid --features mzdata
           cargo test -p tims_stage -p timsquery
 
-  # CLI / simulator / macro crates, which the timsseek matrix above never
-  # touches: timsseek_cli's config drift guards live in its bin target,
-  # apex_sim's tests in its lib (default features, so the gui-gated modules
-  # compile too), timsseek_macros' in its proc-macro lib.
-  # `--all-targets` so examples are compiled as well — examples going unbuilt
-  # is what let `timsseek_cli/examples/load_bench.rs` rot undetected.
+  # Crates the timsseek matrix above never compiles. `--all-targets` so examples
+  # are built too — that is what let `timsseek_cli/examples/load_bench.rs` rot.
   cli-and-sim:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          # Bump when the `-p` list changes: the key ignores it, so a widened
+          # build hits the old key and rust-cache saves nothing.
+          cache-key: pkgs-cli-sim-viewer
+          # This action defaults to `-D warnings`; `task clippy` owns that.
+          rustflags: ''
       - name: Build
-        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros
+        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
       - name: Run tests
-        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros --all-targets
+        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
+      # Opt-in, so these call sites compile under no other leg.
+      - name: Type-check (dashboard feature)
+        run: cargo check -p timsseek_cli --features dashboard --all-targets
