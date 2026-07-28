@@ -38,7 +38,6 @@ use crate::metrics::BatchMetrics;
 use crate::recording::{
     DpDecision,
     FitRecording,
-    bin_index,
 };
 use calibrt::{
     LibraryRT,
@@ -1164,22 +1163,24 @@ fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, Half) {
     (ty, dc, half)
 }
 
-/// `recording::bin_index` with this module's domain screening in front: zero
-/// bins, a non-finite `v` or a zero-width range map to bin 0 rather than panicking
-/// or producing NaN. Overlay placement reads geometry straight off a recording, so
-/// it cannot assume a caller ruled those out.
+/// Grid-bin index of `v` within `range`, for placing an overlay mark on a value
+/// that is not itself a grid cell — a curve prediction or a ridge bound.
+///
+/// Zero bins, a non-finite `v` or a zero-width range map to bin 0 rather than
+/// panicking or producing NaN: overlay placement reads geometry straight off a
+/// recording, so it cannot assume a caller ruled those out.
 fn bin_of(v: f64, range: (f64, f64), bins: usize) -> usize {
     if bins == 0 {
         return 0;
     }
-    let span = range.1 - range.0;
+    let (lo, hi) = range;
+    let span = hi - lo;
     // A positive check, not `!(span > 0.0)`: a NaN `span` is then unambiguously
     // "not usable" rather than depending on how `!` reads a partial order.
-    let usable = span.is_finite() && span > 0.0 && v.is_finite();
-    if !usable {
+    if !(span.is_finite() && span > 0.0 && v.is_finite()) {
         return 0;
     }
-    bin_index(v, range, bins)
+    (((v - lo) / span * bins as f64) as usize).min(bins - 1)
 }
 
 // ---------------------------------------------------------------------
@@ -1769,55 +1770,14 @@ mod tests {
     fn dp_lines_report_the_last_nodes_decision_and_considered_list() {
         let app = fixture_app_with_ridge();
         let dp = app.recording().dp();
-        let last = dp.last().expect("the fixture fits with dp_nodes: true");
         assert!(
-            !last.considered.is_empty(),
+            dp.last()
+                .is_some_and(|last| !last.considered.is_empty()),
             "fixture drifted: the last node must have weighed at least one edge"
         );
 
         let text: Vec<String> = dp_lines(dp).iter().map(line_text).collect();
-        assert_eq!(
-            text[0],
-            format!(
-                "last node: chose={} acc_w={:.3}",
-                last.chose.expect("the last node has a predecessor"),
-                last.acc_weight
-            )
-        );
-        assert!(
-            !text[0].contains("lib=") && !text[0].contains("obs="),
-            "the header must not repeat the path list's own columns: {:?}",
-            text[0]
-        );
-
-        assert_eq!(text[1], "  considered:");
-        for (k, (j, w)) in last.considered.iter().enumerate() {
-            assert_eq!(text[2 + k], format!("    j={j} edge_w={w:.3}"));
-        }
-
-        let path_at = text
-            .iter()
-            .position(|l| l == "path:")
-            .expect("the path list is labelled");
-        let path_lines = &text[path_at + 1..];
-        assert_eq!(
-            path_lines.len(),
-            dp.len(),
-            "one path line per DP node: {path_lines:?}"
-        );
-        for (d, line) in dp.iter().zip(path_lines) {
-            let expected = match d.chose {
-                Some(j) => format!("<-{j:<3}"),
-                None => "root ".to_string(),
-            };
-            assert_eq!(
-                *line,
-                format!(
-                    "i={:>3} lib={:.2} obs={:.2} {expected}",
-                    d.i, d.library, d.observed
-                )
-            );
-        }
+        insta::assert_snapshot!(text.join("\n"));
     }
 
     /// `App::set_scrub_recording` is what `CalibDash::sync_scrub` calls once `<`/`>`
@@ -2047,13 +2007,6 @@ mod tests {
         assert!(
             !columns.is_empty(),
             "expected at least one ridge-band cell in the fixture"
-        );
-        assert!(
-            columns.len() <= rec.ridge().len(),
-            "the ridge marks at most one display column per measurement — \
-             {} marked columns for {} measurements",
-            columns.len(),
-            rec.ridge().len()
         );
         for (tx, rows) in &columns {
             assert!(

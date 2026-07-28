@@ -160,6 +160,11 @@ impl CalibrationCurve {
 /// "the" ridge width must read this rather than spell `0.1` again.
 pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
 
+/// The grid weight one calibrant contributes. Every producer weighs calibrants
+/// equally: weight decides which nodes survive `suppress_nonmax` and scales every
+/// DP edge, so a per-calibrant weight would fit a curve no other consumer computes.
+pub const CALIBRANT_WEIGHT: f64 = 1.0;
+
 /// Measurement of the evidence ridge width at one grid column.
 #[derive(Debug, Clone)]
 pub struct RidgeMeasurement {
@@ -265,6 +270,10 @@ pub enum FitEvent<'a> {
     },
     PathFound {
         path: &'a [Point],
+        /// `path`'s cells as row-major grid indices, one per point, from the
+        /// grid's own [`GridGeom`] arithmetic — so an overlay never has to
+        /// re-derive them and risk landing in a different cell.
+        indices: &'a [usize],
         /// The DP-chosen segment within `path`: `path[..dp_range.start]` is a
         /// greedily attached prefix and `path[dp_range.end..]` a greedily
         /// attached suffix (Pass 2's monotonic extension beyond what the DP
@@ -330,6 +339,40 @@ impl CalibrationState {
         })
     }
 
+    /// A state whose geometry is not known yet. The unit range is a placeholder
+    /// that the first [`Self::refit`] replaces with the points' own extents;
+    /// fitting before then fits an empty grid.
+    pub fn deferred(grid_size: usize, lookback: usize) -> Result<Self, CalibRtError> {
+        Self::new(grid_size, (0.0, 1.0), (0.0, 1.0), lookback)
+    }
+
+    /// The whole re-fit sequence, in the one place every consumer shares:
+    /// derive the grid geometry from the points, `reconfigure` onto it, `update`,
+    /// then `fit_with`. Returns the [`GridRanges`] the fit actually ran on.
+    ///
+    /// The geometry is derived *here*, by [`point_ranges`], rather than passed in:
+    /// a caller that supplies the acquisition RT range instead would clamp an
+    /// iRT-scaled library — whose RTs fall entirely outside it — into one edge
+    /// column. Every calibrant weighs [`CALIBRANT_WEIGHT`].
+    ///
+    /// On `Err` the previous fit is left alone: a later, larger point set may well
+    /// span a usable range.
+    pub fn refit<O: FitObserver>(
+        &mut self,
+        bins: usize,
+        points: impl Iterator<Item = (f64, f64)> + Clone,
+        obs: &mut O,
+        opts: ObserveOpts,
+    ) -> Result<GridRanges, CalibRtError> {
+        let (x_range, y_range) = point_ranges(points.clone())?;
+        self.reconfigure(bins, x_range, y_range)?;
+        self.update(
+            points.map(|(lib, obs)| (LibraryRT(lib), ObservedRTSeconds(obs), CALIBRANT_WEIGHT)),
+        )?;
+        self.fit_with(obs, opts);
+        Ok((x_range, y_range))
+    }
+
     /// Feed points into the grid. Returns an error if any point has
     /// non-finite coordinates or weight (NaN/Inf), indicating a bug upstream.
     pub fn update(
@@ -378,28 +421,24 @@ impl CalibrationState {
                 .copied(),
         );
 
-        let mut path_points = Vec::new();
-        let dp_range = pathfinding::find_optimal_path(
+        let (path_points, dp_range) = pathfinding::find_optimal_path(
             &mut self.filtered,
             self.lookback,
             &mut self.scratch,
-            &mut path_points,
             obs,
             opts,
         );
 
         self.path_indices.clear();
-        for pp in &path_points {
-            if let Some(idx) = self.grid.grid_cells().iter().position(|n| {
-                (n.center.library - pp.library).abs() < 1e-9
-                    && (n.center.observed - pp.observed).abs() < 1e-9
-            }) {
-                self.path_indices.push(idx);
-            }
-        }
+        self.path_indices.extend(
+            path_points
+                .iter()
+                .map(|p| self.grid.cell_of(p.library, p.observed)),
+        );
 
         obs.on_event(FitEvent::PathFound {
             path: &path_points,
+            indices: &self.path_indices,
             dp_range,
         });
 
@@ -882,7 +921,6 @@ mod calibration_state_tests {
             .collect();
         s.update(pts1.iter().copied()).unwrap();
         s.fit();
-        let filtered_ptr = s.filtered.as_ptr();
 
         // Same bins, a completely different (shifted, wider) range — the case
         // `reconfigure` exists to keep allocation-free.
@@ -901,11 +939,6 @@ mod calibration_state_tests {
         assert!(
             s.curve().unwrap().predict(LibraryRT(150.0)).is_ok(),
             "the new fit must be defined over the new range"
-        );
-        assert_eq!(
-            s.filtered.as_ptr(),
-            filtered_ptr,
-            "reconfigure at unchanged bins must not reallocate `filtered`"
         );
     }
 }

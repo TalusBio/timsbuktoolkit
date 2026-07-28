@@ -2,8 +2,6 @@
 //!
 //! `weights` are `f32` for storage and display only — every metric is computed
 //! from the `f64` values in the live events, never from this downcast copy.
-//! At `bins = 100` a recording is ~50 KB; the `Grid` the fit already holds is
-//! ~40 bytes per cell, so this is roughly a tenth of what the fit itself spends.
 
 use calibrt::{
     CalibrationCurve,
@@ -28,10 +26,9 @@ pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
     suppressed: Vec<bool>,
-    /// Grid indices of the assembled path (DP chain plus greedy tails). The
-    /// `bins` capacity is a hint, not a bound — weight ties can push the
-    /// survivor count past it, as `calibrt`'s survivor debug assert spells
-    /// out. Growing past a hinted capacity is a reallocation, not a bug.
+    /// Grid indices of the assembled path (DP chain plus greedy tails), as
+    /// `calibrt` reported them. The `bins` capacity is a hint, not a bound —
+    /// weight ties can push the survivor count past it.
     path_indices: Vec<usize>,
     /// The DP-chosen segment within `path_indices`: `path_indices[..dp_range.start]`
     /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
@@ -108,20 +105,6 @@ impl FitRecording {
     }
 }
 
-/// Grid-bin index of `v` within `range`, at `bins` bins: the one place the
-/// value-to-bin arithmetic is written, shared by `FitRecording`'s own
-/// row/column placement and by `ui.rs`'s overlay placement, so a mark can
-/// never land in a different bin than the weight it is marking.
-///
-/// Callers own the domain: `bins` must be nonzero and `range` a finite,
-/// positive-width span. `ui.rs`'s `bin_of` wrapper is what screens for those
-/// before calling in.
-pub(crate) fn bin_index(v: f64, range: (f64, f64), bins: usize) -> usize {
-    let (lo, hi) = range;
-    let span = hi - lo;
-    (((v - lo) / span * bins as f64) as usize).min(bins - 1)
-}
-
 impl FitObserver for FitRecording {
     fn on_event(&mut self, ev: FitEvent<'_>) {
         match ev {
@@ -169,18 +152,15 @@ impl FitObserver for FitRecording {
                     considered: considered.to_vec(),
                 });
             }
-            FitEvent::PathFound { path, dp_range, .. } => {
+            FitEvent::PathFound {
+                indices, dp_range, ..
+            } => {
                 debug_assert!(
-                    dp_range.end <= path.len(),
+                    dp_range.end <= indices.len(),
                     "dp_range must fall within the assembled path"
                 );
                 self.dp_range = dp_range;
-                // path_indices are grid indices, derived from the point's cell.
-                for p in path {
-                    let col = bin_index(p.library, self.geom.x_range, self.geom.bins);
-                    let row = bin_index(p.observed, self.geom.y_range, self.geom.bins);
-                    self.path_indices.push(row * self.geom.bins + col);
-                }
+                self.path_indices.extend_from_slice(indices);
             }
             FitEvent::CurveFit { curve } => self.curve = Some(curve.clone()),
             FitEvent::RidgeMeasured { widths } => self.ridge.extend_from_slice(widths),

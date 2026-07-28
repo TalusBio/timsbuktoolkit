@@ -60,6 +60,16 @@ impl Grid {
         Ok(grid)
     }
 
+    /// Row-major index of the cell holding `(library, observed)`, clamped to the
+    /// grid. The one place the value-to-cell arithmetic lives: point insertion and
+    /// path-index reporting must agree on it, or an overlay marks a different cell
+    /// than the weight it came from.
+    pub(crate) fn cell_of(&self, library: f64, observed: f64) -> usize {
+        let gx = (((library - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
+        let gy = (((observed - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
+        gy.min(self.bins - 1) * self.bins + gx.min(self.bins - 1)
+    }
+
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
     pub(crate) fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
         let Point {
@@ -72,13 +82,7 @@ impl Grid {
             return Err(CalibRtError::UnsupportedWeight(*weight));
         }
 
-        let gx = (((library - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
-        let gy = (((observed - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
-
-        let gx = gx.min(self.bins - 1);
-        let gy = gy.min(self.bins - 1);
-
-        let index = gy * self.bins + gx;
+        let index = self.cell_of(*library, *observed);
         if let Some(node) = self.nodes.get_mut(index) {
             node.center.weight += weight;
             node.sum_wx += library * weight;

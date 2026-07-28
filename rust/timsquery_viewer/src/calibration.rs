@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use calibrt::{
+    CALIBRANT_WEIGHT,
     CalibrationState,
     DEFAULT_RIDGE_FRACTION,
     LibraryRT,
@@ -73,10 +74,6 @@ const DEFAULT_GRID_SIZE: usize = 100;
 
 /// Default DP lookback for calibrt pathfinding.
 const DEFAULT_LOOKBACK: usize = 30;
-
-/// Grid weight every calibrant gets, matching Step A in
-/// `timsseek_cli::processing`, which weighs calibrants equally rather than by score.
-const CALIBRANT_WEIGHT: f64 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -392,58 +389,41 @@ impl ViewerCalibrationState {
         changed
     }
 
-    /// Re-fit the curve to `self.snapshot_points`, on a grid the points
-    /// themselves span — library RTs on x, observed on y — as production does
-    /// (`timsseek_cli::processing::calibrate_from_phase1`) and as this viewer's
-    /// own reload path does (`calibrt::CalibrationState::from_snapshot`). The
-    /// file's acquisition RT range would clamp an iRT-scaled library, whose RTs
-    /// fall entirely outside it, into a single edge column.
+    /// Re-fit the curve to `self.snapshot_points`, on a grid the points themselves
+    /// span rather than the file's acquisition RT range — which would clamp an
+    /// iRT-scaled library, whose RTs fall entirely outside it, into one edge column.
     ///
-    /// A geometry the points cannot support leaves the previous fit alone: a
-    /// later snapshot with more calibrants may well span a usable range.
+    /// A geometry the points cannot support leaves the previous fit alone: a later
+    /// snapshot with more calibrants may well span a usable range.
     fn refit(&mut self) {
-        let ranges = calibrt::point_ranges(
-            self.snapshot_points
-                .iter()
-                .map(|&(lib_rt, apex_rt)| (lib_rt.0, apex_rt.0)),
-        );
-        let (x_range, y_range) = match ranges {
-            Ok(ranges) => ranges,
-            Err(e) => {
-                let n = self.snapshot_points.len();
-                tracing::warn!("Calibration refit skipped: {n} points span no grid: {e:?}");
-                return;
-            }
-        };
-
-        // `reconfigure` is the single geometry setter — it reuses the allocation
-        // at unchanged bins, and re-setting the geometry a just-built state
-        // already has is free.
         let bins = self
             .calibration_state
             .as_ref()
             .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins);
-        if self.calibration_state.is_none() {
-            self.calibration_state =
-                CalibrationState::new(bins, x_range, y_range, DEFAULT_LOOKBACK).ok();
-        }
-        let Some(cs) = self.calibration_state.as_mut() else {
-            tracing::warn!("Calibration refit skipped: no grid over x={x_range:?} y={y_range:?}");
-            return;
+        let cs = match self.calibration_state.as_mut() {
+            Some(cs) => cs,
+            None => match CalibrationState::deferred(bins, DEFAULT_LOOKBACK) {
+                Ok(cs) => self.calibration_state.insert(cs),
+                Err(e) => {
+                    tracing::warn!("Calibration refit skipped: no grid at {bins} bins: {e:?}");
+                    return;
+                }
+            },
         };
-        if let Err(e) = cs.reconfigure(bins, x_range, y_range) {
-            tracing::warn!("Calibration refit skipped: grid rejected: {e:?}");
-            return;
-        }
 
-        if let Err(e) = cs.update(
-            self.snapshot_points
-                .iter()
-                .map(|&(lib_rt, apex_rt)| (lib_rt, apex_rt, CALIBRANT_WEIGHT)),
-        ) {
-            tracing::warn!("Calibration update rejected points: {e:?}");
-        }
-        cs.fit();
+        let points = self
+            .snapshot_points
+            .iter()
+            .map(|&(lib_rt, apex_rt)| (lib_rt.0, apex_rt.0));
+        let (x_range, y_range) = match cs.refit(bins, points, &mut (), calibrt::ObserveOpts::NONE) {
+            Ok(ranges) => ranges,
+            Err(e) => {
+                let n = self.snapshot_points.len();
+                tracing::warn!("Calibration refit skipped over {n} points: {e:?}");
+                return;
+            }
+        };
+
         let n_retained = cs
             .grid_cells()
             .iter()
@@ -1087,9 +1067,6 @@ impl ViewerCalibrationState {
                     ui.label(format!(
                         "RT tol (fallback): \u{00B1}{rt_min:.2} min, uniform over all queries",
                     ));
-                    // This button only writes the uniform scalar, not the ridge
-                    // half-width at each query's own library RT — what
-                    // `timsseek::rt_calibration::get_tolerance` does.
                     if ui.button("Apply").clicked() {
                         let rt_tol = rt_min as f32;
                         tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));

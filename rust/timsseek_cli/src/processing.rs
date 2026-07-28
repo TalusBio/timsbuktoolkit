@@ -31,6 +31,7 @@ use timsseek::ml::{
     rescore_with,
 };
 use timsseek::rt_calibration::{
+    CALIBRANT_WEIGHT,
     CalibRtError,
     CalibratedGrid,
     CalibrationResult,
@@ -41,10 +42,8 @@ use timsseek::rt_calibration::{
     FitObserver,
     LibraryRT,
     ObserveOpts,
-    ObservedRTSeconds,
     Point,
     RidgeSummary,
-    point_ranges,
     ridge_half_width_interp,
 };
 use timsseek::scoring::offsets::MzMobilityOffsets;
@@ -85,7 +84,6 @@ mod calib_dash_hook {
         CalibrantCandidate,
         CalibrationConfig,
         CalibrationResult,
-        FitObserver,
     };
 
     pub use arm::*;
@@ -96,10 +94,12 @@ mod calib_dash_hook {
             CalibrantCandidate,
             CalibrationConfig,
             CalibrationResult,
-            FitObserver,
         };
         use std::io::IsTerminal;
-        use timsseek::rt_calibration::FitEvent;
+        use timsseek::rt_calibration::{
+            FitEvent,
+            FitObserver,
+        };
 
         /// The dashboard for a whole run. Stays `None` inside unless
         /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
@@ -245,24 +245,18 @@ mod calib_dash_hook {
             CalibrantCandidate,
             CalibrationConfig,
             CalibrationResult,
-            FitObserver,
         };
-        use timsseek::rt_calibration::FitEvent;
 
         pub struct Dash;
-        pub struct Recording;
 
-        impl FitObserver for Recording {
-            fn on_event(&mut self, _: FitEvent<'_>) {}
-        }
+        /// `calibrt` already implements `FitObserver` for `()` as its no-op.
+        pub type Recording = ();
 
         pub fn attach(_n_chunks: usize, _config: &CalibrationConfig) -> Dash {
             Dash
         }
 
-        pub fn start_recording(_dash: &Dash, _config: &CalibrationConfig) -> Recording {
-            Recording
-        }
+        pub fn start_recording(_dash: &Dash, _config: &CalibrationConfig) -> Recording {}
 
         pub fn on_batch<'a>(
             _dash: &mut Dash,
@@ -502,6 +496,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
+    // Unit-valued with the feature off, where `Recording` is calibrt's no-op `()`.
+    #[allow(clippy::let_unit_value)]
     let mut phase2_recording = calib_dash_hook::start_recording(&calib_dash_state, calib_config);
     let calibration = match calibrate_from_phase1(
         calibrants,
@@ -793,13 +789,13 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-fn calibrate_from_phase1<I: ScorerQueriable>(
+fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &Speclib,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-    dash_recording: &mut calib_dash_hook::Recording,
+    observer: &mut O,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
@@ -853,7 +849,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
             Some(Point {
                 library: lib_rt,
                 observed: c.apex_rt.0 as f64,
-                weight: 1.0,
+                weight: CALIBRANT_WEIGHT,
             })
         })
         .collect();
@@ -888,23 +884,18 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         }
     }
 
-    let (x_range, y_range) = point_ranges(points.iter().map(|p| (p.library, p.observed)))?;
-
     // Use CalibrationState for fitting + ridge width measurement
-    let mut cal_state =
-        CalibratedGrid::new(config.grid_size, x_range, y_range, config.dp_lookback)?;
-    cal_state.update(points.iter().map(|p| {
-        (
-            LibraryRT(p.library),
-            ObservedRTSeconds(p.observed),
-            p.weight,
-        )
-    }))?;
-    cal_state.fit_with(dash_recording, ObserveOpts::NONE);
+    let mut cal_state = CalibratedGrid::deferred(config.grid_size, config.dp_lookback)?;
+    cal_state.refit(
+        config.grid_size,
+        points.iter().map(|p| (p.library, p.observed)),
+        observer,
+        ObserveOpts::NONE,
+    )?;
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
     // Measure ridge width for position-dependent RT tolerance.
-    let ridge_widths = cal_state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, dash_recording);
+    let ridge_widths = cal_state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, observer);
     if let Some(s) = RidgeSummary::of(&ridge_widths) {
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",

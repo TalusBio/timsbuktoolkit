@@ -6,18 +6,16 @@
 /// Distances smaller than this are treated as degenerate to avoid numerical instability.
 const DISTANCE_THRESHOLD: f64 = 1e-6;
 
-/// The scratch buffers `find_optimal_path` reuses across calls, grouped so the
-/// function itself doesn't take one parameter per buffer. Each one is cleared
-/// and refilled, so these buffers stop reallocating once the problem size
-/// settles — the caller's `out_path` is a separate allocation.
+/// The scratch buffers `find_optimal_path` reuses across calls. Each one is
+/// cleared and refilled, so they stop reallocating once the problem size settles.
 #[derive(Default)]
 pub(crate) struct PathfindingScratch {
     pub max_weights: Vec<f64>,
     pub prev_node_indices: Vec<Option<usize>>,
     /// Filled only when `ObserveOpts::dp_nodes` is set.
     pub considered: Vec<(usize, f64)>,
-    /// The DP chain, drained into the caller's `out_path` once Pass 2 has laid
-    /// the greedy prefix down ahead of it.
+    /// The DP chain, appended to the assembled path once Pass 2 has laid the
+    /// greedy prefix down ahead of it.
     pub path: Vec<crate::Point>,
 }
 
@@ -40,19 +38,19 @@ impl PathfindingScratch {
 /// - Edges exist only between nodes where both x and y increase (monotonic constraint)
 /// - Edge weights favor high-confidence nodes that are geometrically close
 ///
-/// Writes the assembled path (DP chain plus any greedily-attached prefix/suffix,
-/// see Pass 2 below) into `out_path`, clearing it first. Returns the
-/// index range within that path the DP itself chose (`path[..range.start]`
-/// and `path[range.end..]` are the greedy tails).
+/// Returns the assembled path (DP chain plus any greedily-attached prefix/suffix,
+/// see Pass 2 below) and the index range within it the DP itself chose
+/// (`path[..range.start]` and `path[range.end..]` are the greedy tails).
 pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
     scratch: &mut PathfindingScratch,
-    out_path: &mut Vec<crate::Point>,
     obs: &mut O,
     opts: crate::ObserveOpts,
-) -> std::ops::Range<usize> {
-    out_path.clear();
+) -> (Vec<crate::Point>, std::ops::Range<usize>) {
+    if nodes.is_empty() {
+        return (Vec::new(), 0..0);
+    }
     scratch.begin(nodes.len());
     let PathfindingScratch {
         max_weights,
@@ -60,9 +58,7 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
         considered,
         path,
     } = scratch;
-    if nodes.is_empty() {
-        return 0..0;
-    }
+    let mut out_path = Vec::new();
 
     // Sort nodes primarily by x, then by y to process them in order for DAG pathfinding.
     // This ensures we can use dynamic programming: when processing node i, all potential
@@ -142,9 +138,7 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     }
     path.reverse();
 
-    if path.is_empty() {
-        return 0..0;
-    }
+    // At least `end_of_path_idx` was pushed, so the DP chain is never empty here.
     let dp_len = path.len();
 
     // Pass 2: Greedily extend the path beyond the DP endpoints.
@@ -201,7 +195,7 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
         }
     }
 
-    dp_range
+    (out_path, dp_range)
 }
 
 #[cfg(test)]
@@ -252,16 +246,9 @@ mod tests {
             .map(|(i, w)| diag_node(i, w))
             .collect();
         let mut scratch = PathfindingScratch::default();
-        let mut path = Vec::new();
 
-        let dp_range = find_optimal_path(
-            &mut nodes,
-            5,
-            &mut scratch,
-            &mut path,
-            &mut (),
-            ObserveOpts::NONE,
-        );
+        let (path, dp_range) =
+            find_optimal_path(&mut nodes, 5, &mut scratch, &mut (), ObserveOpts::NONE);
 
         assert_eq!(
             path.len(),
@@ -296,16 +283,9 @@ mod tests {
             node_at(4.5, 4.5, 0.5), // the stray
         ];
         let mut scratch = PathfindingScratch::default();
-        let mut path = Vec::new();
 
-        let dp_range = find_optimal_path(
-            &mut nodes,
-            1,
-            &mut scratch,
-            &mut path,
-            &mut (),
-            ObserveOpts::NONE,
-        );
+        let (path, dp_range) =
+            find_optimal_path(&mut nodes, 1, &mut scratch, &mut (), ObserveOpts::NONE);
 
         assert_eq!(
             path.len(),

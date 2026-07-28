@@ -1,6 +1,7 @@
 use crate::ScorerQueriable;
 use crate::scoring::pipeline::Scorer;
 pub use calibrt::{
+    CALIBRANT_WEIGHT,
     CalibRtError,
     CalibrationCurve as RTCalibration,
     CalibrationSnapshot,

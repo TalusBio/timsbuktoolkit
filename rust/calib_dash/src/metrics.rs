@@ -1,9 +1,7 @@
-//! Per-batch convergence metrics: the series a future early-stopping rule
-//! would threshold on.
+//! Per-batch convergence metrics.
 //!
-//! These are computed at every batch, including ones the UI skips past, so the
-//! series has no holes. Each is five floats, so keeping all of them costs
-//! nothing next to the frame slab.
+//! Computed at every batch, including ones the UI skips past, so the series has
+//! no holes.
 
 use crate::CalibrantPoint;
 use calibrt::{
