@@ -27,9 +27,12 @@ chunk_size = 20000
 decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
-## "gbm"    — cross-validated gradient-boosted trees (default)
-## "lda"    — Sage-style shrinkage LDA, ~100x cheaper
-## "hybrid" — cross-fit LDA score folded into the GBM feature frame
+## "gbm"        — cross-validated gradient-boosted trees (default)
+## "lda"        — Sage-style shrinkage LDA, ~100x cheaper
+## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
+## "mlp"        — small MLP on the linear lane (the same features as "lda")
+## "mlp_all"    — small MLP on the full lane (the same features as "gbm")
+## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame
 rescore_model = "gbm"
 
 

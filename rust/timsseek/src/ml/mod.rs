@@ -22,7 +22,8 @@ use serde::{
     Serialize,
 };
 
-/// Fold count for every rescorer (`rescore`, `rescore_lda`, `rescore_hybrid`).
+/// Fold count for every rescorer (`rescore`, `rescore_lda`, `rescore_hybrid`,
+/// `rescore_mlp_linear`, `rescore_mlp_all`, `rescore_hybrid_mlp`).
 ///
 /// Shared rather than repeated per call site because the cross-fit
 /// (`qvalues::crossfit`, used by the LDA path and by both hybrids' extra column)
@@ -42,7 +43,7 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 
 /// Which rescorer produces the final discriminant score.
 ///
-/// Lives here, next to the three rescorers it selects between, so that
+/// Lives here, next to the six rescorers it selects between, so that
 /// integration tests, benches and the pyo3 bindings can pick a model without
 /// going through the CLI. The CLI keeps a `clap::ValueEnum` mirror of this enum
 /// (`timsseek_cli::cli::CliRescoreModel`) purely because `ValueEnum` is a
@@ -53,7 +54,7 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 /// Selected via the `rescore_model` config field / the `--rescore-model` CLI
 /// flag (CLI wins). Dispatch through [`rescore_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum RescoreModel {
     /// Gradient-boosted trees over the ALL lane (linear ++ nonlinear, ~131
     /// features), cross-validated over `N_RESCORE_FOLDS`. The default.
@@ -66,13 +67,32 @@ pub enum RescoreModel {
     /// `nonlinear + lda_score`: the same fold partition on both sides, so a
     /// row's `lda_score` never saw its own label.
     Hybrid,
+    /// MLP on the LINEAR lane only (~101 features) — the same feature set
+    /// [`Lda`](RescoreModel::Lda) trains on, so it isolates "nonlinear model"
+    /// from "more features". THE DEFAULT MLP SHAPE, hence the unqualified name.
+    Mlp,
+    /// MLP on the ALL lane (linear ++ nonlinear, ~128 features) — the same
+    /// feature set [`Gbm`](RescoreModel::Gbm) trains on, so the two are
+    /// directly comparable.
+    MlpAll,
+    /// MLP counterpart of [`Hybrid`](RescoreModel::Hybrid): cross-fit MLP
+    /// (linear lane) -> `mlp_score` column -> GBM CV on
+    /// `nonlinear + mlp_score`, same fold partition on both sides.
+    HybridMlp,
 }
 
 /// Dispatch to the rescorer named by `model`.
 ///
-/// All three rescorers share this signature (candidates in, scored+q-valued
+/// All six rescorers share this signature (candidates in, scored+q-valued
 /// results plus per-fold feature stats out), so this is the single place model
 /// selection is resolved.
+///
+/// The three MLP arms map a variant onto a LANE, and nothing type-checks that
+/// mapping — an inverted arm compiles and produces plausible q-values off the
+/// wrong feature set. The entry points spell their lane in their name for
+/// exactly this reason (see `qvalues`'s note above `rescore_mlp_linear`), and
+/// `rescore_with_dispatches_each_mlp_variant_to_its_lane` pins the mapping by
+/// reading the trained lane back out of the sidecar.
 pub fn rescore_with(
     model: RescoreModel,
     data: Vec<CompetedCandidate>,
@@ -81,6 +101,9 @@ pub fn rescore_with(
         RescoreModel::Gbm => rescore(data),
         RescoreModel::Lda => rescore_lda(data),
         RescoreModel::Hybrid => rescore_hybrid(data),
+        RescoreModel::Mlp => rescore_mlp_linear(data),
+        RescoreModel::MlpAll => rescore_mlp_all(data),
+        RescoreModel::HybridMlp => rescore_hybrid_mlp(data),
     }
 }
 

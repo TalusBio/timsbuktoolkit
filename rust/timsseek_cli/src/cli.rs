@@ -8,20 +8,36 @@ use timsseek::ml::RescoreModel;
 
 /// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
 /// trait, so it cannot be implemented for the lib-owned type from this crate.
+///
+/// `rename_all` is `snake_case` to match `RescoreModel`'s serde spelling, so a
+/// model is named identically on the command line and in the config file
+/// (`--rescore-model hybrid_mlp` / `rescore_model = "hybrid_mlp"`). The
+/// kebab-case aliases exist because that is what a CLI user reaches for first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[clap(rename_all = "lowercase")]
+#[clap(rename_all = "snake_case")]
 pub enum CliRescoreModel {
     Gbm,
     Lda,
     Hybrid,
+    Mlp,
+    #[value(alias = "mlp-all")]
+    MlpAll,
+    #[value(alias = "hybrid-mlp")]
+    HybridMlp,
 }
 
+/// Exhaustive on purpose — no wildcard arm. A variant added to
+/// [`RescoreModel`] and mirrored here without an arm is a compile error, which
+/// is the only thing keeping the two enums from drifting.
 impl From<CliRescoreModel> for RescoreModel {
     fn from(v: CliRescoreModel) -> Self {
         match v {
             CliRescoreModel::Gbm => RescoreModel::Gbm,
             CliRescoreModel::Lda => RescoreModel::Lda,
             CliRescoreModel::Hybrid => RescoreModel::Hybrid,
+            CliRescoreModel::Mlp => RescoreModel::Mlp,
+            CliRescoreModel::MlpAll => RescoreModel::MlpAll,
+            CliRescoreModel::HybridMlp => RescoreModel::HybridMlp,
         }
     }
 }
@@ -94,7 +110,8 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub write_default_config: Option<PathBuf>,
 
-    /// Skip writing results.feature_stats.json sidecar after rescoring.
+    /// Skip writing the post-rescore sidecars (results.feature_stats.tsv and
+    /// results.feature_importance.tsv).
     #[arg(long)]
     pub no_feature_stats: bool,
 }

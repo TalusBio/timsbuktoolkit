@@ -1986,6 +1986,95 @@ mod feature_tests {
         }
     }
 
+    /// The enum -> lane mapping, pinned through the dispatcher users actually
+    /// reach (`rescore_model` config field / `--rescore-model`).
+    ///
+    /// `public_mlp_entry_points_train_on_the_lane_they_name` pins each entry
+    /// point against the lane in its own name; it says nothing about which entry
+    /// point `rescore_with` hands a variant to. That arm is a separate,
+    /// untype-checked mapping: `RescoreModel::Mlp => rescore_mlp_all(data)`
+    /// compiles, runs, and yields plausible q-values off the wrong feature set.
+    /// So the two halves are pinned separately, and this is the half that pins
+    /// the dispatch.
+    ///
+    /// Technique for the two pure-MLP variants is the sibling test's: the
+    /// sidecar's importance rows ARE the trained lane's name set, because
+    /// `MlpFoldModel` reports a finite importance for every lane column
+    /// (culled ones included). `HybridMlp` trains a GBM, whose importance is
+    /// sparse at this fixture size (no tree ever splits), so it is pinned on
+    /// `feature_stats` instead — those names come from the dataset's columns,
+    /// not from the model, and therefore identify the frame the GBM was handed
+    /// (`nonlinear ++ mlp_score`) regardless of what it learned.
+    #[test]
+    fn rescore_with_dispatches_each_mlp_variant_to_its_lane() {
+        use crate::ml::{
+            RescoreModel,
+            rescore_with,
+        };
+
+        let expected_set = |names: Vec<Arc<str>>| -> std::collections::HashSet<Arc<str>> {
+            names.into_iter().collect()
+        };
+
+        // --- The two pure-MLP variants, read off the MLP's own importance ---
+        for (variant, lane) in [
+            (RescoreModel::Mlp, Lane::Linear),
+            (RescoreModel::MlpAll, Lane::All),
+        ] {
+            let (out, stats) = rescore_with(variant, synthetic_competed(90));
+            assert_eq!(out.len(), 90);
+            assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+
+            let expected = expected_set(lane.names());
+            for fs in &stats {
+                let reported: std::collections::HashSet<Arc<str>> = fs
+                    .feature_importance
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                assert_eq!(
+                    reported,
+                    expected,
+                    "rescore_with({variant:?}) fold {}: dispatched to the wrong lane — it \
+                     reported {} features, but {lane:?} has {}. The `rescore_with` arm for \
+                     {variant:?} calls the other lane's entry point.",
+                    fs.fold,
+                    reported.len(),
+                    expected.len(),
+                );
+            }
+        }
+
+        // --- HybridMlp: the GBM's frame is `nonlinear ++ mlp_score` ---
+        let (out, stats) = rescore_with(RescoreModel::HybridMlp, synthetic_competed(90));
+        assert_eq!(out.len(), 90);
+        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+
+        let mut hybrid_names = nonlinear_feature_name_set();
+        hybrid_names.push(Arc::from("mlp_score"));
+        let expected = expected_set(hybrid_names);
+        for fs in &stats {
+            let reported: std::collections::HashSet<Arc<str>> =
+                fs.feature_stats.iter().map(|f| f.name.clone()).collect();
+            // The LDA hybrid's frame is the SAME WIDTH (nonlinear + one score
+            // column), so a count comparison would not separate the two — the
+            // discriminating column is the score's NAME.
+            assert!(
+                reported.contains("mlp_score"),
+                "rescore_with(HybridMlp) fold {}: the GBM's frame has no `mlp_score` column. \
+                 The arm does not call `rescore_hybrid_mlp` (extra columns: {:?}).",
+                fs.fold,
+                reported.difference(&expected).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                reported, expected,
+                "rescore_with(HybridMlp) fold {}: the GBM was handed something other than the \
+                 nonlinear lane plus `mlp_score`.",
+                fs.fold,
+            );
+        }
+    }
+
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
         let n = 360;

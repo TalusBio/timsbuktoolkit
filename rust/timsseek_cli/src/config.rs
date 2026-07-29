@@ -150,6 +150,51 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
+    /// A model must be spelled the SAME on the command line and in the config
+    /// file. Nothing structural enforces that: `RescoreModel`'s `rename_all`
+    /// (serde) and `CliRescoreModel`'s (clap) are two independent attributes,
+    /// and a per-variant `rename`/`value(name)` on one side only would leave
+    /// `--rescore-model hybrid_mlp` working while `rescore_model = "hybrid_mlp"`
+    /// is rejected as an unknown variant — a divergence a user hits, not a
+    /// build.
+    ///
+    /// Driven off `CliRescoreModel::value_variants` so every model is covered
+    /// without a list to maintain; the `From` impl's exhaustiveness is what
+    /// keeps that enumeration equal to `RescoreModel`'s.
+    #[test]
+    fn rescore_model_spellings_agree_between_cli_and_toml() {
+        use crate::cli::CliRescoreModel;
+        use clap::ValueEnum;
+
+        for cli_variant in CliRescoreModel::value_variants() {
+            let model: RescoreModel = (*cli_variant).into();
+
+            let cli_name = cli_variant
+                .to_possible_value()
+                .expect("no rescore model variant is #[value(skip)]ed")
+                .get_name()
+                .to_string();
+
+            let json = serde_json::to_string(&model).unwrap();
+            let toml_name = json.trim_matches('"');
+
+            assert_eq!(
+                cli_name, toml_name,
+                "`--rescore-model {cli_name}` and `rescore_model = \"{toml_name}\"` name \
+                 {model:?} differently"
+            );
+
+            // ...and that spelling really does deserialize out of a config.
+            let src = MINIMAL_TOML.replace(
+                "chunk_size = 20000",
+                &format!("chunk_size = 20000\nrescore_model = \"{toml_name}\""),
+            );
+            let c: Config = toml::from_str(&src)
+                .unwrap_or_else(|e| panic!("rescore_model = \"{toml_name}\" must parse: {e}"));
+            assert_eq!(c.analysis.rescore_model, model);
+        }
+    }
+
     /// Template sanity guard. `default_config()` now *is* a parse of the
     /// embedded template, so a template-vs-literal comparison would be
     /// tautological — but a malformed or silently-edited template would
