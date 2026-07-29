@@ -275,9 +275,11 @@ impl<M: FoldModel> CrossFit<M> {
 /// FOLD-DEPENDENT, i.e. a function of a row's position in the shuffle rather
 /// than of its evidence. That silently corrupts the q-value ranking (a whole
 /// third of the rows is pushed into an arbitrary slab of the sort) in a way that
-/// no downstream check would catch. A uniform failure is both louder and
-/// harmless to the ranking, so callers degrade the WHOLE run instead. Callers
-/// log the failure; this function logs which fold failed.
+/// no downstream check would catch. A uniform failure is louder and cannot
+/// reintroduce fold identity as a splittable feature, so callers degrade the
+/// WHOLE run instead. Callers log the failure; this function logs which fold
+/// failed. "Uniform" does NOT mean the ranking survives — see
+/// [`abort_standalone_mlp`] for what each caller does about that.
 ///
 /// `scores` is local to this call and only reaches the caller through the
 /// `Some` arm, so a partially filled column is not something a caller can
@@ -359,23 +361,68 @@ fn crossfit_lda<D: FoldDataset>(data: &D) -> Option<CrossFit<LdaModel>> {
 /// it makes a row's `mlp_score` depend on its position in the shuffle, gives the
 /// GBM a feature it can split on to recover fold identity, and corrupts the
 /// q-value ranking with nothing downstream to catch it. All-zero is constant ->
-/// zero split gain -> the hybrid degrades to "GBM on the nonlinear lane", which
-/// is sane and loud.
+/// zero split gain -> the hybrid degrades to "GBM on the nonlinear lane".
+///
+/// That degradation is benign only while the nonlinear lane is trainable; when it
+/// is not, the GBM builds no trees and the q-values are meaningless. See
+/// [`abort_standalone_mlp`] for the full argument and
+/// [`degraded_frame_learned_nothing`] for the runtime check that reports the bad
+/// case.
 ///
 /// The models are discarded: the hybrid's sidecar reports the GBM's importance
 /// over `nonlinear + mlp_score`, and the MLP's own per-column weights belong to
 /// a different feature set (the LINEAR lane) that the sidecar has no column for.
 /// [`rescore_mlp_linear`] is the entry point that reports those.
-fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> Vec<f64> {
+/// Returns the column and whether it is the DEGRADED (all-zero) one, which the
+/// caller needs in order to run [`degraded_frame_learned_nothing`] afterwards.
+fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> (Vec<f64>, bool) {
     match crossfit::<D, MlpFoldModel>(data, cfg, "MLP") {
-        Some(cf) => cf.scores,
+        Some(cf) => (cf.scores, false),
         None => {
             tracing::error!(
-                "hybrid: cross-fit MLP failed; mlp_score is uniformly 0 (GBM falls back to the \
-                 nonlinear lane alone)"
+                "hybrid: cross-fit MLP failed; mlp_score is uniformly 0, so the GBM now trains \
+                 on the nonlinear lane ALONE. That is a weaker model, not a broken one — \
+                 PROVIDED the nonlinear lane is trainable at this row count. If it is not, the \
+                 GBM builds no trees and the q-values are meaningless; the check after the fit \
+                 reports that case explicitly."
             );
-            vec![0.0f64; data.nrows()]
+            (vec![0.0f64; data.nrows()], true)
         }
+    }
+}
+
+/// Did a DEGRADED hybrid frame produce no model at all?
+///
+/// Empty importance on every fold means no tree was ever built, so every row in a
+/// fold carries the same score, and `assign_qval` then ranks by nothing but the
+/// seeded shuffle order. On the degraded path that is the difference between "a
+/// weaker model" — which is what the hybrids' failure policy promises — and "no
+/// model", which is the outcome the standalone rescorers abort to avoid.
+///
+/// It is a detector rather than an abort because by this point the run has a full
+/// result set and the caller's job is to make the state VISIBLE: the same
+/// condition is benign on a real search (the nonlinear lane has 27 live features
+/// and hundreds of thousands of rows) and pathological on a small or degenerate
+/// input. `degraded_hybrid_ranks_only_when_the_rest_of_the_frame_is_trainable`
+/// pins both sides.
+///
+/// Only meaningful when the appended column IS the all-zero fallback — a
+/// non-degraded frame that built no trees is a different (and equally
+/// interesting) problem this does not claim to diagnose.
+fn degraded_frame_learned_nothing(stats: &RescoreFeatureStats) -> bool {
+    !stats.is_empty() && stats.iter().all(|fs| fs.feature_importance.is_empty())
+}
+
+/// Log the degraded-and-untrainable state, if that is what happened. `what` names
+/// the zeroed column.
+fn report_degraded_frame(what: &str, degraded: bool, stats: &RescoreFeatureStats) {
+    if degraded && degraded_frame_learned_nothing(stats) {
+        tracing::error!(
+            "hybrid: {what} was zeroed by a failed cross-fit AND the GBM then built no trees on \
+             the nonlinear lane (no fold reported any feature importance). Every row in a fold \
+             therefore carries the SAME score, so the q-values below rank by the internal \
+             shuffle order and are NOT usable for FDR. Treat this run as failed."
+        );
     }
 }
 
@@ -615,15 +662,19 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     // filled: a fold-dependent `lda_score` is a feature the GBM can split on to
     // recover fold identity, which is strictly worse than no feature at all.
     // An all-zero column is constant -> zero split gain -> hybrid degrades to
-    // "GBM on the nonlinear lane", which is a sane, loud degradation.
-    let lda_score = match crossfit_lda(&lin_dataset) {
-        Some(cf) => cf.scores,
+    // "GBM on the nonlinear lane" — benign only while that lane is trainable,
+    // which is why `report_degraded_frame` checks after the fit.
+    let (lda_score, degraded) = match crossfit_lda(&lin_dataset) {
+        Some(cf) => (cf.scores, false),
         None => {
             tracing::error!(
-                "hybrid: cross-fit LDA failed; lda_score is uniformly 0 (GBM falls back to the \
-                 nonlinear lane alone)"
+                "hybrid: cross-fit LDA failed; lda_score is uniformly 0, so the GBM now trains \
+                 on the nonlinear lane ALONE. That is a weaker model, not a broken one — \
+                 PROVIDED the nonlinear lane is trainable at this row count. If it is not, the \
+                 GBM builds no trees and the q-values are meaningless; the check after the fit \
+                 reports that case explicitly."
             );
-            vec![0.0f64; nrows]
+            (vec![0.0f64; nrows], true)
         }
     };
 
@@ -640,6 +691,7 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     scorer.fit().unwrap();
 
     let stats = scorer.feature_stats();
+    report_degraded_frame("lda_score", degraded, &stats);
 
     finalize(scorer.score(), stats)
 }
@@ -703,9 +755,29 @@ impl Lane {
 ///
 /// * In [`rescore_hybrid_mlp_with`] a failed cross-fit zeroes ONE COLUMN of a
 ///   frame that still carries `NONLINEAR_NCOLS` real features. A constant column
-///   has zero split gain, so the GBM simply ignores it and the run degrades to
-///   "GBM on the nonlinear lane" — a weaker model, but one whose q-values still
-///   rank rows by their evidence. Same for `lda_score` in [`rescore_hybrid`].
+///   has zero split gain, so the GBM ignores it and the run degrades to "GBM on
+///   the nonlinear lane" — a weaker model, but one whose q-values still rank rows
+///   by their evidence. Same for `lda_score` in [`rescore_hybrid`].
+///
+///   THIS HOLDS ONLY WHILE THE NONLINEAR LANE IS ITSELF TRAINABLE, and that
+///   condition is load-bearing, not a caveat. If the GBM finds no admissible
+///   split on the remaining columns — too few rows per fold against
+///   `GBMConfig::default`'s `min_leaf_weight`, or a lane with no live variance —
+///   it builds no trees, emits one constant score per fold, and the q-values are
+///   exactly as meaningless as the standalone degradation this function rejects.
+///   Both sides are measured and pinned by
+///   `degraded_hybrid_ranks_only_when_the_rest_of_the_frame_is_trainable`, which
+///   also records that `synthetic_competed` — the suite's main fixture — falls on
+///   the WRONG side of it at every row count, because its nonlinear lane is
+///   entirely constant.
+///
+///   What keeps the asymmetry defensible is therefore not that the hybrid
+///   degradation is always benign — it is not — but that it is benign in the
+///   regime a real search runs in (27 live nonlinear features, rows in the
+///   hundreds of thousands) and DETECTED when it is not: both hybrids run
+///   [`degraded_frame_learned_nothing`] after fitting and log that the run is
+///   unusable. An operator can see this one in the log; the standalone
+///   degradation would have been invisible.
 /// * Here the failed fit IS the discriminant. Degrading to a uniform score makes
 ///   every row's score identical, so `assign_qval` walks a ranking that is
 ///   nothing but the seeded shuffle order and every q-value it emits is a
@@ -888,7 +960,7 @@ fn rescore_hybrid_mlp_with(
 
     // Uniformly zero if the cross-fit failed, never partially filled — see
     // `crossfit_mlp_scores`.
-    let mlp_score = crossfit_mlp_scores(&lin_dataset, &mlp_config);
+    let (mlp_score, degraded) = crossfit_mlp_scores(&lin_dataset, &mlp_config);
 
     let (precomputed, names) = hybrid_frame(&data, responses, "mlp_score", mlp_score);
 
@@ -903,6 +975,7 @@ fn rescore_hybrid_mlp_with(
     scorer.fit().unwrap();
 
     let stats = scorer.feature_stats();
+    report_degraded_frame("mlp_score", degraded, &stats);
 
     finalize(scorer.score(), stats)
 }
@@ -1455,6 +1528,179 @@ mod feature_tests {
                 c
             })
             .collect()
+    }
+
+    /// A peptide of exactly `len` residues, so a fixture can put label signal in
+    /// the `sequence_counts` block — the tail of the NONLINEAR lane.
+    fn peptide_of_len(len: usize) -> Peptide {
+        const ALPHABET: &[u8] = b"PEPTIDEKAVLGSR";
+        let raw: String = (0..len)
+            .map(|i| ALPHABET[i % ALPHABET.len()] as char)
+            .collect();
+        let residues = raw.bytes().map(AminoAcid::from_ascii).collect();
+        Peptide {
+            raw: Arc::from(raw.as_str()),
+            parsed: Some(ParsedSequence {
+                residues,
+                mods: smallvec![],
+            }),
+            decoy: DecoyMarking::Target,
+            decoy_group: 0,
+        }
+    }
+
+    /// The fixture [`synthetic_competed`] is NOT: label signal in the NONLINEAR
+    /// lane, carried by peptide length (and therefore by the residue counts) so
+    /// that a GBM handed the nonlinear lane alone has something to split on.
+    ///
+    /// Needed because `synthetic_competed`'s nonlinear lane is entirely CONSTANT
+    /// — measured, not assumed: `delta_group` and `delta_group_ratio`, the fields
+    /// it varies for "GBM signal", are all-lane columns 90 and 91, i.e. inside
+    /// `LINEAR_NCOLS`. So no fixture in this file could exercise "the GBM keeps
+    /// working off the rest of the frame" before this one, at any row count.
+    fn synthetic_competed_nonlinear_signal(n: u32) -> Vec<CompetedCandidate> {
+        (0..n)
+            .map(|i| {
+                let is_target = i % 2 == 0;
+                let len = if is_target { 16 } else { 7 } + (i % 3) as usize;
+                let mut c = sample_competed_candidate_parsed();
+                c.scoring.identity.peptide = peptide_of_len(len);
+                c.scoring.identity.library_id = i;
+                c.scoring.identity.is_target = is_target;
+                c
+            })
+            .collect()
+    }
+
+    /// EXACTLY what a hybrid's failure arm hands the GBM: the nonlinear lane plus
+    /// an all-zero score column, through the real [`hybrid_frame`] and the real
+    /// [`CrossValidatedScorer`]. The only thing not reproduced is the failing
+    /// cross-fit that would have produced those zeros.
+    fn degraded_hybrid(
+        mut data: Vec<CompetedCandidate>,
+    ) -> (Vec<FinalResult>, RescoreFeatureStats) {
+        canonicalize_and_shuffle(&mut data);
+        let n = data.len();
+        let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+        let (precomputed, names) = hybrid_frame(&data, responses, "lda_score", vec![0.0f64; n]);
+        let mut scorer =
+            CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
+                N_RESCORE_FOLDS,
+                data,
+                GBMConfig::default(),
+                precomputed,
+                names,
+            );
+        scorer.fit().unwrap();
+        let stats = scorer.feature_stats();
+        finalize(scorer.score(), stats)
+    }
+
+    /// Not one nonlinear-lane column is constant across `fixture`'s rows — the
+    /// mirror of [`assert_nonlinear_lane_is_flat`], and the premise of the
+    /// benign-degradation half below.
+    fn assert_nonlinear_lane_varies(fixture: &[CompetedCandidate]) {
+        let nl = build_nonlinear_matrix(fixture);
+        let varying = nonlinear_feature_name_set()
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| {
+                (0..fixture.len()).any(|i| {
+                    let v = nl[i * NONLINEAR_NCOLS + j];
+                    v.to_bits() != nl[*j].to_bits() && !(v.is_nan() && nl[*j].is_nan())
+                })
+            })
+            .count();
+        assert!(
+            varying > 0,
+            "fixture premise broken: EVERY nonlinear-lane column is constant, so the GBM \
+             has nothing to split on and 'the GBM keeps working off the rest of the frame' \
+             cannot be observed here"
+        );
+    }
+
+    /// THE PREMISE of the hybrids' failure policy: when a cross-fit fails, the
+    /// appended column goes uniformly zero and the GBM carries on off the rest of
+    /// the frame — so the run degrades to a weaker model rather than to a
+    /// meaningless one.
+    ///
+    /// That claim was shipped in `abort_standalone_mlp`'s doc as the whole reason
+    /// the hybrids may degrade where the standalone rescorers abort, and it was
+    /// UNTESTED. This test pins both halves of it, because the claim is
+    /// CONDITIONAL and the condition is not decorative:
+    ///
+    /// * (a) with a trainable nonlinear lane, the degraded frame builds trees and
+    ///   ranks targets above decoys — the premise holds;
+    /// * (b) with `synthetic_competed`, whose nonlinear lane is entirely constant,
+    ///   the SAME degraded frame reports no importance on any fold and emits one
+    ///   score per fold. The q-values are then pure shuffle order — precisely the
+    ///   outcome the standalone abort exists to prevent.
+    ///
+    /// (b) is not a bug being documented as a feature: it is the boundary of the
+    /// premise, and `rescore_hybrid` / `rescore_hybrid_mlp_with` now detect that
+    /// exact state at runtime (see [`degraded_frame_learned_nothing`]) and say so
+    /// in the log instead of returning it quietly. Do not delete (b) — without it
+    /// the next reader will believe the degradation is unconditionally benign,
+    /// which is the error this test was written to correct.
+    #[test]
+    fn degraded_hybrid_ranks_only_when_the_rest_of_the_frame_is_trainable() {
+        // (a) THE PREMISE, on a fixture whose nonlinear lane can be trained.
+        let trainable = synthetic_competed_nonlinear_signal(360);
+        assert_nonlinear_lane_varies(&trainable);
+        let (out, stats) = degraded_hybrid(trainable);
+        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+        for fs in &stats {
+            assert!(
+                !fs.feature_importance.is_empty(),
+                "fold {}: the degraded frame built no trees even though the nonlinear lane \
+                 is trainable, so the hybrids' whole justification for degrading is false",
+                fs.fold
+            );
+        }
+        let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
+        let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
+        let auc = pair_auc(&scores, &is_target);
+        assert!(
+            auc > 0.8,
+            "AUC {auc}: with the appended column zeroed the GBM must still rank on the \
+             nonlinear lane. If this is at chance, degrading is NOT a weaker model — it is \
+             a meaningless one, and the hybrids should abort like the standalone path does"
+        );
+        assert!(
+            !degraded_frame_learned_nothing(&stats),
+            "the runtime detector must not fire when the degraded frame trained fine"
+        );
+
+        // (b) THE CONDITION, on the suite's main fixture: nonlinear lane constant,
+        // so the same degradation yields one constant score per fold.
+        let flat = synthetic_competed(360);
+        assert_nonlinear_lane_is_flat(&flat, "lda_score");
+        let (out, stats) = degraded_hybrid(flat);
+        assert!(
+            stats.iter().all(|fs| fs.feature_importance.is_empty()),
+            "measured: on this fixture the degraded frame builds no trees at all. If that \
+             has changed, the boundary this test documents has moved and the doc on \
+             `abort_standalone_mlp` needs re-checking"
+        );
+        assert!(
+            degraded_frame_learned_nothing(&stats),
+            "the runtime detector must fire on exactly this state, or an operator gets \
+             meaningless q-values with nothing in the log"
+        );
+        let distinct: std::collections::HashSet<u32> =
+            out.iter().map(|r| r.discriminant_score.to_bits()).collect();
+        assert!(
+            distinct.len() <= N_RESCORE_FOLDS as usize,
+            "no trees means one constant score per fold; got {} distinct scores",
+            distinct.len()
+        );
+        let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
+        let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
+        let auc = pair_auc(&scores, &is_target);
+        assert!(
+            (auc - 0.5).abs() < 0.05,
+            "a per-fold constant cannot rank better than chance; AUC {auc}"
+        );
     }
 
     /// The cross-fit must actually HOLD OUT: a row's score has to come from a
@@ -2412,7 +2658,7 @@ mod feature_tests {
             );
 
             // THE ASSERTION.
-            let col = crossfit_mlp_scores(&dataset, &cfg);
+            let (col, degraded) = crossfit_mlp_scores(&dataset, &cfg);
             assert_eq!(
                 col.len(),
                 N,
@@ -2421,6 +2667,13 @@ mod feature_tests {
             assert!(
                 col.iter().all(|s| s.to_bits() == 0.0f64.to_bits()),
                 "seed {seed}: mlp_score must be uniformly zero after a failed fold, got {col:?}"
+            );
+            // The caller has to be TOLD it degraded, or it cannot run the
+            // "…and then the GBM learned nothing" check that makes this state
+            // visible in the log.
+            assert!(
+                degraded,
+                "seed {seed}: a zeroed column must be reported as degraded to the caller"
             );
         }
     }
