@@ -2075,11 +2075,44 @@ mod feature_tests {
         }
     }
 
+    /// Smoke + determinism for the LDA hybrid.
+    ///
+    /// # Why the importance assertion is here
+    /// Every OTHER assertion in this test holds in the regime where the GBM
+    /// builds no trees at all: a per-fold constant score is finite, its q-values
+    /// are in `[0, 1]`, and it is bit-identical run to run. `GBMConfig::default`'s
+    /// `min_leaf_weight` of 5.0 exceeds a 30-row fold's total logloss hessian, so
+    /// at `n = 90` this test would pass while measuring nothing but the
+    /// reproducibility of a constant — measured: `n = 90` gives per-fold
+    /// importance lengths `[0, 0, 0]`, `n = 360` gives `[1, 1, 1]`.
+    ///
+    /// `n = 360` is therefore load-bearing, and the non-empty importance check is
+    /// what makes it so: an empty importance means no tree was ever built, i.e.
+    /// the output does not depend on the features, the appended `lda_score`
+    /// column, or anything else this test names. Do not drop it, and do not
+    /// shrink `n` without watching it fail.
+    ///
+    /// It does NOT claim the output depends on `lda_score` specifically — that is
+    /// `hybrid_lda_score_carries_the_linear_lane_into_the_gbm`'s job, on a fixture
+    /// built so that nothing else could carry the signal.
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
         let n = 360;
-        let (out_a, _stats_a) = rescore_hybrid(synthetic_competed(n));
+        let (out_a, stats_a) = rescore_hybrid(synthetic_competed(n));
         let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n));
+
+        // NON-VACUITY, first: if this fails, every assertion below is about a
+        // per-fold constant rather than about a trained model.
+        assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
+        for fs in &stats_a {
+            assert!(
+                !fs.feature_importance.is_empty(),
+                "fold {}: the GBM reported no importance at all, so it built no trees and \
+                 the score is a per-fold constant — every other assertion in this test \
+                 then passes without measuring anything (this is what n = 90 did)",
+                fs.fold
+            );
+        }
 
         // (a) output length preserved
         assert_eq!(out_a.len(), n as usize);
@@ -2548,12 +2581,13 @@ mod feature_tests {
     ///
     /// The `rescore_hybrid` counterpart of
     /// [`hybrid_mlp_score_carries_the_linear_lane_into_the_gbm`], and the only
-    /// test that can observe whether that (shipping) path's `lda_score` column is
-    /// correct. `rescore_hybrid_smoke_and_determinism` cannot: it runs at 90 rows,
-    /// where `GBMConfig::default`'s `min_leaf_weight` leaves a 30-row fold with no
-    /// admissible split, so the GBM builds no trees and its output is a per-fold
-    /// constant independent of the column. A zeroed, truncated or row-permuted
-    /// `lda_score` passes it unchanged.
+    /// test that observes whether that (shipping) path's `lda_score` column is
+    /// CORRECT rather than merely present.
+    /// `rescore_hybrid_smoke_and_determinism` cannot: its fixture separates on the
+    /// nonlinear lane too, so it notices a dead `lda_score` only as a thinner
+    /// importance report, and a row-permuted or truncated column not at all. This
+    /// fixture leaves `lda_score` as the only non-constant column, so the AUC
+    /// assertion below is a statement about the column's VALUES.
     ///
     /// No seed sweep: the LDA is a closed-form solve with no initialization to
     /// vary, so there is no seed for the "sweep seeds where a model is trained"
