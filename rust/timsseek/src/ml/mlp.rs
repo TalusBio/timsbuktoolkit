@@ -1691,11 +1691,14 @@ impl MlpConfig {
     /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
     /// | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` or `square`, case-insensitive (`-` and `_` interchangeable) |
     /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
+    /// | `TIMSSEEK_MLP_LOSS` | `loss` | `bce`, or `focal:GAMMA:ALPHA` (`focal:2:0.25`) |
     ///
-    /// `MlpLoss` is deliberately absent: [`MlpLoss::Focal`] is two coupled
-    /// floats that also interact with the per-row sample weights (see the
-    /// variant docs) and wants a real config surface, not a string grammar
-    /// wedged into one variable.
+    /// `TIMSSEEK_MLP_LOSS` spells BOTH focal parameters or none of them: they are
+    /// coupled to each other and to the per-row sample weights (see
+    /// [`MlpLoss::Focal`]), so there is no defensible default for one given the
+    /// other, and a bare `focal` that silently picked a `gamma` would be the
+    /// mislabelled sweep row this whole mechanism aborts to avoid. This is still
+    /// a sweep hatch and not the real config surface `MlpLoss` eventually wants.
     ///
     /// # Unset changes nothing
     /// A variable that is not set is not read into anything — see
@@ -1795,6 +1798,9 @@ impl MlpConfig {
         }
         if let Some(raw) = read("TIMSSEEK_MLP_SEED") {
             self.seed = parse_seed("TIMSSEEK_MLP_SEED", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_LOSS") {
+            self.loss = parse_loss("TIMSSEEK_MLP_LOSS", &raw);
         }
 
         applied
@@ -1918,6 +1924,47 @@ fn parse_seed(name: &str, raw: &str) -> u64 {
             "a u64, decimal (`12345`) or hex (`0x2545F4914F6CDD1D`)",
         )
     })
+}
+
+/// `bce` / `focal:GAMMA:ALPHA`. Case is ignored and whitespace around each field
+/// is trimmed, so `FOCAL: 2 : 0.25` lands like `focal:2:0.25`.
+///
+/// The focal arm takes EXACTLY two numbers, both spelled out: `focal` on its own
+/// aborts rather than filling in a `gamma`, because the two parameters are
+/// coupled to each other and to the per-row sample weights (see
+/// [`MlpLoss::Focal`]) and an invented value would land in the sweep table under
+/// the operator's label.
+///
+/// # The ranges
+/// `gamma >= 0` (finite): 0 disables the hard-example modulation, negative would
+/// invert it and up-weight the easy bulk. `alpha` strictly inside `(0, 1)`
+/// (finite): it is applied normalized, as `2 * alpha` for targets and
+/// `2 * (1 - alpha)` for decoys, so 0 or 1 would multiply one entire class by
+/// zero — training on one label, which is never what an `alpha` sweep means.
+/// `focal:0:0.5` is the neutral point and is bit-identical to `bce`.
+fn parse_loss(name: &str, raw: &str) -> MlpLoss {
+    const EXPECTED: &str = "`bce`, or `focal:GAMMA:ALPHA` with a finite GAMMA >= 0 and a finite \
+                            ALPHA strictly inside (0, 1) — e.g. `focal:2:0.25` (case-insensitive)";
+    let t = raw.trim().to_ascii_lowercase();
+    if t == "bce" {
+        return MlpLoss::Bce;
+    }
+    // The trailing `None` is what makes the field count exact: `focal:2` and
+    // `focal:2:0.25:9` both fall through to the abort.
+    let mut fields = t.split(':').map(str::trim);
+    let (gamma, alpha) = match (fields.next(), fields.next(), fields.next(), fields.next()) {
+        (Some("focal"), Some(g), Some(a), None) => (g, a),
+        _ => bad_env(name, raw, EXPECTED),
+    };
+    let gamma = match gamma.parse::<f32>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => v,
+        _ => bad_env(name, raw, EXPECTED),
+    };
+    let alpha = match alpha.parse::<f32>() {
+        Ok(v) if v.is_finite() && v > 0.0 && v < 1.0 => v,
+        _ => bad_env(name, raw, EXPECTED),
+    };
+    MlpLoss::Focal { gamma, alpha }
 }
 
 // ---------------------------------------------------------------- rng helper
@@ -3075,6 +3122,10 @@ mod test {
         assert_eq!(cfg.weight_decay.to_bits(), 1e-4f32.to_bits());
         assert_eq!(cfg.epochs, 60);
         assert_eq!(cfg.batch_size, 1024);
+        // `TIMSSEEK_MLP_LOSS` can SELECT the focal loss but must never make it
+        // the default: every number on `compiled_default` was measured on plain
+        // BCE, and `Focal` is an unswept experiment. Unit variant, so this
+        // equality is as exact as the `to_bits` pinning above.
         assert_eq!(cfg.loss, MlpLoss::Bce);
         assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
         assert_eq!(cfg.early_stopping_patience, Some(5));
@@ -3118,6 +3169,7 @@ mod test {
             ("TIMSSEEK_MLP_PATIENCE", "9"),
             ("TIMSSEEK_MLP_ACTIVATION", "square"),
             ("TIMSSEEK_MLP_SEED", "12345"),
+            ("TIMSSEEK_MLP_LOSS", "focal:2:0.25"),
         ]));
         assert_eq!(cfg.epochs, 77);
         assert_eq!(cfg.lr.to_bits(), 2.5e-3f32.to_bits());
@@ -3127,8 +3179,14 @@ mod test {
         assert_eq!(cfg.early_stopping_patience, Some(9));
         assert_eq!(cfg.activation, Activation::Square);
         assert_eq!(cfg.seed, 12345);
-        assert_eq!(cfg.loss, MlpLoss::Bce, "`loss` is deliberately not a knob");
-        assert_eq!(applied.len(), 8, "every read must be reported: {applied:?}");
+        assert_eq!(
+            cfg.loss,
+            MlpLoss::Focal {
+                gamma: 2.0,
+                alpha: 0.25
+            }
+        );
+        assert_eq!(applied.len(), 9, "every read must be reported: {applied:?}");
     }
 
     /// The explicit spellings for the two fields that have an "off": `hidden`
@@ -3235,6 +3293,128 @@ mod test {
         "relu"
     );
     rejects!(rejects_empty_activation, "TIMSSEEK_MLP_ACTIVATION", "");
+    rejects!(rejects_unknown_loss, "TIMSSEEK_MLP_LOSS", "hinge");
+    rejects!(rejects_empty_loss, "TIMSSEEK_MLP_LOSS", "");
+    // Both focal parameters are spelled or neither is: an invented `gamma` is
+    // exactly the mislabelled sweep row the abort exists for.
+    rejects!(rejects_bare_focal, "TIMSSEEK_MLP_LOSS", "focal");
+    rejects!(rejects_focal_without_alpha, "TIMSSEEK_MLP_LOSS", "focal:2");
+    rejects!(
+        rejects_focal_with_extra_field,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:2:0.25:9"
+    );
+    rejects!(
+        rejects_non_numeric_focal_gamma,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:two:0.25"
+    );
+    rejects!(
+        rejects_negative_focal_gamma,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:-1:0.25"
+    );
+    rejects!(
+        rejects_non_finite_focal_gamma,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:inf:0.25"
+    );
+    // `alpha` is applied as `2*alpha` / `2*(1-alpha)`, so an endpoint zeroes one
+    // class out entirely — a rejection, not a boundary case.
+    rejects!(rejects_zero_focal_alpha, "TIMSSEEK_MLP_LOSS", "focal:2:0");
+    rejects!(rejects_one_focal_alpha, "TIMSSEEK_MLP_LOSS", "focal:2:1");
+    rejects!(
+        rejects_negative_focal_alpha,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:2:-0.25"
+    );
+    rejects!(
+        rejects_above_one_focal_alpha,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:2:1.5"
+    );
+    rejects!(
+        rejects_non_finite_focal_alpha,
+        "TIMSSEEK_MLP_LOSS",
+        "focal:2:nan"
+    );
+
+    /// The accepted spellings of the loss. `focal:0:0.5` is the neutral point —
+    /// see [`MlpLoss::Focal`] for why it is bit-identical to `Bce` rather than
+    /// merely proportional to it, which is what makes an `alpha` sweep's rows
+    /// comparable.
+    #[test]
+    fn loss_spellings_parse() {
+        for spelling in ["bce", "BCE", " Bce "] {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.loss = MlpLoss::Focal {
+                gamma: 3.0,
+                alpha: 0.9,
+            };
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", spelling)]));
+            assert_eq!(cfg.loss, MlpLoss::Bce, "{spelling:?}");
+        }
+
+        for (spelling, gamma, alpha) in [
+            ("focal:2:0.25", 2.0f32, 0.25f32),
+            ("FOCAL:2:0.25", 2.0, 0.25),
+            (" focal : 2 : 0.25 ", 2.0, 0.25),
+            ("focal:2.0:2.5e-1", 2.0, 0.25),
+            // The neutral point, and the extremes of each range that ARE allowed.
+            ("focal:0:0.5", 0.0, 0.5),
+            ("focal:5:0.99", 5.0, 0.99),
+        ] {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", spelling)]));
+            assert_eq!(cfg.loss, MlpLoss::Focal { gamma, alpha }, "{spelling:?}");
+        }
+    }
+
+    /// Overriding the loss moves ONLY the loss, and the audit trail quotes the
+    /// value the operator actually set — the string a sweep table is labelled by.
+    #[test]
+    fn loss_override_moves_only_the_loss() {
+        let base = MlpConfig::compiled_default();
+        let mut cfg = base.clone();
+        let applied = cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", "focal:2:0.25")]));
+        assert_eq!(applied, vec!["TIMSSEEK_MLP_LOSS=\"focal:2:0.25\""]);
+        assert_eq!(
+            MlpConfig {
+                loss: base.loss,
+                ..cfg
+            },
+            base,
+            "overriding `loss` moved some other field too"
+        );
+    }
+
+    /// The loss abort names the variable, the offending value and the grammar,
+    /// including which of the two numbers has which range — a `focal:2:1` that
+    /// said only "malformed" would leave the operator re-reading the source.
+    #[test]
+    fn the_loss_abort_names_the_variable_the_value_and_the_format() {
+        let e = std::panic::catch_unwind(|| {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", "focal:2:1")]));
+        })
+        .expect_err("an out-of-range alpha must abort");
+        let msg = e
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("<not a string payload>");
+        for needle in [
+            "TIMSSEEK_MLP_LOSS",
+            "focal:2:1",
+            "focal:GAMMA:ALPHA",
+            "GAMMA >= 0",
+            "(0, 1)",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "abort message lacks {needle:?}: {msg}"
+            );
+        }
+    }
 
     /// The tolerant spellings of the activation, which a shell script is likely
     /// to produce. Everything outside this set aborts.
@@ -3312,7 +3492,7 @@ mod test {
 
     /// The abort names the variable, the offending value AND the expected
     /// format. A panic that says only "invalid value" would leave an operator
-    /// guessing which of seven variables their sweep script mangled.
+    /// guessing which of nine variables their sweep script mangled.
     #[test]
     fn the_abort_names_the_variable_the_value_and_the_format() {
         let e = std::panic::catch_unwind(|| {

@@ -56,6 +56,7 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
 | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer — `8`; or `none` / `off` to disable early stopping entirely |
 | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` (default) or `square`; case-insensitive, `-` and `_` interchangeable |
 | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x` hex — `0x2545F4914F6CDD1D` |
+| `TIMSSEEK_MLP_LOSS` | `loss` | `bce` (default), or `focal:GAMMA:ALPHA` — `focal:2:0.25`; case-insensitive, whitespace around each field trimmed |
 
 - **Unset changes nothing.** With none set the config is bit-identical to the
   compiled default and nothing is logged.
@@ -74,9 +75,19 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
   the first second, not at Phase 5.
 - **Any override active** logs the full effective config once per run at `info`,
   prefixed `MLP config: DEV OVERRIDE ACTIVE`.
-- `loss` is deliberately absent: `MlpLoss::Focal` is two coupled floats that also
-  interact with the per-row target/decoy sample weights, and wants a real config
-  surface.
+- **`TIMSSEEK_MLP_LOSS=focal:GAMMA:ALPHA` spells BOTH numbers or neither.** `focal`
+  on its own aborts; there is no default for one parameter given the other. `GAMMA`
+  must be finite and `>= 0` (0 disables the hard-example modulation), `ALPHA` finite
+  and strictly inside `(0, 1)`. `focal:0:0.5` is the neutral point and is
+  bit-identical to `bce`, which is what makes an `ALPHA` sweep's loss values
+  comparable across rows. The endpoints are rejected because `ALPHA` is applied
+  normalized — `2*ALPHA` on targets, `2*(1-ALPHA)` on decoys — so 0 or 1 would
+  multiply one whole class by zero.
+- **`ALPHA` and the per-row sample weights are two dials on the same quantity and
+  MULTIPLY.** The MLP already gets `0.5` on targets / `1.0` on decoys from
+  `cv::fold_weights`, so `ALPHA=0.5` does not mean the classes are balanced — it
+  means they are balanced 0.5/1.0 by the row weights alone. Tune the pair together;
+  an `ALPHA` chosen as if the weights were uniform double-counts the imbalance.
 - **`TIMSSEEK_MLP_ACTIVATION=square` is EXPERIMENTAL and is not independent of
   `lr` / `weight_decay`.** `x^2` is unbounded and even, so unlike a rectifier it
   amplifies its input; on a 24-column fixture it reaches a lower train loss than
