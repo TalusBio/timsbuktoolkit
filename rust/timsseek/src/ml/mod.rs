@@ -1,5 +1,6 @@
 pub mod cv;
 pub mod lda;
+pub mod mlp;
 pub mod qvalues;
 pub use cv::RescoreFeatureStats;
 pub use qvalues::{
