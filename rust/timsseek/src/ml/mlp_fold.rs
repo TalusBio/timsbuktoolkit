@@ -11,11 +11,12 @@
 //!     refitting it inside `predict` from the batch being scored, would use
 //!     held-out feature values — the cross-fit's leak-freedom is a property of
 //!     the caller's partition, and this impl must not undermine it.
-//!  2. **The fit is a pure function of the config and the data.** The RNG comes
-//!     from [`MlpConfig::rng_for_fold`], i.e. from the configured seed and the
-//!     fold index and nothing else — no call counter, no clock, no hash-map
-//!     iteration order — so the same build on the same input produces
-//!     bit-identical scores.
+//!  2. **The fit is a pure function of the config, the fold index and the
+//!     data.** The RNG comes from [`MlpConfig::rng_for_fold`], i.e. from the
+//!     configured seed and the `fold` argument [`FoldModel::fit`] is handed and
+//!     nothing else — no call counter, no clock, no hash-map iteration order —
+//!     so folds differ from one another while the same build on the same input
+//!     produces bit-identical scores.
 
 use crate::ml::cv::{
     FoldDataset,
@@ -29,30 +30,6 @@ use crate::ml::mlp::{
     Tensor,
 };
 use std::cell::RefCell;
-
-/// [`MlpConfig`] plus THE fold index this model is being fitted for.
-///
-/// The fold index is threaded through the config rather than derived from the
-/// data (e.g. from the first train row's `get_fold`) because the derivation is
-/// fragile in exactly the cases that matter: an empty train slice has no first
-/// row, and a reordered or multi-fold train slice — which is what
-/// `crossfit_lda`'s partition hands over, since it trains on every fold BUT one
-/// — has no single fold to read. An explicit field also says out loud that the
-/// caller owns the seed/fold correspondence, which is what makes reruns
-/// reproducible.
-#[derive(Debug, Clone, Default)]
-pub struct MlpFoldConfig {
-    pub mlp: MlpConfig,
-    /// Mixed into the per-fold seed by [`MlpConfig::rng_for_fold`]. Callers
-    /// that fit several folds MUST vary it, or every fold gets the same init.
-    pub fold: usize,
-}
-
-impl MlpFoldConfig {
-    pub fn new(mlp: MlpConfig, fold: usize) -> Self {
-        Self { mlp, fold }
-    }
-}
 
 /// The ways fitting or scoring an [`MlpFoldModel`] can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,18 +109,26 @@ fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
 }
 
 impl FoldModel for MlpFoldModel {
-    type Config = MlpFoldConfig;
+    type Config = MlpConfig;
     type Error = MlpFoldError;
 
-    /// `val` is DELIBERATELY IGNORED. Training runs a fixed `cfg.mlp.epochs`
-    /// with no early stopping, and [`FoldModel`] documents that a model without
+    /// `val` is DELIBERATELY IGNORED. Training runs a fixed `cfg.epochs` with
+    /// no early stopping, and [`FoldModel`] documents that a model without
     /// early stopping ignores the validation slice. Callers may pass `&[]`.
+    ///
+    /// `fold` is NOT ignored: it is the only thing that distinguishes one
+    /// fold's initialization from another's, via
+    /// [`MlpConfig::rng_for_fold`]. Passing the same `fold` for every fold
+    /// would give every fold the same weight init and the same shuffle order —
+    /// still leak-free, but the folds would be correlated in a way nothing
+    /// downstream would notice.
     ///
     /// Everything fitted here — the cull set, the standardization moments, the
     /// imputation means, the weights — comes from `train` and only `train`.
     fn fit<D: FoldDataset>(
-        cfg: &MlpFoldConfig,
+        cfg: &MlpConfig,
         data: &D,
+        fold: usize,
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, MlpFoldError> {
@@ -161,7 +146,7 @@ impl FoldModel for MlpFoldModel {
             tracing::warn!(
                 "MLP fold {}: culled {}/{} lane columns (all non-finite or constant on the \
                  {} train rows): {:?}",
-                cfg.fold,
+                fold,
                 culled.len(),
                 ncols,
                 train.len(),
@@ -187,13 +172,13 @@ impl FoldModel for MlpFoldModel {
         }
 
         // Seeded from (config seed, fold index) alone — see the module docs.
-        let mut rng = cfg.mlp.rng_for_fold(cfg.fold);
-        let mut net = Mlp::feedforward(width, &cfg.mlp.hidden, &mut rng);
-        let mut opt = Adam::new(cfg.mlp.lr).with_weight_decay(cfg.mlp.weight_decay);
-        let final_loss = net.train(&cfg.mlp, &x, &y, &w, &mut opt, &mut rng);
+        let mut rng = cfg.rng_for_fold(fold);
+        let mut net = Mlp::feedforward(width, &cfg.hidden, &mut rng);
+        let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+        let final_loss = net.train(cfg, &x, &y, &w, &mut opt, &mut rng);
         tracing::debug!(
             "MLP fold {}: trained on {} rows x {} inputs ({} lane columns), final epoch loss {}",
-            cfg.fold,
+            fold,
             train.len(),
             width,
             ncols,
@@ -330,18 +315,15 @@ mod test {
 
     /// Test config: same architecture family as the default, shrunk so the
     /// seed sweeps stay fast.
-    fn cfg(seed: u64) -> MlpFoldConfig {
-        MlpFoldConfig::new(
-            MlpConfig {
-                hidden: vec![16, 8],
-                lr: 1e-3,
-                epochs: 150,
-                batch_size: 64,
-                seed,
-                ..MlpConfig::default()
-            },
-            0,
-        )
+    fn cfg(seed: u64) -> MlpConfig {
+        MlpConfig {
+            hidden: vec![16, 8],
+            lr: 1e-3,
+            epochs: 150,
+            batch_size: 64,
+            seed,
+            ..MlpConfig::default()
+        }
     }
 
     fn dataset(feat: Vec<f64>, ncols: usize, responses: Vec<f64>) -> RowMajorDataset {
@@ -436,7 +418,7 @@ mod test {
             let data = dataset(feat.clone(), 3, y.clone());
             let (train, held) = split(400);
 
-            let model = MlpFoldModel::fit(&cfg(seed), &data, &train, &[]).unwrap();
+            let model = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
             let scores = model.predict(&data, &held).unwrap();
             let is_target: Vec<bool> = held.iter().map(|&i| y[i] > 0.5).collect();
 
@@ -490,11 +472,11 @@ mod test {
             let a = build(0.0, 1.0);
             let b = build(1.0e6, 1.0e3);
 
-            let sa = MlpFoldModel::fit(&cfg(seed), &a, &train, &[])
+            let sa = MlpFoldModel::fit(&cfg(seed), &a, 0, &train, &[])
                 .unwrap()
                 .predict(&a, &held)
                 .unwrap();
-            let sb = MlpFoldModel::fit(&cfg(seed), &b, &train, &[])
+            let sb = MlpFoldModel::fit(&cfg(seed), &b, 0, &train, &[])
                 .unwrap()
                 .predict(&b, &held)
                 .unwrap();
@@ -506,7 +488,7 @@ mod test {
             // Non-vacuity: the extra rows are not inert data the fit would
             // ignore anyway — training ON them changes the answer.
             let with_extra: Vec<usize> = train.iter().copied().chain(300..400).collect();
-            let sc = MlpFoldModel::fit(&cfg(seed), &b, &with_extra, &[])
+            let sc = MlpFoldModel::fit(&cfg(seed), &b, 0, &with_extra, &[])
                 .unwrap()
                 .predict(&b, &held)
                 .unwrap();
@@ -541,7 +523,7 @@ mod test {
             let data = dataset(feat, 3, y);
             let (train, held) = split(300);
 
-            let model = MlpFoldModel::fit(&cfg(seed), &data, &train, &[]).unwrap();
+            let model = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
             let batched = model.predict(&data, &held).unwrap();
             for (k, &row) in held.iter().enumerate() {
                 let alone = model.predict(&data, &[row]).unwrap();
@@ -571,7 +553,7 @@ mod test {
             let data = dataset(feat, 5, y);
             let (train, _) = split(300);
 
-            let model = MlpFoldModel::fit(&cfg(seed), &data, &train, &[]).unwrap();
+            let model = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
             assert_eq!(model.transform().culled(), &[3, 4]);
 
             let imp = model.importance();
@@ -606,7 +588,7 @@ mod test {
             let data = dataset(feat, 3, y);
             let (train, held) = split(300);
 
-            let model = MlpFoldModel::fit(&cfg(seed), &data, &train, &[]).unwrap();
+            let model = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
             assert!(model.transform().culled().is_empty());
             assert_eq!(
                 model.transform().width(),
@@ -631,7 +613,7 @@ mod test {
         let (feat, y) = toy(50, 7, 0.0);
         let narrow = dataset(feat.clone(), 3, y.clone());
         let (train, held) = split(100);
-        let model = MlpFoldModel::fit(&cfg(7), &narrow, &train, &[]).unwrap();
+        let model = MlpFoldModel::fit(&cfg(7), &narrow, 0, &train, &[]).unwrap();
 
         // Same rows, one extra column.
         let mut wide_feat = Vec::with_capacity(100 * 4);
@@ -658,19 +640,20 @@ mod test {
         let data = dataset(feat, 3, y);
         let (train, held) = split(200);
 
-        let a = MlpFoldModel::fit(&cfg(42), &data, &train, &[]).unwrap();
-        let b = MlpFoldModel::fit(&cfg(42), &data, &train, &[]).unwrap();
+        let a = MlpFoldModel::fit(&cfg(42), &data, 0, &train, &[]).unwrap();
+        let b = MlpFoldModel::fit(&cfg(42), &data, 0, &train, &[]).unwrap();
         assert_eq!(
             a.predict(&data, &held).unwrap(),
             b.predict(&data, &held).unwrap()
         );
         assert_eq!(a.importance(), b.importance());
 
-        // ...and a different fold index really does give a different init,
-        // otherwise `rng_for_fold` would be a no-op and the folds would be
-        // correlated in a way nothing else here would notice.
-        let other =
-            MlpFoldModel::fit(&MlpFoldConfig::new(cfg(42).mlp, 1), &data, &train, &[]).unwrap();
+        // ...and the `fold` ARGUMENT really does reach the init: same config,
+        // same rows, different fold => different weights. Without this the
+        // parameter could be dropped on the floor and every fold would train
+        // from the same initialization, which is still leak-free and so would
+        // not fail any other test here.
+        let other = MlpFoldModel::fit(&cfg(42), &data, 1, &train, &[]).unwrap();
         assert!(other.predict(&data, &held).unwrap() != a.predict(&data, &held).unwrap());
     }
 
@@ -683,7 +666,7 @@ mod test {
         let data = dataset(feat, 2, y);
         let train: Vec<usize> = (0..20).collect();
         assert_eq!(
-            MlpFoldModel::fit(&cfg(7), &data, &train, &[]).err(),
+            MlpFoldModel::fit(&cfg(7), &data, 0, &train, &[]).err(),
             Some(MlpFoldError::NoUsableColumns)
         );
     }

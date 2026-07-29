@@ -281,7 +281,7 @@ fn crossfit_lda<D: FoldDataset>(data: &D) -> Option<CrossFitLda> {
 
         // `val` is empty: LDA is closed-form, there is nothing to early-stop
         // on (see the `FoldModel` impl in `ml::lda`).
-        let model = match <LdaModel as FoldModel>::fit(&cfg, data, &train, &[]) {
+        let model = match <LdaModel as FoldModel>::fit(&cfg, data, f, &train, &[]) {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!("cross-fit LDA: fold {f}/{n_folds} fit failed ({e})");

@@ -214,13 +214,19 @@ impl FoldModel for LdaModel {
     /// and no use for a validation slice. [`FoldModel`] documents that a model
     /// without early stopping is expected to ignore it. Callers may pass an
     /// empty slice.
+    ///
+    /// `fold` is ignored for the same kind of reason: the fit is a
+    /// deterministic linear solve with no initialization to seed, so the fold's
+    /// identity would have nothing to change. Two folds differ because they are
+    /// fitted on different rows, and a rerun of one is bit-identical.
     fn fit<D: FoldDataset>(
         cfg: &LdaConfig,
         data: &D,
+        fold: usize,
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, LdaError> {
-        let _ = val;
+        let (_, _) = (fold, val);
         let ncols = data.column_names().len();
         let mut feat = Vec::with_capacity(train.len() * ncols);
         let mut is_decoy = Vec::with_capacity(train.len());

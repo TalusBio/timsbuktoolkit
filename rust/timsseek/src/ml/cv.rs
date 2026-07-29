@@ -299,9 +299,21 @@ pub trait FoldDataset {
 pub trait FoldModel: Sized {
     type Config;
     type Error;
+    /// Fit one fold's model.
+    ///
+    /// `fold` is the identity of the fold being fitted, and it is a PARAMETER
+    /// rather than config state because the caller is the only thing that knows
+    /// it: a config is shared across every fold, and deriving the fold from
+    /// `train[0]` breaks on an empty slice and is meaningless for a partition
+    /// that trains on several folds at once (`qvalues::crossfit_lda` trains on
+    /// all folds but one). Models with a stochastic initialization mix it into
+    /// their seed, so that folds differ from each other while a rerun of the
+    /// same fold does not. Deterministic models ignore it, the same way a model
+    /// without early stopping ignores `val`.
     fn fit<D: FoldDataset>(
         cfg: &Self::Config,
         data: &D,
+        fold: usize,
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, Self::Error>;
@@ -445,12 +457,18 @@ impl FoldModel for GbmFoldModel {
     type Config = GBMConfig;
     type Error = ForustError;
 
+    /// `fold` is DELIBERATELY IGNORED: forust seeds itself from
+    /// `GBMConfig::seed`, so mixing the fold in here would fight the one seed
+    /// the booster already has. Folds still differ, because they are fitted on
+    /// different rows.
     fn fit<D: FoldDataset>(
         cfg: &GBMConfig,
         data: &D,
+        fold: usize,
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, ForustError> {
+        let _ = fold;
         let ncols = data.column_names().len();
         let mut train_buffer = DataBuffer::default();
         let mut val_buffer = DataBuffer::default();
@@ -886,6 +904,7 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
         let model = M::fit(
             &self.config,
             &self.dataset,
+            fold as usize,
             &self.fold_rows[fold as usize],
             &self.fold_rows[val_fold as usize],
         )?;
@@ -1025,6 +1044,7 @@ mod test {
         fn fit<D: FoldDataset>(
             cfg: &Vec<f32>,
             _data: &D,
+            _fold: usize,
             _train: &[usize],
             _val: &[usize],
         ) -> Result<Self, ()> {
