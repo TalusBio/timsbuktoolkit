@@ -271,56 +271,139 @@ pub trait FeatureVector: FeatureLike {
     fn as_feature(&self) -> impl IntoIterator<Item = f64> + '_;
 }
 
+/// Read-only, random-access view of the rows being cross-fitted.
+///
+/// Everything a [`FoldModel`] is allowed to know about the data: the width and
+/// names of the lane matrix, THE fold partition, one row's values, and one
+/// row's target/decoy label. Deliberately no `ncols` (it is
+/// `column_names().len()`) and no `names` argument threaded through the model
+/// impls — the dataset already knows both, so there is no second copy to drift.
+pub trait FoldDataset {
+    fn nrows(&self) -> usize;
+    /// Lane column names; also defines the row width.
+    fn column_names(&self) -> Vec<Arc<str>>;
+    /// THE partition. One definition, one place.
+    fn get_fold(&self, i: usize) -> usize;
+    /// Writes row `i` into `out` (`out.len() == column_names().len()`).
+    fn get_values(&self, i: usize, out: &mut [f64]);
+    fn is_decoy(&self, i: usize) -> bool;
+}
+
+/// A model [`CrossValidatedScorer`] can cross-fit: fit on a row-index slice,
+/// score another, and report per-column importance.
+///
+/// `fit` receives BOTH the training rows and an early-stopping (`val`) slice.
+/// A model without early stopping is expected to ignore `val`; only the
+/// scorer's guarantee matters, namely that neither slice is ever scored by the
+/// model fitted from it.
+pub trait FoldModel: Sized {
+    type Config;
+    type Error;
+    fn fit<D: FoldDataset>(
+        cfg: &Self::Config,
+        data: &D,
+        train: &[usize],
+        val: &[usize],
+    ) -> Result<Self, Self::Error>;
+    fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, Self::Error>;
+    /// Lane-indexed, always `column_names().len()` long. Columns the model
+    /// never used report `0.0` rather than being absent, so the vector is
+    /// positionally comparable across folds and across models by construction.
+    fn importance(&self) -> Vec<f32>;
+}
+
+/// The one [`FoldDataset`] impl: the already-materialized row-major matrix that
+/// [`PrecomputedFeatures`] holds, plus its column names and the fold count that
+/// defines the partition. `get_values` is a `copy_from_slice` out of a slab
+/// that is already in memory.
+pub struct RowMajorDataset {
+    features: PrecomputedFeatures,
+    names: Vec<Arc<str>>,
+    n_folds: usize,
+}
+
+impl RowMajorDataset {
+    pub(crate) fn new(features: PrecomputedFeatures, names: Vec<Arc<str>>, n_folds: usize) -> Self {
+        assert!(n_folds > 0, "n_folds must be positive");
+        assert_eq!(
+            names.len(),
+            features.ncols,
+            "column names must be one per matrix column"
+        );
+        // `is_decoy` is the ONLY label channel the model traits get, so the
+        // labels have to be binary for it to be lossless. Both producers
+        // (`FeatureVector::get_y` walks and `from_row_major`) feed 0.0/1.0.
+        debug_assert!(
+            features.responses.iter().all(|&y| y == 0.0 || y == 1.0),
+            "FoldDataset labels must be binary 0.0/1.0"
+        );
+        Self {
+            features,
+            names,
+            n_folds,
+        }
+    }
+}
+
+impl FoldDataset for RowMajorDataset {
+    fn nrows(&self) -> usize {
+        self.features.responses.len()
+    }
+
+    fn column_names(&self) -> Vec<Arc<str>> {
+        self.names.clone()
+    }
+
+    fn get_fold(&self, i: usize) -> usize {
+        i % self.n_folds
+    }
+
+    fn get_values(&self, i: usize, out: &mut [f64]) {
+        out.copy_from_slice(self.features.row(i));
+    }
+
+    fn is_decoy(&self, i: usize) -> bool {
+        self.features.responses[i] <= 0.5
+    }
+}
+
 /// Materialized view into a `DataBuffer`: feature matrix + label slice.
 type FoldView<'a> = (Matrix<'a, f64>, &'a [f64]);
 
+/// Column-major scratch space for one `forust` call. `forust` wants
+/// feature-major, so gathering a set of rows out of the row-major dataset is a
+/// transpose; this is where it happens and the only place it does.
 #[derive(Default)]
-pub struct DataBuffer {
+struct DataBuffer {
     fold_buffer: Vec<f64>,
     response_buffer: Vec<f64>,
     nrows: usize,
     ncols: usize,
 }
 
-#[derive(Debug)]
-pub enum DataBufferError {
-    NoDataForFold(u8),
-    UnequalLengths(usize, usize),
-}
-
 impl DataBuffer {
-    fn fill_buffer_precomputed(
-        &mut self,
-        assigned_fold: &[u8],
-        precomputed: &PrecomputedFeatures,
-        fold: u8,
-    ) -> Result<(), DataBufferError> {
+    /// Gather `rows` (in the given order) out of `data` into feature-major
+    /// layout: `fold_buffer[feature_idx * nrows + sample_idx]`.
+    fn fill_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
         self.fold_buffer.clear();
         self.response_buffer.clear();
-        self.nrows = assigned_fold.iter().filter(|&&x| x == fold).count();
-        self.ncols = precomputed.ncols;
-
-        // Feature-major layout: fold_buffer[feature_idx * nrows + sample_idx]
+        self.nrows = rows.len();
+        self.ncols = ncols;
         self.fold_buffer.resize(self.ncols * self.nrows, 0.0);
 
-        let mut sample_idx = 0;
-        for (elem_idx, &elem_fold) in assigned_fold.iter().enumerate() {
-            if fold == elem_fold {
-                let row = precomputed.row(elem_idx);
-                for (feature_idx, &val) in row.iter().enumerate() {
-                    self.fold_buffer[feature_idx * self.nrows + sample_idx] = val;
-                }
-                self.response_buffer.push(precomputed.responses[elem_idx]);
-                sample_idx += 1;
+        let mut row = vec![0.0f64; ncols];
+        for (sample_idx, &elem_idx) in rows.iter().enumerate() {
+            data.get_values(elem_idx, &mut row);
+            for (feature_idx, &val) in row.iter().enumerate() {
+                self.fold_buffer[feature_idx * self.nrows + sample_idx] = val;
             }
+            self.response_buffer
+                .push(if data.is_decoy(elem_idx) { 0.0 } else { 1.0 });
         }
-
-        Ok(())
     }
 
     fn as_matrix(&self) -> FoldView<'_> {
-        let ncols = self.fold_buffer.len() / self.nrows;
-        let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, ncols);
+        let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, self.ncols);
         assert_eq!(self.fold_buffer.len(), self.nrows * self.ncols);
         assert_eq!(mat.rows, self.nrows);
         assert_eq!(self.response_buffer.len(), self.nrows);
@@ -328,17 +411,79 @@ impl DataBuffer {
     }
 }
 
-/// This is meant to IN ESSENCE ...
-///
-/// Provided we have a number of splits k >= 3.
-/// We would train k classifiers, for for classifier n,
-/// we would use as train data fold n, as early stop data
-/// fold n + 1 and thus we can safely use as test/scoring
-/// data any other fold.
-///
-/// So the score for any point in the data is the average of
-/// the results for all classifiers that didint use it
-/// for either training or early_stopping_rounds.
+/// Class weights: decoys 1.0, targets 0.5 — the historical GBM weighting,
+/// unchanged, just expressed through the dataset's label channel.
+fn fold_weights<D: FoldDataset>(data: &D, rows: &[usize]) -> Vec<f64> {
+    rows.iter()
+        .map(|&i| if data.is_decoy(i) { 1.0 } else { 0.5 })
+        .collect()
+}
+
+/// [`FoldModel`] adapter for `forust`'s [`GradientBooster`]. A newtype only
+/// because `GradientBooster` is a foreign type; it also carries the lane width
+/// so [`FoldModel::importance`] can return a full-width, lane-indexed vector
+/// (forust reports only the columns it split on).
+pub struct GbmFoldModel {
+    booster: GradientBooster,
+    ncols: usize,
+}
+
+impl FoldModel for GbmFoldModel {
+    type Config = GBMConfig;
+    type Error = ForustError;
+
+    fn fit<D: FoldDataset>(
+        cfg: &GBMConfig,
+        data: &D,
+        train: &[usize],
+        val: &[usize],
+    ) -> Result<Self, ForustError> {
+        let ncols = data.column_names().len();
+        let mut train_buffer = DataBuffer::default();
+        let mut val_buffer = DataBuffer::default();
+        train_buffer.fill_from(data, train, ncols);
+        val_buffer.fill_from(data, val, ncols);
+
+        let (matrix, response) = train_buffer.as_matrix();
+        let (v_matrix, v_response) = val_buffer.as_matrix();
+
+        let eval_weight = fold_weights(data, val);
+        assert_eq!(eval_weight.len(), v_response.len());
+        let evaluation_data = Some(vec![(v_matrix, v_response, eval_weight.as_ref())]);
+
+        let sample_weight = fold_weights(data, train);
+        assert_eq!(sample_weight.len(), response.len());
+
+        let mut booster = cfg.try_build()?;
+        booster.fit(&matrix, response, &sample_weight, evaluation_data)?;
+        Ok(Self { booster, ncols })
+    }
+
+    fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, ForustError> {
+        let mut buffer = DataBuffer::default();
+        buffer.fill_from(data, rows, self.ncols);
+        let (matrix, _response) = buffer.as_matrix();
+        Ok(self.booster.predict(&matrix, true))
+    }
+
+    fn importance(&self) -> Vec<f32> {
+        let raw = self
+            .booster
+            .calculate_feature_importance(ImportanceMethod::Gain, true);
+        debug_assert!(
+            raw.keys().all(|&idx| idx < self.ncols),
+            "forust importance index exceeds the lane width"
+        );
+        let mut out = vec![0.0f32; self.ncols];
+        for (idx, gain) in raw {
+            if let Some(slot) = out.get_mut(idx) {
+                *slot = gain;
+            }
+        }
+        out
+    }
+}
+
 /// Row-major precomputed feature matrix: features[sample_idx * ncols + feature_idx]
 pub(crate) struct PrecomputedFeatures {
     features: Vec<f64>,
@@ -409,113 +554,120 @@ pub struct FoldStats {
 
 pub type RescoreFeatureStats = Vec<FoldStats>;
 
-pub struct CrossValidatedScorer<T: FeatureLike> {
+/// This is meant to IN ESSENCE ...
+///
+/// Provided we have a number of splits k >= 3.
+/// We would train k classifiers, for for classifier n,
+/// we would use as train data fold n, as early stop data
+/// fold n + 1 and thus we can safely use as test/scoring
+/// data any other fold.
+///
+/// So the score for any point in the data is the average of
+/// the results for all classifiers that didint use it
+/// for either training or early_stopping_rounds.
+///
+/// `M` is the model being cross-fitted ([`FoldModel`]); the partition above is
+/// the scorer's and does not vary with it.
+pub struct CrossValidatedScorer<T: FeatureLike, M: FoldModel> {
     n_folds: u8,
     data: Vec<T>,
-    weights: Vec<f64>,
-    assigned_fold: Vec<u8>,
-    fold_classifiers: Vec<Option<GradientBooster>>,
-    config: GBMConfig,
-    precomputed: PrecomputedFeatures,
+    dataset: RowMajorDataset,
+    /// `fold_rows[f]` = the row indices with `dataset.get_fold(i) == f`, in
+    /// ascending order. Derived from `get_fold` so the partition still has
+    /// exactly one definition; materialized once because every fit and every
+    /// scoring pass needs it.
+    fold_rows: Vec<Vec<usize>>,
+    fold_models: Vec<Option<M>>,
+    config: M::Config,
 }
 
-impl<T: FeatureLike> CrossValidatedScorer<T> {
+impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
     /// Create a new CrossValidatedScorer
     ///
     /// NOTE: THIS ASSUMES YOUR DATA IS ALREADY SHUFFLED
     /// FOLDS WILL BE ASSIGNED IN ORDER (0, 1, 2, ..., n_folds-1, 0, 1, ...)
     /// IF YOUR DATA IS ORDERED IN ANY WAY, COULD LEAD TO BIASED RESULTS.
-    pub fn new_from_shuffled(n_folds: u8, data: Vec<T>, config: GBMConfig) -> Self
+    ///
+    /// The self-walking ctor has no name source, so columns are named
+    /// positionally (`feature_0`, ...). Callers that have real names use
+    /// [`Self::new_from_shuffled_with_precomputed`].
+    pub fn new_from_shuffled(n_folds: u8, data: Vec<T>, config: M::Config) -> Self
     where
         T: FeatureVector,
     {
-        let assigned_fold: Vec<u8> = (0..data.len())
-            .map(|x| (x % n_folds as usize).try_into().unwrap())
-            .collect();
-        let weights: Vec<f64> = data
-            .iter()
-            .map(|x| if x.get_y() > 0.5 { 0.5 } else { 1.0 })
-            .collect();
-
         let precomputed = PrecomputedFeatures::from_data(&data);
-
-        Self {
-            n_folds,
-            data,
-            assigned_fold,
-            fold_classifiers: Vec::new(),
-            weights,
-            config,
-            precomputed,
-        }
+        let names: Vec<Arc<str>> = (0..precomputed.ncols)
+            .map(|j| Arc::from(format!("feature_{j}").as_str()))
+            .collect();
+        Self::new(n_folds, data, config, precomputed, names)
     }
 
     /// Like [`Self::new_from_shuffled`] but with the feature matrix supplied
-    /// externally (already row-major, row-aligned with `data`). Weights + fold
-    /// assignment still derive positionally from `data`, so the caller MUST
-    /// build `precomputed` from the SAME (already-shuffled) `data` order.
+    /// externally (already row-major, row-aligned with `data`) along with its
+    /// column names. Labels + fold assignment are positional, so the caller
+    /// MUST build `precomputed` from the SAME (already-shuffled) `data` order.
     pub(crate) fn new_from_shuffled_with_precomputed(
         n_folds: u8,
         data: Vec<T>,
-        config: GBMConfig,
+        config: M::Config,
         precomputed: PrecomputedFeatures,
+        names: Vec<Arc<str>>,
+    ) -> Self {
+        Self::new(n_folds, data, config, precomputed, names)
+    }
+
+    fn new(
+        n_folds: u8,
+        data: Vec<T>,
+        config: M::Config,
+        precomputed: PrecomputedFeatures,
+        names: Vec<Arc<str>>,
     ) -> Self {
         assert_eq!(
             precomputed.responses.len(),
             data.len(),
             "precomputed rows must align 1:1 with data"
         );
-        let assigned_fold: Vec<u8> = (0..data.len())
-            .map(|x| (x % n_folds as usize).try_into().unwrap())
-            .collect();
-        let weights: Vec<f64> = data
-            .iter()
-            .map(|x| if x.get_y() > 0.5 { 0.5 } else { 1.0 })
-            .collect();
+        let dataset = RowMajorDataset::new(precomputed, names, n_folds as usize);
+        let mut fold_rows: Vec<Vec<usize>> = vec![Vec::new(); n_folds as usize];
+        for i in 0..dataset.nrows() {
+            fold_rows[dataset.get_fold(i)].push(i);
+        }
 
         Self {
             n_folds,
             data,
-            assigned_fold,
-            fold_classifiers: Vec::new(),
-            weights,
+            dataset,
+            fold_rows,
+            fold_models: Vec::new(),
             config,
-            precomputed,
         }
     }
 
-    pub fn fit<'a>(
-        &mut self,
-        train_buffer: &'a mut DataBuffer,
-        val_buffer: &'a mut DataBuffer,
-    ) -> Result<(), ForustError> {
-        self.fit_step(train_buffer, val_buffer)?;
-        self.assign_scores();
+    pub fn fit(&mut self) -> Result<(), M::Error> {
+        self.fit_step()?;
+        self.assign_scores()?;
 
         Ok(())
     }
 
-    pub fn fit_step<'a>(
-        &mut self,
-        train_buffer: &'a mut DataBuffer,
-        val_buffer: &'a mut DataBuffer,
-    ) -> Result<(), ForustError> {
-        self.fold_classifiers.clear();
-        (0..self.n_folds).for_each(|_| self.fold_classifiers.push(None));
+    pub fn fit_step(&mut self) -> Result<(), M::Error> {
+        self.fold_models.clear();
+        (0..self.n_folds).for_each(|_| self.fold_models.push(None));
         for fold in 0..self.n_folds {
             let step = TimedStep::begin_stderr(format_args!(
                 "  Training fold {}/{}...",
                 fold + 1,
                 self.n_folds
             ));
-            self.fit_fold(fold, train_buffer, val_buffer)?;
+            self.fit_fold(fold)?;
             step.finish();
         }
 
         Ok(())
     }
 
-    pub fn get_scores(&self) -> Vec<f64> {
+    pub fn get_scores(&self) -> Result<Vec<f64>, M::Error> {
         // Each row is scored by every fold classifier except its own training
         // fold and that fold's early-stopping fold, i.e. `n_folds - 2` times.
         // At n_folds == 2 that averaging divisor is 0 and the scores silently
@@ -526,7 +678,6 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             self.n_folds
         );
         let mut scores = vec![0.0; self.data.len()];
-        let mut buffer = DataBuffer::default();
 
         let step = TimedStep::begin_stderr("  Scoring folds...");
         for train_i in 0..self.n_folds {
@@ -539,17 +690,12 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
                 if inference_i == early_stop_i {
                     continue;
                 };
-                let scorer = self.fold_classifiers[train_i as usize].as_ref().unwrap();
-                let (matrix, _res) = self.fold_to_matrix(inference_i, &mut buffer);
-                let preds = scorer.predict(&matrix, true);
+                let scorer = self.fold_models[train_i as usize].as_ref().unwrap();
+                let rows = &self.fold_rows[inference_i as usize];
+                let preds = scorer.predict(&self.dataset, rows)?;
                 // Now we need to add the predictions to the scores
-                let mut score_i = 0;
-                for pred in preds.into_iter() {
-                    while self.assigned_fold[score_i] != inference_i {
-                        score_i += 1;
-                    }
-                    scores[score_i] += pred;
-                    score_i += 1;
+                for (&row, pred) in rows.iter().zip(preds) {
+                    scores[row] += pred;
                 }
             }
         }
@@ -560,14 +706,15 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
             *x /= div_factor;
         });
 
-        scores
+        Ok(scores)
     }
 
-    fn assign_scores(&mut self) {
-        let scores = self.get_scores();
+    fn assign_scores(&mut self) -> Result<(), M::Error> {
+        let scores = self.get_scores()?;
         for (v, s) in self.data.iter_mut().zip(scores.iter()) {
             v.assign_score(*s);
         }
+        Ok(())
     }
 
     pub fn score(self) -> Vec<T> {
@@ -579,62 +726,66 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         &self.data
     }
 
-    /// Compute per-fold feature means + Forust Gain importance.
+    /// Compute per-fold feature means + per-fold model importance.
     ///
-    /// `names` is the set-level feature-name list, in the same order as the
-    /// `PrecomputedFeatures` columns (see `crate::ml::qvalues::all_feature_name_set`
-    /// / `linear_feature_name_set` for the live lane-based callers).
-    /// Folds with no classifier (shouldn't happen post-fit) produce empty maps.
-    pub fn feature_stats(&self, names: &[Arc<str>]) -> RescoreFeatureStats {
+    /// Model-agnostic except for the importance half, which is whatever
+    /// [`FoldModel::importance`] reports. Column names come from the dataset,
+    /// so the stats align with the matrix the model saw by construction.
+    /// Folds with no fitted model (shouldn't happen post-fit) produce empty maps.
+    pub fn feature_stats(&self) -> RescoreFeatureStats {
+        let names = self.dataset.column_names();
         let mut out: RescoreFeatureStats = Vec::with_capacity(self.n_folds as usize);
+        let mut row_buf = vec![0.0f64; names.len()];
         for fold in 0..self.n_folds {
-            // --- Gain importance from the booster (sorted desc by gain) ---
-            let importance: Vec<(Arc<str>, f32)> = match self
-                .fold_classifiers
-                .get(fold as usize)
-                .and_then(|o| o.as_ref())
-            {
-                Some(booster) => {
-                    let raw_imp =
-                        booster.calculate_feature_importance(ImportanceMethod::Gain, true);
-                    debug_assert!(
-                        raw_imp.keys().all(|&idx| idx < names.len()),
-                        "forust importance index exceeds feature name list"
-                    );
-                    let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
-                        .into_iter()
-                        .filter_map(|(idx, v)| names.get(idx).map(|n| (n.clone(), v)))
-                        .collect();
-                    pairs
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    pairs
-                }
-                None => Vec::new(),
-            };
+            // --- Importance, back to the (name, gain) sidecar shape ---
+            // Zero-importance columns are dropped rather than emitted: the
+            // sidecar and the dashboard's fold-averaged gain both treat a
+            // feature as "reported by this fold" simply by being present, so
+            // emitting full-width vectors would change both the row set and
+            // the averaging divisor.
+            let importance: Vec<(Arc<str>, f32)> =
+                match self.fold_models.get(fold as usize).and_then(|o| o.as_ref()) {
+                    Some(model) => {
+                        let raw_imp = model.importance();
+                        debug_assert_eq!(
+                            raw_imp.len(),
+                            names.len(),
+                            "FoldModel::importance must be lane-indexed"
+                        );
+                        let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
+                            .into_iter()
+                            .zip(names.iter())
+                            .filter(|(v, _)| *v != 0.0)
+                            .map(|(v, n)| (n.clone(), v))
+                            .collect();
+                        pairs.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        pairs
+                    }
+                    None => Vec::new(),
+                };
 
             // --- Per-feature finite-only means + NaN ratio ---
             let mut sums: Vec<f64> = vec![0.0; names.len()];
             let mut finite_counts: Vec<u32> = vec![0; names.len()];
             let mut nan_counts: Vec<u32> = vec![0; names.len()];
             let mut n: usize = 0;
-            for i in 0..self.data.len() {
-                if self.assigned_fold.get(i) == Some(&fold) {
-                    // Read from the precomputed matrix (the exact columns the
-                    // booster trained on) rather than re-walking a per-record
-                    // feature fn, so the stats align with `names` by
-                    // construction even when features are supplied externally.
-                    for (j, &v) in self.precomputed.row(i).iter().enumerate() {
-                        if j < sums.len() {
-                            if v.is_finite() {
-                                sums[j] += v;
-                                finite_counts[j] += 1;
-                            } else {
-                                nan_counts[j] += 1;
-                            }
-                        }
+            for &i in self.fold_rows[fold as usize].iter() {
+                // Read from the dataset (the exact columns the model trained
+                // on) rather than re-walking a per-record feature fn, so the
+                // stats align with `names` by construction even when features
+                // are supplied externally.
+                self.dataset.get_values(i, &mut row_buf);
+                for (j, &v) in row_buf.iter().enumerate() {
+                    if v.is_finite() {
+                        sums[j] += v;
+                        finite_counts[j] += 1;
+                    } else {
+                        nan_counts[j] += 1;
                     }
-                    n += 1;
                 }
+                n += 1;
             }
             let feature_stats: Vec<FeatureStat> = if n > 0 {
                 names
@@ -673,57 +824,17 @@ impl<T: FeatureLike> CrossValidatedScorer<T> {
         maybe_next
     }
 
-    fn fold_to_matrices<'a>(
-        &'a self,
-        fold: u8,
-        train_buffer: &'a mut DataBuffer,
-        val_buffer: &'a mut DataBuffer,
-    ) -> (FoldView<'a>, FoldView<'a>) {
-        let next_fold_id = self.next_fold(fold);
-        (
-            self.fold_to_matrix(fold, train_buffer),
-            self.fold_to_matrix(next_fold_id, val_buffer),
-        )
-    }
-
-    fn fold_to_matrix<'a>(&self, fold: u8, buffer: &'a mut DataBuffer) -> FoldView<'a> {
-        buffer
-            .fill_buffer_precomputed(self.assigned_fold.as_slice(), &self.precomputed, fold)
-            .unwrap();
-        buffer.as_matrix()
-    }
-
-    fn train_weights(&self, fold: u8) -> Vec<f64> {
-        self.weights
-            .iter()
-            .zip(self.assigned_fold.iter())
-            .filter_map(|(&w, &f)| if f == fold { Some(w) } else { None })
-            .collect()
-    }
-
-    fn fit_fold<'a>(
-        &mut self,
-        fold: u8,
-        train_buffer: &'a mut DataBuffer,
-        val_buffer: &'a mut DataBuffer,
-    ) -> Result<(), ForustError> {
-        // let mut model = SelfSupervisedBooster::try_new(&self.config, 10)?;
-        let mut model = self.config.try_build()?;
-        let ((matrix, response), (v_matrix, v_response)) =
-            self.fold_to_matrices(fold, train_buffer, val_buffer);
-        // let (val_matrix, val_response) = self.fold_to_matrix(fold);
-        let eval_weight = self.train_weights(self.next_fold(fold));
-        assert_eq!(eval_weight.len(), v_response.len());
-        let evaluation_data = Some(vec![(v_matrix, v_response, eval_weight.as_ref())]);
-        // model.fit_unweighted(&matrix, response, evaluation_data)?;
-        // let sample_weight = response
-        //     .iter()
-        //     .map(|&x| if x > 0.5 { 1.0 } else { 2.0 })
-        //     .collect::<Vec<f64>>();
-        let sample_weight = self.train_weights(fold);
-        assert_eq!(sample_weight.len(), response.len());
-        model.fit(&matrix, response, &sample_weight, evaluation_data)?;
-        self.fold_classifiers[fold as usize] = Some(model);
+    /// Fit fold `fold`: trained on that fold's rows, early-stopped on the next
+    /// fold's. Every other fold is therefore safe to score with it.
+    fn fit_fold(&mut self, fold: u8) -> Result<(), M::Error> {
+        let val_fold = self.next_fold(fold);
+        let model = M::fit(
+            &self.config,
+            &self.dataset,
+            &self.fold_rows[fold as usize],
+            &self.fold_rows[val_fold as usize],
+        )?;
+        self.fold_models[fold as usize] = Some(model);
         Ok(())
     }
 }
@@ -814,13 +925,12 @@ mod test {
         let data = random_data(500, 500, 0xC0FFEE);
         let data_len = data.len();
 
-        let mut scorer = CrossValidatedScorer::new_from_shuffled(3, data, config);
-        scorer
-            .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
-            .unwrap();
+        let mut scorer =
+            CrossValidatedScorer::<MyFeature, GbmFoldModel>::new_from_shuffled(3, data, config);
+        scorer.fit().unwrap();
 
         // Rows 0..500 are the targets, 500..1000 the decoys.
-        let out = scorer.get_scores();
+        let out = scorer.get_scores().unwrap();
         let avg_t: f64 = out[..500].iter().sum::<f64>() / 500.0;
         let avg_d: f64 = out[500..].iter().sum::<f64>() / 500.0;
         let num_t_gt_d = out[..500].iter().filter(|&&x| x > avg_d).count();

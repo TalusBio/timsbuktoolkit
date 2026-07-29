@@ -1,10 +1,10 @@
 use super::cv::{
     CrossValidatedScorer,
-    DataBuffer,
     FeatureLike,
     FeatureStat,
     FoldStats,
     GBMConfig,
+    GbmFoldModel,
     PrecomputedFeatures,
     RescoreFeatureStats,
 };
@@ -305,17 +305,17 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ALL_NCOLS, responses);
 
-    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled_with_precomputed(
-        N_RESCORE_FOLDS,
-        data,
-        config,
-        precomputed,
-    );
-    scorer
-        .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
-        .unwrap();
+    let mut scorer =
+        CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
+            N_RESCORE_FOLDS,
+            data,
+            config,
+            precomputed,
+            names,
+        );
+    scorer.fit().unwrap();
 
-    let stats = scorer.feature_stats(&names);
+    let stats = scorer.feature_stats();
 
     finalize(scorer.score(), stats)
 }
@@ -475,17 +475,17 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ncols, responses);
 
-    let mut scorer = CrossValidatedScorer::<CompetedCandidate>::new_from_shuffled_with_precomputed(
-        N_RESCORE_FOLDS,
-        data,
-        config,
-        precomputed,
-    );
-    scorer
-        .fit(&mut DataBuffer::default(), &mut DataBuffer::default())
-        .unwrap();
+    let mut scorer =
+        CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
+            N_RESCORE_FOLDS,
+            data,
+            config,
+            precomputed,
+            names,
+        );
+    scorer.fit().unwrap();
 
-    let stats = scorer.feature_stats(&names);
+    let stats = scorer.feature_stats();
 
     finalize(scorer.score(), stats)
 }
