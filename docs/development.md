@@ -73,8 +73,9 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
   the first second, not at Phase 5.
 - **Any override active** logs the full effective config once per run at `info`,
   prefixed `MLP config: DEV OVERRIDE ACTIVE`.
-- `loss` is deliberately absent: `AsymFocal` is three coupled floats and wants a
-  real config surface.
+- `loss` is deliberately absent: `MlpLoss::Focal` is two coupled floats that also
+  interact with the per-row target/decoy sample weights, and wants a real config
+  surface.
 
 Per-fold results are one `info` line each, so a sweep is greppable:
 

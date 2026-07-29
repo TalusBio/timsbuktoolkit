@@ -472,29 +472,64 @@ impl Layer for BatchNorm {
 
 /// Loss shape for the single-logit head.
 ///
-/// [`MlpLoss::AsymFocal`] with both gammas at zero is exactly
-/// [`MlpLoss::Bce`], so the focal form is a strict generalization and the
-/// default stays the plain loss. See `dev/2026-07-25-nn-rescoring-design.md`
-/// for why the asymmetry points the way it does; briefly, in target/decoy FDR a
-/// confidently-wrong DECOY is expensive (it raises the q-value of everything
-/// below it in the descending walk) while a confidently-wrong TARGET is cheap
-/// and usually not even wrong (target labels are noisy positives). Standard
-/// focal loss up-weights hard examples in both classes, which is the wrong
-/// thing for the target side.
+/// [`MlpLoss::Focal`] at `gamma = 0, alpha = 0.5` is exactly [`MlpLoss::Bce`],
+/// so the focal form is a strict generalization and the default stays the plain
+/// loss.
+///
+/// # A removed variant, and why
+/// There used to be an `AsymFocal` here that weighted every row by
+/// `p^gamma_class` — by the predicted TARGET probability regardless of label,
+/// with a per-class exponent — on the argument that target labels are noisy
+/// positives, so a confidently-wrong target should be DISCOUNTED rather than
+/// emphasized. That argument is wrong for this pipeline: the rows it discounts
+/// are the marginal ones, and the 1% FDR cut lives exactly among them. Removing
+/// gradient signal from the decision boundary removes it from the only region
+/// that determines the identification count. The replacement is the STANDARD
+/// alpha-balanced focal loss, which up-weights hard examples on BOTH sides — the
+/// opposite of what the removed variant did on the target side.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MlpLoss {
     #[default]
     Bce,
-    /// Weight each sample by `p^gamma_class` — by the predicted TARGET
-    /// probability regardless of label, with a per-class exponent. For decoys
-    /// that is standard focal exactly; for targets it is its mirror.
-    AsymFocal {
-        gamma_decoy: f32,
-        gamma_target: f32,
-        /// Lower bound on the modulating factor, so no row's weight reaches
-        /// zero and self-paced learning cannot discard the whole hard tail.
-        floor: f32,
-    },
+    /// Standard alpha-balanced focal loss (Lin et al., 2017):
+    ///
+    /// ```text
+    ///   FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    ///   p_t     = p       if y == 1 else 1 - p
+    ///   alpha_t = alpha   if y == 1 else 1 - alpha
+    /// ```
+    ///
+    /// `1 - p_t` is the probability mass the model put on the WRONG class, so
+    /// `(1 - p_t)^gamma` is near 1 for a row the model gets wrong and near 0 for
+    /// one it gets easily right: `gamma` trades away the easy bulk to concentrate
+    /// the gradient on the hard rows, in both classes. `gamma = 0` disables the
+    /// modulation entirely.
+    ///
+    /// # `alpha` is normalized so `gamma = 0, alpha = 0.5` IS `Bce`
+    /// `alpha_t` is applied as `2 * alpha` (targets) / `2 * (1 - alpha)`
+    /// (decoys), not as the bare `alpha`. The textbook form would leave a
+    /// constant factor of 0.5 at the neutral setting; scaling by 2 makes the
+    /// neutral setting bit-identical to [`MlpLoss::Bce`] instead of merely
+    /// proportional to it. That matters because the loss is compared ACROSS
+    /// configurations here — the early-stopping rule and the per-fold summary
+    /// both read absolute loss values — so a silent 2x on the reported number
+    /// would make an `alpha`-sweep's rows incomparable. `alpha` still has its
+    /// usual meaning: `> 0.5` favors targets, `< 0.5` favors decoys.
+    ///
+    /// # `alpha` and the per-row sample weights MULTIPLY — tune them together
+    /// The MLP already receives per-row weights (`0.5` targets / `1.0` decoys,
+    /// inherited from the GBM's convention via `cv::fold_weights`), and those
+    /// weights multiply this `alpha_t`. They are two dials on the same quantity:
+    /// setting `alpha = 0.5` does NOT mean the classes are balanced, it means
+    /// they are balanced 0.5/1.0 by the sample weights alone. An `alpha` chosen
+    /// as if the weights were uniform will double-count the imbalance. Tune the
+    /// pair, never one in isolation.
+    ///
+    /// This is well-trodden in this domain rather than a novelty: Percolator
+    /// adapts a hinge loss with different target and decoy weights for the same
+    /// reason, so a class-asymmetric loss on top of class-asymmetric row weights
+    /// is the normal shape of a target/decoy discriminant, not an exotic one.
+    Focal { gamma: f32, alpha: f32 },
 }
 
 /// Numerically stable `sigma(z)`.
@@ -521,15 +556,40 @@ impl MlpLoss {
     /// `w` is the per-row sample weight; the mean is taken over `sum(w)` so the
     /// loss scale does not move when the class balance does.
     ///
-    /// # Gradient
-    /// With `p = sigma(z)`, `m = p^g` and `L_i = m * bce`:
+    /// # Gradient of the focal form
+    /// Write `p = sigma(z)`, `p_t = p` for a target and `1 - p` for a decoy,
+    /// `q = 1 - p_t` (the wrong-class mass), `s = +1` for a target and `-1` for a
+    /// decoy, `bce = -log(p_t)`, and `m = alpha_t * q^gamma`, so `L_i = m * bce`.
+    ///
+    /// Two standard identities do the work. First `dp_t/dz = s * p_t * q`, since
+    /// `dp/dz = p(1-p) = p_t * q` and the decoy case flips the sign. Hence
+    ///
     /// ```text
-    ///   dm/dz  = g * p^g * (1 - p)
-    ///   dL/dz  = p^g * [ g * (1 - p) * bce + (p - y) ]
+    ///   d(bce)/dz = -(1/p_t) * dp_t/dz = -s * q = p - y
     /// ```
-    /// At `g = 0` the bracket collapses to `p - y`, the plain BCE-with-logits
-    /// gradient. Below the floor the factor is constant, so its derivative
-    /// drops out and only `floor * (p - y)` remains.
+    ///
+    /// — the plain BCE-with-logits gradient. Second, the MODULATING FACTOR is
+    /// itself a function of `z`, so it contributes its own term:
+    ///
+    /// ```text
+    ///   dm/dz = alpha_t * gamma * q^(gamma-1) * (-dp_t/dz)
+    ///         = -gamma * s * p_t * m
+    /// ```
+    ///
+    /// Product rule:
+    ///
+    /// ```text
+    ///   dL/dz = m * [ (p - y) - gamma * s * p_t * bce ]
+    /// ```
+    ///
+    /// The `- gamma * s * p_t * bce` term is what makes this NOT a reweighted BCE
+    /// gradient: dropping it (the easy mistake) leaves a gradient that is wrong
+    /// everywhere `gamma != 0`, yet still trains, because it still points
+    /// downhill. Finite differences are the only cheap check — see the tests.
+    ///
+    /// At `gamma = 0` the bracket collapses to `p - y` and `q^0 = 1`, so with
+    /// `alpha = 0.5` (hence `alpha_t = 1`) both the loss and the gradient are the
+    /// `Bce` arm's, to the bit.
     pub fn loss_and_grad(&self, logits: &Tensor, y: &[f32], w: &[f32], grad: &mut Tensor) -> f32 {
         let n = logits.rows;
         debug_assert_eq!(logits.cols, 1, "single-logit head");
@@ -548,20 +608,30 @@ impl MlpLoss {
 
             let (m, dm_term) = match *self {
                 MlpLoss::Bce => (1.0, 0.0),
-                MlpLoss::AsymFocal {
-                    gamma_decoy,
-                    gamma_target,
-                    floor,
-                } => {
-                    let g = if yi > 0.5 { gamma_target } else { gamma_decoy };
-                    let p = sigmoid(z);
-                    let raw = p.powf(g);
-                    if raw <= floor {
-                        // Constant region: the factor no longer depends on z.
-                        (floor, 0.0)
+                MlpLoss::Focal { gamma, alpha } => {
+                    let target = yi > 0.5;
+                    // `p_t` and `q` are each taken from `sigmoid` DIRECTLY
+                    // rather than one from `1.0 - other`: at |z| ~ 20 one of
+                    // them rounds to 1.0 and the complement would come out as
+                    // exactly 0 instead of the ~1e-9 it is. `sigmoid(-z)`
+                    // keeps the small side's magnitude.
+                    let (p_t, q) = if target {
+                        (sigmoid(z), sigmoid(-z))
                     } else {
-                        (raw, g * (1.0 - p) * bce)
-                    }
+                        (sigmoid(-z), sigmoid(z))
+                    };
+                    // 2x, so `alpha = 0.5` is the neutral setting — see the
+                    // variant docs.
+                    let a_t = if target {
+                        2.0 * alpha
+                    } else {
+                        2.0 * (1.0 - alpha)
+                    };
+                    let s = if target { 1.0 } else { -1.0 };
+                    // `q.powf(0.0)` is exactly 1.0 for every `q`, including 0,
+                    // and `0.0 * anything_finite` is 0.0, so `gamma = 0` leaves
+                    // both of these at the `Bce` arm's values.
+                    (a_t * q.powf(gamma), -gamma * s * p_t * bce)
                 }
             };
 
@@ -1491,9 +1561,10 @@ impl MlpConfig {
     /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
     /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
     ///
-    /// `MlpLoss` is deliberately absent: `AsymFocal` is three coupled floats and
-    /// wants a real config surface, not a string grammar wedged into one
-    /// variable.
+    /// `MlpLoss` is deliberately absent: [`MlpLoss::Focal`] is two coupled
+    /// floats that also interact with the per-row sample weights (see the
+    /// variant docs) and wants a real config surface, not a string grammar
+    /// wedged into one variable.
     ///
     /// # Unset changes nothing
     /// A variable that is not set is not read into anything — see
@@ -1906,93 +1977,142 @@ mod test {
         check_loss_grad(&MlpLoss::Bce, &z, &y, &w, "Bce");
     }
 
+    /// The modulating factor depends on `p`, hence on the logit, so it
+    /// contributes its own term to `dL/dz` and the BCE-with-logits gradient does
+    /// NOT carry over. Finite differences are what catch a missing or
+    /// sign-flipped term — an analytically wrong gradient here still points
+    /// downhill and still trains, so no learning test would notice.
+    ///
+    /// `(0, 0.5)` is included so the degenerate arm is checked by the same
+    /// machinery as the rest, not only against `Bce`.
     #[test]
     fn focal_gradient_matches_finite_differences() {
         let z = [-2.0f32, -0.3, 0.0, 0.7, 3.1];
         let y = [0.0f32, 1.0, 0.0, 1.0, 1.0];
         let w = [1.0f32, 0.5, 1.0, 0.5, 0.5];
-        for (gd, gt) in [(0.0, 0.0), (2.0, 0.0), (1.0, 0.5), (2.0, 1.0)] {
-            let loss = MlpLoss::AsymFocal {
-                gamma_decoy: gd,
-                gamma_target: gt,
-                floor: 1e-4,
-            };
-            check_loss_grad(&loss, &z, &y, &w, &format!("AsymFocal({gd},{gt})"));
+        for (gamma, alpha) in [
+            (0.0f32, 0.5f32),
+            (0.0, 0.25),
+            (1.0, 0.5),
+            (2.0, 0.5),
+            (2.0, 0.75),
+            (0.5, 0.25),
+            (5.0, 0.5),
+        ] {
+            let loss = MlpLoss::Focal { gamma, alpha };
+            check_loss_grad(&loss, &z, &y, &w, &format!("Focal(g={gamma},a={alpha})"));
         }
     }
 
     /// The cheapest guard against a sign error in the modulating factor's
-    /// derivative: at gamma zero the general case must reproduce plain BCE.
+    /// derivative: at `gamma = 0` with the neutral `alpha` the general case must
+    /// reproduce plain BCE, loss AND gradient. Asserted on the BITS, which the
+    /// 2x `alpha` normalization is what buys — see the [`MlpLoss::Focal`] docs.
     #[test]
     fn focal_at_zero_gamma_is_exactly_bce() {
         let z = [-2.0f32, -0.3, 0.0, 0.7, 3.1];
         let y = [0.0f32, 1.0, 0.0, 1.0, 1.0];
         let w = [1.0f32, 0.5, 1.0, 0.5, 0.5];
-        let focal = MlpLoss::AsymFocal {
-            gamma_decoy: 0.0,
-            gamma_target: 0.0,
-            floor: 0.0,
+        let focal = MlpLoss::Focal {
+            gamma: 0.0,
+            alpha: 0.5,
         };
 
         let (lb, lf) = (
             loss_only(&MlpLoss::Bce, &z, &y, &w),
             loss_only(&focal, &z, &y, &w),
         );
-        assert!((lb - lf).abs() < 1e-6, "loss {lb} vs {lf}");
+        assert_eq!(lb.to_bits(), lf.to_bits(), "loss {lb} vs {lf}");
 
         for (a, b) in loss_grad(&MlpLoss::Bce, &z, &y, &w)
             .iter()
             .zip(loss_grad(&focal, &z, &y, &w).iter())
         {
-            assert!((a - b).abs() < 1e-6, "grad {a} vs {b}");
+            assert!((a - b).abs() < 1e-7, "grad {a} vs {b}");
         }
     }
 
-    /// Pins the sign convention, which is the easy thing to invert: a
-    /// confidently-wrong DECOY must get heavier as `gamma_decoy` rises, and a
-    /// confidently-wrong TARGET must get lighter as `gamma_target` rises.
+    /// The property that replaced the removed `AsymFocal`: `gamma` up-weights
+    /// hard rows RELATIVE to easy ones on BOTH sides. Stated as a ratio of
+    /// ratios, because `(1 - p_t)^gamma <= 1` shrinks every row in absolute
+    /// terms — what focal changes is the balance between them.
+    ///
+    /// This is also where the sign convention is pinned: an implementation that
+    /// modulated by `p_t^gamma` instead of `(1 - p_t)^gamma` (i.e. the discount
+    /// the removed variant applied to targets) fails both halves.
     #[test]
-    fn focal_asymmetry_points_the_intended_way() {
-        // p = 0.9 decoy (confidently wrong), p = 0.1 target (confidently wrong).
-        let z_decoy = [2.1972246f32]; // sigmoid -> 0.9
-        let z_target = [-2.1972246f32]; // sigmoid -> 0.1
+    fn focal_up_weights_hard_examples_in_both_classes() {
         let w = [1.0f32];
+        let at = |gamma: f32, z: f32, y: f32| {
+            loss_only(&MlpLoss::Focal { gamma, alpha: 0.5 }, &[z], &[y], &w)
+        };
 
-        let at = |g_d: f32, g_t: f32, z: &[f32; 1], y: f32| {
+        // |z| = 2.1972246 is p = 0.9 / 0.1.
+        for (y, hard_z, easy_z) in [
+            (1.0f32, -2.1972246f32, 2.1972246f32),
+            (0.0, 2.1972246, -2.1972246),
+        ] {
+            let hard_ratio = at(2.0, hard_z, y) / at(0.0, hard_z, y);
+            let easy_ratio = at(2.0, easy_z, y) / at(0.0, easy_z, y);
+            let class = if y > 0.5 { "target" } else { "decoy" };
+            assert!(
+                hard_ratio > easy_ratio * 10.0,
+                "{class}: the confidently-wrong row must keep far more of its weight \
+                 than the easy one: hard {hard_ratio} vs easy {easy_ratio}"
+            );
+        }
+    }
+
+    /// `alpha` tilts the two classes against each other, and the neutral 0.5
+    /// really is neutral. Same logit magnitude on both sides, so the only
+    /// difference between the two numbers is `alpha_t`.
+    #[test]
+    fn alpha_tilts_the_class_balance() {
+        let w = [1.0f32];
+        let at = |alpha: f32, y: f32| {
             loss_only(
-                &MlpLoss::AsymFocal {
-                    gamma_decoy: g_d,
-                    gamma_target: g_t,
-                    floor: 0.0,
-                },
-                z,
+                &MlpLoss::Focal { gamma: 2.0, alpha },
+                &[if y > 0.5 { -1.0 } else { 1.0 }],
                 &[y],
                 &w,
             )
         };
 
-        let base_decoy = at(0.0, 0.0, &z_decoy, 0.0);
-        // p^gamma with p = 0.9 stays near 1, so the decoy keeps ~full weight
-        // while an EASY decoy would be crushed. Compare against an easy one.
-        let easy_decoy_base = at(0.0, 0.0, &[-2.1972246], 0.0);
-        let easy_decoy_focal = at(2.0, 0.0, &[-2.1972246], 0.0);
-        let hard_decoy_focal = at(2.0, 0.0, &z_decoy, 0.0);
-
-        let hard_ratio = hard_decoy_focal / base_decoy;
-        let easy_ratio = easy_decoy_focal / easy_decoy_base;
-        assert!(
-            hard_ratio > easy_ratio * 10.0,
-            "confidently-wrong decoy must survive the modulation far better \
-             than an easy one: hard {hard_ratio} vs easy {easy_ratio}"
+        assert_eq!(
+            at(0.5, 1.0).to_bits(),
+            at(0.5, 0.0).to_bits(),
+            "alpha 0.5 must treat the two classes identically"
         );
-
-        // Target side: raising gamma_target must DISCOUNT the wrong target.
-        let base_target = at(0.0, 0.0, &z_target, 1.0);
-        let focal_target = at(0.0, 1.0, &z_target, 1.0);
         assert!(
-            focal_target < base_target,
-            "confidently-wrong target must get lighter, {focal_target} !< {base_target}"
+            at(0.9, 1.0) > at(0.5, 1.0) && at(0.9, 0.0) < at(0.5, 0.0),
+            "alpha > 0.5 must favor targets"
         );
+        assert!(
+            at(0.1, 1.0) < at(0.5, 1.0) && at(0.1, 0.0) > at(0.5, 0.0),
+            "alpha < 0.5 must favor decoys"
+        );
+    }
+
+    /// Extreme logits are where a naive `log(p)` or a `1 - p` complement would
+    /// give `inf`, `NaN` or a hard zero. `q` and `p_t` both come straight from
+    /// `sigmoid`, so the modulation stays finite and the loss stays ~linear in
+    /// `|z|` the way `bce_from_logit` is.
+    #[test]
+    fn focal_is_finite_at_extreme_logits() {
+        let w = [1.0f32];
+        for gamma in [0.0f32, 1.0, 2.0, 5.0] {
+            for z in [-90.0f32, -40.0, -20.0, 0.0, 20.0, 40.0, 90.0] {
+                for y in [0.0f32, 1.0] {
+                    let loss = MlpLoss::Focal { gamma, alpha: 0.6 };
+                    let l = loss_only(&loss, &[z], &[y], &w);
+                    let g = loss_grad(&loss, &[z], &[y], &w)[0];
+                    assert!(
+                        l.is_finite() && l >= 0.0 && g.is_finite(),
+                        "gamma {gamma} z {z} y {y}: loss {l} grad {g}"
+                    );
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------ transform
