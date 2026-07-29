@@ -557,10 +557,16 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     finalize(scorer.score(), stats)
 }
 
-/// Sage-style shrinkage-LDA rescorer: closed-form linear fits, no boosting —
-/// ~100x cheaper than the GBM path. The FDR machinery (`assign_qval`,
-/// target-decoy competition) is untouched — only the discriminant score source
-/// changes.
+/// Sage-style shrinkage-LDA rescorer: closed-form linear fits, no boosting — so
+/// ~20x cheaper than the GBM path, measured as Phase 5 wall time on a
+/// 114138-candidate mzML run (0.48s against the GBM's 9.59s). One dataset, one
+/// machine, and that run was FAIMS so a quarter of the linear lane was culled as
+/// dead: the order of magnitude is the claim, not the digits. The figure used to
+/// read "~100x" with nothing said about what it was measured against, which is
+/// exactly why nobody noticed it going stale.
+///
+/// The FDR machinery (`assign_qval`, target-decoy competition) is untouched —
+/// only the discriminant score source changes.
 ///
 /// CROSS-FIT, not a single in-sample fit: every row's score comes from an LDA
 /// fitted without that row, via [`crossfit_lda`] — see [`crossfit`] for the

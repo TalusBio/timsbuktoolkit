@@ -62,8 +62,9 @@ pub enum RescoreModel {
     #[default]
     Gbm,
     /// Sage-style shrinkage LDA on the LINEAR lane only (101 features, see
-    /// [`lda`]). ~100x cheaper than the GBM; cross-fit over the same fold
-    /// ASSIGNMENT.
+    /// [`lda`]). ~20x cheaper than the GBM in Phase 5 wall time on a
+    /// 114138-candidate mzML run — see [`rescore_lda`] for what that measurement
+    /// does and does not cover. Cross-fit over the same fold ASSIGNMENT.
     Lda,
     /// Cross-fit LDA (linear lane) -> `lda_score` column -> GBM CV on
     /// `nonlinear + lda_score`: the same fold ASSIGNMENT on both sides, so a

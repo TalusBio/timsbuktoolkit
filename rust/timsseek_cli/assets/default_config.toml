@@ -28,7 +28,7 @@ decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        — cross-validated gradient-boosted trees (default)
-## "lda"        — Sage-style shrinkage LDA, ~100x cheaper than "gbm"
+## "lda"        — Sage-style shrinkage LDA, ~0.05x "gbm" (i.e. ~20x cheaper)
 ## "hybrid"     — cross-fit LDA score folded into the GBM feature frame,
 ##                ~0.35x "gbm"
 ## "mlp"        — small MLP on the linear lane (the same features as "lda"),
@@ -47,8 +47,9 @@ decoy_strategy = "if_missing"
 ##   * it is a single dataset — these are the right order of magnitude, not a
 ##     benchmark suite.
 ## Sensitivity at 1% FDR was within ~1% across "gbm", "mlp", "mlp_all" and
-## "hybrid_mlp" on that run, with "lda" and "hybrid" a few percent behind, so
-## the MLP options mostly buy runtime rather than targets there.
+## "hybrid_mlp" on that run, with "lda" and "hybrid" a few percent behind. So on
+## that data the MLP options COST runtime without buying targets, and "lda" trades
+## a few percent of sensitivity for most of the wall time.
 rescore_model = "gbm"
 
 
