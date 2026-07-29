@@ -1021,15 +1021,16 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             current.scoring.identity.precursor_charge,
         );
 
-        if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
+        if let Some((prev_group_id, prev_charge, prev_index, ln1p_prev_score)) = previous {
             let prev_key = (prev_group_id, prev_charge);
 
             if current_key == prev_key {
                 // This is the second item in a target/decoy pair
-                let delta_score = current.scoring.primary.main_score - prev_score;
-                let delta_ratio = current.scoring.primary.main_score / prev_score;
+                let log_curr = current.scoring.primary.main_score.ln_1p();
+                let delta_ln_score = log_curr - ln1p_prev_score;
+                let delta_ln_ratio = log_curr / ln1p_prev_score;
 
-                delta_map[prev_index] = (-delta_score, delta_ratio);
+                delta_map[prev_index] = (-delta_ln_score, delta_ln_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -1041,7 +1042,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             current.scoring.identity.decoy_group_id,
             current.scoring.identity.precursor_charge,
             i,
-            current.scoring.primary.main_score,
+            current.scoring.primary.main_score.ln_1p(),
         ));
     }
 

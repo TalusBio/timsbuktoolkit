@@ -17,20 +17,20 @@ use crate::scoring::pipeline::SecondaryLazyScoresRaw;
 /// Stage: apex (traces are dead by finalize).
 #[derive(Debug, Clone, Copy, Serialize, ScoreBlock)]
 pub struct ApexLazyScores {
-    #[feat(raw)]
+    #[feat(ln1p)]
     pub apex_lazyscore: f32,
     #[feat(raw)]
     pub lazyscore_z: f32,
-    #[feat(raw)]
+    #[feat(ln1p)]
     pub lazyscore_vs_baseline: f32,
 }
 
 /// Stage: finalize (from the secondary-query inner/isotope collectors).
 #[derive(Debug, Clone, Copy, Serialize, ScoreBlock)]
 pub struct SecondaryLazyScores {
-    #[feat(raw)]
+    #[feat(ln1p)]
     pub ms2_lazyscore: f32,
-    #[feat(raw)]
+    #[feat(ln1p)]
     pub ms2_isotope_lazyscore: f32,
     #[feat(ln1p)]
     pub ms2_isotope_lazyscore_ratio: f32,
@@ -41,7 +41,7 @@ impl From<SecondaryLazyScoresRaw> for SecondaryLazyScores {
         Self {
             ms2_lazyscore: s.lazyscore,
             ms2_isotope_lazyscore: s.iso_lazyscore,
-            ms2_isotope_lazyscore_ratio: s.ratio,
+            ms2_isotope_lazyscore_ratio: s.isotope_lazyscore_log_diff,
         }
     }
 }

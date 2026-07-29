@@ -386,7 +386,7 @@ pub fn filter_zero_intensity_ions<T: KeyLike + Default>(
 pub struct SecondaryLazyScoresRaw {
     pub lazyscore: f32,
     pub iso_lazyscore: f32,
-    pub ratio: f32,
+    pub isotope_lazyscore_log_diff: f32,
 }
 
 /// Compute lazyscores from inner and isotope collectors.
@@ -400,11 +400,11 @@ fn compute_secondary_lazyscores(
             .map(|((_k, _mz), v)| v.weight() as f32),
     );
     let iso_lazyscore = single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v));
-    let ratio = iso_lazyscore / lazyscore.max(1.0);
+    let ratio = lazyscore.ln_1p() - iso_lazyscore.ln_1p();
     SecondaryLazyScoresRaw {
         lazyscore,
         iso_lazyscore,
-        ratio,
+        isotope_lazyscore_log_diff: ratio,
     }
 }
 
