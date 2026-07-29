@@ -742,7 +742,8 @@ fn hybrid_frame(
 /// NOT "at ~parity", as this doc claimed before either side was measured at more
 /// than one scale: it loses 3.3% of the GBM's targets at 1% FDR on a
 /// 114138-candidate run and 18.0% on a 2174837-candidate one (110425 against
-/// 134710), for ~0.26x the GBM's Phase 5 wall time there. The compression buys
+/// 134710). It buys ~0.36x the GBM's Phase 5 wall time at the smaller scale
+/// (3.455s against 9.588s) and ~0.26x at the larger. The compression buys
 /// real time and costs real sensitivity, and BOTH GROW with the candidate count —
 /// see [`crate::ml::RescoreModel`] for the table and its caveats.
 ///
@@ -1060,10 +1061,18 @@ fn rescore_mlp_lane(
 ///
 /// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
 ///
-/// COST: NOT MEASURED at the current [`MlpConfig`] defaults. The only figures
-/// that exist for this variant predate the retune, so they are not quoted; see
-/// [`crate::ml::RescoreModel`] for what is current and [`rescore_mlp_all`] for
-/// the one MLP variant that is.
+/// COST, Phase 5 wall time / targets at 1% FDR against [`rescore`] on the same
+/// input: at the current [`MlpConfig`] defaults, 6.141s/25077 against
+/// 9.588s/25240 at 114138 competed candidates — 1.56x faster for -163 targets
+/// (-0.6%) at that scale. The retune is what put it on that side of the GBM; the
+/// same code was 14.143s there before it, so the sign of this comparison belongs
+/// to the hyperparameters as much as to the model.
+///
+/// NOT RE-MEASURED AT 2.17M candidates since the retune: the only mid-size figure
+/// for this variant (323.012s/125242) is an OLD-DEFAULTS number, quoted as such in
+/// [`crate::ml::RescoreModel`]'s table, and must not be carried forward as
+/// current. Ratios here move with the candidate count, so do not extrapolate the
+/// 114k one either.
 pub fn rescore_mlp_linear(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     rescore_mlp_lane(data, Lane::Linear, MlpConfig::default())
 }
@@ -1157,10 +1166,19 @@ fn rescore_hybrid_mlp_with(
 ///
 /// The one [`crate::ml::RescoreModel::HybridMlp`] selects.
 ///
-/// COST: the most expensive rescorer at both scales measured, and NOT re-measured
-/// since the [`MlpConfig`] retune, so no current figure is quoted. It fits a full
-/// MLP cross-fit AND a full GBM CV, so [`rescore`]'s Phase 5 time is a floor under
-/// it no matter how the MLP half is tuned.
+/// COST: the most expensive rescorer at both scales measured. It fits a full MLP
+/// cross-fit AND a full GBM CV, so [`rescore`]'s Phase 5 time is a floor under it
+/// no matter how the MLP half is tuned.
+///
+/// At the current [`MlpConfig`] defaults, 114138 competed candidates: 11.258s /
+/// 25454 targets at 1% FDR, against [`rescore`]'s 9.588s / 25240 — 1.17x the time
+/// for +214 targets, the largest target count of any variant at that scale. The
+/// retune moved it from 37.831s there, so it is no longer the outlier the old
+/// numbers made it look.
+///
+/// NOT RE-MEASURED AT 2.17M candidates since the retune: 773.560s/133977 is an
+/// OLD-DEFAULTS figure (see [`crate::ml::RescoreModel`]) and is expected to
+/// improve. Neither ratio transfers to a third library size.
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")

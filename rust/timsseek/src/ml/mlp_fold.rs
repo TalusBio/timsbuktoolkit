@@ -389,7 +389,10 @@ impl FoldModel for MlpFoldModel {
         if !val.is_empty() && val_rows.is_empty() {
             tracing::debug!(
                 "MLP fold {}: the outer validation slice has {} rows, under the {} a held-out \
-                 measurement needs — ignoring it and falling back to the inner carve",
+                 measurement needs — ignoring it, so this fit is exactly the `val = &[]` fit. \
+                 That falls back to the inner carve ONLY with early stopping on and enough \
+                 train rows to carve from (too few rows logs just below); with early stopping \
+                 off there is no carve and no stopping decision to make",
                 fold,
                 val.len(),
                 MIN_INNER_VAL_ROWS,
@@ -1407,8 +1410,32 @@ mod test {
             let (train, held) = split(400);
             assert_eq!(train.len(), 200);
 
+            // `held` is `toy`'s layout thinned: targets first, decoys second, so
+            // its LEADING rows are all one class. Stride over it instead of
+            // taking a prefix, or the slice under test is a target-only set no
+            // stopping rule could learn from — the assertions here are about
+            // whether the slice is USED, and they would hold vacuously on a
+            // degenerate one.
+            let stride = held.len() / MIN_INNER_VAL_ROWS;
+            let spread: Vec<usize> = held
+                .iter()
+                .copied()
+                .step_by(stride)
+                .take(MIN_INNER_VAL_ROWS)
+                .collect();
+            assert_eq!(spread.len(), MIN_INNER_VAL_ROWS);
+            assert!(
+                spread.iter().any(|&i| data.is_decoy(i))
+                    && spread.iter().any(|&i| !data.is_decoy(i)),
+                "seed {seed}: the validation slice must carry both classes"
+            );
+
             let none = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
-            let under: Vec<usize> = held.iter().copied().take(MIN_INNER_VAL_ROWS - 1).collect();
+            let under: Vec<usize> = spread
+                .iter()
+                .copied()
+                .take(MIN_INNER_VAL_ROWS - 1)
+                .collect();
             let floored = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &under).unwrap();
             assert_eq!(
                 floored.n_train_rows(),
@@ -1424,8 +1451,7 @@ mod test {
 
             // NON-VACUITY: one more row and the slice IS used — the floor is at
             // `MIN_INNER_VAL_ROWS`, not "small slices are ignored".
-            let at: Vec<usize> = held.iter().copied().take(MIN_INNER_VAL_ROWS).collect();
-            let used = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &at).unwrap();
+            let used = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &spread).unwrap();
             assert_eq!(
                 used.n_train_rows(),
                 200,

@@ -67,25 +67,34 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 /// | model | 114138 candidates | 2174837 candidates |
 /// |---|---|---|
 /// | `lda` | 0.476s / 24141 | 9.667s / 102843 |
-/// | `hybrid` | (no time recorded) / -3.3% targets | 148.062s / 110425 |
+/// | `hybrid` | 3.455s / 24407 | 148.062s / 110425 |
+/// | `mlp` | 6.141s / 25077 | 323.012s / 125242 — OLD DEFAULTS |
 /// | `mlp_all` | 7.342s / 25451 | 281.953s / 134655 |
 /// | `gbm` | 9.588s / 25240 | 574.315s / 134710 |
+/// | `hybrid_mlp` | 11.258s / 25454 | 773.560s / 133977 — OLD DEFAULTS |
 ///
-/// `mlp` and `hybrid_mlp` are absent on purpose: they were last timed at the
-/// PRE-RETUNE [`mlp::MlpConfig`] defaults and have not been re-measured since, so
-/// there is no current figure for either. Their old numbers are not reproduced
-/// here — a stale number presented as current is the exact failure this table is
-/// repairing. The `mlp_all` row IS at the current defaults.
+/// EVERY 114k CELL IS AT THE CURRENT [`mlp::MlpConfig`] DEFAULTS. The two cells
+/// marked OLD DEFAULTS are not: `mlp` and `hybrid_mlp` have not been re-timed at
+/// 2.17M since the retune, and the retune cut both of their 114k times by more
+/// than half (`mlp` 14.143s -> 6.141s, `hybrid_mlp` 37.831s -> 11.258s at that
+/// scale), so read those two mid-size numbers as loose upper bounds, not as
+/// current cost. `lda`, `hybrid` and `gbm` never construct an `MlpConfig`, so the
+/// retune cannot have moved them at either scale.
 ///
 /// ## The speed ratio GROWS with candidate count
 /// `lda` against `gbm`: ~20x cheaper at 114k, ~59x cheaper at 2.17M, and ~100x
 /// on a ~28M-entry library measured earlier in a different regime. Three anchors
 /// on one curve, not three attempts at one constant.
 ///
-/// The MLP variants can cross the GBM entirely: at the pre-retune defaults
-/// `mlp_all` was 1.73x the GBM's Phase 5 time at 114k (SLOWER) and 0.85x at
-/// 2.17M (faster). Retuned it is 0.77x and 0.49x. Whether "the MLP is slower
-/// than the GBM" is true is a question about your library size.
+/// The MLP variants can cross the GBM entirely, and `mlp` is the sharpest case
+/// on record: at 114k candidates it took 14.143s against the GBM's 9.588s at the
+/// pre-retune defaults (1.5x SLOWER) and takes 6.141s at the current ones (1.56x
+/// FASTER). Same variant, same input, same scale — the comparison changed sign
+/// from hyperparameter tuning alone. `mlp_all` shows the scale axis of the same
+/// effect: 1.73x the GBM's Phase 5 time at 114k (slower) and 0.85x at 2.17M
+/// pre-retune, 0.77x and 0.49x retuned. So "the MLP is slower than the GBM" is a
+/// question about your library size AND which defaults you are on, never a
+/// property of the model.
 ///
 /// ## The LDA's ACCURACY cost grows with scale too, and it is the bigger trap
 /// `lda` gives up 4.4% of the GBM's targets at 114k candidates but **23.7%** at
@@ -124,33 +133,44 @@ pub enum RescoreModel {
     /// row's `lda_score` never saw its own label.
     ///
     /// Between `lda` and `gbm` on both axes, and NOT at parity with the GBM the
-    /// way this was once documented: -3.3% targets at 114k candidates and -18.0%
-    /// at 2.17M, where it took 0.26x the GBM's Phase 5 wall time.
+    /// way this was once documented: -3.3% targets at 114k candidates, where it
+    /// took 0.36x the GBM's Phase 5 wall time (3.455s against 9.588s), and -18.0%
+    /// at 2.17M for 0.26x. Unaffected by the [`mlp::MlpConfig`] retune — the
+    /// compressor here is the LDA, so both figures are current.
     Hybrid,
     /// MLP on the LINEAR lane only (101 features) — the same feature set
     /// [`Lda`](RescoreModel::Lda) trains on, so it isolates "nonlinear model"
     /// from "more features". THE DEFAULT MLP SHAPE, hence the unqualified name.
     ///
-    /// Cost NOT re-measured since the MLP defaults were retuned; only
-    /// [`MlpAll`](RescoreModel::MlpAll) has current figures.
+    /// THE MOST DRAMATIC BENEFICIARY OF THE RETUNE: at 114k candidates it went
+    /// from 14.143s to 6.141s of Phase 5 time, i.e. from 1.5x SLOWER than
+    /// [`Gbm`](RescoreModel::Gbm) to 1.56x faster at that scale, on tuning alone.
+    /// Its 2.17M figure (323.012s / 125242) is still an OLD-DEFAULTS number and
+    /// has not been re-measured. Sensitivity is the trade: -0.6% of the GBM's
+    /// targets at 114k, and -7.0% at 2.17M before the retune. See the cost table
+    /// above.
     Mlp,
     /// MLP on the ALL lane (linear ++ nonlinear, 128 features) — the same
     /// feature set [`Gbm`](RescoreModel::Gbm) trains on, so the two are
     /// directly comparable.
     ///
-    /// The one MLP variant with figures at the current [`mlp::MlpConfig`]
-    /// defaults, and on those two runs the best speed/sensitivity point measured:
-    /// 1.31x faster than `gbm` for +211 targets at 114k candidates, 2.04x faster
-    /// for -55 (-0.04%) at 2.17M.
+    /// THE ARM THE [`mlp::MlpConfig`] DEFAULTS WERE TUNED ON, and the only MLP
+    /// variant timed at those defaults at BOTH scales — on those two runs the best
+    /// speed/sensitivity point measured: 1.31x faster than `gbm` for +211 targets
+    /// at 114k candidates, 2.04x faster for -55 (-0.04%) at 2.17M.
     MlpAll,
     /// MLP counterpart of [`Hybrid`](RescoreModel::Hybrid): cross-fit MLP
     /// (linear lane) -> `mlp_score` column -> GBM CV on
     /// `nonlinear + mlp_score`, same fold ASSIGNMENT on both sides.
     ///
-    /// The most expensive variant at both scales measured, and its cost has NOT
-    /// been re-measured since the MLP defaults were retuned. It pays for two
-    /// models, so the GBM's Phase 5 time is a floor under it however the MLP half
-    /// is tuned.
+    /// THE MOST EXPENSIVE VARIANT AT BOTH SCALES MEASURED, structurally: it pays
+    /// for two models, so the GBM's Phase 5 time is a floor under it however the
+    /// MLP half is tuned. At 114k candidates it costs 11.258s for 25454 targets
+    /// (+214 over `gbm`, the most of any variant, for 1.17x its time) — retuning
+    /// took it from 37.831s to that, so the "structurally hopeless" verdict it
+    /// once carried was really a verdict on the old hyperparameters. Its 2.17M
+    /// figure (773.560s / 133977) is an OLD-DEFAULTS number and will improve; do
+    /// not judge it on that row.
     HybridMlp,
 }
 

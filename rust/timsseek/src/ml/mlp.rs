@@ -1399,12 +1399,28 @@ impl MlpConfig {
         MlpConfig {
             // MEASURED, and counter-intuitively so: `[64, 32]` was
             // OVERPARAMETERIZED for this data. Halving it to `[32, 16]` improved
-            // speed AND accuracy at both scales -- 114k: 16.614s/25425 ->
-            // 9.165s/25476; 2.17M: 487.042s/134345 -> 395.990s/134302 (-43
-            // targets, -0.03%, for a 1.23x speedup). This is NOT a chosen point
-            // on a speed/accuracy trade-off curve; the smaller net is simply
-            // better here, so "it is undersized, give it capacity back" is a
-            // change that has already been tried and lost.
+            // speed AND accuracy at both scales. The two arms compared, both
+            // named in the sweep ledger -- baseline (`hidden: [64, 32]`,
+            // `epochs: 30`, batch 256, `lr` 3e-4) against arm "D"
+            // (`hidden: [32, 16]`, `epochs: 60`, batch and `lr` left at those old
+            // values): at 114k candidates 16.614s/25425 -> 9.165s/25476, and at
+            // 2.17M 487.042s/134345 -> 395.990s/134302 (-43 targets, -0.03%, for
+            // a 1.23x speedup at that scale).
+            //
+            // THAT PAIR IS CONFOUNDED, and no arm of the sweep isolated `hidden`
+            // on its own: `epochs` moved from 30 to 60 alongside it. The
+            // conclusion survives because the epoch raise is INERT -- the three
+            // folds instrumented (the 114k run) stopped at 21, 28 and 22 epochs,
+            // under either ceiling, so a raise from 30 to 60 cannot be what moved
+            // the time (see `epochs` below). Read the pair as "`hidden` plus a
+            // knob that did nothing", not as a clean single-variable measurement,
+            // and note that only that one run's stop epochs were recorded: at
+            // 2.17M nothing counted them, so inertness there is an inference.
+            //
+            // Either way, this is NOT a chosen point on a speed/accuracy
+            // trade-off curve; the smaller net is simply better here, so "it is
+            // undersized, give it capacity back" is a change that has already
+            // been tried and lost.
             hidden: vec![32, 16],
             // COUPLED TO `batch_size`. NEVER MOVE ONE WITHOUT THE OTHER: this is
             // the old 3e-4 (which was tuned at batch 256) scaled linearly with
@@ -1417,12 +1433,30 @@ impl MlpConfig {
             lr: 1.2e-3,
             weight_decay: 1e-4,
             // A CEILING THAT EARLY STOPPING IS EXPECTED TO CUT SHORT, not a
-            // target -- see [`Self::early_stopping_patience`]. It is 60 because
-            // 30 was too tight to let the stopping CRITERION be what decides:
-            // at 30 the three folds ran 21, 28 and 22 epochs, i.e. one of them
-            // came within two epochs of the ceiling, so the budget rather than
-            // the criterion was the binding constraint on that fold. Raising it
-            // does not mean 60 epochs are wanted or expected to run.
+            // target -- see [`Self::early_stopping_patience`]. Raising it does
+            // not mean 60 epochs are wanted or expected to run.
+            //
+            // THE BUDGET WAS NEVER THE BINDING CONSTRAINT, at 30 or at 60. In the
+            // one run whose stop epochs were recorded (114k candidates, `epochs:
+            // 30`, and the pre-retune `hidden`/`lr`/`batch_size` -- nothing has
+            // counted epochs since) the folds ran 21, 28 and 22, which is exactly
+            // `best + patience` for the measured best epochs 16, 23 and 17: all
+            // three terminated ON THE CRITERION and 30 truncated nothing. (An
+            // earlier version of this comment claimed the opposite. It was wrong,
+            // and the speed win came from `hidden`/`batch_size`/`lr`, not from the
+            // ceiling.)
+            //
+            // What the 28-of-30 fold does leave is HEADROOM, which is the only
+            // argument for 60: two spare epochs is not enough slack to tell
+            // whether that fold's held-out curve had finished turning, and a fold
+            // that turns later would be cut off rather than measured. 60 removes
+            // that doubt.
+            //
+            // NO DIRECT A/B SUPPORTS 60 at the `hidden`/`lr`/`batch_size` above;
+            // it rests on the headroom argument alone. It is also free whenever
+            // early stopping fires, and it fired on every fold ever instrumented,
+            // so being generous here has cost nothing observed. Treat 60 as
+            // UNVALIDATED -- neither known-good nor known-wrong.
             epochs: 60,
             // COUPLED TO `lr` -- see there for the measurement. 1024 pays ONLY
             // with the learning rate scaled to match (256 -> 1024 is 4x, so
@@ -2128,13 +2162,22 @@ mod test {
     /// specific init, and a one-seed test would have called that either a pass
     /// or a bug depending on luck.
     ///
-    /// `lr` is INHERITED from [`MlpConfig::default`] rather than pinned, which
-    /// makes this a canary on the default step size: a default that cannot learn
-    /// XOR in 400 epochs fails here. It ran at 3e-4 until the 2026-07 retune and
-    /// at 1.2e-3 since, green across all eight seeds in both regimes — including
-    /// 7 and 13, the two that trapped. That is the only evidence anyone has that
-    /// the higher default is not near a cliff on a tiny net, so leave the
-    /// inheritance in place.
+    /// `lr` is INHERITED from [`MlpConfig::default`] rather than pinned, so the
+    /// test trains at whatever step size the crate ships (3e-4 until the 2026-07
+    /// retune, 1.2e-3 since, green across all eight seeds in both regimes).
+    /// Keep the inheritance: pinning `lr` would leave nothing exercising the
+    /// shipped value on a nonlinear problem at all.
+    ///
+    /// IT IS NOT A CANARY ON THE STEP SIZE, and an earlier version of this note
+    /// claiming otherwise was measured false. All eight seeds pass at `lr` =
+    /// 3e-4, 8e-4, 1.2e-3, 2e-3, 3e-3, 6e-3 and 1.2e-2 — insensitive across a 40x
+    /// range, including the 1e-2 an older dead-plateau warning here named as the
+    /// danger. A test that passes everywhere cannot detect a cliff, so a green run
+    /// says nothing about whether the default is well chosen; that question is
+    /// settled by the sweep in [`MlpConfig::compiled_default`], on real data.
+    /// What this test does still catch is the collapse it was written for: a net
+    /// degenerated to a linear map caps near 0.75 accuracy on XOR, well under the
+    /// 0.95 asserted below.
     #[test]
     fn mlp_learns_xor_which_no_linear_model_can() {
         // Seed 7 is here on purpose: it is the init that trapped at exactly

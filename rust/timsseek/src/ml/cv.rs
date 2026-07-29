@@ -285,6 +285,17 @@ pub trait FoldDataset {
     /// THE partition. One definition, one place.
     fn get_fold(&self, i: usize) -> usize;
     /// Writes row `i` into `out` (`out.len() == column_names().len()`).
+    ///
+    /// EVERY element of `out` must be written, and that requirement acquired
+    /// teeth: it used to be a formality because callers handed over a freshly
+    /// zeroed buffer per row, so a partial write left `0.0` in the gap. The MLP's
+    /// validation pass now streams its held-out rows through ONE REUSED buffer
+    /// (see `MlpFoldModel::fit`), so a partial write there leaves the PREVIOUS
+    /// validation row's values in the gap instead — cross-row contamination of the
+    /// stopping decision rather than a zero, and equally silent. The only impl is
+    /// a `copy_from_slice`, which panics on a length mismatch rather than
+    /// half-filling, so nothing violates this today; a second impl is where it
+    /// would matter.
     fn get_values(&self, i: usize, out: &mut [f64]);
     fn is_decoy(&self, i: usize) -> bool;
 }

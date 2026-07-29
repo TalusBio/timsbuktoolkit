@@ -44,27 +44,33 @@ decoy_strategy = "if_missing"
 ##
 ##                    114,138 candidates        2,174,837 candidates
 ##   lda                0.476s / 24141             9.667s / 102843
-##   hybrid          (no time recorded)          148.062s / 110425
+##   hybrid             3.455s / 24407           148.062s / 110425
+##   mlp                6.141s / 25077           323.012s / 125242  <- OLD DEFAULTS
 ##   mlp_all            7.342s / 25451           281.953s / 134655
 ##   gbm                9.588s / 25240           574.315s / 134710
+##   hybrid_mlp        11.258s / 25454           773.560s / 133977  <- OLD DEFAULTS
 ##
-## "mlp" and "hybrid_mlp" are absent on purpose: their only timings predate the
-## MLP hyperparameter retune, so there is NO current figure for them and a stale
-## one is worse than none. "mlp_all" above IS at the current MLP defaults;
-## "hybrid_mlp" was the most expensive option at both scales and fits two models,
-## so "gbm" is a floor under it.
+## Every 114k number is at the CURRENT MLP defaults. The two marked OLD DEFAULTS
+## are not: "mlp" and "hybrid_mlp" have not been re-timed at 2.17M since the MLP
+## hyperparameter retune, which more than halved both of their 114k times, so treat
+## those two cells as loose upper bounds rather than current cost. "lda", "hybrid"
+## and "gbm" do not use the MLP at all, so the retune cannot have moved them.
 ##
 ## SPEED RATIOS GROW WITH SCALE. "lda" is ~20x cheaper than "gbm" at 114k
 ## candidates, ~59x at 2.17M, and ~100x on a ~28M-entry library measured earlier
-## in a different regime. "mlp_all" is 1.31x faster than "gbm" at 114k and 2.04x
-## at 2.17M — and at the pre-retune MLP defaults the same variant was 1.7x SLOWER
-## than "gbm" at 114k, i.e. this comparison can change sign with library size.
+## in a different regime. "hybrid" is ~0.36x "gbm"'s Phase 5 time at 114k and
+## ~0.26x at 2.17M. "mlp_all" is 1.31x faster than "gbm" at 114k and 2.04x at
+## 2.17M — and at the pre-retune MLP defaults that same variant was 1.7x SLOWER at
+## 114k, so this comparison changes sign with BOTH library size and tuning. "mlp"
+## is the clearest case: 1.5x slower than "gbm" at 114k before the retune, 1.56x
+## faster at the same scale after it.
 ##
 ## THE SENSITIVITY COST GROWS WITH SCALE TOO, and it is the bigger trap: "lda"
 ## gives up 4.4% of "gbm"'s targets at 114k candidates but 23.7% at 2.17M;
 ## "hybrid" 3.3% then 18.0%. Choosing "lda" for speed on a large library costs
-## several times what a small test run will show you. "mlp_all" is the exception
-## measured so far: +211 targets at 114k, -55 (-0.04%) at 2.17M.
+## several times what a small test run will show you. The MLP variants are the
+## exception measured so far: "mlp_all" is +211 targets at 114k and -55 (-0.04%) at
+## 2.17M, and "hybrid_mlp" is +214 at 114k, the most of any option there.
 ##
 ## Caveats on every number above:
 ##   * both runs are the same FAIMS acquisition (NO ion mobility), so 25 of the
