@@ -1279,12 +1279,28 @@ impl ColumnTransform {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MlpConfig {
     pub hidden: Vec<usize>,
+    /// Adam step size. COUPLED TO [`Self::batch_size`] — see
+    /// [`Self::compiled_default`], where the pair was measured together and
+    /// moving one alone is documented as the worst arm of the sweep.
+    ///
+    /// # A superseded warning, kept because it is still true of its own regime
+    /// This field used to carry "1e-2/1e-3 both walked a 2-input ReLU net into a
+    /// dead-unit plateau in testing", which is why the default was 3e-4 for so
+    /// long. That observation stands, but it is about the XOR fixture in this
+    /// module's tests — 2 inputs, pure ReLU, few steps — and NOT about the 101-
+    /// or 128-column rescore lanes, where 1.2e-3 was measured better on two real
+    /// searches. Do not read it as a ceiling on this field. See [`Relu`] for the
+    /// plateau's actual mechanism, which a learning rate cannot fix anyway.
     pub lr: f32,
     pub weight_decay: f32,
     /// UPPER BOUND on epochs, not a target: with
     /// [`Self::early_stopping_patience`] set, training normally stops before
     /// this.
     pub epochs: usize,
+    /// Minibatch size. COUPLED TO [`Self::lr`]: it sets how many optimizer steps
+    /// an epoch is worth, so changing it without rescaling the learning rate
+    /// changes the amount of training, not just its granularity. See
+    /// [`Self::compiled_default`] for the measurement.
     pub batch_size: usize,
     pub loss: MlpLoss,
     pub seed: u64,
@@ -1295,8 +1311,8 @@ pub struct MlpConfig {
     ///
     /// # Why it defaults to on
     /// Measured on a 114k-candidate search, all three rescore folds bottom out
-    /// well inside the 30-epoch budget and then get worse, while the TRAIN loss
-    /// falls monotonically to the end:
+    /// well inside the then-30-epoch budget and then get worse, while the TRAIN
+    /// loss falls monotonically to the end:
     ///
     /// | fold | best held-out | at epoch | held-out @30 |
     /// |------|---------------|----------|--------------|
@@ -1304,11 +1320,17 @@ pub struct MlpConfig {
     /// | 1    | 0.459646      | 23       | 0.461799     |
     /// | 2    | 0.458787      | 17       | 0.462773     |
     ///
-    /// So 40-47% of the budget was spent memorizing. Lowering `epochs` instead
-    /// would NOT do the same job: the best epoch is 16, 23 and 17 on the three
-    /// folds of one single run, so any fixed budget is too long for one fold and
-    /// too short for another. The turn is a per-fold property and only a per-fold
-    /// rule can find it.
+    /// THIS TABLE IS PRE-RETUNE: it was taken at `hidden: [64, 32]`, `lr: 3e-4`,
+    /// `batch_size: 256`, `epochs: 30`, none of which are the current defaults
+    /// (see [`Self::compiled_default`]). Where the turn now falls has NOT been
+    /// re-measured. What it establishes is the MECHANISM, which is not
+    /// hyperparameter-specific: held-out loss turns while train loss keeps
+    /// falling, so 40-47% of that budget was spent memorizing.
+    ///
+    /// Lowering `epochs` instead would NOT do the same job: the best epoch is 16,
+    /// 23 and 17 on the three folds of one single run, so any fixed budget is too
+    /// long for one fold and too short for another. The turn is a per-fold
+    /// property and only a per-fold rule can find it.
     ///
     /// # Why 5
     /// The three curves above are within ~0.2% of their minimum for several
@@ -1358,15 +1380,56 @@ impl MlpConfig {
     /// This is the authoritative default — the values here are what a run with
     /// no `TIMSSEEK_MLP_*` set trains with, and every override starts from this
     /// struct and replaces individual fields.
+    /// # Provenance of these numbers
+    /// `hidden`, `lr`, `batch_size` and `epochs` are the winning arm of a sweep
+    /// on two REAL searches (`mlp_all`, Phase 5 wall time / targets at 1% FDR):
+    /// a 114138-candidate run and a 2174837-candidate run of the same Astral
+    /// mzML. They replaced conventional, unmeasured values. Against the GBM the
+    /// winner is 1.31x faster with +211 targets at 114k, and 2.04x faster with
+    /// -55 targets (-0.04%) at 2.17M; against the previous MLP defaults it is
+    /// 1.73x-2.26x faster while finding MORE targets at both scales.
+    ///
+    /// Sweep-wide caveats, which apply to every figure quoted on the fields
+    /// below: both runs are the same FAIMS acquisition, so there is no ion
+    /// mobility and 25 of the 101 linear / 27 of the 128 all-lane columns were
+    /// culled as dead; two datasets, one machine; and Phase 5 is a fraction of a
+    /// whole search, so a 2x here is not a 2x end to end. See
+    /// [`crate::ml::RescoreModel`] for the cross-model table.
     pub fn compiled_default() -> Self {
         MlpConfig {
-            hidden: vec![64, 32],
-            // Adam's reliable default for a net this size. 1e-2/1e-3 both
-            // walked a 2-input ReLU net into a dead-unit plateau in testing.
-            lr: 3e-4,
+            // MEASURED, and counter-intuitively so: `[64, 32]` was
+            // OVERPARAMETERIZED for this data. Halving it to `[32, 16]` improved
+            // speed AND accuracy at both scales -- 114k: 16.614s/25425 ->
+            // 9.165s/25476; 2.17M: 487.042s/134345 -> 395.990s/134302 (-43
+            // targets, -0.03%, for a 1.23x speedup). This is NOT a chosen point
+            // on a speed/accuracy trade-off curve; the smaller net is simply
+            // better here, so "it is undersized, give it capacity back" is a
+            // change that has already been tried and lost.
+            hidden: vec![32, 16],
+            // COUPLED TO `batch_size`. NEVER MOVE ONE WITHOUT THE OTHER: this is
+            // the old 3e-4 (which was tuned at batch 256) scaled linearly with
+            // the 4x larger batch. Raising the batch alone -- 1024 with `lr`
+            // left at 3e-4 -- was the WORST arm of the entire sweep: 31.612s on
+            // the 114k run against 16.614s for changing nothing at all, because
+            // 4x fewer optimizer steps per epoch never converges and spends the
+            // whole epoch budget not converging. Lowering `lr` instead is worse
+            // still: 1e-4 over 100 epochs cost 35.512s for fewer targets.
+            lr: 1.2e-3,
             weight_decay: 1e-4,
-            epochs: 30,
-            batch_size: 256,
+            // A CEILING THAT EARLY STOPPING IS EXPECTED TO CUT SHORT, not a
+            // target -- see [`Self::early_stopping_patience`]. It is 60 because
+            // 30 was too tight to let the stopping CRITERION be what decides:
+            // at 30 the three folds ran 21, 28 and 22 epochs, i.e. one of them
+            // came within two epochs of the ceiling, so the budget rather than
+            // the criterion was the binding constraint on that fold. Raising it
+            // does not mean 60 epochs are wanted or expected to run.
+            epochs: 60,
+            // COUPLED TO `lr` -- see there for the measurement. 1024 pays ONLY
+            // with the learning rate scaled to match (256 -> 1024 is 4x, so
+            // 3e-4 -> 1.2e-3). Swept as an independent axis it looks strictly
+            // harmful, and anyone who tunes it that way will conclude, wrongly,
+            // that bigger batches are slower on this workload.
+            batch_size: 1024,
             loss: MlpLoss::Bce,
             seed: 0x2545_F491_4F6C_DD1D,
             early_stopping_patience: Some(5),
@@ -2064,6 +2127,14 @@ mod test {
     /// dead-ReLU plateau at exactly 0.75 accuracy / `ln(2)/2` loss for one
     /// specific init, and a one-seed test would have called that either a pass
     /// or a bug depending on luck.
+    ///
+    /// `lr` is INHERITED from [`MlpConfig::default`] rather than pinned, which
+    /// makes this a canary on the default step size: a default that cannot learn
+    /// XOR in 400 epochs fails here. It ran at 3e-4 until the 2026-07 retune and
+    /// at 1.2e-3 since, green across all eight seeds in both regimes — including
+    /// 7 and 13, the two that trapped. That is the only evidence anyone has that
+    /// the higher default is not near a cliff on a tiny net, so leave the
+    /// inheritance in place.
     #[test]
     fn mlp_learns_xor_which_no_linear_model_can() {
         // Seed 7 is here on purpose: it is the init that trapped at exactly
@@ -2585,11 +2656,15 @@ mod test {
         );
         assert_eq!(cfg, MlpConfig::compiled_default());
 
-        assert_eq!(cfg.hidden, vec![64, 32]);
-        assert_eq!(cfg.lr.to_bits(), 3e-4f32.to_bits());
+        // Retuned 2026-07 from the unmeasured `[64, 32]` / 3e-4 / 256 / 30 to
+        // the winning arm of the two-scale sweep documented on
+        // `compiled_default`. `lr` and `batch_size` are COUPLED there: a diff
+        // that touches one of these two literals without the other is a bug.
+        assert_eq!(cfg.hidden, vec![32, 16]);
+        assert_eq!(cfg.lr.to_bits(), 1.2e-3f32.to_bits());
         assert_eq!(cfg.weight_decay.to_bits(), 1e-4f32.to_bits());
-        assert_eq!(cfg.epochs, 30);
-        assert_eq!(cfg.batch_size, 256);
+        assert_eq!(cfg.epochs, 60);
+        assert_eq!(cfg.batch_size, 1024);
         assert_eq!(cfg.loss, MlpLoss::Bce);
         assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
         assert_eq!(cfg.early_stopping_patience, Some(5));
