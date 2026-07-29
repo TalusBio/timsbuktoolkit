@@ -1512,7 +1512,7 @@ mod feature_tests {
 
     #[test]
     fn rescore_lda_is_cross_fit_and_deterministic() {
-        let n = 90;
+        let n = 360;
         let (out_a, stats_a) = rescore_lda(synthetic_competed(n));
         let (out_b, _stats_b) = rescore_lda(synthetic_competed(n));
 
@@ -1809,7 +1809,7 @@ mod feature_tests {
     /// is a ranking of these scores, so "close" is not a property worth having.
     #[test]
     fn rescore_mlp_is_deterministic_on_both_lanes() {
-        let n = 90;
+        let n = 360;
         let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
             let mut v: Vec<(u32, u32)> = out
                 .iter()
@@ -1988,7 +1988,7 @@ mod feature_tests {
 
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
-        let n = 90;
+        let n = 360;
         let (out_a, _stats_a) = rescore_hybrid(synthetic_competed(n));
         let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n));
 
@@ -2259,9 +2259,26 @@ mod feature_tests {
     ///
     /// Bit-identical is the assertion, not approximately-equal: the whole
     /// q-value pipeline is a ranking of these scores.
+    ///
+    /// # Why 360 rows, and why the seed-sensitivity check is mandatory
+    /// This test was written at 90 and was BLIND. `GBMConfig::default`'s
+    /// `min_leaf_weight` of 5.0 is most of a 30-row fold's total logloss
+    /// hessian, so the GBM finds no admissible split, builds no trees, and emits
+    /// one constant score per fold — a value that does not depend on
+    /// `mlp_score`, or on the MLP, at all. Two runs at different MLP SEEDS
+    /// produced identical score vectors, which means the bit-identity assertion
+    /// below would have passed just as happily if `crossfit_mlp_scores` returned
+    /// `rand::random()` per row. That is the one global constraint this test
+    /// exists to hold, so being unable to fail was the whole problem.
+    ///
+    /// 360 rows puts 120 in each training fold, trees get built, and the score
+    /// becomes a function of the appended column. The `assert_ne!` at the end is
+    /// what keeps that true: it fails the moment the output stops depending on
+    /// the MLP, i.e. the moment every assertion above goes vacuous again. Do not
+    /// drop it, and do not shrink `n` without checking it still fails.
     #[test]
     fn rescore_hybrid_mlp_smoke_and_determinism() {
-        let n = 90;
+        let n = 360;
         let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
             let mut v: Vec<(u32, u32)> = out
                 .iter()
@@ -2301,6 +2318,23 @@ mod feature_tests {
             );
             assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
         }
+
+        // NON-VACUITY, and the load-bearing assertion of this test: the output
+        // must actually DEPEND on the MLP. Two different MLP seeds train
+        // different nets, so they produce a different `mlp_score` column and
+        // must produce different final scores. If this passes, the bit-identity
+        // assertions above are measuring reproducibility of the MLP; if it
+        // fails, they are measuring reproducibility of a constant.
+        let by_seed =
+            |seed: u64| key(&rescore_hybrid_mlp_with(synthetic_competed(n), mlp_test_cfg(seed)).0);
+        assert_ne!(
+            by_seed(7),
+            by_seed(999),
+            "two different MLP seeds gave bit-identical hybrid scores, so the output \
+             does not depend on mlp_score and every determinism assertion in this \
+             test is vacuous (at 90 rows this was exactly the case: no trees, one \
+             constant score per fold)"
+        );
 
         // The public entry point, on the DEFAULT `MlpConfig` rather than the
         // shrunk test one — the config the production path actually uses.
@@ -2396,14 +2430,85 @@ mod feature_tests {
         );
     }
 
+    /// The premise BOTH `*_carries_the_linear_lane_into_the_gbm` tests rest on:
+    /// not one nonlinear-lane column varies across `fixture`'s rows, so a GBM
+    /// handed the nonlinear lane has literally nothing to split on and cannot
+    /// rank better than chance. Anything above chance downstream therefore had to
+    /// arrive through the appended `column` and nowhere else.
+    ///
+    /// Checked rather than assumed, and checked per-feature rather than by a
+    /// count, so a future nonlinear feature that happens to vary with something
+    /// `synthetic_competed_linear_only` sets fails loudly here instead of quietly
+    /// giving the GBM a second signal and turning both tests into "the GBM can
+    /// separate something".
+    fn assert_nonlinear_lane_is_flat(fixture: &[CompetedCandidate], column: &str) {
+        let nl = build_nonlinear_matrix(fixture);
+        for (j, name) in nonlinear_feature_name_set().iter().enumerate() {
+            let first = nl[j].to_bits();
+            assert!(
+                (0..fixture.len()).all(|i| nl[i * NONLINEAR_NCOLS + j].to_bits() == first),
+                "fixture premise broken: nonlinear feature {name} varies across rows, so \
+                 the GBM could separate without {column} and the assertions that follow \
+                 would prove nothing"
+            );
+        }
+    }
+
+    /// `lda_score` is not decoration: it is the channel through which the LINEAR
+    /// lane reaches a GBM that is never shown it.
+    ///
+    /// The `rescore_hybrid` counterpart of
+    /// [`hybrid_mlp_score_carries_the_linear_lane_into_the_gbm`], and the only
+    /// test that can observe whether that (shipping) path's `lda_score` column is
+    /// correct. `rescore_hybrid_smoke_and_determinism` cannot: it runs at 90 rows,
+    /// where `GBMConfig::default`'s `min_leaf_weight` leaves a 30-row fold with no
+    /// admissible split, so the GBM builds no trees and its output is a per-fold
+    /// constant independent of the column. A zeroed, truncated or row-permuted
+    /// `lda_score` passes it unchanged.
+    ///
+    /// No seed sweep: the LDA is a closed-form solve with no initialization to
+    /// vary, so there is no seed for the "sweep seeds where a model is trained"
+    /// rule to sweep — a rerun is bit-identical by construction, which
+    /// `rescore_lda_is_cross_fit_and_deterministic` already pins.
+    #[test]
+    fn hybrid_lda_score_carries_the_linear_lane_into_the_gbm() {
+        assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "lda_score");
+
+        let (out, stats) = rescore_hybrid(synthetic_competed_linear_only(360));
+
+        let split_on_it = stats
+            .iter()
+            .filter(|fs| {
+                fs.feature_importance
+                    .iter()
+                    .any(|(n, _)| &**n == "lda_score")
+            })
+            .count();
+        assert!(
+            split_on_it > 0,
+            "no fold split on lda_score even though it is the only non-constant \
+             column, so the appended column never reached the GBM or is constant \
+             (a silently failed cross-fit)"
+        );
+
+        let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
+        let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
+        let auc = pair_auc(&scores, &is_target);
+        assert!(
+            auc > 0.8,
+            "AUC {auc} — the GBM sees a constant nonlinear lane here, so anything above \
+             chance has to come through lda_score, and it did not"
+        );
+    }
+
     /// `mlp_score` is not decoration: it is the channel through which the LINEAR
     /// lane reaches a GBM that is never shown it.
     ///
     /// `synthetic_competed_linear_only` puts ALL the label signal in the linear
-    /// lane and leaves the nonlinear lane bit-for-bit constant across rows (that
-    /// is asserted, not assumed). A GBM handed the nonlinear lane alone therefore
-    /// has nothing to split on and cannot rank better than chance. So on this
-    /// fixture:
+    /// lane and leaves the nonlinear lane bit-for-bit constant across rows (see
+    /// [`assert_nonlinear_lane_is_flat`], which checks it). A GBM handed the
+    /// nonlinear lane alone therefore has nothing to split on and cannot rank
+    /// better than chance. So on this fixture:
     ///
     /// * `mlp_score` MUST appear in some fold's importance — forust omits the
     ///   columns it never split on, and a constant column (all-zero from a
@@ -2417,20 +2522,7 @@ mod feature_tests {
     /// wrong row order, and a cross-fit whose scores are noise.
     #[test]
     fn hybrid_mlp_score_carries_the_linear_lane_into_the_gbm() {
-        // The fixture's premise, checked once: no nonlinear-lane column varies at
-        // all, so nothing but `mlp_score` can separate anything downstream.
-        let fixture = synthetic_competed_linear_only(360);
-        let nl = build_nonlinear_matrix(&fixture);
-        let names = nonlinear_feature_name_set();
-        for (j, name) in names.iter().enumerate() {
-            let first = nl[j].to_bits();
-            assert!(
-                (0..fixture.len()).all(|i| nl[i * NONLINEAR_NCOLS + j].to_bits() == first),
-                "fixture premise broken: nonlinear feature {name} varies across rows, so \
-                 the GBM could separate without mlp_score and the assertions below would \
-                 prove nothing"
-            );
-        }
+        assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "mlp_score");
 
         for seed in [7u64, 13, 42, 1234] {
             let (out, stats) =
