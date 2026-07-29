@@ -1256,7 +1256,14 @@ impl ColumnTransform {
 /// Hyperparameters. Not TOML-exposed, matching how `GBMConfig` is handled —
 /// only the input dimension is dynamic, and it is derived from the lane matrix
 /// at fit time rather than configured.
-#[derive(Debug, Clone)]
+///
+/// # Dev-only env overrides
+/// [`Self::default`] applies the `TIMSSEEK_MLP_*` overrides described on
+/// [`Self::from_env`]. That is an EXPERIMENT ESCAPE HATCH for sweeps, in the
+/// spirit of `TIMSSEEK_LDA_DUMP`, not a config surface: it is undocumented in
+/// `--help`, unsupported, and with nothing set the config is bit-identical to
+/// [`Self::compiled_default`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct MlpConfig {
     pub hidden: Vec<usize>,
     pub lr: f32,
@@ -1300,7 +1307,45 @@ pub struct MlpConfig {
 }
 
 impl Default for MlpConfig {
+    /// [`Self::compiled_default`], plus the dev-only `TIMSSEEK_MLP_*` overrides
+    /// (see [`Self::from_env`]) in non-test builds.
+    ///
+    /// # Why `cfg(test)` skips the environment
+    /// This crate's tests run in-process and share one environment, and a large
+    /// number of them build their fixture config as `MlpConfig { .. ,
+    /// ..MlpConfig::default() }` — including the seed-sweeping learning tests,
+    /// whose whole job is to pin training behaviour at KNOWN hyperparameters. A
+    /// stray `TIMSSEEK_MLP_EPOCHS` in the developer's shell would silently
+    /// retune every one of them at once, so under `cfg(test)` `default()` is
+    /// exactly the compiled default and the environment is never read.
+    /// [`Self::apply_overrides`] is what the parsing tests exercise instead: it
+    /// takes the lookup as an argument, so the whole override path is testable
+    /// without a process-wide (and, in edition 2024, `unsafe`) `set_var`.
     fn default() -> Self {
+        #[cfg(test)]
+        {
+            Self::compiled_default()
+        }
+        #[cfg(not(test))]
+        {
+            Self::from_env()
+        }
+    }
+}
+
+/// Gate for the once-per-process effective-config log in [`MlpConfig::from_env`].
+/// `default()` is called once per rescorer entry point, but the hybrids and the
+/// tests can reach it more than once in a process and the sweep wants ONE line
+/// to grep, not one per call.
+static ENV_OVERRIDE_LOGGED: std::sync::Once = std::sync::Once::new();
+
+impl MlpConfig {
+    /// The hyperparameters AS COMPILED. No environment, no logging.
+    ///
+    /// This is the authoritative default — the values here are what a run with
+    /// no `TIMSSEEK_MLP_*` set trains with, and every override starts from this
+    /// struct and replaces individual fields.
+    pub fn compiled_default() -> Self {
         MlpConfig {
             hidden: vec![64, 32],
             // Adam's reliable default for a net this size. 1e-2/1e-3 both
@@ -1314,14 +1359,235 @@ impl Default for MlpConfig {
             early_stopping_patience: Some(5),
         }
     }
-}
 
-impl MlpConfig {
+    /// [`Self::compiled_default`] with the dev-only `TIMSSEEK_MLP_*` overrides
+    /// applied. **THE ONLY PLACE IN THE CRATE THAT READS THE ENVIRONMENT FOR
+    /// HYPERPARAMETERS** — one reader is what makes "which knobs exist" a
+    /// question with a single answer, in [`Self::apply_overrides`].
+    ///
+    /// This exists because `MlpConfig` is deliberately NOT TOML-exposed (see the
+    /// type docs), which makes every hyperparameter experiment a recompile —
+    /// unworkable for sweeping a 2M-candidate search. It is a dev affordance in
+    /// the spirit of `TIMSSEEK_LDA_DUMP`, NOT a supported interface, and it is
+    /// not a step towards putting these in the config file.
+    ///
+    /// | Variable | Field | Format |
+    /// |---|---|---|
+    /// | `TIMSSEEK_MLP_EPOCHS` | `epochs` | positive integer, e.g. `60` |
+    /// | `TIMSSEEK_MLP_LR` | `lr` | positive finite float, e.g. `1e-3` |
+    /// | `TIMSSEEK_MLP_BATCH_SIZE` | `batch_size` | positive integer, e.g. `512` |
+    /// | `TIMSSEEK_MLP_HIDDEN` | `hidden` | comma-separated positive integers (`64,32`), or `none` for no hidden layer |
+    /// | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | non-negative finite float, e.g. `0` or `1e-3` |
+    /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
+    /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
+    ///
+    /// `MlpLoss` is deliberately absent: `AsymFocal` is three coupled floats and
+    /// wants a real config surface, not a string grammar wedged into one
+    /// variable.
+    ///
+    /// # Unset changes nothing
+    /// A variable that is not set is not read into anything — see
+    /// [`Self::apply_overrides`], which touches a field only on `Some`. With
+    /// none set this returns [`Self::compiled_default`] and logs nothing.
+    ///
+    /// # A malformed value ABORTS
+    /// `TIMSSEEK_MLP_LR=banana` panics with the variable name, the offending
+    /// value and the expected format. It does NOT warn-and-continue, because the
+    /// failure this override exists inside of is a SWEEP: a warned-past variable
+    /// produces a run that completes normally, lands in the results table under
+    /// the label the operator believes they set, and is indistinguishable from
+    /// the compiled-default row next to it. A `warn!` line is 1 of ~10^4 in a
+    /// full search log and would be found after the conclusion was drawn.
+    /// Aborting costs one re-run and cannot be missed.
+    ///
+    /// `timsseek_cli` calls this at startup when the selected rescore model uses
+    /// the MLP, so the abort lands in the first second rather than at Phase 5.
+    ///
+    /// # Determinism
+    /// Untouched: this only chooses the numbers. For a FIXED environment the fit
+    /// is the same pure function of (config, fold, rows) it was before — see
+    /// [`Self::rng_for_fold`].
+    pub fn from_env() -> Self {
+        let mut cfg = Self::compiled_default();
+        let applied = cfg.apply_overrides(|k| std::env::var(k).ok());
+        if !applied.is_empty() {
+            // Once per process, at `info`: the default filter is `info`, so a
+            // sweep's run log records WHAT ACTUALLY RAN with no extra flags,
+            // which is the whole point. Not `warn` — deliberately setting an
+            // override is not a problem, and the malformed case aborts instead.
+            ENV_OVERRIDE_LOGGED.call_once(|| {
+                tracing::info!(
+                    "MLP config: DEV OVERRIDE ACTIVE ({}); effective config: hidden={:?} \
+                     lr={:e} weight_decay={:e} epochs={} batch_size={} patience={:?} \
+                     seed={:#018x} loss={:?}",
+                    applied.join(" "),
+                    cfg.hidden,
+                    cfg.lr,
+                    cfg.weight_decay,
+                    cfg.epochs,
+                    cfg.batch_size,
+                    cfg.early_stopping_patience,
+                    cfg.seed,
+                    cfg.loss,
+                );
+            });
+        }
+        cfg
+    }
+
+    /// The pure core of [`Self::from_env`]: `get` stands in for
+    /// `std::env::var`, so the parsing, the validation and the "unset changes
+    /// nothing" property are all testable without mutating the process
+    /// environment (`unsafe` in edition 2024, and racy across parallel tests
+    /// regardless).
+    ///
+    /// Returns one `NAME=value` string per variable that was actually read, in
+    /// declaration order — the audit trail [`Self::from_env`] logs. Empty means
+    /// nothing was touched.
+    ///
+    /// # Panics
+    /// On any malformed or out-of-range value. See [`Self::from_env`].
+    fn apply_overrides(&mut self, get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+        let mut applied = Vec::new();
+        // One closure per variable so a variable that is UNSET never reaches an
+        // assignment: `read` yields `None` and the `if let` body is skipped.
+        let mut read = |name: &str| -> Option<String> {
+            let raw = get(name)?;
+            // Quoted, so a value that contains a space or is empty is still
+            // unambiguous in the one-line audit trail.
+            applied.push(format!("{name}={raw:?}"));
+            Some(raw)
+        };
+
+        if let Some(raw) = read("TIMSSEEK_MLP_EPOCHS") {
+            self.epochs = parse_positive_usize("TIMSSEEK_MLP_EPOCHS", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_LR") {
+            self.lr = parse_float("TIMSSEEK_MLP_LR", &raw, false);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_BATCH_SIZE") {
+            self.batch_size = parse_positive_usize("TIMSSEEK_MLP_BATCH_SIZE", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_HIDDEN") {
+            self.hidden = parse_hidden("TIMSSEEK_MLP_HIDDEN", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_WEIGHT_DECAY") {
+            self.weight_decay = parse_float("TIMSSEEK_MLP_WEIGHT_DECAY", &raw, true);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_PATIENCE") {
+            self.early_stopping_patience = parse_patience("TIMSSEEK_MLP_PATIENCE", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_SEED") {
+            self.seed = parse_seed("TIMSSEEK_MLP_SEED", &raw);
+        }
+
+        applied
+    }
+
     /// Per-fold RNG: the configured seed mixed with the fold index, so folds
     /// differ but a rerun of the same fold does not.
     pub fn rng_for_fold(&self, fold: usize) -> StdRng {
         StdRng::seed_from_u64(self.seed ^ (fold as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
+}
+
+/// The one abort message shape, so every malformed variable explains itself the
+/// same way and says why it is not continuing.
+fn bad_env(name: &str, raw: &str, expected: &str) -> ! {
+    panic!(
+        "{name}={raw:?} is not usable: expected {expected}.\n\
+         This is a DEV-ONLY MLP hyperparameter override and a malformed value ABORTS rather \
+         than falling back to the compiled default: a run that quietly used the default would \
+         land in your sweep table labelled with a value it never trained on. Fix the variable \
+         or unset it."
+    );
+}
+
+fn parse_positive_usize(name: &str, raw: &str) -> usize {
+    match raw.trim().parse::<usize>() {
+        Ok(v) if v > 0 => v,
+        _ => bad_env(name, raw, "a positive integer, e.g. `60`"),
+    }
+}
+
+/// `allow_zero` distinguishes `weight_decay` (0 disables it, a legitimate sweep
+/// arm) from `lr` (0 trains nothing and is never what anyone meant).
+fn parse_float(name: &str, raw: &str, allow_zero: bool) -> f32 {
+    let lo = if allow_zero {
+        "non-negative"
+    } else {
+        "positive"
+    };
+    match raw.trim().parse::<f32>() {
+        Ok(v) if v.is_finite() && (v > 0.0 || (allow_zero && v == 0.0)) => v,
+        _ => bad_env(name, raw, &format!("a finite {lo} float, e.g. `1e-3`")),
+    }
+}
+
+fn parse_hidden(name: &str, raw: &str) -> Vec<usize> {
+    let t = raw.trim();
+    // No hidden layer is a real sweep arm (`feedforward` then builds a single
+    // `n_in -> 1` linear layer), but it must be SPELLED: an empty string is
+    // indistinguishable from a shell that dropped the value.
+    if t.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for part in t.split(',') {
+        match part.trim().parse::<usize>() {
+            Ok(v) if v > 0 => out.push(v),
+            _ => bad_env(
+                name,
+                raw,
+                "a comma-separated list of positive integers, e.g. `64,32`, or `none` for no \
+                 hidden layer",
+            ),
+        }
+    }
+    if out.is_empty() {
+        bad_env(
+            name,
+            raw,
+            "a comma-separated list of positive integers, e.g. `64,32`, or `none` for no hidden \
+             layer",
+        );
+    }
+    out
+}
+
+fn parse_patience(name: &str, raw: &str) -> Option<usize> {
+    let t = raw.trim();
+    if t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    match t.parse::<usize>() {
+        // 0 is rejected rather than mapped to either meaning: as a number it
+        // would stop on the first non-improving epoch, and as a synonym for
+        // "off" it would silently disagree with the `none` spelling.
+        Ok(v) if v > 0 => Some(v),
+        _ => bad_env(
+            name,
+            raw,
+            "a positive integer, or `none`/`off` to disable early stopping",
+        ),
+    }
+}
+
+fn parse_seed(name: &str, raw: &str) -> u64 {
+    let t = raw.trim();
+    // Hex accepted because the compiled default is written that way, so
+    // `TIMSSEEK_MLP_SEED=0x2545F4914F6CDD1D` reproduces it verbatim.
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => t.parse::<u64>(),
+    };
+    parsed.unwrap_or_else(|_| {
+        bad_env(
+            name,
+            raw,
+            "a u64, decimal (`12345`) or hex (`0x2545F4914F6CDD1D`)",
+        )
+    })
 }
 
 // ---------------------------------------------------------------- rng helper
@@ -2269,5 +2535,226 @@ mod test {
                 "seed {seed}: up-weighting decoys must pull logits down: {m_dec} !< {m_bal}"
             );
         }
+    }
+
+    // ------------------------------------------------- dev env overrides
+    //
+    // These drive `MlpConfig::apply_overrides` with a fake lookup instead of
+    // `std::env::set_var`. That is not a convenience: `set_var` is `unsafe` in
+    // edition 2024 and process-global, so a test that set `TIMSSEEK_MLP_LR`
+    // would be racing every other test in this binary. The lookup argument makes
+    // the whole override path a pure function.
+
+    /// Lookup over a fixed `(name, value)` table; everything else is unset.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    /// THE LOAD-BEARING PROPERTY: with nothing set, the config is bit-identical
+    /// to the compiled default, so the override cannot perturb a production run
+    /// that did not ask for it.
+    ///
+    /// The literal values are re-asserted here on purpose. This affordance adds
+    /// a way to override the defaults and must not retune them; a diff that
+    /// changes one has to change this test and say so.
+    #[test]
+    fn unset_env_changes_nothing() {
+        let mut cfg = MlpConfig::compiled_default();
+        let applied = cfg.apply_overrides(env_of(&[]));
+        assert!(
+            applied.is_empty(),
+            "nothing was set, so nothing may be reported as applied: {applied:?}"
+        );
+        assert_eq!(cfg, MlpConfig::compiled_default());
+
+        assert_eq!(cfg.hidden, vec![64, 32]);
+        assert_eq!(cfg.lr.to_bits(), 3e-4f32.to_bits());
+        assert_eq!(cfg.weight_decay.to_bits(), 1e-4f32.to_bits());
+        assert_eq!(cfg.epochs, 30);
+        assert_eq!(cfg.batch_size, 256);
+        assert_eq!(cfg.loss, MlpLoss::Bce);
+        assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
+        assert_eq!(cfg.early_stopping_patience, Some(5));
+    }
+
+    /// An unrelated variable is not a read, and one variable moves ONE field.
+    #[test]
+    fn one_variable_moves_one_field() {
+        let base = MlpConfig::compiled_default();
+        let mut cfg = base.clone();
+        let applied = cfg.apply_overrides(env_of(&[
+            ("TIMSSEEK_MLP_LR", "1e-3"),
+            ("TIMSSEEK_MLP_NOT_A_KNOB", "7"),
+        ]));
+        assert_eq!(applied, vec!["TIMSSEEK_MLP_LR=\"1e-3\""]);
+        assert_eq!(cfg.lr.to_bits(), 1e-3f32.to_bits());
+        assert_eq!(
+            MlpConfig { lr: base.lr, ..cfg },
+            base,
+            "overriding `lr` moved some other field too"
+        );
+    }
+
+    /// Every documented variable is wired to its field, and the audit trail
+    /// lists them all. A knob that parses but is never assigned would otherwise
+    /// produce exactly the silent no-op sweep this whole affordance is meant to
+    /// prevent.
+    #[test]
+    fn every_documented_variable_reaches_its_field() {
+        let mut cfg = MlpConfig::compiled_default();
+        let applied = cfg.apply_overrides(env_of(&[
+            ("TIMSSEEK_MLP_EPOCHS", "77"),
+            ("TIMSSEEK_MLP_LR", "2.5e-3"),
+            ("TIMSSEEK_MLP_BATCH_SIZE", "512"),
+            ("TIMSSEEK_MLP_HIDDEN", "128,64,16"),
+            ("TIMSSEEK_MLP_WEIGHT_DECAY", "0"),
+            ("TIMSSEEK_MLP_PATIENCE", "9"),
+            ("TIMSSEEK_MLP_SEED", "12345"),
+        ]));
+        assert_eq!(cfg.epochs, 77);
+        assert_eq!(cfg.lr.to_bits(), 2.5e-3f32.to_bits());
+        assert_eq!(cfg.batch_size, 512);
+        assert_eq!(cfg.hidden, vec![128, 64, 16]);
+        assert_eq!(cfg.weight_decay, 0.0);
+        assert_eq!(cfg.early_stopping_patience, Some(9));
+        assert_eq!(cfg.seed, 12345);
+        assert_eq!(cfg.loss, MlpLoss::Bce, "`loss` is deliberately not a knob");
+        assert_eq!(applied.len(), 7, "every read must be reported: {applied:?}");
+    }
+
+    /// The explicit spellings for the two fields that have an "off": `hidden`
+    /// can be empty (a bare linear model) and `patience` is an `Option`.
+    #[test]
+    fn the_off_spellings_parse() {
+        let mut cfg = MlpConfig::compiled_default();
+        cfg.apply_overrides(env_of(&[
+            ("TIMSSEEK_MLP_HIDDEN", "none"),
+            ("TIMSSEEK_MLP_PATIENCE", "off"),
+        ]));
+        assert!(cfg.hidden.is_empty());
+        assert_eq!(cfg.early_stopping_patience, None);
+
+        let mut cfg = MlpConfig::compiled_default();
+        cfg.apply_overrides(env_of(&[
+            ("TIMSSEEK_MLP_HIDDEN", "NONE"),
+            ("TIMSSEEK_MLP_PATIENCE", "None"),
+        ]));
+        assert!(cfg.hidden.is_empty(), "the spelling is case-insensitive");
+        assert_eq!(cfg.early_stopping_patience, None);
+
+        // `hidden = []` must still build a usable net, or the spelling is a trap.
+        let mut rng = seeded();
+        let mut net = Mlp::feedforward(4, &cfg.hidden, &mut rng);
+        let x = filled(3, 4, &mut rng);
+        assert_eq!(net.forward(&x, false).rows(), 3);
+    }
+
+    /// Whitespace around a value survives a shell that added it.
+    #[test]
+    fn values_are_trimmed() {
+        let mut cfg = MlpConfig::compiled_default();
+        cfg.apply_overrides(env_of(&[
+            ("TIMSSEEK_MLP_EPOCHS", " 40 "),
+            ("TIMSSEEK_MLP_HIDDEN", " 32 , 8 "),
+        ]));
+        assert_eq!(cfg.epochs, 40);
+        assert_eq!(cfg.hidden, vec![32, 8]);
+    }
+
+    /// Hex, so the compiled default seed can be restated verbatim.
+    #[test]
+    fn seed_takes_decimal_or_hex() {
+        for spelling in [
+            "0x2545F4914F6CDD1D",
+            "0X2545f4914f6cdd1d",
+            "2685821657736338717",
+        ] {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.seed = 0;
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_SEED", spelling)]));
+            assert_eq!(
+                cfg.seed, 0x2545_F491_4F6C_DD1D,
+                "{spelling} must round-trip to the default seed"
+            );
+        }
+    }
+
+    /// A malformed value must ABORT, not fall back to the default. Each of these
+    /// would otherwise produce a sweep row labelled with a value that never
+    /// trained. One case per rejection rule.
+    macro_rules! rejects {
+        ($name:ident, $var:literal, $val:literal) => {
+            #[test]
+            #[should_panic(expected = "is not usable")]
+            fn $name() {
+                let mut cfg = MlpConfig::compiled_default();
+                cfg.apply_overrides(env_of(&[($var, $val)]));
+            }
+        };
+    }
+
+    rejects!(rejects_non_numeric_lr, "TIMSSEEK_MLP_LR", "banana");
+    rejects!(rejects_zero_lr, "TIMSSEEK_MLP_LR", "0");
+    rejects!(rejects_negative_lr, "TIMSSEEK_MLP_LR", "-1e-3");
+    rejects!(rejects_nan_lr, "TIMSSEEK_MLP_LR", "NaN");
+    rejects!(rejects_zero_epochs, "TIMSSEEK_MLP_EPOCHS", "0");
+    rejects!(rejects_float_epochs, "TIMSSEEK_MLP_EPOCHS", "30.5");
+    rejects!(rejects_zero_batch_size, "TIMSSEEK_MLP_BATCH_SIZE", "0");
+    rejects!(
+        rejects_negative_weight_decay,
+        "TIMSSEEK_MLP_WEIGHT_DECAY",
+        "-1"
+    );
+    rejects!(rejects_empty_hidden, "TIMSSEEK_MLP_HIDDEN", "");
+    rejects!(rejects_zero_width_hidden, "TIMSSEEK_MLP_HIDDEN", "64,0");
+    rejects!(rejects_non_numeric_hidden, "TIMSSEEK_MLP_HIDDEN", "64x32");
+    rejects!(
+        rejects_trailing_comma_hidden,
+        "TIMSSEEK_MLP_HIDDEN",
+        "64,32,"
+    );
+    // 0 is neither a patience nor a synonym for `none` — see `parse_patience`.
+    rejects!(rejects_zero_patience, "TIMSSEEK_MLP_PATIENCE", "0");
+    rejects!(rejects_negative_patience, "TIMSSEEK_MLP_PATIENCE", "-1");
+    rejects!(rejects_non_numeric_seed, "TIMSSEEK_MLP_SEED", "0xZZ");
+
+    /// The abort names the variable, the offending value AND the expected
+    /// format. A panic that says only "invalid value" would leave an operator
+    /// guessing which of seven variables their sweep script mangled.
+    #[test]
+    fn the_abort_names_the_variable_the_value_and_the_format() {
+        let e = std::panic::catch_unwind(|| {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LR", "banana")]));
+        })
+        .expect_err("a malformed value must abort");
+        let msg = e
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("<not a string payload>");
+        for needle in ["TIMSSEEK_MLP_LR", "banana", "finite positive float"] {
+            assert!(
+                msg.contains(needle),
+                "abort message lacks {needle:?}: {msg}"
+            );
+        }
+    }
+
+    /// Under `cfg(test)` — which is how this assertion is compiled —
+    /// `MlpConfig::default()` MUST NOT read the environment, so the many
+    /// fixtures built as `..MlpConfig::default()` cannot be retuned by a stray
+    /// variable in the developer's shell.
+    ///
+    /// A tripwire, not a proof: it is tautological while the `cfg(test)` arm
+    /// stands, and starts failing the moment someone removes that arm while a
+    /// `TIMSSEEK_MLP_*` is exported.
+    #[test]
+    fn default_ignores_the_environment_in_tests() {
+        assert_eq!(MlpConfig::default(), MlpConfig::compiled_default());
     }
 }
