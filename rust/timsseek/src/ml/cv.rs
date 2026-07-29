@@ -306,9 +306,22 @@ pub trait FoldModel: Sized {
         val: &[usize],
     ) -> Result<Self, Self::Error>;
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, Self::Error>;
-    /// Lane-indexed, always `column_names().len()` long. Columns the model
-    /// never used report `0.0` rather than being absent, so the vector is
+    /// Lane-indexed, always `column_names().len()` long, so the vector is
     /// positionally comparable across folds and across models by construction.
+    ///
+    /// # The NAN-vs-finite contract
+    /// * `f32::NAN` means **"this model does not report a value for this
+    ///   column"** — the column is absent from the sidecar for this fold.
+    /// * Any FINITE value, **including `0.0`**, is a reported measurement and
+    ///   reaches the sidecar as-is.
+    ///
+    /// The distinction is load-bearing and the two cases are NOT the same
+    /// thing. A tree model that never split on a column has measured nothing
+    /// about it (`NAN`); an LDA whose `|coef|` came out exactly `0.0` for a
+    /// dead or constant column has measured precisely that, and dropping it
+    /// would delete the columns an operator most wants to see. `0.0` used to
+    /// carry both meanings, and the `!= 0.0` filter at the [`fold_feature_stats`]
+    /// boundary silently applied the first model's semantics to every model.
     fn importance(&self) -> Vec<f32>;
 }
 
@@ -466,6 +479,10 @@ impl FoldModel for GbmFoldModel {
         Ok(self.booster.predict(&matrix, true))
     }
 
+    /// forust reports only the columns it actually split on. Every other lane
+    /// is `NAN` — "not reported" — rather than `0.0`, because this model has no
+    /// gain measurement for a column it never used. See the
+    /// [`FoldModel::importance`] contract.
     fn importance(&self) -> Vec<f32> {
         let raw = self
             .booster
@@ -474,9 +491,16 @@ impl FoldModel for GbmFoldModel {
             raw.keys().all(|&idx| idx < self.ncols),
             "forust importance index exceeds the lane width"
         );
-        let mut out = vec![0.0f32; self.ncols];
+        let mut out = vec![f32::NAN; self.ncols];
         for (idx, gain) in raw {
             if let Some(slot) = out.get_mut(idx) {
+                // A NAN here would be indistinguishable from "not reported".
+                // forust has no reason to emit one; pin that rather than let it
+                // silently delete a row from the sidecar.
+                debug_assert!(
+                    gain.is_finite(),
+                    "forust reported a non-finite gain for column {idx}"
+                );
                 *slot = gain;
             }
         }
@@ -578,16 +602,18 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
     let mut row_buf = vec![0.0f64; names.len()];
     for (fold, rows) in fold_rows.iter().enumerate() {
         // --- Importance, back to the (name, gain) sidecar shape ---
-        // Zero-importance columns are dropped rather than emitted: the
-        // sidecar and the dashboard's fold-averaged gain both treat a
-        // feature as "reported by this fold" simply by being present, so
-        // emitting full-width vectors would change both the row set and
-        // the averaging divisor. What that filters out is model-dependent: a
-        // tree model leaves every column it never split on at 0.0, while an
-        // LDA's `|coef|` is dense apart from columns with no within-fold
-        // variance (or no finite values at all), whose weight solves to exactly
-        // 0 — i.e. in both cases, the columns that provably did not move the
-        // score.
+        // UNREPORTED (`NAN`) columns are dropped; every REPORTED column is
+        // emitted, `0.0` included. See the [`FoldModel::importance`] contract
+        // for why those are different things. The drop matters because the
+        // sidecar and the dashboard's fold-averaged gain both treat a feature
+        // as "reported by this fold" simply by being present, so a model's
+        // unmeasured columns would otherwise pad the averaging divisor with
+        // values it never produced.
+        //
+        // The filter is `is_finite`, NOT `!= 0.0`: the old rule was written for
+        // the tree model, where 0.0 did mean "never split on this", and then
+        // silently deleted an LDA's genuine zero-weight columns — exactly the
+        // dead/constant features an operator reads the sidecar to find.
         let importance: Vec<(Arc<str>, f32)> = match models.get(fold).copied().flatten() {
             Some(model) => {
                 let raw_imp = model.importance();
@@ -599,9 +625,12 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
                 let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
                     .into_iter()
                     .zip(names.iter())
-                    .filter(|(v, _)| *v != 0.0)
+                    .filter(|(v, _)| v.is_finite())
                     .map(|(v, n)| (n.clone(), v))
                     .collect();
+                // Every surviving value is finite, so this comparison is total;
+                // the sort is stable, so equal gains (e.g. a run of genuine
+                // 0.0s) keep lane order.
                 pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 pairs
             }
@@ -983,5 +1012,119 @@ mod test {
             avg_d
         );
         assert_eq!(out.len(), data_len);
+    }
+
+    /// A [`FoldModel`] that reports whatever importance vector it is configured
+    /// with, so the sentinel contract can be tested without a real fit.
+    struct StubModel(Vec<f32>);
+
+    impl FoldModel for StubModel {
+        type Config = Vec<f32>;
+        type Error = ();
+
+        fn fit<D: FoldDataset>(
+            cfg: &Vec<f32>,
+            _data: &D,
+            _train: &[usize],
+            _val: &[usize],
+        ) -> Result<Self, ()> {
+            Ok(StubModel(cfg.clone()))
+        }
+
+        fn predict<D: FoldDataset>(&self, _data: &D, rows: &[usize]) -> Result<Vec<f64>, ()> {
+            Ok(vec![0.0; rows.len()])
+        }
+
+        fn importance(&self) -> Vec<f32> {
+            self.0.clone()
+        }
+    }
+
+    /// THE [`FoldModel::importance`] sentinel contract, at the sidecar boundary:
+    /// `NAN` means "this model reports nothing for this column" and is dropped;
+    /// every FINITE value reaches the sidecar, `0.0` included.
+    ///
+    /// Regression guard. The boundary used to filter `!= 0.0`, which was right
+    /// for a tree model (where 0.0 did mean "never split on") and wrong for
+    /// every other model: an LDA's `|coef|` of exactly 0.0 is a measurement of a
+    /// dead or constant column, and silently deleting those rows removes
+    /// exactly what an operator reads the sidecar to find. Both halves are
+    /// asserted — dropping the NAN alone would also pass if 0.0 were dropped
+    /// too, so the surviving zero is the load-bearing assertion.
+    #[test]
+    fn importance_nan_is_unreported_but_zero_is_a_value() {
+        let dataset = RowMajorDataset::new(
+            PrecomputedFeatures::from_row_major(
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                3,
+                vec![1.0, 0.0],
+            ),
+            vec![Arc::from("unreported"), Arc::from("zero"), Arc::from("big")],
+            1,
+        );
+        let model = StubModel(vec![f32::NAN, 0.0, 2.5]);
+        let stats = fold_feature_stats(&dataset, &[vec![0, 1]], &[Some(&model)]);
+
+        let imp = &stats[0].feature_importance;
+        // Gain-descending, and the genuine zero SURVIVES.
+        assert_eq!(
+            imp.iter().map(|(n, v)| (&**n, *v)).collect::<Vec<_>>(),
+            vec![("big", 2.5), ("zero", 0.0)],
+            "a finite 0.0 is a reported measurement and must reach the sidecar"
+        );
+        // The NAN does not.
+        assert!(
+            !imp.iter().any(|(n, _)| &**n == "unreported"),
+            "a NAN importance means 'not reported' and must be absent: {imp:?}"
+        );
+
+        // The stats half is unaffected by the sentinel: it is always full width.
+        assert_eq!(stats[0].feature_stats.len(), 3);
+    }
+
+    /// The GBM side of the same contract: forust reports only the columns it
+    /// split on, and the ones it did not must come back as `NAN` (absent from
+    /// the sidecar), NOT as a 0.0 gain it never measured.
+    ///
+    /// `feature_4` is constant, so no tree can split on it. The other four are
+    /// the usual separable draws, so their presence keeps the absence
+    /// assertion from passing vacuously.
+    #[test]
+    fn gbm_importance_omits_columns_it_never_split_on() {
+        let mut data = random_data(300, 300, 0xBEEF);
+        for d in data.iter_mut() {
+            d.vals[4] = 1.0;
+        }
+
+        let mut scorer = CrossValidatedScorer::<MyFeature, GbmFoldModel>::new_from_shuffled(
+            3,
+            data,
+            GBMConfig::default(),
+        );
+        scorer.fit().unwrap();
+
+        for fold in scorer.feature_stats() {
+            let names: Vec<&str> = fold
+                .feature_importance
+                .iter()
+                .map(|(n, _)| &**n)
+                .collect::<Vec<_>>();
+            assert!(
+                !names.contains(&"feature_4"),
+                "fold {}: constant column was never split on, so it must be \
+                 unreported rather than a fabricated 0.0 gain; got {names:?}",
+                fold.fold
+            );
+            assert!(
+                !names.is_empty(),
+                "fold {}: no feature reported at all, so the check above is vacuous",
+                fold.fold
+            );
+            assert!(
+                fold.feature_importance.iter().all(|(_, g)| g.is_finite()),
+                "fold {}: the sidecar must never carry the NAN sentinel itself",
+                fold.fold
+            );
+        }
     }
 }

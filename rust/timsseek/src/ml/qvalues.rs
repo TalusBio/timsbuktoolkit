@@ -1198,6 +1198,55 @@ mod feature_tests {
         assert_eq!(key(&out_a), key(&out_b), "lda rescore not deterministic");
     }
 
+    /// The LDA sidecar is FULL WIDTH: one importance row per linear-lane
+    /// feature, per fold, including the features whose `|coef|` is exactly 0.0.
+    ///
+    /// An LDA looks at every column, so it has a measurement for every column —
+    /// a zero weight means "this feature is dead or constant in this fold",
+    /// which is a finding, not a gap. The sidecar used to lose those rows to a
+    /// `!= 0.0` filter meant for the tree model's "never split on this"
+    /// sentinel; under `synthetic_competed` most linear fields are constant, so
+    /// that filter dropped the large majority of the lane here.
+    ///
+    /// Both directions are pinned: the width, and that the zeros are really
+    /// present (a full-width vector of all-nonzero values would satisfy the
+    /// length check alone).
+    #[test]
+    fn lda_sidecar_reports_every_linear_feature_including_zero_weights() {
+        let (_out, stats) = rescore_lda(synthetic_competed(90));
+        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+
+        for fs in &stats {
+            assert_eq!(
+                fs.feature_importance.len(),
+                LINEAR_NCOLS,
+                "fold {}: LDA must report one importance per linear-lane feature",
+                fs.fold
+            );
+            assert!(
+                fs.feature_importance.iter().all(|(_, g)| g.is_finite()),
+                "fold {}: LDA importance is never the 'unreported' NAN sentinel",
+                fs.fold
+            );
+            assert!(
+                fs.feature_importance.iter().any(|(_, g)| *g == 0.0),
+                "fold {}: this fixture has constant linear features, whose \
+                 zero weights must survive to the sidecar",
+                fs.fold
+            );
+        }
+
+        // Names are the linear lane exactly — no duplicates, no strays.
+        let lane: std::collections::HashSet<Arc<str>> =
+            linear_feature_name_set().into_iter().collect();
+        let reported: std::collections::HashSet<Arc<str>> = stats[0]
+            .feature_importance
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        assert_eq!(reported, lane);
+    }
+
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
         let n = 90;

@@ -246,13 +246,25 @@ impl FoldModel for LdaModel {
     }
 
     /// `|coef|` — the discriminant weights live in standardized space, so their
-    /// magnitudes are directly comparable across columns. Full-width and, for
-    /// any column with within-fold variance, non-zero: unlike a tree model
-    /// there is no "column the fit never looked at". A column that is constant
-    /// or has no finite value at all standardizes to all-zero and therefore
-    /// solves to exactly `0.0`, which is the correct weight for it.
+    /// magnitudes are directly comparable across columns.
+    ///
+    /// NEVER `NAN`, i.e. never "unreported" under the
+    /// [`FoldModel::importance`] contract: the solve looks at every column, so
+    /// every column has a measurement. `LdaModel::fit` rejects a non-finite
+    /// solution outright, so `coef` is finite by construction and this cannot
+    /// emit the sentinel by accident.
+    ///
+    /// A column that is constant, or has no finite value at all, standardizes
+    /// to all-zeros and therefore solves to exactly `0.0`. That zero is a
+    /// RESULT, not a gap, and it reaches the sidecar — "this feature is dead in
+    /// this fold" is one of the more useful things the sidecar can say.
     fn importance(&self) -> Vec<f32> {
-        self.coef.iter().map(|c| c.abs() as f32).collect()
+        let out: Vec<f32> = self.coef.iter().map(|c| c.abs() as f32).collect();
+        debug_assert!(
+            out.iter().all(|v| v.is_finite()),
+            "LdaModel::fit guarantees finite coefficients"
+        );
+        out
     }
 }
 
