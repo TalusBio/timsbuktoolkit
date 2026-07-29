@@ -201,8 +201,14 @@ impl MlpFoldModel {
 /// want, since both index `feat` by their `rows` argument.
 ///
 /// Materializing rather than streaming is deliberate: `FoldDataset` only offers
-/// row-at-a-time access and the transform needs two passes. The copy is a fixed
-/// cost per fold and correctness comes first.
+/// row-at-a-time access and BOTH callers make two passes over the result —
+/// `fit` runs `ColumnTransform::fit` and then `apply`, `predict` runs
+/// `check_clean` and then `apply`. The copy is a fixed cost per fold and
+/// correctness comes first.
+///
+/// A consumer that reads each row ONCE, in order, should not call this: the slab
+/// is `rows.len() * ncols` f64 and at production scale that is hundreds of
+/// megabytes held for no reason. The held-out set in `fit` streams instead.
 fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
     let mut feat = vec![0.0f64; rows.len() * ncols];
     for (k, &i) in rows.iter().enumerate() {
@@ -244,7 +250,34 @@ const INNER_VAL_STRIDE: usize = 5;
 /// folds are 10^4-10^5 rows and are nowhere near it; the fixtures in this crate
 /// straddle it, so some of them early-stop and some do not.
 const MIN_TRAIN_ROWS_FOR_INNER_VAL: usize = MIN_INNER_VAL_ROWS * INNER_VAL_STRIDE;
+
+/// The floor on the number of rows the stopping decision is averaged over.
+///
+/// It applies to EITHER source of those rows — the inner carve (via
+/// [`MIN_TRAIN_ROWS_FOR_INNER_VAL`], which is this times the stride) and the
+/// outer `val` slice a caller passes (via [`usable_val`]). The argument above is
+/// about the SIZE of the held-out set and says nothing about where it came from:
+/// a 30-row outer slice makes exactly the same noisy stopping decision a 30-row
+/// carve would, and an outer slice is not privileged just because the caller
+/// chose it. Under the floor the knob goes inert and the full epoch budget runs,
+/// which is what the pre-early-stopping behaviour was.
 const MIN_INNER_VAL_ROWS: usize = 32;
+
+/// The outer `val` slice if it is big enough to make a stopping decision on,
+/// otherwise nothing — see [`MIN_INNER_VAL_ROWS`].
+///
+/// Returning an empty slice rather than a flag so the rest of `fit` has ONE
+/// notion of "is there a held-out set": an under-floor slice is indistinguishable
+/// from the `&[]` the `crossfit` driver passes, and therefore takes the same
+/// path (an inner carve if `train` can afford one, no early stopping if it
+/// cannot).
+fn usable_val(val: &[usize]) -> &[usize] {
+    if val.len() < MIN_INNER_VAL_ROWS {
+        &[]
+    } else {
+        val
+    }
+}
 
 /// Split `0..len` into (rows to TRAIN on, rows to make the stopping decision
 /// on), or `(all, none)` when `len` is under [`MIN_TRAIN_ROWS_FOR_INNER_VAL`].
@@ -279,6 +312,11 @@ impl FoldModel for MlpFoldModel {
     /// [`inner_val_split`] for the rule and [`MIN_TRAIN_ROWS_FOR_INNER_VAL`] for
     /// when it declines to. Those rows are excluded from the optimizer and used
     /// only for the stopping decision.
+    ///
+    /// An outer `val` slice SHORTER THAN [`MIN_INNER_VAL_ROWS`] takes that same
+    /// path, i.e. it is ignored: the floor is on the size of the held-out set,
+    /// and a 30-row outer slice makes the same sampling-noise stopping decision a
+    /// 30-row carve would. See [`usable_val`].
     ///
     /// **The [`ColumnTransform`] is still fitted over ALL of `train`,
     /// inner-validation rows included.** Deliberate, and the choice worth
@@ -339,18 +377,30 @@ impl FoldModel for MlpFoldModel {
             });
         }
 
-        // Where the stopping decision gets measured. An outer `val` slice is
-        // preferred whenever there is one — it costs no training rows — and the
-        // inner carve is the fallback for the callers that pass `&[]`. With
-        // early stopping off there is no decision to make, so no carve either
-        // and every train row trains, exactly as before.
+        // Where the stopping decision gets measured. A big enough outer `val`
+        // slice is preferred whenever there is one — it costs no training rows —
+        // and the inner carve is the fallback for the callers that pass `&[]`
+        // (and for an outer slice under [`MIN_INNER_VAL_ROWS`], which is not a
+        // set worth stopping on; see [`usable_val`]). With early stopping off
+        // there is no decision to make, so no carve either and every train row
+        // trains, exactly as before.
         let early_stopping = cfg.early_stopping_patience.is_some();
-        let (fit_pos, inner_pos) = if early_stopping && val.is_empty() {
+        let val_rows = usable_val(val);
+        if !val.is_empty() && val_rows.is_empty() {
+            tracing::debug!(
+                "MLP fold {}: the outer validation slice has {} rows, under the {} a held-out \
+                 measurement needs — ignoring it and falling back to the inner carve",
+                fold,
+                val.len(),
+                MIN_INNER_VAL_ROWS,
+            );
+        }
+        let (fit_pos, inner_pos) = if early_stopping && val_rows.is_empty() {
             inner_val_split(train.len())
         } else {
             ((0..train.len()).collect(), Vec::new())
         };
-        if early_stopping && val.is_empty() && inner_pos.is_empty() {
+        if early_stopping && val_rows.is_empty() && inner_pos.is_empty() {
             tracing::debug!(
                 "MLP fold {}: {} train rows is under the {} needed to carve an inner \
                  validation slice — training the full {} epoch budget with no early stopping",
@@ -390,16 +440,23 @@ impl FoldModel for MlpFoldModel {
         // Built UNCONDITIONALLY when early stopping is on: it is the stopping
         // decision now, not just a log line. With early stopping off it is
         // built only for the trace, as it always was.
-        let val_rows: &[usize] = if val.is_empty() { &[] } else { val };
         let want_val = early_stopping || tracing::enabled!(tracing::Level::DEBUG);
         let val_set = if !want_val {
             None
         } else if !val_rows.is_empty() {
-            let vfeat = gather(data, val_rows, ncols);
+            // STREAMED, not gathered into a slab first. The train gather has to
+            // materialize — `ColumnTransform::fit` makes two passes over it —
+            // but this one is read exactly once, in order, so a slab would be a
+            // second `val_rows.len() * ncols` f64 buffer (~740 MB per fold at
+            // production scale) that exists only to be walked front to back.
+            // One row of scratch does the same work; the arithmetic reaching
+            // `transform.apply` is byte-for-byte what `gather` used to hand it.
+            let mut vrow = vec![0.0f64; ncols];
             let mut vx = Tensor::new(val_rows.len(), width);
             let mut vy = Vec::with_capacity(val_rows.len());
             for (k, &i) in val_rows.iter().enumerate() {
-                transform.apply(&vfeat[k * ncols..(k + 1) * ncols], vx.row_mut(k));
+                data.get_values(i, &mut vrow);
+                transform.apply(&vrow, vx.row_mut(k));
                 vy.push(if data.is_decoy(i) { 0.0 } else { 1.0 });
             }
             let vw: Vec<f32> = fold_weights(data, val_rows)
@@ -1323,6 +1380,58 @@ mod test {
                 "seed {seed}: rows with no NaN must not be reported, else the assertion \
                  above holds for any input"
             );
+        }
+    }
+
+    /// An outer `val` slice under [`MIN_INNER_VAL_ROWS`] is IGNORED, exactly as
+    /// an under-floor carve would be.
+    ///
+    /// The floor is on the SIZE of the held-out set — see [`MIN_INNER_VAL_ROWS`]
+    /// — so it cannot be a property of only one of the two ways the rows arrive.
+    /// The concrete caller: `CrossValidatedScorer` hands `fold_rows[f + 1]`, which
+    /// on this crate's 90-row fixtures is 30 rows, and a patience rule reading a
+    /// 30-row loss stops on which rows landed in it.
+    ///
+    /// Asserted as BIT-IDENTITY with the `val = &[]` fit rather than as a row
+    /// count alone: "ignored" means the fit is the one it would have been with no
+    /// outer slice at all, down to the epoch kept.
+    ///
+    /// Several seeds because the fits being compared are real training runs, and
+    /// a single init could agree by luck on a fixture where the two paths in fact
+    /// diverge — the same reason every other learning test here sweeps.
+    #[test]
+    fn an_outer_validation_slice_under_the_floor_is_ignored() {
+        for seed in [7u64, 13, 42] {
+            let (feat, y) = toy(200, seed, 0.0);
+            let data = dataset(feat, 3, y);
+            let (train, held) = split(400);
+            assert_eq!(train.len(), 200);
+
+            let none = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
+            let under: Vec<usize> = held.iter().copied().take(MIN_INNER_VAL_ROWS - 1).collect();
+            let floored = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &under).unwrap();
+            assert_eq!(
+                floored.n_train_rows(),
+                160,
+                "seed {seed}: an under-floor outer slice must fall through to the inner carve"
+            );
+            assert_eq!(
+                floored.predict(&data, &held).unwrap(),
+                none.predict(&data, &held).unwrap(),
+                "seed {seed}: an ignored outer slice must give the `val = &[]` fit exactly"
+            );
+            assert_eq!(floored.outcome(), none.outcome(), "seed {seed}");
+
+            // NON-VACUITY: one more row and the slice IS used — the floor is at
+            // `MIN_INNER_VAL_ROWS`, not "small slices are ignored".
+            let at: Vec<usize> = held.iter().copied().take(MIN_INNER_VAL_ROWS).collect();
+            let used = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &at).unwrap();
+            assert_eq!(
+                used.n_train_rows(),
+                200,
+                "seed {seed}: a slice AT the floor is usable, so no carve and every row trains"
+            );
+            assert!(used.outcome().best_val_loss.is_some(), "seed {seed}");
         }
     }
 }

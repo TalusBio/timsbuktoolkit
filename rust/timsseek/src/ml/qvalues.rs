@@ -966,7 +966,9 @@ fn abort_standalone_mlp(lane: Lane, ncols: usize, nrows: usize, e: MlpFoldError)
 /// [`CrossValidatedScorer`] for the partition. Two MLP-specific notes on top of
 /// it: the early-stopping fold (`f + 1`) IS used, by [`MlpFoldModel`]'s
 /// patience rule exactly as the GBM uses it through forust's
-/// `early_stopping_rounds`, and every fitted statistic (cull set,
+/// `early_stopping_rounds` (unless the fold is under that fit's minimum
+/// held-out size, which no production fold is — see `MIN_INNER_VAL_ROWS`), and
+/// every fitted statistic (cull set,
 /// standardization moments, imputation means, weights) is train-fold-only
 /// inside [`MlpFoldModel::fit`]. The early-stopping fold reaches the loss
 /// measurement and nothing else, and the scorer never asks a model to score

@@ -451,9 +451,17 @@ impl DataBuffer {
         mat
     }
 
-    /// Features + labels. Only valid after [`Self::fill_from`]; the length
-    /// assertion is what makes calling it after a features-only gather a panic
-    /// rather than a silently empty response slice.
+    /// Features + labels. Only valid after [`Self::fill_from`].
+    ///
+    /// The assertion catches a features-only gather OF A NON-EMPTY ROW SET —
+    /// [`Self::fill_features_from`] clears `response_buffer`, so the labels are
+    /// missing while `nrows` is not, and this panics instead of handing out an
+    /// empty response slice. It does NOT catch the zero-row case: with
+    /// `nrows == 0` both sides are `0` and the two fills are indistinguishable
+    /// here, so an empty gather returns an empty view either way. That is the
+    /// shape `crossfit` produces (it passes `val = &[]`), and it is harmless
+    /// because that path uses [`Self::fill_from`] anyway — but the assertion is
+    /// not what makes it safe.
     fn as_matrix(&self) -> FoldView<'_> {
         let mat = self.features_as_matrix();
         assert_eq!(self.response_buffer.len(), self.nrows);

@@ -58,6 +58,14 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
 
 - **Unset changes nothing.** With none set the config is bit-identical to the
   compiled default and nothing is logged.
+- **`TIMSSEEK_MLP_PATIENCE` also changes the TRAINING-SET SIZE on the hybrid
+  path.** `hybrid_mlp` cross-fits its `mlp_score` column through the `crossfit`
+  driver, which has no fold to spare for validation, so a set patience carves 20%
+  of each fold's train rows off for the stopping decision and the optimizer sees
+  80%; `off` trains on 100%. A sweep arm comparing `PATIENCE=off` to
+  `PATIENCE=8` on `hybrid_mlp` therefore varies two things at once. `mlp` /
+  `mlp_all` are unaffected — they early-stop on the next fold, so every train row
+  still trains.
 - **A malformed value ABORTS the run** with the variable, the value and the
   expected format — it never falls back to the default, because a warned-past
   variable produces a sweep row labelled with a value that never trained. The

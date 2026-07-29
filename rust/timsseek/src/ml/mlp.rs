@@ -656,6 +656,13 @@ pub struct Mlp {
     acts: Vec<Tensor>,  // acts[k] = output of layer k
     grads: Vec<Tensor>, // grads[k] = dL/d(acts[k])
     scratch: Tensor,    // sink for dL/dx of layer 0
+    /// Throwaway gradient sink for [`Self::eval_loss`], persistent for the same
+    /// reason every other buffer here is: with early stopping on, `eval_loss`
+    /// runs once per epoch, so a local `Tensor` would be one
+    /// `val_rows * 1` alloc/free per epoch for a value that is never read. Kept
+    /// SEPARATE from `grads` so an eval can never leave a gradient behind that a
+    /// later backward pass might read.
+    eval_sink: Tensor,
 }
 
 impl Mlp {
@@ -667,6 +674,7 @@ impl Mlp {
             acts,
             grads,
             scratch: Tensor::default(),
+            eval_sink: Tensor::default(),
         }
     }
 
@@ -742,11 +750,16 @@ impl Mlp {
     /// it writes goes to a throwaway buffer; the caller's `grads` are untouched,
     /// and `train_step` overwrites `grads.last()` before every backward pass
     /// regardless.
+    ///
+    /// The sink is the persistent [`Self::eval_sink`] rather than a local, so an
+    /// every-epoch early-stopping evaluation allocates nothing in steady state —
+    /// the claim the module header makes. Reusing it cannot change the returned
+    /// number: `loss_and_grad` reshapes the sink and writes every row of it
+    /// before returning, and the loss it returns never reads the gradient.
     pub fn eval_loss(&mut self, x: &Tensor, y: &[f32], w: &[f32], loss: &MlpLoss) -> f32 {
         self.forward(x, false);
         let last = self.acts.len() - 1;
-        let mut sink = Tensor::default();
-        loss.loss_and_grad(&self.acts[last], y, w, &mut sink)
+        loss.loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink)
     }
 
     /// Copy every parameter into `out`, in [`Self::params_and_grads`] order.
