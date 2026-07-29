@@ -9,8 +9,6 @@
 //! * [`chunked_fold_reduce`] — per-chunk accumulate over a thread-count-
 //!   independent partition, merged in ascending chunk order: bitwise
 //!   reproducible.
-//! * [`scatter_write`] — `out[i] = f(i)`. Each index is written independently,
-//!   so the result never depends on the schedule.
 //! * [`sort_by`] — in-place STABLE sort: ties keep input order, on any thread
 //!   count. Reproducible, which matters when a later pass walks the order
 //!   positionally (see `assign_qval`).
@@ -107,24 +105,6 @@ where
         merge(&mut out, p);
     }
     out
-}
-
-/// Fill `out` in parallel with `out[i] = f(i)`.
-pub(crate) fn scatter_write<T, F>(out: &mut [T], f: F)
-where
-    T: Send,
-    F: Fn(usize) -> T + Send + Sync,
-{
-    #[cfg(feature = "rayon")]
-    {
-        out.par_iter_mut().enumerate().for_each(|(i, o)| *o = f(i));
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = f(i);
-        }
-    }
 }
 
 /// Sort `items` in place by `cmp`, in parallel when rayon is on.

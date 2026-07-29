@@ -1,9 +1,10 @@
 //! Sage-style two-class Fisher LDA (github.com/lazear/sage) with ridge
 //! shrinkage: `w = (Sw + lambda*I)^-1 (mu_t - mu_d)`, targets projecting high.
 //!
-//! Fits the LINEAR lane only (~102 dims). That lane is NOT the GBM's input —
-//! the GBM sees the ALL lane (~131 dims), including the 22 `sequence_counts`
-//! AA counts, which have no linear lane and never reach LDA.
+//! Fits the LINEAR lane only (`LINEAR_NCOLS`, 101 columns today). That lane is
+//! NOT the GBM's input — the GBM sees the ALL lane (`ALL_NCOLS`, 128), including
+//! the 22-wide `sequence_counts` block, which has no linear lane and never
+//! reaches LDA.
 //!
 //! Features are z-standardized before the fit (Fisher LDA is scale-invariant,
 //! but the `lambda * I` term is not), and non-finite values are imputed to the
@@ -13,10 +14,7 @@ use crate::ml::cv::{
     FoldDataset,
     FoldModel,
 };
-use crate::utils::maybe_par::{
-    chunked_fold_reduce,
-    scatter_write,
-};
+use crate::utils::maybe_par::chunked_fold_reduce;
 use std::time::Instant;
 
 /// Fraction of `mean(diag(Sw))` added to the diagonal as ridge shrinkage.
@@ -152,14 +150,6 @@ impl LdaModel {
             acc += self.coef[j] * z;
         }
         acc
-    }
-
-    /// Score every row of a flat row-major matrix (parallel), into `out`.
-    pub fn score_all(&self, feat: &[f64], nrows: usize, out: &mut [f64]) {
-        let d = self.ncols;
-        assert_eq!(feat.len(), nrows * d);
-        assert_eq!(out.len(), nrows);
-        scatter_write(out, |i| self.score(&feat[i * d..(i + 1) * d]));
     }
 }
 
