@@ -233,7 +233,7 @@ impl<M: FoldModel> CrossFit<M> {
 /// return each row's HELD-OUT score.
 ///
 /// THE canonical statement of leak-freedom — [`crossfit_lda`],
-/// [`crossfit_mlp_scores`] and therefore `rescore_lda` / `rescore_hybrid` /
+/// [`crossfit_score_column`] and therefore `rescore_lda` / `rescore_hybrid` /
 /// `rescore_hybrid_mlp` all route through here and their docs just point back
 /// at this one.
 ///
@@ -380,36 +380,52 @@ fn crossfit_lda<D: FoldDataset>(data: &D) -> Option<CrossFit<LdaModel>> {
     crossfit::<D, LdaModel>(data, &LdaConfig::default(), "LDA")
 }
 
-/// The `mlp_score` column [`rescore_hybrid_mlp`] appends to the nonlinear lane:
-/// each row's HELD-OUT MLP score over the canonical rescore partition (see
-/// [`crossfit`]), or a UNIFORMLY ZERO column if the cross-fit failed.
+/// The extra COLUMN a hybrid appends to the nonlinear lane: each row's HELD-OUT
+/// `M` score over the canonical rescore partition (see [`crossfit`]), or a
+/// UNIFORMLY ZERO column if the cross-fit failed — plus which of the two it is.
+///
+/// ONE function for BOTH hybrids' degradation arms, so `lda_score` and
+/// `mlp_score` cannot drift apart. They used to differ in nothing but the model
+/// name and the column name, with a byte-identical five-line prose block in each,
+/// and only one of the two was even factored out of its caller.
+///
+/// `model` names the model in [`crossfit`]'s per-fold failure logs; `column`
+/// names the frame column in this function's own.
 ///
 /// Always `data.nrows()` long, and never partially filled — the fallback is a
 /// fresh vector rather than whatever [`crossfit`] had accumulated before the
 /// failing fold, so a run where folds 0 and 1 fitted and fold 2 did not still
 /// yields all zeros. A partially filled column is the failure mode worth naming:
-/// it makes a row's `mlp_score` depend on its position in the shuffle, gives the
-/// GBM a feature it can split on to recover fold identity, and corrupts the
-/// q-value ranking with nothing downstream to catch it. All-zero is constant ->
-/// zero split gain -> the hybrid degrades to "GBM on the nonlinear lane".
+/// it makes a row's score depend on its position in the shuffle, gives the GBM a
+/// feature it can split on to recover fold identity, and corrupts the q-value
+/// ranking with nothing downstream to catch it. All-zero is constant -> zero
+/// split gain -> the hybrid degrades to "GBM on the nonlinear lane".
 ///
-/// That degradation is benign only while the nonlinear lane is trainable; when it
-/// is not, the GBM builds no trees and the q-values are meaningless. See
-/// [`abort_standalone_mlp`] for the full argument and [`untrained_folds`] for the
-/// runtime check that reports the bad case.
+/// Whether THAT degradation is benign is argued in exactly one place —
+/// [`abort_standalone_mlp`] — and the short version is "only while the nonlinear
+/// lane is itself trainable". [`report_untrained_folds`] is the runtime check the
+/// callers run afterwards, and the flag returned here is what lets it tell "the
+/// column degraded AND nothing trained" from "nothing trained at all".
 ///
-/// The models are discarded: the hybrid's sidecar reports the GBM's importance
-/// over `nonlinear + mlp_score`, and the MLP's own per-column weights belong to
-/// a different feature set (the LINEAR lane) that the sidecar has no column for.
-/// [`rescore_mlp_linear`] is the entry point that reports those.
-/// Returns the column and whether it is the DEGRADED (all-zero) one, which the
-/// caller needs in order to run [`untrained_folds`] afterwards.
-fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> (Vec<f64>, bool) {
-    match crossfit::<D, MlpFoldModel>(data, cfg, "MLP") {
+/// The models are discarded: a hybrid's sidecar reports the GBM's importance over
+/// `nonlinear + <column>`, and this model's own per-column weights belong to a
+/// different feature set (the LINEAR lane) that the sidecar has no column for.
+/// [`rescore_lda`] and [`rescore_mlp_linear`] are the entry points that report
+/// those.
+fn crossfit_score_column<D: FoldDataset, M: FoldModel>(
+    data: &D,
+    cfg: &M::Config,
+    model: &str,
+    column: &str,
+) -> (Vec<f64>, bool)
+where
+    M::Error: std::fmt::Display,
+{
+    match crossfit::<D, M>(data, cfg, model) {
         Some(cf) => (cf.scores, false),
         None => {
             tracing::error!(
-                "hybrid: cross-fit MLP failed; mlp_score is uniformly 0, so the GBM now trains \
+                "hybrid: cross-fit {model} failed; {column} is uniformly 0, so the GBM now trains \
                  on the nonlinear lane ALONE. That is a weaker model, not a broken one — \
                  PROVIDED the nonlinear lane is trainable at this row count. If it is not, the \
                  GBM builds no trees and the q-values are meaningless; the check after the fit \
@@ -439,11 +455,9 @@ fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> (Vec<f64>, 
 /// and a finite value for the ones it did, `0.0` included, so a fold that built
 /// even one split has at least one entry.
 ///
-/// Only meaningful when the appended column IS the all-zero fallback — a
-/// non-degraded frame that built no trees is a different (and equally
-/// interesting) problem this does not claim to diagnose. Nor does it see a fold
-/// that trained on noise: trees built off uninformative columns report importance
-/// like any other. The claim is strictly "some fold produced no model".
+/// It does NOT see a fold that trained on noise: trees built off uninformative
+/// columns report importance like any other. The claim is strictly "some fold
+/// produced no model".
 fn untrained_folds(stats: &RescoreFeatureStats) -> usize {
     stats
         .iter()
@@ -451,32 +465,58 @@ fn untrained_folds(stats: &RescoreFeatureStats) -> usize {
         .count()
 }
 
-/// Log the degraded-and-untrained state, if that is what happened. `what` names
-/// the zeroed column.
+/// Log the untrained-frame state, if that is what happened. `frame` names what
+/// the GBM was handed; `degraded_column` is `Some(name)` only when a hybrid's
+/// appended column is the all-zero fallback.
+///
+/// Called UNCONDITIONALLY by all three GBM-bearing rescorers, including the
+/// default [`rescore`]. The check used to be gated behind the degraded flag, so
+/// the path most users run never ran it — and a small real search (below
+/// `GBMConfig::default`'s `min_leaf_weight` floor of roughly 34 rows per fold)
+/// therefore emitted per-fold constants and q-values that rank by shuffle order
+/// with nothing said about it. That is pre-existing behavior for [`rescore`], not
+/// a regression, but the state is exactly the one this function calls "NOT usable
+/// for FDR" and there is now machinery to detect it.
+///
+/// The two states stay DISTINGUISHABLE in the message, because they are different
+/// diagnoses. "The fallback column degraded AND nothing trained" points at two
+/// failures whose combination is what makes the run useless (see
+/// [`crossfit_score_column`] and [`abort_standalone_mlp`] for why either alone is
+/// survivable). "Nothing trained at all" points at the frame or the row count,
+/// with no cross-fit involved — the only actionable thing there is more rows, a
+/// lane with live variance, or a different `rescore_model`.
 ///
 /// This is a detector rather than an abort because by this point the run has a
 /// full result set, and the same condition is benign on a real search (27 live
 /// nonlinear features, rows in the hundreds of thousands) while pathological on a
 /// small or degenerate input. The caller's job is to make it VISIBLE.
-fn report_degraded_frame(what: &str, degraded: bool, stats: &RescoreFeatureStats) {
-    if !degraded {
+fn report_untrained_folds(frame: &str, degraded_column: Option<&str>, stats: &RescoreFeatureStats) {
+    let untrained = untrained_folds(stats);
+    if untrained == 0 {
         return;
     }
-    let untrained = untrained_folds(stats);
-    if untrained > 0 {
-        tracing::error!(
-            "hybrid: {what} was zeroed by a failed cross-fit AND {untrained} of {} GBM folds then \
-             built no trees on the nonlinear lane. Every row those folds scored carries the SAME \
-             value, so its q-value ranks by the internal shuffle order rather than by evidence \
-             and is NOT usable for FDR. {}Treat this run as failed.",
+    // Identical in both arms, and the sentence the operator has to act on.
+    let unusable = "Every row those folds scored carries the SAME value, so its q-value ranks by \
+                    the internal shuffle order rather than by evidence and is NOT usable for FDR.";
+    let partial = if untrained < stats.len() {
+        "The remaining folds DID train, so the score distribution is fold-dependent — worse than \
+         uniformly degenerate, not better. "
+    } else {
+        ""
+    };
+    match degraded_column {
+        Some(column) => tracing::error!(
+            "rescore: {column} was zeroed by a failed cross-fit AND {untrained} of {} GBM folds \
+             then built no trees on {frame}. {unusable} {partial}Treat this run as failed.",
             stats.len(),
-            if untrained < stats.len() {
-                "The remaining folds DID train, so the score distribution is fold-dependent — \
-                 worse than uniformly degenerate, not better. "
-            } else {
-                ""
-            }
-        );
+        ),
+        None => tracing::error!(
+            "rescore: {untrained} of {} GBM folds built no trees on {frame}, with no failed \
+             cross-fit involved — the frame itself is untrainable here, typically too few rows \
+             per fold for GBMConfig's min_leaf_weight or a lane with no live variance. \
+             {unusable} {partial}Treat this run as failed.",
+            stats.len(),
+        ),
     }
 }
 
@@ -509,6 +549,10 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
     scorer.fit().unwrap();
 
     let stats = scorer.feature_stats();
+    // No cross-fit column here, so there is nothing to have degraded — but a
+    // frame that trained nothing is still unusable, and this is the path most
+    // users run. See `report_untrained_folds`.
+    report_untrained_folds("the ALL lane", None, &stats);
 
     finalize(scorer.score(), stats)
 }
@@ -699,8 +743,6 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     // reproducible.
     canonicalize_and_shuffle(&mut data);
 
-    let nrows = data.len();
-
     // BOTH lane matrices are built from `data` in its post-shuffle order (see
     // `canonicalize_and_shuffle`), so row `i` is the same candidate in lin, nl,
     // lda_score, responses, and the moved `data`.
@@ -708,25 +750,16 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     let lin_dataset = hybrid_linear_dataset(&data, responses.clone());
 
     // --- CROSS-FIT lda_score (leak-free), via the shared partition ---
-    // On failure the column is left uniformly zero rather than partially
-    // filled: a fold-dependent `lda_score` is a feature the GBM can split on to
-    // recover fold identity, which is strictly worse than no feature at all.
-    // An all-zero column is constant -> zero split gain -> hybrid degrades to
-    // "GBM on the nonlinear lane" — benign only while that lane is trainable,
-    // which is why `report_degraded_frame` checks after the fit.
-    let (lda_score, degraded) = match crossfit_lda(&lin_dataset) {
-        Some(cf) => (cf.scores, false),
-        None => {
-            tracing::error!(
-                "hybrid: cross-fit LDA failed; lda_score is uniformly 0, so the GBM now trains \
-                 on the nonlinear lane ALONE. That is a weaker model, not a broken one — \
-                 PROVIDED the nonlinear lane is trainable at this row count. If it is not, the \
-                 GBM builds no trees and the q-values are meaningless; the check after the fit \
-                 reports that case explicitly."
-            );
-            (vec![0.0f64; nrows], true)
-        }
-    };
+    // Uniformly zero if the cross-fit failed, never partially filled, and the
+    // same helper the MLP hybrid uses — see `crossfit_score_column` for the
+    // fallback's shape and `abort_standalone_mlp` for when degrading is benign.
+    // `LdaConfig::default()` is the same default `crossfit_lda` pins.
+    let (lda_score, degraded) = crossfit_score_column::<_, LdaModel>(
+        &lin_dataset,
+        &LdaConfig::default(),
+        "LDA",
+        "lda_score",
+    );
 
     let (precomputed, names) = hybrid_frame(&data, responses, "lda_score", lda_score);
 
@@ -741,7 +774,11 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     scorer.fit().unwrap();
 
     let stats = scorer.feature_stats();
-    report_degraded_frame("lda_score", degraded, &stats);
+    report_untrained_folds(
+        "nonlinear + lda_score",
+        degraded.then_some("lda_score"),
+        &stats,
+    );
 
     finalize(scorer.score(), stats)
 }
@@ -825,10 +862,10 @@ impl Lane {
 ///   degradation is always benign — it is not — but that it is benign in the
 ///   regime a real search runs in (27 live nonlinear features, rows in the
 ///   hundreds of thousands), and that the way it fails LOUDEST is the way it is
-///   most likely to fail: both hybrids run [`untrained_folds`] after fitting and,
-///   if any fold produced no model, log that the run is not usable for FDR. An
-///   operator can see that in the log; the standalone degradation would have been
-///   invisible.
+///   most likely to fail: every GBM-bearing rescorer runs
+///   [`report_untrained_folds`] after fitting and, if any fold produced no model,
+///   logs that the run is not usable for FDR. An operator can see that in the log;
+///   the standalone degradation would have been invisible.
 ///
 ///   The detector's reach is narrower than "we would notice a bad degraded run".
 ///   It sees a fold that built NO trees. It cannot see a fold that built trees on
@@ -859,17 +896,22 @@ impl Lane {
 /// decision that caller could make is "abort the run" — so the `Result` would
 /// buy an unwrap at the call site and a signature split across the six.
 ///
-/// # Two variants, two audiences
-/// `scorer.fit()` surfaces BOTH of [`MlpFoldError`]'s variants — the fit's
-/// `NoUsableColumns` and, via `assign_scores` -> `get_scores` -> `predict`, a
-/// `WidthMismatch`. They need opposite advice, so this matches rather than
-/// printing one message for both. `NoUsableColumns` is a statement about the
-/// INPUT (this lane is dead at this row count), which a different
-/// `rescore_model` can work around. `WidthMismatch` is an internal invariant
-/// violation — the scorer predicts against the very dataset it was constructed
-/// from, so the widths cannot disagree unless the lane wiring is broken — and
-/// sending that operator to their config would waste their time on a code
-/// defect.
+/// # Three variants, three audiences
+/// `scorer.fit()` surfaces ALL of [`MlpFoldError`]'s variants — the fit's
+/// `NoUsableColumns`, and via `assign_scores` -> `get_scores` -> `predict` both
+/// `WidthMismatch` and `NonFiniteScore`. They need different advice, so this
+/// matches rather than printing one message for all three.
+///
+/// * `NoUsableColumns` is a statement about the INPUT (this lane is dead at this
+///   row count), which a different `rescore_model` can work around.
+/// * `WidthMismatch` is an internal invariant violation — the scorer predicts
+///   against the very dataset it was constructed from, so the widths cannot
+///   disagree unless the lane wiring is broken — and sending that operator to
+///   their config would waste their time on a code defect.
+/// * `NonFiniteScore` is a NUMERIC failure of the model itself, and the reason it
+///   is an error at all is that its natural downstream abort names the wrong
+///   thing: `assign_qval`'s only assertion is about sort order, so a `NaN`
+///   discriminant used to abort the run blaming the SORT. See the variant's doc.
 fn abort_standalone_mlp(lane: Lane, ncols: usize, nrows: usize, e: MlpFoldError) -> ! {
     let where_ = format!("{lane:?} lane ({ncols} columns, {nrows} candidates)");
     match e {
@@ -887,6 +929,15 @@ fn abort_standalone_mlp(lane: Lane, ncols: usize, nrows: usize, e: MlpFoldError)
              predicts against that same dataset, so a width disagreement means the lane \
              wiring in `ml::qvalues` / `ml::mlp_fold` is broken. Changing `rescore_model` \
              will not help — please report this with the two widths above."
+        ),
+        MlpFoldError::NonFiniteScore { .. } => panic!(
+            "MLP rescore aborted: {where_}: {e}\n\
+             THE MLP'S RAW LOGIT IS THE DISCRIMINANT SCORE on this path, so a non-finite one \
+             cannot be ranked: it would reach `assign_qval`, whose only assertion is that \
+             scores are sorted in descending order, and abort there blaming the SORT for a \
+             model failure. This is a numeric divergence in the fit, not a config error and \
+             not a dead lane — lower `MlpConfig::lr`, or re-run with `gbm` / `lda`, whose \
+             discriminants are finite by construction."
         ),
     }
 }
@@ -1034,8 +1085,9 @@ fn rescore_hybrid_mlp_with(
     let lin_dataset = hybrid_linear_dataset(&data, responses.clone());
 
     // Uniformly zero if the cross-fit failed, never partially filled — see
-    // `crossfit_mlp_scores`.
-    let (mlp_score, degraded) = crossfit_mlp_scores(&lin_dataset, &mlp_config);
+    // `crossfit_score_column`, which is also the LDA hybrid's arm.
+    let (mlp_score, degraded) =
+        crossfit_score_column::<_, MlpFoldModel>(&lin_dataset, &mlp_config, "MLP", "mlp_score");
 
     let (precomputed, names) = hybrid_frame(&data, responses, "mlp_score", mlp_score);
 
@@ -1050,7 +1102,11 @@ fn rescore_hybrid_mlp_with(
     scorer.fit().unwrap();
 
     let stats = scorer.feature_stats();
-    report_degraded_frame("mlp_score", degraded, &stats);
+    report_untrained_folds(
+        "nonlinear + mlp_score",
+        degraded.then_some("mlp_score"),
+        &stats,
+    );
 
     finalize(scorer.score(), stats)
 }
@@ -1108,7 +1164,7 @@ fn dump_feature_matrix(
 // ---------------------------------------------------------------------------
 //
 // A lane matrix is a flat row-major `Vec<f64>` (`feat[i * ncols + j]`), the
-// layout `LdaModel::fit` and `PrecomputedFeatures::from_row_major` both index
+// layout `LdaModel::fit_matrix` and `PrecomputedFeatures::from_row_major` both index
 // directly. `ncols` is not carried alongside it: every contributing block's
 // width is an inherent const, so the lane widths below are compile-time
 // constants.
@@ -1839,41 +1895,59 @@ mod feature_tests {
         // THE ASSERTION, on the REPORTER and not just on the count: a threshold of
         // `== stats.len()` would keep the worst outcome on the degraded path off
         // the operator's log entirely.
-        let log = ErrorLog::default();
-        tracing::subscriber::with_default(log.clone(), || {
-            report_degraded_frame("lda_score", true, &stats)
-        });
-        let msgs = log.messages();
-        let hit = msgs
-            .iter()
-            .find(|m| m.contains("lda_score") && m.contains("built no trees"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "a PARTIALLY untrained degraded frame was not reported at all — the worst \
-                     state on this path reached an operator in silence. Captured: {msgs:#?}"
-                )
+        let capture = |degraded: Option<&str>| -> String {
+            let log = ErrorLog::default();
+            tracing::subscriber::with_default(log.clone(), || {
+                report_untrained_folds("nonlinear + lda_score", degraded, &stats)
             });
-        assert!(
-            hit.contains(&format!("{untrained} of {} GBM folds", stats.len())),
-            "the message must say HOW MANY folds failed, or the operator cannot tell the \
-             fold-dependent case from the uniform one: {hit}"
-        );
-        assert!(
-            hit.contains("fold-dependent"),
-            "a partial failure must be named as such — it is worse than the uniform case, not \
-             better: {hit}"
-        );
+            let msgs = log.messages();
+            msgs.iter()
+                .find(|m| m.contains("built no trees"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a PARTIALLY untrained frame was not reported at all — the worst state \
+                         on this path reached an operator in silence. Captured: {msgs:#?}"
+                    )
+                })
+        };
 
-        // The flag still gates it: a frame that did not degrade is not this
-        // function's business even if the GBM built nothing.
-        let quiet = ErrorLog::default();
-        tracing::subscriber::with_default(quiet.clone(), || {
-            report_degraded_frame("lda_score", false, &stats)
-        });
+        // Both diagnoses must reach the log, and both must carry the count and
+        // the partial-ness — those are what separate the fold-dependent case
+        // from the uniform one.
+        let with_degradation = capture(Some("lda_score"));
+        let untrained_only = capture(None);
+        for hit in [&with_degradation, &untrained_only] {
+            assert!(
+                hit.contains(&format!("{untrained} of {} GBM folds", stats.len())),
+                "the message must say HOW MANY folds failed, or the operator cannot tell the \
+                 fold-dependent case from the uniform one: {hit}"
+            );
+            assert!(
+                hit.contains("fold-dependent"),
+                "a partial failure must be named as such — it is worse than the uniform case, \
+                 not better: {hit}"
+            );
+        }
+
+        // …and they must stay DISTINGUISHABLE: "the fallback column degraded AND
+        // nothing trained" is a different diagnosis from "nothing trained at
+        // all", and an operator acts on them differently.
         assert!(
-            quiet.messages().is_empty(),
-            "a non-degraded frame must not be reported here: {:?}",
-            quiet.messages()
+            with_degradation.contains("lda_score")
+                && with_degradation.contains("zeroed by a failed cross-fit"),
+            "the degraded arm must name the zeroed column and say it was zeroed: \
+             {with_degradation}"
+        );
+        assert!(
+            !untrained_only.contains("zeroed by a failed cross-fit"),
+            "with no cross-fit failure the message must not invent one — that sends the reader \
+             looking at the wrong half of the pipeline: {untrained_only}"
+        );
+        assert!(
+            untrained_only.contains("no failed cross-fit"),
+            "the untrained-only arm has to say the cross-fit was fine, or it reads as the \
+             degraded one with a word missing: {untrained_only}"
         );
     }
 
@@ -1985,6 +2059,51 @@ mod feature_tests {
         }
     }
 
+    /// THE WIRING for the DEFAULT rescorer, which is the path most users run and
+    /// the one the detector was originally not pointed at.
+    ///
+    /// [`rescore`] has no cross-fit column, so under the old `degraded`-gated
+    /// check it could never report anything: a search below
+    /// `GBMConfig::default`'s `min_leaf_weight` floor emitted per-fold constants
+    /// and q-values that rank by shuffle order, silently. That is pre-existing
+    /// behavior rather than a regression, which is exactly why it needed a test —
+    /// nothing else on this branch would have noticed the omission.
+    ///
+    /// `indistinguishable_competed(24)` makes every ALL-lane column bit-constant,
+    /// so no fold builds a tree (see the fixture's doc). The message must ALSO not
+    /// blame a cross-fit failure, because there was no cross-fit: the two
+    /// diagnoses are different and an operator acts on them differently.
+    #[test]
+    fn plain_rescore_reports_a_frame_that_trained_nothing() {
+        let log = ErrorLog::default();
+        tracing::subscriber::with_default(log.clone(), || {
+            rescore(indistinguishable_competed(24));
+        });
+
+        let msgs = log.messages();
+        let hit = msgs
+            .iter()
+            .find(|m| m.contains("built no trees") && m.contains("NOT usable"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the default rescorer trained nothing and said nothing — the detector is \
+                     not wired into the path most users run. Captured ERROR messages: {msgs:#?}"
+                )
+            });
+        assert!(
+            hit.contains(&format!(
+                "{} of {} GBM folds",
+                N_RESCORE_FOLDS, N_RESCORE_FOLDS
+            )),
+            "every fold was untrained here, so the message must say so: {hit}"
+        );
+        assert!(
+            !hit.contains("zeroed by a failed cross-fit"),
+            "`rescore` has no cross-fit column to zero, so blaming one sends the reader to a \
+             stage this path does not have: {hit}"
+        );
+    }
+
     /// The cross-fit must actually HOLD OUT: a row's score has to come from a
     /// model that never saw that row.
     ///
@@ -2067,7 +2186,7 @@ mod feature_tests {
         // (b) CONTROL: the same rows, scored by an in-sample fit over ALL rows,
         // separate perfectly — so (a) is a property of the hold-out, not of the
         // data being unlearnable.
-        let insample = LdaModel::fit(&feat, N, 3, &is_decoy, DEFAULT_SHRINKAGE).unwrap();
+        let insample = LdaModel::fit_matrix(&feat, N, 3, &is_decoy, DEFAULT_SHRINKAGE).unwrap();
         let (mut min_t, mut max_d) = (f64::MAX, f64::MIN);
         for &i in &fold0 {
             let s = insample.score(&feat[i * 3..(i + 1) * 3]);
@@ -2088,9 +2207,16 @@ mod feature_tests {
         );
     }
 
+    /// 90 rows, like `rescore_mlp_is_deterministic_on_both_lanes` and for the same
+    /// reason: `min_leaf_weight`'s no-trees trap is a property of `GBMConfig` and
+    /// this path trains no GBM. An LDA reports a finite `|coef|` for every linear
+    /// -lane column at any row count, so the non-empty assertions below cannot go
+    /// vacuous the way a GBM's sparse importance can. The row count is free here,
+    /// so it is small. (It sat at 360 for a while with no comment saying why, which
+    /// read as if the GBM trap applied.)
     #[test]
     fn rescore_lda_is_cross_fit_and_deterministic() {
-        let n = 360;
+        let n = 90;
         let (out_a, stats_a) = rescore_lda(synthetic_competed(n));
         let (out_b, _stats_b) = rescore_lda(synthetic_competed(n));
 
@@ -3072,7 +3198,7 @@ mod feature_tests {
     ///
     /// Asserted on RAW BITS, so a `-0.0` or a denormal cannot pass as zero.
     #[test]
-    fn crossfit_mlp_scores_is_uniformly_zero_when_any_fold_fails() {
+    fn crossfit_score_column_is_uniformly_zero_when_any_fold_fails() {
         const N: usize = 60;
         const NCOLS: usize = 2;
         let n_folds = N_RESCORE_FOLDS as usize;
@@ -3133,7 +3259,8 @@ mod feature_tests {
             );
 
             // THE ASSERTION.
-            let (col, degraded) = crossfit_mlp_scores(&dataset, &cfg);
+            let (col, degraded) =
+                crossfit_score_column::<_, MlpFoldModel>(&dataset, &cfg, "MLP", "mlp_score");
             assert_eq!(
                 col.len(),
                 N,
@@ -3156,10 +3283,13 @@ mod feature_tests {
     /// `n` candidates that are IDENTICAL in every feature — only `library_id`
     /// (a positional index, not a feature) and the label differ.
     ///
-    /// Every lane column is therefore bit-constant, and at the row counts the two
-    /// tests below use the variance `ColumnTransform` computes as
-    /// `sumsq/n - mean^2` comes out EXACTLY zero, so it culls all 101 of them and
-    /// `MlpFoldModel::fit` has nothing left to train on.
+    /// Every lane column is therefore bit-constant, and at `n = 24` — the only
+    /// size any caller passes, in this module and above this definition as well as
+    /// below it — the variance `ColumnTransform` computes as `sumsq/n - mean^2`
+    /// comes out EXACTLY zero, so it culls all 101 of them and
+    /// `MlpFoldModel::fit` has nothing left to train on. A GBM handed the same
+    /// fixture likewise builds no trees, which is what the detector tests use it
+    /// for.
     ///
     /// THE ROW COUNT IS LOAD-BEARING and cannot be scaled freely: that expression
     /// keeps a hair of floating-point residue on a constant column of realistic
@@ -3186,7 +3316,7 @@ mod feature_tests {
     ///
     /// This is the decision the panic encodes, so it is pinned as a test rather
     /// than left to a comment: the degradation the hybrids use
-    /// (`crossfit_mlp_scores_is_uniformly_zero_when_any_fold_fails`) would, on
+    /// (`crossfit_score_column_is_uniformly_zero_when_any_fold_fails`) would, on
     /// this path, give every row the same discriminant and therefore q-values
     /// that are a function of the seeded shuffle order alone — meaningless, and
     /// indistinguishable from a real result in the output file. A future reader
@@ -3209,23 +3339,25 @@ mod feature_tests {
         );
     }
 
-    /// The abort's two arms must say DIFFERENT things, and the difference is the
+    /// The abort's three arms must say DIFFERENT things, and the difference is the
     /// whole point of matching on the variant.
     ///
-    /// `scorer.fit()` surfaces both: `NoUsableColumns` from the fit, and
-    /// `WidthMismatch` through `assign_scores` -> `get_scores` -> `predict`. Only
-    /// the first is a statement about the INPUT that a different `rescore_model`
-    /// could work around. A single message for both sent an operator to their
-    /// config over an internal invariant violation.
+    /// `scorer.fit()` surfaces all three: `NoUsableColumns` from the fit, and
+    /// `WidthMismatch` / `NonFiniteScore` through `assign_scores` -> `get_scores`
+    /// -> `predict`. Only the first is a statement about the INPUT that a different
+    /// `rescore_model` could work around. A single message for all of them sent an
+    /// operator to their config over an internal invariant violation.
     ///
-    /// Driven straight at [`abort_standalone_mlp`] because the `WidthMismatch`
-    /// arm is not reachable from a fixture:
-    /// [`rescore_mlp_lane`] hands the scorer the very dataset the scorer then
-    /// predicts against, so provoking one would require the bug this message
-    /// exists for. The other arm is covered end to end by
+    /// Driven straight at [`abort_standalone_mlp`] because neither predict-side arm
+    /// is reachable from a fixture: [`rescore_mlp_lane`] hands the scorer the very
+    /// dataset the scorer then predicts against (so a width mismatch would require
+    /// the bug the message exists for), and no input can make the net diverge on
+    /// demand — `mlp_fold`'s `predict_rejects_a_non_finite_logit_instead_of_
+    /// returning_it` covers that half by poisoning a fitted net. The
+    /// `NoUsableColumns` arm is covered end to end by
     /// `standalone_mlp_aborts_rather_than_scoring_every_row_the_same`.
     ///
-    /// Both panics reach stderr while this runs — the default hook is left in
+    /// Every panic reaches stderr while this runs — the default hook is left in
     /// place on purpose rather than swapped out, since a `set_hook` here would
     /// silence any concurrently-running test's panic message too.
     #[test]
@@ -3250,9 +3382,18 @@ mod feature_tests {
             fitted: LINEAR_NCOLS,
             got: ALL_NCOLS,
         });
+        let diverged = message(MlpFoldError::NonFiniteScore {
+            row: 17,
+            n_bad: 8,
+            scored: 24,
+        });
 
-        // Shared: both name the abort, the lane, and the error's own diagnostic.
-        for (what, msg) in [("dead lane", &dead_lane), ("width", &bad_width)] {
+        // Shared: all name the abort, the lane, and the error's own diagnostic.
+        for (what, msg) in [
+            ("dead lane", &dead_lane),
+            ("width", &bad_width),
+            ("diverged", &diverged),
+        ] {
             assert!(
                 msg.contains("MLP rescore aborted: Linear lane")
                     && msg.contains(&format!("{LINEAR_NCOLS} columns"))
@@ -3284,6 +3425,27 @@ mod feature_tests {
             bad_width.contains(&format!("{ALL_NCOLS} lane columns"))
                 && bad_width.contains(&format!("fitted on {LINEAR_NCOLS}")),
             "the two widths are the only actionable content here: {bad_width}"
+        );
+
+        // The NUMERIC failure must name the discriminant — the whole reason this
+        // is an error rather than a value is that `assign_qval` would have blamed
+        // the sort instead.
+        assert!(
+            diverged.contains("DISCRIMINANT SCORE") && diverged.contains("sorted"),
+            "a non-finite logit has to say it IS the score and that the downstream abort \
+             would have blamed the sort, or the next reader re-diagnoses it from scratch: \
+             {diverged}"
+        );
+        assert!(
+            diverged.contains("dataset row 17") && diverged.contains("8 of 24"),
+            "the row and the count come from `MlpFoldError`'s Display, which is why the \
+             variant carries them: {diverged}"
+        );
+        assert!(
+            !diverged.contains("INTERNAL INVARIANT VIOLATION")
+                && !diverged.contains("no usable fallback"),
+            "a diverged fit is neither a code defect nor a dead lane, and reusing either \
+             arm's advice would misdirect: {diverged}"
         );
     }
 
@@ -3362,7 +3524,7 @@ mod feature_tests {
     /// one constant score per fold — a value that does not depend on
     /// `mlp_score`, or on the MLP, at all. Two runs at different MLP SEEDS
     /// produced identical score vectors, which means the bit-identity assertion
-    /// below would have passed just as happily if `crossfit_mlp_scores` returned
+    /// below would have passed just as happily if `crossfit_score_column` returned
     /// `rand::random()` per row. That is the one global constraint this test
     /// exists to hold, so being unable to fail was the whole problem.
     ///

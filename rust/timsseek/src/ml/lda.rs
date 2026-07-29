@@ -44,7 +44,15 @@ impl LdaModel {
     ///
     /// Returns `None` if either class is empty or the linear solve is singular
     /// even after shrinkage.
-    pub fn fit(
+    ///
+    /// `fit_matrix`, not `fit`: the [`FoldModel`] impl below also has a
+    /// 5-argument `fit` on this same type, and the two were distinguishable only
+    /// by argument TYPES — `(&[f64], usize, usize, &[bool], f64)` against
+    /// `(&LdaConfig, &D, usize, &[usize], &[usize])`. Calling the wrong one is a
+    /// type error rather than a silent bug, but a reader at a call site could not
+    /// tell which was meant, and the arities matched only by coincidence (the
+    /// `fold` parameter equalized them).
+    pub fn fit_matrix(
         feat: &[f64],
         nrows: usize,
         ncols: usize,
@@ -169,7 +177,7 @@ impl Default for LdaConfig {
     }
 }
 
-/// The only way an LDA fit fails. [`LdaModel::fit`] returns `None` for both
+/// The only way an LDA fit fails. [`LdaModel::fit_matrix`] returns `None` for both
 /// causes without distinguishing them, so this enum has one variant rather
 /// than inventing a distinction the fit does not actually report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +200,7 @@ impl std::error::Error for LdaError {}
 /// [`FoldModel`] adapter over the closed-form fit above.
 ///
 /// Gathers its train rows out of the dataset into the flat row-major buffer
-/// [`LdaModel::fit`] wants; `predict` reads scored rows the same way. Neither
+/// [`LdaModel::fit_matrix`] wants; `predict` reads scored rows the same way. Neither
 /// touches a row outside the index slice it was handed, so leak-freedom is
 /// entirely the caller's partition and never this impl's.
 impl FoldModel for LdaModel {
@@ -226,7 +234,7 @@ impl FoldModel for LdaModel {
             feat.extend_from_slice(&row);
             is_decoy.push(data.is_decoy(i));
         }
-        LdaModel::fit(&feat, train.len(), ncols, &is_decoy, cfg.shrinkage)
+        LdaModel::fit_matrix(&feat, train.len(), ncols, &is_decoy, cfg.shrinkage)
             .ok_or(LdaError::SingularOrEmptyClass)
     }
 
@@ -246,7 +254,7 @@ impl FoldModel for LdaModel {
     ///
     /// NEVER `NAN`, i.e. never "unreported" under the
     /// [`FoldModel::importance`] contract: the solve looks at every column, so
-    /// every column has a measurement. `LdaModel::fit` rejects a non-finite
+    /// every column has a measurement. `LdaModel::fit_matrix` rejects a non-finite
     /// solution outright, so `coef` is finite by construction and this cannot
     /// emit the sentinel by accident.
     ///
@@ -258,7 +266,7 @@ impl FoldModel for LdaModel {
         let out: Vec<f32> = self.coef.iter().map(|c| c.abs() as f32).collect();
         debug_assert!(
             out.iter().all(|v| v.is_finite()),
-            "LdaModel::fit guarantees finite coefficients"
+            "LdaModel::fit_matrix guarantees finite coefficients"
         );
         out
     }
@@ -485,7 +493,7 @@ mod test {
             labels.push(true); // decoy
         }
         let (feat, nrows, ncols) = flat(&rows);
-        let lda = LdaModel::fit(&feat, nrows, ncols, &labels, DEFAULT_SHRINKAGE).unwrap();
+        let lda = LdaModel::fit_matrix(&feat, nrows, ncols, &labels, DEFAULT_SHRINKAGE).unwrap();
         let mut t_sum = 0.0;
         let mut d_sum = 0.0;
         for (i, &d) in labels.iter().enumerate() {
@@ -514,7 +522,7 @@ mod test {
         ];
         let labels = vec![false, false, true, true];
         let (feat, nrows, ncols) = flat(&rows);
-        let lda = LdaModel::fit(&feat, nrows, ncols, &labels, DEFAULT_SHRINKAGE).unwrap();
+        let lda = LdaModel::fit_matrix(&feat, nrows, ncols, &labels, DEFAULT_SHRINKAGE).unwrap();
 
         for i in 0..nrows {
             assert!(lda.score(&feat[i * ncols..(i + 1) * ncols]).is_finite());

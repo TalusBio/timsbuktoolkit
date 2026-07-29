@@ -341,7 +341,11 @@ pub trait FoldModel: Sized {
 /// [`PrecomputedFeatures`] holds, plus its column names and the fold count that
 /// defines the partition. `get_values` is a `copy_from_slice` out of a slab
 /// that is already in memory.
-pub struct RowMajorDataset {
+///
+/// `pub(crate)`, matching [`PrecomputedFeatures`]: the only constructor is
+/// `pub(crate)` and there is no other public inherent method, so `pub` made the
+/// name visible outside the crate while leaving it unconstructable there.
+pub(crate) struct RowMajorDataset {
     features: PrecomputedFeatures,
     names: Vec<Arc<str>>,
     n_folds: usize,
@@ -407,9 +411,16 @@ struct DataBuffer {
 }
 
 impl DataBuffer {
-    /// Gather `rows` (in the given order) out of `data` into feature-major
-    /// layout: `fold_buffer[feature_idx * nrows + sample_idx]`.
-    fn fill_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
+    /// Gather the FEATURES of `rows` (in the given order) out of `data` into
+    /// feature-major layout: `fold_buffer[feature_idx * nrows + sample_idx]`.
+    ///
+    /// Deliberately does NOT read [`FoldDataset::is_decoy`]. The scoring path has
+    /// no use for the labels, and this module is where leak-freedom is enforced,
+    /// so "the labels are not even read here" is worth being structurally true
+    /// rather than true by inspection of a discarded binding. `response_buffer`
+    /// is cleared, so [`Self::as_matrix`] cannot hand out a stale label slice
+    /// from a previous gather; use [`Self::features_as_matrix`] after this.
+    fn fill_features_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
         self.fold_buffer.clear();
         self.response_buffer.clear();
         self.nrows = rows.len();
@@ -422,15 +433,29 @@ impl DataBuffer {
             for (feature_idx, &val) in row.iter().enumerate() {
                 self.fold_buffer[feature_idx * self.nrows + sample_idx] = val;
             }
-            self.response_buffer
-                .push(if data.is_decoy(elem_idx) { 0.0 } else { 1.0 });
         }
     }
 
-    fn as_matrix(&self) -> FoldView<'_> {
-        let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, self.ncols);
+    /// [`Self::fill_features_from`] plus the label channel — the TRAINING path.
+    fn fill_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
+        self.fill_features_from(data, rows, ncols);
+        self.response_buffer
+            .extend(rows.iter().map(|&i| f64::from(!data.is_decoy(i))));
+    }
+
+    /// Feature matrix only — valid after EITHER fill.
+    fn features_as_matrix(&self) -> Matrix<'_, f64> {
         assert_eq!(self.fold_buffer.len(), self.nrows * self.ncols);
+        let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, self.ncols);
         assert_eq!(mat.rows, self.nrows);
+        mat
+    }
+
+    /// Features + labels. Only valid after [`Self::fill_from`]; the length
+    /// assertion is what makes calling it after a features-only gather a panic
+    /// rather than a silently empty response slice.
+    fn as_matrix(&self) -> FoldView<'_> {
+        let mat = self.features_as_matrix();
         assert_eq!(self.response_buffer.len(), self.nrows);
         (mat, self.response_buffer.as_slice())
     }
@@ -495,11 +520,12 @@ impl FoldModel for GbmFoldModel {
         Ok(Self { booster, ncols })
     }
 
+    /// Features only — see [`DataBuffer::fill_features_from`] for why the label
+    /// channel is not touched on the scoring path.
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, ForustError> {
         let mut buffer = DataBuffer::default();
-        buffer.fill_from(data, rows, self.ncols);
-        let (matrix, _response) = buffer.as_matrix();
-        Ok(self.booster.predict(&matrix, true))
+        buffer.fill_features_from(data, rows, self.ncols);
+        Ok(self.booster.predict(&buffer.features_as_matrix(), true))
     }
 
     /// forust reports only the columns it actually split on. Every other lane
@@ -589,9 +615,18 @@ pub struct FeatureStat {
     pub nan_ratio: f32,
 }
 
-/// Per-fold feature statistics. `feature_stats` preserves `feature_names`
-/// insertion order. `feature_importance` sorted by gain descending
-/// (top features first) so the JSON reads top-down.
+/// Per-fold feature statistics.
+///
+/// `feature_stats` is in the dataset's own column order
+/// ([`FoldDataset::column_names`], i.e. the matrix's column order), one entry per
+/// column. `feature_importance` is sorted by importance DESCENDING (top features
+/// first), and carries only the columns the model reported a finite value for —
+/// see [`FoldModel::importance`] — so it is generally shorter than
+/// `feature_stats` and in a different order.
+///
+/// Descending because the two TSV sidecars `timsseek_cli` writes
+/// (`results.feature_stats.tsv` / `results.feature_importance.tsv`) emit these
+/// vectors in order, one row per entry, and the importance one is read top-down.
 #[derive(Debug, Serialize)]
 pub struct FoldStats {
     pub fold: u8,

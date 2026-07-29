@@ -64,6 +64,33 @@ pub enum MlpFoldError {
         /// was empty.
         train_rows: usize,
     },
+    /// `predict` produced a non-finite logit.
+    ///
+    /// The MLP is the ONLY rescorer whose discriminant is not finite by
+    /// construction: the LDA rejects a non-finite `coef` at fit time
+    /// (`lda::LdaModel::fit_matrix`), and a forust prediction is a sum of leaf
+    /// values. Here the score is whatever the net's output layer computes, and
+    /// weights that diverged during training (or overflowed an activation) put a
+    /// `NaN` or an infinity in it.
+    ///
+    /// Caught HERE rather than downstream because downstream diagnoses it wrongly.
+    /// A non-finite score reaches `qvalues::finalize` -> `assign_qval`, whose
+    /// release-mode `assert!` says "Expecting scores to be sorted in descending
+    /// order" — a `NaN` makes every comparison in that window false, so the run
+    /// aborts several stages later blaming the SORT for a model failure. Reporting
+    /// it as an `MlpFoldError` puts the abort next to the model that produced it
+    /// and routes it through the diagnostics `qvalues::abort_standalone_mlp`
+    /// already has.
+    NonFiniteScore {
+        /// Dataset row index of the FIRST non-finite score, so the caller can
+        /// look at that row.
+        row: usize,
+        /// How many of the scored rows came out non-finite. One is a suspicious
+        /// row; all of them is a diverged net.
+        n_bad: usize,
+        /// How many rows were in this batch.
+        scored: usize,
+    },
 }
 
 impl std::fmt::Display for MlpFoldError {
@@ -92,6 +119,11 @@ impl std::fmt::Display for MlpFoldError {
                 f,
                 "fold {fold}: all {ncols} lane columns were culled (each one non-finite or \
                  constant across the {train_rows} train rows)"
+            ),
+            MlpFoldError::NonFiniteScore { row, n_bad, scored } => write!(
+                f,
+                "the net produced a NON-FINITE logit for {n_bad} of {scored} scored rows (first \
+                 at dataset row {row}) — the weights or an activation diverged during training"
             ),
         }
     }
@@ -255,6 +287,10 @@ impl FoldModel for MlpFoldModel {
     ///
     /// The returned score is the raw logit, not a probability: `assign_qval`
     /// needs a monotone ranking and the sigmoid is a monotone no-op on it.
+    ///
+    /// Every returned value is FINITE, or this is an
+    /// [`MlpFoldError::NonFiniteScore`] — see that variant for why the check lives
+    /// here and not downstream.
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, MlpFoldError> {
         let names = data.column_names();
         let ncols = names.len();
@@ -298,7 +334,22 @@ impl FoldModel for MlpFoldModel {
 
         let mut net = self.net.borrow_mut();
         let out = net.forward(&x, false);
-        Ok((0..rows.len()).map(|i| out.row(i)[0] as f64).collect())
+        let scores: Vec<f64> = (0..rows.len()).map(|i| out.row(i)[0] as f64).collect();
+
+        // A hard error, not a `debug_assert!`: release is where a diverged net
+        // would actually be met, and the alternative is aborting in `assign_qval`
+        // with a message about the SORT. See `MlpFoldError::NonFiniteScore`.
+        let n_bad = scores.iter().filter(|s| !s.is_finite()).count();
+        if n_bad > 0 {
+            let first = scores.iter().position(|s| !s.is_finite()).unwrap();
+            return Err(MlpFoldError::NonFiniteScore {
+                row: rows[first],
+                n_bad,
+                scored: rows.len(),
+            });
+        }
+
+        Ok(scores)
     }
 
     /// `sum_o |W1[j, o]|` over the first layer, mapped back to lane indices.
@@ -594,6 +645,61 @@ mod test {
                 );
             }
         }
+    }
+
+    /// The MLP is the only rescorer whose discriminant is not finite by
+    /// construction, and a non-finite one must surface HERE rather than as
+    /// `assign_qval`'s "Expecting scores to be sorted in descending order" several
+    /// stages downstream. See [`MlpFoldError::NonFiniteScore`].
+    ///
+    /// Provoked by poisoning the fitted net's output weights, because no INPUT can
+    /// reach this: the transform imputes every non-finite feature value before the
+    /// forward pass, so a diverged fit is the only route and this test manufactures
+    /// its end state directly rather than trying to find a config that diverges.
+    ///
+    /// The clean predict on the same model is the non-vacuity half — it says the
+    /// error came from the poison and not from the fixture.
+    #[test]
+    fn predict_rejects_a_non_finite_logit_instead_of_returning_it() {
+        let (feat, y) = toy(60, 7, 0.0);
+        let data = dataset(feat, 3, y);
+        let (train, held) = split(120);
+
+        let model = MlpFoldModel::fit(&cfg(7), &data, 0, &train, &[]).unwrap();
+        assert!(
+            model
+                .predict(&data, &held)
+                .unwrap()
+                .iter()
+                .all(|s| s.is_finite()),
+            "the fixture must score finite before the poison, or the assertion below \
+             would pass for the wrong reason"
+        );
+
+        // NaN into every parameter of the net. The last `Linear` writes the logit,
+        // so this is guaranteed to reach the output regardless of layer layout.
+        for (p, _grad, _decay) in model.net.borrow_mut().params_and_grads() {
+            p.fill(f32::NAN);
+        }
+
+        let err = model
+            .predict(&data, &held)
+            .expect_err("a NaN logit must not be returned as a score");
+        assert_eq!(
+            err,
+            MlpFoldError::NonFiniteScore {
+                row: held[0],
+                n_bad: held.len(),
+                scored: held.len(),
+            },
+            "the error has to name the first offending DATASET row (not its index in \
+             the batch) and how many of the batch went bad"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NON-FINITE") && msg.contains("diverged"),
+            "the message must say what happened and where to look: {msg}"
+        );
     }
 
     /// The [`FoldModel::importance`] contract: culled columns report a FINITE
