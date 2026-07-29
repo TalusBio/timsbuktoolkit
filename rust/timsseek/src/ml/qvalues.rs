@@ -547,8 +547,8 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
 /// catch, and the enum removes the opportunity.
 ///
 /// Deliberately NOT public: the lane is an internal knob of the MLP rescorers
-/// (see [`rescore_mlp`] / [`rescore_mlp_linear`]), not part of the model
-/// selection surface.
+/// (see [`rescore_mlp_linear`] / [`rescore_mlp_all`], each of which pins one
+/// variant), not part of the model selection surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lane {
     /// Fields approx-Gaussian after their declared per-row transform — what the
@@ -655,20 +655,38 @@ fn rescore_mlp_lane(
     finalize(scorer.score(), stats)
 }
 
-/// MLP rescorer over the ALL lane (linear ++ nonlinear) — the same feature set
-/// [`rescore`] gives the GBM, so the two are directly comparable.
-///
-/// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
-pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
-    rescore_mlp_lane(data, Lane::All, MlpConfig::default())
-}
+// BOTH entry points NAME THEIR LANE, and there is deliberately no bare
+// `rescore_mlp` for either to be mistaken for.
+//
+// The lane is not a detail an entry point may leave implicit: it selects the
+// feature set the model trains on, nothing type-checks which one a caller
+// meant, and a wrong pick still compiles, still runs, and still produces
+// plausible q-values. The concrete hazard is the model-selection arm a later
+// task writes — `RescoreModel::Mlp => rescore_mlp(data)` reads as correct
+// against ANY mapping, so a bare name would make the inversion invisible at
+// exactly the site that decides it. Spelling the lane in the name is what
+// forces that arm to state which one it wants.
+//
+// Intended mapping (the enum variants themselves are NOT this task's scope):
+//   `RescoreModel::Mlp`    -> `rescore_mlp_linear` (the default MLP shape)
+//   `RescoreModel::MlpAll` -> `rescore_mlp_all`
 
 /// MLP rescorer over the LINEAR lane only — the same feature set
 /// [`rescore_lda`] uses, so it isolates "nonlinear model" from "more features".
+/// THE DEFAULT MLP SHAPE, i.e. the one `RescoreModel::Mlp` is meant to select.
 ///
 /// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
 pub fn rescore_mlp_linear(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     rescore_mlp_lane(data, Lane::Linear, MlpConfig::default())
+}
+
+/// MLP rescorer over the ALL lane (linear ++ nonlinear) — the same feature set
+/// [`rescore`] gives the GBM, so the two are directly comparable. The one
+/// `RescoreModel::MlpAll` is meant to select.
+///
+/// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
+pub fn rescore_mlp_all(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
+    rescore_mlp_lane(data, Lane::All, MlpConfig::default())
 }
 
 /// Dump the raw feature matrix + labels for offline analysis. Best-effort:
@@ -1688,20 +1706,66 @@ mod feature_tests {
         }
     }
 
-    /// The public entry points themselves — the default [`MlpConfig`], not the
-    /// shrunk test one — run end to end and stay deterministic. Cheap here
-    /// (90 rows, 30 epochs) and it is the only thing that would catch a default
-    /// config the live path cannot actually fit through.
+    /// Each public entry point runs on the default [`MlpConfig`] (not the shrunk
+    /// test one), stays deterministic, and — the load-bearing part — TRAINS ON
+    /// THE LANE ITS NAME CLAIMS.
+    ///
+    /// The lane assertion is what makes the naming a fact rather than a
+    /// convention. Nothing type-checks it: both entry points have the same
+    /// signature, both run to completion on either lane, and both produce
+    /// plausible q-values either way, so an inverted wiring is invisible
+    /// everywhere except in which features the model actually saw. That is
+    /// recoverable from the output: the sidecar's importance rows are the lane's
+    /// name set exactly (`MlpFoldModel` measures every column), so comparing
+    /// them against `Lane::names()` pins the lane from the outside.
+    ///
+    /// A length check alone would be weaker but would still work here, since
+    /// `LINEAR_NCOLS != ALL_NCOLS`; the name-set comparison is used instead
+    /// because it does not depend on that inequality holding as features are
+    /// added and removed.
+    ///
+    /// This test is also the one that would have caught the inversion this
+    /// function's names were shipped with (`rescore_mlp` = ALL,
+    /// `rescore_mlp_linear` = LINEAR, against a spec that maps
+    /// `RescoreModel::Mlp` to the LINEAR lane): the old version iterated both
+    /// entry points but asserted nothing about which lane either one used.
     #[test]
-    fn public_mlp_entry_points_run_on_the_default_config() {
-        for rescorer in [
-            rescore_mlp as fn(Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats),
-            rescore_mlp_linear,
+    fn public_mlp_entry_points_train_on_the_lane_they_name() {
+        type Rescorer = fn(Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats);
+
+        for (name, rescorer, lane) in [
+            (
+                "rescore_mlp_linear",
+                rescore_mlp_linear as Rescorer,
+                Lane::Linear,
+            ),
+            ("rescore_mlp_all", rescore_mlp_all as Rescorer, Lane::All),
         ] {
             let (out_a, stats) = rescorer(synthetic_competed(90));
             let (out_b, _) = rescorer(synthetic_competed(90));
             assert_eq!(out_a.len(), 90);
             assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+
+            // THE LANE, read back out of the sidecar.
+            let expected: std::collections::HashSet<Arc<str>> = lane.names().into_iter().collect();
+            for fs in &stats {
+                let reported: std::collections::HashSet<Arc<str>> = fs
+                    .feature_importance
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                assert_eq!(
+                    reported,
+                    expected,
+                    "{name} fold {}: trained on the wrong lane — it reported {} features, \
+                     but {lane:?} has {}. The entry point's name and the lane it passes to \
+                     `rescore_mlp_lane` have been inverted.",
+                    fs.fold,
+                    reported.len(),
+                    expected.len(),
+                );
+            }
+
             let bits = |out: &[FinalResult]| -> Vec<(u32, u32)> {
                 let mut v: Vec<(u32, u32)> = out
                     .iter()
@@ -1715,7 +1779,7 @@ mod feature_tests {
                 v.sort_unstable();
                 v
             };
-            assert_eq!(bits(&out_a), bits(&out_b));
+            assert_eq!(bits(&out_a), bits(&out_b), "{name} is not deterministic");
             assert!(out_a.iter().all(|r| r.discriminant_score.is_finite()));
         }
     }

@@ -8,7 +8,7 @@ pub use qvalues::{
     rescore,
     rescore_hybrid,
     rescore_lda,
-    rescore_mlp,
+    rescore_mlp_all,
     rescore_mlp_linear,
 };
 
