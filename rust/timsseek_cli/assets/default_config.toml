@@ -28,28 +28,51 @@ decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        — cross-validated gradient-boosted trees (default)
-## "lda"        — Sage-style shrinkage LDA, ~0.05x "gbm" (i.e. ~20x cheaper)
-## "hybrid"     — cross-fit LDA score folded into the GBM feature frame,
-##                ~0.35x "gbm"
-## "mlp"        — small MLP on the linear lane (the same features as "lda"),
-##                ~1.5x "gbm"
-## "mlp_all"    — small MLP on the full lane (the same features as "gbm"),
-##                ~1.8x "gbm"
-## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame,
-##                ~4x "gbm"
+## "lda"        — Sage-style shrinkage LDA on the linear lane. The cheapest and
+##                the least sensitive by a wide margin; both gaps GROW with the
+##                candidate count.
+## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
+## "mlp"        — small MLP on the linear lane (the same features as "lda")
+## "mlp_all"    — small MLP on the full lane (the same features as "gbm")
+## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame
 ##
-## COST: the multipliers above are Phase 5 wall time relative to "gbm", measured
-## on one 114138-candidate mzML run. Phase 5 is a fraction of a whole search, so
-## a 4x there is not a 4x end to end. Two caveats:
-##   * that run was FAIMS (no ion mobility), so 25 of the 101 linear and 27 of
-##     the 128 all-lane columns were culled as dead. A TIMS run exercises more
-##     features and may time differently.
-##   * it is a single dataset — these are the right order of magnitude, not a
-##     benchmark suite.
-## Sensitivity at 1% FDR was within ~1% across "gbm", "mlp", "mlp_all" and
-## "hybrid_mlp" on that run, with "lda" and "hybrid" a few percent behind. So on
-## that data the MLP options COST runtime without buying targets, and "lda" trades
-## a few percent of sensitivity for most of the wall time.
+## COST: THERE IS NO SINGLE MULTIPLIER FOR ANY OF THESE. Every ratio below moves
+## with the candidate count, in both directions and by more than 2x, so a bare
+## "~Nx cheaper" is wrong at every scale but one — which is how each earlier
+## version of this note went stale. Anchors, so you can interpolate; Phase 5 wall
+## time / targets at 1% FDR, two runs of one Astral mzML:
+##
+##                    114,138 candidates        2,174,837 candidates
+##   lda                0.476s / 24141             9.667s / 102843
+##   hybrid          (no time recorded)          148.062s / 110425
+##   mlp_all            7.342s / 25451           281.953s / 134655
+##   gbm                9.588s / 25240           574.315s / 134710
+##
+## "mlp" and "hybrid_mlp" are absent on purpose: their only timings predate the
+## MLP hyperparameter retune, so there is NO current figure for them and a stale
+## one is worse than none. "mlp_all" above IS at the current MLP defaults;
+## "hybrid_mlp" was the most expensive option at both scales and fits two models,
+## so "gbm" is a floor under it.
+##
+## SPEED RATIOS GROW WITH SCALE. "lda" is ~20x cheaper than "gbm" at 114k
+## candidates, ~59x at 2.17M, and ~100x on a ~28M-entry library measured earlier
+## in a different regime. "mlp_all" is 1.31x faster than "gbm" at 114k and 2.04x
+## at 2.17M — and at the pre-retune MLP defaults the same variant was 1.7x SLOWER
+## than "gbm" at 114k, i.e. this comparison can change sign with library size.
+##
+## THE SENSITIVITY COST GROWS WITH SCALE TOO, and it is the bigger trap: "lda"
+## gives up 4.4% of "gbm"'s targets at 114k candidates but 23.7% at 2.17M;
+## "hybrid" 3.3% then 18.0%. Choosing "lda" for speed on a large library costs
+## several times what a small test run will show you. "mlp_all" is the exception
+## measured so far: +211 targets at 114k, -55 (-0.04%) at 2.17M.
+##
+## Caveats on every number above:
+##   * both runs are the same FAIMS acquisition (NO ion mobility), so 25 of the
+##     101 linear and 27 of the 128 all-lane columns were culled as dead. A TIMS
+##     run exercises more features and may time differently.
+##   * two datasets, one machine — orders of magnitude and directions of movement,
+##     not a benchmark suite.
+##   * Phase 5 is a fraction of a whole search, so 2x there is not 2x end to end.
 rescore_model = "gbm"
 
 

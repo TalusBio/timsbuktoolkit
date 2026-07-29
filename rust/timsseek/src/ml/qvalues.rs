@@ -561,12 +561,21 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
 }
 
 /// Sage-style shrinkage-LDA rescorer: closed-form linear fits, no boosting — so
-/// ~20x cheaper than the GBM path, measured as Phase 5 wall time on a
-/// 114138-candidate mzML run (0.48s against the GBM's 9.59s). One dataset, one
-/// machine, and that run was FAIMS so a quarter of the linear lane was culled as
-/// dead: the order of magnitude is the claim, not the digits. The figure used to
-/// read "~100x" with nothing said about what it was measured against, which is
-/// exactly why nobody noticed it going stale.
+/// far cheaper than the GBM path, BY A FACTOR THAT IS NOT A CONSTANT. Phase 5
+/// wall time, two runs of one mzML: 0.476s against the GBM's 9.588s at 114138
+/// competed candidates (~20x), 9.667s against 574.315s at 2174837 (~59x), and
+/// ~100x on a ~28M-entry library measured earlier in a different regime. THE
+/// RATIO GROWS WITH THE CANDIDATE COUNT — quoting one multiplier is how this doc
+/// went stale twice already (it read "~100x" with nothing said about what it was
+/// measured against, then "~20x" as though that were the answer).
+///
+/// The SENSITIVITY it costs scales the same way, and matters more: 24141 targets
+/// at 1% FDR against the GBM's 25240 on the small run (-4.4%), but 102843 against
+/// 134710 on the mid-size one (-23.7%). This is the cheap option, not the cheap
+/// equivalent, and it gets less equivalent as the library grows. See
+/// [`crate::ml::RescoreModel`] for the full table and the caveats — both runs are
+/// FAIMS, so a quarter of the linear lane was culled as dead, and it is two
+/// datasets on one machine.
 ///
 /// The FDR machinery (`assign_qval`, target-decoy competition) is untouched —
 /// only the discriminant score source changes.
@@ -728,8 +737,14 @@ fn hybrid_frame(
 /// Hybrid rescorer: cross-fit an LDA on the LINEAR lane, push its (leak-free)
 /// `lda_score` as one extra column into the NONLINEAR lane, then train the GBM
 /// CV on `nonlinear + lda_score`. The GBM re-sees `NONLINEAR_NCOLS + 1` features
-/// (28 today) instead of the full ALL lane (128) — the compression play — at
-/// ~parity.
+/// (28 today) instead of the full ALL lane (128) — the compression play.
+///
+/// NOT "at ~parity", as this doc claimed before either side was measured at more
+/// than one scale: it loses 3.3% of the GBM's targets at 1% FDR on a
+/// 114138-candidate run and 18.0% on a 2174837-candidate one (110425 against
+/// 134710), for ~0.26x the GBM's Phase 5 wall time there. The compression buys
+/// real time and costs real sensitivity, and BOTH GROW with the candidate count —
+/// see [`crate::ml::RescoreModel`] for the table and its caveats.
 ///
 /// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit`] — see there for the
 /// partition, why a label-aware feature fed to a CV'd GBM in particular must be
@@ -1044,6 +1059,11 @@ fn rescore_mlp_lane(
 /// THE DEFAULT MLP SHAPE, i.e. the one [`crate::ml::RescoreModel::Mlp`] selects.
 ///
 /// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
+///
+/// COST: NOT MEASURED at the current [`MlpConfig`] defaults. The only figures
+/// that exist for this variant predate the retune, so they are not quoted; see
+/// [`crate::ml::RescoreModel`] for what is current and [`rescore_mlp_all`] for
+/// the one MLP variant that is.
 pub fn rescore_mlp_linear(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     rescore_mlp_lane(data, Lane::Linear, MlpConfig::default())
 }
@@ -1053,6 +1073,14 @@ pub fn rescore_mlp_linear(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
 /// [`crate::ml::RescoreModel::MlpAll`] selects.
 ///
 /// See [`rescore_mlp_lane`] for the cross-fit and determinism contracts.
+///
+/// COST, at the current [`MlpConfig`] defaults and the arm they were tuned on —
+/// Phase 5 wall time / targets at 1% FDR against [`rescore`] on the same input:
+/// 7.342s/25451 against 9.588s/25240 at 114138 competed candidates (1.31x faster,
+/// +211 targets), 281.953s/134655 against 574.315s/134710 at 2174837 (2.04x
+/// faster, -55 targets, -0.04%). The RATIO IS SCALE-DEPENDENT and was on the other
+/// side of 1.0 before the retune, so do not carry either multiplier to a third
+/// library size. [`crate::ml::RescoreModel`] holds the table and the caveats.
 pub fn rescore_mlp_all(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     rescore_mlp_lane(data, Lane::All, MlpConfig::default())
 }
@@ -1128,6 +1156,11 @@ fn rescore_hybrid_mlp_with(
 /// The MLP hybrid on [`MlpConfig::default`] — see [`rescore_hybrid_mlp_with`].
 ///
 /// The one [`crate::ml::RescoreModel::HybridMlp`] selects.
+///
+/// COST: the most expensive rescorer at both scales measured, and NOT re-measured
+/// since the [`MlpConfig`] retune, so no current figure is quoted. It fits a full
+/// MLP cross-fit AND a full GBM CV, so [`rescore`]'s Phase 5 time is a floor under
+/// it no matter how the MLP half is tuned.
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
@@ -2333,22 +2366,23 @@ mod feature_tests {
     /// default is left alone on purpose — tuning a production default for test
     /// runtime is how a default stops meaning anything.
     ///
-    /// # Why `lr` is `1e-3` and not the default's `3e-4`
-    /// [`MlpConfig::default`] records that `1e-2` and `1e-3` both "walked a
-    /// 2-input ReLU net into a dead-unit plateau in testing", so raising it here
-    /// looks like contradicting a warning written 400 lines away. It is not: that
-    /// warning is about the DEFAULT's step budget (30 epochs at batch 256, i.e.
-    /// roughly one full-batch step per epoch), where a large step has nothing to
-    /// recover from a dead unit with. This config runs 150 epochs at batch 16 —
-    /// one to two orders of magnitude more steps on the same fixtures — and the
-    /// plateau does not reproduce across the four-seed sweeps below.
+    /// # Why `lr` is pinned at `1e-3`
+    /// It is pinned rather than inherited because these fixtures MEASURABLY need
+    /// this value: `3e-4` (the default until the 2026-07 retune) under-trains at
+    /// this budget, and `mlp_crossfit_scores_are_held_out`'s leak control — which
+    /// has to reach AUC > 0.99 on a 30-row fold to keep the hold-out assertion it
+    /// guards non-vacuous — only reaches 0.92 there. So do not "align it with the
+    /// default" without re-running that test, in either direction: the default is
+    /// now `1.2e-3`, ABOVE this, and these fixtures are 90-360 rows rather than
+    /// the millions the default was tuned on.
     ///
-    /// `3e-4` was tried and MEASURABLY UNDER-TRAINS at this budget:
-    /// `mlp_crossfit_scores_are_held_out`'s leak control has to reach AUC > 0.99
-    /// on a 30-row fold and only reaches 0.92, which would make the hold-out
-    /// assertion it guards vacuous. So `1e-3` is a measured requirement of these
-    /// fixtures, not an oversight — do not "align it with the default" without
-    /// re-running that test.
+    /// This also used to read as a contradiction of a warning on
+    /// [`MlpConfig::default`] that `1e-2`/`1e-3` "walked a 2-input ReLU net into a
+    /// dead-unit plateau". That warning has moved to the `MlpConfig::lr` field
+    /// docs, where it is now scoped to the regime it was observed in (the 2-input
+    /// XOR fixture, not a real rescore lane); 150 epochs at batch 16 is one to two
+    /// orders of magnitude more steps than the fixture that trapped, and the
+    /// plateau does not reproduce across the four-seed sweeps below.
     fn mlp_test_cfg(seed: u64) -> MlpConfig {
         MlpConfig {
             hidden: vec![16, 8],

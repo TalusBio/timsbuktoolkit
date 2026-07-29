@@ -54,33 +54,103 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 ///
 /// Selected via the `rescore_model` config field / the `--rescore-model` CLI
 /// flag (CLI wins). Dispatch through [`rescore_with`].
+///
+/// # Cost — THE CANONICAL TABLE, AND WHY IT IS A TABLE
+/// **No variant here has a single cost multiplier.** Every ratio below moves
+/// with the candidate count, in both directions and by more than a factor of
+/// two, so a lone "~Nx" is wrong at every scale but one. Successive versions of
+/// this documentation each picked a number and each rotted; the table exists so
+/// the next reader interpolates between anchors instead.
+///
+/// Phase 5 wall time / targets at 1% FDR, two runs of one Astral mzML:
+///
+/// | model | 114138 candidates | 2174837 candidates |
+/// |---|---|---|
+/// | `lda` | 0.476s / 24141 | 9.667s / 102843 |
+/// | `hybrid` | (no time recorded) / -3.3% targets | 148.062s / 110425 |
+/// | `mlp_all` | 7.342s / 25451 | 281.953s / 134655 |
+/// | `gbm` | 9.588s / 25240 | 574.315s / 134710 |
+///
+/// `mlp` and `hybrid_mlp` are absent on purpose: they were last timed at the
+/// PRE-RETUNE [`mlp::MlpConfig`] defaults and have not been re-measured since, so
+/// there is no current figure for either. Their old numbers are not reproduced
+/// here — a stale number presented as current is the exact failure this table is
+/// repairing. The `mlp_all` row IS at the current defaults.
+///
+/// ## The speed ratio GROWS with candidate count
+/// `lda` against `gbm`: ~20x cheaper at 114k, ~59x cheaper at 2.17M, and ~100x
+/// on a ~28M-entry library measured earlier in a different regime. Three anchors
+/// on one curve, not three attempts at one constant.
+///
+/// The MLP variants can cross the GBM entirely: at the pre-retune defaults
+/// `mlp_all` was 1.73x the GBM's Phase 5 time at 114k (SLOWER) and 0.85x at
+/// 2.17M (faster). Retuned it is 0.77x and 0.49x. Whether "the MLP is slower
+/// than the GBM" is true is a question about your library size.
+///
+/// ## The LDA's ACCURACY cost grows with scale too, and it is the bigger trap
+/// `lda` gives up 4.4% of the GBM's targets at 114k candidates but **23.7%** at
+/// 2.17M; `hybrid` -3.3% then -18.0%. Someone who picks `lda` for its speed
+/// after a small-run comparison is giving up several times what that comparison
+/// showed them.
+///
+/// ## Caveats that survive every number above
+/// * Both runs are the same FAIMS acquisition, i.e. NO ion mobility: 25 of the
+///   101 linear and 27 of the 128 all-lane columns were culled as dead. A TIMS
+///   run exercises more features and may time differently.
+/// * Two datasets, one machine. Orders of magnitude and directions of movement,
+///   not a benchmark suite.
+/// * Phase 5 is a fraction of a whole search, so 2x here is not 2x end to end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RescoreModel {
     /// Gradient-boosted trees over the ALL lane (linear ++ nonlinear, 128
-    /// features), cross-validated over `N_RESCORE_FOLDS`. The default.
+    /// features), cross-validated over `N_RESCORE_FOLDS`. The default, and the
+    /// most sensitive option measured at both scales (25240 and 134710 targets at
+    /// 1% FDR) — though [`MlpAll`](RescoreModel::MlpAll) now lands within 0.04% of
+    /// it for half the Phase 5 time on the larger of the two. See the cost table
+    /// above.
     #[default]
     Gbm,
     /// Sage-style shrinkage LDA on the LINEAR lane only (101 features, see
-    /// [`lda`]). ~20x cheaper than the GBM in Phase 5 wall time on a
-    /// 114138-candidate mzML run — see [`rescore_lda`] for what that measurement
-    /// does and does not cover. Cross-fit over the same fold ASSIGNMENT.
+    /// [`lda`]). Cross-fit over the same fold ASSIGNMENT.
+    ///
+    /// THE CHEAPEST AND THE LEAST SENSITIVE, and both gaps widen with the
+    /// candidate count: 20x cheaper for -4.4% targets at 114k candidates, 59x
+    /// cheaper for **-23.7%** at 2.17M. See the type-level cost table, and
+    /// [`rescore_lda`] for what the measurement does and does not cover.
     Lda,
     /// Cross-fit LDA (linear lane) -> `lda_score` column -> GBM CV on
     /// `nonlinear + lda_score`: the same fold ASSIGNMENT on both sides, so a
     /// row's `lda_score` never saw its own label.
+    ///
+    /// Between `lda` and `gbm` on both axes, and NOT at parity with the GBM the
+    /// way this was once documented: -3.3% targets at 114k candidates and -18.0%
+    /// at 2.17M, where it took 0.26x the GBM's Phase 5 wall time.
     Hybrid,
     /// MLP on the LINEAR lane only (101 features) — the same feature set
     /// [`Lda`](RescoreModel::Lda) trains on, so it isolates "nonlinear model"
     /// from "more features". THE DEFAULT MLP SHAPE, hence the unqualified name.
+    ///
+    /// Cost NOT re-measured since the MLP defaults were retuned; only
+    /// [`MlpAll`](RescoreModel::MlpAll) has current figures.
     Mlp,
     /// MLP on the ALL lane (linear ++ nonlinear, 128 features) — the same
     /// feature set [`Gbm`](RescoreModel::Gbm) trains on, so the two are
     /// directly comparable.
+    ///
+    /// The one MLP variant with figures at the current [`mlp::MlpConfig`]
+    /// defaults, and on those two runs the best speed/sensitivity point measured:
+    /// 1.31x faster than `gbm` for +211 targets at 114k candidates, 2.04x faster
+    /// for -55 (-0.04%) at 2.17M.
     MlpAll,
     /// MLP counterpart of [`Hybrid`](RescoreModel::Hybrid): cross-fit MLP
     /// (linear lane) -> `mlp_score` column -> GBM CV on
     /// `nonlinear + mlp_score`, same fold ASSIGNMENT on both sides.
+    ///
+    /// The most expensive variant at both scales measured, and its cost has NOT
+    /// been re-measured since the MLP defaults were retuned. It pays for two
+    /// models, so the GBM's Phase 5 time is a floor under it however the MLP half
+    /// is tuned.
     HybridMlp,
 }
 
