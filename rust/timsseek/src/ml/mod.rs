@@ -8,6 +8,8 @@ pub use qvalues::{
     rescore,
     rescore_hybrid,
     rescore_lda,
+    rescore_mlp,
+    rescore_mlp_linear,
 };
 
 use crate::scoring::results::{
