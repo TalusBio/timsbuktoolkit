@@ -365,16 +365,15 @@ fn crossfit_lda<D: FoldDataset>(data: &D) -> Option<CrossFit<LdaModel>> {
 ///
 /// That degradation is benign only while the nonlinear lane is trainable; when it
 /// is not, the GBM builds no trees and the q-values are meaningless. See
-/// [`abort_standalone_mlp`] for the full argument and
-/// [`degraded_frame_learned_nothing`] for the runtime check that reports the bad
-/// case.
+/// [`abort_standalone_mlp`] for the full argument and [`untrained_folds`] for the
+/// runtime check that reports the bad case.
 ///
 /// The models are discarded: the hybrid's sidecar reports the GBM's importance
 /// over `nonlinear + mlp_score`, and the MLP's own per-column weights belong to
 /// a different feature set (the LINEAR lane) that the sidecar has no column for.
 /// [`rescore_mlp_linear`] is the entry point that reports those.
 /// Returns the column and whether it is the DEGRADED (all-zero) one, which the
-/// caller needs in order to run [`degraded_frame_learned_nothing`] afterwards.
+/// caller needs in order to run [`untrained_folds`] afterwards.
 fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> (Vec<f64>, bool) {
     match crossfit::<D, MlpFoldModel>(data, cfg, "MLP") {
         Some(cf) => (cf.scores, false),
@@ -391,37 +390,62 @@ fn crossfit_mlp_scores<D: FoldDataset>(data: &D, cfg: &MlpConfig) -> (Vec<f64>, 
     }
 }
 
-/// Did a DEGRADED hybrid frame produce no model at all?
+/// How many folds produced NO MODEL AT ALL: empty importance means no tree was
+/// ever built, so every row that fold scored carries the same value.
 ///
-/// Empty importance on every fold means no tree was ever built, so every row in a
-/// fold carries the same score, and `assign_qval` then ranks by nothing but the
-/// seeded shuffle order. On the degraded path that is the difference between "a
-/// weaker model" — which is what the hybrids' failure policy promises — and "no
-/// model", which is the outcome the standalone rescorers abort to avoid.
+/// A COUNT, and the callers act on `> 0` rather than on `== stats.len()`, because
+/// the partial case is the worse one. One untrained fold out of three leaves a
+/// third of the rows on real discriminant values and two thirds on a per-fold
+/// constant: the score distribution then depends on a row's POSITION IN THE
+/// SHUFFLE, which is exactly what [`crossfit`]'s own failure policy calls out as
+/// silently corrupting the q-value ranking with nothing downstream to catch it.
+/// A uniform failure is at least uniform. An earlier version of this used `all`
+/// and was therefore blind to the state it most needed to report — measured on
+/// `degraded_hybrid(synthetic_competed_nonlinear_signal(n))`: `n = 198` gives
+/// `[0, 0, 0]`, `n = 204` gives `[1, 0, 0]`, `n = 208` gives `[1, 0, 1]`.
 ///
-/// It is a detector rather than an abort because by this point the run has a full
-/// result set and the caller's job is to make the state VISIBLE: the same
-/// condition is benign on a real search (the nonlinear lane has 27 live features
-/// and hundreds of thousands of rows) and pathological on a small or degenerate
-/// input. `degraded_hybrid_ranks_only_when_the_rest_of_the_frame_is_trainable`
-/// pins both sides.
+/// No false positives on the healthy side: `GbmFoldModel::importance` reports
+/// `NaN` for the columns forust never split on (dropped at the sidecar boundary)
+/// and a finite value for the ones it did, `0.0` included, so a fold that built
+/// even one split has at least one entry.
 ///
 /// Only meaningful when the appended column IS the all-zero fallback — a
 /// non-degraded frame that built no trees is a different (and equally
-/// interesting) problem this does not claim to diagnose.
-fn degraded_frame_learned_nothing(stats: &RescoreFeatureStats) -> bool {
-    !stats.is_empty() && stats.iter().all(|fs| fs.feature_importance.is_empty())
+/// interesting) problem this does not claim to diagnose. Nor does it see a fold
+/// that trained on noise: trees built off uninformative columns report importance
+/// like any other. The claim is strictly "some fold produced no model".
+fn untrained_folds(stats: &RescoreFeatureStats) -> usize {
+    stats
+        .iter()
+        .filter(|fs| fs.feature_importance.is_empty())
+        .count()
 }
 
-/// Log the degraded-and-untrainable state, if that is what happened. `what` names
+/// Log the degraded-and-untrained state, if that is what happened. `what` names
 /// the zeroed column.
+///
+/// This is a detector rather than an abort because by this point the run has a
+/// full result set, and the same condition is benign on a real search (27 live
+/// nonlinear features, rows in the hundreds of thousands) while pathological on a
+/// small or degenerate input. The caller's job is to make it VISIBLE.
 fn report_degraded_frame(what: &str, degraded: bool, stats: &RescoreFeatureStats) {
-    if degraded && degraded_frame_learned_nothing(stats) {
+    if !degraded {
+        return;
+    }
+    let untrained = untrained_folds(stats);
+    if untrained > 0 {
         tracing::error!(
-            "hybrid: {what} was zeroed by a failed cross-fit AND the GBM then built no trees on \
-             the nonlinear lane (no fold reported any feature importance). Every row in a fold \
-             therefore carries the SAME score, so the q-values below rank by the internal \
-             shuffle order and are NOT usable for FDR. Treat this run as failed."
+            "hybrid: {what} was zeroed by a failed cross-fit AND {untrained} of {} GBM folds then \
+             built no trees on the nonlinear lane. Every row those folds scored carries the SAME \
+             value, so its q-value ranks by the internal shuffle order rather than by evidence \
+             and is NOT usable for FDR. {}Treat this run as failed.",
+            stats.len(),
+            if untrained < stats.len() {
+                "The remaining folds DID train, so the score distribution is fold-dependent — \
+                 worse than uniformly degenerate, not better. "
+            } else {
+                ""
+            }
         );
     }
 }
@@ -774,10 +798,18 @@ impl Lane {
 ///   What keeps the asymmetry defensible is therefore not that the hybrid
 ///   degradation is always benign — it is not — but that it is benign in the
 ///   regime a real search runs in (27 live nonlinear features, rows in the
-///   hundreds of thousands) and DETECTED when it is not: both hybrids run
-///   [`degraded_frame_learned_nothing`] after fitting and log that the run is
-///   unusable. An operator can see this one in the log; the standalone
-///   degradation would have been invisible.
+///   hundreds of thousands), and that the way it fails LOUDEST is the way it is
+///   most likely to fail: both hybrids run [`untrained_folds`] after fitting and,
+///   if any fold produced no model, log that the run is not usable for FDR. An
+///   operator can see that in the log; the standalone degradation would have been
+///   invisible.
+///
+///   The detector's reach is narrower than "we would notice a bad degraded run".
+///   It sees a fold that built NO trees. It cannot see a fold that built trees on
+///   columns carrying no real signal — that run is degraded, uninformative, and
+///   silent. What bounds the damage there is not this check but the fact that
+///   such a lane would have to be uninformative on a real search's worth of rows,
+///   and that the sidecar reports the per-fold importance an operator can read.
 /// * Here the failed fit IS the discriminant. Degrading to a uniform score makes
 ///   every row's score identical, so `assign_qval` walks a ranking that is
 ///   nothing but the seeded shuffle order and every q-value it emits is a
@@ -1638,7 +1670,7 @@ mod feature_tests {
     ///
     /// (b) is not a bug being documented as a feature: it is the boundary of the
     /// premise, and `rescore_hybrid` / `rescore_hybrid_mlp_with` now detect that
-    /// exact state at runtime (see [`degraded_frame_learned_nothing`]) and say so
+    /// exact state at runtime (see [`untrained_folds`]) and say so
     /// in the log instead of returning it quietly. Do not delete (b) — without it
     /// the next reader will believe the degradation is unconditionally benign,
     /// which is the error this test was written to correct.
@@ -1666,9 +1698,10 @@ mod feature_tests {
              nonlinear lane. If this is at chance, degrading is NOT a weaker model — it is \
              a meaningless one, and the hybrids should abort like the standalone path does"
         );
-        assert!(
-            !degraded_frame_learned_nothing(&stats),
-            "the runtime detector must not fire when the degraded frame trained fine"
+        assert_eq!(
+            untrained_folds(&stats),
+            0,
+            "the runtime detector must not fire when every fold of the degraded frame trained"
         );
 
         // (b) THE CONDITION, on the suite's main fixture: nonlinear lane constant,
@@ -1682,8 +1715,9 @@ mod feature_tests {
              has changed, the boundary this test documents has moved and the doc on \
              `abort_standalone_mlp` needs re-checking"
         );
-        assert!(
-            degraded_frame_learned_nothing(&stats),
+        assert_eq!(
+            untrained_folds(&stats),
+            N_RESCORE_FOLDS as usize,
             "the runtime detector must fire on exactly this state, or an operator gets \
              meaningless q-values with nothing in the log"
         );
@@ -1701,6 +1735,190 @@ mod feature_tests {
             (auc - 0.5).abs() < 0.05,
             "a per-fold constant cannot rank better than chance; AUC {auc}"
         );
+    }
+
+    /// THE WORST STATE, and the one a `all`-based detector was blind to: SOME
+    /// folds of a degraded frame build trees and some build none.
+    ///
+    /// Two thirds of the rows then carry a per-fold constant while one third
+    /// carries real discriminant values, so a row's score distribution is a
+    /// function of its POSITION IN THE SEEDED SHUFFLE. [`crossfit`]'s failure
+    /// policy names that exact shape as the one that "silently corrupts the
+    /// q-value ranking … in a way that no downstream check would catch", and it is
+    /// worse than the uniform case precisely because it is not uniform: uniform
+    /// scores are visibly degenerate, a fold-dependent mixture looks like a
+    /// working result.
+    ///
+    /// The row count is chosen from a measured plateau, not guessed:
+    /// `synthetic_competed_nonlinear_signal` through the degraded frame gives
+    /// `[0, 0, 0]` at 192-198, `[1, 0, 0]` at 200-206, `[1, 0, 1]` at 208 and
+    /// `[1, 2, 1]` at 210. 204 sits in the middle of the partial plateau. The
+    /// partial-ness is ASSERTED rather than assumed, so a shift in that boundary
+    /// fails here instead of quietly turning this into a second copy of the
+    /// uniform test.
+    #[test]
+    fn detector_fires_when_only_some_folds_of_a_degraded_frame_trained() {
+        let (_out, stats) = degraded_hybrid(synthetic_competed_nonlinear_signal(204));
+        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+
+        let untrained = untrained_folds(&stats);
+        assert!(
+            untrained > 0 && untrained < stats.len(),
+            "fixture premise broken: this must be the PARTIAL state (some folds trained, some \
+             did not), or it does not distinguish `any` from `all`. importance lengths: {:?}",
+            stats
+                .iter()
+                .map(|fs| fs.feature_importance.len())
+                .collect::<Vec<_>>()
+        );
+
+        // THE ASSERTION, on the REPORTER and not just on the count: a threshold of
+        // `== stats.len()` would keep the worst outcome on the degraded path off
+        // the operator's log entirely.
+        let log = ErrorLog::default();
+        tracing::subscriber::with_default(log.clone(), || {
+            report_degraded_frame("lda_score", true, &stats)
+        });
+        let msgs = log.messages();
+        let hit = msgs
+            .iter()
+            .find(|m| m.contains("lda_score") && m.contains("built no trees"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a PARTIALLY untrained degraded frame was not reported at all — the worst \
+                     state on this path reached an operator in silence. Captured: {msgs:#?}"
+                )
+            });
+        assert!(
+            hit.contains(&format!("{untrained} of {} GBM folds", stats.len())),
+            "the message must say HOW MANY folds failed, or the operator cannot tell the \
+             fold-dependent case from the uniform one: {hit}"
+        );
+        assert!(
+            hit.contains("fold-dependent"),
+            "a partial failure must be named as such — it is worse than the uniform case, not \
+             better: {hit}"
+        );
+
+        // The flag still gates it: a frame that did not degrade is not this
+        // function's business even if the GBM built nothing.
+        let quiet = ErrorLog::default();
+        tracing::subscriber::with_default(quiet.clone(), || {
+            report_degraded_frame("lda_score", false, &stats)
+        });
+        assert!(
+            quiet.messages().is_empty(),
+            "a non-degraded frame must not be reported here: {:?}",
+            quiet.messages()
+        );
+    }
+
+    /// A `tracing::Subscriber` that records ERROR-level messages, so a test can
+    /// assert an operator would actually SEE something rather than that a
+    /// predicate returned true.
+    ///
+    /// Hand-rolled: `tracing-subscriber` is not a dependency of this crate and
+    /// this work may not add one.
+    #[derive(Clone, Default)]
+    struct ErrorLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl ErrorLog {
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl tracing::Subscriber for ErrorLog {
+        fn enabled(&self, md: &tracing::Metadata<'_>) -> bool {
+            *md.level() == tracing::Level::ERROR
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::ERROR {
+                return;
+            }
+            struct Msg(String);
+            impl tracing::field::Visit for Msg {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut msg = Msg(String::new());
+            event.record(&mut msg);
+            self.0.lock().unwrap().push(msg.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// THE WIRING, for BOTH hybrids: a degraded frame that trained nothing must
+    /// reach the LOG, not just a predicate.
+    ///
+    /// [`untrained_folds`] being right is worth nothing if a rescorer never calls
+    /// it, and the two arms compute their `degraded` flag independently — a
+    /// hardcoded `false` at either call site would otherwise be caught by nothing.
+    /// So this drives the real public entry points and asserts on captured ERROR
+    /// output, once per arm, keyed on the COLUMN NAME so one arm's message cannot
+    /// stand in for the other's.
+    ///
+    /// `indistinguishable_competed(24)` degrades BOTH cross-fits: the LDA's
+    /// scatter matrix is singular even after shrinkage when every column is
+    /// constant, and the MLP's cull leaves nothing (see the fixture's doc). The GBM
+    /// then trains on a nonlinear lane that is constant too, so no fold builds a
+    /// tree and the detector must fire in both runs.
+    #[test]
+    fn both_hybrids_log_a_degraded_frame_that_trained_nothing() {
+        for (column, run) in [
+            (
+                "lda_score",
+                (|| {
+                    rescore_hybrid(indistinguishable_competed(24));
+                }) as fn(),
+            ),
+            ("mlp_score", || {
+                rescore_hybrid_mlp_with(indistinguishable_competed(24), mlp_test_cfg(7));
+            }),
+        ] {
+            let log = ErrorLog::default();
+            tracing::subscriber::with_default(log.clone(), run);
+
+            let msgs = log.messages();
+            let hit = msgs.iter().find(|m| {
+                m.contains(column) && m.contains("built no trees") && m.contains("NOT usable")
+            });
+            assert!(
+                hit.is_some(),
+                "{column}: the degraded-and-untrained state never reached the log, so the \
+                 hybrid either did not flag its own degradation or never ran the check. \
+                 Captured ERROR messages: {msgs:#?}"
+            );
+            // The count is in the message, so the operator learns whether it was
+            // the uniform case or the (worse) fold-dependent one.
+            let hit = hit.unwrap();
+            assert!(
+                hit.contains(&format!(
+                    "{} of {} GBM folds",
+                    N_RESCORE_FOLDS, N_RESCORE_FOLDS
+                )),
+                "{column}: every fold was untrained here, so the message must say so: {hit}"
+            );
+        }
     }
 
     /// The cross-fit must actually HOLD OUT: a row's score has to come from a
