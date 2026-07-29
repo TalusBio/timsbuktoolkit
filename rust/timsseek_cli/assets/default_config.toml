@@ -29,16 +29,26 @@ decoy_strategy = "if_missing"
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        — cross-validated gradient-boosted trees (default)
 ## "lda"        — Sage-style shrinkage LDA, ~100x cheaper than "gbm"
-## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
-## "mlp"        — small MLP on the linear lane (the same features as "lda")
-## "mlp_all"    — small MLP on the full lane (the same features as "gbm")
-## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame
+## "hybrid"     — cross-fit LDA score folded into the GBM feature frame,
+##                ~0.35x "gbm"
+## "mlp"        — small MLP on the linear lane (the same features as "lda"),
+##                ~1.5x "gbm"
+## "mlp_all"    — small MLP on the full lane (the same features as "gbm"),
+##                ~1.8x "gbm"
+## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame,
+##                ~4x "gbm"
 ##
-## COST: only "lda"'s ~100x has a measurement behind it. The three MLP options
-## have no figure yet — they train a fixed-epoch net per fold, so their cost
-## scales with rows rather than with tree count, but nobody has timed one on a
-## real run. Treat their runtime as unknown before committing a long search to
-## one; "gbm" and "lda" are the two with known cost.
+## COST: the multipliers above are Phase 5 wall time relative to "gbm", measured
+## on one 114138-candidate mzML run. Phase 5 is a fraction of a whole search, so
+## a 4x there is not a 4x end to end. Two caveats:
+##   * that run was FAIMS (no ion mobility), so 25 of the 101 linear and 27 of
+##     the 128 all-lane columns were culled as dead. A TIMS run exercises more
+##     features and may time differently.
+##   * it is a single dataset — these are the right order of magnitude, not a
+##     benchmark suite.
+## Sensitivity at 1% FDR was within ~1% across "gbm", "mlp", "mlp_all" and
+## "hybrid_mlp" on that run, with "lda" and "hybrid" a few percent behind, so
+## the MLP options mostly buy runtime rather than targets there.
 rescore_model = "gbm"
 
 
