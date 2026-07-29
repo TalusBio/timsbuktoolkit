@@ -554,6 +554,109 @@ pub struct FoldStats {
 
 pub type RescoreFeatureStats = Vec<FoldStats>;
 
+/// Per-fold feature means/NaN ratios + model importance, for ANY fold
+/// partition.
+///
+/// Partition-agnostic on purpose: `fold_rows[f]` is simply "the rows summarized
+/// under fold `f`" and `models[f]` is "the model whose importance is reported
+/// there". The two rescoring partitions in this crate disagree on both — the
+/// [`CrossValidatedScorer`] fits on fold `f` and scores the others, while
+/// `qvalues::crossfit_lda` fits on everything BUT fold `f` and scores only fold
+/// `f` — and both are leak-free. Keeping this function ignorant of which one it
+/// is handed is what lets the sidecar have one implementation without the two
+/// partitions being forced to converge.
+///
+/// Column names (and therefore the row width) come from `data`, so the stats
+/// align with the matrix the model saw by construction.
+pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
+    data: &D,
+    fold_rows: &[Vec<usize>],
+    models: &[Option<&M>],
+) -> RescoreFeatureStats {
+    let names = data.column_names();
+    let mut out: RescoreFeatureStats = Vec::with_capacity(fold_rows.len());
+    let mut row_buf = vec![0.0f64; names.len()];
+    for (fold, rows) in fold_rows.iter().enumerate() {
+        // --- Importance, back to the (name, gain) sidecar shape ---
+        // Zero-importance columns are dropped rather than emitted: the
+        // sidecar and the dashboard's fold-averaged gain both treat a
+        // feature as "reported by this fold" simply by being present, so
+        // emitting full-width vectors would change both the row set and
+        // the averaging divisor. What that filters out is model-dependent: a
+        // tree model leaves every column it never split on at 0.0, while an
+        // LDA's `|coef|` is dense apart from columns with no within-fold
+        // variance (or no finite values at all), whose weight solves to exactly
+        // 0 — i.e. in both cases, the columns that provably did not move the
+        // score.
+        let importance: Vec<(Arc<str>, f32)> = match models.get(fold).copied().flatten() {
+            Some(model) => {
+                let raw_imp = model.importance();
+                debug_assert_eq!(
+                    raw_imp.len(),
+                    names.len(),
+                    "FoldModel::importance must be lane-indexed"
+                );
+                let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
+                    .into_iter()
+                    .zip(names.iter())
+                    .filter(|(v, _)| *v != 0.0)
+                    .map(|(v, n)| (n.clone(), v))
+                    .collect();
+                pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                pairs
+            }
+            None => Vec::new(),
+        };
+
+        // --- Per-feature finite-only means + NaN ratio ---
+        let mut sums: Vec<f64> = vec![0.0; names.len()];
+        let mut finite_counts: Vec<u32> = vec![0; names.len()];
+        let mut nan_counts: Vec<u32> = vec![0; names.len()];
+        let mut n: usize = 0;
+        for &i in rows.iter() {
+            // Read from the dataset (the exact columns the model trained
+            // on) rather than re-walking a per-record feature fn, so the
+            // stats align with `names` by construction even when features
+            // are supplied externally.
+            data.get_values(i, &mut row_buf);
+            for (j, &v) in row_buf.iter().enumerate() {
+                if v.is_finite() {
+                    sums[j] += v;
+                    finite_counts[j] += 1;
+                } else {
+                    nan_counts[j] += 1;
+                }
+            }
+            n += 1;
+        }
+        let feature_stats: Vec<FeatureStat> = if n > 0 {
+            names
+                .iter()
+                .zip(sums.iter())
+                .zip(finite_counts.iter())
+                .zip(nan_counts.iter())
+                .map(|(((name, s), fc), nc)| {
+                    let mean = if *fc > 0 { *s / *fc as f64 } else { f64::NAN };
+                    FeatureStat {
+                        name: name.clone(),
+                        mean: mean as f32,
+                        nan_ratio: *nc as f32 / n as f32,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        out.push(FoldStats {
+            fold: fold as u8,
+            feature_stats,
+            feature_importance: importance,
+        });
+    }
+    out
+}
+
 /// This is meant to IN ESSENCE ...
 ///
 /// Provided we have a number of splits k >= 3.
@@ -728,91 +831,14 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
 
     /// Compute per-fold feature means + per-fold model importance.
     ///
-    /// Model-agnostic except for the importance half, which is whatever
-    /// [`FoldModel::importance`] reports. Column names come from the dataset,
-    /// so the stats align with the matrix the model saw by construction.
-    /// Folds with no fitted model (shouldn't happen post-fit) produce empty maps.
+    /// The stats for fold `f` summarize `fold_rows[f]` — for THIS partition,
+    /// the rows fold `f`'s model was TRAINED on. Folds with no fitted model
+    /// (shouldn't happen post-fit) produce empty maps. See
+    /// [`fold_feature_stats`], which the LDA cross-fit shares with a different
+    /// partition.
     pub fn feature_stats(&self) -> RescoreFeatureStats {
-        let names = self.dataset.column_names();
-        let mut out: RescoreFeatureStats = Vec::with_capacity(self.n_folds as usize);
-        let mut row_buf = vec![0.0f64; names.len()];
-        for fold in 0..self.n_folds {
-            // --- Importance, back to the (name, gain) sidecar shape ---
-            // Zero-importance columns are dropped rather than emitted: the
-            // sidecar and the dashboard's fold-averaged gain both treat a
-            // feature as "reported by this fold" simply by being present, so
-            // emitting full-width vectors would change both the row set and
-            // the averaging divisor.
-            let importance: Vec<(Arc<str>, f32)> =
-                match self.fold_models.get(fold as usize).and_then(|o| o.as_ref()) {
-                    Some(model) => {
-                        let raw_imp = model.importance();
-                        debug_assert_eq!(
-                            raw_imp.len(),
-                            names.len(),
-                            "FoldModel::importance must be lane-indexed"
-                        );
-                        let mut pairs: Vec<(Arc<str>, f32)> = raw_imp
-                            .into_iter()
-                            .zip(names.iter())
-                            .filter(|(v, _)| *v != 0.0)
-                            .map(|(v, n)| (n.clone(), v))
-                            .collect();
-                        pairs.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        pairs
-                    }
-                    None => Vec::new(),
-                };
-
-            // --- Per-feature finite-only means + NaN ratio ---
-            let mut sums: Vec<f64> = vec![0.0; names.len()];
-            let mut finite_counts: Vec<u32> = vec![0; names.len()];
-            let mut nan_counts: Vec<u32> = vec![0; names.len()];
-            let mut n: usize = 0;
-            for &i in self.fold_rows[fold as usize].iter() {
-                // Read from the dataset (the exact columns the model trained
-                // on) rather than re-walking a per-record feature fn, so the
-                // stats align with `names` by construction even when features
-                // are supplied externally.
-                self.dataset.get_values(i, &mut row_buf);
-                for (j, &v) in row_buf.iter().enumerate() {
-                    if v.is_finite() {
-                        sums[j] += v;
-                        finite_counts[j] += 1;
-                    } else {
-                        nan_counts[j] += 1;
-                    }
-                }
-                n += 1;
-            }
-            let feature_stats: Vec<FeatureStat> = if n > 0 {
-                names
-                    .iter()
-                    .zip(sums.iter())
-                    .zip(finite_counts.iter())
-                    .zip(nan_counts.iter())
-                    .map(|(((name, s), fc), nc)| {
-                        let mean = if *fc > 0 { *s / *fc as f64 } else { f64::NAN };
-                        FeatureStat {
-                            name: name.clone(),
-                            mean: mean as f32,
-                            nan_ratio: *nc as f32 / n as f32,
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            out.push(FoldStats {
-                fold,
-                feature_stats,
-                feature_importance: importance,
-            });
-        }
-        out
+        let models: Vec<Option<&M>> = self.fold_models.iter().map(|m| m.as_ref()).collect();
+        fold_feature_stats(&self.dataset, &self.fold_rows, &models)
     }
 
     fn next_fold(&self, fold: u8) -> u8 {

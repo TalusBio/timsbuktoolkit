@@ -9,6 +9,10 @@
 //! but the `lambda * I` term is not), and non-finite values are imputed to the
 //! column mean, i.e. 0 post-standardization — LDA cannot take missing natively.
 
+use crate::ml::cv::{
+    FoldDataset,
+    FoldModel,
+};
 use crate::utils::maybe_par::{
     chunked_fold_reduce,
     scatter_write,
@@ -157,11 +161,98 @@ impl LdaModel {
         assert_eq!(out.len(), nrows);
         scatter_write(out, |i| self.score(&feat[i * d..(i + 1) * d]));
     }
+}
 
-    /// Discriminant weights in standardized space, `|coef|`-interpretable as
-    /// feature importance.
-    pub fn coef(&self) -> &[f64] {
-        &self.coef
+/// Everything [`LdaModel`] needs that is not data. One field today; a struct
+/// rather than a bare `f64` so [`FoldModel::Config`] has somewhere to grow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LdaConfig {
+    /// Ridge shrinkage, see [`DEFAULT_SHRINKAGE`].
+    pub shrinkage: f64,
+}
+
+impl Default for LdaConfig {
+    fn default() -> Self {
+        Self {
+            shrinkage: DEFAULT_SHRINKAGE,
+        }
+    }
+}
+
+/// The only way an LDA fit fails. [`LdaModel::fit`] returns `None` for both
+/// causes without distinguishing them, so this enum has one variant rather
+/// than inventing a distinction the fit does not actually report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LdaError {
+    /// Either class had no rows, or the within-class scatter stayed singular
+    /// even after shrinkage.
+    SingularOrEmptyClass,
+}
+
+impl std::fmt::Display for LdaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LdaError::SingularOrEmptyClass => f.write_str("singular or empty class"),
+        }
+    }
+}
+
+impl std::error::Error for LdaError {}
+
+/// [`FoldModel`] adapter over the closed-form fit above.
+///
+/// Gathers its train rows out of the dataset into the flat row-major buffer
+/// [`LdaModel::fit`] wants; `predict` reads scored rows the same way. Neither
+/// touches a row outside the index slice it was handed, so leak-freedom is
+/// entirely the caller's partition and never this impl's.
+impl FoldModel for LdaModel {
+    type Config = LdaConfig;
+    type Error = LdaError;
+
+    /// `val` is DELIBERATELY IGNORED, and that is not an oversight: this LDA is
+    /// closed-form (one linear solve), so there is no iteration to early-stop
+    /// and no use for a validation slice. [`FoldModel`] documents that a model
+    /// without early stopping is expected to ignore it. Callers may pass an
+    /// empty slice.
+    fn fit<D: FoldDataset>(
+        cfg: &LdaConfig,
+        data: &D,
+        train: &[usize],
+        val: &[usize],
+    ) -> Result<Self, LdaError> {
+        let _ = val;
+        let ncols = data.column_names().len();
+        let mut feat = Vec::with_capacity(train.len() * ncols);
+        let mut is_decoy = Vec::with_capacity(train.len());
+        let mut row = vec![0.0f64; ncols];
+        for &i in train {
+            data.get_values(i, &mut row);
+            feat.extend_from_slice(&row);
+            is_decoy.push(data.is_decoy(i));
+        }
+        LdaModel::fit(&feat, train.len(), ncols, &is_decoy, cfg.shrinkage)
+            .ok_or(LdaError::SingularOrEmptyClass)
+    }
+
+    fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, LdaError> {
+        let mut row = vec![0.0f64; self.ncols];
+        Ok(rows
+            .iter()
+            .map(|&i| {
+                data.get_values(i, &mut row);
+                self.score(&row)
+            })
+            .collect())
+    }
+
+    /// `|coef|` — the discriminant weights live in standardized space, so their
+    /// magnitudes are directly comparable across columns. Full-width and, for
+    /// any column with within-fold variance, non-zero: unlike a tree model
+    /// there is no "column the fit never looked at". A column that is constant
+    /// or has no finite value at all standardizes to all-zero and therefore
+    /// solves to exactly `0.0`, which is the correct weight for it.
+    fn importance(&self) -> Vec<f32> {
+        self.coef.iter().map(|c| c.abs() as f32).collect()
     }
 }
 

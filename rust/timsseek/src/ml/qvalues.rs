@@ -1,15 +1,18 @@
 use super::cv::{
     CrossValidatedScorer,
     FeatureLike,
-    FeatureStat,
+    FoldDataset,
+    FoldModel,
     FoldStats,
     GBMConfig,
     GbmFoldModel,
     PrecomputedFeatures,
     RescoreFeatureStats,
+    RowMajorDataset,
+    fold_feature_stats,
 };
 use super::lda::{
-    DEFAULT_SHRINKAGE,
+    LdaConfig,
     LdaModel,
 };
 use super::{
@@ -186,6 +189,22 @@ struct CrossFitLda {
     /// The per-fold fitted models, indexed by fold. Always
     /// `N_RESCORE_FOLDS` long — a `CrossFitLda` only exists if every fold fit.
     models: Vec<LdaModel>,
+    /// `fold_rows[f]` = the rows `models[f]` SCORED (ascending). Kept so the
+    /// sidecar stats summarize exactly those rows without re-deriving the
+    /// partition a second time.
+    fold_rows: Vec<Vec<usize>>,
+}
+
+impl CrossFitLda {
+    /// Per-fold sidecar stats, on the GBM path's shared implementation
+    /// ([`fold_feature_stats`]): for fold `f` the means / NaN ratios cover the
+    /// rows `models[f]` scored, and the importance is that model's `|coef|`.
+    ///
+    /// `data` must be the dataset this was cross-fit over.
+    fn feature_stats<D: FoldDataset>(&self, data: &D) -> RescoreFeatureStats {
+        let models: Vec<Option<&LdaModel>> = self.models.iter().map(Some).collect();
+        fold_feature_stats(data, &self.fold_rows, &models)
+    }
 }
 
 /// Cross-fit an [`LdaModel`] over the canonical rescore fold partition and
@@ -210,18 +229,26 @@ struct CrossFitLda {
 /// CV cannot notice, and the leak surfaces only as an optimistic FDR.
 ///
 /// # THE partition
-/// `fold(i) = i % N_RESCORE_FOLDS`, the single definition used by both callers.
-/// For fold `f` the model is fitted on every row `i` with
-/// `i % N_RESCORE_FOLDS != f` and then scores only the rows with
-/// `i % N_RESCORE_FOLDS == f`, so no row contributes to the model scoring it.
+/// Fold membership comes from [`FoldDataset::get_fold`] — for the
+/// [`RowMajorDataset`] both callers build, that is `i % N_RESCORE_FOLDS`. For
+/// fold `f` the model is fitted on every row with `get_fold(i) != f` and then
+/// scores only the rows with `get_fold(i) == f`, so no row contributes to the
+/// model scoring it.
 ///
-/// It MUST equal the partition `CrossValidatedScorer` builds internally
-/// (`assigned_fold[i] = i % n_folds`, see
-/// `ml::cv::CrossValidatedScorer::new_from_shuffled`), or a hybrid row's
-/// `lda_score` can come from an LDA trained on rows the GBM is holding out —
-/// leak restored, silently. NOTHING ENFORCES THAT MATCH: it is the same modulo
-/// written in two modules, kept together only by each side having exactly one
-/// definition. Changing either means changing both.
+/// This is NOT `CrossValidatedScorer`'s partition and must not be unified with
+/// it: that one fits on fold `f` alone, early-stops on `f + 1`, and scores the
+/// remaining `n_folds - 2` folds, so a row is scored by several models that
+/// each saw a fraction of the data. Here a row is scored exactly once, by a
+/// model that saw everything else. Both satisfy leak-freedom, which is the only
+/// property either has to satisfy; how many rows a model sees and how many
+/// models score a row are free to differ, and do.
+///
+/// What the two DO have to agree on is the fold ASSIGNMENT `get_fold`, or a
+/// hybrid row's `lda_score` can come from an LDA trained on rows the GBM is
+/// holding out — leak restored, silently. That agreement used to be the same
+/// modulo written out in two modules with nothing enforcing the match; both
+/// sides now read it from `RowMajorDataset::get_fold`, so there is one
+/// definition rather than two that happen to coincide.
 ///
 /// # Failure policy — all-or-nothing
 /// Returns `None` if ANY fold's fit fails (singular scatter / empty class).
@@ -233,55 +260,54 @@ struct CrossFitLda {
 /// sort) in a way that no downstream check would catch. A uniform failure is
 /// both louder and harmless to the ranking, so callers degrade the WHOLE run
 /// instead. Callers log the failure; this function logs which fold failed.
-fn crossfit_lda(
-    feat: &[f64],
-    nrows: usize,
-    ncols: usize,
-    is_decoy: &[bool],
-) -> Option<CrossFitLda> {
+fn crossfit_lda<D: FoldDataset>(data: &D) -> Option<CrossFitLda> {
     let n_folds = N_RESCORE_FOLDS as usize;
+    let nrows = data.nrows();
+    let cfg = LdaConfig::default();
     let mut scores = vec![0.0f64; nrows];
     let mut models = Vec::with_capacity(n_folds);
-
-    // Reused across folds: the gathered training matrix is the only sizeable
-    // allocation here and its capacity is fold-invariant.
-    let mut train: Vec<f64> = Vec::with_capacity(feat.len());
-    let mut train_is_decoy: Vec<bool> = Vec::with_capacity(nrows);
+    let mut fold_rows: Vec<Vec<usize>> = Vec::with_capacity(n_folds);
+    debug_assert!(
+        (0..nrows).all(|i| data.get_fold(i) < n_folds),
+        "dataset partitions into more folds than the cross-fit walks"
+    );
 
     for f in 0..n_folds {
-        // TRAIN rows = every row NOT in fold f, gathered contiguously.
-        train.clear();
-        train_is_decoy.clear();
-        for i in 0..nrows {
-            if i % n_folds != f {
-                train.extend_from_slice(&feat[i * ncols..(i + 1) * ncols]);
-                train_is_decoy.push(is_decoy[i]);
-            }
-        }
-        let train_nrows = train_is_decoy.len();
-        let model = match LdaModel::fit(
-            &train,
-            train_nrows,
-            ncols,
-            &train_is_decoy,
-            DEFAULT_SHRINKAGE,
-        ) {
-            Some(m) => m,
-            None => {
-                tracing::error!(
-                    "cross-fit LDA: fold {f}/{n_folds} fit failed (singular or empty class)"
-                );
+        // TRAIN rows = every row NOT in fold f. HELD = exactly fold f.
+        // Ascending in both cases, so the row order the fit reduces over is the
+        // dataset's own order.
+        let train: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) != f).collect();
+        let held: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) == f).collect();
+
+        // `val` is empty: LDA is closed-form, there is nothing to early-stop
+        // on (see the `FoldModel` impl in `ml::lda`).
+        let model = match <LdaModel as FoldModel>::fit(&cfg, data, &train, &[]) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("cross-fit LDA: fold {f}/{n_folds} fit failed ({e})");
                 return None;
             }
         };
         // Score ONLY the held-out fold, with a model that never saw it.
-        for i in (f..nrows).step_by(n_folds) {
-            scores[i] = model.score(&feat[i * ncols..(i + 1) * ncols]);
+        let preds = match model.predict(data, &held) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("cross-fit LDA: fold {f}/{n_folds} scoring failed ({e})");
+                return None;
+            }
+        };
+        for (&i, s) in held.iter().zip(preds) {
+            scores[i] = s;
         }
+        fold_rows.push(held);
         models.push(model);
     }
 
-    Some(CrossFitLda { scores, models })
+    Some(CrossFitLda {
+        scores,
+        models,
+        fold_rows,
+    })
 }
 
 #[cfg_attr(
@@ -362,13 +388,14 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
     let t = Instant::now();
     let feat = build_linear_matrix(&data);
     debug_assert_eq!(feat.len(), nrows * ncols);
-    let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
+    let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
 
     // Optional raw-matrix dump for offline feature-engineering iteration.
     // `TIMSSEEK_LDA_DUMP=/prefix` writes `<prefix>.f64` (row-major matrix),
     // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. This is the
     // LINEAR-lane matrix + linear names (offline python reads this).
     if let Ok(prefix) = std::env::var("TIMSSEEK_LDA_DUMP") {
+        let is_decoy: Vec<bool> = responses.iter().map(|&y| y < 0.5).collect();
         dump_feature_matrix(&prefix, &feat, nrows, &names, &is_decoy);
     }
     eprintln!(
@@ -376,8 +403,17 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
         t.elapsed()
     );
 
+    // The matrix, its names and the fold partition become one dataset from here
+    // on; the cross-fit and the sidecar stats both read rows through it, so
+    // neither can disagree with the other about a column or a fold.
+    let dataset = RowMajorDataset::new(
+        PrecomputedFeatures::from_row_major(feat, ncols, responses),
+        names,
+        N_RESCORE_FOLDS as usize,
+    );
+
     let t = Instant::now();
-    let stats = match crossfit_lda(&feat, nrows, ncols, &is_decoy) {
+    let stats = match crossfit_lda(&dataset) {
         Some(cf) => {
             for (cand, &s) in data.iter_mut().zip(cf.scores.iter()) {
                 cand.assign_score(s);
@@ -386,7 +422,7 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
                 "  LDA: cross-fit ({N_RESCORE_FOLDS} folds) + scored {nrows} candidates in {:.2?}",
                 t.elapsed()
             );
-            lda_feature_stats(&names, &feat, nrows, ncols, &cf.models)
+            cf.feature_stats(&dataset)
         }
         None => {
             // All-or-nothing (see `crossfit_lda`). Here that means every score
@@ -437,7 +473,16 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     // `i` is the same candidate in lin, nl, lda_score, responses, and the moved
     // `data`.
     let lin = build_linear_matrix(&data);
-    let is_decoy: Vec<bool> = data.iter().map(|c| c.get_y() < 0.5).collect();
+    let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+
+    // The LINEAR-lane dataset the LDA is cross-fit over. Same `RowMajorDataset`
+    // fold assignment the GBM's scorer uses below, which is what makes the
+    // "same partition on both sides" claim structural rather than a comment.
+    let lin_dataset = RowMajorDataset::new(
+        PrecomputedFeatures::from_row_major(lin, LINEAR_NCOLS, responses.clone()),
+        linear_feature_name_set(),
+        N_RESCORE_FOLDS as usize,
+    );
 
     // --- CROSS-FIT lda_score (leak-free), via the shared partition ---
     // On failure the column is left uniformly zero rather than partially
@@ -445,7 +490,7 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     // recover fold identity, which is strictly worse than no feature at all.
     // An all-zero column is constant -> zero split gain -> hybrid degrades to
     // "GBM on the nonlinear lane", which is a sane, loud degradation.
-    let lda_score = match crossfit_lda(&lin, nrows, LINEAR_NCOLS, &is_decoy) {
+    let lda_score = match crossfit_lda(&lin_dataset) {
         Some(cf) => cf.scores,
         None => {
             tracing::error!(
@@ -472,7 +517,6 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Re
     debug_assert_eq!(names.len(), ncols);
     debug_assert_eq!(feat.len(), nrows * ncols);
 
-    let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ncols, responses);
 
     let mut scorer =
@@ -525,77 +569,6 @@ fn dump_feature_matrix(
         Ok(()) => eprintln!("  LDA: dumped feature matrix to {prefix}.{{f64,labels,names.txt}}"),
         Err(e) => tracing::error!("feature dump failed: {e}"),
     }
-}
-
-/// Per-fold feature stats for the cross-fit LDA path, mirroring the GBM's
-/// [`CrossValidatedScorer::feature_stats`] semantics exactly: for fold `f` the
-/// means / NaN ratios are computed over that fold's HELD-OUT rows
-/// (`i % N_RESCORE_FOLDS == f`, the rows `models[f]` actually scored), and the
-/// importance ranking is `|coef|` of that fold's model (LDA weights in
-/// standardized space are directly interpretable as importance).
-///
-/// `models` is indexed by fold and must be `N_RESCORE_FOLDS` long — the
-/// invariant `crossfit_lda` upholds.
-fn lda_feature_stats(
-    names: &[Arc<str>],
-    feat: &[f64],
-    nrows: usize,
-    ncols: usize,
-    models: &[LdaModel],
-) -> RescoreFeatureStats {
-    debug_assert_eq!(names.len(), ncols);
-    let n_folds = N_RESCORE_FOLDS as usize;
-    let mut out: RescoreFeatureStats = Vec::with_capacity(n_folds);
-
-    for (f, model) in models.iter().enumerate() {
-        let mut sums = vec![0.0f64; ncols];
-        let mut finite = vec![0u32; ncols];
-        let mut nan = vec![0u32; ncols];
-        let mut n = 0usize;
-        for i in (f..nrows).step_by(n_folds) {
-            let row = &feat[i * ncols..(i + 1) * ncols];
-            for j in 0..ncols {
-                let v = row[j];
-                if v.is_finite() {
-                    sums[j] += v;
-                    finite[j] += 1;
-                } else {
-                    nan[j] += 1;
-                }
-            }
-            n += 1;
-        }
-        let feature_stats: Vec<FeatureStat> = if n > 0 {
-            (0..ncols)
-                .map(|j| FeatureStat {
-                    name: names[j].clone(),
-                    mean: if finite[j] > 0 {
-                        (sums[j] / finite[j] as f64) as f32
-                    } else {
-                        f32::NAN
-                    },
-                    nan_ratio: nan[j] as f32 / n as f32,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let mut feature_importance: Vec<(Arc<str>, f32)> = names
-            .iter()
-            .zip(model.coef().iter())
-            .map(|(nm, c)| (nm.clone(), c.abs() as f32))
-            .collect();
-        feature_importance
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        out.push(FoldStats {
-            fold: f as u8,
-            feature_stats,
-            feature_importance,
-        });
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +870,7 @@ mod tests {
 #[cfg(test)]
 mod feature_tests {
     use super::*;
+    use crate::ml::lda::DEFAULT_SHRINKAGE;
     use crate::models::DecoyMarking;
     use crate::models::sequence::{
         AminoAcid,
@@ -1122,7 +1096,21 @@ mod feature_tests {
             is_decoy.push(!is_target(i));
         }
 
-        let cf = crossfit_lda(&feat, N, 3, &is_decoy).expect("cross-fit must succeed");
+        // Same matrix, handed over as the dataset the cross-fit now reads
+        // through. `RowMajorDataset`'s `get_fold` IS `i % N_RESCORE_FOLDS`, so
+        // the fold-0 construction above still describes the partition exactly.
+        let responses: Vec<f64> = is_decoy
+            .iter()
+            .map(|&d| if d { 0.0 } else { 1.0 })
+            .collect();
+        let names: Vec<Arc<str>> = ["col0", "col1", "col2"].map(Arc::from).to_vec();
+        let dataset = RowMajorDataset::new(
+            PrecomputedFeatures::from_row_major(feat.clone(), 3, responses),
+            names,
+            n_folds,
+        );
+
+        let cf = crossfit_lda(&dataset).expect("cross-fit must succeed");
         assert_eq!(
             cf.models.len(),
             n_folds,
