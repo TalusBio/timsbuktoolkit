@@ -734,6 +734,56 @@ impl Mlp {
         l
     }
 
+    /// Mean loss over a set WITHOUT touching parameters, gradients, or the RNG.
+    ///
+    /// Runs the forward pass in eval mode and reuses
+    /// [`MlpLoss::loss_and_grad`] rather than re-deriving the loss, so the
+    /// reported number cannot drift from the one being optimized. The gradient
+    /// it writes goes to a throwaway buffer; the caller's `grads` are untouched,
+    /// and `train_step` overwrites `grads.last()` before every backward pass
+    /// regardless.
+    pub fn eval_loss(&mut self, x: &Tensor, y: &[f32], w: &[f32], loss: &MlpLoss) -> f32 {
+        self.forward(x, false);
+        let last = self.acts.len() - 1;
+        let mut sink = Tensor::default();
+        loss.loss_and_grad(&self.acts[last], y, w, &mut sink)
+    }
+
+    /// Copy every parameter into `out`, in [`Self::params_and_grads`] order.
+    ///
+    /// `out` is reused across epochs, so a whole training run snapshots into one
+    /// allocation. The order is a pure function of the layer stack, which never
+    /// changes after construction, so [`Self::load_params_from`] can walk it
+    /// back with nothing but the length of each slot.
+    ///
+    /// **Parameters only.** [`BatchNorm`]'s running mean/variance are NOT
+    /// parameters and are therefore NOT snapshotted, so restoring a snapshot
+    /// into a net containing one would pair epoch-`k` weights with epoch-`n`
+    /// running stats. No architecture this crate builds contains a `BatchNorm`
+    /// ([`Self::feedforward`] emits `Linear`/`Relu` only) and the type is kept
+    /// for gradient tests, so this is documented rather than solved.
+    fn snapshot_params_into(&mut self, out: &mut Vec<f32>) {
+        out.clear();
+        for (p, _, _) in self.params_and_grads() {
+            out.extend_from_slice(p);
+        }
+    }
+
+    /// Inverse of [`Self::snapshot_params_into`].
+    fn load_params_from(&mut self, src: &[f32]) {
+        let mut at = 0;
+        for (p, _, _) in self.params_and_grads() {
+            let n = p.len();
+            p.copy_from_slice(&src[at..at + n]);
+            at += n;
+        }
+        debug_assert_eq!(
+            at,
+            src.len(),
+            "snapshot length disagrees with the layer stack"
+        );
+    }
+
     /// Shuffled-minibatch training. Returns the mean loss of the final epoch.
     ///
     /// The per-epoch shuffle is seeded from the caller's RNG (which
@@ -744,6 +794,10 @@ impl Mlp {
     /// ReLU net can settle into a dead-unit configuration and stay there,
     /// because every step sees the identical gradient. The per-batch noise is
     /// what walks it back out.
+    ///
+    /// No held-out set, therefore NO EARLY STOPPING regardless of
+    /// [`MlpConfig::early_stopping_patience`]: the stopping rule has nothing to
+    /// measure. Callers that want it go through [`Self::train_reporting`].
     pub fn train(
         &mut self,
         cfg: &MlpConfig,
@@ -753,16 +807,84 @@ impl Mlp {
         opt: &mut Adam,
         rng: &mut StdRng,
     ) -> f32 {
+        self.train_reporting(cfg, x, y, w, opt, rng, None, "")
+            .final_train_loss
+    }
+
+    /// [`Self::train`] plus a per-epoch loss trace at `debug` level and,
+    /// when [`MlpConfig::early_stopping_patience`] is set and `val` is present,
+    /// EARLY STOPPING with best-weight restore.
+    ///
+    /// `val` is a HELD-OUT set. It reaches [`Self::eval_loss`] and nothing
+    /// else — never the optimizer, never the input transform, never the RNG —
+    /// so the only ways it can influence the result are the log and the choice
+    /// of WHICH epoch's weights are kept. Both are what early stopping is.
+    ///
+    /// Enable the trace with:
+    /// ```text
+    /// RUST_LOG=timsseek::ml::mlp=debug
+    /// ```
+    ///
+    /// The point of tracing BOTH curves is that they answer different
+    /// questions. Train loss still falling means the fixed epoch budget is the
+    /// binding constraint; held-out loss flattening or turning up while train
+    /// loss keeps falling means the budget is already too large and the epochs
+    /// after the turn are spent overfitting. Only the second reading justifies
+    /// early stopping, and it cannot be read off the train curve alone.
+    ///
+    /// # The stopping rule
+    /// After every epoch the held-out loss is measured. An epoch IMPROVES iff
+    /// `loss < best` — a STRICT comparison, so a tie is not an improvement.
+    /// Two consequences, both wanted: the EARLIEST epoch attaining the minimum
+    /// is the one kept (fewer epochs, and no dependence on how a later epoch's
+    /// rounding happens to land), and a dead-flat plateau still runs the
+    /// patience counter down instead of training forever. A `NaN` held-out loss
+    /// compares false and so counts as no improvement; if EVERY epoch is `NaN`
+    /// there is no snapshot to restore and the last weights stand.
+    ///
+    /// When `patience` epochs pass with no improvement, the best-seen weights
+    /// are restored and training stops. Restoring is not optional: stopping at
+    /// `best + patience` and keeping those weights leaves exactly the
+    /// overfitted parameters the rule exists to avoid. The restore also happens
+    /// when the epoch budget runs out before patience does, so with early
+    /// stopping on you always get the best-held-out-loss weights that were seen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn train_reporting(
+        &mut self,
+        cfg: &MlpConfig,
+        x: &Tensor,
+        y: &[f32],
+        w: &[f32],
+        opt: &mut Adam,
+        rng: &mut StdRng,
+        val: Option<ValSet<'_>>,
+        tag: &str,
+    ) -> TrainOutcome {
         let n = x.rows;
         debug_assert_eq!(y.len(), n);
         debug_assert_eq!(w.len(), n);
+
+        // Early stopping needs something to stop ON. With no held-out set the
+        // knob is inert, which is what makes `Mlp::train` and the `val = &[]`
+        // paths behave as they always did.
+        let patience = match (cfg.early_stopping_patience, val.is_some()) {
+            (Some(p), true) => Some(p),
+            _ => None,
+        };
 
         let mut order: Vec<usize> = (0..n).collect();
         let batch = cfg.batch_size.max(1);
         let (mut xb, mut yb, mut wb) = (Tensor::default(), Vec::new(), Vec::new());
         let mut last_epoch = 0.0;
 
-        for _ in 0..cfg.epochs {
+        let mut best_val = f32::INFINITY;
+        let mut best_epoch: Option<usize> = None;
+        let mut best_train = 0.0f32;
+        let mut best_params: Vec<f32> = Vec::new();
+        let mut stale = 0usize;
+        let mut epochs_run = 0usize;
+
+        for epoch in 0..cfg.epochs {
             // Fisher-Yates, so the shuffle consumes a fixed number of draws
             // per epoch and the sequence stays reproducible.
             for i in (1..order.len()).rev() {
@@ -784,8 +906,83 @@ impl Mlp {
                 nb += 1;
             }
             last_epoch = if nb > 0 { running / nb as f32 } else { 0.0 };
+            epochs_run = epoch + 1;
+
+            // The held-out forward pass runs when the STOPPING RULE needs it
+            // (every epoch, because it is the decision) or when the trace is on
+            // (a diagnostic nobody asked to see should not cost a forward pass).
+            // `tracing::enabled!` is still what gates the LOG, exactly as before.
+            let traced = tracing::enabled!(tracing::Level::DEBUG);
+            let val_loss = match (&val, patience.is_some() || traced) {
+                (Some(v), true) => Some(self.eval_loss(v.x, v.y, v.w, &cfg.loss)),
+                _ => None,
+            };
+
+            if traced {
+                match val_loss {
+                    Some(vl) => tracing::debug!(
+                        "{tag}epoch {}/{}: train_loss={:.6} held_out_loss={:.6}",
+                        epoch + 1,
+                        cfg.epochs,
+                        last_epoch,
+                        vl,
+                    ),
+                    None => tracing::debug!(
+                        "{tag}epoch {}/{}: train_loss={:.6} (no held-out set)",
+                        epoch + 1,
+                        cfg.epochs,
+                        last_epoch,
+                    ),
+                }
+            }
+
+            let Some(p) = patience else { continue };
+            // `val_loss` is `Some` whenever `patience` is: both arms of the
+            // match above require `val` to be present, and `patience` is only
+            // `Some` when it is.
+            let vl = val_loss.expect("early stopping requires a held-out measurement");
+            // STRICT: a tie is not an improvement. See the rule in the docs.
+            if vl < best_val {
+                best_val = vl;
+                best_epoch = Some(epoch);
+                best_train = last_epoch;
+                self.snapshot_params_into(&mut best_params);
+                stale = 0;
+            } else {
+                stale += 1;
+                if stale >= p {
+                    break;
+                }
+            }
         }
-        last_epoch
+
+        // Restore whenever the kept epoch is not the one we happen to be
+        // standing on — i.e. after a patience stop, and also after a budget
+        // exhaustion whose last epochs were not improvements.
+        let restored = match best_epoch {
+            Some(b) if patience.is_some() && b + 1 != epochs_run => {
+                self.load_params_from(&best_params);
+                true
+            }
+            _ => false,
+        };
+        if restored {
+            tracing::debug!(
+                "{tag}early stop: ran {} of {} epochs, restored epoch {} (held_out_loss={:.6})",
+                epochs_run,
+                cfg.epochs,
+                best_epoch.unwrap() + 1,
+                best_val,
+            );
+        }
+
+        TrainOutcome {
+            final_train_loss: if restored { best_train } else { last_epoch },
+            epochs_run,
+            best_epoch,
+            best_val_loss: best_epoch.map(|_| best_val),
+            restored,
+        }
     }
 
     /// `sum_o |W1[j, o]|` over the first weight-bearing layer, per input
@@ -800,6 +997,46 @@ impl Mlp {
             .find_map(|l| l.abs_in_weights())
             .unwrap_or_default()
     }
+}
+
+/// A held-out set for the per-epoch loss trace AND the early-stopping
+/// decision, borrowed for the call.
+///
+/// Deliberately a distinct type from the training triple so a caller cannot
+/// swap the two by argument order: handing the training set here would turn
+/// early stopping into "stop when the train loss stops falling", which on this
+/// net is never, and handing the held-out set to `train` would be an actual
+/// leak. The rows here reach nothing but [`Mlp::eval_loss`] — no optimizer
+/// step, no input transform, no RNG draw — so the only thing they can move is
+/// which epoch's weights are kept.
+pub struct ValSet<'a> {
+    pub x: &'a Tensor,
+    pub y: &'a [f32],
+    pub w: &'a [f32],
+}
+
+/// What one [`Mlp::train_reporting`] call did.
+///
+/// A struct rather than the bare loss because with early stopping the loss no
+/// longer describes the run: the caller's log wants to say WHERE it stopped and
+/// which epoch it kept, and the tests need those two numbers to distinguish
+/// "stopped early" from "ran the budget and got lucky".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrainOutcome {
+    /// Mean training loss of the epoch whose weights the model now holds — the
+    /// last epoch run, or the RESTORED epoch when early stopping rolled back.
+    /// Reporting the last epoch's loss after a rollback would describe weights
+    /// that were thrown away.
+    pub final_train_loss: f32,
+    /// Epochs actually executed, `<= cfg.epochs`.
+    pub epochs_run: usize,
+    /// Zero-based epoch with the best held-out loss, or `None` when there was
+    /// no held-out set (or every measurement was `NaN`).
+    pub best_epoch: Option<usize>,
+    /// The held-out loss at `best_epoch`.
+    pub best_val_loss: Option<f32>,
+    /// Whether the parameters were rolled back to `best_epoch`.
+    pub restored: bool,
 }
 
 // ---------------------------------------------------------------- input transform
@@ -1024,10 +1261,42 @@ pub struct MlpConfig {
     pub hidden: Vec<usize>,
     pub lr: f32,
     pub weight_decay: f32,
+    /// UPPER BOUND on epochs, not a target: with
+    /// [`Self::early_stopping_patience`] set, training normally stops before
+    /// this.
     pub epochs: usize,
     pub batch_size: usize,
     pub loss: MlpLoss,
     pub seed: u64,
+    /// Stop after this many consecutive epochs with no improvement in held-out
+    /// loss, and restore the best-seen weights. `None` disables the whole
+    /// mechanism: the full `epochs` budget runs, nothing is snapshotted, and
+    /// the fit is bit-identical to what it was before early stopping existed.
+    ///
+    /// # Why it defaults to on
+    /// Measured on a 114k-candidate search, all three rescore folds bottom out
+    /// well inside the 30-epoch budget and then get worse, while the TRAIN loss
+    /// falls monotonically to the end:
+    ///
+    /// | fold | best held-out | at epoch | held-out @30 |
+    /// |------|---------------|----------|--------------|
+    /// | 0    | 0.465810      | 16       | 0.469477     |
+    /// | 1    | 0.459646      | 23       | 0.461799     |
+    /// | 2    | 0.458787      | 17       | 0.462773     |
+    ///
+    /// So 40-47% of the budget was spent memorizing. Lowering `epochs` instead
+    /// would NOT do the same job: the best epoch is 16, 23 and 17 on the three
+    /// folds of one single run, so any fixed budget is too long for one fold and
+    /// too short for another. The turn is a per-fold property and only a per-fold
+    /// rule can find it.
+    ///
+    /// # Why 5
+    /// The three curves above are within ~0.2% of their minimum for several
+    /// epochs around it, so a patience of 1 or 2 would stop on measurement noise
+    /// well before the turn. Five is long enough to walk through a flat stretch
+    /// and short enough to cut most of the memorizing tail. It has NOT been swept
+    /// on real data; it is a default, not a tuned value.
+    pub early_stopping_patience: Option<usize>,
 }
 
 impl Default for MlpConfig {
@@ -1042,6 +1311,7 @@ impl Default for MlpConfig {
             batch_size: 256,
             loss: MlpLoss::Bce,
             seed: 0x2545_F491_4F6C_DD1D,
+            early_stopping_patience: Some(5),
         }
     }
 }
@@ -1573,6 +1843,393 @@ mod test {
     /// being asserted from "weights move the boundary" to "weights move the
     /// boundary on any sample", which needs a tolerance rather than a strict
     /// inequality.
+    /// THE `patience: None` contract: with early stopping off, handing
+    /// `train_reporting` a held-out set changes the LOG and nothing else. That
+    /// is the behavior the whole module had before early stopping existed, and
+    /// `None` has to reproduce it exactly.
+    ///
+    /// This is a leak assertion, not a tidiness one. The set passed here is by
+    /// construction rows the fitted model will later be asked to score, so if
+    /// reporting could nudge a weight — through the optimizer, the RNG stream, or
+    /// a stale gradient buffer left by `eval_loss` — the model would have been
+    /// fitted on rows it is scoring, and every downstream leak test would still
+    /// pass because they all check the PARTITION rather than the training loop.
+    /// Asserted on raw bits over the whole score vector, at several seeds.
+    ///
+    /// `patience: None` is EXPLICIT here rather than inherited: the default is
+    /// `Some(5)`, under which passing a held-out set is SUPPOSED to be able to
+    /// change the fit. The second half of this test asserts that it can, so a
+    /// `None` that silently early-stopped anyway — or a `Some` that silently did
+    /// not — fails one arm or the other.
+    #[test]
+    fn patience_none_makes_a_held_out_set_reporting_only() {
+        for seed in [7u64, 13, 42] {
+            let mut dr = StdRng::seed_from_u64(seed);
+            let n = 128;
+            let mut x = Tensor::new(n, 3);
+            let mut y = vec![0.0f32; n];
+            for i in 0..n {
+                let pos = i % 2 == 0;
+                let r = x.row_mut(i);
+                r[0] = if pos { 0.7 } else { -0.7 } + 0.5 * normal(&mut dr);
+                r[1] = normal(&mut dr);
+                r[2] = if pos { -0.3 } else { 0.3 } + 0.5 * normal(&mut dr);
+                y[i] = if pos { 1.0 } else { 0.0 };
+            }
+            let w = vec![1.0f32; n];
+            // A DIFFERENT set, standing in for the early-stop fold. Pure noise
+            // against alternating labels, so its loss cannot fall for long and
+            // the `Some` arm below is guaranteed something to stop on.
+            let mut vx = Tensor::new(32, 3);
+            for i in 0..32 {
+                for j in 0..3 {
+                    vx.row_mut(i)[j] = normal(&mut dr);
+                }
+            }
+            let vy: Vec<f32> = (0..32)
+                .map(|i| if i % 2 == 0 { 1.0 } else { 0.0 })
+                .collect();
+            let vw = vec![1.0f32; 32];
+
+            let cfg = MlpConfig {
+                hidden: vec![8],
+                // Long enough that the noise validation set has certainly
+                // turned by the end, which is what the control arm needs.
+                epochs: 400,
+                batch_size: 32,
+                early_stopping_patience: None,
+                ..MlpConfig::default()
+            };
+
+            let run = |cfg: &MlpConfig, val: Option<ValSet<'_>>| {
+                let mut r = StdRng::seed_from_u64(99);
+                let mut m = Mlp::feedforward(3, &cfg.hidden, &mut r);
+                let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+                let out = m.train_reporting(cfg, &x, &y, &w, &mut o, &mut r, val, "t");
+                let p = m.forward(&x, false);
+                let bits = (0..n).map(|i| p.row(i)[0].to_bits()).collect::<Vec<u32>>();
+                (out, bits)
+            };
+            let vset = || {
+                Some(ValSet {
+                    x: &vx,
+                    y: &vy,
+                    w: &vw,
+                })
+            };
+
+            let (out_without, without) = run(&cfg, None);
+            let (out_with, with) = run(&cfg, vset());
+            assert_eq!(
+                without, with,
+                "seed {seed}: with patience None a held-out set moved the fit — it must only log"
+            );
+            // Non-vacuity: the fit is not a constant that any two runs would match.
+            assert!(
+                without
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    > 1,
+                "seed {seed}: scores are all identical, so the comparison proves nothing"
+            );
+            // ...and `None` really means the whole budget, unsnapshotted.
+            for o in [out_without, out_with] {
+                assert_eq!(
+                    o.epochs_run, cfg.epochs,
+                    "seed {seed}: None must run the budget"
+                );
+                assert_eq!(
+                    o.best_epoch, None,
+                    "seed {seed}: None must not track a best"
+                );
+                assert!(!o.restored, "seed {seed}: None must not roll back");
+            }
+
+            // THE CONTROL: the same call with patience ON does change the fit,
+            // so the equality above is a property of `None` and not of a
+            // held-out set that could never matter.
+            let es = MlpConfig {
+                early_stopping_patience: Some(5),
+                ..cfg.clone()
+            };
+            let (out_es, es_bits) = run(&es, vset());
+            assert!(
+                out_es.epochs_run < es.epochs,
+                "seed {seed}: the fixture must overfit its noise validation set for the \
+                 control to mean anything (ran {} of {} epochs)",
+                out_es.epochs_run,
+                es.epochs
+            );
+            assert!(
+                es_bits != without,
+                "seed {seed}: early stopping produced the SAME weights as the full budget, \
+                 so `patience: None` reproducing them proves nothing"
+            );
+        }
+    }
+
+    // ------------------------------------------------------- early stopping
+
+    /// `(train x, y, w, validation x, y, w)` — see [`overfitting_fixture`].
+    type OverfitFixture = (Tensor, Vec<f32>, Vec<f32>, Tensor, Vec<f32>, Vec<f32>);
+
+    /// A fixture that MUST overfit: 48 training rows, 24 columns of which
+    /// exactly one carries a weak signal, against a 256-row validation set from
+    /// the same distribution. There is far more capacity than signal, so the
+    /// train loss walks to zero while the validation loss bottoms out early and
+    /// then climbs — which is the situation early stopping exists for.
+    fn overfitting_fixture(seed: u64) -> OverfitFixture {
+        const NCOLS: usize = 24;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut make = |n: usize| {
+            let mut t = Tensor::new(n, NCOLS);
+            let mut labels = vec![0.0f32; n];
+            for i in 0..n {
+                let pos = i % 2 == 0;
+                let r = t.row_mut(i);
+                // Column 0 is weakly informative; 1..24 are pure noise the net
+                // can memorize the training rows with and nothing else.
+                r[0] = if pos { 0.6 } else { -0.6 } + normal(&mut rng);
+                for j in 1..NCOLS {
+                    r[j] = normal(&mut rng);
+                }
+                labels[i] = if pos { 1.0 } else { 0.0 };
+            }
+            let w = vec![1.0f32; n];
+            (t, labels, w)
+        };
+        let (x, y, w) = make(48);
+        let (vx, vy, vw) = make(256);
+        (x, y, w, vx, vy, vw)
+    }
+
+    fn overfitting_cfg(patience: Option<usize>) -> MlpConfig {
+        MlpConfig {
+            hidden: vec![32, 16],
+            lr: 1e-2,
+            weight_decay: 0.0,
+            epochs: 200,
+            batch_size: 16,
+            early_stopping_patience: patience,
+            ..MlpConfig::default()
+        }
+    }
+
+    /// Train the overfitting fixture and hand back the outcome plus the
+    /// validation loss OF THE WEIGHTS THE CALLER IS LEFT WITH.
+    fn run_overfit(
+        cfg: &MlpConfig,
+        init_seed: u64,
+        fx: &OverfitFixture,
+        with_val: bool,
+    ) -> (TrainOutcome, f32, Vec<u32>) {
+        let (x, y, w, vx, vy, vw) = fx;
+        let mut r = StdRng::seed_from_u64(init_seed);
+        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, &mut r);
+        let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+        let val = with_val.then(|| ValSet {
+            x: vx,
+            y: vy,
+            w: vw,
+        });
+        let outcome = m.train_reporting(cfg, x, y, w, &mut o, &mut r, val, "es");
+        let vl = m.eval_loss(vx, vy, vw, &cfg.loss);
+        let bits = m
+            .params_and_grads()
+            .into_iter()
+            .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+            .collect();
+        (outcome, vl, bits)
+    }
+
+    /// Early stopping stops BEFORE the budget on a fixture that overfits, and
+    /// the weights it leaves behind are no worse on the held-out set than the
+    /// ones the full budget produces.
+    ///
+    /// Swept over seeds, like every learning test in this module: this one is
+    /// doubly init-dependent, since both the training trap and the epoch the
+    /// validation curve turns at move with the initialization.
+    #[test]
+    fn early_stopping_stops_early_and_does_not_hurt_the_held_out_loss() {
+        for seed in [7u64, 13, 42, 1234, 31337] {
+            let fx = overfitting_fixture(seed ^ 0xF00D);
+            let es = overfitting_cfg(Some(5));
+            let full = overfitting_cfg(None);
+
+            let (out, es_val, _) = run_overfit(&es, seed, &fx, true);
+            let (full_out, full_val, _) = run_overfit(&full, seed, &fx, true);
+
+            assert_eq!(full_out.epochs_run, full.epochs);
+            assert!(
+                out.epochs_run < es.epochs,
+                "seed {seed}: ran the whole {} epoch budget, so nothing was stopped",
+                es.epochs
+            );
+            assert!(
+                out.restored,
+                "seed {seed}: a run that stopped early must roll back"
+            );
+            // The stop is exactly `patience` epochs after the best one.
+            assert_eq!(
+                out.epochs_run,
+                out.best_epoch.unwrap() + 1 + 5,
+                "seed {seed}: stopped somewhere other than best + patience"
+            );
+            assert!(
+                es_val <= full_val,
+                "seed {seed}: early stopping made the held-out loss WORSE \
+                 ({es_val} > {full_val}) — it is supposed to be the point"
+            );
+            // Non-vacuity: the full budget really does overfit here, so the
+            // comparison above is not two identical numbers.
+            assert!(
+                full_val > es_val,
+                "seed {seed}: the full budget did not overfit this fixture \
+                 (held-out {full_val} vs {es_val}), so there was nothing to stop"
+            );
+        }
+    }
+
+    /// THE restore assertion: the weights left behind are the BEST-seen ones,
+    /// not the ones training was standing on when patience ran out.
+    ///
+    /// The comparison arm is the same trajectory truncated at the same epoch
+    /// WITHOUT a rollback — `patience: None` with `epochs` set to what the early
+    /// stopped run actually executed. Nothing else differs: the RNG feeds only
+    /// the init and the per-epoch shuffle, and `eval_loss` draws from it not at
+    /// all, so the two runs are bit-identical up to the point one of them rolls
+    /// back. An implementation that stopped without restoring would produce that
+    /// arm's weights and fail both assertions below.
+    #[test]
+    fn early_stopping_restores_the_best_weights_not_the_last_ones() {
+        for seed in [7u64, 13, 42, 1234, 31337] {
+            let fx = overfitting_fixture(seed ^ 0xF00D);
+            let es = overfitting_cfg(Some(5));
+            let (out, es_val, es_bits) = run_overfit(&es, seed, &fx, true);
+
+            // The held-out loss of the restored weights IS the best one seen,
+            // to the bit — not merely close to it.
+            assert_eq!(
+                es_val.to_bits(),
+                out.best_val_loss.unwrap().to_bits(),
+                "seed {seed}: the restored weights do not reproduce the best held-out \
+                 loss ({es_val} vs {})",
+                out.best_val_loss.unwrap()
+            );
+
+            let stopped_here = MlpConfig {
+                epochs: out.epochs_run,
+                ..overfitting_cfg(None)
+            };
+            let (no_restore_out, no_restore_val, no_restore_bits) =
+                run_overfit(&stopped_here, seed, &fx, true);
+            assert_eq!(no_restore_out.epochs_run, out.epochs_run);
+            assert!(
+                es_bits != no_restore_bits,
+                "seed {seed}: restoring changed no weight, so this test cannot tell a \
+                 restoring implementation from a non-restoring one"
+            );
+            assert!(
+                es_val < no_restore_val,
+                "seed {seed}: stopping WITHOUT restoring would have left held-out loss \
+                 {no_restore_val}; the restore must beat it, got {es_val}"
+            );
+        }
+    }
+
+    /// TIES ARE NOT IMPROVEMENTS, pinned on the one fixture where every epoch
+    /// ties exactly: `lr = 0` freezes every parameter (both the Adam step and
+    /// the decoupled decay scale by `lr`), so the held-out loss is bit-identical
+    /// at every epoch.
+    ///
+    /// Under the strict `<` rule epoch 0 is the only improvement, the patience
+    /// counter then runs uninterrupted, and training stops at epoch `patience`.
+    /// Under a `<=` rule every epoch would improve, the counter would never
+    /// advance, and the run would train the full budget and keep the LAST epoch
+    /// — so this test distinguishes the two rules exactly.
+    #[test]
+    fn a_tie_is_not_an_improvement() {
+        for patience in [1usize, 3, 5] {
+            let fx = overfitting_fixture(11);
+            let cfg = MlpConfig {
+                lr: 0.0,
+                weight_decay: 0.0,
+                epochs: 100,
+                early_stopping_patience: Some(patience),
+                ..overfitting_cfg(Some(patience))
+            };
+            let (out, _, _) = run_overfit(&cfg, 5, &fx, true);
+            assert_eq!(
+                out.best_epoch,
+                Some(0),
+                "patience {patience}: with every epoch tied, the FIRST must be kept"
+            );
+            assert_eq!(
+                out.epochs_run,
+                patience + 1,
+                "patience {patience}: a dead-flat curve must still run the counter down"
+            );
+        }
+    }
+
+    /// Determinism, including the stopping decision: two runs of the same build
+    /// on the same input agree on the epoch they stopped at, the epoch they
+    /// kept, and every parameter bit.
+    #[test]
+    fn early_stopping_is_bit_reproducible() {
+        for seed in [7u64, 42, 31337] {
+            let fx = overfitting_fixture(seed ^ 0xF00D);
+            let cfg = overfitting_cfg(Some(5));
+            let (a_out, a_val, a_bits) = run_overfit(&cfg, seed, &fx, true);
+            let (b_out, b_val, b_bits) = run_overfit(&cfg, seed, &fx, true);
+            assert_eq!(a_out, b_out, "seed {seed}: the stopping decision moved");
+            assert_eq!(a_val.to_bits(), b_val.to_bits(), "seed {seed}");
+            assert_eq!(a_bits, b_bits, "seed {seed}: the restored weights moved");
+        }
+    }
+
+    /// With no held-out set the knob is INERT — there is nothing to measure a
+    /// stopping decision against, so the full budget runs and `Mlp::train`
+    /// behaves as it always did even on the default config.
+    #[test]
+    fn early_stopping_without_a_validation_set_is_a_no_op() {
+        let fx = overfitting_fixture(11);
+        let cfg = overfitting_cfg(Some(5));
+        let (out, _, with_knob) = run_overfit(&cfg, 7, &fx, false);
+        assert_eq!(out.epochs_run, cfg.epochs);
+        assert_eq!(out.best_epoch, None);
+        assert!(!out.restored);
+
+        let (_, _, without_knob) = run_overfit(&overfitting_cfg(None), 7, &fx, false);
+        assert_eq!(
+            with_knob, without_knob,
+            "with no validation set the patience knob must change nothing"
+        );
+    }
+
+    #[test]
+    fn eval_loss_leaves_the_parameters_untouched() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut m = Mlp::feedforward(4, &[6], &mut rng);
+        let x = filled(16, 4, &mut rng);
+        let y: Vec<f32> = (0..16).map(|i| (i % 2) as f32).collect();
+        let w = vec![1.0f32; 16];
+
+        let snapshot = |m: &mut Mlp| -> Vec<u32> {
+            m.params_and_grads()
+                .into_iter()
+                .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+                .collect()
+        };
+
+        let before = snapshot(&mut m);
+        let l = m.eval_loss(&x, &y, &w, &MlpLoss::Bce);
+        let after = snapshot(&mut m);
+        assert_eq!(before, after, "eval_loss mutated a parameter");
+        assert!(l.is_finite() && l > 0.0, "eval_loss returned {l}");
+    }
+
     #[test]
     fn sample_weights_shift_the_decision_boundary() {
         // Two overlapping classes; up-weighting one must move the fitted

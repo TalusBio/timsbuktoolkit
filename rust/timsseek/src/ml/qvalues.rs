@@ -329,9 +329,12 @@ where
         let train: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) != f).collect();
         let held: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) == f).collect();
 
-        // `val` is empty: neither model here early-stops (the LDA is
-        // closed-form, the MLP runs a fixed epoch count), and `FoldModel`
-        // documents that such a model ignores the slice.
+        // `val` is EMPTY and the partition is why: this walk trains on
+        // all-but-fold-`f` and scores fold `f`, so every row is already spoken
+        // for and there is no third slice to hand over. The LDA is closed-form
+        // and ignores it. `MlpFoldModel` DOES early-stop, and handles the empty
+        // slice by carving a deterministic inner validation set out of `train`
+        // — see its `fit` for the rule; nothing about it reaches fold `f`.
         let model = match M::fit(cfg, data, f, &train, &[]) {
             Ok(m) => m,
             Err(e) => {
@@ -961,10 +964,13 @@ fn abort_standalone_mlp(lane: Lane, ncols: usize, nrows: usize, e: MlpFoldError)
 /// # Cross-fit semantics
 /// UNCHANGED from the GBM path, because it is literally the same scorer — see
 /// [`CrossValidatedScorer`] for the partition. Two MLP-specific notes on top of
-/// it: the early-stopping fold is a no-op here ([`MlpFoldModel`] runs a fixed
-/// epoch count and ignores the validation slice), and every fitted statistic
-/// (cull set, standardization moments, imputation means, weights) is
-/// train-fold-only inside [`MlpFoldModel::fit`].
+/// it: the early-stopping fold (`f + 1`) IS used, by [`MlpFoldModel`]'s
+/// patience rule exactly as the GBM uses it through forust's
+/// `early_stopping_rounds`, and every fitted statistic (cull set,
+/// standardization moments, imputation means, weights) is train-fold-only
+/// inside [`MlpFoldModel::fit`]. The early-stopping fold reaches the loss
+/// measurement and nothing else, and the scorer never asks a model to score
+/// either the fold it trained on or the fold it stopped on.
 ///
 /// # Determinism
 /// [`canonicalize_and_shuffle`] pins the row order and therefore the positional

@@ -12,11 +12,14 @@
 //!     held-out feature values — the cross-fit's leak-freedom is a property of
 //!     the caller's partition, and this impl must not undermine it.
 //!  2. **The fit is a pure function of the config, the fold index and the
-//!     data.** The RNG comes from [`MlpConfig::rng_for_fold`], i.e. from the
-//!     configured seed and the `fold` argument [`FoldModel::fit`] is handed and
-//!     nothing else — no call counter, no clock, no hash-map iteration order —
-//!     so folds differ from one another while the same build on the same input
-//!     produces bit-identical scores.
+//!     row slices.** The RNG comes from [`MlpConfig::rng_for_fold`], i.e. from
+//!     the configured seed and the `fold` argument [`FoldModel::fit`] is handed
+//!     and nothing else — no call counter, no clock, no hash-map iteration
+//!     order — so folds differ from one another while the same build on the
+//!     same input produces bit-identical scores. Early stopping does not weaken
+//!     this: the stopping decision is a strict comparison of floats computed by
+//!     the same deterministic forward pass, and the inner-validation carve
+//!     ([`inner_val_split`]) is a pure function of `train.len()`.
 
 use crate::ml::cv::{
     FoldDataset,
@@ -29,6 +32,8 @@ use crate::ml::mlp::{
     Mlp,
     MlpConfig,
     Tensor,
+    TrainOutcome,
+    ValSet,
 };
 use std::cell::RefCell;
 
@@ -145,10 +150,21 @@ pub struct MlpFoldModel {
     /// Fitted on the TRAIN rows at `fit` time and never refitted. This is the
     /// field the whole leak argument rests on.
     transform: ColumnTransform,
-    /// Mean loss of the final training epoch. Diagnostics only — `fit` logs it,
-    /// and [`MlpFoldModel::final_loss`] hands it to a failing test's message.
+    /// Mean training loss of the epoch whose weights the net holds. Diagnostics
+    /// only — `fit` logs it, and [`MlpFoldModel::final_loss`] hands it to a
+    /// failing test's message.
     #[cfg_attr(not(test), allow(dead_code))]
     final_loss: f32,
+    /// Rows that actually reached the optimizer: `train.len()` minus whatever
+    /// the inner-validation carve took. The ONE externally checkable statement
+    /// that the carve is excluded from training — see
+    /// `inner_validation_rows_are_withheld_from_the_optimizer`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    n_train_rows: usize,
+    /// What the training run did — epochs run, epoch kept, whether it rolled
+    /// back. `fit` logs it; the tests assert on it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    outcome: TrainOutcome,
 }
 
 // Both accessors are TEST SURFACE and are scoped to it. Nothing in the live path
@@ -166,6 +182,16 @@ impl MlpFoldModel {
     /// Mean loss over the final training epoch.
     pub(crate) fn final_loss(&self) -> f32 {
         self.final_loss
+    }
+
+    /// Rows the optimizer actually saw.
+    pub(crate) fn n_train_rows(&self) -> usize {
+        self.n_train_rows
+    }
+
+    /// What the training run did.
+    pub(crate) fn outcome(&self) -> TrainOutcome {
+        self.outcome
     }
 }
 
@@ -185,13 +211,87 @@ fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
     feat
 }
 
+/// One row in every `INNER_VAL_STRIDE` of `train` is carved off as the inner
+/// validation slice — 20%.
+///
+/// Why a STRIDE and not a tail cut or a random sample:
+///
+///  * **Deterministic with no RNG.** It is a pure function of `train.len()`, so
+///    it cannot consume a draw and shift the weight init or the shuffle
+///    sequence, and two runs of the same build carve the same rows by
+///    construction. A random sample would have to be seeded from somewhere, and
+///    every seed source available here is already spoken for.
+///  * **Class-proportional under any row ORDER.** The rescore path shuffles
+///    before building the matrix, so a tail cut would usually be fine there —
+///    but `FoldModel::fit` is handed whatever slice the caller has, and the
+///    obvious unshuffled layout is targets-then-decoys, where a tail cut is a
+///    single-class validation set and the stopping decision becomes nonsense. A
+///    stride takes 20% of every contiguous run of rows, whatever it holds.
+const INNER_VAL_STRIDE: usize = 5;
+
+/// Below this many train rows, no inner slice is carved and no early stopping
+/// happens on the `val = &[]` path — the full epoch budget runs, as it did
+/// before early stopping existed.
+///
+/// `160` is `MIN_INNER_VAL_ROWS * INNER_VAL_STRIDE`: the floor is really on the
+/// SIZE OF THE VALIDATION SET, 32 rows. A held-out loss averaged over fewer
+/// rows than that is dominated by which rows landed in it, and a patience rule
+/// reading it stops on sampling noise rather than on the overfitting turn —
+/// worse than not stopping at all. The 20% also costs training rows, which a
+/// small fold cannot spare.
+///
+/// This is a floor chosen for the reason above, not a tuned value. Production
+/// folds are 10^4-10^5 rows and are nowhere near it; the fixtures in this crate
+/// straddle it, so some of them early-stop and some do not.
+const MIN_TRAIN_ROWS_FOR_INNER_VAL: usize = MIN_INNER_VAL_ROWS * INNER_VAL_STRIDE;
+const MIN_INNER_VAL_ROWS: usize = 32;
+
+/// Split `0..len` into (rows to TRAIN on, rows to make the stopping decision
+/// on), or `(all, none)` when `len` is under [`MIN_TRAIN_ROWS_FOR_INNER_VAL`].
+///
+/// Positions, not dataset row indices: the caller has already gathered `train`
+/// into a slab whose row `k` is `train[k]`, so both halves index that slab.
+///
+/// Offset `INNER_VAL_STRIDE - 1` rather than `0` so position 0 trains; nothing
+/// depends on which offset it is, only on it being fixed.
+fn inner_val_split(len: usize) -> (Vec<usize>, Vec<usize>) {
+    if len < MIN_TRAIN_ROWS_FOR_INNER_VAL {
+        return ((0..len).collect(), Vec::new());
+    }
+    (0..len).partition(|k| k % INNER_VAL_STRIDE != INNER_VAL_STRIDE - 1)
+}
+
 impl FoldModel for MlpFoldModel {
     type Config = MlpConfig;
     type Error = MlpFoldError;
 
-    /// `val` is DELIBERATELY IGNORED. Training runs a fixed `cfg.epochs` with
-    /// no early stopping, and [`FoldModel`] documents that a model without
-    /// early stopping ignores the validation slice. Callers may pass `&[]`.
+    /// `val` is the EARLY-STOPPING SLICE, and it is used as one whenever
+    /// [`MlpConfig::early_stopping_patience`] is set. It reaches
+    /// [`ColumnTransform::apply`] and [`Mlp::eval_loss`] and nothing else — not
+    /// the transform FIT, not the optimizer, not the RNG — so the only thing it
+    /// can move is which epoch's weights are kept, which is what early stopping
+    /// means.
+    ///
+    /// # The `val = &[]` callers
+    /// `qvalues::crossfit` (the driver both hybrids use) has no fold to spare
+    /// and passes an empty slice. Rather than silently training the full budget
+    /// there, an inner slice is carved out of `train` — see
+    /// [`inner_val_split`] for the rule and [`MIN_TRAIN_ROWS_FOR_INNER_VAL`] for
+    /// when it declines to. Those rows are excluded from the optimizer and used
+    /// only for the stopping decision.
+    ///
+    /// **The [`ColumnTransform`] is still fitted over ALL of `train`,
+    /// inner-validation rows included.** Deliberate, and the choice worth
+    /// stating: those rows are train-fold rows — the outer partition does not
+    /// hold them out from this model, this function does, for a decision that
+    /// never leaves it — so including them breaks no leak property. What it buys
+    /// is that the cull set, the standardization moments and the imputation
+    /// means do not move when the patience knob does: a config knob that changed
+    /// WHICH LANE COLUMNS ARE ALIVE would change the importance sidecar and the
+    /// [`MlpFoldError::NoUsableColumns`] failure mode along with it. The cost is
+    /// that the inner-validation loss is very slightly optimistic, through
+    /// label-free per-column moments that 80% of the same rows already
+    /// determine — second-order next to the epoch it is being used to choose.
     ///
     /// `fold` is NOT ignored: it is the only thing that distinguishes one
     /// fold's initialization from another's, via
@@ -209,7 +309,6 @@ impl FoldModel for MlpFoldModel {
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, MlpFoldError> {
-        let _ = val;
         let names = data.column_names();
         let ncols = names.len();
         let feat = gather(data, train, ncols);
@@ -240,41 +339,121 @@ impl FoldModel for MlpFoldModel {
             });
         }
 
-        // Labels: y = 1.0 target / 0.0 decoy, the GBM's convention.
-        let mut x = Tensor::new(train.len(), width);
-        let mut y = Vec::with_capacity(train.len());
-        for (k, &i) in train.iter().enumerate() {
-            transform.apply(&feat[k * ncols..(k + 1) * ncols], x.row_mut(k));
-            y.push(if data.is_decoy(i) { 0.0 } else { 1.0 });
+        // Where the stopping decision gets measured. An outer `val` slice is
+        // preferred whenever there is one — it costs no training rows — and the
+        // inner carve is the fallback for the callers that pass `&[]`. With
+        // early stopping off there is no decision to make, so no carve either
+        // and every train row trains, exactly as before.
+        let early_stopping = cfg.early_stopping_patience.is_some();
+        let (fit_pos, inner_pos) = if early_stopping && val.is_empty() {
+            inner_val_split(train.len())
+        } else {
+            ((0..train.len()).collect(), Vec::new())
+        };
+        if early_stopping && val.is_empty() && inner_pos.is_empty() {
+            tracing::debug!(
+                "MLP fold {}: {} train rows is under the {} needed to carve an inner \
+                 validation slice — training the full {} epoch budget with no early stopping",
+                fold,
+                train.len(),
+                MIN_TRAIN_ROWS_FOR_INNER_VAL,
+                cfg.epochs,
+            );
         }
+
+        // Labels: y = 1.0 target / 0.0 decoy, the GBM's convention.
+        //
         // Sample weights come from [`fold_weights`], the ONE definition of the
         // decoy-1.0 / target-0.5 convention. Re-inlining it here is how the MLP
         // and the GBM would come to weight their classes differently without any
         // test noticing — the two models would just be trained on different
         // objectives.
-        let w: Vec<f32> = fold_weights(data, train)
-            .into_iter()
-            .map(|v| v as f32)
-            .collect();
+        let weights = fold_weights(data, train);
+        // `pos` indexes the gathered slab, whose row `k` is `train[k]`.
+        let build = |pos: &[usize]| -> (Tensor, Vec<f32>, Vec<f32>) {
+            let mut t = Tensor::new(pos.len(), width);
+            let mut labels = Vec::with_capacity(pos.len());
+            let mut ws = Vec::with_capacity(pos.len());
+            for (k, &p) in pos.iter().enumerate() {
+                transform.apply(&feat[p * ncols..(p + 1) * ncols], t.row_mut(k));
+                labels.push(if data.is_decoy(train[p]) { 0.0 } else { 1.0 });
+                ws.push(weights[p] as f32);
+            }
+            (t, labels, ws)
+        };
+        let (x, y, w) = build(&fit_pos);
+
+        // The held-out set, transformed through the TRAIN-fitted transform. It
+        // reaches `Mlp::eval_loss` and nothing else — no optimizer step, no
+        // transform fit, no RNG draw.
+        //
+        // Built UNCONDITIONALLY when early stopping is on: it is the stopping
+        // decision now, not just a log line. With early stopping off it is
+        // built only for the trace, as it always was.
+        let val_rows: &[usize] = if val.is_empty() { &[] } else { val };
+        let want_val = early_stopping || tracing::enabled!(tracing::Level::DEBUG);
+        let val_set = if !want_val {
+            None
+        } else if !val_rows.is_empty() {
+            let vfeat = gather(data, val_rows, ncols);
+            let mut vx = Tensor::new(val_rows.len(), width);
+            let mut vy = Vec::with_capacity(val_rows.len());
+            for (k, &i) in val_rows.iter().enumerate() {
+                transform.apply(&vfeat[k * ncols..(k + 1) * ncols], vx.row_mut(k));
+                vy.push(if data.is_decoy(i) { 0.0 } else { 1.0 });
+            }
+            let vw: Vec<f32> = fold_weights(data, val_rows)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect();
+            Some((vx, vy, vw))
+        } else if !inner_pos.is_empty() {
+            // Already gathered and already transformed the same way — the inner
+            // slice is a subset of the rows in `feat`.
+            Some(build(&inner_pos))
+        } else {
+            None
+        };
 
         // Seeded from (config seed, fold index) alone — see the module docs.
         let mut rng = cfg.rng_for_fold(fold);
         let mut net = Mlp::feedforward(width, &cfg.hidden, &mut rng);
         let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-        let final_loss = net.train(cfg, &x, &y, &w, &mut opt, &mut rng);
+        let tag = format!("MLP fold {fold}: ");
+        let outcome = net.train_reporting(
+            cfg,
+            &x,
+            &y,
+            &w,
+            &mut opt,
+            &mut rng,
+            val_set.as_ref().map(|(vx, vy, vw)| ValSet {
+                x: vx,
+                y: vy,
+                w: vw,
+            }),
+            &tag,
+        );
         tracing::debug!(
-            "MLP fold {}: trained on {} rows x {} inputs ({} lane columns), final epoch loss {}",
+            "MLP fold {}: trained on {} of {} rows x {} inputs ({} lane columns), \
+             {} of {} epochs, kept epoch {:?}, final epoch loss {}",
             fold,
+            x.rows(),
             train.len(),
             width,
             ncols,
-            final_loss,
+            outcome.epochs_run,
+            cfg.epochs,
+            outcome.best_epoch.map(|b| b + 1),
+            outcome.final_train_loss,
         );
 
         Ok(MlpFoldModel {
             net: RefCell::new(net),
             transform,
-            final_loss,
+            final_loss: outcome.final_train_loss,
+            n_train_rows: x.rows(),
+            outcome,
         })
     }
 
@@ -813,11 +992,19 @@ mod test {
 
     /// Same config + same fold + same data => bit-identical scores, run to run.
     /// The whole q-value pipeline downstream is a ranking of these.
+    ///
+    /// The STOPPING DECISION is part of what has to reproduce: an early stop is
+    /// a branch on a measured float, and a run that stopped at a different epoch
+    /// would produce a different (still finite, still plausible) score vector.
+    /// `TrainOutcome` carries the epoch it ran to and the epoch it kept, and
+    /// both are asserted equal here.
     #[test]
     fn refitting_the_same_fold_reproduces_the_scores_exactly() {
-        let (feat, y) = toy(100, 42, 0.0);
+        // 200 train rows, i.e. over `MIN_TRAIN_ROWS_FOR_INNER_VAL`, so this
+        // fixture exercises the carve and the stop rather than a fixed budget.
+        let (feat, y) = toy(200, 42, 0.0);
         let data = dataset(feat, 3, y);
-        let (train, held) = split(200);
+        let (train, held) = split(400);
 
         let a = MlpFoldModel::fit(&cfg(42), &data, 0, &train, &[]).unwrap();
         let b = MlpFoldModel::fit(&cfg(42), &data, 0, &train, &[]).unwrap();
@@ -826,6 +1013,21 @@ mod test {
             b.predict(&data, &held).unwrap()
         );
         assert_eq!(a.importance(), b.importance());
+        assert_eq!(a.outcome(), b.outcome(), "the stopping decision moved");
+        // Non-vacuity for the line above: this fixture goes down the
+        // early-stopping path — an inner slice was carved, a best epoch was
+        // chosen, and the weights were rolled back to it — so "same outcome" is
+        // a comparison of two real decisions and not of two inert budgets. It
+        // does NOT run out of patience here (this toy's validation loss is
+        // still improving at epoch 147 of 150); the stop itself is covered by
+        // `mlp::test::early_stopping_stops_early_and_does_not_hurt_the_held_out_loss`.
+        assert!(
+            a.outcome().best_epoch.is_some() && a.outcome().restored,
+            "this train slice ({} rows) is supposed to carve an inner validation \
+             slice and roll back to its best epoch: {:?}",
+            train.len(),
+            a.outcome()
+        );
 
         // ...and the `fold` ARGUMENT really does reach the init: same config,
         // same rows, different fold => different weights. Without this the
@@ -904,6 +1106,113 @@ mod test {
         // here. The even-row slice is class-balanced and costs nothing.
         let (train, _) = split(40);
         assert!(MlpFoldModel::fit(&cfg(7), &data, 2, &train, &[]).is_ok());
+    }
+
+    // --------------------------------------------------- inner validation
+
+    /// The carve is a PURE FUNCTION OF `train.len()` — no RNG, no data, no
+    /// clock — which is the whole reason it can sit inside a fit that has to
+    /// reproduce bit-for-bit.
+    #[test]
+    fn the_inner_validation_carve_is_a_deterministic_partition() {
+        // Under the floor: everything trains, nothing is carved.
+        for len in [0usize, 1, 31, MIN_TRAIN_ROWS_FOR_INNER_VAL - 1] {
+            let (fit, val) = inner_val_split(len);
+            assert_eq!(fit, (0..len).collect::<Vec<_>>(), "len {len}");
+            assert!(
+                val.is_empty(),
+                "len {len}: nothing may be carved under the floor"
+            );
+        }
+
+        for len in [
+            MIN_TRAIN_ROWS_FOR_INNER_VAL,
+            MIN_TRAIN_ROWS_FOR_INNER_VAL + 1,
+            201,
+            1000,
+            76_543,
+        ] {
+            let (fit, val) = inner_val_split(len);
+
+            // Same call, same answer — and the SECOND call is what a rerun of
+            // the same fit makes.
+            assert_eq!(
+                (fit.clone(), val.clone()),
+                inner_val_split(len),
+                "len {len}"
+            );
+
+            // A partition: disjoint, and together exactly `0..len`.
+            let mut all: Vec<usize> = fit.iter().chain(val.iter()).copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..len).collect::<Vec<_>>(), "len {len}");
+
+            // The stride, stated as the rule and not as a row count: every
+            // position congruent to `STRIDE - 1` is held out and no other is.
+            assert!(
+                val.iter()
+                    .all(|k| k % INNER_VAL_STRIDE == INNER_VAL_STRIDE - 1),
+                "len {len}: a carved position is off the stride"
+            );
+            assert!(
+                fit.iter()
+                    .all(|k| k % INNER_VAL_STRIDE != INNER_VAL_STRIDE - 1),
+                "len {len}: a stride position was left in the training set"
+            );
+            assert_eq!(val.len(), len / INNER_VAL_STRIDE, "len {len}: 20%, exactly");
+            assert!(
+                val.len() >= MIN_INNER_VAL_ROWS,
+                "len {len}: the floor is on the VALIDATION SIZE, and it was not met"
+            );
+            assert!(fit.contains(&0), "position 0 must train");
+        }
+    }
+
+    /// The carved rows never reach the optimizer.
+    ///
+    /// Asserted through the row count the fit actually trained on, because it is
+    /// the only externally visible statement of the property. The tempting
+    /// observational test — perturb the carved rows and check the scores do not
+    /// move — cannot be written here: their FEATURE values feed the
+    /// [`ColumnTransform`] by design (see [`FoldModel::fit`]), and perturbing
+    /// their LABELS legitimately moves the stopping decision and hence the
+    /// scores.
+    #[test]
+    fn inner_validation_rows_are_withheld_from_the_optimizer() {
+        let (feat, y) = toy(200, 7, 0.0);
+        let data = dataset(feat, 3, y);
+
+        // 200 train rows, comfortably over the floor: 40 carved, 160 trained.
+        let (train, _) = split(400);
+        assert_eq!(train.len(), 200);
+        let m = MlpFoldModel::fit(&cfg(7), &data, 0, &train, &[]).unwrap();
+        assert_eq!(m.n_train_rows(), 160, "20% of `train` must be withheld");
+        assert!(m.outcome().best_val_loss.is_some());
+
+        // ...but an OUTER validation slice is used as-is and costs no training
+        // rows, which is the reason it is preferred over the carve.
+        let held: Vec<usize> = (1..400).step_by(2).collect();
+        let outer = MlpFoldModel::fit(&cfg(7), &data, 0, &train, &held).unwrap();
+        assert_eq!(outer.n_train_rows(), 200);
+        assert!(outer.outcome().best_val_loss.is_some());
+
+        // Under the floor, no carve and no early stopping: the full budget runs
+        // on every row, exactly as it did before early stopping existed.
+        let small: Vec<usize> = (0..100).step_by(2).collect();
+        let tiny = MlpFoldModel::fit(&cfg(7), &data, 0, &small, &[]).unwrap();
+        assert_eq!(tiny.n_train_rows(), small.len());
+        assert_eq!(tiny.outcome().epochs_run, cfg(7).epochs);
+        assert_eq!(tiny.outcome().best_epoch, None);
+
+        // And with the knob off there is no carve at any size.
+        let off = MlpConfig {
+            early_stopping_patience: None,
+            ..cfg(7)
+        };
+        let m_off = MlpFoldModel::fit(&off, &data, 0, &train, &[]).unwrap();
+        assert_eq!(m_off.n_train_rows(), 200);
+        assert_eq!(m_off.outcome().epochs_run, off.epochs);
+        assert!(!m_off.outcome().restored);
     }
 
     /// [`ColumnTransform::check_clean`]'s report must actually fire, i.e. the
