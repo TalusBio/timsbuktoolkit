@@ -39,9 +39,29 @@ pub enum MlpFoldError {
     /// column `j` of a different matrix.
     WidthMismatch { fitted: usize, got: usize },
     /// The cull left nothing to train on: every lane column was entirely
-    /// non-finite or (near-)constant on the train rows. An empty train slice
-    /// lands here too, since every column is then vacuously non-finite.
-    NoUsableColumns,
+    /// non-finite or (near-)constant on the train rows.
+    ///
+    /// Carries its own diagnostic context because the callers that report it
+    /// cannot reconstruct it: [`FoldModel::fit`]'s error travels up through
+    /// `CrossValidatedScorer::fit`, which knows nothing about columns, and the
+    /// abort in `qvalues::rescore_mlp_lane` prints only what the error says.
+    ///
+    /// `train_rows == 0` is a DIFFERENT failure wearing the same variant: with
+    /// no rows every column is vacuously non-finite, so the cull takes all of
+    /// them and the operator's actual problem is "this fold got zero rows", not
+    /// "the lane is dead". [`Display`](std::fmt::Display) separates the two —
+    /// the message used to blame the cull in both cases, which sent the reader
+    /// looking at features when the fixture or the fold partition was the
+    /// problem.
+    NoUsableColumns {
+        /// The fold index this fit was for.
+        fold: usize,
+        /// Lane width, i.e. how many columns were offered and therefore culled.
+        ncols: usize,
+        /// How many rows the cull was fitted over. Zero means the train slice
+        /// was empty.
+        train_rows: usize,
+    },
 }
 
 impl std::fmt::Display for MlpFoldError {
@@ -53,8 +73,23 @@ impl std::fmt::Display for MlpFoldError {
                     "dataset has {got} lane columns, model was fitted on {fitted}"
                 )
             }
-            MlpFoldError::NoUsableColumns => f.write_str(
-                "every lane column was culled (all non-finite or constant on the train rows)",
+            MlpFoldError::NoUsableColumns {
+                fold,
+                ncols,
+                train_rows: 0,
+            } => write!(
+                f,
+                "fold {fold}: the train slice is EMPTY, so all {ncols} lane columns are \
+                 vacuously dead — this is a zero-row fold, not a dead feature set"
+            ),
+            MlpFoldError::NoUsableColumns {
+                fold,
+                ncols,
+                train_rows,
+            } => write!(
+                f,
+                "fold {fold}: all {ncols} lane columns were culled (each one non-finite or \
+                 constant across the {train_rows} train rows)"
             ),
         }
     }
@@ -156,7 +191,11 @@ impl FoldModel for MlpFoldModel {
 
         let width = transform.width();
         if width == 0 {
-            return Err(MlpFoldError::NoUsableColumns);
+            return Err(MlpFoldError::NoUsableColumns {
+                fold,
+                ncols,
+                train_rows: train.len(),
+            });
         }
 
         // Labels and sample weights follow the GBM's convention (`cv.rs`):
@@ -659,15 +698,67 @@ mod test {
 
     /// An all-dead matrix has nothing to train on; that is an error rather than
     /// a net with zero inputs.
+    ///
+    /// The error's payload is asserted, not just its variant: it is the ONLY
+    /// diagnostic the abort in `qvalues::rescore_mlp_lane` can print, so a fit
+    /// that reported the wrong fold, the wrong lane width or the wrong row count
+    /// would send an operator looking in the wrong place.
     #[test]
     fn fit_rejects_a_fully_culled_matrix() {
         let feat = vec![1.0f64; 20 * 2];
         let y: Vec<f64> = (0..20).map(|i| (i % 2) as f64).collect();
         let data = dataset(feat, 2, y);
         let train: Vec<usize> = (0..20).collect();
+        let err = MlpFoldModel::fit(&cfg(7), &data, 0, &train, &[]).err();
         assert_eq!(
-            MlpFoldModel::fit(&cfg(7), &data, 0, &train, &[]).err(),
-            Some(MlpFoldError::NoUsableColumns)
+            err,
+            Some(MlpFoldError::NoUsableColumns {
+                fold: 0,
+                ncols: 2,
+                train_rows: 20,
+            })
         );
+        let msg = err.unwrap().to_string();
+        assert!(
+            msg.contains("all 2 lane columns were culled") && msg.contains("20 train rows"),
+            "the culled-lane message must name the lane width and the row count: {msg}"
+        );
+    }
+
+    /// A ZERO-ROW fold reaches [`MlpFoldError::NoUsableColumns`] too — every
+    /// column is vacuously dead when there is nothing to measure it on — and the
+    /// message must say THAT rather than blaming the cull.
+    ///
+    /// This is the realistic way the variant fires: a genuinely constant column
+    /// of any magnitude keeps a hair of floating-point variance in
+    /// `sumsq/n - mean^2` at most row counts, so it survives `MIN_STD` and the
+    /// "every column is dead" reading is the rarer one. The message used to
+    /// assert it in both cases, which is a wrong-diagnosis bug, not a wording
+    /// nit: it points the reader at the feature set when the fold partition or
+    /// the input size is what broke.
+    #[test]
+    fn an_empty_train_slice_reports_zero_rows_rather_than_blaming_the_cull() {
+        let (feat, y) = toy(20, 7, 2.0);
+        let data = dataset(feat, 3, y);
+
+        let err = MlpFoldModel::fit(&cfg(7), &data, 2, &[], &[]).err();
+        assert_eq!(
+            err,
+            Some(MlpFoldError::NoUsableColumns {
+                fold: 2,
+                ncols: 3,
+                train_rows: 0,
+            })
+        );
+        let msg = err.unwrap().to_string();
+        assert!(
+            msg.contains("train slice is EMPTY") && msg.contains("fold 2"),
+            "an empty train slice must be reported as such, not as a culled lane: {msg}"
+        );
+
+        // NON-VACUITY: the same dataset with real train rows FITS, so the error
+        // above is a property of the empty slice and not of a dead fixture.
+        let train: Vec<usize> = (0..20).collect();
+        assert!(MlpFoldModel::fit(&cfg(7), &data, 2, &train, &[]).is_ok());
     }
 }

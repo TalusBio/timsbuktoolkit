@@ -16,7 +16,10 @@ use super::lda::{
     LdaModel,
 };
 use super::mlp::MlpConfig;
-use super::mlp_fold::MlpFoldModel;
+use super::mlp_fold::{
+    MlpFoldError,
+    MlpFoldModel,
+};
 use super::{
     LabelledScore,
     N_RESCORE_FOLDS,
@@ -690,6 +693,51 @@ impl Lane {
     }
 }
 
+/// FAILURE POLICY for the STANDALONE MLP rescorers: abort the run, loudly and
+/// with the fold-level diagnostic, rather than degrade.
+///
+/// Diverging (`-> !`) rather than returning a sentinel, because there is no
+/// value a standalone rescorer could return here that means anything. This
+/// deliberately DIFFERS from what the same failure does in the hybrids, and the
+/// asymmetry is the whole point:
+///
+/// * In [`rescore_hybrid_mlp_with`] a failed cross-fit zeroes ONE COLUMN of a
+///   frame that still carries `NONLINEAR_NCOLS` real features. A constant column
+///   has zero split gain, so the GBM simply ignores it and the run degrades to
+///   "GBM on the nonlinear lane" — a weaker model, but one whose q-values still
+///   rank rows by their evidence. Same for `lda_score` in [`rescore_hybrid`].
+/// * Here the failed fit IS the discriminant. Degrading to a uniform score makes
+///   every row's score identical, so `assign_qval` walks a ranking that is
+///   nothing but the seeded shuffle order and every q-value it emits is a
+///   fiction. Nothing downstream can tell that apart from a real result: the
+///   output file has the same columns, the same row count, and a q-value
+///   distribution that looks plausible. That is strictly worse than not
+///   finishing, because a search whose FDR is meaningless but unmarked gets used.
+///
+/// [`rescore_lda`] is the awkward case for this rule: its scores are also the
+/// discriminant, and it degrades. It is deliberately left alone — it is a
+/// shipping path, its failure condition is a different one (a singular scatter
+/// matrix, not a culled lane), and re-deciding its policy is not what this task
+/// was scoped to. The asymmetry to defend is not "MLP vs LDA" but "the score
+/// itself vs one column of many", and on that axis this path and `rescore_lda`
+/// belong on the same side. If `rescore_lda`'s degradation is ever revisited,
+/// this is the argument to revisit it with.
+///
+/// A `Result` on the public rescorers was the other candidate and was rejected:
+/// all six share one signature so [`crate::ml::rescore_with`] can dispatch on a
+/// config value, the only caller is the CLI's search pipeline, and the only
+/// decision that caller could make is "abort the run" — so the `Result` would
+/// buy an unwrap at the call site and a signature split across the six.
+fn abort_standalone_mlp(lane: Lane, ncols: usize, nrows: usize, e: MlpFoldError) -> ! {
+    panic!(
+        "MLP rescore aborted: {lane:?} lane ({ncols} columns, {nrows} candidates): {e}\n\
+         A standalone MLP rescorer has no usable fallback — degrading would score every \
+         row identically, which makes every q-value meaningless while still looking like a \
+         finished search. Re-run with a different `rescore_model` (e.g. `gbm`, or the \
+         `hybrid_mlp` variant, which tolerates this failure by dropping one column)."
+    );
+}
+
 /// The body of BOTH MLP rescorers: the GBM's pipeline
 /// ([`canonicalize_and_shuffle`] -> lane matrix -> [`CrossValidatedScorer`] ->
 /// [`finalize`]) with [`MlpFoldModel`] swapped in for `GbmFoldModel`.
@@ -716,6 +764,10 @@ impl Lane {
 /// function of the config seed and the fold index. Nothing else is stochastic,
 /// so two runs of the same build on the same input produce bit-identical
 /// scores.
+///
+/// # Failure policy
+/// A fold that cannot be fitted ABORTS the run — see [`abort_standalone_mlp`]
+/// for why this path does not degrade the way the hybrids do.
 fn rescore_mlp_lane(
     mut data: Vec<CompetedCandidate>,
     lane: Lane,
@@ -737,6 +789,7 @@ fn rescore_mlp_lane(
     let feat = lane.matrix(&data);
     debug_assert_eq!(feat.len(), data.len() * ncols);
 
+    let nrows = data.len();
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ncols, responses);
 
@@ -748,11 +801,8 @@ fn rescore_mlp_lane(
             precomputed,
             names,
         );
-    // Same failure policy as the GBM path: a rescorer that cannot fit has no
-    // meaningful score to fall back to, and a partially-scored run would be
-    // fold-dependent (see `crossfit`'s all-or-nothing note).
     if let Err(e) = scorer.fit() {
-        panic!("MLP rescore ({lane:?} lane) failed: {e}");
+        abort_standalone_mlp(lane, ncols, nrows, e);
     }
 
     let stats = scorer.feature_stats();
@@ -2302,8 +2352,6 @@ mod feature_tests {
     /// Asserted on RAW BITS, so a `-0.0` or a denormal cannot pass as zero.
     #[test]
     fn crossfit_mlp_scores_is_uniformly_zero_when_any_fold_fails() {
-        use crate::ml::mlp_fold::MlpFoldError;
-
         const N: usize = 60;
         const NCOLS: usize = 2;
         let n_folds = N_RESCORE_FOLDS as usize;
@@ -2339,7 +2387,11 @@ mod feature_tests {
             }
             assert_eq!(
                 MlpFoldModel::fit(&cfg, &dataset, last, &complement(last), &[]).err(),
-                Some(MlpFoldError::NoUsableColumns),
+                Some(MlpFoldError::NoUsableColumns {
+                    fold: last,
+                    ncols: NCOLS,
+                    train_rows: complement(last).len(),
+                }),
                 "seed {seed}: fold {last} must fail for this test to exercise the \
                  failure path at all"
             );
@@ -2371,6 +2423,121 @@ mod feature_tests {
                 "seed {seed}: mlp_score must be uniformly zero after a failed fold, got {col:?}"
             );
         }
+    }
+
+    /// `n` candidates that are IDENTICAL in every feature — only `library_id`
+    /// (a positional index, not a feature) and the label differ.
+    ///
+    /// Every lane column is therefore bit-constant, and at the row counts the two
+    /// tests below use the variance `ColumnTransform` computes as
+    /// `sumsq/n - mean^2` comes out EXACTLY zero, so it culls all 101 of them and
+    /// `MlpFoldModel::fit` has nothing left to train on.
+    ///
+    /// THE ROW COUNT IS LOAD-BEARING and cannot be scaled freely: that expression
+    /// keeps a hair of floating-point residue on a constant column of realistic
+    /// magnitude once the row count gets large enough, and the residue clears
+    /// `MIN_STD` (1e-12). Measured on this fixture: 8 and 16 train rows cull all
+    /// 101 columns, 30 and 32 leave 10 of them alive and the fit SUCCEEDS. So
+    /// `n = 24` is chosen to put both paths under the cull —
+    /// `CrossValidatedScorer` trains fold `f` on fold `f` alone (8 rows), while
+    /// [`crossfit`] trains on all-but-fold-`f` (16 rows) — and raising it to 48
+    /// silently stops exercising the hybrid's failure path.
+    fn indistinguishable_competed(n: u32) -> Vec<CompetedCandidate> {
+        (0..n)
+            .map(|i| {
+                let mut c = sample_competed_candidate_parsed();
+                c.scoring.identity.library_id = i;
+                c.scoring.identity.is_target = i % 2 == 0;
+                c
+            })
+            .collect()
+    }
+
+    /// FAILURE POLICY, standalone half: a fold that cannot be fitted ABORTS the
+    /// run. It does not fall back to a uniform score.
+    ///
+    /// This is the decision the panic encodes, so it is pinned as a test rather
+    /// than left to a comment: the degradation the hybrids use
+    /// (`crossfit_mlp_scores_is_uniformly_zero_when_any_fold_fails`) would, on
+    /// this path, give every row the same discriminant and therefore q-values
+    /// that are a function of the seeded shuffle order alone — meaningless, and
+    /// indistinguishable from a real result in the output file. A future reader
+    /// "unifying" the two policies has to delete this test to do it.
+    ///
+    /// The `expected` substring covers the policy (aborted), the entry point and
+    /// the LANE. The diagnostic tail is `MlpFoldError`'s own `Display`, pinned in
+    /// `mlp_fold`'s `fit_rejects_a_fully_culled_matrix` and
+    /// `an_empty_train_slice_reports_zero_rows_rather_than_blaming_the_cull`; the
+    /// abort only interpolates it.
+    ///
+    /// The row count is not free — see [`indistinguishable_competed`].
+    #[test]
+    #[should_panic(expected = "MLP rescore aborted: Linear lane")]
+    fn standalone_mlp_aborts_rather_than_scoring_every_row_the_same() {
+        rescore_mlp_lane(
+            indistinguishable_competed(24),
+            Lane::Linear,
+            mlp_test_cfg(7),
+        );
+    }
+
+    /// The other half of that decision: the SAME fixture that aborts the
+    /// standalone rescorer runs to completion through the hybrid, because there a
+    /// failed MLP cross-fit costs one column out of `NONLINEAR_NCOLS + 1` and the
+    /// GBM keeps the rest.
+    ///
+    /// The two paths are deliberately asymmetric and this is the pair of tests
+    /// that says so; `abort_standalone_mlp`'s docs carry the reasoning.
+    ///
+    /// The cross-fit really does fail on this fixture at this size (16 train rows
+    /// per fold, all columns culled — see [`indistinguishable_competed`]), so the
+    /// `mlp_score` column reaching the GBM below is the all-zero fallback.
+    ///
+    /// NOTE for the `min_leaf_weight` audit: this runs a GBM on 8 rows per fold,
+    /// so it builds NO TREES. That is fine, and deliberate — nothing here claims
+    /// the GBM learned anything. Every assertion is about the run COMPLETING and
+    /// about the frame it was handed (`feature_stats` names come from the dataset,
+    /// not from the model), all of which hold in the no-trees regime. Do not add
+    /// an assertion about scores or importance to this test; put it at 360 rows in
+    /// `hybrid_mlp_score_carries_the_linear_lane_into_the_gbm` instead.
+    #[test]
+    fn hybrid_mlp_degrades_where_the_standalone_mlp_aborts() {
+        const N: u32 = 24;
+        let data = indistinguishable_competed(N);
+
+        // The premise: the MLP cross-fit this hybrid depends on cannot fit here.
+        // Without it, the test would pass on a fixture where nothing degraded.
+        let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+        let lin = hybrid_linear_dataset(&data, responses);
+        assert!(
+            crossfit::<_, MlpFoldModel>(&lin, &mlp_test_cfg(7), "MLP").is_none(),
+            "fixture premise broken: the MLP cross-fit SUCCEEDS here, so this test is not \
+             exercising the degraded path at all"
+        );
+
+        let (out, stats) = rescore_hybrid_mlp_with(data, mlp_test_cfg(7));
+        assert_eq!(
+            out.len(),
+            N as usize,
+            "the hybrid must still return every row"
+        );
+        assert!(
+            out.iter().all(|r| r.discriminant_score.is_finite()),
+            "a failed cross-fit must not put non-finite values in the score column"
+        );
+        assert!(
+            out.iter().all(|r| (0.0..=1.0).contains(&r.qvalue)),
+            "q-values must stay in range on the degraded path"
+        );
+        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
+        // The frame the GBM was handed still carries the appended column — the
+        // degradation zeroes its VALUES, it does not drop the column.
+        assert!(
+            stats
+                .iter()
+                .all(|fs| fs.feature_stats.iter().any(|f| &*f.name == "mlp_score")),
+            "the degraded hybrid must still hand the GBM an mlp_score column"
+        );
     }
 
     /// Smoke + determinism for the MLP hybrid, mirroring
