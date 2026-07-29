@@ -20,6 +20,13 @@
 //!     this: the stopping decision is a strict comparison of floats computed by
 //!     the same deterministic forward pass, and the inner-validation carve
 //!     ([`inner_val_split`]) is a pure function of `train.len()`.
+//!  3. **Reporting cannot move the fit.** Two feature-importance metrics are
+//!     selectable ([`MlpImportance`]) and the choice reaches no weight, no RNG
+//!     draw and no optimizer step: the gradient metric is a DEDICATED
+//!     forward/backward pass that runs after training and wipes the parameter
+//!     gradients it accumulated, so two runs differing only in
+//!     `TIMSSEEK_MLP_IMPORTANCE` produce bit-identical scores and differ only in
+//!     the sidecar. That is what makes diffing the two rankings meaningful.
 
 use crate::ml::cv::{
     FoldDataset,
@@ -31,11 +38,13 @@ use crate::ml::mlp::{
     ColumnTransform,
     Mlp,
     MlpConfig,
+    MlpImportance,
     Tensor,
     TrainOutcome,
     ValSet,
 };
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// The ways fitting or scoring an [`MlpFoldModel`] can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +174,17 @@ pub struct MlpFoldModel {
     /// back. `fit` logs it; the tests assert on it.
     #[cfg_attr(not(test), allow(dead_code))]
     outcome: TrainOutcome,
+    /// Which metric [`FoldModel::importance`] reports. Copied off the config at
+    /// `fit` time because `importance(&self)` has no config in scope, and because
+    /// the `Grad` metric has to be MEASURED during `fit` — the train rows are gone
+    /// by the time anyone asks.
+    importance_kind: MlpImportance,
+    /// Mean `|dL/dx|` per TRANSFORMED input over the train rows, from the
+    /// dedicated post-training pass in [`Mlp::input_grad_importance`]. `None` when
+    /// nothing asked for it: the pass costs about one epoch, so it runs only when
+    /// [`MlpConfig::importance`] selects it or when the `debug` comparison log is
+    /// enabled (the same `tracing::enabled!` gate the held-out trace uses).
+    grad_importance: Option<Vec<f32>>,
 }
 
 // Both accessors are TEST SURFACE and are scoped to it. Nothing in the live path
@@ -215,6 +235,83 @@ fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
         data.get_values(i, &mut feat[k * ncols..(k + 1) * ncols]);
     }
     feat
+}
+
+/// Map a per-TRANSFORMED-INPUT vector onto lane columns, which is what
+/// [`FoldModel::importance`] has to return.
+///
+/// Shared by both importance metrics on purpose: the two differ in what they
+/// measure, never in how a measurement is placed, and a second copy of this loop
+/// is how the `_isna` folding rule would come to disagree with itself.
+///
+/// **Culled lanes come back `0.0`, not `NAN`.** The output starts zeroed and a
+/// culled lane is never written, which is the [`FoldModel::importance`] contract's
+/// "a culled column genuinely contributed nothing" case: a finite `0.0` reaches
+/// the sidecar and tells the operator the column was culled, where `NAN` would be
+/// filtered out at the `fold_feature_stats` boundary and delete the cull report.
+///
+/// **`_isna` companions have no lane of their own**, so each one's value is summed
+/// into the column it flags. For either metric the resulting number answers one
+/// question — how much this column matters, through its value AND through its
+/// missingness — which is the only reading that makes the two comparable.
+fn fold_inputs_to_lanes(transform: &ColumnTransform, raw: &[f32]) -> Vec<f32> {
+    // Every transformed input is either a standardized column or a companion, so
+    // with the right length the loop below places all of them; a short/long
+    // vector is the only way one could go missing.
+    debug_assert_eq!(
+        raw.len(),
+        transform.width(),
+        "an importance vector must report one value per transformed input"
+    );
+    let mut out = vec![0.0f32; transform.ncols_lane()];
+    for (k, &v) in raw.iter().enumerate() {
+        let lane = transform
+            .lane_of_input(k)
+            .or_else(|| transform.isna_lane_of_input(k));
+        if let Some(lane) = lane {
+            out[lane] += v;
+        }
+    }
+    debug_assert!(
+        out.iter().all(|v| v.is_finite()),
+        "a non-finite importance would read as the NAN 'unreported' sentinel"
+    );
+    debug_assert!(
+        {
+            let (a, b) = (out.iter().sum::<f32>(), raw.iter().sum::<f32>());
+            (a - b).abs() <= 1e-3 * b.abs().max(1.0)
+        },
+        "folding companions into their parent lane must not drop or double any value"
+    );
+    out
+}
+
+/// How many lane columns the per-fold `debug` comparison line names per metric.
+///
+/// The line exists so the two rankings can be eyeballed WITHOUT a second search
+/// (requirement: diffable in one run). It is a top-N and not the whole vector
+/// because the vector is 101 or 128 columns wide and three folds of that at
+/// `debug` is a wall of text; the authoritative diff is still two runs, one per
+/// `TIMSSEEK_MLP_IMPORTANCE` value, whose sidecars are directly comparable.
+const IMPORTANCE_LOG_TOP_N: usize = 10;
+
+/// `name=value` for the top `IMPORTANCE_LOG_TOP_N` lanes, descending.
+///
+/// Ties keep lane order (the sort is stable), matching how `fold_feature_stats`
+/// orders the sidecar, so the log and the file agree on which of two equal
+/// columns comes first.
+fn top_lanes(lane_imp: &[f32], names: &[Arc<str>], n: usize) -> String {
+    let mut idx: Vec<usize> = (0..lane_imp.len()).collect();
+    idx.sort_by(|&a, &b| {
+        lane_imp[b]
+            .partial_cmp(&lane_imp[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    idx.into_iter()
+        .take(n)
+        .map(|j| format!("{}={:.6}", names[j], lane_imp[j]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One row in every `INNER_VAL_STRIDE` of `train` is carved off as the inner
@@ -494,6 +591,57 @@ impl FoldModel for MlpFoldModel {
             }),
             &tag,
         );
+
+        // --- Feature importance, measured now because the rows are only here ---
+        //
+        // A DEDICATED PASS AFTER TRAINING, over the TRAIN rows only. Three
+        // properties, all load-bearing:
+        //
+        //  * It measures THE FITTED NET. `train_reporting` has already rolled the
+        //    weights back to the best held-out epoch, so a gradient accumulated
+        //    during the last epoch would describe parameters that were thrown
+        //    away. See `Mlp::input_grad_importance`.
+        //  * It reads `x`, i.e. THE ROWS THE OPTIMIZER SAW. Attributing over the
+        //    held-out/val rows would make the sidecar's importance a function of
+        //    rows this model is about to SCORE — a reporting-side leak of exactly
+        //    the kind the rest of this module is built to avoid. (The inner
+        //    early-stopping carve is train-fold data and would be defensible too,
+        //    but it is excluded: `x` is precisely the rows that produced these
+        //    weights, and it is already materialized.)
+        //  * It touches no weight, no RNG draw and no optimizer step, so the fit
+        //    is bit-identical whether or not this runs.
+        //
+        // Gated so it costs nothing when nobody asked: roughly one epoch of
+        // forward/backward on top of the ~20-30 a fold runs. Same
+        // `tracing::enabled!` shape as the held-out trace above — a diagnostic
+        // nobody asked to see should not cost a pass.
+        let traced = tracing::enabled!(tracing::Level::DEBUG);
+        let want_grad = cfg.importance == MlpImportance::Grad || traced;
+        let grad_importance = want_grad
+            .then(|| net.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size.max(1)));
+
+        // The per-fold COMPARISON line: both rankings, one fold, no second run
+        // needed to see whether they disagree. At `debug` because it is 2 lines
+        // per fold of ~10 columns each, which is trace-volume next to the `info`
+        // summary below. The authoritative diff is still two runs (one per
+        // `TIMSSEEK_MLP_IMPORTANCE` value), whose sidecars carry every column.
+        if traced {
+            let w1 = fold_inputs_to_lanes(&transform, &net.input_importance());
+            tracing::debug!(
+                "{tag}importance top {} by w1:   {}",
+                IMPORTANCE_LOG_TOP_N,
+                top_lanes(&w1, &names, IMPORTANCE_LOG_TOP_N),
+            );
+            if let Some(g) = grad_importance.as_ref() {
+                let grad = fold_inputs_to_lanes(&transform, g);
+                tracing::debug!(
+                    "{tag}importance top {} by grad: {}",
+                    IMPORTANCE_LOG_TOP_N,
+                    top_lanes(&grad, &names, IMPORTANCE_LOG_TOP_N),
+                );
+            }
+        }
+
         // ONE grep-able line per fold, at `info` — the summary a sweep reads.
         //
         // `info` and not `debug` because the per-epoch trace is already at
@@ -519,7 +667,7 @@ impl FoldModel for MlpFoldModel {
         tracing::info!(
             "MLP fold summary: fold={} epochs_run={} epoch_budget={} kept_epoch={} \
              best_held_out_loss={} final_train_loss={:.6} restored={} train_rows={} \
-             fit_rows={} inputs={} lane_columns={}",
+             fit_rows={} inputs={} lane_columns={} importance={:?}",
             fold,
             outcome.epochs_run,
             cfg.epochs,
@@ -531,6 +679,7 @@ impl FoldModel for MlpFoldModel {
             x.rows(),
             width,
             ncols,
+            cfg.importance,
         );
 
         Ok(MlpFoldModel {
@@ -539,6 +688,8 @@ impl FoldModel for MlpFoldModel {
             final_loss: outcome.final_train_loss,
             n_train_rows: x.rows(),
             outcome,
+            importance_kind: cfg.importance,
+            grad_importance,
         })
     }
 
@@ -616,55 +767,41 @@ impl FoldModel for MlpFoldModel {
         Ok(scores)
     }
 
-    /// `sum_o |W1[j, o]|` over the first layer, mapped back to lane indices.
+    /// Whichever of the TWO metrics [`MlpConfig::importance`] selected, mapped
+    /// back to lane indices by [`fold_inputs_to_lanes`].
+    ///
+    ///  * [`MlpImportance::W1`] (THE DEFAULT, and the content the externally
+    ///    consumed sidecar has always carried): `sum_o |W1[j, o]|` over the first
+    ///    layer.
+    ///  * [`MlpImportance::Grad`]: mean `|dL/dx_j|` over the train rows, measured
+    ///    at `fit` time by [`Mlp::input_grad_importance`].
+    ///
+    /// See [`MlpImportance`] for what each one can and cannot see, and
+    /// [`MlpConfig::from_env`] for the `TIMSSEEK_MLP_IMPORTANCE` selector.
     ///
     /// NEVER `NAN`, i.e. never "unreported" under the [`FoldModel::importance`]
-    /// contract: the first layer has a weight for every input, so every lane
-    /// column that survived the cull has a measurement.
-    ///
-    /// **Culled columns report `0.0`, not `NAN`.** A culled column genuinely
-    /// contributed nothing — it has no input to weigh — and "this column was
-    /// culled" is exactly what an operator reads the sidecar to find; it is the
-    /// machine-readable half of the warn `fit` emits. `NAN` would drop those
-    /// rows at the `fold_feature_stats` boundary and delete the cull report.
-    ///
-    /// `_isna` companions have no lane of their own, so each one's weight is
-    /// summed into the column it flags: the importance of a missable column is
-    /// the weight the net puts on its value plus the weight it puts on its
-    /// missingness, which is the one number that answers "how much does this
-    /// column matter".
+    /// contract, for EITHER metric: the first layer has a weight for every input
+    /// and the backward pass writes a gradient for every input, so every lane
+    /// column that survived the cull has a measurement, and the culled ones report
+    /// a finite `0.0` — see [`fold_inputs_to_lanes`], which is where both of those
+    /// properties live for both metrics.
     fn importance(&self) -> Vec<f32> {
-        let raw = self.net.borrow().input_importance();
-        // Every transformed input is either a standardized column or a
-        // companion, so with the right length the loop below places all of
-        // them; a short/long vector is the only way one could go missing.
-        debug_assert_eq!(
-            raw.len(),
-            self.transform.width(),
-            "input_importance must report one value per transformed input"
-        );
-        let mut out = vec![0.0f32; self.transform.ncols_lane()];
-        for (k, &v) in raw.iter().enumerate() {
-            let lane = self
-                .transform
-                .lane_of_input(k)
-                .or_else(|| self.transform.isna_lane_of_input(k));
-            if let Some(lane) = lane {
-                out[lane] += v;
+        let raw = match self.importance_kind {
+            MlpImportance::W1 => self.net.borrow().input_importance(),
+            // `fit` computes this whenever `importance_kind` is `Grad`, so the
+            // fallback is unreachable. It is a clone-or-empty rather than an
+            // `expect` because an importance report is a diagnostic: aborting a
+            // finished search over a sidecar column would be a worse failure than
+            // an empty one, and the `debug_assert` names the bug in test builds.
+            MlpImportance::Grad => {
+                debug_assert!(
+                    self.grad_importance.is_some(),
+                    "fit must measure the gradient attribution when it is the selected metric"
+                );
+                self.grad_importance.clone().unwrap_or_default()
             }
-        }
-        debug_assert!(
-            out.iter().all(|v| v.is_finite()),
-            "a non-finite importance would read as the NAN 'unreported' sentinel"
-        );
-        debug_assert!(
-            {
-                let (a, b) = (out.iter().sum::<f32>(), raw.iter().sum::<f32>());
-                (a - b).abs() <= 1e-3 * b.abs().max(1.0)
-            },
-            "folding companions into their parent lane must not drop or double any weight"
-        );
-        out
+        };
+        fold_inputs_to_lanes(&self.transform, &raw)
     }
 }
 
@@ -680,7 +817,6 @@ mod test {
         Distribution,
         Uniform,
     };
-    use std::sync::Arc;
 
     /// Test config: same architecture family as the default, shrunk so the
     /// seed sweeps stay fast.
@@ -1047,6 +1183,261 @@ mod test {
             let scores = model.predict(&data, &held).unwrap();
             assert!(scores.iter().all(|s| s.is_finite()), "seed {seed}");
         }
+    }
+
+    // ------------------------------------------- input-gradient importance
+
+    /// [`cfg`] with the gradient metric selected. Nothing else differs, which is
+    /// the premise of every test below.
+    fn grad_cfg(seed: u64) -> MlpConfig {
+        MlpConfig {
+            importance: MlpImportance::Grad,
+            ..cfg(seed)
+        }
+    }
+
+    /// The 5-column fixture the two importance tests share: lanes 0 and 1
+    /// informative, 2 pure noise, 3 all-NaN (culled), 4 constant (culled).
+    fn importance_fixture(seed: u64) -> (RowMajorDataset, Vec<usize>) {
+        let (base, y) = toy(150, seed, 0.0);
+        let mut feat = Vec::with_capacity(300 * 5);
+        for i in 0..300 {
+            feat.extend_from_slice(&base[i * 3..i * 3 + 3]);
+            feat.push(f64::NAN);
+            feat.push(7.0);
+        }
+        (dataset(feat, 5, y), split(300).0)
+    }
+
+    /// THE PROPERTY THAT MAKES THE TWO METRICS COMPARABLE: selecting one changes
+    /// the sidecar and NOTHING ELSE. Two runs of the same search, one with
+    /// `TIMSSEEK_MLP_IMPORTANCE=grad`, must produce the same scores down to the
+    /// bit, or the diff of the two rankings is a diff of two different fits.
+    ///
+    /// The gradient metric runs a real forward/BACKWARD pass over the train rows
+    /// after training, so this is not a formality: it is the observable
+    /// consequence of that pass taking no optimizer step, drawing no RNG and
+    /// leaving no stale gradient (see
+    /// `mlp::test::input_grad_importance_leaves_the_fit_untouched`, which asserts
+    /// the mechanism; this asserts the effect at the fold boundary).
+    ///
+    /// The second half is non-vacuity: the two metrics must actually DISAGREE
+    /// somewhere, or "both are reportable" would be an expensive way to report one
+    /// number twice.
+    #[test]
+    fn the_importance_metric_choice_does_not_move_the_scores() {
+        let mut ranking_differs = false;
+        for seed in [7u64, 13, 42, 1234] {
+            let (data, train) = importance_fixture(seed);
+            let held: Vec<usize> = (1..300).step_by(2).collect();
+
+            let w1 = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
+            let grad = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
+
+            assert_eq!(
+                w1.predict(&data, &held).unwrap(),
+                grad.predict(&data, &held).unwrap(),
+                "seed {seed}: selecting an importance metric moved the SCORES"
+            );
+            assert_eq!(
+                w1.outcome(),
+                grad.outcome(),
+                "seed {seed}: the stopping decision moved"
+            );
+
+            let (iw, ig) = (w1.importance(), grad.importance());
+            assert_ne!(
+                iw, ig,
+                "seed {seed}: the two metrics reported the same vector"
+            );
+
+            // The `debug` comparison line builds its `w1` row from the FITTED NET,
+            // because a `Grad`-configured model's `importance()` returns the other
+            // metric. Same numbers, which is what makes the two log rows comparable
+            // to the two runs' sidecars. This is also the only coverage of that
+            // branch's body: the branch itself is gated on
+            // `tracing::enabled!(DEBUG)` and no test here installs a subscriber.
+            assert_eq!(
+                fold_inputs_to_lanes(grad.transform(), &grad.net.borrow().input_importance()),
+                iw,
+                "seed {seed}: the log's w1 row must be the number the sidecar would carry"
+            );
+
+            let top = |v: &[f32]| {
+                (0..v.len())
+                    .max_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap())
+                    .unwrap()
+            };
+            ranking_differs |= top(&iw) != top(&ig);
+        }
+        // MEASURED, and the entire justification for a second metric: on this
+        // fixture `W1` ranks the PURE-NOISE lane (2) top on seeds 42 and 1234,
+        // where the gradient ranks it last on all four. If this ever fails, the
+        // two metrics have started agreeing on this fixture and the fixture — not
+        // the assertion — is what needs replacing.
+        assert!(
+            ranking_differs,
+            "the two metrics agreed on the top lane for every seed, so nothing here \
+             demonstrates that comparing them is worth the pass"
+        );
+    }
+
+    /// The [`FoldModel::importance`] contract, for the SECOND metric: culled
+    /// columns report a FINITE `0.0` (which reaches the sidecar and tells the
+    /// operator they were culled), never the `NAN` "unreported" sentinel (which
+    /// `fold_feature_stats` filters out).
+    ///
+    /// The mirror of [`importance_reports_zero_for_culled_columns`], asserted
+    /// separately rather than parameterized over the metric: the two arrive at the
+    /// zero by different routes — `W1` has no weight row for a culled column,
+    /// `Grad` has no gradient for one — and a regression in either could leave the
+    /// other passing.
+    #[test]
+    fn grad_importance_reports_zero_for_culled_columns() {
+        for seed in [7u64, 13, 42, 1234] {
+            let (data, train) = importance_fixture(seed);
+            let model = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
+            assert_eq!(model.transform().culled(), &[3, 4]);
+
+            let imp = model.importance();
+            assert_eq!(imp.len(), 5, "importance must be lane-indexed, full width");
+            assert!(
+                imp.iter().all(|v| v.is_finite()),
+                "seed {seed}: the NAN sentinel would delete the cull report: {imp:?}"
+            );
+            assert_eq!(imp[3], 0.0, "an all-NaN culled column reports 0.0");
+            assert_eq!(imp[4], 0.0, "a constant culled column reports 0.0");
+            assert!(
+                imp[0] > 0.0 && imp[1] > 0.0 && imp[2] > 0.0,
+                "seed {seed}: surviving columns must carry attribution, else the zeros \
+                 above are vacuous: {imp:?}"
+            );
+
+            // The reported measurement survives to the sidecar shape: `0.0` is
+            // present, and it is the culled lanes that carry it.
+            let stats = crate::ml::cv::fold_feature_stats(
+                &data,
+                std::slice::from_ref(&train),
+                &[Some(&model)],
+            );
+            let imp_rows = &stats[0].feature_importance;
+            assert_eq!(
+                imp_rows.len(),
+                5,
+                "seed {seed}: every reported column must reach the sidecar: {imp_rows:?}"
+            );
+            let zeros: Vec<&str> = imp_rows
+                .iter()
+                .filter(|(_, v)| *v == 0.0)
+                .map(|(n, _)| &**n)
+                .collect();
+            assert_eq!(
+                zeros,
+                vec!["feature_3", "feature_4"],
+                "seed {seed}: the culled lanes are the ones that must show up as 0.0"
+            );
+        }
+    }
+
+    /// What the gradient metric buys over the weight norm, at the fold boundary:
+    /// it ranks the pure-noise lane BELOW both informative ones.
+    ///
+    /// Seed-swept, because it is a claim about a trained net.
+    ///
+    /// MEASURED on this fixture (lane 2 is the noise column):
+    ///
+    /// | seed | grad[0] | grad[1] | grad[2] | w1[0] | w1[1] | w1[2] |
+    /// |------|---------|---------|---------|-------|-------|-------|
+    /// | 7    | 0.228   | 0.252   | 0.102   | 11.66 | 15.30 | 13.17 |
+    /// | 13   | 0.184   | 0.220   | 0.049   | 12.79 | 14.00 |  9.44 |
+    /// | 42   | 0.241   | 0.228   | 0.068   | 10.38 | 13.60 | 14.57 |
+    /// | 1234 | 0.170   | 0.233   | 0.088   |  9.80 |  7.70 | 11.76 |
+    ///
+    /// `W1` ranks the noise lane FIRST on seeds 42 and 1234 and second on seed 7.
+    /// The gradient ranks it last on all four, by a factor of 1.9x-3.8x, so the bar
+    /// below is 1.5x.
+    #[test]
+    fn grad_importance_ranks_the_noise_lane_below_the_informative_ones() {
+        for seed in [7u64, 13, 42, 1234] {
+            let (data, train) = importance_fixture(seed);
+            let model = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
+            let g = model.importance();
+            assert!(
+                1.5 * g[2] < g[0].min(g[1]),
+                "seed {seed}: the noise lane must rank below both informative lanes: {g:?}"
+            );
+        }
+    }
+
+    /// Same config + same fold + same data => bit-identical gradient attribution.
+    ///
+    /// The sidecar exists to be diffed across runs, so this is the property that
+    /// makes the diff readable at all. It also covers the `_isna` companion route:
+    /// lane 2 carries NaNs here, so its reported value is the sum of its own
+    /// gradient and its companion's, and the `debug_assert` inside
+    /// [`fold_inputs_to_lanes`] executes on this (debug) build.
+    #[test]
+    fn grad_importance_is_bit_reproducible() {
+        for seed in [7u64, 13, 42] {
+            let (mut feat, y) = toy(150, seed, 0.0);
+            // NaNs into lane 2 on every 7th row, so it becomes `Missable` and gets
+            // an `_isna` companion whose attribution folds back into it.
+            for i in (0..300).step_by(7) {
+                feat[i * 3 + 2] = f64::NAN;
+            }
+            let data = dataset(feat, 3, y);
+            let (train, _) = split(300);
+
+            let a = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
+            let b = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
+            assert_eq!(
+                a.transform().width(),
+                4,
+                "seed {seed}: three survivors + one _isna companion, or the companion \
+                 folding below is not exercised"
+            );
+            assert_eq!(a.transform().isna_lane_of_input(3), Some(2));
+
+            let (ia, ib) = (a.importance(), b.importance());
+            assert_eq!(
+                ia.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                ib.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "seed {seed}: the attribution moved between two identical fits"
+            );
+            assert_eq!(ia.len(), 3, "lane-indexed, companions folded in");
+            assert!(
+                ia.iter().all(|v| v.is_finite() && *v > 0.0),
+                "seed {seed}: {ia:?}"
+            );
+        }
+    }
+
+    /// [`top_lanes`] is what the per-fold `debug` comparison line is made of, and
+    /// it is not otherwise executed by this suite: the branch that calls it is
+    /// gated on `tracing::enabled!(DEBUG)`, and no test here installs a subscriber,
+    /// so with no direct test the ordering could be reversed and nothing would say
+    /// so.
+    ///
+    /// Descending, truncated to `n`, and TIES KEEP LANE ORDER — the same rule
+    /// `fold_feature_stats` sorts the sidecar by, so the log and the file agree on
+    /// which of two equal columns comes first.
+    #[test]
+    fn the_comparison_log_names_the_strongest_lanes_first() {
+        let names: Vec<Arc<str>> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| Arc::from(*s))
+            .collect();
+        let imp = [0.5f32, 0.0, 2.0, 0.0, 1.0];
+
+        let line = top_lanes(&imp, &names, 3);
+        assert_eq!(line, "c=2.000000 e=1.000000 a=0.500000");
+
+        // Ties in lane order, and `n` past the end is not an error.
+        let all = top_lanes(&imp, &names, 99);
+        assert_eq!(
+            all, "c=2.000000 e=1.000000 a=0.500000 b=0.000000 d=0.000000",
+            "equal values must keep lane order, matching the sidecar's stable sort"
+        );
     }
 
     /// A dataset of the wrong width would silently read column `j` of a

@@ -829,6 +829,52 @@ impl Adam {
     }
 }
 
+// ---------------------------------------------------------------- importance
+
+/// Which feature-importance metric a fitted net reports.
+///
+/// TWO METRICS EXIST SO THEY CAN BE COMPARED, not so one can replace the other.
+/// [`MlpImportance::W1`] is the DEFAULT and must stay the default: the per-fold
+/// TSV sidecar (`results.feature_importance.tsv`) is consumed outside this
+/// codebase, and silently changing what the numbers in it mean would invalidate
+/// every comparison anyone has already drawn from it.
+///
+/// Select the other one with `TIMSSEEK_MLP_IMPORTANCE=grad` — see
+/// [`MlpConfig::from_env`] — and diff the two rankings across two runs of the
+/// same search. Neither choice touches the RNG, the optimizer or the parameters,
+/// so the two runs produce BIT-IDENTICAL scores and differ only in the sidecar.
+///
+/// # What the two actually measure, and why the second exists
+/// `W1` is `sum_o |W1[j, o]|`, the absolute row sums of the FIRST `Linear`
+/// layer's weights. It is the closest analogue to LDA's `|coef|` that a net
+/// admits, and it is cheap — it reads weights and touches no data. What it cannot
+/// see is everything past the first activation: a feature the net amplifies
+/// downstream and one whose contribution a later layer cancels have the same
+/// first-layer row norm, and `W1` scores them identically.
+///
+/// `Grad` is input-gradient (saliency) attribution: the mean of `|dL/dx_j|` over
+/// rows, which propagates through the WHOLE net, so cancellation and
+/// amplification both reach the number. It costs one forward/backward pass over
+/// the train rows per fold (~1 epoch out of the ~20-30 a fold actually runs).
+///
+/// # What `Grad` still is NOT
+/// A `0.0` from `Grad` does not mean "the net ignores this feature", and a small
+/// value does not mean "nearly ignores". `dL/dx_j` for a `Linear` first layer is
+/// `sum_o (dL/dh_o) W1[j, o]`, which does not depend on `x_j` at all — a column
+/// the net makes no use of still receives whatever gradient its randomly
+/// initialized `W1` row carries, and nothing in this training setup drives that
+/// row to zero (weight decay is `1e-4` over a few hundred steps). Read `Grad` as a
+/// RANKING, the same way `W1` is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MlpImportance {
+    /// `sum_o |W1[j, o]|`. The shipped metric; the sidecar's default content.
+    #[default]
+    W1,
+    /// Mean `|dL/dx_j|` over the train rows, at the TRUE labels. See
+    /// [`Mlp::input_grad_importance`].
+    Grad,
+}
+
 // ---------------------------------------------------------------- model
 
 pub struct Mlp {
@@ -1196,6 +1242,179 @@ impl Mlp {
             .find_map(|l| l.abs_in_weights())
             .unwrap_or_default()
     }
+
+    /// Are every layer's parameter gradient buffers exactly zero?
+    ///
+    /// The invariant [`Adam::step`] leaves behind (it writes `g[i] = 0.0` as it
+    /// consumes each gradient) and the one [`Self::input_grad_importance`] must
+    /// restore. Not a diagnostic anybody displays — it exists so that the
+    /// stale-gradient hazard is CHECKABLE rather than argued about.
+    pub(crate) fn param_grads_all_zero(&mut self) -> bool {
+        self.params_and_grads()
+            .into_iter()
+            .all(|(_, g, _)| g.iter().all(|v| *v == 0.0))
+    }
+
+    /// Drop every accumulated parameter gradient on the floor.
+    fn zero_param_grads(&mut self) {
+        for (_, g, _) in self.params_and_grads() {
+            g.fill(0.0);
+        }
+    }
+
+    /// INPUT-GRADIENT (SALIENCY) ATTRIBUTION: mean `|dL/dx_j|` over `x`'s rows,
+    /// per transformed input column, at the labels given.
+    ///
+    /// Indexed by TRANSFORMED input, exactly like [`Self::input_importance`], so
+    /// callers map back through [`ColumnTransform::lane_of_input`] /
+    /// [`ColumnTransform::isna_lane_of_input`] to get a lane-indexed vector.
+    /// Every returned value is `>= 0` and finite for a finite net, so it is a
+    /// REPORTED measurement under the `FoldModel::importance` contract, never the
+    /// `NAN` "unreported" sentinel.
+    ///
+    /// # The gradient is already computed and was being thrown away
+    /// [`Self::backward`] writes layer 0's `dL/dx` into [`Self::scratch`] on every
+    /// single training step and nothing has ever read it. This is an accumulator
+    /// over that buffer; there is no new backward math here, which is why the
+    /// number cannot drift from the gradient the optimizer actually descends.
+    ///
+    /// # A DEDICATED PASS, not an accumulation over the last training epoch
+    /// Two reasons, the second decisive:
+    ///
+    ///  1. The last epoch's gradients are measured at a moving parameter vector —
+    ///     one `dL/dx` per minibatch, each from a different model. The average is
+    ///     then an attribution of no particular net.
+    ///  2. WITH EARLY STOPPING ON, THE LAST EPOCH'S WEIGHTS ARE NOT THE WEIGHTS
+    ///     THAT SHIP. `train_reporting` rolls back to the best held-out epoch,
+    ///     which on every fold ever instrumented is 5+ epochs earlier, so an
+    ///     accumulation during training would describe parameters that were
+    ///     deliberately thrown away.
+    ///
+    /// The cost is one forward/backward over `x` — roughly one epoch on top of the
+    /// ~20-30 a fold runs.
+    ///
+    /// # It must not perturb the fit, and here is how it does not
+    ///  * **No optimizer step**, so no parameter moves. Asserted bit-for-bit by
+    ///    `input_grad_importance_leaves_the_fit_untouched`.
+    ///  * **No RNG draw**, so a run with attribution on has the same
+    ///    initialization and the same shuffle sequence as one without.
+    ///  * **THE STALE-GRADIENT HAZARD, WHICH IS THE SHARP ONE.**
+    ///    [`Linear::backward`] ACCUMULATES into `gw`/`gb` (`+=`) and [`Adam::step`]
+    ///    is what zeroes them, so a backward pass with no matching step leaves
+    ///    gradients that the NEXT `train_step` would fold into its update — a
+    ///    silent perturbation of a later fit, not a crash. This function therefore
+    ///    zeroes every parameter gradient before returning, restoring exactly the
+    ///    post-`Adam::step` invariant it found (the `debug_assert!` below is what
+    ///    says it found it).
+    ///
+    /// # Labels: the TRUE ones, and why the flipped variant is a reweighting
+    /// For this single-logit head `dL/dx_j = (dL/dz) * (dz/dx_j)`, and `dz/dx_j`
+    /// does not involve the labels at all. The label enters through the SCALAR
+    /// `dL/dz` alone — `p - y` for BCE — so every label choice produces the same
+    /// per-row `|dz/dx_j|` profile under a different per-row weight:
+    ///
+    ///  * TRUE labels weight a row by `|p - y|`, i.e. by how wrong the model still
+    ///    is on it. The attribution is dominated by rows near the decision
+    ///    boundary, which is where the 1% FDR cut lives.
+    ///  * FLIPPED labels weight it by `|p - (1 - y)| = |1 - (p - y) * s|`, which is
+    ///    near 1 for the confidently-correct bulk. Same feature profile, opposite
+    ///    row emphasis.
+    ///
+    /// So the label-flipped difference is a CHOICE OF ROW WEIGHTS, not a second
+    /// source of information about a feature, and there is no argument here for
+    /// preferring it. Only the true-label form is implemented. The flipped form is
+    /// a small, well-defined addition if the boundary-row emphasis turns out to be
+    /// the wrong lens: pass `1.0 - y[i]` here and subtract. The label-free limit of
+    /// the same family is mean `|dz/dx_j|`, which would drop `dL/dz` entirely.
+    ///
+    /// # Batching, and why the chunk size does not (materially) change the answer
+    /// `x` is walked in `batch`-row chunks IN ORDER — no shuffle, no RNG — to bound
+    /// the activation buffers at production row counts. [`MlpLoss::loss_and_grad`]
+    /// normalizes its gradient by `1 / sum(w)` OVER THE CHUNK, which would make the
+    /// result depend on the chunk size, so each chunk's contribution is multiplied
+    /// back by its own `sum(w)`. What is accumulated is therefore
+    /// `|w_i * d(loss_i)/dx_ij|`, and the return value is that divided by the row
+    /// count: the mean per-row gradient of the WEIGHTED per-row loss, which is the
+    /// quantity the optimizer sees. Chunking changes only the summation order, so
+    /// two chunk sizes agree to float-accumulation error rather than exactly.
+    ///
+    /// The sample weights are deliberately kept in (`0.5` targets / `1.0` decoys,
+    /// from `cv::fold_weights`): they are part of the objective this net was
+    /// actually fitted to. They scale rows, not features, so they cannot reorder
+    /// the ranking on their own.
+    ///
+    /// # `BatchNorm` is not supported here
+    /// The forward pass runs in EVAL mode, so a `BatchNorm` in the stack would
+    /// leave `xhat` unwritten (or stale) and its `backward` would read it. No
+    /// architecture this crate builds contains one — [`Self::feedforward`] emits
+    /// `Linear` plus a parameterless activation only — so this is documented
+    /// rather than solved, exactly as [`Self::snapshot_params_into`] documents the
+    /// same gap.
+    pub fn input_grad_importance(
+        &mut self,
+        x: &Tensor,
+        y: &[f32],
+        w: &[f32],
+        loss: &MlpLoss,
+        batch: usize,
+    ) -> Vec<f32> {
+        let (n, cols) = (x.rows, x.cols);
+        debug_assert_eq!(y.len(), n);
+        debug_assert_eq!(w.len(), n);
+        // The invariant this function has to restore. If it does not hold on
+        // entry, someone ran a backward pass without a matching optimizer step
+        // and the zeroing below would silently discard a real gradient.
+        debug_assert!(
+            self.param_grads_all_zero(),
+            "input_grad_importance expects the post-Adam::step invariant (all parameter \
+             gradients zero); a stale gradient here would be discarded by the wipe below"
+        );
+        if n == 0 || cols == 0 {
+            return vec![0.0; cols];
+        }
+
+        // f64 accumulator: at 10^5-10^6 rows an f32 running sum of same-signed
+        // magnitudes loses low-order bits to the growing total, and this is a
+        // reported statistic that two runs have to agree on.
+        let mut acc = vec![0.0f64; cols];
+        let batch = batch.max(1);
+        let last = self.acts.len() - 1;
+        let (mut xb, mut yb, mut wb) = (Tensor::default(), Vec::new(), Vec::new());
+
+        for start in (0..n).step_by(batch) {
+            let end = (start + batch).min(n);
+            xb.reshape(end - start, cols);
+            yb.clear();
+            wb.clear();
+            for (bi, i) in (start..end).enumerate() {
+                xb.row_mut(bi).copy_from_slice(x.row(i));
+                yb.push(y[i]);
+                wb.push(w[i]);
+            }
+            // Undoes `loss_and_grad`'s per-chunk `1 / sum(w)`, so the chunk size
+            // is not baked into the answer. See the docs above.
+            let wsum: f32 = wb.iter().sum();
+
+            self.forward(&xb, false);
+            loss.loss_and_grad(&self.acts[last], &yb, &wb, &mut self.grads[last]);
+            self.backward(&xb);
+
+            for bi in 0..(end - start) {
+                let g = self.scratch.row(bi);
+                for j in 0..cols {
+                    acc[j] += (g[j] * wsum).abs() as f64;
+                }
+            }
+        }
+
+        // THE STALE-GRADIENT WIPE. `Linear::backward` accumulated into every
+        // `gw`/`gb` above and no `Adam::step` consumed them; leaving them would
+        // hand a later `train_step` a gradient from this reporting pass.
+        self.zero_param_grads();
+
+        let inv_n = 1.0 / n as f64;
+        acc.iter().map(|v| (v * inv_n) as f32).collect()
+    }
 }
 
 /// A held-out set for the per-epoch loss trace AND the early-stopping
@@ -1501,6 +1720,18 @@ pub struct MlpConfig {
     /// and reading the result as "the activation is worse" is the same mistake the
     /// `lr`/`batch_size` coupling above warns about.
     pub activation: Activation,
+    /// Which feature-importance metric the fitted fold model reports into the TSV
+    /// sidecar. Defaults to [`MlpImportance::W1`], the shipped metric, and THE
+    /// DEFAULT MUST NOT MOVE — see [`MlpImportance`] for why (the sidecar is
+    /// consumed outside this codebase).
+    ///
+    /// Purely a REPORTING choice: it reaches no weight, no RNG draw and no
+    /// optimizer step, so two runs that differ only in this field produce
+    /// bit-identical scores and differ only in the sidecar. That is what makes
+    /// "run the same search twice and diff the two rankings" a valid comparison,
+    /// and it is asserted in `mlp_fold`'s
+    /// `the_importance_metric_choice_does_not_move_the_scores`.
+    pub importance: MlpImportance,
     pub seed: u64,
     /// Stop after this many consecutive epochs with no improvement in held-out
     /// loss, and restore the best-seen weights. `None` disables the whole
@@ -1665,6 +1896,10 @@ impl MlpConfig {
             loss: MlpLoss::Bce,
             // The rectifier the whole sweep above ran on. See `activation`.
             activation: Activation::LeakyRelu,
+            // The metric the sidecar has always carried. An externally consumed
+            // file: changing what its numbers mean is not a default change, it
+            // invalidates every comparison already drawn from it.
+            importance: MlpImportance::W1,
             seed: 0x2545_F491_4F6C_DD1D,
             early_stopping_patience: Some(5),
         }
@@ -1690,8 +1925,16 @@ impl MlpConfig {
     /// | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | non-negative finite float, e.g. `0` or `1e-3` |
     /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
     /// | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` or `square`, case-insensitive (`-` and `_` interchangeable) |
+    /// | `TIMSSEEK_MLP_IMPORTANCE` | `importance` | `w1` or `grad`, case-insensitive |
     /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
     /// | `TIMSSEEK_MLP_LOSS` | `loss` | `bce`, or `focal:GAMMA:ALPHA` (`focal:2:0.25`) |
+    ///
+    /// `TIMSSEEK_MLP_IMPORTANCE` is the ODD ONE OUT: every other variable here
+    /// retunes the FIT, and this one cannot touch it. It selects which of the two
+    /// feature-importance metrics lands in `results.feature_importance.tsv` (see
+    /// [`MlpImportance`]), so the intended use is to run the same search twice —
+    /// once unset, once `=grad` — and diff the two rankings, with the scores
+    /// guaranteed bit-identical between the runs.
     ///
     /// `TIMSSEEK_MLP_LOSS` spells BOTH focal parameters or none of them: they are
     /// coupled to each other and to the per-row sample weights (see
@@ -1734,7 +1977,7 @@ impl MlpConfig {
                 tracing::info!(
                     "MLP config: DEV OVERRIDE ACTIVE ({}); effective config: hidden={:?} \
                      lr={:e} weight_decay={:e} epochs={} batch_size={} patience={:?} \
-                     activation={:?} seed={:#018x} loss={:?}",
+                     activation={:?} seed={:#018x} loss={:?} importance={:?}",
                     applied.join(" "),
                     cfg.hidden,
                     cfg.lr,
@@ -1745,6 +1988,7 @@ impl MlpConfig {
                     cfg.activation,
                     cfg.seed,
                     cfg.loss,
+                    cfg.importance,
                 );
             });
         }
@@ -1795,6 +2039,9 @@ impl MlpConfig {
         }
         if let Some(raw) = read("TIMSSEEK_MLP_ACTIVATION") {
             self.activation = parse_activation("TIMSSEEK_MLP_ACTIVATION", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_IMPORTANCE") {
+            self.importance = parse_importance("TIMSSEEK_MLP_IMPORTANCE", &raw);
         }
         if let Some(raw) = read("TIMSSEEK_MLP_SEED") {
             self.seed = parse_seed("TIMSSEEK_MLP_SEED", &raw);
@@ -1906,6 +2153,26 @@ fn parse_activation(name: &str, raw: &str) -> Activation {
         "leaky_relu" => Activation::LeakyRelu,
         "square" => Activation::Square,
         _ => bad_env(name, raw, "`leaky_relu` or `square` (case-insensitive)"),
+    }
+}
+
+/// `w1` / `grad`. Case is ignored and `-` normalizes to `_`, matching
+/// [`parse_activation`]; anything else ABORTS like every other malformed
+/// override. Aborting matters here for a different reason than it does for the
+/// hyperparameters: a typo'd metric name would produce a sidecar full of the
+/// OTHER metric's numbers under the operator's label, and the whole point of the
+/// variable is to diff two rankings that must be correctly attributed.
+fn parse_importance(name: &str, raw: &str) -> MlpImportance {
+    let t = raw.trim().to_ascii_lowercase().replace('-', "_");
+    match t.as_str() {
+        "w1" => MlpImportance::W1,
+        "grad" => MlpImportance::Grad,
+        _ => bad_env(
+            name,
+            raw,
+            "`w1` (first-layer absolute weight row sums, the default) or `grad` (mean \
+             |dL/dx| input-gradient attribution), case-insensitive",
+        ),
     }
 }
 
@@ -3015,6 +3282,15 @@ mod test {
         );
     }
 
+    /// Every parameter as raw bits, in `params_and_grads` order. Bit equality is
+    /// the only useful notion of "untouched" for a parameter vector.
+    fn param_bits(m: &mut Mlp) -> Vec<u32> {
+        m.params_and_grads()
+            .into_iter()
+            .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+            .collect()
+    }
+
     #[test]
     fn eval_loss_leaves_the_parameters_untouched() {
         let mut rng = StdRng::seed_from_u64(5);
@@ -3023,18 +3299,276 @@ mod test {
         let y: Vec<f32> = (0..16).map(|i| (i % 2) as f32).collect();
         let w = vec![1.0f32; 16];
 
-        let snapshot = |m: &mut Mlp| -> Vec<u32> {
-            m.params_and_grads()
-                .into_iter()
-                .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
-                .collect()
-        };
-
-        let before = snapshot(&mut m);
+        let before = param_bits(&mut m);
         let l = m.eval_loss(&x, &y, &w, &MlpLoss::Bce);
-        let after = snapshot(&mut m);
+        let after = param_bits(&mut m);
         assert_eq!(before, after, "eval_loss mutated a parameter");
         assert!(l.is_finite() && l > 0.0, "eval_loss returned {l}");
+    }
+
+    // ------------------------------------------- input-gradient importance
+
+    /// `(x, y, w)` for the attribution tests: 4 columns against alternating
+    /// labels. Column 0 carries a STRONG signal, column 1 is PURE NOISE, column 2
+    /// carries a weak inverted signal, column 3 is CONSTANT. Standardized-ish
+    /// scales throughout, matching what [`ColumnTransform`] hands the net.
+    fn attribution_fixture(seed: u64) -> (Tensor, Vec<f32>, Vec<f32>) {
+        let mut dr = StdRng::seed_from_u64(seed ^ 0xDA7A);
+        let n = 512;
+        let mut x = Tensor::new(n, 4);
+        let mut y = vec![0.0f32; n];
+        for i in 0..n {
+            let pos = i % 2 == 0;
+            let r = x.row_mut(i);
+            r[0] = if pos { 1.2 } else { -1.2 } + 0.5 * normal(&mut dr);
+            r[1] = normal(&mut dr);
+            r[2] = if pos { -0.4 } else { 0.4 } + 0.9 * normal(&mut dr);
+            r[3] = 1.0;
+            y[i] = if pos { 1.0 } else { 0.0 };
+        }
+        (x, y, vec![1.0f32; n])
+    }
+
+    fn attribution_cfg(seed: u64) -> MlpConfig {
+        MlpConfig {
+            hidden: vec![16, 8],
+            epochs: 200,
+            batch_size: 64,
+            seed,
+            ..MlpConfig::default()
+        }
+    }
+
+    /// Train [`attribution_fixture`] to convergence and hand back the net.
+    fn trained_on_fixture(cfg: &MlpConfig, x: &Tensor, y: &[f32], w: &[f32]) -> Mlp {
+        let mut rng = StdRng::seed_from_u64(cfg.seed);
+        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, cfg.activation, &mut rng);
+        let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+        m.train(cfg, x, y, w, &mut o, &mut rng);
+        m
+    }
+
+    /// THE SHARPEST HAZARD IN THE WHOLE ATTRIBUTION PASS, as a test.
+    ///
+    /// [`Linear::backward`] ACCUMULATES into `gw`/`gb` (`+=`) and [`Adam::step`] is
+    /// what zeroes them, so a backward pass with no matching step leaves gradients
+    /// that the next `train_step` folds into its update. That is not a crash and
+    /// not a wrong number in the report — it is a SILENT perturbation of a later
+    /// fit, and the only reason a reporting pass could move a score.
+    ///
+    /// Three assertions, in increasing strength:
+    ///
+    ///  1. No parameter moved (bits).
+    ///  2. Every parameter gradient is back to zero, the post-`Adam::step`
+    ///     invariant the pass found on entry.
+    ///  3. THE ONE WITH TEETH: a net that attributed and then took more steps is
+    ///     bit-identical to one that only took those steps. Assertion 2 is how the
+    ///     implementation happens to achieve this today; assertion 3 is the
+    ///     property, and it would fail for any other leak of state between the
+    ///     pass and a later step.
+    ///
+    /// The control arm in 3 is not optional: without it, deleting the wipe would
+    /// still pass 1 (a backward pass moves no parameter by itself).
+    #[test]
+    fn input_grad_importance_leaves_the_fit_untouched() {
+        for seed in [7u64, 13, 42] {
+            let cfg = attribution_cfg(seed);
+            let (x, y, w) = attribution_fixture(seed);
+            let mut m = trained_on_fixture(&cfg, &x, &y, &w);
+
+            let before = param_bits(&mut m);
+            assert!(
+                m.param_grads_all_zero(),
+                "seed {seed}: training must leave the post-Adam::step invariant"
+            );
+            let imp = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
+            assert_eq!(
+                before,
+                param_bits(&mut m),
+                "seed {seed}: the attribution pass moved a parameter"
+            );
+            assert!(
+                m.param_grads_all_zero(),
+                "seed {seed}: the attribution pass left a STALE GRADIENT that the next \
+                 train_step would apply"
+            );
+            assert!(
+                imp.iter().all(|v| v.is_finite() && *v >= 0.0),
+                "seed {seed}: {imp:?}"
+            );
+
+            // ...and the property, not just the mechanism: more training on top of
+            // an attributed net matches a net that never attributed.
+            let mut control = trained_on_fixture(&cfg, &x, &y, &w);
+            assert_eq!(
+                before,
+                param_bits(&mut control),
+                "seed {seed}: the two arms must start identical"
+            );
+            let mut o_a = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+            let mut o_b = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+            for _ in 0..5 {
+                m.train_step(&x, &y, &w, &cfg.loss, &mut o_a);
+                control.train_step(&x, &y, &w, &cfg.loss, &mut o_b);
+            }
+            assert_eq!(
+                param_bits(&mut m),
+                param_bits(&mut control),
+                "seed {seed}: training after an attribution pass diverged from training \
+                 without one — a gradient leaked out of the reporting pass"
+            );
+        }
+    }
+
+    /// The reason the second metric exists: it can tell an informative column from
+    /// a noise one, and `W1` cannot.
+    ///
+    /// Swept over seeds, like every learning test in this module — it has two
+    /// documented init-dependent training traps, and an attribution is read off a
+    /// trained net, so a single seed would be measuring one init's luck.
+    ///
+    /// MEASURED on this fixture, all eight seeds (column 0 = strong signal,
+    /// column 1 = pure noise):
+    ///
+    /// | seed | grad[0] | grad[1] | ratio | w1[0] | w1[1] |
+    /// |------|---------|---------|-------|-------|-------|
+    /// | 7    | 0.1184  | 0.0044  | 27.0  | 12.07 | 12.64 |
+    /// | 13   | 0.1127  | 0.0114  | 9.8   | 12.58 |  9.79 |
+    /// | 42   | 0.0253  | 0.0024  | 10.7  | 12.15 |  9.15 |
+    /// | 99   | 0.0250  | 0.0033  |  7.7  | 10.35 |  6.86 |
+    /// | 1234 | 0.1013  | 0.0054  | 18.9  | 10.62 |  4.79 |
+    /// | 3    | 0.1211  | 0.0233  |  5.2  | 13.52 |  8.43 |
+    ///
+    /// The `w1` columns are the point of the table, not decoration: on SEED 7 the
+    /// first-layer row norm of the pure-noise column is LARGER than the signal
+    /// column's, i.e. `W1` ranks noise above signal, while the gradient separates
+    /// them by 27x. Nothing is wrong with `W1` — it is a weight norm, and a
+    /// randomly initialized row that the net never uses keeps whatever norm it
+    /// started with — but it is precisely why one metric is not enough.
+    ///
+    /// The bar is `3x` against a measured minimum of `5.2x`. Deliberately loose:
+    /// this asserts that the gradient ORDERS the two columns with room to spare,
+    /// not that it reproduces a particular ratio.
+    #[test]
+    fn input_grad_importance_separates_a_learned_column_from_a_noise_one() {
+        for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
+            let cfg = attribution_cfg(seed);
+            let (x, y, w) = attribution_fixture(seed);
+            let mut m = trained_on_fixture(&cfg, &x, &y, &w);
+            let g = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
+
+            assert_eq!(g.len(), 4, "one value per transformed input");
+            assert!(g.iter().all(|v| v.is_finite() && *v >= 0.0), "{g:?}");
+            assert!(
+                g[0] > 3.0 * g[1],
+                "seed {seed}: the strong signal column must outrank the pure-noise one \
+                 by a wide margin: {g:?}"
+            );
+            assert!(
+                g[0] >= g[1].max(g[2]).max(g[3]),
+                "seed {seed}: the strong signal column must rank first: {g:?}"
+            );
+            // The documented caveat, asserted so it cannot quietly stop being
+            // true: a CONSTANT column still receives gradient, because `dL/dx_j`
+            // for a `Linear` first layer does not depend on `x_j`. `Grad` is a
+            // ranking, not a used/unused test — see [`MlpImportance`].
+            assert!(
+                g[3] > 0.0,
+                "seed {seed}: a constant column is expected to carry NONZERO gradient; \
+                 if this now fails, the caveat on `MlpImportance` is stale: {g:?}"
+            );
+        }
+    }
+
+    /// The one case where "the net ignores this feature" IS provable, and where
+    /// the metric must therefore report exactly `0.0`: a first-layer weight row of
+    /// zeros. `dL/dx_j = sum_o (dL/dh_o) * W1[j, o]`, so the gradient is
+    /// identically zero for every row, and a `0.0` here is a REPORTED measurement
+    /// under the `FoldModel::importance` contract, not the `NAN` sentinel.
+    ///
+    /// Constructed rather than trained, because training cannot produce it: weight
+    /// decay of `1e-4` over a few hundred steps does not drive an unused row to
+    /// zero, which is exactly the caveat
+    /// [`input_grad_importance_separates_a_learned_column_from_a_noise_one`]
+    /// asserts on its constant column. Both metrics are checked, since both must
+    /// agree in the one case where the answer is known.
+    #[test]
+    fn a_zeroed_first_layer_row_gets_exactly_zero_attribution() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let (n_in, n_h) = (4usize, 6usize);
+        let mut lin = Linear::new(n_in, n_h, &mut rng);
+        // Column 1 is disconnected from the net entirely: `w` is row-major with
+        // stride `n_out`, so input `i`'s row is `w[i * n_out .. (i + 1) * n_out]`.
+        const DEAD: usize = 1;
+        lin.w[DEAD * n_h..(DEAD + 1) * n_h].fill(0.0);
+        let layers: Vec<Box<dyn Layer>> = vec![
+            Box::new(lin),
+            Box::new(Relu::leaky(n_h, LEAKY_SLOPE)),
+            Box::new(Linear::new(n_h, 1, &mut rng)),
+        ];
+        let mut m = Mlp::new(layers);
+
+        let x = filled(64, n_in, &mut rng);
+        let y: Vec<f32> = (0..64).map(|i| (i % 2) as f32).collect();
+        let w = vec![1.0f32; 64];
+
+        let g = m.input_grad_importance(&x, &y, &w, &MlpLoss::Bce, 16);
+        assert_eq!(
+            g[1], 0.0,
+            "a disconnected input must report exactly 0.0: {g:?}"
+        );
+        assert_eq!(
+            m.input_importance()[1],
+            0.0,
+            "the W1 metric must agree in the one case where the answer is known"
+        );
+        // NON-VACUITY: the connected columns are not zero, so the assertion above
+        // is about the zeroed row and not about a dead fixture.
+        assert!(
+            [0usize, 2, 3].iter().all(|&j| g[j] > 0.0),
+            "connected inputs must carry gradient: {g:?}"
+        );
+    }
+
+    /// Bit-for-bit reproducible, and essentially unmoved by the chunk size.
+    ///
+    /// Reproducibility is the load-bearing half: the sidecar is diffed across runs
+    /// (that is the entire purpose of `TIMSSEEK_MLP_IMPORTANCE`), so a metric that
+    /// wobbled would make every diff unreadable. It follows from the pass drawing
+    /// no RNG and reading no clock, and this is what pins it.
+    ///
+    /// The chunk size is checked as a RELATIVE tolerance rather than as bit
+    /// equality on purpose. [`Mlp::input_grad_importance`] multiplies each chunk's
+    /// contribution back by its own `sum(w)` so the chunking cannot enter the
+    /// ANSWER, but it still changes the summation ORDER, and float addition is not
+    /// associative. `1e-4` relative is float noise on a 512-row f64 accumulation;
+    /// a chunk size that leaked into the metric itself would be off by the ratio of
+    /// the chunk sums, i.e. by whole factors.
+    #[test]
+    fn input_grad_importance_is_reproducible_and_chunk_size_independent() {
+        let cfg = attribution_cfg(42);
+        let (x, y, w) = attribution_fixture(42);
+        let mut m = trained_on_fixture(&cfg, &x, &y, &w);
+
+        let a = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
+        let b = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
+        assert_eq!(
+            a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "two identical passes must agree to the bit"
+        );
+
+        for batch in [1usize, 7, 64, 512, 4096] {
+            let c = m.input_grad_importance(&x, &y, &w, &cfg.loss, batch);
+            for j in 0..a.len() {
+                let rel = (a[j] - c[j]).abs() / a[j].abs().max(1e-30);
+                assert!(
+                    rel < 1e-4,
+                    "batch {batch}: input {j} moved by {rel} relative — the chunk size \
+                     reached the metric instead of only the summation order ({a:?} vs {c:?})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3133,6 +3667,11 @@ mod test {
         // `Square` is an experiment and must never become the default by
         // accident — see [`Square`] for the divergence hazard.
         assert_eq!(cfg.activation, Activation::LeakyRelu);
+        // THE SIDECAR'S DEFAULT CONTENT. `results.feature_importance.tsv` is
+        // consumed outside this codebase, so `Grad` becoming the default is not a
+        // retune — it silently changes what every number in that file means. A
+        // diff that flips this has to say so out loud.
+        assert_eq!(cfg.importance, MlpImportance::W1);
     }
 
     /// An unrelated variable is not a read, and one variable moves ONE field.
@@ -3168,6 +3707,7 @@ mod test {
             ("TIMSSEEK_MLP_WEIGHT_DECAY", "0"),
             ("TIMSSEEK_MLP_PATIENCE", "9"),
             ("TIMSSEEK_MLP_ACTIVATION", "square"),
+            ("TIMSSEEK_MLP_IMPORTANCE", "grad"),
             ("TIMSSEEK_MLP_SEED", "12345"),
             ("TIMSSEEK_MLP_LOSS", "focal:2:0.25"),
         ]));
@@ -3178,6 +3718,7 @@ mod test {
         assert_eq!(cfg.weight_decay, 0.0);
         assert_eq!(cfg.early_stopping_patience, Some(9));
         assert_eq!(cfg.activation, Activation::Square);
+        assert_eq!(cfg.importance, MlpImportance::Grad);
         assert_eq!(cfg.seed, 12345);
         assert_eq!(
             cfg.loss,
@@ -3186,7 +3727,41 @@ mod test {
                 alpha: 0.25
             }
         );
-        assert_eq!(applied.len(), 9, "every read must be reported: {applied:?}");
+        assert_eq!(
+            applied.len(),
+            10,
+            "every read must be reported: {applied:?}"
+        );
+    }
+
+    /// `TIMSSEEK_MLP_IMPORTANCE` is the one variable here that must NOT be able to
+    /// retune the fit — it selects a report. Asserted as "it moves that field and
+    /// no other", the same shape as [`one_variable_moves_one_field`]; the stronger
+    /// claim (the SCORES do not move either) is
+    /// `mlp_fold::test::the_importance_metric_choice_does_not_move_the_scores`.
+    #[test]
+    fn importance_spellings_parse_and_move_only_the_report() {
+        for (spelling, want) in [
+            ("w1", MlpImportance::W1),
+            ("W1", MlpImportance::W1),
+            ("grad", MlpImportance::Grad),
+            ("GRAD", MlpImportance::Grad),
+            (" grad ", MlpImportance::Grad),
+        ] {
+            let base = MlpConfig::compiled_default();
+            let mut cfg = base.clone();
+            let applied = cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_IMPORTANCE", spelling)]));
+            assert_eq!(cfg.importance, want, "{spelling:?}");
+            assert_eq!(applied.len(), 1);
+            assert_eq!(
+                MlpConfig {
+                    importance: base.importance,
+                    ..cfg
+                },
+                base,
+                "{spelling:?}: selecting an importance metric moved a HYPERPARAMETER"
+            );
+        }
     }
 
     /// The explicit spellings for the two fields that have an "off": `hidden`
@@ -3293,6 +3868,15 @@ mod test {
         "relu"
     );
     rejects!(rejects_empty_activation, "TIMSSEEK_MLP_ACTIVATION", "");
+    // A typo'd metric name would fill the sidecar with the OTHER metric's numbers
+    // under the operator's label, which is the mislabelled-comparison failure the
+    // whole abort convention exists to prevent.
+    rejects!(
+        rejects_unknown_importance,
+        "TIMSSEEK_MLP_IMPORTANCE",
+        "saliency"
+    );
+    rejects!(rejects_empty_importance, "TIMSSEEK_MLP_IMPORTANCE", "");
     rejects!(rejects_unknown_loss, "TIMSSEEK_MLP_LOSS", "hinge");
     rejects!(rejects_empty_loss, "TIMSSEEK_MLP_LOSS", "");
     // Both focal parameters are spelled or neither is: an invented `gamma` is
