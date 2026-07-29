@@ -21,6 +21,7 @@
 use crate::ml::cv::{
     FoldDataset,
     FoldModel,
+    fold_weights,
 };
 use crate::ml::mlp::{
     Adam,
@@ -39,7 +40,8 @@ pub enum MlpFoldError {
     /// column `j` of a different matrix.
     WidthMismatch { fitted: usize, got: usize },
     /// The cull left nothing to train on: every lane column was entirely
-    /// non-finite or (near-)constant on the train rows.
+    /// non-finite on the train rows, or measured a std at or below `MIN_STD`
+    /// (see [`ColumnTransform`] for what that does and does not guarantee).
     ///
     /// Carries its own diagnostic context because the callers that report it
     /// cannot reconstruct it: [`FoldModel::fit`]'s error travels up through
@@ -111,18 +113,26 @@ pub struct MlpFoldModel {
     /// Fitted on the TRAIN rows at `fit` time and never refitted. This is the
     /// field the whole leak argument rests on.
     transform: ColumnTransform,
-    /// Mean loss of the final training epoch. Diagnostics only.
+    /// Mean loss of the final training epoch. Diagnostics only — `fit` logs it,
+    /// and [`MlpFoldModel::final_loss`] hands it to a failing test's message.
+    #[cfg_attr(not(test), allow(dead_code))]
     final_loss: f32,
 }
 
+// Both accessors are TEST SURFACE and are scoped to it. Nothing in the live path
+// reads either one, but the leak property this module exists to keep
+// (`transform` is fitted on the train rows and never refitted) is only checkable
+// from outside through `transform()`, and `final_loss()` is what makes a failing
+// convergence assertion diagnosable. `pub` would have advertised them as API.
+#[cfg(test)]
 impl MlpFoldModel {
     /// The transform fitted at `fit` time — the one `predict` uses.
-    pub fn transform(&self) -> &ColumnTransform {
+    pub(crate) fn transform(&self) -> &ColumnTransform {
         &self.transform
     }
 
     /// Mean loss over the final training epoch.
-    pub fn final_loss(&self) -> f32 {
+    pub(crate) fn final_loss(&self) -> f32 {
         self.final_loss
     }
 }
@@ -198,17 +208,22 @@ impl FoldModel for MlpFoldModel {
             });
         }
 
-        // Labels and sample weights follow the GBM's convention (`cv.rs`):
-        // y = 1.0 target / 0.0 decoy, weight 0.5 target / 1.0 decoy.
+        // Labels: y = 1.0 target / 0.0 decoy, the GBM's convention.
         let mut x = Tensor::new(train.len(), width);
         let mut y = Vec::with_capacity(train.len());
-        let mut w = Vec::with_capacity(train.len());
         for (k, &i) in train.iter().enumerate() {
             transform.apply(&feat[k * ncols..(k + 1) * ncols], x.row_mut(k));
-            let decoy = data.is_decoy(i);
-            y.push(if decoy { 0.0 } else { 1.0 });
-            w.push(if decoy { 1.0 } else { 0.5 });
+            y.push(if data.is_decoy(i) { 0.0 } else { 1.0 });
         }
+        // Sample weights come from [`fold_weights`], the ONE definition of the
+        // decoy-1.0 / target-0.5 convention. Re-inlining it here is how the MLP
+        // and the GBM would come to weight their classes differently without any
+        // test noticing — the two models would just be trained on different
+        // objectives.
+        let w: Vec<f32> = fold_weights(data, train)
+            .into_iter()
+            .map(|v| v as f32)
+            .collect();
 
         // Seeded from (config seed, fold index) alone — see the module docs.
         let mut rng = cfg.rng_for_fold(fold);
@@ -446,10 +461,15 @@ mod test {
     /// drawn from twice the decoy range, so `(9/19)^2 ~ 22%` of targets land
     /// entirely inside the decoy support and are indistinguishable from one.
     /// The Bayes-optimal AUC is therefore only ~0.89, and the fits below come
-    /// in at 0.87-0.89. A fixed floor alone would be an arbitrary number, so
-    /// the load-bearing assertion is the second one: the fitted model must beat
-    /// the best SINGLE raw column (~0.76 here), i.e. it must actually have
-    /// combined the two informative features rather than latched onto one.
+    /// in at 0.87-0.89.
+    ///
+    /// BOTH bars are asserted and the ABSOLUTE one is the tighter of the two on
+    /// this fixture: the best single raw column comes in at ~0.763, so the
+    /// relative bar sits at ~0.813 and the absolute 0.85 subsumes it. The
+    /// relative bar is kept anyway, and is the one to keep if the fixture
+    /// changes — it says the model COMBINED the two informative features rather
+    /// than latching onto one, which is a claim about the fit; 0.85 is a number
+    /// that happens to be right for these draws.
     #[test]
     fn fitted_model_separates_a_separable_toy_on_held_out_rows() {
         for seed in [7u64, 13, 42, 1234] {
@@ -551,9 +571,10 @@ mod test {
     fn predict_scores_a_row_the_same_alone_as_in_a_batch() {
         for seed in [7u64, 13, 42, 1234] {
             let (mut feat, y) = toy(150, seed, 0.0);
-            // Rows 150.. are the decoys; push the second half of EACH class far
-            // off so the scored batch has a different mean and spread from the
-            // train rows.
+            // Push the HELD rows far off, so the scored batch has a different
+            // mean and spread from the train rows. `split` takes even rows as
+            // train and odd rows as held, and the layout is targets-then-decoys,
+            // so "every odd row" is half of each class — the held half.
             for i in (0..300).filter(|i| i % 2 == 1) {
                 for j in 0..3 {
                     feat[i * 3 + j] = feat[i * 3 + j] * 50.0 + 500.0;
@@ -614,8 +635,12 @@ mod test {
     /// A missable column's `_isna` companion has no lane of its own, so its
     /// weight is folded into the column it flags rather than dropped. The
     /// no-weight-lost half is a `debug_assert` inside `importance`, which this
-    /// test (a debug build) executes; asserted here is that the companion
-    /// exists at all, so that assert is not vacuous.
+    /// test (a debug build) executes; asserted here is that the companion exists
+    /// at all, so that assert is not vacuous, AND that it maps back to the column
+    /// it flags — without which this test would pass for an
+    /// `isna_lane_of_input` that always answered lane 0, i.e. for an
+    /// implementation that folded every companion's weight into the wrong
+    /// feature.
     #[test]
     fn missable_columns_fold_their_companion_into_the_parent_lane() {
         for seed in [7u64, 13, 42] {
@@ -633,6 +658,15 @@ mod test {
                 model.transform().width(),
                 4,
                 "three survivors + one _isna companion"
+            );
+            // The companion is transformed input 3 (it follows the three
+            // standardized columns) and it flags LANE 2 — the column the NaNs
+            // were punched into. This is the property in this test's name.
+            assert_eq!(model.transform().isna_lane_of_input(3), Some(2));
+            assert_eq!(
+                model.transform().isna_lane_of_input(2),
+                None,
+                "inputs 0..3 are standardized columns, not companions"
             );
 
             let imp = model.importance();
@@ -758,7 +792,97 @@ mod test {
 
         // NON-VACUITY: the same dataset with real train rows FITS, so the error
         // above is a property of the empty slice and not of a dead fixture.
-        let train: Vec<usize> = (0..20).collect();
+        // `split(40).0` rather than `(0..20)`: `toy` lays out targets then
+        // decoys, so the first 20 rows are 20 targets and no decoys, and a
+        // single-class fit is a second thing that could be going right or wrong
+        // here. The even-row slice is class-balanced and costs nothing.
+        let (train, _) = split(40);
         assert!(MlpFoldModel::fit(&cfg(7), &data, 2, &train, &[]).is_ok());
+    }
+
+    /// [`ColumnTransform::check_clean`]'s report must actually fire, i.e. the
+    /// warn branch in [`FoldModel::predict`] must be reachable.
+    ///
+    /// It needs a column that is CLEAN across the train rows and non-finite only
+    /// on a row being scored. That is an awkward fixture to hit by accident, and
+    /// no other test in this file does: every one of them either NaNs the column
+    /// in the train rows too — which makes it `Missable`, and `check_clean` skips
+    /// those on purpose, since a missable column has an `_isna` companion to carry
+    /// the missingness — or leaves the column entirely dead, which culls it. So
+    /// `dirty` was empty everywhere and this path was never executed.
+    ///
+    /// Why it matters: on such a column the NaN imputes to the TRAIN MEAN with no
+    /// flag, so the row is scored as if it were average on that feature. That is a
+    /// train/score distribution mismatch worth telling an operator about, which is
+    /// why the report is a returned value rather than a `debug_assert!` — the
+    /// production build is exactly where it would happen.
+    #[test]
+    fn a_nan_only_in_a_scored_row_is_reported_rather_than_silently_imputed() {
+        for seed in [7u64, 13, 42] {
+            let (mut feat, y) = toy(150, seed, 0.0);
+            let (train, held) = split(300);
+
+            // Column 2, on TWO HELD rows only — one per class, so the fixture is
+            // not also testing single-class behaviour.
+            let dirty_rows = [held[0], held[1]];
+            for &i in &dirty_rows {
+                feat[i * 3 + 2] = f64::NAN;
+            }
+            let data = dataset(feat, 3, y);
+
+            let model = MlpFoldModel::fit(&cfg(seed), &data, 0, &train, &[]).unwrap();
+            // THE PREMISE: column 2 survived the cull and the fit saw it as
+            // CLEAN, so it has no `_isna` companion to carry the missingness.
+            assert!(
+                model.transform().culled().is_empty(),
+                "seed {seed}: a culled column has no clean/dirty distinction to report"
+            );
+            assert_eq!(
+                model.transform().width(),
+                3,
+                "seed {seed}: three survivors and NO companion — a companion would mean the \
+                 fit saw the column as missable, which is the case `check_clean` skips"
+            );
+
+            // THE ASSERTION: the branch's condition is true, so the warn in
+            // `predict` runs — and it names the offending column.
+            let dirty = model.transform().check_clean(
+                &gather(&data, &held, 3),
+                &(0..held.len()).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                dirty,
+                &[2],
+                "seed {seed}: a NaN that only ever appears in a scored row must be reported"
+            );
+
+            // ...and scoring still completes, with finite values: the report is a
+            // diagnostic, not a failure.
+            let scores = model.predict(&data, &held).unwrap();
+            assert_eq!(scores.len(), held.len());
+            assert!(
+                scores.iter().all(|s| s.is_finite()),
+                "seed {seed}: the imputed rows must still score finitely"
+            );
+
+            // NON-VACUITY for the report: the SAME transform over rows without the
+            // NaN reports nothing, so `dirty` above is about those two rows.
+            let clean_rows: Vec<usize> = held
+                .iter()
+                .copied()
+                .filter(|i| !dirty_rows.contains(i))
+                .collect();
+            assert!(
+                model
+                    .transform()
+                    .check_clean(
+                        &gather(&data, &clean_rows, 3),
+                        &(0..clean_rows.len()).collect::<Vec<_>>()
+                    )
+                    .is_empty(),
+                "seed {seed}: rows with no NaN must not be reported, else the assertion \
+                 above holds for any input"
+            );
+        }
     }
 }

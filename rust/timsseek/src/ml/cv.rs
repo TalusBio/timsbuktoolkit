@@ -438,7 +438,12 @@ impl DataBuffer {
 
 /// Class weights: decoys 1.0, targets 0.5 — the historical GBM weighting,
 /// unchanged, just expressed through the dataset's label channel.
-fn fold_weights<D: FoldDataset>(data: &D, rows: &[usize]) -> Vec<f64> {
+///
+/// `pub(crate)` because [`crate::ml::mlp_fold`] weights its training rows the
+/// same way and used to re-inline the two literals. Two copies of a training
+/// objective is not a duplication a test would catch: both models would simply
+/// be fitted against different weightings, and nothing downstream compares them.
+pub(crate) fn fold_weights<D: FoldDataset>(data: &D, rows: &[usize]) -> Vec<f64> {
     rows.iter()
         .map(|&i| if data.is_decoy(i) { 1.0 } else { 0.5 })
         .collect()
