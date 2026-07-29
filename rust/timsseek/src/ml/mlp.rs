@@ -306,6 +306,116 @@ impl Layer for Relu {
     }
 }
 
+// ---------------------------------------------------------------- square
+
+/// `f(x) = x^2`, as an alternative to the rectifier.
+///
+/// Reported to work well by the project owner in cases where DEAD UNITS were the
+/// problem, which is the case for it: `x^2` has zero gradient at exactly one
+/// point rather than over a whole half-line, so there is no absorbing dead state
+/// of the kind [`Relu`] documents. Nonlinear on its own — a single squaring layer
+/// already separates XOR — and even, so it responds to the MAGNITUDE of a
+/// standardized feature rather than its sign, which is a different inductive bias
+/// from a rectifier, not merely a smoother one.
+///
+/// # It is unbounded and even, and that is a real hazard
+/// A rectifier is 1-Lipschitz and cannot amplify its input; squaring can, and
+/// does. Inputs here are standardized, so |x| = 3 is an ordinary value, and one
+/// layer turns that into 9. Two stacked squaring layers compound it (9 -> 81
+/// before the second layer's weights are even applied), so the forward pass can
+/// reach a non-finite logit from a weight update that a rectifier would merely
+/// have made large. That is a live failure mode for this activation in a way it
+/// is not for [`Relu`].
+///
+/// The failure is DIAGNOSED rather than silent: `MlpFoldError::NonFiniteScore`
+/// checks every scored logit and aborts naming the row, so a diverged net does
+/// not reach `assign_qval`. But diagnosed is not prevented — expect to need a
+/// SMALLER `lr`, or a larger `weight_decay`, than the rectifier defaults in
+/// [`MlpConfig::compiled_default`], which were swept with a rectifier in place
+/// and carry no guarantee here.
+///
+/// # What was actually measured, and what was not
+/// The 2-input XOR fixture in this module's tests does NOT diverge: it reaches
+/// the same accuracy as the rectifier at the shipped `lr` of 1.2e-3 on all eight
+/// seeds, at a lower training loss on every one, and it still does not go
+/// non-finite at 400x that step size. Read that as "the layer and its gradient
+/// are right", not as reassurance — 2 inputs of magnitude ~1 is the case where
+/// squaring cannot amplify much.
+///
+/// The 24-column overfitting fixture is the closer analogue and it shows the
+/// amplification plainly. At the same `lr`, `hidden` and epoch budget, the
+/// squaring net reaches a LOWER train loss and a held-out loss of 11-21 against
+/// the rectifier's 1.1-1.6 (three seeds), i.e. it emits far larger logits on rows
+/// it has not seen; at `lr = 1e-1` it drives train loss to exactly 0 with a
+/// held-out loss of 4e6-4.5e7. Nothing there is non-finite, so the guard rail
+/// never trips — the realistic hazard is not a crash but a net whose held-out
+/// logits are enormous, and the 101- and 128-column rescore lanes have not been
+/// measured at all.
+pub struct Square {
+    dim: usize,
+}
+
+impl Square {
+    pub fn new(dim: usize) -> Self {
+        Square { dim }
+    }
+}
+
+impl Layer for Square {
+    fn out_dim(&self) -> usize {
+        self.dim
+    }
+
+    fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
+        out.reshape(x.rows, x.cols);
+        let (src, dst) = (x.live(), out.live_mut());
+        for k in 0..src.len() {
+            dst[k] = src[k] * src[k];
+        }
+    }
+
+    /// `dL/dx = gy * 2x`, and it READS `x` — unlike [`Relu::backward`], which
+    /// deliberately ignores `x` because `y > 0` recovers its mask. Squaring
+    /// destroys the sign, so `y` alone cannot say whether the local slope is
+    /// `+2|x|` or `-2|x|`; `sqrt(y)` would recover the magnitude and lose the
+    /// sign, which is exactly the wrong half. The trait hands both in, so this
+    /// costs nothing but is worth naming: a future refactor that drops the `x`
+    /// argument because "`Relu` does not use it" would silently break this layer.
+    fn backward(&mut self, x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
+        gx.reshape(gy.rows, gy.cols);
+        let (xv, gv, dst) = (x.live(), gy.live(), gx.live_mut());
+        for k in 0..dst.len() {
+            dst[k] = gv[k] * 2.0 * xv[k];
+        }
+    }
+}
+
+/// Which activation [`Mlp::feedforward`] puts between hidden layers.
+///
+/// Default is [`Activation::LeakyRelu`] at [`LEAKY_SLOPE`], which is what every
+/// measurement in [`MlpConfig::compiled_default`] was taken with.
+/// [`Activation::Square`] is EXPERIMENTAL — see [`Square`] for the divergence
+/// hazard and the learning-rate caveat that comes with it.
+///
+/// Neither variant draws from the RNG, so switching between them does not move
+/// the initialization stream: a `LeakyRelu` fit is bit-identical to what it was
+/// before this choice existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Activation {
+    #[default]
+    LeakyRelu,
+    Square,
+}
+
+impl Activation {
+    fn layer(self, dim: usize) -> Box<dyn Layer> {
+        match self {
+            Activation::LeakyRelu => Box::new(Relu::leaky(dim, LEAKY_SLOPE)),
+            Activation::Square => Box::new(Square::new(dim)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- batch norm
 
 /// Ported and gradient-tested, but NOT part of the default architecture — see
@@ -748,14 +858,19 @@ impl Mlp {
         }
     }
 
-    /// `n_in -> hidden[0] -> ... -> 1`, ReLU between hidden layers, single
+    /// `n_in -> hidden[0] -> ... -> 1`, `act` between hidden layers, single
     /// logit out. No BatchNorm: inputs arrive standardized.
-    pub fn feedforward(n_in: usize, hidden: &[usize], rng: &mut StdRng) -> Self {
+    ///
+    /// `act` comes from [`MlpConfig::activation`] on every production path.
+    /// It is a positional argument rather than a builder default so that adding
+    /// [`Activation::Square`] could not leave a call site silently on the
+    /// rectifier while its config said otherwise.
+    pub fn feedforward(n_in: usize, hidden: &[usize], act: Activation, rng: &mut StdRng) -> Self {
         let mut layers: Vec<Box<dyn Layer>> = Vec::new();
         let mut prev = n_in;
         for &h in hidden {
             layers.push(Box::new(Linear::new(prev, h, rng)));
-            layers.push(Box::new(Relu::leaky(h, LEAKY_SLOPE)));
+            layers.push(act.layer(h));
             prev = h;
         }
         layers.push(Box::new(Linear::new(prev, 1, rng)));
@@ -843,8 +958,9 @@ impl Mlp {
     /// parameters and are therefore NOT snapshotted, so restoring a snapshot
     /// into a net containing one would pair epoch-`k` weights with epoch-`n`
     /// running stats. No architecture this crate builds contains a `BatchNorm`
-    /// ([`Self::feedforward`] emits `Linear`/`Relu` only) and the type is kept
-    /// for gradient tests, so this is documented rather than solved.
+    /// ([`Self::feedforward`] emits `Linear` plus a parameterless activation —
+    /// [`Relu`] or [`Square`] — only) and the type is kept for gradient tests, so
+    /// this is documented rather than solved.
     fn snapshot_params_into(&mut self, out: &mut Vec<f32>) {
         out.clear();
         for (p, _, _) in self.params_and_grads() {
@@ -1373,6 +1489,18 @@ pub struct MlpConfig {
     /// [`Self::compiled_default`] for the measurement.
     pub batch_size: usize,
     pub loss: MlpLoss,
+    /// Activation between hidden layers. Defaults to
+    /// [`Activation::LeakyRelu`], which is what every number quoted on
+    /// [`Self::compiled_default`] was measured with; [`Activation::Square`] is an
+    /// experiment, and [`Square`] documents both what recommends it and the
+    /// divergence hazard it brings.
+    ///
+    /// NOT INDEPENDENT OF [`Self::lr`] AND [`Self::weight_decay`]. `x^2` can
+    /// amplify its input where a rectifier cannot, so the step size that is right
+    /// for one is not automatically right for the other. Changing this field alone
+    /// and reading the result as "the activation is worse" is the same mistake the
+    /// `lr`/`batch_size` coupling above warns about.
+    pub activation: Activation,
     pub seed: u64,
     /// Stop after this many consecutive epochs with no improvement in held-out
     /// loss, and restore the best-seen weights. `None` disables the whole
@@ -1535,6 +1663,8 @@ impl MlpConfig {
             // that bigger batches are slower on this workload.
             batch_size: 1024,
             loss: MlpLoss::Bce,
+            // The rectifier the whole sweep above ran on. See `activation`.
+            activation: Activation::LeakyRelu,
             seed: 0x2545_F491_4F6C_DD1D,
             early_stopping_patience: Some(5),
         }
@@ -1559,6 +1689,7 @@ impl MlpConfig {
     /// | `TIMSSEEK_MLP_HIDDEN` | `hidden` | comma-separated positive integers (`64,32`), or `none` for no hidden layer |
     /// | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | non-negative finite float, e.g. `0` or `1e-3` |
     /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
+    /// | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` or `square`, case-insensitive (`-` and `_` interchangeable) |
     /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
     ///
     /// `MlpLoss` is deliberately absent: [`MlpLoss::Focal`] is two coupled
@@ -1600,7 +1731,7 @@ impl MlpConfig {
                 tracing::info!(
                     "MLP config: DEV OVERRIDE ACTIVE ({}); effective config: hidden={:?} \
                      lr={:e} weight_decay={:e} epochs={} batch_size={} patience={:?} \
-                     seed={:#018x} loss={:?}",
+                     activation={:?} seed={:#018x} loss={:?}",
                     applied.join(" "),
                     cfg.hidden,
                     cfg.lr,
@@ -1608,6 +1739,7 @@ impl MlpConfig {
                     cfg.epochs,
                     cfg.batch_size,
                     cfg.early_stopping_patience,
+                    cfg.activation,
                     cfg.seed,
                     cfg.loss,
                 );
@@ -1657,6 +1789,9 @@ impl MlpConfig {
         }
         if let Some(raw) = read("TIMSSEEK_MLP_PATIENCE") {
             self.early_stopping_patience = parse_patience("TIMSSEEK_MLP_PATIENCE", &raw);
+        }
+        if let Some(raw) = read("TIMSSEEK_MLP_ACTIVATION") {
+            self.activation = parse_activation("TIMSSEEK_MLP_ACTIVATION", &raw);
         }
         if let Some(raw) = read("TIMSSEEK_MLP_SEED") {
             self.seed = parse_seed("TIMSSEEK_MLP_SEED", &raw);
@@ -1751,6 +1886,20 @@ fn parse_patience(name: &str, raw: &str) -> Option<usize> {
             raw,
             "a positive integer, or `none`/`off` to disable early stopping",
         ),
+    }
+}
+
+/// `leaky_relu` / `square`. Case is ignored and `-` normalizes to `_`, so the
+/// three spellings a shell script is likely to produce (`SQUARE`, `leaky-relu`,
+/// `leaky_relu`) all land; anything else ABORTS like every other malformed
+/// override, because "the activation I asked for was ignored" is invisible in a
+/// sweep table.
+fn parse_activation(name: &str, raw: &str) -> Activation {
+    let t = raw.trim().to_ascii_lowercase().replace('-', "_");
+    match t.as_str() {
+        "leaky_relu" => Activation::LeakyRelu,
+        "square" => Activation::Square,
+        _ => bad_env(name, raw, "`leaky_relu` or `square` (case-insensitive)"),
     }
 }
 
@@ -1915,6 +2064,49 @@ mod test {
 
         assert_eq!(grad_at(0.0), 0.0, "pure ReLU: no way back");
         assert_eq!(grad_at(LEAKY_SLOPE), LEAKY_SLOPE);
+    }
+
+    /// `dL/dx = gy * 2x`. Unlike [`Relu`], this needs the layer INPUT, so the
+    /// check is also what would catch a `backward` that tried to re-derive the
+    /// slope from `y = x^2` (which has lost the sign).
+    #[test]
+    fn square_gradient_matches_finite_differences() {
+        let mut rng = seeded();
+        let mut sq = Square::new(4);
+        // Both signs are present in the draw, which is the point: a
+        // `y`-derived implementation agrees on the positive half and is wrong
+        // on the negative one.
+        let x = filled(5, 4, &mut rng);
+        assert!(
+            x.live().iter().any(|v| *v < 0.0) && x.live().iter().any(|v| *v > 0.0),
+            "the fixture must straddle zero or it cannot see a sign error"
+        );
+        let gy = filled(5, 4, &mut rng);
+        check_input_grad(&mut sq, x, &gy, "Square");
+    }
+
+    /// The sign asymmetry, pinned directly: at `+a` and `-a` the OUTPUT is the
+    /// same and the gradient is opposite. This is the whole reason `Square`
+    /// reads `x` where `Relu` reads `y`.
+    #[test]
+    fn square_gradient_sign_follows_the_input_not_the_output() {
+        let mut gy = Tensor::new(1, 1);
+        gy.row_mut(0)[0] = 1.0;
+        let at = |xv: f32| {
+            let mut x = Tensor::new(1, 1);
+            x.row_mut(0)[0] = xv;
+            let mut sq = Square::new(1);
+            let mut out = Tensor::default();
+            sq.forward(&x, &mut out, true);
+            let mut gx = Tensor::default();
+            sq.backward(&x, &out, &gy, &mut gx);
+            (out.row(0)[0], gx.row(0)[0])
+        };
+        assert_eq!(at(3.0), (9.0, 6.0));
+        assert_eq!(at(-3.0), (9.0, -6.0));
+        // The one point with no gradient — a single point, not the half-line
+        // that makes a pure ReLU's dead state absorbing.
+        assert_eq!(at(0.0), (0.0, 0.0));
     }
 
     #[test]
@@ -2272,6 +2464,53 @@ mod test {
 
     // ------------------------------------------------------------ learning
 
+    /// Build the noisy-XOR fixture, train `cfg` on it from init seed `seed`, and
+    /// return `(accuracy, final_train_loss)`.
+    ///
+    /// ONE `StdRng`, consumed in a fixed order — 512 rows of data, then the
+    /// init, then the per-epoch shuffles. That order is load-bearing: it is what
+    /// makes a given `(cfg, seed)` a fixed experiment, so every caller here is
+    /// comparing the same trajectory.
+    fn xor_accuracy(cfg: &MlpConfig, seed: u64) -> (f32, f32) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let n = 512;
+        let mut x = Tensor::new(n, 2);
+        let mut y = vec![0.0f32; n];
+        for i in 0..n {
+            let a = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let b = if (i / 2) % 2 == 0 { 1.0 } else { -1.0 };
+            let r = x.row_mut(i);
+            r[0] = a + 0.1 * normal(&mut rng);
+            r[1] = b + 0.1 * normal(&mut rng);
+            y[i] = if a * b > 0.0 { 1.0 } else { 0.0 };
+        }
+        let w = vec![1.0f32; n];
+
+        let mut model = Mlp::feedforward(2, &cfg.hidden, cfg.activation, &mut rng);
+        let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+        let loss = model.train(cfg, &x, &y, &w, &mut opt, &mut rng);
+
+        let out = model.forward(&x, false);
+        let correct = (0..n)
+            .filter(|&i| (out.row(i)[0] > 0.0) == (y[i] > 0.5))
+            .count();
+        (correct as f32 / n as f32, loss)
+    }
+
+    /// The XOR config the learning tests share: everything but the activation is
+    /// held fixed, `lr` and `weight_decay` INCLUDED FROM THE DEFAULT — see
+    /// [`mlp_learns_xor_which_no_linear_model_can`] for why the inheritance is
+    /// deliberate.
+    fn xor_cfg(activation: Activation) -> MlpConfig {
+        MlpConfig {
+            hidden: vec![16, 8],
+            epochs: 400,
+            batch_size: 64,
+            activation,
+            ..MlpConfig::default()
+        }
+    }
+
     /// Without this, every other test still passes if the MLP silently
     /// collapses to a linear map — XOR is the cheapest thing a linear
     /// discriminant provably cannot separate.
@@ -2305,38 +2544,46 @@ mod test {
         // Verified green across 16 seeds; trimmed to 8 to keep the test under
         // ~10s. Seeds 7 and 13 are pinned members, not arbitrary.
         for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let n = 512;
-            let mut x = Tensor::new(n, 2);
-            let mut y = vec![0.0f32; n];
-            for i in 0..n {
-                let a = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let b = if (i / 2) % 2 == 0 { 1.0 } else { -1.0 };
-                let r = x.row_mut(i);
-                r[0] = a + 0.1 * normal(&mut rng);
-                r[1] = b + 0.1 * normal(&mut rng);
-                y[i] = if a * b > 0.0 { 1.0 } else { 0.0 };
-            }
-            let w = vec![1.0f32; n];
-
-            let cfg = MlpConfig {
-                hidden: vec![16, 8],
-                epochs: 400,
-                batch_size: 64,
-                ..MlpConfig::default()
-            };
-            let mut model = Mlp::feedforward(2, &cfg.hidden, &mut rng);
-            let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-            let loss = model.train(&cfg, &x, &y, &w, &mut opt, &mut rng);
-
-            let out = model.forward(&x, false);
-            let correct = (0..n)
-                .filter(|&i| (out.row(i)[0] > 0.0) == (y[i] > 0.5))
-                .count();
-            let acc = correct as f32 / n as f32;
+            let (acc, loss) = xor_accuracy(&xor_cfg(Activation::LeakyRelu), seed);
             assert!(
                 acc > 0.95,
                 "seed {seed}: XOR accuracy {acc} (loss {loss}) — collapsed to linear?"
+            );
+        }
+    }
+
+    /// [`Activation::Square`] can fit something a linear model cannot, at the
+    /// SHIPPED `lr` — the same fixture, seed set and threshold as
+    /// [`mlp_learns_xor_which_no_linear_model_can`], with only the activation
+    /// changed, so the two are directly comparable.
+    ///
+    /// Swept over seeds for the reason every learning test here is: this module
+    /// has two documented init-dependent training traps, and `x^2` adds a third
+    /// hazard of its own — it is unbounded, so a bad init can diverge outright
+    /// rather than merely converge slowly (see [`Square`]). A single seed would
+    /// not distinguish "works" from "worked once".
+    ///
+    /// MEASURED, and the point of recording it: all eight seeds reach the same
+    /// threshold as the rectifier at the shipped `lr` of 1.2e-3, and the loss it
+    /// gets there is LOWER on every seed. That says the activation is usable on a
+    /// small nonlinear problem; it says nothing about the 101-column rescore
+    /// lanes, where the divergence hazard scales with the input dimension and
+    /// nothing has been measured at all.
+    #[test]
+    fn square_activation_learns_xor() {
+        for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
+            let cfg = xor_cfg(Activation::Square);
+            let (acc, loss) = xor_accuracy(&cfg, seed);
+            assert!(
+                loss.is_finite(),
+                "seed {seed}: the squaring net diverged (loss {loss}) at lr {}",
+                cfg.lr
+            );
+            assert!(
+                acc > 0.95,
+                "seed {seed}: XOR accuracy {acc} (loss {loss}) at lr {} — \
+                 report the lr it needs rather than retuning the default",
+                cfg.lr
             );
         }
     }
@@ -2416,7 +2663,7 @@ mod test {
 
             let run = |cfg: &MlpConfig, val: Option<ValSet<'_>>| {
                 let mut r = StdRng::seed_from_u64(99);
-                let mut m = Mlp::feedforward(3, &cfg.hidden, &mut r);
+                let mut m = Mlp::feedforward(3, &cfg.hidden, cfg.activation, &mut r);
                 let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
                 let out = m.train_reporting(cfg, &x, &y, &w, &mut o, &mut r, val, "t");
                 let p = m.forward(&x, false);
@@ -2539,7 +2786,7 @@ mod test {
     ) -> (TrainOutcome, f32, Vec<u32>) {
         let (x, y, w, vx, vy, vw) = fx;
         let mut r = StdRng::seed_from_u64(init_seed);
-        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, &mut r);
+        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, cfg.activation, &mut r);
         let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
         let val = with_val.then(|| ValSet {
             x: vx,
@@ -2724,7 +2971,7 @@ mod test {
     #[test]
     fn eval_loss_leaves_the_parameters_untouched() {
         let mut rng = StdRng::seed_from_u64(5);
-        let mut m = Mlp::feedforward(4, &[6], &mut rng);
+        let mut m = Mlp::feedforward(4, &[6], Activation::default(), &mut rng);
         let x = filled(16, 4, &mut rng);
         let y: Vec<f32> = (0..16).map(|i| (i % 2) as f32).collect();
         let w = vec![1.0f32; 16];
@@ -2758,7 +3005,7 @@ mod test {
         }
 
         let mean_logit = |w: &[f32], rng: &mut StdRng| {
-            let mut m = Mlp::feedforward(1, &[8], rng);
+            let mut m = Mlp::feedforward(1, &[8], Activation::default(), rng);
             let mut o = Adam::new(1e-2);
             for _ in 0..200 {
                 m.train_step(&x, &y, w, &MlpLoss::Bce, &mut o);
@@ -2831,6 +3078,10 @@ mod test {
         assert_eq!(cfg.loss, MlpLoss::Bce);
         assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
         assert_eq!(cfg.early_stopping_patience, Some(5));
+        // The rectifier every number on `compiled_default` was measured with.
+        // `Square` is an experiment and must never become the default by
+        // accident — see [`Square`] for the divergence hazard.
+        assert_eq!(cfg.activation, Activation::LeakyRelu);
     }
 
     /// An unrelated variable is not a read, and one variable moves ONE field.
@@ -2865,6 +3116,7 @@ mod test {
             ("TIMSSEEK_MLP_HIDDEN", "128,64,16"),
             ("TIMSSEEK_MLP_WEIGHT_DECAY", "0"),
             ("TIMSSEEK_MLP_PATIENCE", "9"),
+            ("TIMSSEEK_MLP_ACTIVATION", "square"),
             ("TIMSSEEK_MLP_SEED", "12345"),
         ]));
         assert_eq!(cfg.epochs, 77);
@@ -2873,9 +3125,10 @@ mod test {
         assert_eq!(cfg.hidden, vec![128, 64, 16]);
         assert_eq!(cfg.weight_decay, 0.0);
         assert_eq!(cfg.early_stopping_patience, Some(9));
+        assert_eq!(cfg.activation, Activation::Square);
         assert_eq!(cfg.seed, 12345);
         assert_eq!(cfg.loss, MlpLoss::Bce, "`loss` is deliberately not a knob");
-        assert_eq!(applied.len(), 7, "every read must be reported: {applied:?}");
+        assert_eq!(applied.len(), 8, "every read must be reported: {applied:?}");
     }
 
     /// The explicit spellings for the two fields that have an "off": `hidden`
@@ -2900,7 +3153,7 @@ mod test {
 
         // `hidden = []` must still build a usable net, or the spelling is a trap.
         let mut rng = seeded();
-        let mut net = Mlp::feedforward(4, &cfg.hidden, &mut rng);
+        let mut net = Mlp::feedforward(4, &cfg.hidden, cfg.activation, &mut rng);
         let x = filled(3, 4, &mut rng);
         assert_eq!(net.forward(&x, false).rows(), 3);
     }
@@ -2973,6 +3226,89 @@ mod test {
     rejects!(rejects_zero_patience, "TIMSSEEK_MLP_PATIENCE", "0");
     rejects!(rejects_negative_patience, "TIMSSEEK_MLP_PATIENCE", "-1");
     rejects!(rejects_non_numeric_seed, "TIMSSEEK_MLP_SEED", "0xZZ");
+    // A near-miss spelling is a rejection, not a silent fall back to the
+    // rectifier: a sweep arm labelled `square` that trained a ReLU is exactly
+    // the outcome this abort exists to prevent.
+    rejects!(
+        rejects_unknown_activation,
+        "TIMSSEEK_MLP_ACTIVATION",
+        "relu"
+    );
+    rejects!(rejects_empty_activation, "TIMSSEEK_MLP_ACTIVATION", "");
+
+    /// The tolerant spellings of the activation, which a shell script is likely
+    /// to produce. Everything outside this set aborts.
+    #[test]
+    fn activation_spellings_parse() {
+        for spelling in ["square", "SQUARE", " Square "] {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_ACTIVATION", spelling)]));
+            assert_eq!(cfg.activation, Activation::Square, "{spelling:?}");
+        }
+        for spelling in ["leaky_relu", "leaky-relu", "LEAKY_RELU"] {
+            let mut cfg = MlpConfig::compiled_default();
+            cfg.activation = Activation::Square;
+            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_ACTIVATION", spelling)]));
+            assert_eq!(cfg.activation, Activation::LeakyRelu, "{spelling:?}");
+        }
+    }
+
+    /// The configured activation reaches the BUILT NET, and each variant builds
+    /// the layer it names. Asserted against hand-assembled stacks rather than
+    /// against each other: the hand-built arm draws from the RNG in the same
+    /// order, so agreement is bit-exact and a plumbing mistake (either variant
+    /// wired to the other's layer, or the choice dropped on the floor) fails.
+    ///
+    /// This is also the DETERMINISM check for the new field. Neither activation
+    /// draws from the RNG, so the `LeakyRelu` stack is bit-identical to what
+    /// `feedforward` produced before the choice existed — which is what the
+    /// hand-built `Relu::leaky(_, LEAKY_SLOPE)` arm restates.
+    #[test]
+    fn the_configured_activation_reaches_the_built_net() {
+        let x = filled(4, 3, &mut StdRng::seed_from_u64(9));
+        let logits = |m: &mut Mlp| -> Vec<u32> {
+            let out = m.forward(&x, false);
+            (0..out.rows()).map(|i| out.row(i)[0].to_bits()).collect()
+        };
+
+        for (act, hand) in [
+            (
+                Activation::LeakyRelu,
+                Box::new(|d: usize| -> Box<dyn Layer> { Box::new(Relu::leaky(d, LEAKY_SLOPE)) })
+                    as Box<dyn Fn(usize) -> Box<dyn Layer>>,
+            ),
+            (
+                Activation::Square,
+                Box::new(|d: usize| -> Box<dyn Layer> { Box::new(Square::new(d)) }),
+            ),
+        ] {
+            let mut r1 = StdRng::seed_from_u64(5);
+            let mut built = Mlp::feedforward(3, &[8, 4], act, &mut r1);
+
+            let mut r2 = StdRng::seed_from_u64(5);
+            let mut expected = Mlp::new(vec![
+                Box::new(Linear::new(3, 8, &mut r2)),
+                hand(8),
+                Box::new(Linear::new(8, 4, &mut r2)),
+                hand(4),
+                Box::new(Linear::new(4, 1, &mut r2)),
+            ]);
+
+            assert_eq!(
+                logits(&mut built),
+                logits(&mut expected),
+                "{act:?} did not build the stack it names"
+            );
+        }
+
+        // Non-vacuity: the two stacks are not the same net, so the equalities
+        // above are not both true of everything.
+        let mut r = StdRng::seed_from_u64(5);
+        let mut leaky = Mlp::feedforward(3, &[8, 4], Activation::LeakyRelu, &mut r);
+        let mut r = StdRng::seed_from_u64(5);
+        let mut square = Mlp::feedforward(3, &[8, 4], Activation::Square, &mut r);
+        assert_ne!(logits(&mut leaky), logits(&mut square));
+    }
 
     /// The abort names the variable, the offending value AND the expected
     /// format. A panic that says only "invalid value" would leave an operator

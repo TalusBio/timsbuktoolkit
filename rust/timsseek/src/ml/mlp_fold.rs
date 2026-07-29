@@ -477,7 +477,7 @@ impl FoldModel for MlpFoldModel {
 
         // Seeded from (config seed, fold index) alone — see the module docs.
         let mut rng = cfg.rng_for_fold(fold);
-        let mut net = Mlp::feedforward(width, &cfg.hidden, &mut rng);
+        let mut net = Mlp::feedforward(width, &cfg.hidden, cfg.activation, &mut rng);
         let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
         let tag = format!("MLP fold {fold}: ");
         let outcome = net.train_reporting(

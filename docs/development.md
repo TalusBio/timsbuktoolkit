@@ -54,6 +54,7 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
 | `TIMSSEEK_MLP_HIDDEN` | `hidden` | comma-separated positive integers — `128,64`; or `none` for no hidden layer (bare linear model) |
 | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | finite non-negative float — `0`, `1e-3` |
 | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer — `8`; or `none` / `off` to disable early stopping entirely |
+| `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` (default) or `square`; case-insensitive, `-` and `_` interchangeable |
 | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x` hex — `0x2545F4914F6CDD1D` |
 
 - **Unset changes nothing.** With none set the config is bit-identical to the
@@ -76,6 +77,13 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
 - `loss` is deliberately absent: `MlpLoss::Focal` is two coupled floats that also
   interact with the per-row target/decoy sample weights, and wants a real config
   surface.
+- **`TIMSSEEK_MLP_ACTIVATION=square` is EXPERIMENTAL and is not independent of
+  `lr` / `weight_decay`.** `x^2` is unbounded and even, so unlike a rectifier it
+  amplifies its input; on a 24-column fixture it reaches a lower train loss than
+  leaky ReLU while emitting held-out logits an order of magnitude larger, and the
+  gap grows with `lr`. Sweep it together with a smaller `lr` or a larger
+  `weight_decay`, not on its own. A net that diverges outright is caught at
+  `predict` (`MlpFoldError::NonFiniteScore`) rather than silently ranked.
 
 Per-fold results are one `info` line each, so a sweep is greppable:
 
