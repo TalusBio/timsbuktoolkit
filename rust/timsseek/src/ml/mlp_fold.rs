@@ -434,18 +434,43 @@ impl FoldModel for MlpFoldModel {
             }),
             &tag,
         );
-        tracing::debug!(
-            "MLP fold {}: trained on {} of {} rows x {} inputs ({} lane columns), \
-             {} of {} epochs, kept epoch {:?}, final epoch loss {}",
+        // ONE grep-able line per fold, at `info` — the summary a sweep reads.
+        //
+        // `info` and not `debug` because the per-epoch trace is already at
+        // `debug`: turning that on to find the stopping epoch means parsing
+        // `epochs` lines per fold to recover 5 numbers, which is exactly the
+        // thing this line exists to avoid. The cost is bounded and tiny —
+        // `N_RESCORE_FOLDS` lines per run, 3 today — and the CLI's default
+        // filter is `info`, so a sweep's run log carries them with no extra
+        // flags. Extract with:
+        //   grep -o 'MLP fold summary:.*' run.log
+        //
+        // 1-based epochs, matching the per-epoch trace. `kept_epoch` /
+        // `best_held_out_loss` are `none` when there was no held-out set (early
+        // stopping off and the trace off) or when every measurement was NaN.
+        let kept_epoch = match outcome.best_epoch {
+            Some(b) => (b + 1).to_string(),
+            None => "none".to_string(),
+        };
+        let best_held_out = match outcome.best_val_loss {
+            Some(v) => format!("{v:.6}"),
+            None => "none".to_string(),
+        };
+        tracing::info!(
+            "MLP fold summary: fold={} epochs_run={} epoch_budget={} kept_epoch={} \
+             best_held_out_loss={} final_train_loss={:.6} restored={} train_rows={} \
+             fit_rows={} inputs={} lane_columns={}",
             fold,
-            x.rows(),
-            train.len(),
-            width,
-            ncols,
             outcome.epochs_run,
             cfg.epochs,
-            outcome.best_epoch.map(|b| b + 1),
+            kept_epoch,
+            best_held_out,
             outcome.final_train_loss,
+            outcome.restored,
+            train.len(),
+            x.rows(),
+            width,
+            ncols,
         );
 
         Ok(MlpFoldModel {
