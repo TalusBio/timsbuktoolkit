@@ -825,10 +825,9 @@ struct ColSpec {
 ///
 /// Three jobs, one pass, because they all read the same per-column moments:
 ///
-///  1. **Cull** columns that are entirely non-finite or (near-)constant. They
-///     carry no discriminant information and a constant column is a
-///     divide-by-zero in standardization. Dropping beats epsilon-guarding
-///     because the drop is observable — see [`ColumnTransform::culled`].
+///  1. **Cull** columns with no finite value at all, and columns whose measured
+///     std is `<= MIN_STD`. What that GUARANTEES is narrower than "constant
+///     columns are dropped" — see below.
 ///  2. **Standardize** the survivors, which is what lets the default
 ///     architecture skip BatchNorm entirely.
 ///  3. **Impute** non-finite values to the column mean and emit an `_isna`
@@ -838,6 +837,25 @@ struct ColSpec {
 /// Every statistic here is fitted on the rows it is handed and then applied
 /// unchanged to held-out rows. Fitting across all rows would use held-out
 /// feature values.
+///
+/// # What the cull does NOT guarantee
+/// The variance is the textbook-unstable `sumsq/n - mean^2` form, so a
+/// bit-for-bit CONSTANT column of realistic magnitude keeps enough
+/// floating-point residue to clear `MIN_STD` and SURVIVES. Measured on the
+/// suite's all-constant fixture: 8 and 16 train rows cull all 101 columns, while
+/// 30 leaves 10 of them alive. So the cull reliably drops all-non-finite
+/// columns, and drops constant ones only sometimes — as a function of the row
+/// count, not of the data.
+///
+/// This is numerically benign, which is why it is documented rather than fixed.
+/// The `.max(0.0)` closes the only real hazard (a negative variance would give a
+/// `NAN` std, hence `NAN` inputs), and a surviving constant column standardizes
+/// to values bounded by roughly `sqrt(f64::EPSILON)`, about `1.5e-8` — noise the
+/// net cannot learn from. What it costs is honesty in the report: such a column
+/// silently occupies an MLP input and a row in the importance sidecar, reading as
+/// "uninformative" rather than as "constant". Switching to Welford or a two-pass
+/// variance would make the cull dependable; that is a numerics change to a
+/// shipping path, not a doc fix, and has not been made.
 pub struct ColumnTransform {
     ncols_lane: usize,
     cols: Vec<ColSpec>,

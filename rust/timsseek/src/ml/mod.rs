@@ -27,9 +27,10 @@ use serde::{
 ///
 /// Shared rather than repeated per call site because the cross-fit
 /// (`qvalues::crossfit`, used by the LDA path and by both hybrids' extra column)
-/// requires the same fold ASSIGNMENT (`i % N_RESCORE_FOLDS`, i.e.
-/// `RowMajorDataset::get_fold`) that `CrossValidatedScorer` uses — if the two
-/// drift, a hybrid row's `lda_score` / `mlp_score` can peek at its own label.
+/// requires the same fold ASSIGNMENT that `CrossValidatedScorer` uses, or a
+/// hybrid row's `lda_score` / `mlp_score` can peek at its own label. Both sides
+/// read that assignment from `RowMajorDataset::get_fold`, so it has one
+/// definition; the fold COUNT living here is what keeps it fed the same argument.
 ///
 /// The two do NOT use the same train/score split on top of that assignment, and
 /// must not be made to: `CrossValidatedScorer` fits on one fold and scores the
@@ -56,28 +57,29 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RescoreModel {
-    /// Gradient-boosted trees over the ALL lane (linear ++ nonlinear, ~131
+    /// Gradient-boosted trees over the ALL lane (linear ++ nonlinear, 128
     /// features), cross-validated over `N_RESCORE_FOLDS`. The default.
     #[default]
     Gbm,
-    /// Sage-style shrinkage LDA on the LINEAR lane only (see [`lda`]). ~100x
-    /// cheaper than the GBM; cross-fit over the same fold partition.
+    /// Sage-style shrinkage LDA on the LINEAR lane only (101 features, see
+    /// [`lda`]). ~100x cheaper than the GBM; cross-fit over the same fold
+    /// ASSIGNMENT.
     Lda,
     /// Cross-fit LDA (linear lane) -> `lda_score` column -> GBM CV on
-    /// `nonlinear + lda_score`: the same fold partition on both sides, so a
+    /// `nonlinear + lda_score`: the same fold ASSIGNMENT on both sides, so a
     /// row's `lda_score` never saw its own label.
     Hybrid,
-    /// MLP on the LINEAR lane only (~101 features) — the same feature set
+    /// MLP on the LINEAR lane only (101 features) — the same feature set
     /// [`Lda`](RescoreModel::Lda) trains on, so it isolates "nonlinear model"
     /// from "more features". THE DEFAULT MLP SHAPE, hence the unqualified name.
     Mlp,
-    /// MLP on the ALL lane (linear ++ nonlinear, ~128 features) — the same
+    /// MLP on the ALL lane (linear ++ nonlinear, 128 features) — the same
     /// feature set [`Gbm`](RescoreModel::Gbm) trains on, so the two are
     /// directly comparable.
     MlpAll,
     /// MLP counterpart of [`Hybrid`](RescoreModel::Hybrid): cross-fit MLP
     /// (linear lane) -> `mlp_score` column -> GBM CV on
-    /// `nonlinear + mlp_score`, same fold partition on both sides.
+    /// `nonlinear + mlp_score`, same fold ASSIGNMENT on both sides.
     HybridMlp,
 }
 
@@ -87,12 +89,15 @@ pub enum RescoreModel {
 /// results plus per-fold feature stats out), so this is the single place model
 /// selection is resolved.
 ///
-/// The three MLP arms map a variant onto a LANE, and nothing type-checks that
-/// mapping — an inverted arm compiles and produces plausible q-values off the
-/// wrong feature set. The entry points spell their lane in their name for
-/// exactly this reason (see `qvalues`'s note above `rescore_mlp_linear`), and
-/// `rescore_with_dispatches_each_mlp_variant_to_its_lane` pins the mapping by
-/// reading the trained lane back out of the sidecar.
+/// NOTHING TYPE-CHECKS ANY OF THESE ARMS: every rescorer has this signature, so
+/// an inverted arm compiles, runs, and produces plausible q-values off the wrong
+/// model or the wrong feature set. The MLP entry points spell their lane in their
+/// name for exactly that reason (see `qvalues`'s note above
+/// `rescore_mlp_linear`), and both halves of the mapping are pinned as tests:
+/// `rescore_with_dispatches_each_mlp_variant_to_its_lane` for the three MLP
+/// arms, `rescore_with_dispatches_the_default_and_the_non_mlp_variants` for
+/// `Gbm` / `Lda` / `Hybrid` — the latter matters most, since `Gbm` is what runs
+/// when nobody sets the flag.
 pub fn rescore_with(
     model: RescoreModel,
     data: Vec<CompetedCandidate>,

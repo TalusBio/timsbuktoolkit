@@ -28,11 +28,17 @@ decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        — cross-validated gradient-boosted trees (default)
-## "lda"        — Sage-style shrinkage LDA, ~100x cheaper
+## "lda"        — Sage-style shrinkage LDA, ~100x cheaper than "gbm"
 ## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
 ## "mlp"        — small MLP on the linear lane (the same features as "lda")
 ## "mlp_all"    — small MLP on the full lane (the same features as "gbm")
 ## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame
+##
+## COST: only "lda"'s ~100x has a measurement behind it. The three MLP options
+## have no figure yet — they train a fixed-epoch net per fold, so their cost
+## scales with rows rather than with tree count, but nobody has timed one on a
+## real run. Treat their runtime as unknown before committing a long search to
+## one; "gbm" and "lda" are the two with known cost.
 rescore_model = "gbm"
 
 

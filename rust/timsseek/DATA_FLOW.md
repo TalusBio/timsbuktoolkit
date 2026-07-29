@@ -47,7 +47,7 @@ re-query tightly around it for main and isotope patterns) and assembles
 
 ## Rescoring
 
-Three interchangeable rescorers in `ml/qvalues.rs`, selected by the
+Six interchangeable rescorers in `ml/qvalues.rs`, selected by the
 `rescore_model` config field / `--rescore-model` flag (CLI wins). All share the
 same input, the same canonical sort + seeded shuffle, and the same FDR tail
 (`q = cummin(decoys / targets)`); only the discriminant differs.
@@ -57,6 +57,9 @@ same input, the same canonical sort + seeded shuffle, and the same FDR tail
 | `gbm` (default) | all | cross-validated gradient boosting (forust) |
 | `lda` | linear | closed-form shrinkage LDA, cross-fit |
 | `hybrid` | nonlinear + `lda_score` | per-fold cross-fit LDA feeding the GBM |
+| `mlp` | linear | cross-validated MLP (dependency-free, `ml/mlp.rs`) |
+| `mlp_all` | all | cross-validated MLP |
+| `hybrid_mlp` | nonlinear + `mlp_score` | per-fold cross-fit MLP feeding the GBM |
 
 Features are extracted by a **lane walk**, not a per-result method: a flat
 row-major buffer built over the already-shuffled slice, so row *i* aligns with
@@ -71,9 +74,12 @@ unconditional — an unparsed peptide contributes NaN rather than a shorter row,
 so every row is the same width. Those AA counts have no linear lane, so LDA
 never sees them.
 
-`hybrid` cross-fits on the same fold partition the GBM uses internally, so a
-candidate's `lda_score` never comes from an LDA that saw it. Those two
-partitions agreeing is what makes it leak-free, and nothing enforces it.
+Both hybrids cross-fit their extra column under the same fold ASSIGNMENT the GBM
+uses internally, so a candidate's `lda_score` / `mlp_score` never comes from a
+model that saw it. The two train/score SPLITS deliberately differ (the cross-fit
+fits on all-but-one fold, the GBM scorer on one fold at a time) and both are
+leak-free; what has to agree is only which rows land in which fold, and both
+sides read that from `RowMajorDataset::get_fold`.
 
 ## The candidate chain
 
