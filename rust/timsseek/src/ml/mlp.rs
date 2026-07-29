@@ -1558,11 +1558,25 @@ mod test {
         }
     }
 
+    /// The only test that the MLP's per-row weights do anything — this is what
+    /// carries the GBM's 0.5/1.0 target/decoy balance into the MLP.
+    ///
+    /// Swept over INIT seeds, like every other learning test here. It is a PAIRED
+    /// comparison with matched init (both arms start from the same
+    /// `StdRng::seed_from_u64(seed)`, so the two nets are bit-identical before the
+    /// first step and the only difference is the weight vector), which makes it far
+    /// more robust than an absolute-threshold test — but "robust" was an argument,
+    /// not a measurement, and this module has two documented init-dependent
+    /// training traps. The sweep is what turns it into a measurement.
+    ///
+    /// The DATA seed stays fixed at 11: varying the draws too would change what is
+    /// being asserted from "weights move the boundary" to "weights move the
+    /// boundary on any sample", which needs a tolerance rather than a strict
+    /// inequality.
     #[test]
     fn sample_weights_shift_the_decision_boundary() {
         // Two overlapping classes; up-weighting one must move the fitted
-        // boundary toward the other. This is what carries the GBM's 0.5/1.0
-        // target/decoy balance into the MLP.
+        // boundary toward the other.
         let mut rng = StdRng::seed_from_u64(11);
         let n = 400;
         let mut x = Tensor::new(n, 1);
@@ -1586,13 +1600,17 @@ mod test {
         let balanced = vec![1.0f32; n];
         let decoy_heavy: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { 0.5 } else { 1.0 }).collect();
 
-        let mut r1 = StdRng::seed_from_u64(3);
-        let mut r2 = StdRng::seed_from_u64(3);
-        let m_bal = mean_logit(&balanced, &mut r1);
-        let m_dec = mean_logit(&decoy_heavy, &mut r2);
-        assert!(
-            m_dec < m_bal,
-            "up-weighting decoys must pull logits down: {m_dec} !< {m_bal}"
-        );
+        for seed in [3u64, 7, 42] {
+            // MATCHED INIT: same seed on both sides, so the two runs differ in
+            // nothing but `w`.
+            let mut r1 = StdRng::seed_from_u64(seed);
+            let mut r2 = StdRng::seed_from_u64(seed);
+            let m_bal = mean_logit(&balanced, &mut r1);
+            let m_dec = mean_logit(&decoy_heavy, &mut r2);
+            assert!(
+                m_dec < m_bal,
+                "seed {seed}: up-weighting decoys must pull logits down: {m_dec} !< {m_bal}"
+            );
+        }
     }
 }
