@@ -35,6 +35,54 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
 | `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek`, built with `--features dashboard` | unset (off) | Any value but `0`/`false` opens the rescore dashboard TUI after the Phase 6 write; without `--features dashboard` the check is compiled out entirely. Warns and skips when stdout is not a terminal. Invocation: `cargo run -r --bin timsseek --features dashboard -- ...`. |
+| `TIMSSEEK_LDA_DUMP` | `timsseek` | unset (off) | `=/some/prefix` writes the raw LINEAR-lane matrix for offline feature engineering: `<prefix>.f64` (`nrows`/`ncols` header then row-major LE `f64`), `<prefix>.labels` (`u8`, 1 = target), `<prefix>.names.txt`. Best-effort — I/O errors log and are skipped. |
+| `TIMSSEEK_MLP_*` | `timsseek` | unset (compiled defaults) | Dev-only hyperparameter sweep overrides for `MlpConfig`, which is deliberately NOT TOML-exposed. See the table below. |
+
+### `TIMSSEEK_MLP_*` (dev-only MLP hyperparameter overrides)
+
+**Not a supported interface.** An escape hatch for sweeps, so a hyperparameter
+experiment is not a recompile. Read in exactly one place,
+`MlpConfig::from_env` (`rust/timsseek/src/ml/mlp.rs`), which `MlpConfig::default()`
+calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
+`hybrid_mlp`) read them; the config file stays the authority for everything else.
+
+| Env var | Field | Format |
+|---------|-------|--------|
+| `TIMSSEEK_MLP_EPOCHS` | `epochs` (upper bound, not a target) | positive integer — `60` |
+| `TIMSSEEK_MLP_LR` | `lr` | finite positive float — `1e-3` |
+| `TIMSSEEK_MLP_BATCH_SIZE` | `batch_size` | positive integer — `512` |
+| `TIMSSEEK_MLP_HIDDEN` | `hidden` | comma-separated positive integers — `128,64`; or `none` for no hidden layer (bare linear model) |
+| `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | finite non-negative float — `0`, `1e-3` |
+| `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer — `8`; or `none` / `off` to disable early stopping entirely |
+| `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x` hex — `0x2545F4914F6CDD1D` |
+
+- **Unset changes nothing.** With none set the config is bit-identical to the
+  compiled default and nothing is logged.
+- **A malformed value ABORTS the run** with the variable, the value and the
+  expected format — it never falls back to the default, because a warned-past
+  variable produces a sweep row labelled with a value that never trained. The
+  CLI checks at startup (when an MLP model is selected) so the abort lands in
+  the first second, not at Phase 5.
+- **Any override active** logs the full effective config once per run at `info`,
+  prefixed `MLP config: DEV OVERRIDE ACTIVE`.
+- `loss` is deliberately absent: `AsymFocal` is three coupled floats and wants a
+  real config surface.
+
+Per-fold results are one `info` line each, so a sweep is greppable:
+
+```bash
+grep -o 'MLP fold summary:.*' run.log
+# MLP fold summary: fold=0 epochs_run=15 epoch_budget=60 kept_epoch=7 \
+#   best_held_out_loss=0.467983 final_train_loss=0.437800 restored=true \
+#   train_rows=38046 fit_rows=38046 inputs=92 lane_columns=101
+```
+
+`kept_epoch` is the 1-based epoch whose weights were restored; `kept_epoch=none` /
+`best_held_out_loss=none` mean there was no held-out set. `inputs` < `lane_columns`
+means columns were culled (also a `warn`).
+
+`RUST_LOG=timsseek::ml::mlp=debug` additionally traces train/held-out loss every
+epoch (`epochs` lines per fold) — for looking at a curve, not for building a table.
 
 ## Taskfile
 
