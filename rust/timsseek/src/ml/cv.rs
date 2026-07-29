@@ -888,6 +888,23 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
         fold_feature_stats(&self.dataset, &self.fold_rows, &models)
     }
 
+    /// THE fold partition this scorer built: `fold_rows[f]` is the rows with
+    /// `get_fold(i) == f`, ascending.
+    ///
+    /// Test-only, and it exists for one assertion. The hybrid rescorers feed
+    /// this scorer a column that was cross-fit under a DIFFERENT train/score
+    /// split (`qvalues::crossfit`), and the two splits are only leak-free
+    /// together if they agree on the fold ASSIGNMENT — a disagreement is
+    /// invisible to this scorer's own cross-validation and shows up solely as an
+    /// optimistic FDR. Exposing the partition lets
+    /// `qvalues::crossfit_holds_out_exactly_the_rows_the_gbm_scorer_trains_on`
+    /// compare the two against each other rather than each against a repeated
+    /// `i % n_folds`.
+    #[cfg(test)]
+    pub(crate) fn fold_rows(&self) -> &[Vec<usize>] {
+        &self.fold_rows
+    }
+
     fn next_fold(&self, fold: u8) -> u8 {
         let mut maybe_next = fold + 1;
         if maybe_next >= self.n_folds {

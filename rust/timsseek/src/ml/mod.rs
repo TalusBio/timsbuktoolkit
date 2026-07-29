@@ -7,6 +7,7 @@ pub use cv::RescoreFeatureStats;
 pub use qvalues::{
     rescore,
     rescore_hybrid,
+    rescore_hybrid_mlp,
     rescore_lda,
     rescore_mlp_all,
     rescore_mlp_linear,
@@ -23,16 +24,16 @@ use serde::{
 
 /// Fold count for every rescorer (`rescore`, `rescore_lda`, `rescore_hybrid`).
 ///
-/// Shared rather than repeated per call site because the LDA cross-fit
-/// (`qvalues::crossfit_lda`, used by both the LDA and hybrid paths) requires the
-/// same fold ASSIGNMENT (`i % N_RESCORE_FOLDS`, i.e. `RowMajorDataset::get_fold`)
-/// that `CrossValidatedScorer` uses — if the two drift, a hybrid row's
-/// `lda_score` can peek at its own label.
+/// Shared rather than repeated per call site because the cross-fit
+/// (`qvalues::crossfit`, used by the LDA path and by both hybrids' extra column)
+/// requires the same fold ASSIGNMENT (`i % N_RESCORE_FOLDS`, i.e.
+/// `RowMajorDataset::get_fold`) that `CrossValidatedScorer` uses — if the two
+/// drift, a hybrid row's `lda_score` / `mlp_score` can peek at its own label.
 ///
 /// The two do NOT use the same train/score split on top of that assignment, and
 /// must not be made to: `CrossValidatedScorer` fits on one fold and scores the
-/// rest, `crossfit_lda` fits on all but one fold and scores that one. Both are
-/// leak-free; see `qvalues::crossfit_lda` for why the difference is deliberate.
+/// rest, `crossfit` fits on all but one fold and scores that one. Both are
+/// leak-free; see `qvalues::crossfit` for why the difference is deliberate.
 ///
 /// Must be >= 3: `CrossValidatedScorer::get_scores` averages over the
 /// `n_folds - 2` folds that are neither the training nor the early-stopping
