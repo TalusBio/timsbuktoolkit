@@ -975,6 +975,25 @@ impl ColumnTransform {
     pub fn lane_of_input(&self, k: usize) -> Option<usize> {
         self.cols.get(k).map(|c| c.lane)
     }
+
+    /// The other half of [`Self::lane_of_input`]: the lane column an `_isna`
+    /// COMPANION belongs to, or `None` when `k` is a standardized feature (or
+    /// past the end).
+    ///
+    /// Companions have no lane of their own — they are appended after the
+    /// standardized block, in the lane order of the missable columns they
+    /// flag — so a caller that wants a lane-indexed vector has no way to place
+    /// them without this. It is a lookup rather than a public field so the
+    /// companion LAYOUT stays an internal detail of [`Self::apply`]; the two
+    /// must agree, and this is the only other place that encodes the order.
+    pub fn isna_lane_of_input(&self, k: usize) -> Option<usize> {
+        let nth = k.checked_sub(self.cols.len())?;
+        self.cols
+            .iter()
+            .filter(|c| c.kind == ColKind::Missable)
+            .nth(nth)
+            .map(|c| c.lane)
+    }
 }
 
 // ---------------------------------------------------------------- config
@@ -1376,6 +1395,57 @@ mod test {
         // Row 0 is finite: companion stays clear.
         t.apply(&feat[0..2], &mut out);
         assert_eq!(out[2], 0.0);
+    }
+
+    /// `lane_of_input` / `isna_lane_of_input` must agree with the layout
+    /// `apply` actually writes, or a lane-indexed importance vector puts a
+    /// companion's weight on the wrong feature. Asserted against `apply`
+    /// itself rather than against a hand-copied layout: lane 1 is the only
+    /// missable column here, so the slot that trips when lane 1 is NaN IS its
+    /// companion by definition.
+    #[test]
+    fn isna_companions_map_back_to_the_column_they_flag() {
+        let ncols = 3;
+        // col0 clean, col1 missable, col2 clean.
+        let feat: Vec<f64> = vec![
+            1.0,
+            10.0,
+            -1.0, //
+            2.0,
+            f64::NAN,
+            5.0, //
+            3.0,
+            30.0,
+            2.0, //
+            4.0,
+            40.0,
+            9.0, //
+        ];
+        let rows: Vec<usize> = (0..4).collect();
+        let t = ColumnTransform::fit(&feat, ncols, &rows);
+        assert_eq!(t.width(), 4, "three survivors + one companion");
+
+        // Standardized block: lanes, no companions.
+        assert_eq!(
+            (0..3).map(|k| t.lane_of_input(k)).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(
+            (0..3).map(|k| t.isna_lane_of_input(k)).collect::<Vec<_>>(),
+            vec![None; 3]
+        );
+
+        // Companion block: the reverse.
+        assert_eq!(t.lane_of_input(3), None);
+        assert_eq!(t.isna_lane_of_input(3), Some(1));
+        // Past the end on both.
+        assert_eq!(t.lane_of_input(4), None);
+        assert_eq!(t.isna_lane_of_input(4), None);
+
+        // And slot 3 is the one `apply` actually trips for a NaN in lane 1.
+        let mut out = vec![0.0f32; t.width()];
+        t.apply(&feat[3..6], &mut out);
+        assert_eq!(out[3], 1.0);
     }
 
     /// The property the whole input transform rests on: statistics come from
