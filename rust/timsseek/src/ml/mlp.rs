@@ -2052,18 +2052,8 @@ impl ColumnTransform {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MlpConfig {
     pub hidden: Vec<usize>,
-    /// Adam step size. COUPLED TO [`Self::batch_size`] — see
-    /// [`Self::compiled_default`], where the pair was measured together and
-    /// moving one alone is documented as the worst arm of the sweep.
-    ///
-    /// # A superseded warning, kept because it is still true of its own regime
-    /// This field used to carry "1e-2/1e-3 both walked a 2-input ReLU net into a
-    /// dead-unit plateau in testing", which is why the default was 3e-4 for so
-    /// long. That observation stands, but it is about the XOR fixture in this
-    /// module's tests — 2 inputs, pure ReLU, few steps — and NOT about the 101-
-    /// or 128-column rescore lanes, where 1.2e-3 was measured better on two real
-    /// searches. Do not read it as a ceiling on this field. See [`Relu`] for the
-    /// plateau's actual mechanism, which a learning rate cannot fix anyway.
+    /// Adam step size. Coupled to [`Self::batch_size`]: tune the pair together,
+    /// because changing batch size also changes optimizer steps per epoch.
     pub lr: f32,
     pub weight_decay: f32,
     /// UPPER BOUND on epochs, not a target: with
@@ -2077,10 +2067,8 @@ pub struct MlpConfig {
     pub batch_size: usize,
     pub loss: MlpLoss,
     /// Activation between hidden layers. Defaults to
-    /// [`Activation::LeakyRelu`], which is what every number quoted on
-    /// [`Self::compiled_default`] was measured with; [`Activation::Square`] is an
-    /// experiment, and [`Square`] documents both what recommends it and the
-    /// divergence hazard it brings.
+    /// [`Activation::LeakyRelu`]. [`Activation::Square`] is an experiment, and
+    /// [`Square`] documents both what recommends it and its divergence hazard.
     ///
     /// NOT INDEPENDENT OF [`Self::lr`] AND [`Self::weight_decay`]. `x^2` can
     /// amplify its input where a rectifier cannot, so the step size that is right
@@ -2106,35 +2094,9 @@ pub struct MlpConfig {
     /// mechanism: the full `epochs` budget runs, nothing is snapshotted, and
     /// the fit is bit-identical to what it was before early stopping existed.
     ///
-    /// # Why it defaults to on
-    /// Measured on a 114k-candidate search, all three rescore folds bottom out
-    /// well inside the then-30-epoch budget and then get worse, while the TRAIN
-    /// loss falls monotonically to the end:
-    ///
-    /// | fold | best held-out | at epoch | held-out @30 |
-    /// |------|---------------|----------|--------------|
-    /// | 0    | 0.465810      | 16       | 0.469477     |
-    /// | 1    | 0.459646      | 23       | 0.461799     |
-    /// | 2    | 0.458787      | 17       | 0.462773     |
-    ///
-    /// THIS TABLE IS PRE-RETUNE: it was taken at `hidden: [64, 32]`, `lr: 3e-4`,
-    /// `batch_size: 256`, `epochs: 30`, none of which are the current defaults
-    /// (see [`Self::compiled_default`]). Where the turn now falls has NOT been
-    /// re-measured. What it establishes is the MECHANISM, which is not
-    /// hyperparameter-specific: held-out loss turns while train loss keeps
-    /// falling, so 40-47% of that budget was spent memorizing.
-    ///
-    /// Lowering `epochs` instead would NOT do the same job: the best epoch is 16,
-    /// 23 and 17 on the three folds of one single run, so any fixed budget is too
-    /// long for one fold and too short for another. The turn is a per-fold
-    /// property and only a per-fold rule can find it.
-    ///
-    /// # Why 5
-    /// The three curves above are within ~0.2% of their minimum for several
-    /// epochs around it, so a patience of 1 or 2 would stop on measurement noise
-    /// well before the turn. Five is long enough to walk through a flat stretch
-    /// and short enough to cut most of the memorizing tail. It has NOT been swept
-    /// on real data; it is a default, not a tuned value.
+    /// A per-fold rule is preferable to lowering [`Self::epochs`]: different
+    /// folds turn at different times. The compiled patience is intentionally
+    /// short enough to avoid long memorizing tails while tolerating brief noise.
     pub early_stopping_patience: Option<usize>,
 }
 
@@ -2177,86 +2139,17 @@ impl MlpConfig {
     /// This is the authoritative default — the values here are what a run with
     /// no `TIMSSEEK_MLP_*` set trains with, and every override starts from this
     /// struct and replaces individual fields.
-    /// # Provenance of these numbers
-    /// `hidden`, `lr`, `batch_size` and `epochs` are the winning arm of a sweep
-    /// on two real searches of the same Astral mzML at different candidate
-    /// counts. They replaced conventional, unmeasured values and improved both
-    /// runtime and target yield over the previous MLP defaults on those runs.
-    ///
-    /// Sweep-wide caveats, which apply to every figure quoted on the fields
-    /// below: both runs are the same FAIMS acquisition, so there is no ion
-    /// mobility and 25 of the 101 linear / 27 of the 128 all-lane columns were
-    /// culled as dead; two datasets, one machine; and Phase 5 is a fraction of a
-    /// whole search, so a 2x here is not a 2x end to end. See
-    /// [`crate::ml::RescoreModel`] for the cross-model table.
+    /// These values are validated together on representative searches. Runtime
+    /// and sensitivity are dataset-dependent; benchmark artifacts belong with
+    /// the experiment or PR rather than in this maintained configuration.
     pub fn compiled_default() -> Self {
         MlpConfig {
-            // MEASURED, and counter-intuitively so: `[64, 32]` was
-            // OVERPARAMETERIZED for this data. Halving it to `[32, 16]` improved
-            // speed AND accuracy at both scales. The two arms compared, both
-            // named in the sweep ledger -- baseline (`hidden: [64, 32]`,
-            // `epochs: 30`, batch 256, `lr` 3e-4) against arm "D"
-            // (`hidden: [32, 16]`, `epochs: 60`, batch and `lr` left at those old
-            // values): at 114k candidates 16.614s/25425 -> 9.165s/25476, and at
-            // 2.17M 487.042s/134345 -> 395.990s/134302 (-43 targets, -0.03%, for
-            // a 1.23x speedup at that scale).
-            //
-            // THAT PAIR IS CONFOUNDED, and no arm of the sweep isolated `hidden`
-            // on its own: `epochs` moved from 30 to 60 alongside it. The
-            // conclusion survives because the epoch raise is INERT -- the three
-            // folds instrumented (the 114k run) stopped at 21, 28 and 22 epochs,
-            // under either ceiling, so a raise from 30 to 60 cannot be what moved
-            // the time (see `epochs` below). Read the pair as "`hidden` plus a
-            // knob that did nothing", not as a clean single-variable measurement,
-            // and note that only that one run's stop epochs were recorded: at
-            // 2.17M nothing counted them, so inertness there is an inference.
-            //
-            // Either way, this is NOT a chosen point on a speed/accuracy
-            // trade-off curve; the smaller net is simply better here, so "it is
-            // undersized, give it capacity back" is a change that has already
-            // been tried and lost.
             hidden: vec![32, 16],
-            // COUPLED TO `batch_size`. NEVER MOVE ONE WITHOUT THE OTHER: this is
-            // the old 3e-4 (which was tuned at batch 256) scaled linearly with
-            // the 4x larger batch. Raising the batch alone -- 1024 with `lr`
-            // left at 3e-4 -- was the WORST arm of the entire sweep: 31.612s on
-            // the 114k run against 16.614s for changing nothing at all, because
-            // 4x fewer optimizer steps per epoch never converges and spends the
-            // whole epoch budget not converging. Lowering `lr` instead is worse
-            // still: 1e-4 over 100 epochs cost 35.512s for fewer targets.
+            // Keep learning rate and batch size coupled when tuning.
             lr: 1.2e-3,
             weight_decay: 1e-4,
-            // A CEILING THAT EARLY STOPPING IS EXPECTED TO CUT SHORT, not a
-            // target -- see [`Self::early_stopping_patience`]. Raising it does
-            // not mean 60 epochs are wanted or expected to run.
-            //
-            // THE BUDGET WAS NEVER THE BINDING CONSTRAINT, at 30 or at 60. In the
-            // one run whose stop epochs were recorded (114k candidates, `epochs:
-            // 30`, and the pre-retune `hidden`/`lr`/`batch_size` -- nothing has
-            // counted epochs since) the folds ran 21, 28 and 22, which is exactly
-            // `best + patience` for the measured best epochs 16, 23 and 17: all
-            // three terminated ON THE CRITERION and 30 truncated nothing. (An
-            // earlier version of this comment claimed the opposite. It was wrong,
-            // and the speed win came from `hidden`/`batch_size`/`lr`, not from the
-            // ceiling.)
-            //
-            // What the 28-of-30 fold does leave is HEADROOM, which is the only
-            // argument for 60: two spare epochs is not enough slack to tell
-            // whether that fold's held-out curve had finished turning, and a fold
-            // that turns later would be cut off rather than measured. 60 removes
-            // that doubt.
-            //
-            // NO DIRECT A/B SUPPORTS 60 at the `hidden`/`lr`/`batch_size` above;
-            // it rests on the headroom argument alone. It is also free whenever
-            // early stopping fires, and it fired on every fold ever instrumented,
-            // so being generous here has cost nothing observed. Treat 60 as
-            // UNVALIDATED -- neither known-good nor known-wrong.
+            // Generous ceiling; early stopping determines the actual work.
             epochs: 60,
-            // COUPLED TO `lr` -- see there for the measurement. 1024 pays ONLY
-            // with the learning rate scaled to match (256 -> 1024 is 4x, so
-            // 3e-4 -> 1.2e-3). Swept as an independent axis it looks strictly
-            // harmful, and anyone who tunes it that way will conclude, wrongly,
-            // that bigger batches are slower on this workload.
             batch_size: 1024,
             loss: MlpLoss::Bce,
             // The rectifier the whole sweep above ran on. See `activation`.
@@ -2266,7 +2159,7 @@ impl MlpConfig {
             // invalidates every comparison already drawn from it.
             importance: MlpImportance::W1,
             seed: 0x2545_F491_4F6C_DD1D,
-            early_stopping_patience: Some(5),
+            early_stopping_patience: Some(3),
         }
     }
 
@@ -4106,7 +3999,7 @@ mod test {
         // equality is as exact as the `to_bits` pinning above.
         assert_eq!(cfg.loss, MlpLoss::Bce);
         assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
-        assert_eq!(cfg.early_stopping_patience, Some(5));
+        assert_eq!(cfg.early_stopping_patience, Some(3));
         // The rectifier every number on `compiled_default` was measured with.
         // `Square` is an experiment and must never become the default by
         // accident — see [`Square`] for the divergence hazard.
