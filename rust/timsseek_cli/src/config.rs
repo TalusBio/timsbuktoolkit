@@ -154,7 +154,7 @@ rt = "Unrestricted"
     /// file. Nothing structural enforces that: `RescoreModel`'s `rename_all`
     /// (serde) and `CliRescoreModel`'s (clap) are two independent attributes,
     /// and a per-variant `rename`/`value(name)` on one side only would leave
-    /// `--rescore-model hybrid_mlp` working while `rescore_model = "hybrid_mlp"`
+    /// `--rescore-model mlp` working while `rescore_model = "mlp"`
     /// is rejected as an unknown variant — a divergence a user hits, not a
     /// build.
     ///

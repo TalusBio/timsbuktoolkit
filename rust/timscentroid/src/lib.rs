@@ -12,7 +12,10 @@ pub mod timings;
 pub mod utils;
 
 #[doc(inline)]
-pub use timings::TimedStep;
+pub use timings::{
+    TimedStep,
+    make_progress_bar,
+};
 
 #[doc(inline)]
 pub use geometry::QuadrupoleIsolationScheme;

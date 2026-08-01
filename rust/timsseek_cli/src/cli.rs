@@ -11,8 +11,7 @@ use timsseek::ml::RescoreModel;
 ///
 /// `rename_all` is `snake_case` to match `RescoreModel`'s serde spelling, so a
 /// model is named identically on the command line and in the config file
-/// (`--rescore-model hybrid_mlp` / `rescore_model = "hybrid_mlp"`). The
-/// kebab-case aliases exist because that is what a CLI user reaches for first.
+/// (`--rescore-model mlp` / `rescore_model = "mlp"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "snake_case")]
 pub enum CliRescoreModel {
@@ -20,10 +19,6 @@ pub enum CliRescoreModel {
     Lda,
     Hybrid,
     Mlp,
-    #[value(alias = "mlp-all")]
-    MlpAll,
-    #[value(alias = "hybrid-mlp")]
-    HybridMlp,
 }
 
 /// Exhaustive on purpose — no wildcard arm. A variant added to
@@ -36,8 +31,6 @@ impl From<CliRescoreModel> for RescoreModel {
             CliRescoreModel::Lda => RescoreModel::Lda,
             CliRescoreModel::Hybrid => RescoreModel::Hybrid,
             CliRescoreModel::Mlp => RescoreModel::Mlp,
-            CliRescoreModel::MlpAll => RescoreModel::MlpAll,
-            CliRescoreModel::HybridMlp => RescoreModel::HybridMlp,
         }
     }
 }

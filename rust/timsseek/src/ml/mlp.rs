@@ -35,6 +35,27 @@ use rand::{
     Rng as _,
     SeedableRng,
 };
+use std::time::{
+    Duration,
+    Instant,
+};
+
+/// Opt-in production timing buckets. Durations are accumulated over every
+/// minibatch/epoch in one fold; `train_wall` and `validation_wall` are elapsed
+/// wall time, while their component buckets are consumer-thread CPU time.
+#[derive(Default)]
+pub(crate) struct MlpRuntimeProfile {
+    pub train_wall: Duration,
+    pub validation_wall: Duration,
+    pub train_forward: Duration,
+    pub train_loss: Duration,
+    pub train_backward: Duration,
+    pub adam: Duration,
+    pub validation_forward: Duration,
+    pub validation_loss: Duration,
+    pub train_batches: u64,
+    pub validation_batches: u64,
+}
 
 // ---------------------------------------------------------------- tensor
 
@@ -98,7 +119,7 @@ impl Tensor {
 /// `false` — decaying them toward zero fights what those layers are for.
 type ParamSlots<'a> = Vec<(&'a mut [f32], &'a mut [f32], bool)>;
 
-pub trait Layer {
+pub trait Layer: Send {
     fn out_dim(&self) -> usize;
     fn forward(&mut self, x: &Tensor, out: &mut Tensor, training: bool);
     /// `x` = layer input, `y` = layer output, `gy` = dL/dy, writes dL/dx into `gx`.
@@ -973,6 +994,35 @@ impl Mlp {
         l
     }
 
+    pub(crate) fn train_step_profiled(
+        &mut self,
+        x: &Tensor,
+        y: &[f32],
+        w: &[f32],
+        loss: &MlpLoss,
+        opt: &mut Adam,
+        profile: &mut MlpRuntimeProfile,
+    ) -> f32 {
+        let t = Instant::now();
+        self.forward(x, true);
+        profile.train_forward += t.elapsed();
+
+        let t = Instant::now();
+        let last = self.acts.len() - 1;
+        let l = loss.loss_and_grad(&self.acts[last], y, w, &mut self.grads[last]);
+        profile.train_loss += t.elapsed();
+
+        let t = Instant::now();
+        self.backward(x);
+        profile.train_backward += t.elapsed();
+
+        let t = Instant::now();
+        opt.step(self.params_and_grads());
+        profile.adam += t.elapsed();
+        profile.train_batches += 1;
+        l
+    }
+
     /// Mean loss over a set WITHOUT touching parameters, gradients, or the RNG.
     ///
     /// Runs the forward pass in eval mode and reuses
@@ -991,6 +1041,26 @@ impl Mlp {
         self.forward(x, false);
         let last = self.acts.len() - 1;
         loss.loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink)
+    }
+
+    pub(crate) fn eval_loss_profiled(
+        &mut self,
+        x: &Tensor,
+        y: &[f32],
+        w: &[f32],
+        loss: &MlpLoss,
+        profile: &mut MlpRuntimeProfile,
+    ) -> f32 {
+        let t = Instant::now();
+        self.forward(x, false);
+        profile.validation_forward += t.elapsed();
+
+        let t = Instant::now();
+        let last = self.acts.len() - 1;
+        let value = loss.loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink);
+        profile.validation_loss += t.elapsed();
+        profile.validation_batches += 1;
+        value
     }
 
     /// Copy every parameter into `out`, in [`Self::params_and_grads`] order.
@@ -1093,7 +1163,7 @@ impl Mlp {
     /// overfitted parameters the rule exists to avoid. The restore also happens
     /// when the epoch budget runs out before patience does, so with early
     /// stopping on you always get the best-held-out-loss weights that were seen.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn train_reporting(
         &mut self,
         cfg: &MlpConfig,
@@ -1204,6 +1274,160 @@ impl Mlp {
         // Restore whenever the kept epoch is not the one we happen to be
         // standing on — i.e. after a patience stop, and also after a budget
         // exhaustion whose last epochs were not improvements.
+        let restored = match best_epoch {
+            Some(b) if patience.is_some() && b + 1 != epochs_run => {
+                self.load_params_from(&best_params);
+                true
+            }
+            _ => false,
+        };
+        if restored {
+            tracing::debug!(
+                "{tag}early stop: ran {} of {} epochs, restored epoch {} (held_out_loss={:.6})",
+                epochs_run,
+                cfg.epochs,
+                best_epoch.unwrap() + 1,
+                best_val,
+            );
+        }
+
+        TrainOutcome {
+            final_train_loss: if restored { best_train } else { last_epoch },
+            epochs_run,
+            best_epoch,
+            best_val_loss: best_epoch.map(|_| best_val),
+            restored,
+        }
+    }
+
+    /// Production training path over regenerated, batch-sized chunks. Candidate
+    /// order was randomized before fold assignment, so each chunk already has
+    /// random membership; epochs shuffle chunk IDs only. `visit_train` supplies
+    /// each transformed chunk to the consumer and retains none of them.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn train_reporting_streaming(
+        &mut self,
+        cfg: &MlpConfig,
+        n_train_batches: usize,
+        visit_train: &mut dyn FnMut(&[usize], &mut dyn FnMut(&MlpBatch)),
+        mut visit_val: Option<&mut dyn FnMut(&mut dyn FnMut(&MlpBatch))>,
+        opt: &mut Adam,
+        rng: &mut StdRng,
+        tag: &str,
+        epoch_finished: &(dyn Fn() + Sync),
+        mut profile: Option<&mut MlpRuntimeProfile>,
+    ) -> TrainOutcome {
+        let patience = match (cfg.early_stopping_patience, visit_val.is_some()) {
+            (Some(p), true) => Some(p),
+            _ => None,
+        };
+        let mut order: Vec<usize> = (0..n_train_batches).collect();
+        let mut last_epoch = 0.0f32;
+        let mut best_val = f32::INFINITY;
+        let mut best_epoch = None;
+        let mut best_train = 0.0f32;
+        let mut best_params = Vec::new();
+        let mut stale = 0usize;
+        let mut epochs_run = 0usize;
+
+        for epoch in 0..cfg.epochs {
+            for i in (1..order.len()).rev() {
+                let j = rng.random_range(0..=i);
+                order.swap(i, j);
+            }
+
+            let mut running = 0.0f32;
+            let mut seen = 0usize;
+            let pass_started = profile.is_some().then(Instant::now);
+            {
+                let mut consume_train = |b: &MlpBatch| {
+                    running += match profile.as_deref_mut() {
+                        Some(profile) => {
+                            self.train_step_profiled(&b.x, &b.y, &b.w, &cfg.loss, opt, profile)
+                        }
+                        None => self.train_step(&b.x, &b.y, &b.w, &cfg.loss, opt),
+                    };
+                    seen += 1;
+                };
+                visit_train(&order, &mut consume_train);
+            }
+            if let (Some(started), Some(profile)) = (pass_started, profile.as_deref_mut()) {
+                profile.train_wall += started.elapsed();
+            }
+            last_epoch = if seen == 0 {
+                0.0
+            } else {
+                running / seen as f32
+            };
+            epochs_run = epoch + 1;
+
+            let traced = tracing::enabled!(tracing::Level::DEBUG);
+            let val_loss = match (visit_val.as_mut(), patience.is_some() || traced) {
+                (Some(visit), true) => {
+                    let mut weighted = 0.0f64;
+                    let mut total_weight = 0.0f64;
+                    let pass_started = profile.is_some().then(Instant::now);
+                    {
+                        let mut consume_val = |b: &MlpBatch| {
+                            let weight: f32 = b.w.iter().sum();
+                            let loss = match profile.as_deref_mut() {
+                                Some(profile) => {
+                                    self.eval_loss_profiled(&b.x, &b.y, &b.w, &cfg.loss, profile)
+                                }
+                                None => self.eval_loss(&b.x, &b.y, &b.w, &cfg.loss),
+                            };
+                            weighted += loss as f64 * weight as f64;
+                            total_weight += weight as f64;
+                        };
+                        (**visit)(&mut consume_val);
+                    }
+                    if let (Some(started), Some(profile)) = (pass_started, profile.as_deref_mut()) {
+                        profile.validation_wall += started.elapsed();
+                    }
+                    Some(if total_weight > 0.0 {
+                        (weighted / total_weight) as f32
+                    } else {
+                        0.0
+                    })
+                }
+                _ => None,
+            };
+
+            if traced {
+                match val_loss {
+                    Some(vl) => tracing::debug!(
+                        "{tag}epoch {}/{}: train_loss={:.6} held_out_loss={:.6}",
+                        epoch + 1,
+                        cfg.epochs,
+                        last_epoch,
+                        vl,
+                    ),
+                    None => tracing::debug!(
+                        "{tag}epoch {}/{}: train_loss={:.6} (no held-out set)",
+                        epoch + 1,
+                        cfg.epochs,
+                        last_epoch,
+                    ),
+                }
+            }
+
+            epoch_finished();
+            let Some(p) = patience else { continue };
+            let vl = val_loss.expect("early stopping requires a held-out measurement");
+            if vl < best_val {
+                best_val = vl;
+                best_epoch = Some(epoch);
+                best_train = last_epoch;
+                self.snapshot_params_into(&mut best_params);
+                stale = 0;
+            } else {
+                stale += 1;
+                if stale >= p {
+                    break;
+                }
+            }
+        }
+
         let restored = match best_epoch {
             Some(b) if patience.is_some() && b + 1 != epochs_run => {
                 self.load_params_from(&best_params);
@@ -1433,6 +1657,33 @@ pub struct ValSet<'a> {
     pub w: &'a [f32],
 }
 
+/// One reusable transformed batch buffer. Production fitting owns exactly two:
+/// the producer fills one from candidate rows while forward/backward consumes
+/// the other, then the buffers trade places.
+pub struct MlpBatch {
+    pub x: Tensor,
+    pub y: Vec<f32>,
+    pub w: Vec<f32>,
+}
+
+impl MlpBatch {
+    pub fn rows(&self) -> usize {
+        self.x.rows()
+    }
+
+    /// Reusable producer/consumer buffer with capacity for one full batch and
+    /// initially zero live rows.
+    pub fn buffer(row_capacity: usize, cols: usize) -> Self {
+        let mut x = Tensor::new(row_capacity, cols);
+        x.reshape(0, cols);
+        Self {
+            x,
+            y: Vec::with_capacity(row_capacity),
+            w: Vec::with_capacity(row_capacity),
+        }
+    }
+}
+
 /// What one [`Mlp::train_reporting`] call did.
 ///
 /// A struct rather than the bare loss because with early stopping the loss no
@@ -1526,13 +1777,27 @@ const MIN_STD: f64 = 1e-12;
 impl ColumnTransform {
     /// Fit over `rows` of the row-major lane matrix `feat` (`feat[i*ncols + j]`).
     pub fn fit(feat: &[f64], ncols_lane: usize, rows: &[usize]) -> Self {
+        Self::fit_streaming(ncols_lane, rows.iter().copied(), |i, out| {
+            out.copy_from_slice(&feat[i * ncols_lane..(i + 1) * ncols_lane]);
+        })
+    }
+
+    /// Fit from rows supplied into one reusable scratch buffer. This is
+    /// numerically the same one-pass moment calculation as [`Self::fit`], but it
+    /// does not require a retained raw lane matrix.
+    pub fn fit_streaming(
+        ncols_lane: usize,
+        rows: impl IntoIterator<Item = usize>,
+        mut write_row: impl FnMut(usize, &mut [f64]),
+    ) -> Self {
         let mut sum = vec![0.0f64; ncols_lane];
         let mut sumsq = vec![0.0f64; ncols_lane];
         let mut finite = vec![0u64; ncols_lane];
         let mut nonfinite = vec![0u64; ncols_lane];
+        let mut row = vec![0.0f64; ncols_lane];
 
-        for &i in rows {
-            let row = &feat[i * ncols_lane..(i + 1) * ncols_lane];
+        for i in rows {
+            write_row(i, &mut row);
             for (j, &v) in row.iter().enumerate() {
                 if v.is_finite() {
                     sum[j] += v;
@@ -1617,6 +1882,19 @@ impl ColumnTransform {
             }
         }
         bad
+    }
+
+    /// Mark clean-at-fit lane columns that are non-finite in this one row.
+    /// Streaming inference accumulates these marks while transforming rows,
+    /// avoiding the old gather + diagnostic pass over a raw matrix.
+    pub fn mark_dirty_clean(&self, row: &[f64], dirty: &mut [bool]) {
+        debug_assert_eq!(row.len(), self.ncols_lane);
+        debug_assert_eq!(dirty.len(), self.ncols_lane);
+        for spec in self.cols.iter().filter(|c| c.kind == ColKind::Clean) {
+            if !row[spec.lane].is_finite() {
+                dirty[spec.lane] = true;
+            }
+        }
     }
 
     /// Transform one lane row into `out` (`out.len() == self.width()`).
@@ -1798,8 +2076,8 @@ impl Default for MlpConfig {
 }
 
 /// Gate for the once-per-process effective-config log in [`MlpConfig::from_env`].
-/// `default()` is called once per rescorer entry point, but the hybrids and the
-/// tests can reach it more than once in a process and the sweep wants ONE line
+/// `default()` is called once per rescorer entry point, but tests can reach it
+/// more than once in a process and the sweep wants ONE line
 /// to grep, not one per call.
 static ENV_OVERRIDE_LOGGED: std::sync::Once = std::sync::Once::new();
 
@@ -1811,12 +2089,9 @@ impl MlpConfig {
     /// struct and replaces individual fields.
     /// # Provenance of these numbers
     /// `hidden`, `lr`, `batch_size` and `epochs` are the winning arm of a sweep
-    /// on two REAL searches (`mlp_all`, Phase 5 wall time / targets at 1% FDR):
-    /// a 114138-candidate run and a 2174837-candidate run of the same Astral
-    /// mzML. They replaced conventional, unmeasured values. Against the GBM the
-    /// winner is 1.31x faster with +211 targets at 114k, and 2.04x faster with
-    /// -55 targets (-0.04%) at 2.17M; against the previous MLP defaults it is
-    /// 1.73x-2.26x faster while finding MORE targets at both scales.
+    /// on two real searches of the same Astral mzML at different candidate
+    /// counts. They replaced conventional, unmeasured values and improved both
+    /// runtime and target yield over the previous MLP defaults on those runs.
     ///
     /// Sweep-wide caveats, which apply to every figure quoted on the fields
     /// below: both runs are the same FAIMS acquisition, so there is no ion

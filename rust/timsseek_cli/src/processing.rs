@@ -1,11 +1,5 @@
 use super::config::OutputConfig;
-use indicatif::{
-    ProgressBar,
-    ProgressFinish,
-    ProgressIterator,
-    ProgressStyle,
-};
-use std::io::IsTerminal;
+use indicatif::ProgressIterator;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -44,7 +38,10 @@ use timsseek::rt_calibration::{
 };
 use timsseek::scoring::offsets::MzMobilityOffsets;
 use timsseek::scoring::pipeline::Scorer;
-use timsseek::scoring::timings::TimedStep;
+use timsseek::scoring::timings::{
+    TimedStep,
+    make_progress_bar,
+};
 use timsseek::scoring::{
     CalibrantCandidate,
     CalibrantHeap,
@@ -70,22 +67,6 @@ use tracing::{
 /// Used to re-anchor a separate calibration library onto the main library's
 /// iRT axis via shared-fragment matching.
 type PrecursorFragmentLookup = std::collections::HashMap<(i64, u8), Vec<(f32, Vec<i64>)>>;
-
-/// Create a progress bar that writes to stderr when it is a TTY, or a hidden
-/// (no-op) bar when stderr is not a terminal (e.g. piped / redirected).
-fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-    let style = ProgressStyle::with_template(&format!(
-        "{{spinner:.green}} {} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({{eta}})",
-        label
-    ))
-    .unwrap();
-    ProgressBar::new(len)
-        .with_style(style)
-        .with_finish(ProgressFinish::AndLeave)
-}
 
 /// Check that two speclibs are on a compatible RT scale.
 /// Warns loudly if the RT ranges don't overlap, which would produce a useless calibration.

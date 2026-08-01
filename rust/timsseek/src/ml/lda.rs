@@ -61,13 +61,58 @@ impl LdaModel {
     ) -> Option<LdaModel> {
         assert_eq!(is_decoy.len(), nrows);
         assert_eq!(feat.len(), nrows * ncols);
-        if nrows == 0 || ncols == 0 {
+        let rows: Vec<usize> = (0..nrows).collect();
+        Self::fit_rows(
+            &rows,
+            ncols,
+            |i| is_decoy[i],
+            |i, out| out.copy_from_slice(&feat[i * ncols..(i + 1) * ncols]),
+            shrinkage,
+        )
+    }
+
+    /// Fit from a repeatable row projection. Three fixed-order streaming passes
+    /// accumulate column moments, class means, and within-class scatter. There
+    /// is no per-row feature storage; parallel scatter uses one `O(d²)` partial
+    /// per fixed 65,536-row reduction chunk.
+    fn fit_rows(
+        rows: &[usize],
+        ncols: usize,
+        is_decoy: impl Fn(usize) -> bool + Sync,
+        write_row: impl Fn(usize, &mut [f64]) + Sync,
+        shrinkage: f64,
+    ) -> Option<LdaModel> {
+        if rows.is_empty() || ncols == 0 {
             return None;
         }
 
         // --- Standardization stats (finite values only), parallel reduce ---
         let t = Instant::now();
-        let (sum, sumsq, cnt) = col_finite_moments(feat, ncols);
+        let (sum, sumsq, cnt) = chunked_fold_reduce(
+            rows,
+            CHUNK_ROWS,
+            || (vec![0.0f64; ncols], vec![0.0f64; ncols], vec![0u64; ncols]),
+            |acc, _ci, block| {
+                let mut row = vec![0.0f64; ncols];
+                for &i in block {
+                    write_row(i, &mut row);
+                    for (j, &v) in row.iter().enumerate() {
+                        if v.is_finite() {
+                            acc.0[j] += v;
+                            acc.1[j] += v * v;
+                            acc.2[j] += 1;
+                        }
+                    }
+                }
+            },
+            |out, partial| {
+                for j in 0..ncols {
+                    out.0[j] += partial.0[j];
+                    out.1[j] += partial.1[j];
+                    out.2[j] += partial.2[j];
+                }
+            },
+        );
         let mut mean = vec![0.0f64; ncols];
         let mut inv_std = vec![1.0f64; ncols];
         for j in 0..ncols {
@@ -81,8 +126,34 @@ impl LdaModel {
             }
         }
 
-        // --- Pass 1: per-class means in standardized space (parallel) ---
-        let (class_sum, class_cnt) = class_std_sums(feat, nrows, ncols, is_decoy, &mean, &inv_std);
+        // --- Pass 2: per-class means in standardized space (parallel) ---
+        let (class_sum, class_cnt) = chunked_fold_reduce(
+            rows,
+            CHUNK_ROWS,
+            || ([vec![0.0f64; ncols], vec![0.0f64; ncols]], [0u64; 2]),
+            |(class_sum, class_cnt), _ci, block| {
+                let mut row = vec![0.0f64; ncols];
+                for &i in block {
+                    write_row(i, &mut row);
+                    let c = if is_decoy(i) { 0 } else { 1 };
+                    for j in 0..ncols {
+                        let v = row[j];
+                        if v.is_finite() {
+                            class_sum[c][j] += (v - mean[j]) * inv_std[j];
+                        }
+                    }
+                    class_cnt[c] += 1;
+                }
+            },
+            |out, partial| {
+                for c in 0..2 {
+                    for j in 0..ncols {
+                        out.0[c][j] += partial.0[c][j];
+                    }
+                    out.1[c] += partial.1[c];
+                }
+            },
+        );
         if class_cnt[0] == 0 || class_cnt[1] == 0 {
             return None;
         }
@@ -91,15 +162,53 @@ impl LdaModel {
             (0..ncols).map(|j| class_sum[c][j] / n).collect()
         });
         eprintln!(
-            "  LDA: standardized + class means ({nrows} rows x {ncols} feats) in {:.2?}",
+            "  LDA: streamed standardization + class means ({} rows x {ncols} feats) in {:.2?}",
+            rows.len(),
             t.elapsed()
         );
 
-        // --- Pass 2: pooled within-class scatter Sw (parallel, D x D) ---
+        // --- Pass 3: pooled within-class scatter Sw (parallel, D x D) ---
         // Sw = sum_c (1/n_c) sum_{i in c} (z_i - mu_c)(z_i - mu_c)^T
         let t = Instant::now();
-        let mut sw =
-            within_class_scatter(feat, nrows, ncols, is_decoy, &mean, &inv_std, &class_mean);
+        let dd = ncols * ncols;
+        let mut sw = chunked_fold_reduce(
+            rows,
+            CHUNK_ROWS,
+            || vec![0.0f64; 2 * dd],
+            |out, _ci, block| {
+                let mut row = vec![0.0f64; ncols];
+                let mut centered = vec![0.0f64; ncols];
+                for &i in block {
+                    write_row(i, &mut row);
+                    let c = if is_decoy(i) { 0 } else { 1 };
+                    for j in 0..ncols {
+                        let v = row[j];
+                        let z = if v.is_finite() {
+                            (v - mean[j]) * inv_std[j]
+                        } else {
+                            0.0
+                        };
+                        centered[j] = z - class_mean[c][j];
+                    }
+                    let base = c * dd;
+                    for j in 0..ncols {
+                        let cj = centered[j];
+                        if cj == 0.0 {
+                            continue;
+                        }
+                        let rowbase = base + j * ncols;
+                        for k in 0..ncols {
+                            out[rowbase + k] += cj * centered[k];
+                        }
+                    }
+                }
+            },
+            |out, partial| {
+                for e in 0..2 * dd {
+                    out[e] += partial[e];
+                }
+            },
+        );
         for (c, &cnt) in class_cnt.iter().enumerate() {
             let inv_nc = 1.0 / cnt as f64;
             let off = c * ncols * ncols;
@@ -177,8 +286,8 @@ impl Default for LdaConfig {
     }
 }
 
-/// The only way an LDA fit fails. [`LdaModel::fit_matrix`] returns `None` for both
-/// causes without distinguishing them, so this enum has one variant rather
+/// The only way an LDA fit fails. The matrix and streaming fits return `None` for
+/// both causes without distinguishing them, so this enum has one variant rather
 /// than inventing a distinction the fit does not actually report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LdaError {
@@ -199,10 +308,10 @@ impl std::error::Error for LdaError {}
 
 /// [`FoldModel`] adapter over the closed-form fit above.
 ///
-/// Gathers its train rows out of the dataset into the flat row-major buffer
-/// [`LdaModel::fit_matrix`] wants; `predict` reads scored rows the same way. Neither
-/// touches a row outside the index slice it was handed, so leak-freedom is
-/// entirely the caller's partition and never this impl's.
+/// Streams its train rows through three sufficient-statistic passes and streams
+/// scored rows once. Neither path retains a row matrix or touches a row outside
+/// the index slice it was handed, so leak-freedom is entirely the caller's
+/// partition and never this impl's.
 impl FoldModel for LdaModel {
     type Config = LdaConfig;
     type Error = LdaError;
@@ -226,16 +335,14 @@ impl FoldModel for LdaModel {
     ) -> Result<Self, LdaError> {
         let (_, _) = (fold, val);
         let ncols = data.column_names().len();
-        let mut feat = Vec::with_capacity(train.len() * ncols);
-        let mut is_decoy = Vec::with_capacity(train.len());
-        let mut row = vec![0.0f64; ncols];
-        for &i in train {
-            data.get_values(i, &mut row);
-            feat.extend_from_slice(&row);
-            is_decoy.push(data.is_decoy(i));
-        }
-        LdaModel::fit_matrix(&feat, train.len(), ncols, &is_decoy, cfg.shrinkage)
-            .ok_or(LdaError::SingularOrEmptyClass)
+        LdaModel::fit_rows(
+            train,
+            ncols,
+            |i| data.is_decoy(i),
+            |i, out| data.get_values(i, out),
+            cfg.shrinkage,
+        )
+        .ok_or(LdaError::SingularOrEmptyClass)
     }
 
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, LdaError> {
@@ -254,7 +361,7 @@ impl FoldModel for LdaModel {
     ///
     /// NEVER `NAN`, i.e. never "unreported" under the
     /// [`FoldModel::importance`] contract: the solve looks at every column, so
-    /// every column has a measurement. `LdaModel::fit_matrix` rejects a non-finite
+    /// every column has a measurement. The fit rejects a non-finite
     /// solution outright, so `coef` is finite by construction and this cannot
     /// emit the sentinel by accident.
     ///
@@ -266,138 +373,10 @@ impl FoldModel for LdaModel {
         let out: Vec<f32> = self.coef.iter().map(|c| c.abs() as f32).collect();
         debug_assert!(
             out.iter().all(|v| v.is_finite()),
-            "LdaModel::fit_matrix guarantees finite coefficients"
+            "LdaModel fitting guarantees finite coefficients"
         );
         out
     }
-}
-
-/// Per-column finite sum / sum-of-squares / count, reduced over fixed row
-/// chunks (deterministic summation order).
-fn col_finite_moments(feat: &[f64], ncols: usize) -> (Vec<f64>, Vec<f64>, Vec<u64>) {
-    chunked_fold_reduce(
-        feat,
-        CHUNK_ROWS * ncols,
-        || (vec![0.0f64; ncols], vec![0.0f64; ncols], vec![0u64; ncols]),
-        |acc, _ci, block| {
-            for row in block.chunks_exact(ncols) {
-                for (j, &v) in row.iter().enumerate() {
-                    if v.is_finite() {
-                        acc.0[j] += v;
-                        acc.1[j] += v * v;
-                        acc.2[j] += 1;
-                    }
-                }
-            }
-        },
-        |out, (s, sq, c)| {
-            for j in 0..ncols {
-                out.0[j] += s[j];
-                out.1[j] += sq[j];
-                out.2[j] += c[j];
-            }
-        },
-    )
-}
-
-/// Per-class standardized-feature sums + counts (parallel, deterministic).
-fn class_std_sums(
-    feat: &[f64],
-    nrows: usize,
-    ncols: usize,
-    is_decoy: &[bool],
-    mean: &[f64],
-    inv_std: &[f64],
-) -> ([Vec<f64>; 2], [u64; 2]) {
-    debug_assert_eq!(feat.len(), nrows * ncols);
-    let std_at = |row: &[f64], j: usize| {
-        let v = row[j];
-        if v.is_finite() {
-            (v - mean[j]) * inv_std[j]
-        } else {
-            0.0
-        }
-    };
-    chunked_fold_reduce(
-        feat,
-        CHUNK_ROWS * ncols,
-        || ([vec![0.0f64; ncols], vec![0.0f64; ncols]], [0u64; 2]),
-        |(csum, ccnt), ci, block| {
-            // The block holds rows `ci * CHUNK_ROWS ..` of the matrix; the
-            // labels are indexed globally, so recover the offset.
-            let r0 = ci * CHUNK_ROWS;
-            for (local, row) in block.chunks_exact(ncols).enumerate() {
-                let c = if is_decoy[r0 + local] { 0 } else { 1 };
-                for (j, s) in csum[c].iter_mut().enumerate() {
-                    *s += std_at(row, j);
-                }
-                ccnt[c] += 1;
-            }
-        },
-        |(class_sum, class_cnt), (csum, ccnt)| {
-            for c in 0..2 {
-                for j in 0..ncols {
-                    class_sum[c][j] += csum[c][j];
-                }
-                class_cnt[c] += ccnt[c];
-            }
-        },
-    )
-}
-
-/// Per-class within-class scatter (un-normalized), returned as two stacked
-/// row-major `D x D` blocks: `[class0 (D*D), class1 (D*D)]`. Reduced over fixed
-/// row chunks for determinism. This is the `O(n * d^2)` hot loop.
-fn within_class_scatter(
-    feat: &[f64],
-    nrows: usize,
-    ncols: usize,
-    is_decoy: &[bool],
-    mean: &[f64],
-    inv_std: &[f64],
-    class_mean: &[Vec<f64>; 2],
-) -> Vec<f64> {
-    debug_assert_eq!(feat.len(), nrows * ncols);
-    let dd = ncols * ncols;
-    chunked_fold_reduce(
-        feat,
-        CHUNK_ROWS * ncols,
-        || vec![0.0f64; 2 * dd],
-        |out, ci, block| {
-            // Global row offset of this block, for the label lookup.
-            let r0 = ci * CHUNK_ROWS;
-            let mut centered = vec![0.0f64; ncols];
-            for (local, row) in block.chunks_exact(ncols).enumerate() {
-                let c = if is_decoy[r0 + local] { 0 } else { 1 };
-                let mu = &class_mean[c];
-                for j in 0..ncols {
-                    let v = row[j];
-                    let z = if v.is_finite() {
-                        (v - mean[j]) * inv_std[j]
-                    } else {
-                        0.0
-                    };
-                    centered[j] = z - mu[j];
-                }
-                let base = c * dd;
-                for j in 0..ncols {
-                    let cj = centered[j];
-                    if cj == 0.0 {
-                        continue;
-                    }
-                    let rowbase = base + j * ncols;
-                    for k in 0..ncols {
-                        out[rowbase + k] += cj * centered[k];
-                    }
-                }
-            }
-        },
-        |sw, p| {
-            for e in 0..2 * dd {
-                sw[e] += p[e];
-            }
-        },
-    )
 }
 
 /// Solve `A x = b` for a row-major `n x n` matrix `A` via Gaussian elimination
@@ -542,5 +521,41 @@ mod test {
         // Guard the premise: a DIFFERENT col-1 value must move the score, else
         // the equality above would be vacuous (e.g. a zeroed coefficient).
         assert_ne!(lda.score(&[1.0, COL1_MEAN]), lda.score(&[1.0, 5.0]));
+    }
+
+    #[test]
+    fn indexed_streaming_fit_matches_the_equivalent_compact_matrix() {
+        let rows = [
+            [3.0, 1.0, f64::NAN],
+            [99.0, 99.0, 99.0], // deliberately outside the fitted row set
+            [2.5, 0.5, 4.0],
+            [-2.0, -1.0, 1.0],
+            [-3.0, -0.5, f64::NAN],
+        ];
+        let decoy = [false, false, false, true, true];
+        let selected = [0usize, 2, 3, 4];
+        let compact: Vec<f64> = selected.iter().flat_map(|&i| rows[i]).collect();
+        let compact_labels: Vec<bool> = selected.iter().map(|&i| decoy[i]).collect();
+        let matrix = LdaModel::fit_matrix(
+            &compact,
+            selected.len(),
+            3,
+            &compact_labels,
+            DEFAULT_SHRINKAGE,
+        )
+        .unwrap();
+        let streamed = LdaModel::fit_rows(
+            &selected,
+            3,
+            |i| decoy[i],
+            |i, out| out.copy_from_slice(&rows[i]),
+            DEFAULT_SHRINKAGE,
+        )
+        .unwrap();
+
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&streamed.mean), bits(&matrix.mean));
+        assert_eq!(bits(&streamed.inv_std), bits(&matrix.inv_std));
+        assert_eq!(bits(&streamed.coef), bits(&matrix.coef));
     }
 }

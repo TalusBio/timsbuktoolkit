@@ -35,7 +35,8 @@ Not shown by `--help`. Read directly via `std::env::var`.
 | `BUCKET_SIZE` | `timsseek` | `256` | Overrides peak-index rebucket size after load. Raw `.d` files ship with `bucket_size=4096`, too large for tight mz tolerances. Lower → faster Phase 1/3 (~−24% wall at 256). For perf experiments. |
 | `TIMSCENTROID_WORKER_THREADS` | any using `timscentroid` (`timsseek`, `timsquery_cli`, `timsquery_viewer`) | `8` | Tokio runtime worker threads for cloud (`object_store` / S3) reads. Bump for higher remote concurrency. |
 | `TIMSSEEK_RESCORE_DASHBOARD` | `timsseek`, built with `--features dashboard` | unset (off) | Any value but `0`/`false` opens the rescore dashboard TUI after the Phase 6 write; without `--features dashboard` the check is compiled out entirely. Warns and skips when stdout is not a terminal. Invocation: `cargo run -r --bin timsseek --features dashboard -- ...`. |
-| `TIMSSEEK_LDA_DUMP` | `timsseek` | unset (off) | `=/some/prefix` writes the raw LINEAR-lane matrix for offline feature engineering: `<prefix>.f64` (`nrows`/`ncols` header then row-major LE `f64`), `<prefix>.labels` (`u8`, 1 = target), `<prefix>.names.txt`. Best-effort — I/O errors log and are skipped. |
+| `TIMSSEEK_LDA_DUMP` | `timsseek` | unset (off) | `=/some/prefix` streams the raw LINEAR lane to an on-disk matrix for offline feature engineering: `<prefix>.f64` (`nrows`/`ncols` header then row-major LE `f64`), `<prefix>.labels` (`u8`, 1 = target), `<prefix>.names.txt`. No in-memory matrix is retained; I/O errors log and are skipped. |
+| `TIMSSEEK_MLP_PROFILE` | `timsseek` | unset (off) | Any value except empty/`0`/`false`/`off` enables one `MLP runtime profile:` line per fold. Breaks fitting into transform, train/validation wall time, forward/loss/backward/Adam, and loader prepare/wait time. |
 | `TIMSSEEK_MLP_*` | `timsseek` | unset (compiled defaults) | Dev-only hyperparameter sweep overrides for `MlpConfig`, which is deliberately NOT TOML-exposed. See the table below. |
 
 ### `TIMSSEEK_MLP_*` (dev-only MLP hyperparameter overrides)
@@ -43,8 +44,8 @@ Not shown by `--help`. Read directly via `std::env::var`.
 **Not a supported interface.** An escape hatch for sweeps, so a hyperparameter
 experiment is not a recompile. Read in exactly one place,
 `MlpConfig::from_env` (`rust/timsseek/src/ml/mlp.rs`), which `MlpConfig::default()`
-calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
-`hybrid_mlp`) read them; the config file stays the authority for everything else.
+calls in non-test builds. Only the `mlp` rescore model reads them; the config
+file stays the authority for everything else.
 
 | Env var | Field | Format |
 |---------|-------|--------|
@@ -60,14 +61,8 @@ calls in non-test builds. Only the three MLP rescore models (`mlp`, `mlp_all`,
 
 - **Unset changes nothing.** With none set the config is bit-identical to the
   compiled default and nothing is logged.
-- **`TIMSSEEK_MLP_PATIENCE` also changes the TRAINING-SET SIZE on the hybrid
-  path.** `hybrid_mlp` cross-fits its `mlp_score` column through the `crossfit`
-  driver, which has no fold to spare for validation, so a set patience carves 20%
-  of each fold's train rows off for the stopping decision and the optimizer sees
-  80%; `off` trains on 100%. A sweep arm comparing `PATIENCE=off` to
-  `PATIENCE=8` on `hybrid_mlp` therefore varies two things at once. `mlp` /
-  `mlp_all` are unaffected — they early-stop on the next fold, so every train row
-  still trains.
+- **`TIMSSEEK_MLP_PATIENCE` controls early stopping.** The MLP early-stops on the
+  next fold, so every train row still trains.
 - **A malformed value ABORTS the run** with the variable, the value and the
   expected format — it never falls back to the default, because a warned-past
   variable produces a sweep row labelled with a value that never trained. The
@@ -111,6 +106,20 @@ means columns were culled (also a `warn`).
 
 `RUST_LOG=timsseek::ml::mlp=debug` additionally traces train/held-out loss every
 epoch (`epochs` lines per fold) — for looking at a curve, not for building a table.
+
+For the production runtime breakdown, run the ordinary command with
+`TIMSSEEK_MLP_PROFILE=1` and extract the three fold summaries with:
+
+```bash
+grep -o 'MLP runtime profile:.*' run.log
+```
+
+`*_wall_s` buckets are elapsed fold time. Dense-kernel buckets are time on the
+MLP consumer thread; `*_prepare_cpu_s` is producer-thread work and overlaps the
+consumer. `*_wait_for_batch_s` is the actionable loader number: appreciable wait
+means feature preparation starved the MLP, while a near-zero value means deeper
+prefetching cannot materially help. The three fold totals overlap because folds
+train concurrently; do not add them to estimate Phase 5 wall time.
 
 ## Taskfile
 

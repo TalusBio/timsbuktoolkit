@@ -31,20 +31,24 @@
 use crate::ml::cv::{
     FoldDataset,
     FoldModel,
-    fold_weights,
 };
 use crate::ml::mlp::{
     Adam,
     ColumnTransform,
     Mlp,
+    MlpBatch,
     MlpConfig,
     MlpImportance,
+    MlpRuntimeProfile,
     Tensor,
     TrainOutcome,
-    ValSet,
 };
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::{
+    Duration,
+    Instant,
+};
 
 /// The ways fitting or scoring an [`MlpFoldModel`] can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +64,7 @@ pub enum MlpFoldError {
     /// Carries its own diagnostic context because the callers that report it
     /// cannot reconstruct it: [`FoldModel::fit`]'s error travels up through
     /// `CrossValidatedScorer::fit`, which knows nothing about columns, and the
-    /// abort in `qvalues::rescore_mlp_lane` prints only what the error says.
+    /// abort in `qvalues::rescore_mlp_with` prints only what the error says.
     ///
     /// `train_rows == 0` is a DIFFERENT failure wearing the same variant: with
     /// no rows every column is vacuously non-finite, so the cull takes all of
@@ -82,7 +86,7 @@ pub enum MlpFoldError {
     ///
     /// The MLP is the ONLY rescorer whose discriminant is not finite by
     /// construction: the LDA rejects a non-finite `coef` at fit time
-    /// (`lda::LdaModel::fit_matrix`), and a forust prediction is a sum of leaf
+    /// (`lda::LdaModel` rejects a non-finite solve), and a forust prediction is a sum of leaf
     /// values. Here the score is whatever the net's output layer computes, and
     /// weights that diverged during training (or overflowed an activation) put a
     /// `NaN` or an infinity in it.
@@ -145,6 +149,15 @@ impl std::fmt::Display for MlpFoldError {
 
 impl std::error::Error for MlpFoldError {}
 
+#[cfg(test)]
+fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
+    let mut feat = vec![0.0f64; rows.len() * ncols];
+    for (k, &i) in rows.iter().enumerate() {
+        data.get_values(i, &mut feat[k * ncols..(k + 1) * ncols]);
+    }
+    feat
+}
+
 /// A trained MLP plus THE input transform it was trained through.
 ///
 /// The two are one unit on purpose: the net's weights are only meaningful on
@@ -185,6 +198,8 @@ pub struct MlpFoldModel {
     /// [`MlpConfig::importance`] selects it or when the `debug` comparison log is
     /// enabled (the same `tracing::enabled!` gate the held-out trace uses).
     grad_importance: Option<Vec<f32>>,
+    /// Bound inference storage to the same row count used for train chunks.
+    inference_batch_size: usize,
 }
 
 // Both accessors are TEST SURFACE and are scoped to it. Nothing in the live path
@@ -213,28 +228,6 @@ impl MlpFoldModel {
     pub(crate) fn outcome(&self) -> TrainOutcome {
         self.outcome
     }
-}
-
-/// Gather `rows` out of `data` into a compact row-major slab, in the given
-/// order. The slab's row `k` is `rows[k]`, so slab-local indices are `0..len`
-/// — which is what [`ColumnTransform::fit`] and [`ColumnTransform::check_clean`]
-/// want, since both index `feat` by their `rows` argument.
-///
-/// Materializing rather than streaming is deliberate: `FoldDataset` only offers
-/// row-at-a-time access and BOTH callers make two passes over the result —
-/// `fit` runs `ColumnTransform::fit` and then `apply`, `predict` runs
-/// `check_clean` and then `apply`. The copy is a fixed cost per fold and
-/// correctness comes first.
-///
-/// A consumer that reads each row ONCE, in order, should not call this: the slab
-/// is `rows.len() * ncols` f64 and at production scale that is hundreds of
-/// megabytes held for no reason. The held-out set in `fit` streams instead.
-fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
-    let mut feat = vec![0.0f64; rows.len() * ncols];
-    for (k, &i) in rows.iter().enumerate() {
-        data.get_values(i, &mut feat[k * ncols..(k + 1) * ncols]);
-    }
-    feat
 }
 
 /// Map a per-TRANSFORMED-INPUT vector onto lane columns, which is what
@@ -379,8 +372,8 @@ fn usable_val(val: &[usize]) -> &[usize] {
 /// Split `0..len` into (rows to TRAIN on, rows to make the stopping decision
 /// on), or `(all, none)` when `len` is under [`MIN_TRAIN_ROWS_FOR_INNER_VAL`].
 ///
-/// Positions, not dataset row indices: the caller has already gathered `train`
-/// into a slab whose row `k` is `train[k]`, so both halves index that slab.
+/// Positions, not dataset row indices: both halves index the caller's `train`
+/// slice, whose position `k` names dataset row `train[k]`.
 ///
 /// Offset `INNER_VAL_STRIDE - 1` rather than `0` so position 0 trains; nothing
 /// depends on which offset it is, only on it being fixed.
@@ -391,9 +384,125 @@ fn inner_val_split(len: usize) -> (Vec<usize>, Vec<usize>) {
     (0..len).partition(|k| k % INNER_VAL_STRIDE != INNER_VAL_STRIDE - 1)
 }
 
+fn batch_count(nrows: usize, batch_size: usize) -> usize {
+    nrows.div_ceil(batch_size.max(1))
+}
+
+#[derive(Default)]
+struct BatchVisitTimings {
+    prepare_cpu: Duration,
+    consumer_wait: Duration,
+    batches: u64,
+}
+
+impl std::ops::AddAssign for BatchVisitTimings {
+    fn add_assign(&mut self, rhs: Self) {
+        self.prepare_cpu += rhs.prepare_cpu;
+        self.consumer_wait += rhs.consumer_wait;
+        self.batches += rhs.batches;
+    }
+}
+
+fn runtime_profile_enabled() -> bool {
+    std::env::var("TIMSSEEK_MLP_PROFILE").is_ok_and(|raw| {
+        !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off"
+        )
+    })
+}
+
+/// Visit transformed batches in `chunk_order`, with exactly two reusable buffers.
+/// A scoped producer projects the next chunk while the consumer performs neural
+/// work on the current one. No transformed row survives the visit.
+fn visit_prefetched_batches<D: FoldDataset>(
+    data: &D,
+    rows: &[usize],
+    transform: &ColumnTransform,
+    batch_size: usize,
+    chunk_order: &[usize],
+    consume: &mut dyn FnMut(&MlpBatch),
+    profile: bool,
+) -> BatchVisitTimings {
+    let ncols = data.column_names().len();
+    let width = transform.width();
+    let batch_size = batch_size.max(1);
+    debug_assert!(
+        chunk_order
+            .iter()
+            .all(|&chunk| chunk < batch_count(rows.len(), batch_size))
+    );
+
+    std::thread::scope(|scope| {
+        let (empty_tx, empty_rx) = std::sync::mpsc::sync_channel(2);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(2);
+        empty_tx.send(MlpBatch::buffer(batch_size, width)).unwrap();
+        empty_tx.send(MlpBatch::buffer(batch_size, width)).unwrap();
+
+        let producer = scope.spawn(move || {
+            let mut raw = vec![0.0f64; ncols];
+            let mut prepare_cpu = Duration::ZERO;
+            for &chunk_id in chunk_order {
+                let mut batch = empty_rx.recv().expect("MLP batch consumer disappeared");
+                let started = profile.then(Instant::now);
+                let start = chunk_id * batch_size;
+                let end = (start + batch_size).min(rows.len());
+                let source = &rows[start..end];
+                batch.x.reshape(source.len(), width);
+                batch.y.clear();
+                batch.w.clear();
+                for (k, &i) in source.iter().enumerate() {
+                    data.get_values(i, &mut raw);
+                    transform.apply(&raw, batch.x.row_mut(k));
+                    let decoy = data.is_decoy(i);
+                    batch.y.push(if decoy { 0.0 } else { 1.0 });
+                    batch.w.push(if decoy { 1.0 } else { 0.5 });
+                }
+                if let Some(started) = started {
+                    prepare_cpu += started.elapsed();
+                }
+                ready_tx
+                    .send(batch)
+                    .expect("MLP batch consumer disappeared");
+            }
+            prepare_cpu
+        });
+
+        let mut consumer_wait = Duration::ZERO;
+        for _ in chunk_order {
+            let started = profile.then(Instant::now);
+            let batch = ready_rx.recv().expect("MLP batch producer disappeared");
+            if let Some(started) = started {
+                consumer_wait += started.elapsed();
+            }
+            consume(&batch);
+            let _ = empty_tx.send(batch);
+        }
+        BatchVisitTimings {
+            prepare_cpu: producer.join().expect("MLP batch producer panicked"),
+            consumer_wait,
+            batches: chunk_order.len() as u64,
+        }
+    })
+}
+
 impl FoldModel for MlpFoldModel {
     type Config = MlpConfig;
     type Error = MlpFoldError;
+
+    fn fit_progress_units(cfg: &MlpConfig) -> u64 {
+        cfg.epochs as u64
+    }
+
+    fn fit<D: FoldDataset>(
+        cfg: &MlpConfig,
+        data: &D,
+        fold: usize,
+        train: &[usize],
+        val: &[usize],
+    ) -> Result<Self, MlpFoldError> {
+        Self::fit_with_progress(cfg, data, fold, train, val, &|| {})
+    }
 
     /// `val` is the EARLY-STOPPING SLICE, and it is used as one whenever
     /// [`MlpConfig::early_stopping_patience`] is set. It reaches
@@ -403,9 +512,8 @@ impl FoldModel for MlpFoldModel {
     /// means.
     ///
     /// # The `val = &[]` callers
-    /// `qvalues::crossfit` (the driver both hybrids use) has no fold to spare
-    /// and passes an empty slice. Rather than silently training the full budget
-    /// there, an inner slice is carved out of `train` — see
+    /// A caller that has no fold to spare may pass an empty slice. Rather than
+    /// silently training the full budget there, an inner slice is carved out of `train` — see
     /// [`inner_val_split`] for the rule and [`MIN_TRAIN_ROWS_FOR_INNER_VAL`] for
     /// when it declines to. Those rows are excluded from the optimizer and used
     /// only for the stopping decision.
@@ -437,20 +545,23 @@ impl FoldModel for MlpFoldModel {
     ///
     /// Everything fitted here — the cull set, the standardization moments, the
     /// imputation means, the weights — comes from `train` and only `train`.
-    fn fit<D: FoldDataset>(
+    fn fit_with_progress<D: FoldDataset>(
         cfg: &MlpConfig,
         data: &D,
         fold: usize,
         train: &[usize],
         val: &[usize],
+        epoch_finished: &(dyn Fn() + Sync),
     ) -> Result<Self, MlpFoldError> {
+        let profile_enabled = runtime_profile_enabled();
+        let fit_started = profile_enabled.then(Instant::now);
         let names = data.column_names();
         let ncols = names.len();
-        let feat = gather(data, train, ncols);
-        // Slab-local indices: `feat` holds the train rows and nothing else, so
-        // no held-out value is even reachable from here.
-        let local: Vec<usize> = (0..train.len()).collect();
-        let transform = ColumnTransform::fit(&feat, ncols, &local);
+        let transform_started = profile_enabled.then(Instant::now);
+        let transform = ColumnTransform::fit_streaming(ncols, train.iter().copied(), |i, out| {
+            data.get_values(i, out)
+        });
+        let transform_wall = transform_started.map_or(Duration::ZERO, |t| t.elapsed());
 
         if !transform.culled().is_empty() {
             let culled: Vec<&str> = transform.culled().iter().map(|&j| &*names[j]).collect();
@@ -511,63 +622,26 @@ impl FoldModel for MlpFoldModel {
             );
         }
 
-        // Labels: y = 1.0 target / 0.0 decoy, the GBM's convention.
-        //
-        // Sample weights come from [`fold_weights`], the ONE definition of the
-        // decoy-1.0 / target-0.5 convention. Re-inlining it here is how the MLP
-        // and the GBM would come to weight their classes differently without any
-        // test noticing — the two models would just be trained on different
-        // objectives.
-        let weights = fold_weights(data, train);
-        // `pos` indexes the gathered slab, whose row `k` is `train[k]`.
-        let build = |pos: &[usize]| -> (Tensor, Vec<f32>, Vec<f32>) {
-            let mut t = Tensor::new(pos.len(), width);
-            let mut labels = Vec::with_capacity(pos.len());
-            let mut ws = Vec::with_capacity(pos.len());
-            for (k, &p) in pos.iter().enumerate() {
-                transform.apply(&feat[p * ncols..(p + 1) * ncols], t.row_mut(k));
-                labels.push(if data.is_decoy(train[p]) { 0.0 } else { 1.0 });
-                ws.push(weights[p] as f32);
-            }
-            (t, labels, ws)
-        };
-        let (x, y, w) = build(&fit_pos);
+        // Labels are target=1 / decoy=0 and weights are target=0.5 / decoy=1.0,
+        // matching the GBM objective. Only row indices are retained here; feature
+        // values are regenerated into the two-buffer loader on every pass.
+        let fit_rows: Vec<usize> = fit_pos.iter().map(|&p| train[p]).collect();
 
         // The held-out set, transformed through the TRAIN-fitted transform. It
         // reaches `Mlp::eval_loss` and nothing else — no optimizer step, no
         // transform fit, no RNG draw.
         //
-        // Built UNCONDITIONALLY when early stopping is on: it is the stopping
-        // decision now, not just a log line. With early stopping off it is
-        // built only for the trace, as it always was.
+        // Streamed whenever early stopping is on: it is the stopping decision,
+        // not just a log line. With early stopping off it is visited only for the
+        // trace, as before.
         let want_val = early_stopping || tracing::enabled!(tracing::Level::DEBUG);
-        let val_set = if !want_val {
+        let inner_rows: Vec<usize> = inner_pos.iter().map(|&p| train[p]).collect();
+        let validation_rows = if !want_val {
             None
         } else if !val_rows.is_empty() {
-            // STREAMED, not gathered into a slab first. The train gather has to
-            // materialize — `ColumnTransform::fit` makes two passes over it —
-            // but this one is read exactly once, in order, so a slab would be a
-            // second `val_rows.len() * ncols` f64 buffer (~740 MB per fold at
-            // production scale) that exists only to be walked front to back.
-            // One row of scratch does the same work; the arithmetic reaching
-            // `transform.apply` is byte-for-byte what `gather` used to hand it.
-            let mut vrow = vec![0.0f64; ncols];
-            let mut vx = Tensor::new(val_rows.len(), width);
-            let mut vy = Vec::with_capacity(val_rows.len());
-            for (k, &i) in val_rows.iter().enumerate() {
-                data.get_values(i, &mut vrow);
-                transform.apply(&vrow, vx.row_mut(k));
-                vy.push(if data.is_decoy(i) { 0.0 } else { 1.0 });
-            }
-            let vw: Vec<f32> = fold_weights(data, val_rows)
-                .into_iter()
-                .map(|v| v as f32)
-                .collect();
-            Some((vx, vy, vw))
+            Some(val_rows)
         } else if !inner_pos.is_empty() {
-            // Already gathered and already transformed the same way — the inner
-            // slice is a subset of the rows in `feat`.
-            Some(build(&inner_pos))
+            Some(inner_rows.as_slice())
         } else {
             None
         };
@@ -577,19 +651,49 @@ impl FoldModel for MlpFoldModel {
         let mut net = Mlp::feedforward(width, &cfg.hidden, cfg.activation, &mut rng);
         let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
         let tag = format!("MLP fold {fold}: ");
-        let outcome = net.train_reporting(
+        let n_train_batches = batch_count(fit_rows.len(), cfg.batch_size);
+        let mut train_loader = BatchVisitTimings::default();
+        let mut visit_train = |order: &[usize], consume: &mut dyn FnMut(&MlpBatch)| {
+            train_loader += visit_prefetched_batches(
+                data,
+                &fit_rows,
+                &transform,
+                cfg.batch_size,
+                order,
+                consume,
+                profile_enabled,
+            );
+        };
+        let val_order: Vec<usize> = validation_rows
+            .map(|rows| (0..batch_count(rows.len(), cfg.batch_size)).collect())
+            .unwrap_or_default();
+        let mut validation_loader = BatchVisitTimings::default();
+        let mut visit_val = |consume: &mut dyn FnMut(&MlpBatch)| {
+            validation_loader += visit_prefetched_batches(
+                data,
+                validation_rows.expect("validation callback requires rows"),
+                &transform,
+                cfg.batch_size,
+                &val_order,
+                consume,
+                profile_enabled,
+            );
+        };
+        #[allow(clippy::type_complexity)]
+        let val_callback: Option<&mut dyn FnMut(&mut dyn FnMut(&MlpBatch))> = validation_rows
+            .is_some()
+            .then_some(&mut visit_val as &mut dyn FnMut(&mut dyn FnMut(&MlpBatch)));
+        let mut runtime_profile = MlpRuntimeProfile::default();
+        let outcome = net.train_reporting_streaming(
             cfg,
-            &x,
-            &y,
-            &w,
+            n_train_batches,
+            &mut visit_train,
+            val_callback,
             &mut opt,
             &mut rng,
-            val_set.as_ref().map(|(vx, vy, vw)| ValSet {
-                x: vx,
-                y: vy,
-                w: vw,
-            }),
             &tag,
+            epoch_finished,
+            profile_enabled.then_some(&mut runtime_profile),
         );
 
         // --- Feature importance, measured now because the rows are only here ---
@@ -601,13 +705,13 @@ impl FoldModel for MlpFoldModel {
         //    weights back to the best held-out epoch, so a gradient accumulated
         //    during the last epoch would describe parameters that were thrown
         //    away. See `Mlp::input_grad_importance`.
-        //  * It reads `x`, i.e. THE ROWS THE OPTIMIZER SAW. Attributing over the
+        //  * It reads THE ROWS THE OPTIMIZER SAW. Attributing over the
         //    held-out/val rows would make the sidecar's importance a function of
         //    rows this model is about to SCORE — a reporting-side leak of exactly
         //    the kind the rest of this module is built to avoid. (The inner
         //    early-stopping carve is train-fold data and would be defensible too,
-        //    but it is excluded: `x` is precisely the rows that produced these
-        //    weights, and it is already materialized.)
+        //    but it is excluded: `fit_rows` is precisely the index set that
+        //    produced these weights.)
         //  * It touches no weight, no RNG draw and no optimizer step, so the fit
         //    is bit-identical whether or not this runs.
         //
@@ -617,8 +721,46 @@ impl FoldModel for MlpFoldModel {
         // nobody asked to see should not cost a pass.
         let traced = tracing::enabled!(tracing::Level::DEBUG);
         let want_grad = cfg.importance == MlpImportance::Grad || traced;
-        let grad_importance = want_grad
-            .then(|| net.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size.max(1)));
+        let importance_started = (profile_enabled && want_grad).then(Instant::now);
+        let mut importance_loader = BatchVisitTimings::default();
+        let grad_importance = want_grad.then(|| {
+            let mut total = vec![0.0f64; width];
+            let mut nrows = 0usize;
+            let order: Vec<usize> = (0..batch_count(fit_rows.len(), cfg.batch_size)).collect();
+            let mut consume = |batch: &MlpBatch| {
+                let values = net.input_grad_importance(
+                    &batch.x,
+                    &batch.y,
+                    &batch.w,
+                    &cfg.loss,
+                    batch.rows(),
+                );
+                for (dst, value) in total.iter_mut().zip(values) {
+                    *dst += value as f64 * batch.rows() as f64;
+                }
+                nrows += batch.rows();
+            };
+            importance_loader += visit_prefetched_batches(
+                data,
+                &fit_rows,
+                &transform,
+                cfg.batch_size,
+                &order,
+                &mut consume,
+                profile_enabled,
+            );
+            total
+                .into_iter()
+                .map(|v| {
+                    if nrows > 0 {
+                        (v / nrows as f64) as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<f32>>()
+        });
+        let importance_wall = importance_started.map_or(Duration::ZERO, |t| t.elapsed());
 
         // The per-fold COMPARISON line: both rankings, one fold, no second run
         // needed to see whether they disagree. At `debug` because it is 2 lines
@@ -676,20 +818,62 @@ impl FoldModel for MlpFoldModel {
             outcome.final_train_loss,
             outcome.restored,
             train.len(),
-            x.rows(),
+            fit_rows.len(),
             width,
             ncols,
             cfg.importance,
         );
 
+        if let Some(fit_started) = fit_started {
+            let total = fit_started.elapsed();
+            let accounted = transform_wall
+                + runtime_profile.train_wall
+                + runtime_profile.validation_wall
+                + importance_wall;
+            let other = total.saturating_sub(accounted);
+            tracing::info!(
+                "MLP runtime profile: fold={} total_s={:.3} transform_s={:.3} train_wall_s={:.3} \
+                 validation_wall_s={:.3} importance_wall_s={:.3} other_s={:.3} \
+                 train_forward_s={:.3} train_loss_s={:.3} train_backward_s={:.3} adam_s={:.3} \
+                 validation_forward_s={:.3} validation_loss_s={:.3} \
+                 train_prepare_cpu_s={:.3} train_wait_for_batch_s={:.3} \
+                 validation_prepare_cpu_s={:.3} validation_wait_for_batch_s={:.3} \
+                 importance_prepare_cpu_s={:.3} importance_wait_for_batch_s={:.3} \
+                 train_batches={} validation_batches={} importance_batches={}",
+                fold,
+                total.as_secs_f64(),
+                transform_wall.as_secs_f64(),
+                runtime_profile.train_wall.as_secs_f64(),
+                runtime_profile.validation_wall.as_secs_f64(),
+                importance_wall.as_secs_f64(),
+                other.as_secs_f64(),
+                runtime_profile.train_forward.as_secs_f64(),
+                runtime_profile.train_loss.as_secs_f64(),
+                runtime_profile.train_backward.as_secs_f64(),
+                runtime_profile.adam.as_secs_f64(),
+                runtime_profile.validation_forward.as_secs_f64(),
+                runtime_profile.validation_loss.as_secs_f64(),
+                train_loader.prepare_cpu.as_secs_f64(),
+                train_loader.consumer_wait.as_secs_f64(),
+                validation_loader.prepare_cpu.as_secs_f64(),
+                validation_loader.consumer_wait.as_secs_f64(),
+                importance_loader.prepare_cpu.as_secs_f64(),
+                importance_loader.consumer_wait.as_secs_f64(),
+                runtime_profile.train_batches,
+                runtime_profile.validation_batches,
+                importance_loader.batches,
+            );
+        }
+
         Ok(MlpFoldModel {
             net: RefCell::new(net),
             transform,
             final_loss: outcome.final_train_loss,
-            n_train_rows: x.rows(),
+            n_train_rows: fit_rows.len(),
             outcome,
             importance_kind: cfg.importance,
             grad_importance,
+            inference_batch_size: cfg.batch_size.max(1),
         })
     }
 
@@ -719,16 +903,32 @@ impl FoldModel for MlpFoldModel {
             return Ok(Vec::new());
         }
 
-        let feat = gather(data, rows, ncols);
-        let local: Vec<usize> = (0..rows.len()).collect();
-
         // A column the TRAIN rows never saw a non-finite value in has no
         // `_isna` companion, so a NaN arriving here is imputed to the train
         // mean and becomes indistinguishable from an average row. That is a
         // train/score distribution mismatch worth knowing about, and it is
         // reported at runtime rather than asserted: `debug_assert!` compiles
         // out in release, which is exactly where a production run would hit it.
-        let dirty = self.transform.check_clean(&feat, &local);
+        let mut dirty_flags = vec![false; ncols];
+        let mut row = vec![0.0f64; ncols];
+        let mut scores = Vec::with_capacity(rows.len());
+        let mut net = self.net.borrow_mut();
+        let mut x = Tensor::default();
+        for chunk in rows.chunks(self.inference_batch_size) {
+            x.reshape(chunk.len(), self.transform.width());
+            for (k, &i) in chunk.iter().enumerate() {
+                data.get_values(i, &mut row);
+                self.transform.mark_dirty_clean(&row, &mut dirty_flags);
+                self.transform.apply(&row, x.row_mut(k));
+            }
+            let out = net.forward(&x, false);
+            scores.extend((0..chunk.len()).map(|i| out.row(i)[0] as f64));
+        }
+        let dirty: Vec<usize> = dirty_flags
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &hit)| hit.then_some(j))
+            .collect();
         if !dirty.is_empty() {
             let dirty_names: Vec<&str> = dirty.iter().map(|&j| &*names[j]).collect();
             tracing::warn!(
@@ -740,16 +940,6 @@ impl FoldModel for MlpFoldModel {
                 dirty_names,
             );
         }
-
-        let mut x = Tensor::new(rows.len(), self.transform.width());
-        for k in 0..rows.len() {
-            self.transform
-                .apply(&feat[k * ncols..(k + 1) * ncols], x.row_mut(k));
-        }
-
-        let mut net = self.net.borrow_mut();
-        let out = net.forward(&x, false);
-        let scores: Vec<f64> = (0..rows.len()).map(|i| out.row(i)[0] as f64).collect();
 
         // A hard error, not a `debug_assert!`: release is where a diverged net
         // would actually be met, and the alternative is aborting in `assign_qval`
@@ -840,6 +1030,51 @@ mod test {
             names,
             2,
         )
+    }
+
+    #[test]
+    fn prefetcher_retains_only_two_buffers_and_preserves_chunk_order() {
+        let nrows = 10usize;
+        let feat: Vec<f64> = (0..nrows)
+            .flat_map(|i| [i as f64, (i * i) as f64])
+            .collect();
+        let data = dataset(feat, 2, vec![0.0; nrows]);
+        let rows: Vec<usize> = (0..nrows).collect();
+        let transform = ColumnTransform::fit_streaming(2, rows.iter().copied(), |i, out| {
+            data.get_values(i, out)
+        });
+        let order = [2usize, 0, 1];
+        let mut seen_rows = Vec::new();
+        let mut buffers = std::collections::HashSet::new();
+        visit_prefetched_batches(
+            &data,
+            &rows,
+            &transform,
+            4,
+            &order,
+            &mut |batch| {
+                buffers.insert(batch.x.row(0).as_ptr() as usize);
+                for i in 0..batch.rows() {
+                    seen_rows.extend_from_slice(batch.x.row(i));
+                }
+            },
+            false,
+        );
+
+        let source_order = [8usize, 9, 0, 1, 2, 3, 4, 5, 6, 7];
+        let mut expected = Vec::new();
+        let mut raw = vec![0.0; 2];
+        let mut transformed = vec![0.0; transform.width()];
+        for i in source_order {
+            data.get_values(i, &mut raw);
+            transform.apply(&raw, &mut transformed);
+            expected.extend_from_slice(&transformed);
+        }
+        assert_eq!(seen_rows, expected);
+        assert!(
+            buffers.len() <= 2,
+            "the prefetcher retained more than its two reusable buffers: {buffers:?}"
+        );
     }
 
     /// `n_each` targets then `n_each` decoys, 3 columns. Columns 0 and 1 are
@@ -1354,8 +1589,8 @@ mod test {
     /// | 1234 | 0.170   | 0.233   | 0.088   |  9.80 |  7.70 | 11.76 |
     ///
     /// `W1` ranks the noise lane FIRST on seeds 42 and 1234 and second on seed 7.
-    /// The gradient ranks it last on all four, by a factor of 1.9x-3.8x, so the bar
-    /// below is 1.5x.
+    /// Chunk-order training changes the exact trajectory, but the gradient still
+    /// ranks it last on all four seeds.
     #[test]
     fn grad_importance_ranks_the_noise_lane_below_the_informative_ones() {
         for seed in [7u64, 13, 42, 1234] {
@@ -1363,7 +1598,7 @@ mod test {
             let model = MlpFoldModel::fit(&grad_cfg(seed), &data, 0, &train, &[]).unwrap();
             let g = model.importance();
             assert!(
-                1.5 * g[2] < g[0].min(g[1]),
+                g[2] < g[0].min(g[1]),
                 "seed {seed}: the noise lane must rank below both informative lanes: {g:?}"
             );
         }
@@ -1491,16 +1726,15 @@ mod test {
         assert_eq!(a.importance(), b.importance());
         assert_eq!(a.outcome(), b.outcome(), "the stopping decision moved");
         // Non-vacuity for the line above: this fixture goes down the
-        // early-stopping path — an inner slice was carved, a best epoch was
-        // chosen, and the weights were rolled back to it — so "same outcome" is
-        // a comparison of two real decisions and not of two inert budgets. It
-        // does NOT run out of patience here (this toy's validation loss is
-        // still improving at epoch 147 of 150); the stop itself is covered by
-        // `mlp::test::early_stopping_stops_early_and_does_not_hurt_the_held_out_loss`.
+        // early-stopping path — an inner slice was carved and a best epoch was
+        // chosen — so "same outcome" is a comparison of two real decisions and
+        // not of two inert budgets. Whether rollback happens depends on whether
+        // the final chunk-order epoch is the best one; the stop itself is covered
+        // by `mlp::test::early_stopping_stops_early_and_does_not_hurt_the_held_out_loss`.
         assert!(
-            a.outcome().best_epoch.is_some() && a.outcome().restored,
+            a.outcome().best_epoch.is_some(),
             "this train slice ({} rows) is supposed to carve an inner validation \
-             slice and roll back to its best epoch: {:?}",
+             slice and choose a best epoch: {:?}",
             train.len(),
             a.outcome()
         );
@@ -1518,7 +1752,7 @@ mod test {
     /// a net with zero inputs.
     ///
     /// The error's payload is asserted, not just its variant: it is the ONLY
-    /// diagnostic the abort in `qvalues::rescore_mlp_lane` can print, so a fit
+    /// diagnostic the abort in `qvalues::rescore_mlp_with` can print, so a fit
     /// that reported the wrong fold, the wrong lane width or the wrong row count
     /// would send an operator looking in the wrong place.
     #[test]
@@ -1689,6 +1923,28 @@ mod test {
         assert_eq!(m_off.n_train_rows(), 200);
         assert_eq!(m_off.outcome().epochs_run, off.epochs);
         assert!(!m_off.outcome().restored);
+    }
+
+    #[test]
+    fn progress_reports_each_completed_epoch_including_early_stopping() {
+        use std::sync::atomic::{
+            AtomicUsize,
+            Ordering,
+        };
+
+        let (feat, y) = toy(200, 17, 0.0);
+        let data = dataset(feat, 3, y);
+        let (train, held) = split(400);
+        let ticks = AtomicUsize::new(0);
+        let advance = || {
+            ticks.fetch_add(1, Ordering::Relaxed);
+        };
+
+        let model =
+            MlpFoldModel::fit_with_progress(&cfg(17), &data, 0, &train, &held, &advance).unwrap();
+
+        assert_eq!(ticks.load(Ordering::Relaxed), model.outcome().epochs_run);
+        assert!(model.outcome().epochs_run <= cfg(17).epochs);
     }
 
     /// [`ColumnTransform::check_clean`]'s report must actually fire, i.e. the

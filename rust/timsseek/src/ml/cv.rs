@@ -1,5 +1,8 @@
 pub use super::TargetDecoy;
-use crate::scoring::timings::TimedStep;
+use crate::scoring::timings::{
+    TimedStep,
+    make_progress_bar,
+};
 pub use forust_ml::constraints::{
     Constraint,
     ConstraintMap,
@@ -278,7 +281,7 @@ pub trait FeatureVector: FeatureLike {
 /// row's target/decoy label. Deliberately no `ncols` (it is
 /// `column_names().len()`) and no `names` argument threaded through the model
 /// impls — the dataset already knows both, so there is no second copy to drift.
-pub trait FoldDataset {
+pub trait FoldDataset: Sync {
     fn nrows(&self) -> usize;
     /// Lane column names; also defines the row width.
     fn column_names(&self) -> Vec<Arc<str>>;
@@ -298,6 +301,56 @@ pub trait FoldDataset {
     /// would matter.
     fn get_values(&self, i: usize, out: &mut [f64]);
     fn is_decoy(&self, i: usize) -> bool;
+}
+
+/// Borrowed, matrix-free dataset over records whose feature projection can be
+/// written into caller-owned row scratch. Used by the closed-form LDA paths,
+/// which need repeated passes over sufficient statistics but never need to
+/// retain individual feature rows.
+pub(crate) struct StreamingDataset<'a, T> {
+    data: &'a [T],
+    names: Vec<Arc<str>>,
+    n_folds: usize,
+    write_row: fn(&T, &mut [f64]),
+}
+
+impl<'a, T> StreamingDataset<'a, T> {
+    pub(crate) fn new(
+        data: &'a [T],
+        names: Vec<Arc<str>>,
+        n_folds: usize,
+        write_row: fn(&T, &mut [f64]),
+    ) -> Self {
+        assert!(n_folds > 0, "n_folds must be positive");
+        Self {
+            data,
+            names,
+            n_folds,
+            write_row,
+        }
+    }
+}
+
+impl<T: FeatureLike + Sync> FoldDataset for StreamingDataset<'_, T> {
+    fn nrows(&self) -> usize {
+        self.data.len()
+    }
+
+    fn column_names(&self) -> Vec<Arc<str>> {
+        self.names.clone()
+    }
+
+    fn get_fold(&self, i: usize) -> usize {
+        i % self.n_folds
+    }
+
+    fn get_values(&self, i: usize, out: &mut [f64]) {
+        (self.write_row)(&self.data[i], out);
+    }
+
+    fn is_decoy(&self, i: usize) -> bool {
+        self.data[i].get_y() <= 0.5
+    }
 }
 
 /// A model [`CrossValidatedScorer`] can cross-fit: fit on a row-index slice,
@@ -328,6 +381,28 @@ pub trait FoldModel: Sized {
         train: &[usize],
         val: &[usize],
     ) -> Result<Self, Self::Error>;
+
+    /// Fit while reporting completed model-defined work units. The default is
+    /// one unit when the whole fold finishes; iterative models override this to
+    /// report useful intermediate progress.
+    fn fit_with_progress<D: FoldDataset>(
+        cfg: &Self::Config,
+        data: &D,
+        fold: usize,
+        train: &[usize],
+        val: &[usize],
+        progress: &(dyn Fn() + Sync),
+    ) -> Result<Self, Self::Error> {
+        let result = Self::fit(cfg, data, fold, train, val);
+        progress();
+        result
+    }
+
+    /// Maximum work units one fold reports through [`Self::fit_with_progress`].
+    fn fit_progress_units(_cfg: &Self::Config) -> u64 {
+        1
+    }
+
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, Self::Error>;
     /// Lane-indexed, always `column_names().len()` long, so the vector is
     /// positionally comparable across folds and across models by construction.
@@ -360,6 +435,55 @@ pub(crate) struct RowMajorDataset {
     features: PrecomputedFeatures,
     names: Vec<Arc<str>>,
     n_folds: usize,
+}
+
+/// How a [`CrossValidatedScorer`] obtains feature rows. Tree/LDA callers keep
+/// their precomputed matrix; the MLP uses the streaming arm so the 128-wide raw
+/// `f64` frame never exists. The function pointer writes one complete row into
+/// caller-owned scratch.
+enum FeatureSource<T> {
+    Precomputed(RowMajorDataset),
+    Streaming {
+        names: Vec<Arc<str>>,
+        write_row: fn(&T, &mut [f64]),
+    },
+}
+
+/// A temporary dataset view over the scorer's records and feature source.
+/// Keeping this borrowed avoids a second owned copy of `T` merely to let the
+/// streaming feature source reach it.
+struct ScorerDataset<'a, T> {
+    data: &'a [T],
+    source: &'a FeatureSource<T>,
+    n_folds: usize,
+}
+
+impl<T: FeatureLike + Sync> FoldDataset for ScorerDataset<'_, T> {
+    fn nrows(&self) -> usize {
+        self.data.len()
+    }
+
+    fn column_names(&self) -> Vec<Arc<str>> {
+        match self.source {
+            FeatureSource::Precomputed(d) => d.column_names(),
+            FeatureSource::Streaming { names, .. } => names.clone(),
+        }
+    }
+
+    fn get_fold(&self, i: usize) -> usize {
+        i % self.n_folds
+    }
+
+    fn get_values(&self, i: usize, out: &mut [f64]) {
+        match self.source {
+            FeatureSource::Precomputed(d) => d.get_values(i, out),
+            FeatureSource::Streaming { write_row, .. } => write_row(&self.data[i], out),
+        }
+    }
+
+    fn is_decoy(&self, i: usize) -> bool {
+        self.data[i].get_y() <= 0.5
+    }
 }
 
 impl RowMajorDataset {
@@ -777,10 +901,10 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
 ///
 /// `M` is the model being cross-fitted ([`FoldModel`]); the partition above is
 /// the scorer's and does not vary with it.
-pub struct CrossValidatedScorer<T: FeatureLike, M: FoldModel> {
+pub struct CrossValidatedScorer<T: FeatureLike + Sync, M: FoldModel> {
     n_folds: u8,
     data: Vec<T>,
-    dataset: RowMajorDataset,
+    feature_source: FeatureSource<T>,
     /// `fold_rows[f]` = the row indices with `dataset.get_fold(i) == f`, in
     /// ascending order. Derived from `get_fold` so the partition still has
     /// exactly one definition; materialized once because every fit and every
@@ -790,7 +914,7 @@ pub struct CrossValidatedScorer<T: FeatureLike, M: FoldModel> {
     config: M::Config,
 }
 
-impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
+impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
     /// Create a new CrossValidatedScorer
     ///
     /// NOTE: THIS ASSUMES YOUR DATA IS ALREADY SHUFFLED
@@ -825,6 +949,32 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
         Self::new(n_folds, data, config, precomputed, names)
     }
 
+    /// Construct without a raw feature matrix. `write_row` is called into a
+    /// reusable one-row scratch buffer whenever a model needs a feature row.
+    /// The MLP turns those rows directly into two reusable transformed `f32`
+    /// batch buffers; it never retains a raw or transformed fold frame.
+    pub(crate) fn new_from_shuffled_streaming(
+        n_folds: u8,
+        data: Vec<T>,
+        config: M::Config,
+        names: Vec<Arc<str>>,
+        write_row: fn(&T, &mut [f64]),
+    ) -> Self {
+        assert!(n_folds > 0, "n_folds must be positive");
+        let mut fold_rows: Vec<Vec<usize>> = vec![Vec::new(); n_folds as usize];
+        for i in 0..data.len() {
+            fold_rows[i % n_folds as usize].push(i);
+        }
+        Self {
+            n_folds,
+            data,
+            feature_source: FeatureSource::Streaming { names, write_row },
+            fold_rows,
+            fold_models: Vec::new(),
+            config,
+        }
+    }
+
     fn new(
         n_folds: u8,
         data: Vec<T>,
@@ -846,10 +996,18 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
         Self {
             n_folds,
             data,
-            dataset,
+            feature_source: FeatureSource::Precomputed(dataset),
             fold_rows,
             fold_models: Vec::new(),
             config,
+        }
+    }
+
+    fn dataset(&self) -> ScorerDataset<'_, T> {
+        ScorerDataset {
+            data: &self.data,
+            source: &self.feature_source,
+            n_folds: self.n_folds as usize,
         }
     }
 
@@ -857,6 +1015,73 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
         self.fit_step()?;
         self.assign_scores()?;
 
+        Ok(())
+    }
+
+    /// Fit independent folds concurrently, then score in the same deterministic
+    /// fold order as [`Self::fit`]. Intended for single-threaded models such as
+    /// the in-crate MLP; callers whose model already parallelizes internally can
+    /// keep using the serial fold driver.
+    pub fn fit_parallel(&mut self) -> Result<(), M::Error>
+    where
+        M: Send,
+        M::Config: Sync,
+        M::Error: Send,
+    {
+        self.fold_models.clear();
+        let progress = make_progress_bar(
+            self.n_folds as u64 * M::fit_progress_units(&self.config),
+            &format!("Training {} folds", self.n_folds),
+        );
+        // An indicatif bar owns the interactive line. Captured output gets the
+        // ordinary one-line timer instead, since its progress bar is hidden.
+        let step = progress.is_hidden().then(|| {
+            TimedStep::begin_stderr(format_args!(
+                "  Training {} folds in parallel...",
+                self.n_folds
+            ))
+        });
+
+        let dataset = self.dataset();
+        let results = std::thread::scope(|scope| {
+            let dataset = &dataset;
+            let config = &self.config;
+            let fold_rows = &self.fold_rows;
+            let n_folds = self.n_folds;
+            let progress = &progress;
+            let mut handles = Vec::with_capacity(n_folds as usize);
+            for fold in 0..n_folds {
+                handles.push(scope.spawn(move || {
+                    let val_fold = if fold + 1 == n_folds { 0 } else { fold + 1 };
+                    let advance = || progress.inc(1);
+                    M::fit_with_progress(
+                        config,
+                        dataset,
+                        fold as usize,
+                        &fold_rows[fold as usize],
+                        &fold_rows[val_fold as usize],
+                        &advance,
+                    )
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("fold training thread panicked"))
+                .collect::<Vec<_>>()
+        });
+        // Early stopping makes the configured epoch count an upper bound. End
+        // on the work actually performed rather than leaving a "short" bar.
+        progress.set_length(progress.position());
+        progress.finish();
+
+        // Join order is fold order, regardless of which worker completed first.
+        // Do not publish a partial model vector if any fold failed.
+        let models = results.into_iter().collect::<Result<Vec<_>, _>>();
+        if let Some(step) = step {
+            step.finish();
+        }
+        self.fold_models = models?.into_iter().map(Some).collect();
+        self.assign_scores()?;
         Ok(())
     }
 
@@ -901,7 +1126,8 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
                 };
                 let scorer = self.fold_models[train_i as usize].as_ref().unwrap();
                 let rows = &self.fold_rows[inference_i as usize];
-                let preds = scorer.predict(&self.dataset, rows)?;
+                let dataset = self.dataset();
+                let preds = scorer.predict(&dataset, rows)?;
                 // Now we need to add the predictions to the scores
                 for (&row, pred) in rows.iter().zip(preds) {
                     scores[row] += pred;
@@ -944,7 +1170,7 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
     /// partition.
     pub fn feature_stats(&self) -> RescoreFeatureStats {
         let models: Vec<Option<&M>> = self.fold_models.iter().map(|m| m.as_ref()).collect();
-        fold_feature_stats(&self.dataset, &self.fold_rows, &models)
+        fold_feature_stats(&self.dataset(), &self.fold_rows, &models)
     }
 
     /// THE fold partition this scorer built: `fold_rows[f]` is the rows with
@@ -977,13 +1203,16 @@ impl<T: FeatureLike, M: FoldModel> CrossValidatedScorer<T, M> {
     /// fold's. Every other fold is therefore safe to score with it.
     fn fit_fold(&mut self, fold: u8) -> Result<(), M::Error> {
         let val_fold = self.next_fold(fold);
-        let model = M::fit(
-            &self.config,
-            &self.dataset,
-            fold as usize,
-            &self.fold_rows[fold as usize],
-            &self.fold_rows[val_fold as usize],
-        )?;
+        let model = {
+            let dataset = self.dataset();
+            M::fit(
+                &self.config,
+                &dataset,
+                fold as usize,
+                &self.fold_rows[fold as usize],
+                &self.fold_rows[val_fold as usize],
+            )?
+        };
         self.fold_models[fold as usize] = Some(model);
         Ok(())
     }
@@ -1107,6 +1336,61 @@ mod test {
             avg_d
         );
         assert_eq!(out.len(), data_len);
+    }
+
+    struct FoldIdModel(usize);
+
+    impl FoldModel for FoldIdModel {
+        type Config = ();
+        type Error = ();
+
+        fn fit<D: FoldDataset>(
+            _cfg: &(),
+            _data: &D,
+            fold: usize,
+            _train: &[usize],
+            _val: &[usize],
+        ) -> Result<Self, ()> {
+            Ok(Self(fold))
+        }
+
+        fn predict<D: FoldDataset>(&self, _data: &D, rows: &[usize]) -> Result<Vec<f64>, ()> {
+            Ok(vec![self.0 as f64; rows.len()])
+        }
+
+        fn importance(&self) -> Vec<f32> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn parallel_fit_preserves_serial_fold_order_and_scores() {
+        let mut serial = CrossValidatedScorer::<MyFeature, FoldIdModel>::new_from_shuffled(
+            3,
+            random_data(12, 12, 7),
+            (),
+        );
+        let mut parallel = CrossValidatedScorer::<MyFeature, FoldIdModel>::new_from_shuffled(
+            3,
+            random_data(12, 12, 7),
+            (),
+        );
+
+        serial.fit().unwrap();
+        parallel.fit_parallel().unwrap();
+
+        let serial_scores: Vec<u64> = serial
+            .data()
+            .iter()
+            .map(|row| row.get_score().to_bits())
+            .collect();
+        let parallel_scores: Vec<u64> = parallel
+            .data()
+            .iter()
+            .map(|row| row.get_score().to_bits())
+            .collect();
+        assert_eq!(parallel_scores, serial_scores);
+        assert_eq!(parallel_scores, [1.0, 2.0, 0.0].map(f64::to_bits).repeat(8));
     }
 
     /// A [`FoldModel`] that reports whatever importance vector it is configured

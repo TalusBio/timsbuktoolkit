@@ -32,53 +32,10 @@ decoy_strategy = "if_missing"
 ##                the least sensitive by a wide margin; both gaps GROW with the
 ##                candidate count.
 ## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
-## "mlp"        — small MLP on the linear lane (the same features as "lda")
-## "mlp_all"    — small MLP on the full lane (the same features as "gbm")
-## "hybrid_mlp" — cross-fit MLP score folded into the GBM feature frame
+## "mlp"        — small MLP on the full lane (the same features as "gbm")
 ##
-## COST: THERE IS NO SINGLE MULTIPLIER FOR ANY OF THESE. Every ratio below moves
-## with the candidate count, in both directions and by more than 2x, so a bare
-## "~Nx cheaper" is wrong at every scale but one — which is how each earlier
-## version of this note went stale. Anchors, so you can interpolate; Phase 5 wall
-## time / targets at 1% FDR, two runs of one Astral mzML:
-##
-##                    114,138 candidates        2,174,837 candidates
-##   lda                0.476s / 24141             9.667s / 102843
-##   hybrid             3.455s / 24407           148.062s / 110425
-##   mlp                6.141s / 25077           323.012s / 125242  <- OLD DEFAULTS
-##   mlp_all            7.342s / 25451           281.953s / 134655
-##   gbm                9.588s / 25240           574.315s / 134710
-##   hybrid_mlp        11.258s / 25454           773.560s / 133977  <- OLD DEFAULTS
-##
-## Every 114k number is at the CURRENT MLP defaults. The two marked OLD DEFAULTS
-## are not: "mlp" and "hybrid_mlp" have not been re-timed at 2.17M since the MLP
-## hyperparameter retune, which more than halved both of their 114k times, so treat
-## those two cells as loose upper bounds rather than current cost. "lda", "hybrid"
-## and "gbm" do not use the MLP at all, so the retune cannot have moved them.
-##
-## SPEED RATIOS GROW WITH SCALE. "lda" is ~20x cheaper than "gbm" at 114k
-## candidates, ~59x at 2.17M, and ~100x on a ~28M-entry library measured earlier
-## in a different regime. "hybrid" is ~0.36x "gbm"'s Phase 5 time at 114k and
-## ~0.26x at 2.17M. "mlp_all" is 1.31x faster than "gbm" at 114k and 2.04x at
-## 2.17M — and at the pre-retune MLP defaults that same variant was 1.7x SLOWER at
-## 114k, so this comparison changes sign with BOTH library size and tuning. "mlp"
-## is the clearest case: 1.5x slower than "gbm" at 114k before the retune, 1.56x
-## faster at the same scale after it.
-##
-## THE SENSITIVITY COST GROWS WITH SCALE TOO, and it is the bigger trap: "lda"
-## gives up 4.4% of "gbm"'s targets at 114k candidates but 23.7% at 2.17M;
-## "hybrid" 3.3% then 18.0%. Choosing "lda" for speed on a large library costs
-## several times what a small test run will show you. The MLP variants are the
-## exception measured so far: "mlp_all" is +211 targets at 114k and -55 (-0.04%) at
-## 2.17M, and "hybrid_mlp" is +214 at 114k, the most of any option there.
-##
-## Caveats on every number above:
-##   * both runs are the same FAIMS acquisition (NO ion mobility), so 25 of the
-##     101 linear and 27 of the 128 all-lane columns were culled as dead. A TIMS
-##     run exercises more features and may time differently.
-##   * two datasets, one machine — orders of magnitude and directions of movement,
-##     not a benchmark suite.
-##   * Phase 5 is a fraction of a whole search, so 2x there is not 2x end to end.
+## Runtime and sensitivity differences are scale- and dataset-dependent; benchmark
+## representative inputs rather than relying on a fixed multiplier.
 rescore_model = "gbm"
 
 

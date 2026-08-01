@@ -797,10 +797,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     // emits the once-per-run effective-config log at the TOP of the run log
     // where a sweep can find it. Gated on the selected model so a stale variable
     // in the shell cannot fail a run that never touches the MLP.
-    if matches!(
-        config.analysis.rescore_model,
-        RescoreModel::Mlp | RescoreModel::MlpAll | RescoreModel::HybridMlp
-    ) {
+    if matches!(config.analysis.rescore_model, RescoreModel::Mlp) {
         let _ = MlpConfig::from_env();
     }
 

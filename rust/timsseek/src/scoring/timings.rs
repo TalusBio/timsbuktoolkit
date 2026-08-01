@@ -15,7 +15,10 @@ use super::skip::SkipCounts;
 use serde::Serialize;
 use std::time::Duration;
 
-pub use timscentroid::TimedStep;
+pub use timscentroid::{
+    TimedStep,
+    make_progress_bar,
+};
 
 /// Time a block, accumulate elapsed into `$target`, return the block's value.
 ///

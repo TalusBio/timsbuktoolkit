@@ -4,9 +4,16 @@
 //! then appends elapsed time when the work finishes.
 
 use std::fmt;
+use std::io::IsTerminal;
 use std::time::{
     Duration,
     Instant,
+};
+
+use indicatif::{
+    ProgressBar,
+    ProgressFinish,
+    ProgressStyle,
 };
 
 /// A timed step that prints a dot-padded label immediately, opens a tracing
@@ -26,6 +33,23 @@ pub struct TimedStep {
 
 /// Column width for dot-padded labels on stdout.
 const LABEL_WIDTH: usize = 26;
+
+/// Create a progress bar on stderr when it is interactive, or a hidden no-op
+/// bar when output is captured or redirected. Keeping the TTY decision here
+/// gives library work and CLI phases the same non-spamming behavior.
+pub fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let style = ProgressStyle::with_template(&format!(
+        "{{spinner:.green}} {} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({{eta}})",
+        label
+    ))
+    .expect("the built-in progress template must be valid");
+    ProgressBar::new(len)
+        .with_style(style)
+        .with_finish(ProgressFinish::AndLeave)
+}
 
 impl TimedStep {
     /// Dot-pad `label` to stdout, open a tracing span, flush, start clock.

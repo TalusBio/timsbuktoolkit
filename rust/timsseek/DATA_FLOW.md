@@ -14,7 +14,7 @@ hits, then re-extract everything with the calibrated windows.
 | 2. Calibrate | `calibrate_from_phase1` | Fits the iRT→RT curve from the calibrants, measures m/z and mobility error, derives the narrow tolerances. |
 | 3. Score | `phase3_score` | Re-extracts every peptide at its calibrated RT with the derived tolerances and computes the full feature set. |
 | 4. Compete | `target_decoy_compete` | Dedups by sequence, competes within decoy groups, adds `delta_group`. |
-| 5. Rescore | `ml::rescore_with` — `timsseek/src/ml/mod.rs` | Fits a discriminant over the feature matrix and assigns q-values. |
+| 5. Rescore | `ml::rescore_with` — `timsseek/src/ml/mod.rs` | Fits a discriminant over feature projections and assigns q-values. LDA/MLP stream raw rows; GBM retains its input frame. |
 
 `main()` → `process_single_file()` loads the raw index, builds a `Scorer`, and
 calls `processing::run_pipeline()` → `execute_pipeline()`, which runs all five
@@ -47,7 +47,7 @@ re-query tightly around it for main and isotope patterns) and assembles
 
 ## Rescoring
 
-Six interchangeable rescorers in `ml/qvalues.rs`, selected by the
+Four interchangeable rescorers in `ml/qvalues.rs`, selected by the
 `rescore_model` config field / `--rescore-model` flag (CLI wins). All share the
 same input, the same canonical sort + seeded shuffle, and the same FDR tail
 (`q = cummin(decoys / targets)`); only the discriminant differs.
@@ -57,9 +57,7 @@ same input, the same canonical sort + seeded shuffle, and the same FDR tail
 | `gbm` (default) | all | cross-validated gradient boosting (forust) |
 | `lda` | linear | closed-form shrinkage LDA, cross-fit |
 | `hybrid` | nonlinear + `lda_score` | per-fold cross-fit LDA feeding the GBM |
-| `mlp` | linear | cross-validated MLP (dependency-free, `ml/mlp.rs`) |
-| `mlp_all` | all | cross-validated MLP |
-| `hybrid_mlp` | nonlinear + `mlp_score` | per-fold cross-fit MLP feeding the GBM |
+| `mlp` | all | cross-validated MLP (dependency-free, `ml/mlp.rs`) |
 
 Features are extracted by a **lane walk**, not a per-result method: a flat
 row-major buffer built over the already-shuffled slice, so row *i* aligns with
@@ -74,8 +72,8 @@ unconditional — an unparsed peptide contributes NaN rather than a shorter row,
 so every row is the same width. Those AA counts have no linear lane, so LDA
 never sees them.
 
-Both hybrids cross-fit their extra column under the same fold ASSIGNMENT the GBM
-uses internally, so a candidate's `lda_score` / `mlp_score` never comes from a
+The hybrid cross-fits its extra column under the same fold ASSIGNMENT the GBM
+uses internally, so a candidate's `lda_score` never comes from a
 model that saw it. The two train/score SPLITS deliberately differ (the cross-fit
 fits on all-but-one fold, the GBM scorer on one fold at a time) and both are
 leak-free; what has to agree is only which rows land in which fold, and both
