@@ -183,6 +183,49 @@ impl Linear {
     }
 }
 
+/// Scalar source shaped to expose four independent multiply-accumulate chains
+/// to LLVM. This stays portable Rust (no target features or explicit SIMD), but
+/// unlike a single running sum it permits the loop vectorizer to operate without
+/// reassociating one dependency chain. The final horizontal sum deliberately
+/// fixes the new addition order.
+#[inline(always)]
+fn dot_f32x4(lhs: &[f32], rhs: &[f32]) -> f32 {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    let mut sums = [0.0f32; 4];
+    let mut lhs_chunks = lhs.chunks_exact(4);
+    let mut rhs_chunks = rhs.chunks_exact(4);
+
+    for (l, r) in lhs_chunks.by_ref().zip(rhs_chunks.by_ref()) {
+        for lane in 0..4 {
+            sums[lane] += l[lane] * r[lane];
+        }
+    }
+
+    let mut total = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+    for (&l, &r) in lhs_chunks.remainder().iter().zip(rhs_chunks.remainder()) {
+        total += l * r;
+    }
+    total
+}
+
+/// The chunked reduction wins once there is enough work to amortize its four
+/// accumulators. Keep small layers on the strict scalar chain: the default
+/// 32-wide first layer benefits from x4, while its 16-wide and 1-wide successors
+/// are measurably faster without it.
+#[inline(always)]
+fn dot_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    if lhs.len() >= 32 {
+        dot_f32x4(lhs, rhs)
+    } else {
+        let mut total = 0.0;
+        for (&l, &r) in lhs.iter().zip(rhs) {
+            total += l * r;
+        }
+        total
+    }
+}
+
 impl Layer for Linear {
     fn out_dim(&self) -> usize {
         self.n_out
@@ -225,11 +268,7 @@ impl Layer for Linear {
                     *g += xi * d;
                 }
                 let wr = &self.w[i * no..i * no + no];
-                let mut acc = 0.0;
-                for (d, w) in gr.iter().zip(wr) {
-                    acc += d * w;
-                }
-                gxr[i] = acc;
+                gxr[i] = dot_f32(gr, wr);
             }
         }
     }
@@ -2538,6 +2577,24 @@ mod test {
             *v = normal(rng);
         }
         t
+    }
+
+    #[test]
+    fn portable_dot_handles_scalar_chunks_and_remainders() {
+        let lhs: Vec<f32> = (0..39).map(|i| i as f32 * 0.25 - 3.0).collect();
+        let rhs: Vec<f32> = (0..39).map(|i| (i as f32 * 0.7).sin()).collect();
+        for len in 0..=lhs.len() {
+            let expected: f64 = lhs[..len]
+                .iter()
+                .zip(&rhs[..len])
+                .map(|(&l, &r)| f64::from(l) * f64::from(r))
+                .sum();
+            let actual = dot_f32(&lhs[..len], &rhs[..len]);
+            assert!(
+                (f64::from(actual) - expected).abs() < 2e-5 * expected.abs().max(1.0),
+                "length {len}: {actual} vs {expected}"
+            );
+        }
     }
 
     /// Scalar objective `L = sum(y .* gy)` for a fixed upstream gradient `gy`,
