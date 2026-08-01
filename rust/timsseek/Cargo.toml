@@ -12,6 +12,7 @@ zstd = "0.13"
 # Gradient boosted tree
 forust-ml = "0.5.0"
 rand = "0.9.2"
+matrixmultiply = "0.3.10"
 
 # Workspace member deps
 timsquery = { path = "../timsquery" }

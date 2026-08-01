@@ -1,4 +1,4 @@
-//! Dependency-free MLP for rescoring, ported from `dev/mlp.rs`.
+//! Small in-process MLP for rescoring, ported from `dev/mlp.rs`.
 //!
 //! Differences from the reference implementation, all deliberate:
 //!
@@ -30,6 +30,7 @@
 // codegen — the same tradeoff `ml/lda.rs` documents at its own hot loops.
 #![allow(clippy::needless_range_loop)]
 
+use matrixmultiply::sgemm;
 use rand::rngs::StdRng;
 use rand::{
     Rng as _,
@@ -183,49 +184,6 @@ impl Linear {
     }
 }
 
-/// Scalar source shaped to expose four independent multiply-accumulate chains
-/// to LLVM. This stays portable Rust (no target features or explicit SIMD), but
-/// unlike a single running sum it permits the loop vectorizer to operate without
-/// reassociating one dependency chain. The final horizontal sum deliberately
-/// fixes the new addition order.
-#[inline(always)]
-fn dot_f32x4(lhs: &[f32], rhs: &[f32]) -> f32 {
-    debug_assert_eq!(lhs.len(), rhs.len());
-    let mut sums = [0.0f32; 4];
-    let mut lhs_chunks = lhs.chunks_exact(4);
-    let mut rhs_chunks = rhs.chunks_exact(4);
-
-    for (l, r) in lhs_chunks.by_ref().zip(rhs_chunks.by_ref()) {
-        for lane in 0..4 {
-            sums[lane] += l[lane] * r[lane];
-        }
-    }
-
-    let mut total = (sums[0] + sums[1]) + (sums[2] + sums[3]);
-    for (&l, &r) in lhs_chunks.remainder().iter().zip(rhs_chunks.remainder()) {
-        total += l * r;
-    }
-    total
-}
-
-/// The chunked reduction wins once there is enough work to amortize its four
-/// accumulators. Keep small layers on the strict scalar chain: the default
-/// 32-wide first layer benefits from x4, while its 16-wide and 1-wide successors
-/// are measurably faster without it.
-#[inline(always)]
-fn dot_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
-    debug_assert_eq!(lhs.len(), rhs.len());
-    if lhs.len() >= 32 {
-        dot_f32x4(lhs, rhs)
-    } else {
-        let mut total = 0.0;
-        for (&l, &r) in lhs.iter().zip(rhs) {
-            total += l * r;
-        }
-        total
-    }
-}
-
 impl Layer for Linear {
     fn out_dim(&self) -> usize {
         self.n_out
@@ -234,101 +192,77 @@ impl Layer for Linear {
     fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
         let (n, ni, no) = (x.rows, self.n_in, self.n_out);
         out.reshape(n, no);
-        let mut blocks = out.data[..n * no].chunks_exact_mut(4 * no);
-        for (block_index, block) in blocks.by_ref().enumerate() {
-            let b = block_index * 4;
-            let (o0, rest) = block.split_at_mut(no);
-            let (o1, rest) = rest.split_at_mut(no);
-            let (o2, o3) = rest.split_at_mut(no);
-            o0.copy_from_slice(&self.b);
-            o1.copy_from_slice(&self.b);
-            o2.copy_from_slice(&self.b);
-            o3.copy_from_slice(&self.b);
-            for i in 0..ni {
-                let wr = &self.w[i * no..(i + 1) * no];
-                let (x0, x1, x2, x3) = (
-                    x.data[b * ni + i],
-                    x.data[(b + 1) * ni + i],
-                    x.data[(b + 2) * ni + i],
-                    x.data[(b + 3) * ni + i],
-                );
-                for o in 0..no {
-                    let w = wr[o];
-                    o0[o] += x0 * w;
-                    o1[o] += x1 * w;
-                    o2[o] += x2 * w;
-                    o3[o] += x3 * w;
-                }
-            }
+        for row in out.data[..n * no].chunks_exact_mut(no) {
+            row.copy_from_slice(&self.b);
         }
-
-        let first_remainder_row = n - blocks.into_remainder().len() / no;
-        for b in first_remainder_row..n {
-            let xr = x.row(b);
-            let or = out.row_mut(b);
-            or.copy_from_slice(&self.b);
-            for i in 0..ni {
-                let xi = xr[i];
-                let wr = &self.w[i * no..i * no + no];
-                for (v, w) in or.iter_mut().zip(wr) {
-                    *v += xi * w;
-                }
-            }
+        // SAFETY: X, W, and out are distinct allocations with the declared
+        // row-major extents. Output strides do not alias, and every live output
+        // element was initialized with its bias for beta=1.
+        unsafe {
+            sgemm(
+                n,
+                ni,
+                no,
+                1.0,
+                x.data.as_ptr(),
+                ni as isize,
+                1,
+                self.w.as_ptr(),
+                no as isize,
+                1,
+                1.0,
+                out.data.as_mut_ptr(),
+                no as isize,
+                1,
+            );
         }
     }
 
     fn backward(&mut self, x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
         let (n, ni, no) = (gy.rows, self.n_in, self.n_out);
         gx.reshape(n, ni);
-        let full_rows = n / 4 * 4;
-        for b in (0..full_rows).step_by(4) {
-            let (gr0, gr1, gr2, gr3) = (gy.row(b), gy.row(b + 1), gy.row(b + 2), gy.row(b + 3));
-            let (xr0, xr1, xr2, xr3) = (x.row(b), x.row(b + 1), x.row(b + 2), x.row(b + 3));
-            let block = &mut gx.data[b * ni..(b + 4) * ni];
-            let (gx0, rest) = block.split_at_mut(ni);
-            let (gx1, rest) = rest.split_at_mut(ni);
-            let (gx2, gx3) = rest.split_at_mut(ni);
-
-            for o in 0..no {
-                self.gb[o] += gr0[o];
-                self.gb[o] += gr1[o];
-                self.gb[o] += gr2[o];
-                self.gb[o] += gr3[o];
-            }
-            for i in 0..ni {
-                let gwr = &mut self.gw[i * no..(i + 1) * no];
-                for o in 0..no {
-                    gwr[o] += xr0[i] * gr0[o];
-                    gwr[o] += xr1[i] * gr1[o];
-                    gwr[o] += xr2[i] * gr2[o];
-                    gwr[o] += xr3[i] * gr3[o];
-                }
-                let wr = &self.w[i * no..(i + 1) * no];
-                gx0[i] = dot_f32(gr0, wr);
-                gx1[i] = dot_f32(gr1, wr);
-                gx2[i] = dot_f32(gr2, wr);
-                gx3[i] = dot_f32(gr3, wr);
+        for gr in gy.data[..n * no].chunks_exact(no) {
+            for (gb, &value) in self.gb.iter_mut().zip(gr) {
+                *gb += value;
             }
         }
-
-        for b in full_rows..n {
-            let gr = gy.row(b);
-            let xr = x.row(b);
-            let gxr = gx.row_mut(b);
-            for o in 0..no {
-                self.gb[o] += gr[o];
-            }
-            for i in 0..ni {
-                // Two separate loops: the AXPY vectorizes, the reduction
-                // doesn't, and fusing them would sink both.
-                let xi = xr[i];
-                let gwr = &mut self.gw[i * no..i * no + no];
-                for (g, d) in gwr.iter_mut().zip(gr) {
-                    *g += xi * d;
-                }
-                let wr = &self.w[i * no..i * no + no];
-                gxr[i] = dot_f32(gr, wr);
-            }
+        // SAFETY: all buffers are distinct allocations and cover the declared
+        // row-major matrices. dW uses X with transposed strides and beta=1 to
+        // honor gradient accumulation; dX uses W with transposed strides and
+        // initializes every live gx element with beta=0.
+        unsafe {
+            sgemm(
+                ni,
+                n,
+                no,
+                1.0,
+                x.data.as_ptr(),
+                1,
+                ni as isize,
+                gy.data.as_ptr(),
+                no as isize,
+                1,
+                1.0,
+                self.gw.as_mut_ptr(),
+                no as isize,
+                1,
+            );
+            sgemm(
+                n,
+                no,
+                ni,
+                1.0,
+                gy.data.as_ptr(),
+                no as isize,
+                1,
+                self.w.as_ptr(),
+                1,
+                no as isize,
+                0.0,
+                gx.data.as_mut_ptr(),
+                ni as isize,
+                1,
+            );
         }
     }
 
@@ -2639,25 +2573,7 @@ mod test {
     }
 
     #[test]
-    fn portable_dot_handles_scalar_chunks_and_remainders() {
-        let lhs: Vec<f32> = (0..39).map(|i| i as f32 * 0.25 - 3.0).collect();
-        let rhs: Vec<f32> = (0..39).map(|i| (i as f32 * 0.7).sin()).collect();
-        for len in 0..=lhs.len() {
-            let expected: f64 = lhs[..len]
-                .iter()
-                .zip(&rhs[..len])
-                .map(|(&l, &r)| f64::from(l) * f64::from(r))
-                .sum();
-            let actual = dot_f32(&lhs[..len], &rhs[..len]);
-            assert!(
-                (f64::from(actual) - expected).abs() < 2e-5 * expected.abs().max(1.0),
-                "length {len}: {actual} vs {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn row_blocked_forward_is_bit_identical_to_row_at_a_time() {
+    fn gemm_forward_matches_row_at_a_time() {
         for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
             let mut rng = seeded();
             let mut layer = Linear::new(ni, no, &mut rng);
@@ -2677,12 +2593,18 @@ mod test {
                     }
                 }
             }
-            assert_eq!(actual.live(), expected.live(), "shape {rows}x{ni}x{no}");
+            for (&got, &want) in actual.live().iter().zip(expected.live()) {
+                let scale = got.abs().max(want.abs()).max(1.0);
+                assert!(
+                    (got - want).abs() <= 2e-5 * scale,
+                    "shape {rows}x{ni}x{no}: {got} vs {want}"
+                );
+            }
         }
     }
 
     #[test]
-    fn row_blocked_backward_is_bit_identical_to_row_at_a_time() {
+    fn gemm_backward_matches_row_at_a_time() {
         for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
             let mut data_rng = seeded();
             let x = filled(rows, ni, &mut data_rng);
@@ -2705,12 +2627,26 @@ mod test {
                     for (g, d) in gwr.iter_mut().zip(gr) {
                         *g += xr[i] * d;
                     }
-                    gxr[i] = dot_f32(gr, &expected.w[i * no..(i + 1) * no]);
+                    gxr[i] = gr
+                        .iter()
+                        .zip(&expected.w[i * no..(i + 1) * no])
+                        .map(|(&d, &w)| d * w)
+                        .sum();
                 }
             }
 
-            assert_eq!(actual_gx.live(), expected_gx.live(), "gx {rows}x{ni}x{no}");
-            assert_eq!(actual.gw, expected.gw, "gw {rows}x{ni}x{no}");
+            for (what, got, want) in [
+                ("gx", actual_gx.live(), expected_gx.live()),
+                ("gw", actual.gw.as_slice(), expected.gw.as_slice()),
+            ] {
+                for (&got, &want) in got.iter().zip(want) {
+                    let scale = got.abs().max(want.abs()).max(1.0);
+                    assert!(
+                        (got - want).abs() <= 2e-5 * scale,
+                        "{what} {rows}x{ni}x{no}: {got} vs {want}"
+                    );
+                }
+            }
             assert_eq!(actual.gb, expected.gb, "gb {rows}x{ni}x{no}");
         }
     }

@@ -6353,6 +6353,7 @@ dependencies = [
  "arrow",
  "calibrt",
  "forust-ml",
+ "matrixmultiply",
  "micromzpaf",
  "parquet",
  "rand 0.9.3",
