@@ -13,6 +13,7 @@ pub mod utils;
 
 #[doc(inline)]
 pub use timings::{
+    ProgressGroup,
     TimedStep,
     make_progress_bar,
 };

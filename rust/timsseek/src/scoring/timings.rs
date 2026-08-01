@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::time::Duration;
 
 pub use timscentroid::{
+    ProgressGroup,
     TimedStep,
     make_progress_bar,
 };

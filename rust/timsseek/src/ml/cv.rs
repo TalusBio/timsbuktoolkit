@@ -1,7 +1,7 @@
 pub use super::TargetDecoy;
 use crate::scoring::timings::{
+    ProgressGroup,
     TimedStep,
-    make_progress_bar,
 };
 pub use forust_ml::constraints::{
     Constraint,
@@ -1029,12 +1029,17 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
         M::Error: Send,
     {
         self.fold_models.clear();
-        let progress = make_progress_bar(
-            self.n_folds as u64 * M::fit_progress_units(&self.config),
-            &format!("Training {} folds", self.n_folds),
-        );
-        // An indicatif bar owns the interactive line. Captured output gets the
-        // ordinary one-line timer instead, since its progress bar is hidden.
+        let progress = ProgressGroup::new();
+        let fold_progress: Vec<_> = (0..self.n_folds)
+            .map(|fold| {
+                progress.add(
+                    M::fit_progress_units(&self.config),
+                    &format!("Training fold {}/{}", fold + 1, self.n_folds),
+                )
+            })
+            .collect();
+        // Interactive stderr gets one independently updating line per fold.
+        // Captured output keeps the ordinary one-line timer instead.
         let step = progress.is_hidden().then(|| {
             TimedStep::begin_stderr(format_args!(
                 "  Training {} folds in parallel...",
@@ -1048,20 +1053,26 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
             let config = &self.config;
             let fold_rows = &self.fold_rows;
             let n_folds = self.n_folds;
-            let progress = &progress;
+            let fold_progress = &fold_progress;
             let mut handles = Vec::with_capacity(n_folds as usize);
             for fold in 0..n_folds {
                 handles.push(scope.spawn(move || {
                     let val_fold = if fold + 1 == n_folds { 0 } else { fold + 1 };
-                    let advance = || progress.inc(1);
-                    M::fit_with_progress(
+                    let bar = &fold_progress[fold as usize];
+                    let advance = || bar.inc(1);
+                    let result = M::fit_with_progress(
                         config,
                         dataset,
                         fold as usize,
                         &fold_rows[fold as usize],
                         &fold_rows[val_fold as usize],
                         &advance,
-                    )
+                    );
+                    // Early stopping makes the configured epoch count an upper
+                    // bound. Finish at the work this fold actually performed.
+                    bar.set_length(bar.position());
+                    bar.finish();
+                    result
                 }));
             }
             handles
@@ -1069,10 +1080,6 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
                 .map(|handle| handle.join().expect("fold training thread panicked"))
                 .collect::<Vec<_>>()
         });
-        // Early stopping makes the configured epoch count an upper bound. End
-        // on the work actually performed rather than leaving a "short" bar.
-        progress.set_length(progress.position());
-        progress.finish();
 
         // Join order is fold order, regardless of which worker completed first.
         // Do not publish a partial model vector if any fold failed.

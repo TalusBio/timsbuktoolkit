@@ -11,6 +11,7 @@ use std::time::{
 };
 
 use indicatif::{
+    MultiProgress,
     ProgressBar,
     ProgressFinish,
     ProgressStyle,
@@ -41,6 +42,10 @@ pub fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
     if !std::io::stderr().is_terminal() {
         return ProgressBar::hidden();
     }
+    styled_progress_bar(len, label)
+}
+
+fn styled_progress_bar(len: u64, label: &str) -> ProgressBar {
     let style = ProgressStyle::with_template(&format!(
         "{{spinner:.green}} {} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({{eta}})",
         label
@@ -49,6 +54,38 @@ pub fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
     ProgressBar::new(len)
         .with_style(style)
         .with_finish(ProgressFinish::AndLeave)
+}
+
+/// A TTY-aware set of independently updating progress bars. On captured or
+/// redirected stderr, [`Self::add`] returns hidden no-op bars so callers can keep
+/// one progress-reporting code path without emitting redraw noise.
+pub struct ProgressGroup {
+    inner: Option<MultiProgress>,
+}
+
+impl ProgressGroup {
+    pub fn new() -> Self {
+        Self {
+            inner: std::io::stderr().is_terminal().then(MultiProgress::new),
+        }
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    pub fn add(&self, len: u64, label: &str) -> ProgressBar {
+        match &self.inner {
+            Some(group) => group.add(styled_progress_bar(len, label)),
+            None => ProgressBar::hidden(),
+        }
+    }
+}
+
+impl Default for ProgressGroup {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TimedStep {
