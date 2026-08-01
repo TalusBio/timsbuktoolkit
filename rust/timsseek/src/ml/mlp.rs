@@ -41,6 +41,82 @@ use std::time::{
     Instant,
 };
 
+/// Checked, safe boundary around [`sgemm`] for the layouts used by this MLP.
+/// Inputs may be row-major or transposed views via positive strides; output is
+/// always contiguous row-major. Separate shared/mutable borrows rule out output
+/// aliasing either input at every safe call site.
+#[allow(clippy::too_many_arguments)]
+fn gemm_f32(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: &[f32],
+    a_row_stride: usize,
+    a_col_stride: usize,
+    b: &[f32],
+    b_row_stride: usize,
+    b_col_stride: usize,
+    beta: f32,
+    c: &mut [f32],
+) {
+    fn required_len(rows: usize, cols: usize, row_stride: usize, col_stride: usize) -> usize {
+        if rows == 0 || cols == 0 {
+            return 0;
+        }
+        (rows - 1)
+            .checked_mul(row_stride)
+            .and_then(|last_row| {
+                (cols - 1)
+                    .checked_mul(col_stride)
+                    .and_then(|last_col| last_row.checked_add(last_col))
+            })
+            .and_then(|last| last.checked_add(1))
+            .expect("GEMM matrix extent overflows usize")
+    }
+
+    assert!(
+        a.len() >= required_len(m, k, a_row_stride, a_col_stride),
+        "GEMM left input is smaller than its declared strided extent"
+    );
+    assert!(
+        b.len() >= required_len(k, n, b_row_stride, b_col_stride),
+        "GEMM right input is smaller than its declared strided extent"
+    );
+    assert!(
+        c.len()
+            >= m.checked_mul(n)
+                .expect("GEMM output extent overflows usize"),
+        "GEMM output is smaller than its declared row-major extent"
+    );
+    let ars = isize::try_from(a_row_stride).expect("GEMM left row stride exceeds isize");
+    let acs = isize::try_from(a_col_stride).expect("GEMM left column stride exceeds isize");
+    let brs = isize::try_from(b_row_stride).expect("GEMM right row stride exceeds isize");
+    let bcs = isize::try_from(b_col_stride).expect("GEMM right column stride exceeds isize");
+    let crs = isize::try_from(n).expect("GEMM output row stride exceeds isize");
+
+    // SAFETY: the extent checks prove every strided input access and contiguous
+    // output access is in bounds. Safe borrowing prevents C from aliasing A or
+    // B, and C's fixed (n, 1) strides cannot alias distinct output elements.
+    unsafe {
+        sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a.as_ptr(),
+            ars,
+            acs,
+            b.as_ptr(),
+            brs,
+            bcs,
+            beta,
+            c.as_mut_ptr(),
+            crs,
+            1,
+        );
+    }
+}
+
 /// Opt-in production timing buckets. Durations are accumulated over every
 /// minibatch/epoch in one fold; `train_wall` and `validation_wall` are elapsed
 /// wall time, while their component buckets are consumer-thread CPU time.
@@ -195,27 +271,19 @@ impl Layer for Linear {
         for row in out.data[..n * no].chunks_exact_mut(no) {
             row.copy_from_slice(&self.b);
         }
-        // SAFETY: X, W, and out are distinct allocations with the declared
-        // row-major extents. Output strides do not alias, and every live output
-        // element was initialized with its bias for beta=1.
-        unsafe {
-            sgemm(
-                n,
-                ni,
-                no,
-                1.0,
-                x.data.as_ptr(),
-                ni as isize,
-                1,
-                self.w.as_ptr(),
-                no as isize,
-                1,
-                1.0,
-                out.data.as_mut_ptr(),
-                no as isize,
-                1,
-            );
-        }
+        gemm_f32(
+            n,
+            ni,
+            no,
+            &x.data,
+            ni,
+            1,
+            &self.w,
+            no,
+            1,
+            1.0,
+            &mut out.data,
+        );
     }
 
     fn backward(&mut self, x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
@@ -226,44 +294,34 @@ impl Layer for Linear {
                 *gb += value;
             }
         }
-        // SAFETY: all buffers are distinct allocations and cover the declared
-        // row-major matrices. dW uses X with transposed strides and beta=1 to
-        // honor gradient accumulation; dX uses W with transposed strides and
-        // initializes every live gx element with beta=0.
-        unsafe {
-            sgemm(
-                ni,
-                n,
-                no,
-                1.0,
-                x.data.as_ptr(),
-                1,
-                ni as isize,
-                gy.data.as_ptr(),
-                no as isize,
-                1,
-                1.0,
-                self.gw.as_mut_ptr(),
-                no as isize,
-                1,
-            );
-            sgemm(
-                n,
-                no,
-                ni,
-                1.0,
-                gy.data.as_ptr(),
-                no as isize,
-                1,
-                self.w.as_ptr(),
-                1,
-                no as isize,
-                0.0,
-                gx.data.as_mut_ptr(),
-                ni as isize,
-                1,
-            );
-        }
+        // dW = X^T dY; beta=1 honors gradient accumulation.
+        gemm_f32(
+            ni,
+            n,
+            no,
+            &x.data,
+            1,
+            ni,
+            &gy.data,
+            no,
+            1,
+            1.0,
+            &mut self.gw,
+        );
+        // dX = dY W^T; beta=0 initializes every live output element.
+        gemm_f32(
+            n,
+            no,
+            ni,
+            &gy.data,
+            no,
+            1,
+            &self.w,
+            1,
+            no,
+            0.0,
+            &mut gx.data,
+        );
     }
 
     fn params_and_grads(&mut self) -> ParamSlots<'_> {
