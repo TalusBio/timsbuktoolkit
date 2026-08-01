@@ -234,11 +234,39 @@ impl Layer for Linear {
     fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
         let (n, ni, no) = (x.rows, self.n_in, self.n_out);
         out.reshape(n, no);
-        for b in 0..n {
+        let mut blocks = out.data[..n * no].chunks_exact_mut(4 * no);
+        for (block_index, block) in blocks.by_ref().enumerate() {
+            let b = block_index * 4;
+            let (o0, rest) = block.split_at_mut(no);
+            let (o1, rest) = rest.split_at_mut(no);
+            let (o2, o3) = rest.split_at_mut(no);
+            o0.copy_from_slice(&self.b);
+            o1.copy_from_slice(&self.b);
+            o2.copy_from_slice(&self.b);
+            o3.copy_from_slice(&self.b);
+            for i in 0..ni {
+                let wr = &self.w[i * no..(i + 1) * no];
+                let (x0, x1, x2, x3) = (
+                    x.data[b * ni + i],
+                    x.data[(b + 1) * ni + i],
+                    x.data[(b + 2) * ni + i],
+                    x.data[(b + 3) * ni + i],
+                );
+                for o in 0..no {
+                    let w = wr[o];
+                    o0[o] += x0 * w;
+                    o1[o] += x1 * w;
+                    o2[o] += x2 * w;
+                    o3[o] += x3 * w;
+                }
+            }
+        }
+
+        let first_remainder_row = n - blocks.into_remainder().len() / no;
+        for b in first_remainder_row..n {
             let xr = x.row(b);
             let or = out.row_mut(b);
             or.copy_from_slice(&self.b);
-            // AXPY order: inner loop is contiguous and vectorizes.
             for i in 0..ni {
                 let xi = xr[i];
                 let wr = &self.w[i * no..i * no + no];
@@ -252,7 +280,38 @@ impl Layer for Linear {
     fn backward(&mut self, x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
         let (n, ni, no) = (gy.rows, self.n_in, self.n_out);
         gx.reshape(n, ni);
-        for b in 0..n {
+        let full_rows = n / 4 * 4;
+        for b in (0..full_rows).step_by(4) {
+            let (gr0, gr1, gr2, gr3) = (gy.row(b), gy.row(b + 1), gy.row(b + 2), gy.row(b + 3));
+            let (xr0, xr1, xr2, xr3) = (x.row(b), x.row(b + 1), x.row(b + 2), x.row(b + 3));
+            let block = &mut gx.data[b * ni..(b + 4) * ni];
+            let (gx0, rest) = block.split_at_mut(ni);
+            let (gx1, rest) = rest.split_at_mut(ni);
+            let (gx2, gx3) = rest.split_at_mut(ni);
+
+            for o in 0..no {
+                self.gb[o] += gr0[o];
+                self.gb[o] += gr1[o];
+                self.gb[o] += gr2[o];
+                self.gb[o] += gr3[o];
+            }
+            for i in 0..ni {
+                let gwr = &mut self.gw[i * no..(i + 1) * no];
+                for o in 0..no {
+                    gwr[o] += xr0[i] * gr0[o];
+                    gwr[o] += xr1[i] * gr1[o];
+                    gwr[o] += xr2[i] * gr2[o];
+                    gwr[o] += xr3[i] * gr3[o];
+                }
+                let wr = &self.w[i * no..(i + 1) * no];
+                gx0[i] = dot_f32(gr0, wr);
+                gx1[i] = dot_f32(gr1, wr);
+                gx2[i] = dot_f32(gr2, wr);
+                gx3[i] = dot_f32(gr3, wr);
+            }
+        }
+
+        for b in full_rows..n {
             let gr = gy.row(b);
             let xr = x.row(b);
             let gxr = gx.row_mut(b);
@@ -2594,6 +2653,65 @@ mod test {
                 (f64::from(actual) - expected).abs() < 2e-5 * expected.abs().max(1.0),
                 "length {len}: {actual} vs {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn row_blocked_forward_is_bit_identical_to_row_at_a_time() {
+        for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
+            let mut rng = seeded();
+            let mut layer = Linear::new(ni, no, &mut rng);
+            let x = filled(rows, ni, &mut rng);
+            let mut actual = Tensor::default();
+            layer.forward(&x, &mut actual, false);
+
+            let mut expected = Tensor::new(rows, no);
+            for b in 0..rows {
+                let xr = x.row(b);
+                let out = expected.row_mut(b);
+                out.copy_from_slice(&layer.b);
+                for (i, &xi) in xr.iter().enumerate() {
+                    let wr = &layer.w[i * no..(i + 1) * no];
+                    for (value, &weight) in out.iter_mut().zip(wr) {
+                        *value += xi * weight;
+                    }
+                }
+            }
+            assert_eq!(actual.live(), expected.live(), "shape {rows}x{ni}x{no}");
+        }
+    }
+
+    #[test]
+    fn row_blocked_backward_is_bit_identical_to_row_at_a_time() {
+        for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
+            let mut data_rng = seeded();
+            let x = filled(rows, ni, &mut data_rng);
+            let gy = filled(rows, no, &mut data_rng);
+            let mut actual = Linear::new(ni, no, &mut seeded());
+            let mut expected = Linear::new(ni, no, &mut seeded());
+            let mut actual_gx = Tensor::default();
+            let mut expected_gx = Tensor::new(rows, ni);
+            actual.backward(&x, &Tensor::default(), &gy, &mut actual_gx);
+
+            for b in 0..rows {
+                let gr = gy.row(b);
+                let xr = x.row(b);
+                let gxr = expected_gx.row_mut(b);
+                for o in 0..no {
+                    expected.gb[o] += gr[o];
+                }
+                for i in 0..ni {
+                    let gwr = &mut expected.gw[i * no..(i + 1) * no];
+                    for (g, d) in gwr.iter_mut().zip(gr) {
+                        *g += xr[i] * d;
+                    }
+                    gxr[i] = dot_f32(gr, &expected.w[i * no..(i + 1) * no]);
+                }
+            }
+
+            assert_eq!(actual_gx.live(), expected_gx.live(), "gx {rows}x{ni}x{no}");
+            assert_eq!(actual.gw, expected.gw, "gw {rows}x{ni}x{no}");
+            assert_eq!(actual.gb, expected.gb, "gb {rows}x{ni}x{no}");
         }
     }
 
