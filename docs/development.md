@@ -56,6 +56,7 @@ file stays the authority for everything else.
 | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | finite non-negative float — `0`, `1e-3` |
 | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer — `8`; or `none` / `off` to disable early stopping entirely |
 | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` (default) or `square`; case-insensitive, `-` and `_` interchangeable |
+| `TIMSSEEK_MLP_IMPORTANCE` | `importance` | `w1` (default) or `grad`; changes only the feature-importance sidecar, not fitting or scores |
 | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x` hex — `0x2545F4914F6CDD1D` |
 | `TIMSSEEK_MLP_LOSS` | `loss` | `bce` (default), or `focal:GAMMA:ALPHA` — `focal:2:0.25`; case-insensitive, whitespace around each field trimmed |
 
@@ -85,9 +86,7 @@ file stays the authority for everything else.
   an `ALPHA` chosen as if the weights were uniform double-counts the imbalance.
 - **`TIMSSEEK_MLP_ACTIVATION=square` is EXPERIMENTAL and is not independent of
   `lr` / `weight_decay`.** `x^2` is unbounded and even, so unlike a rectifier it
-  amplifies its input; on a 24-column fixture it reaches a lower train loss than
-  leaky ReLU while emitting held-out logits an order of magnitude larger, and the
-  gap grows with `lr`. Sweep it together with a smaller `lr` or a larger
+  can amplify its input. Sweep it together with a smaller `lr` or a larger
   `weight_decay`, not on its own. A net that diverges outright is caught at
   `predict` (`MlpFoldError::NonFiniteScore`) rather than silently ranked.
 

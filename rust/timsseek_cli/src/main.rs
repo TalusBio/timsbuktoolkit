@@ -12,8 +12,10 @@ use timsquery::{
     IndexingCentroidingConfig,
     load_index,
 };
-use timsseek::ml::RescoreModel;
-use timsseek::ml::mlp::MlpConfig;
+use timsseek::ml::{
+    RescoreModel,
+    validate_mlp_env_overrides,
+};
 use timsseek::scoring::Scorer;
 use timsseek::scoring::timings::TimedStep;
 use tracing::{
@@ -791,14 +793,14 @@ fn run() -> std::result::Result<(), errors::CliError> {
 
     info!("Parsed configuration: {:#?}", config.clone());
 
-    // Dev-only `TIMSSEEK_MLP_*` overrides (see `MlpConfig::from_env`) are read
+    // Dev-only `TIMSSEEK_MLP_*` overrides are read
     // at Phase 5, which is an hour into a large search. Building the config here
     // and dropping it moves the malformed-value abort to the first second, and
     // emits the once-per-run effective-config log at the TOP of the run log
     // where a sweep can find it. Gated on the selected model so a stale variable
     // in the shell cannot fail a run that never touches the MLP.
     if matches!(config.analysis.rescore_model, RescoreModel::Mlp) {
-        let _ = MlpConfig::from_env();
+        validate_mlp_env_overrides();
     }
 
     alloc_track::snap!("start");

@@ -440,10 +440,7 @@ where
 /// constant: the score distribution then depends on a row's POSITION IN THE
 /// SHUFFLE, which is exactly what [`crossfit`]'s own failure policy calls out as
 /// silently corrupting the q-value ranking with nothing downstream to catch it.
-/// A uniform failure is at least uniform. An earlier version of this used `all`
-/// and was therefore blind to the state it most needed to report — measured on
-/// `degraded_hybrid(synthetic_competed_nonlinear_signal(n))`: `n = 198` gives
-/// `[0, 0, 0]`, `n = 204` gives `[1, 0, 0]`, `n = 208` gives `[1, 0, 1]`.
+/// A uniform failure is at least uniform.
 ///
 /// No false positives on the healthy side: `GbmFoldModel::importance` reports
 /// `NaN` for the columns forust never split on (dropped at the sidecar boundary)

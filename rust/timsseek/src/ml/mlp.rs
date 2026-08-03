@@ -237,13 +237,8 @@ impl Linear {
     /// the whole first layer hinges on the exact center of the data. A unit
     /// that lands with all its inputs on the negative side outputs zero, and
     /// a dead ReLU has EXACTLY zero gradient — an absorbing state that no
-    /// learning rate, epoch count, or minibatch noise recovers from.
-    ///
-    /// Observed, not theorized: with zero biases a 2-16-8-1 net on XOR settles
-    /// at exactly 0.75 accuracy and `ln(2)/2` loss for some seeds and never
-    /// leaves. `dev/mlp.rs` never hit it because it puts a `BatchNorm` at layer
-    /// 0, whose learnable `beta` supplies the shift zero biases do not; the
-    /// default architecture here has no BatchNorm, so the bias has to.
+    /// learning rate, epoch count, or minibatch noise recovers from. A random
+    /// bias moves those boundaries away from the shared input origin.
     pub fn new(n_in: usize, n_out: usize, rng: &mut StdRng) -> Self {
         let scale = (2.0 / n_in as f32).sqrt(); // He init
         let bound = 1.0 / (n_in as f32).sqrt();
@@ -361,25 +356,12 @@ pub const LEAKY_SLOPE: f32 = 0.01;
 /// zero, so a unit that dies contributes nothing and receives nothing, forever.
 /// That is not a slow-learning problem that a smaller learning rate or more
 /// epochs or minibatch noise can fix — there is no gradient to be noisy about.
-///
-/// Measured on the XOR test in this module: with pure ReLU, seeds 7 and 13 both
-/// pinned at exactly 0.75 accuracy / `ln(2)/2` loss (half the samples emitting
-/// logit 0) and never moved across 400 epochs. Non-zero bias init made it
-/// rarer — seed 7 recovered — but did not remove it, because it changes where
-/// units start, not what happens once one dies.
 pub struct Relu {
     dim: usize,
     slope: f32,
 }
 
 impl Relu {
-    /// Pure ReLU, zero negative slope. Retained for gradient tests and for
-    /// anyone who wants the exact classical behavior; see the type docs for
-    /// why it is not the default.
-    pub fn new(dim: usize) -> Self {
-        Relu { dim, slope: 0.0 }
-    }
-
     pub fn leaky(dim: usize, slope: f32) -> Self {
         Relu { dim, slope }
     }
@@ -445,23 +427,8 @@ impl Layer for Relu {
 /// [`MlpConfig::compiled_default`], which were swept with a rectifier in place
 /// and carry no guarantee here.
 ///
-/// # What was actually measured, and what was not
-/// The 2-input XOR fixture in this module's tests does NOT diverge: it reaches
-/// the same accuracy as the rectifier at the shipped `lr` of 1.2e-3 on all eight
-/// seeds, at a lower training loss on every one, and it still does not go
-/// non-finite at 400x that step size. Read that as "the layer and its gradient
-/// are right", not as reassurance — 2 inputs of magnitude ~1 is the case where
-/// squaring cannot amplify much.
-///
-/// The 24-column overfitting fixture is the closer analogue and it shows the
-/// amplification plainly. At the same `lr`, `hidden` and epoch budget, the
-/// squaring net reaches a LOWER train loss and a held-out loss of 11-21 against
-/// the rectifier's 1.1-1.6 (three seeds), i.e. it emits far larger logits on rows
-/// it has not seen; at `lr = 1e-1` it drives train loss to exactly 0 with a
-/// held-out loss of 4e6-4.5e7. Nothing there is non-finite, so the guard rail
-/// never trips — the realistic hazard is not a crash but a net whose held-out
-/// logits are enormous, and the 101- and 128-column rescore lanes have not been
-/// measured at all.
+/// Finite logits can still be badly overconfident, so the non-finite guard is
+/// not a substitute for tuning this activation on held-out data.
 pub struct Square {
     dim: usize,
 }
@@ -532,6 +499,7 @@ impl Activation {
 /// Ported and gradient-tested, but NOT part of the default architecture — see
 /// the module docs. Kept as the first escalation if standardized inputs turn
 /// out not to be enough to train stably.
+#[cfg(test)]
 pub struct BatchNorm {
     dim: usize,
     gamma: Vec<f32>,
@@ -551,6 +519,7 @@ pub struct BatchNorm {
     g_beta: Vec<f32>,
 }
 
+#[cfg(test)]
 impl BatchNorm {
     pub fn new(dim: usize) -> Self {
         BatchNorm {
@@ -573,6 +542,7 @@ impl BatchNorm {
     }
 }
 
+#[cfg(test)]
 impl Layer for BatchNorm {
     fn out_dim(&self) -> usize {
         self.dim
@@ -1203,6 +1173,7 @@ impl Mlp {
     /// No held-out set, therefore NO EARLY STOPPING regardless of
     /// [`MlpConfig::early_stopping_patience`]: the stopping rule has nothing to
     /// measure. Callers that want it go through [`Self::train_reporting`].
+    #[cfg(test)]
     pub fn train(
         &mut self,
         cfg: &MlpConfig,
@@ -1254,6 +1225,7 @@ impl Mlp {
     /// when the epoch budget runs out before patience does, so with early
     /// stopping on you always get the best-held-out-loss weights that were seen.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[cfg(test)]
     pub fn train_reporting(
         &mut self,
         cfg: &MlpConfig,
@@ -1741,6 +1713,7 @@ impl Mlp {
 /// leak. The rows here reach nothing but [`Mlp::eval_loss`] — no optimizer
 /// step, no input transform, no RNG draw — so the only thing they can move is
 /// which epoch's weights are kept.
+#[cfg(test)]
 pub struct ValSet<'a> {
     pub x: &'a Tensor,
     pub y: &'a [f32],
@@ -1866,6 +1839,7 @@ const MIN_STD: f64 = 1e-12;
 
 impl ColumnTransform {
     /// Fit over `rows` of the row-major lane matrix `feat` (`feat[i*ncols + j]`).
+    #[cfg(test)]
     pub fn fit(feat: &[f64], ncols_lane: usize, rows: &[usize]) -> Self {
         Self::fit_streaming(ncols_lane, rows.iter().copied(), |i, out| {
             out.copy_from_slice(&feat[i * ncols_lane..(i + 1) * ncols_lane]);
@@ -1961,6 +1935,7 @@ impl ColumnTransform {
     /// Deliberately a returned count rather than a `debug_assert!`: assertions
     /// compile out in release, which is exactly where a production run would
     /// hit this.
+    #[cfg(test)]
     pub fn check_clean(&self, feat: &[f64], rows: &[usize]) -> Vec<usize> {
         let mut bad = Vec::new();
         for spec in self.cols.iter().filter(|c| c.kind == ColKind::Clean) {

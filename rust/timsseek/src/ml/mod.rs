@@ -1,7 +1,7 @@
 pub mod cv;
 pub mod lda;
-pub mod mlp;
-pub mod mlp_fold;
+mod mlp;
+mod mlp_fold;
 pub mod qvalues;
 pub use cv::RescoreFeatureStats;
 pub use qvalues::{
@@ -10,6 +10,14 @@ pub use qvalues::{
     rescore_lda,
     rescore_mlp,
 };
+
+/// Parse and validate the dev-only `TIMSSEEK_MLP_*` overrides early.
+///
+/// The MLP configuration and implementation stay private; the CLI only needs
+/// this startup check so a malformed sweep variable fails before extraction.
+pub fn validate_mlp_env_overrides() {
+    let _ = mlp::MlpConfig::from_env();
+}
 
 use crate::scoring::results::{
     CompetedCandidate,
@@ -76,15 +84,15 @@ pub enum RescoreModel {
     /// row's `lda_score` never saw its own label.
     ///
     /// Measured between `lda` and `gbm` on both runtime and sensitivity, but not
-    /// at parity with GBM. Unaffected by [`mlp::MlpConfig`]: its compressor is
-    /// LDA.
+    /// at parity with GBM. Unaffected by the MLP configuration: its compressor
+    /// is LDA.
     Hybrid,
     /// MLP on the ALL lane (linear ++ nonlinear, 128 features) — the same
     /// feature set [`Gbm`](RescoreModel::Gbm) trains on, so the two are
     /// directly comparable.
     ///
-    /// The [`mlp::MlpConfig`] defaults were tuned on this model. It has been the
-    /// best measured speed/sensitivity point on the benchmarked inputs.
+    /// Its defaults were tuned on this model. It has been the best measured
+    /// speed/sensitivity point on the benchmarked inputs.
     Mlp,
 }
 

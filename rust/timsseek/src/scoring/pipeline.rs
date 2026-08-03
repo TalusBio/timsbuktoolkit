@@ -400,11 +400,11 @@ fn compute_secondary_lazyscores(
             .map(|((_k, _mz), v)| v.weight() as f32),
     );
     let iso_lazyscore = single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v));
-    let ratio = lazyscore.ln_1p() - iso_lazyscore.ln_1p();
+    let isotope_lazyscore_log_diff = lazyscore.ln_1p() - iso_lazyscore.ln_1p();
     SecondaryLazyScoresRaw {
         lazyscore,
         iso_lazyscore,
-        isotope_lazyscore_log_diff: ratio,
+        isotope_lazyscore_log_diff,
     }
 }
 

@@ -28,9 +28,7 @@ decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        — cross-validated gradient-boosted trees (default)
-## "lda"        — Sage-style shrinkage LDA on the linear lane. The cheapest and
-##                the least sensitive by a wide margin; both gaps GROW with the
-##                candidate count.
+## "lda"        — Sage-style shrinkage LDA on the linear lane
 ## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
 ## "mlp"        — small MLP on the full lane (the same features as "gbm")
 ##
