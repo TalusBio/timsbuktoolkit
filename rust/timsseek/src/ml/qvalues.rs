@@ -565,7 +565,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFe
 /// that fold's model.
 ///
 /// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
-/// ([`crate::ml::RescoreModel::Lda`]); the GBM `rescore` remains the default.
+/// ([`crate::ml::RescoreModel::Lda`]).
 /// See `ml::lda` for the fit details.
 pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     use std::time::Instant;
@@ -1997,7 +1997,7 @@ mod feature_tests {
     }
 
     #[test]
-    fn rescore_with_dispatches_the_default_and_the_non_mlp_variants() {
+    fn rescore_with_dispatches_every_variant() {
         use crate::ml::{
             RescoreModel,
             rescore_with,
@@ -2021,9 +2021,8 @@ mod feature_tests {
 
         assert_eq!(
             RescoreModel::default(),
-            RescoreModel::Gbm,
-            "the default rescorer moved; `default_config.toml` and this test's whole \
-             premise both say it is the GBM"
+            RescoreModel::Mlp,
+            "the library default must match the shipped configuration"
         );
 
         let mut seen: Vec<(RescoreModel, Vec<(u32, u32)>)> = Vec::new();
@@ -2035,6 +2034,7 @@ mod feature_tests {
                 rescore_hybrid as Rescorer,
                 NONLINEAR_NCOLS + 1,
             ),
+            (RescoreModel::Mlp, rescore_mlp as Rescorer, ALL_NCOLS),
         ] {
             let (dispatched, stats) = rescore_with(variant, synthetic_competed(N));
             assert_eq!(dispatched.len(), N as usize);

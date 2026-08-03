@@ -682,7 +682,7 @@ wheels = [
 
 [[package]]
 name = "timsseek-workspace"
-version = "0.31.0"
+version = "0.33.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -792,8 +792,8 @@ resolution-markers = [
     "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "matplotlib", marker = "python_full_version < '3.12'" },
-    { name = "seaborn", marker = "python_full_version < '3.12'" },
+    { name = "matplotlib" },
+    { name = "seaborn" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b6/a3/0c7225e5a13fc1450e264d8809451db2776afb68856f53c64ab3a5bbfead/vizta-0.0.1.tar.gz", hash = "sha256:d6e01083ee14785a8d31343c1010a5402c0f8f6fa3a0f6c6a422910e1151ef27", size = 160764, upload-time = "2022-11-08T19:08:46.802Z" }
 wheels = [
@@ -813,8 +813,8 @@ resolution-markers = [
     "python_full_version >= '3.12' and platform_machine == 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "matplotlib", marker = "python_full_version >= '3.12'" },
-    { name = "seaborn", marker = "python_full_version >= '3.12'" },
+    { name = "matplotlib" },
+    { name = "seaborn" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f6/82/8786e7633cd2ef03c3b3fbb6209dbcc0981ddf47851e1379c36990bb12c0/vizta-1.1.2.tar.gz", hash = "sha256:1c47448d2e9df1582d0b61a1ae021d965aac202658d0dd55a75e2bf7cb0232ff", size = 301491, upload-time = "2025-09-01T21:08:58.962Z" }
 wheels = [

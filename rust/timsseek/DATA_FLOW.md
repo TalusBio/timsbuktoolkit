@@ -54,10 +54,10 @@ same input, the same canonical sort + seeded shuffle, and the same FDR tail
 
 | Model | Feature lane | Fit |
 |---|---|---|
-| `gbm` (default) | all | cross-validated gradient boosting (forust) |
+| `gbm` | all | cross-validated gradient boosting (forust) |
 | `lda` | linear | closed-form shrinkage LDA, cross-fit |
 | `hybrid` | nonlinear + `lda_score` | per-fold cross-fit LDA feeding the GBM |
-| `mlp` | all | cross-validated MLP (dependency-free, `ml/mlp.rs`) |
+| `mlp` (default) | all | cross-validated MLP (`ml/mlp.rs`) |
 
 Features are extracted by a **lane walk**, not a per-result method: a flat
 row-major buffer built over the already-shuffled slice, so row *i* aligns with

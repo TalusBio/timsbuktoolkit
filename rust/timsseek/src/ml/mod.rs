@@ -61,9 +61,7 @@ pub const N_RESCORE_FOLDS: u8 = 3;
 #[serde(rename_all = "snake_case")]
 pub enum RescoreModel {
     /// Gradient-boosted trees over the ALL lane (linear ++ nonlinear, 128
-    /// features), cross-validated over `N_RESCORE_FOLDS`. The default, and the
-    /// historical default.
-    #[default]
+    /// features), cross-validated over `N_RESCORE_FOLDS`.
     Gbm,
     /// Sage-style shrinkage LDA on the LINEAR lane only (101 features, see
     /// [`lda`]). Cross-fit over the same fold ASSIGNMENT.
@@ -85,6 +83,7 @@ pub enum RescoreModel {
     ///
     /// Its defaults were tuned on this model. It has been the best measured
     /// speed/sensitivity point on the benchmarked inputs.
+    #[default]
     Mlp,
 }
 
@@ -97,7 +96,7 @@ pub enum RescoreModel {
 /// NOTHING TYPE-CHECKS ANY OF THESE ARMS: every rescorer has this signature, so
 /// an inverted arm compiles, runs, and produces plausible q-values off the wrong
 /// model or the wrong feature set. Tests pin every arm against its direct entry
-/// point; this matters most for `Gbm`, which runs when nobody sets the flag.
+/// point.
 pub fn rescore_with(
     model: RescoreModel,
     data: Vec<CompetedCandidate>,

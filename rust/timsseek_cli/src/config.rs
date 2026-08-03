@@ -145,6 +145,7 @@ rt = "Unrestricted"
     #[test]
     fn default_config_roundtrips_through_toml() {
         let a = Config::default_config();
+        assert_eq!(a.analysis.rescore_model, RescoreModel::Mlp);
         let s = toml::to_string(&a).unwrap();
         let b: Config = toml::from_str(&s).unwrap();
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
