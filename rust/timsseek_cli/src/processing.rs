@@ -1170,10 +1170,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         results.len()
     );
 
-    // Calculate delta scores between consecutive target/decoy pairs
+    // Calculate log-space delta features between the two best group members.
     // Results are sorted by (decoy_group_id, precursor_charge, score desc)
-    // We store (group_id, charge, index, main_score) and the computed deltas per index.
-    let mut delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
+    // We store (group_id, charge, index, ln_1p(main_score)).
+    let mut ln1p_delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
     let mut previous: Option<(u32, u8, usize, f32)> = None;
 
     for (i, current) in results.iter().enumerate() {
@@ -1188,10 +1188,11 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             if current_key == prev_key {
                 // This is the second item in a target/decoy pair
                 let log_curr = current.scoring.primary.main_score.ln_1p();
-                let delta_ln_score = log_curr - ln1p_prev_score;
-                let delta_ln_ratio = log_curr / ln1p_prev_score;
+                let delta_group_ln1p_diff = ln1p_prev_score - log_curr;
+                let delta_group_ln1p_ratio = log_curr / ln1p_prev_score;
 
-                delta_map[prev_index] = (-delta_ln_score, delta_ln_ratio);
+                ln1p_delta_map[prev_index] =
+                    (delta_group_ln1p_diff, delta_group_ln1p_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -1237,11 +1238,11 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     let competed: Vec<CompetedCandidate> = kept_indices
         .into_iter()
         .map(|i| {
-            let (dg, dgr) = delta_map[i];
+            let (delta_group_ln1p_diff, delta_group_ln1p_ratio) = ln1p_delta_map[i];
             results_opt[i]
                 .take()
                 .expect("index should be unique")
-                .into_competed(dg, dgr)
+                .into_competed(delta_group_ln1p_diff, delta_group_ln1p_ratio)
         })
         .collect();
 
@@ -1358,6 +1359,27 @@ mod tests {
                 ("PEPTIDEK".to_string(), 500.0f64.to_bits(), false),
                 ("PEPTIDEK".to_string(), 502.0f64.to_bits(), false),
             ]
+        );
+    }
+
+    #[test]
+    fn competition_features_match_their_ln1p_names() {
+        let mut best = candidate("BEST", 501.0, true, 7);
+        best.scoring.primary.main_score = 8.0;
+        let mut runner_up = candidate("RUNNER", 502.0, false, 7);
+        runner_up.scoring.primary.main_score = 3.0;
+
+        let competed = target_decoy_compete(vec![runner_up, best]);
+        assert_eq!(competed.len(), 1);
+        let winner = &competed[0];
+        let best_ln1p = 8.0f32.ln_1p();
+        let runner_up_ln1p = 3.0f32.ln_1p();
+
+        assert!(
+            (winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6
+        );
+        assert!(
+            (winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6
         );
     }
 }

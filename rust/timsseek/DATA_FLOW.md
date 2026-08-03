@@ -13,7 +13,7 @@ hits, then re-extract everything with the calibrated windows.
 | 1. Prescore | `phase1_prescore` — `timsseek_cli/src/processing.rs` | Broad, uncalibrated extraction of the whole library; keeps the best-scoring peptides as calibrants. |
 | 2. Calibrate | `calibrate_from_phase1` | Fits the iRT→RT curve from the calibrants, measures m/z and mobility error, derives the narrow tolerances. |
 | 3. Score | `phase3_score` | Re-extracts every peptide at its calibrated RT with the derived tolerances and computes the full feature set. |
-| 4. Compete | `target_decoy_compete` | Dedups by sequence, competes within decoy groups, adds `delta_group`. |
+| 4. Compete | `target_decoy_compete` | Dedups by sequence, competes within decoy groups, adds log-space group-difference features. |
 | 5. Rescore | `ml::rescore_with` — `timsseek/src/ml/mod.rs` | Fits a discriminant over feature projections and assigns q-values. LDA/MLP stream raw rows; GBM retains its input frame. |
 | 6. Write | `execute_pipeline` — `timsseek_cli/src/processing.rs` | Writes filtered results and optional feature-statistics sidecars, then completes the performance report. |
 
@@ -83,7 +83,7 @@ sides read that from `RowMajorDataset::get_fold`.
 
 ## The candidate chain
 
-`ScoredCandidate` (Phase 3) → `CompetedCandidate` (`+ delta_group`) →
+`ScoredCandidate` (Phase 3) → `CompetedCandidate` (`+ delta_group_ln1p_diff`, `+ delta_group_ln1p_ratio`) →
 `FinalResult` (`+ discriminant_score`, `qvalue`) → parquet. All three live in
 `scoring/results.rs`; `ScoringFields` is composed there from an ordered block
 list, and that order is what parquet columns and the ML lanes both follow.

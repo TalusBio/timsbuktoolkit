@@ -1053,8 +1053,8 @@ mod feature_tests {
         };
         CompetedCandidate {
             scoring: base_scoring_fields(peptide),
-            delta_group: 1.0,
-            delta_group_ratio: 0.5,
+            delta_group_ln1p_diff: 1.0,
+            delta_group_ln1p_ratio: 0.5,
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
@@ -1069,8 +1069,8 @@ mod feature_tests {
         };
         CompetedCandidate {
             scoring: base_scoring_fields(peptide),
-            delta_group: 1.0,
-            delta_group_ratio: 0.5,
+            delta_group_ln1p_diff: 1.0,
+            delta_group_ln1p_ratio: 0.5,
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
@@ -1179,13 +1179,8 @@ mod feature_tests {
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
-    /// EVERY field this varies lands in the LINEAR lane — `delta_group` and
-    /// `delta_group_ratio` included. They are `ResultMeta`'s two LINEAR features
-    /// and `ResultMeta::NONLINEAR_LEN == 0`, so this fixture's NONLINEAR lane is
-    /// bit-constant at EVERY row count. The property is stated by MEASUREMENT,
-    /// not by this comment: [`assert_nonlinear_lane_is_flat`] checks it and
-    /// [`assert_nonlinear_lane_varies`] is its mirror, so a future feature that
-    /// changes the answer fails a test rather than rotting a doc.
+    /// Every field varied here lands in the linear lane, including the two
+    /// log-space group-delta features. The nonlinear lane is therefore constant.
     ///
     /// The nonlinear lane is intentionally constant; use
     /// [`synthetic_competed_nonlinear_signal`] when a nonlinear split is needed.
@@ -1202,8 +1197,9 @@ mod feature_tests {
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                c.delta_group = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
-                c.delta_group_ratio = if is_target { 0.8 } else { 0.3 };
+                c.delta_group_ln1p_diff =
+                    if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
+                c.delta_group_ln1p_ratio = if is_target { 0.8 } else { 0.3 };
                 c
             })
             .collect()
@@ -1214,8 +1210,8 @@ mod feature_tests {
             .into_iter()
             .map(|mut c| {
                 let sample = sample_competed_candidate_parsed();
-                c.delta_group = sample.delta_group;
-                c.delta_group_ratio = sample.delta_group_ratio;
+                c.delta_group_ln1p_diff = sample.delta_group_ln1p_diff;
+                c.delta_group_ln1p_ratio = sample.delta_group_ln1p_ratio;
                 c
             })
             .collect()
@@ -1925,16 +1921,16 @@ mod feature_tests {
     /// Every consumer indexes on that contract — `rescore_dash` sweeps the
     /// matrix a row at a time with every column's accumulator live, so an
     /// interleaved or transposed write would silently mix features together
-    /// rather than fail. Rows carry distinct `delta_group` values so the
+    /// rather than fail. Rows carry distinct `delta_group_ln1p_diff` values so the
     /// assertion can tell them apart; a length check alone passes even when
     /// the layout is wrong.
     #[test]
     fn feature_frame_rows_are_contiguous() {
         let rows: Vec<_> = [1.0f32, 2.0, 3.0]
             .into_iter()
-            .map(|delta_group| {
+            .map(|delta_group_ln1p_diff| {
                 let mut c = sample_competed_candidate_parsed();
-                c.delta_group = delta_group;
+                c.delta_group_ln1p_diff = delta_group_ln1p_diff;
                 c.into_final()
             })
             .collect();
@@ -1945,13 +1941,13 @@ mod feature_tests {
 
         let j = names
             .iter()
-            .position(|n| &**n == "delta_group")
-            .expect("delta_group is an ALL-lane feature");
+            .position(|n| &**n == "delta_group_ln1p_diff")
+            .expect("delta_group_ln1p_diff is an ALL-lane feature");
         for (i, expected) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
             assert_eq!(
                 got[i * nf + j],
                 expected,
-                "row {i}'s delta_group is not at matrix[{i} * {nf} + {j}]"
+                "row {i}'s delta_group_ln1p_diff is not at matrix[{i} * {nf} + {j}]"
             );
         }
     }
