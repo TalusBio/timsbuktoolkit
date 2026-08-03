@@ -4,6 +4,7 @@ members = [
     "rust/alloc_track",
     "rust/array2d",
     "rust/calibrt",
+    "rust/calib_dash",
     "rust/micromzpaf",
     "rust/timscentroid",
     "rust/timsseek",
@@ -22,6 +23,8 @@ default-members = [
     "rust/alloc_track",
     "rust/array2d",
     "rust/calibrt",
+    # calib_dash is deliberately NOT here: it pulls ratatui/crossterm, and a bare
+    # `cargo build` should not compile a dev-only TUI. CI names it with `-p`.
     "rust/micromzpaf",
     "rust/timscentroid",
     "rust/timsseek",

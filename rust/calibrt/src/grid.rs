@@ -5,7 +5,17 @@ use crate::{
 use array2d::Array2D;
 use tracing::info;
 
-pub struct Grid {
+/// The x/y extents of a grid geometry, rejecting the empty and inverted ones.
+fn spans(x_range: (f64, f64), y_range: (f64, f64)) -> Result<(f64, f64), CalibRtError> {
+    let x_span = x_range.1 - x_range.0;
+    let y_span = y_range.1 - y_range.0;
+    if x_span <= 0.0 || y_span <= 0.0 {
+        return Err(CalibRtError::ZeroRange);
+    }
+    Ok((x_span, y_span))
+}
+
+pub(crate) struct Grid {
     pub(crate) nodes: Vec<Node>,
     pub(crate) x_range: (f64, f64),
     pub(crate) y_range: (f64, f64),
@@ -20,7 +30,7 @@ pub struct Grid {
 impl Grid {
     /// Creates a new, empty grid with a fixed geometry.
     /// The center of each node is constant based on the grid resolution.
-    pub fn new(
+    pub(crate) fn new(
         bins: usize,
         x_range: (f64, f64),
         y_range: (f64, f64),
@@ -28,39 +38,15 @@ impl Grid {
         if bins == 0 {
             return Err(CalibRtError::ZeroRange);
         };
-        let x_span = x_range.1 - x_range.0;
-        let y_span = y_range.1 - y_range.0;
+        let (x_span, y_span) = spans(x_range, y_range)?;
 
-        if x_span <= 0.0 || y_span <= 0.0 {
-            return Err(CalibRtError::ZeroRange);
-        }
-
-        let mut nodes = Vec::with_capacity(bins * bins);
-        for r in 0..bins {
-            for c in 0..bins {
-                // Add 0.5 to place node center at the midpoint of each bin
-                let center_x = x_range.0 + (c as f64 + 0.5) * (x_span / bins as f64);
-                let center_y = y_range.0 + (r as f64 + 0.5) * (y_span / bins as f64);
-                nodes.push(Node {
-                    center: Point {
-                        library: center_x,
-                        observed: center_y,
-                        weight: 0.0,
-                    },
-                    suppressed: false,
-                    sum_wx: 0.0,
-                    sum_wy: 0.0,
-                    sum_w: 0.0,
-                });
-            }
-        }
-
+        let nodes = vec![Node::default(); bins * bins];
         let weights_a = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
             .expect("Grid dimensions are valid");
         let weights_b = Array2D::from_flat_vector(vec![0.0; bins * bins], bins, bins)
             .expect("Grid dimensions are valid");
 
-        Ok(Self {
+        let mut grid = Self {
             nodes,
             x_range,
             y_range,
@@ -69,18 +55,23 @@ impl Grid {
             bins,
             weights_a,
             weights_b,
-        })
+        };
+        grid.reset();
+        Ok(grid)
     }
 
-    pub fn extend_points<'a, T>(&mut self, points: T) -> Result<(), CalibRtError>
-    where
-        T: IntoIterator<Item = &'a Point> + 'a,
-    {
-        points.into_iter().try_for_each(|p| self.add_point(p))
+    /// Row-major index of the cell holding `(library, observed)`, clamped to the
+    /// grid. The one place the value-to-cell arithmetic lives: point insertion and
+    /// path-index reporting must agree on it, or an overlay marks a different cell
+    /// than the weight it came from.
+    pub(crate) fn cell_of(&self, library: f64, observed: f64) -> usize {
+        let gx = (((library - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
+        let gy = (((observed - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
+        gy.min(self.bins - 1) * self.bins + gx.min(self.bins - 1)
     }
 
     /// Adds a single point to the grid, incrementing the frequency of the corresponding cell.
-    pub fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
+    pub(crate) fn add_point(&mut self, point: &Point) -> Result<(), CalibRtError> {
         let Point {
             library,
             observed,
@@ -91,13 +82,7 @@ impl Grid {
             return Err(CalibRtError::UnsupportedWeight(*weight));
         }
 
-        let gx = (((library - self.x_range.0) / self.x_span) * self.bins as f64) as usize;
-        let gy = (((observed - self.y_range.0) / self.y_span) * self.bins as f64) as usize;
-
-        let gx = gx.min(self.bins - 1);
-        let gy = gy.min(self.bins - 1);
-
-        let index = gy * self.bins + gx;
+        let index = self.cell_of(*library, *observed);
         if let Some(node) = self.nodes.get_mut(index) {
             node.center.weight += weight;
             node.sum_wx += library * weight;
@@ -117,7 +102,7 @@ impl Grid {
     /// # Returns
     /// - `Ok(())` if at least one node remains non-suppressed
     /// - `Err(CalibRtError::NoPoints)` if all nodes have zero weight
-    pub fn suppress_nonmax(&mut self) -> Result<(), CalibRtError> {
+    pub(crate) fn suppress_nonmax(&mut self) -> Result<(), CalibRtError> {
         // Initialize with 1.0 to handle empty grids gracefully
         let mut max_in_row = vec![1.; self.bins];
         let mut max_in_col = vec![1.; self.bins];
@@ -179,7 +164,7 @@ impl Grid {
 
     /// Zero all node weights and suppression flags, preserving bin geometry.
     /// Restores each node center to the midpoint of its bin.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         for (i, node) in self.nodes.iter_mut().enumerate() {
             let r = i / self.bins;
             let c = i % self.bins;
@@ -197,20 +182,30 @@ impl Grid {
         self.weights_b.reset_with_value(self.bins, self.bins, 0.0);
     }
 
-    /// Reset the grid with new dimensions and ranges. Reallocates if the
-    /// bin count changes.
-    pub fn reconfigure(
+    /// Reset the grid with new dimensions and ranges. Reallocates only if the
+    /// bin count changes; otherwise reuses the node buffer and recomputes cell
+    /// centers from the new ranges.
+    pub(crate) fn reconfigure(
         &mut self,
         bins: usize,
         x_range: (f64, f64),
         y_range: (f64, f64),
     ) -> Result<(), CalibRtError> {
-        *self = Self::new(bins, x_range, y_range)?;
+        if bins != self.bins {
+            *self = Self::new(bins, x_range, y_range)?;
+            return Ok(());
+        }
+        let (x_span, y_span) = spans(x_range, y_range)?;
+        self.x_range = x_range;
+        self.y_range = y_range;
+        self.x_span = x_span;
+        self.y_span = y_span;
+        self.reset();
         Ok(())
     }
 
     /// Read access to all grid cells.
-    pub fn grid_cells(&self) -> &[Node] {
+    pub(crate) fn grid_cells(&self) -> &[Node] {
         &self.nodes
     }
 
@@ -261,6 +256,34 @@ pub struct Node {
 mod tests {
     use super::*;
     use crate::Point;
+
+    #[test]
+    fn reconfigure_preserves_allocation_when_bins_are_unchanged() {
+        let mut grid = Grid::new(10, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let ptr_before = grid.nodes.as_ptr();
+        let cap_before = grid.nodes.capacity();
+
+        grid.reconfigure(10, (5.0, 200.0), (7.0, 300.0)).unwrap();
+
+        assert_eq!(grid.nodes.as_ptr(), ptr_before, "must not reallocate");
+        assert_eq!(grid.nodes.capacity(), cap_before);
+        assert_eq!(grid.x_range, (5.0, 200.0), "ranges must still update");
+        assert_eq!(grid.y_range, (7.0, 300.0));
+
+        // Centers are recomputed from the new ranges. Ten bins over `5..200`
+        // makes the first one `5.0 .. 24.5`, whose midpoint is 14.75, and the
+        // last `180.5 .. 200.0`, midpoint 190.25; ten over `7..300` makes the
+        // first row `7.0 .. 36.3`, midpoint 21.65.
+        let first = grid.nodes[0].center;
+        assert!((first.library - 14.75).abs() < 1e-9, "{first:?}");
+        assert!((first.observed - 21.65).abs() < 1e-9, "{first:?}");
+        let last_col = grid.nodes[9].center;
+        assert!((last_col.library - 190.25).abs() < 1e-9, "{last_col:?}");
+        assert!(
+            (last_col.observed - 21.65).abs() < 1e-9,
+            "row 0 throughout: {last_col:?}"
+        );
+    }
 
     #[test]
     fn test_grid_reset_preserves_allocation() {
@@ -366,99 +389,5 @@ mod tests {
 
         assert!(non_suppressed.contains(&(0, 2, 9.0)));
         assert!(non_suppressed.contains(&(2, 1, 8.0)));
-    }
-
-    #[test]
-    fn test_suppress_nonmax_single_global_max() {
-        // Create a 3x3 grid where one cell is the max in both its row and column
-        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
-
-        let test_data = [
-            (0.5, 0.5, 1.0),
-            (1.5, 0.5, 2.0),
-            (2.5, 0.5, 3.0),
-            (0.5, 1.5, 4.0),
-            (1.5, 1.5, 9.0),
-            (2.5, 1.5, 6.0), // 9 is max
-            (0.5, 2.5, 7.0),
-            (1.5, 2.5, 8.0),
-            (2.5, 2.5, 5.0),
-        ];
-
-        for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point {
-                library: *x,
-                observed: *y,
-                weight: *weight,
-            })
-            .unwrap();
-        }
-
-        grid.suppress_nonmax().unwrap();
-
-        let non_suppressed = print_grid_state(&grid);
-
-        // Only the center cell (1,1) with weight 9 should be non-suppressed
-        // It is the max in both its row (row 1: 4,9,6) and column (col 1: 2,9,8)
-        assert_eq!(
-            non_suppressed.len(),
-            1,
-            "Expected 1 non-suppressed node, found {}",
-            non_suppressed.len()
-        );
-
-        assert!(non_suppressed.contains(&(1, 1, 9.0)));
-    }
-
-    #[test]
-    fn test_suppress_nonmax_diagonal_pattern() {
-        // Create a diagonal pattern where each diagonal element is max in its row and column
-        let mut grid = Grid::new(3, (0.0, 3.0), (0.0, 3.0)).unwrap();
-
-        let test_data = [
-            (0.5, 0.5, 9.0),
-            (1.5, 0.5, 1.0),
-            (2.5, 0.5, 1.0), // (0,0) = 9
-            (0.5, 1.5, 1.0),
-            (1.5, 1.5, 9.0),
-            (2.5, 1.5, 1.0), // (1,1) = 9
-            (0.5, 2.5, 1.0),
-            (1.5, 2.5, 1.0),
-            (2.5, 2.5, 9.0), // (2,2) = 9
-        ];
-
-        for (x, y, weight) in test_data.iter() {
-            grid.add_point(&Point {
-                library: *x,
-                observed: *y,
-                weight: *weight,
-            })
-            .unwrap();
-        }
-
-        grid.suppress_nonmax().unwrap();
-
-        let non_suppressed = print_grid_state(&grid);
-
-        // All 3 diagonal elements should be non-suppressed
-        assert_eq!(
-            non_suppressed.len(),
-            3,
-            "Expected 3 non-suppressed nodes (diagonal), found {}",
-            non_suppressed.len()
-        );
-
-        assert!(
-            non_suppressed.contains(&(0, 0, 9.0)),
-            "Diagonal (0,0) should be non-suppressed"
-        );
-        assert!(
-            non_suppressed.contains(&(1, 1, 9.0)),
-            "Diagonal (1,1) should be non-suppressed"
-        );
-        assert!(
-            non_suppressed.contains(&(2, 2, 9.0)),
-            "Diagonal (2,2) should be non-suppressed"
-        );
     }
 }

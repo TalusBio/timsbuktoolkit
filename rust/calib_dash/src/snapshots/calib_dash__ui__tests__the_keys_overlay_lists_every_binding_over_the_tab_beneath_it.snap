@@ -1,0 +1,34 @@
+---
+source: rust/calib_dash/src/ui.rs
+expression: "render(&mut app, 100, 30)"
+---
+ Fit │ Convergence │ Tolerances                                                                     
+    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
+    │ Showing: none — density only                                                                 │
+    │                                                                                              │
+    │                                                                                        ▄▄▄▄▄▄│
+    │                                                                                        ░░░░░░│
+  40┤                                                                                              │
+    │                                                                            ▄▄▄▄▄▄▄           │
+    │                   ┌ Keys ────────────────────────────────────────────┐     ███████           │
+    │                   │Every tab                                         │                       │
+    │                   │  n          next batch                           │▄▄▄▄▄▄                 │
+  30┤                   │  r          run to end                           │██████                 │
+    │                   │  h l        switch tab                           │                       │
+    │                   │  q          detach                               │                       │
+    │                   │  ^C         abort                                │                       │
+    │                   │  ?          this screen                          │           ░░░░░░░     │
+  20┤                   │                                                  │           ▀▀▀▀▀▀▀     │
+    │                   │Fit tab                                           │                       │
+    │                   │  < >        scrub retained frames                │                       │
+    │                   │  m M        cycle mark layer                     │                       │
+    │                   │  d          toggle DP pane                       │                       │
+  10┤                   └──────────────────────────────────────────────────┘                       │
+    │                 ▄▄▄▄▄▄▄▄▄▄▄▄▓▀▀▀▀▀▀                                                          │
+    │                 ▒▒▒▒▒▒▒▒▒▒▒▒▒                                                                │
+    │           ▒▒▒▒▒▒▒                                                                            │
+    │     ▄▄▄▄▄▄▒▀▀▀▀▀▀                                                                            │
+   0┤     ▒▒▒▒▒▒▒                                                                                  │
+    └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
+     0                            5                           10                            15      
+ b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys

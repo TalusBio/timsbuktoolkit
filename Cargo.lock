@@ -1359,11 +1359,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "calib_dash"
+version = "0.32.0"
+dependencies = [
+ "calibrt",
+ "insta",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "calibrt"
 version = "0.32.0"
 dependencies = [
  "array2d",
- "insta",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -6379,6 +6390,7 @@ name = "timsseek_cli"
 version = "0.32.0"
 dependencies = [
  "alloc_track",
+ "calib_dash",
  "chrono",
  "clap",
  "indicatif",

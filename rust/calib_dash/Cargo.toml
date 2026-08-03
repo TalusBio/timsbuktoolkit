@@ -1,0 +1,20 @@
+[package]
+name = "calib_dash"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "calib_dash"
+path = "src/bin/calib_dash.rs"
+
+[dependencies]
+calibrt = { path = "../calibrt" }
+ratatui = "0.29"
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+tempfile = { workspace = true }
