@@ -151,17 +151,9 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
-    /// A model must be spelled the SAME on the command line and in the config
-    /// file. Nothing structural enforces that: `RescoreModel`'s `rename_all`
-    /// (serde) and `CliRescoreModel`'s (clap) are two independent attributes,
-    /// and a per-variant `rename`/`value(name)` on one side only would leave
-    /// `--rescore-model mlp` working while `rescore_model = "mlp"`
-    /// is rejected as an unknown variant — a divergence a user hits, not a
-    /// build.
-    ///
-    /// Driven off `CliRescoreModel::value_variants` so every model is covered
-    /// without a list to maintain; the `From` impl's exhaustiveness is what
-    /// keeps that enumeration equal to `RescoreModel`'s.
+    /// Serde and clap derive names independently, so verify the user-facing
+    /// spellings agree. Reciprocal conversions keep the variant sets exhaustive
+    /// in both directions.
     #[test]
     fn rescore_model_spellings_agree_between_cli_and_toml() {
         use crate::cli::CliRescoreModel;
@@ -169,6 +161,7 @@ rt = "Unrestricted"
 
         for cli_variant in CliRescoreModel::value_variants() {
             let model: RescoreModel = (*cli_variant).into();
+            assert_eq!(CliRescoreModel::from(model), *cli_variant);
 
             let cli_name = cli_variant
                 .to_possible_value()

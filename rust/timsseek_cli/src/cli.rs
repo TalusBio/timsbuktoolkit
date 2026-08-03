@@ -9,9 +9,8 @@ use timsseek::ml::RescoreModel;
 /// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
 /// trait, so it cannot be implemented for the lib-owned type from this crate.
 ///
-/// `rename_all` is `snake_case` to match `RescoreModel`'s serde spelling, so a
-/// model is named identically on the command line and in the config file
-/// (`--rescore-model mlp` / `rescore_model = "mlp"`).
+/// `rename_all` matches `RescoreModel`'s serde spelling so model names are
+/// identical on the command line and in configuration files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "snake_case")]
 pub enum CliRescoreModel {
@@ -21,9 +20,6 @@ pub enum CliRescoreModel {
     Mlp,
 }
 
-/// Exhaustive on purpose — no wildcard arm. A variant added to
-/// [`RescoreModel`] and mirrored here without an arm is a compile error, which
-/// is the only thing keeping the two enums from drifting.
 impl From<CliRescoreModel> for RescoreModel {
     fn from(v: CliRescoreModel) -> Self {
         match v {
@@ -31,6 +27,20 @@ impl From<CliRescoreModel> for RescoreModel {
             CliRescoreModel::Lda => RescoreModel::Lda,
             CliRescoreModel::Hybrid => RescoreModel::Hybrid,
             CliRescoreModel::Mlp => RescoreModel::Mlp,
+        }
+    }
+}
+
+// Keep the mirror exhaustive in both directions. Adding a variant to either
+// enum now requires updating a conversion rather than silently omitting a CLI
+// value.
+impl From<RescoreModel> for CliRescoreModel {
+    fn from(v: RescoreModel) -> Self {
+        match v {
+            RescoreModel::Gbm => CliRescoreModel::Gbm,
+            RescoreModel::Lda => CliRescoreModel::Lda,
+            RescoreModel::Hybrid => CliRescoreModel::Hybrid,
+            RescoreModel::Mlp => CliRescoreModel::Mlp,
         }
     }
 }

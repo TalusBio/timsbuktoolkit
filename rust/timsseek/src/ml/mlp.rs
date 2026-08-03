@@ -397,14 +397,13 @@ fn loss_and_grad(logits: &Tensor, y: &[f32], w: &[f32], grad: &mut Tensor) -> f3
 
 // ---------------------------------------------------------------- optimizer
 
-/// Adam / AdamW. `decoupled_wd = true` gives AdamW.
+/// AdamW optimizer.
 pub struct Adam {
     lr: f32,
     beta1: f32,
     beta2: f32,
     eps: f32,
     weight_decay: f32,
-    decoupled_wd: bool,
     t: i32,
     m: Vec<Vec<f32>>,
     v: Vec<Vec<f32>>,
@@ -418,7 +417,6 @@ impl Adam {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 0.0,
-            decoupled_wd: true,
             t: 0,
             m: Vec::new(),
             v: Vec::new(),
@@ -453,16 +451,13 @@ impl Adam {
             let wd = if decay { self.weight_decay } else { 0.0 };
 
             for i in 0..p.len() {
-                let mut grad = g[i];
-                if wd != 0.0 && !self.decoupled_wd {
-                    grad += wd * p[i]; // classic Adam: L2 inside the moments
-                }
+                let grad = g[i];
                 m[i] = self.beta1 * m[i] + (1.0 - self.beta1) * grad;
                 v[i] = self.beta2 * v[i] + (1.0 - self.beta2) * grad * grad;
                 let m_hat = m[i] / bc1;
                 let v_hat = v[i] / bc2;
-                if wd != 0.0 && self.decoupled_wd {
-                    p[i] -= self.lr * wd * p[i]; // AdamW: decoupled
+                if wd != 0.0 {
+                    p[i] -= self.lr * wd * p[i];
                 }
                 p[i] -= self.lr * m_hat / (v_hat.sqrt() + self.eps);
                 g[i] = 0.0;
@@ -817,9 +812,8 @@ struct ColSpec {
 ///
 /// Three jobs, one pass, because they all read the same per-column moments:
 ///
-///  1. **Cull** columns with no finite value at all, and columns whose measured
-///     std is `<= MIN_STD`. What that GUARANTEES is narrower than "constant
-///     columns are dropped" — see below.
+///  1. **Cull** columns with no finite value at all or a standard deviation at
+///     or below `MIN_STD`.
 ///  2. **Standardize** the survivors, which is what lets the default
 ///     architecture skip BatchNorm entirely.
 ///  3. **Impute** non-finite values to the column mean and emit an `_isna`
@@ -829,25 +823,6 @@ struct ColSpec {
 /// Every statistic here is fitted on the rows it is handed and then applied
 /// unchanged to held-out rows. Fitting across all rows would use held-out
 /// feature values.
-///
-/// # What the cull does NOT guarantee
-/// The variance is the textbook-unstable `sumsq/n - mean^2` form, so a
-/// bit-for-bit CONSTANT column of realistic magnitude keeps enough
-/// floating-point residue to clear `MIN_STD` and SURVIVES. Measured on the
-/// suite's all-constant fixture: 8 and 16 train rows cull all 101 columns, while
-/// 30 leaves 10 of them alive. So the cull reliably drops all-non-finite
-/// columns, and drops constant ones only sometimes — as a function of the row
-/// count, not of the data.
-///
-/// This is numerically benign, which is why it is documented rather than fixed.
-/// The `.max(0.0)` closes the only real hazard (a negative variance would give a
-/// `NAN` std, hence `NAN` inputs), and a surviving constant column standardizes
-/// to values bounded by roughly `sqrt(f64::EPSILON)`, about `1.5e-8` — noise the
-/// net cannot learn from. What it costs is honesty in the report: such a column
-/// silently occupies an MLP input and a row in the importance sidecar, reading as
-/// "uninformative" rather than as "constant". Switching to Welford or a two-pass
-/// variance would make the cull dependable; that is a numerics change to a
-/// shipping path, not a doc fix, and has not been made.
 pub struct ColumnTransform {
     ncols_lane: usize,
     cols: Vec<ColSpec>,
@@ -870,15 +845,15 @@ impl ColumnTransform {
     }
 
     /// Fit from rows supplied into one reusable scratch buffer. This is
-    /// numerically the same one-pass moment calculation as [`Self::fit`], but it
-    /// does not require a retained raw lane matrix.
+    /// uses Welford's stable online variance calculation and does not require a
+    /// retained raw lane matrix.
     pub fn fit_streaming(
         ncols_lane: usize,
         rows: impl IntoIterator<Item = usize>,
         mut write_row: impl FnMut(usize, &mut [f64]),
     ) -> Self {
-        let mut sum = vec![0.0f64; ncols_lane];
-        let mut sumsq = vec![0.0f64; ncols_lane];
+        let mut mean = vec![0.0f64; ncols_lane];
+        let mut m2 = vec![0.0f64; ncols_lane];
         let mut finite = vec![0u64; ncols_lane];
         let mut nonfinite = vec![0u64; ncols_lane];
         let mut row = vec![0.0f64; ncols_lane];
@@ -887,9 +862,11 @@ impl ColumnTransform {
             write_row(i, &mut row);
             for (j, &v) in row.iter().enumerate() {
                 if v.is_finite() {
-                    sum[j] += v;
-                    sumsq[j] += v * v;
                     finite[j] += 1;
+                    let n = finite[j] as f64;
+                    let delta = v - mean[j];
+                    mean[j] += delta / n;
+                    m2[j] += delta * (v - mean[j]);
                 } else {
                     nonfinite[j] += 1;
                 }
@@ -904,9 +881,7 @@ impl ColumnTransform {
                 culled.push(j);
                 continue;
             }
-            let n = finite[j] as f64;
-            let mean = sum[j] / n;
-            let var = (sumsq[j] / n - mean * mean).max(0.0);
+            let var = m2[j] / finite[j] as f64;
             let std = var.sqrt();
             if std <= MIN_STD {
                 culled.push(j);
@@ -920,7 +895,7 @@ impl ColumnTransform {
             };
             cols.push(ColSpec {
                 lane: j,
-                mean,
+                mean: mean[j],
                 inv_std: 1.0 / std,
                 kind,
             });
@@ -949,27 +924,6 @@ impl ColumnTransform {
     /// Lane column count this transform was fitted against.
     pub fn ncols_lane(&self) -> usize {
         self.ncols_lane
-    }
-
-    /// Non-finite values seen on a column the fit saw as clean. Always zero on
-    /// the fitting rows by construction; nonzero here means a scored row
-    /// carried a NaN into a column that never had one during training.
-    ///
-    /// Deliberately a returned count rather than a `debug_assert!`: assertions
-    /// compile out in release, which is exactly where a production run would
-    /// hit this.
-    #[cfg(test)]
-    pub fn check_clean(&self, feat: &[f64], rows: &[usize]) -> Vec<usize> {
-        let mut bad = Vec::new();
-        for spec in self.cols.iter().filter(|c| c.kind == ColKind::Clean) {
-            let hit = rows
-                .iter()
-                .any(|&i| !feat[i * self.ncols_lane + spec.lane].is_finite());
-            if hit {
-                bad.push(spec.lane);
-            }
-        }
-        bad
     }
 
     /// Mark clean-at-fit lane columns that are non-finite in this one row.
@@ -1200,6 +1154,17 @@ mod test {
         tx.apply(&feat[..3], &mut out);
         assert_eq!(out[1], 0.0);
         assert_eq!(out[2], 1.0);
+    }
+
+    #[test]
+    fn transform_culls_large_constant_columns_independent_of_row_count() {
+        for nrows in [2, 8, 16, 30, 101] {
+            let feat = vec![1.0e12; nrows];
+            let rows: Vec<usize> = (0..nrows).collect();
+            let tx = ColumnTransform::fit(&feat, 1, &rows);
+            assert_eq!(tx.culled(), &[0], "failed with {nrows} rows");
+            assert_eq!(tx.width(), 0);
+        }
     }
 
     #[test]

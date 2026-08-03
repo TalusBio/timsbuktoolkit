@@ -20,14 +20,14 @@ use std::time::Instant;
 /// Fraction of `mean(diag(Sw))` added to the diagonal as ridge shrinkage.
 /// Small enough to barely perturb a well-conditioned problem, large enough to
 /// rescue a rank-deficient one.
-pub const DEFAULT_SHRINKAGE: f64 = 1e-2;
+pub(crate) const DEFAULT_SHRINKAGE: f64 = 1e-2;
 
 /// Row-chunk size for the parallel reductions. Fixed so chunk boundaries — and
 /// therefore the summation order of the partial accumulators — are identical
 /// across runs, keeping the fit bitwise-deterministic despite parallelism.
 const CHUNK_ROWS: usize = 65_536;
 
-pub struct LdaModel {
+pub(crate) struct LdaModel {
     /// Discriminant direction in standardized feature space.
     coef: Vec<f64>,
     /// Per-feature standardization mean (finite-only).
@@ -52,7 +52,8 @@ impl LdaModel {
     /// type error rather than a silent bug, but a reader at a call site could not
     /// tell which was meant, and the arities matched only by coincidence (the
     /// `fold` parameter equalized them).
-    pub fn fit_matrix(
+    #[cfg(test)]
+    pub(crate) fn fit_matrix(
         feat: &[f64],
         nrows: usize,
         ncols: usize,
@@ -251,7 +252,7 @@ impl LdaModel {
     }
 
     /// Project one raw (un-standardized) feature row onto the discriminant.
-    pub fn score(&self, row: &[f64]) -> f64 {
+    pub(crate) fn score(&self, row: &[f64]) -> f64 {
         debug_assert_eq!(row.len(), self.ncols);
         let mut acc = 0.0;
         // `self.ncols` (not `row.len()`) is the authoritative width across the four
@@ -273,7 +274,7 @@ impl LdaModel {
 /// Everything [`LdaModel`] needs that is not data. One field today; a struct
 /// rather than a bare `f64` so [`FoldModel::Config`] has somewhere to grow.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LdaConfig {
+pub(crate) struct LdaConfig {
     /// Ridge shrinkage, see [`DEFAULT_SHRINKAGE`].
     pub shrinkage: f64,
 }
@@ -290,7 +291,7 @@ impl Default for LdaConfig {
 /// both causes without distinguishing them, so this enum has one variant rather
 /// than inventing a distinction the fit does not actually report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LdaError {
+pub(crate) enum LdaError {
     /// Either class had no rows, or the within-class scatter stayed singular
     /// even after shrinkage.
     SingularOrEmptyClass,

@@ -599,11 +599,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    // Model selectable via the `rescore_model` config field / `--rescore-model`
-    // CLI flag (CLI wins); MLP is the default. Dispatch + per-model notes live
-    // in `timsseek::ml::rescore_with`.
+    // The CLI flag overrides the configured model; MLP is the default.
     info!("Phase 5 rescore model: {rescore_model:?}");
-    let (data, feature_stats) = rescore_with(rescore_model, competed);
+    let (data, feature_stats) = rescore_with(rescore_model, competed)?;
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 

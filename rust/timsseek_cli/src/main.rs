@@ -788,7 +788,6 @@ fn run() -> std::result::Result<(), errors::CliError> {
     let _tracing = init_tracing(&args, &config);
 
     info!("Parsed configuration: {:#?}", config.clone());
-
     alloc_track::snap!("start");
 
     let validated = validate_inputs(&config, &args)?;

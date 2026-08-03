@@ -6,7 +6,10 @@
 use crate::ml::cv::{
     FoldDataset,
     FoldModel,
+    class_weight,
 };
+#[cfg(test)]
+use crate::ml::mlp::TrainOutcome;
 use crate::ml::mlp::{
     Adam,
     ColumnTransform,
@@ -14,7 +17,6 @@ use crate::ml::mlp::{
     MlpBatch,
     MlpConfig,
     Tensor,
-    TrainOutcome,
 };
 use std::cell::RefCell;
 
@@ -59,14 +61,8 @@ pub enum MlpFoldError {
     /// weights that diverged during training (or overflowed an activation) put a
     /// `NaN` or an infinity in it.
     ///
-    /// Caught HERE rather than downstream because downstream diagnoses it wrongly.
-    /// A non-finite score reaches `qvalues::finalize` -> `assign_qval`, whose
-    /// release-mode `assert!` says "Expecting scores to be sorted in descending
-    /// order" — a `NaN` makes every comparison in that window false, so the run
-    /// aborts several stages later blaming the SORT for a model failure. Reporting
-    /// it as an `MlpFoldError` puts the abort next to the model that produced it
-    /// and routes it through the diagnostics `qvalues::abort_standalone_mlp`
-    /// already has.
+    /// Caught here so rescoring can report a model failure before attempting to
+    /// rank a non-finite discriminant.
     NonFiniteScore {
         /// Dataset row index of the FIRST non-finite score, so the caller can
         /// look at that row.
@@ -117,15 +113,6 @@ impl std::fmt::Display for MlpFoldError {
 
 impl std::error::Error for MlpFoldError {}
 
-#[cfg(test)]
-fn gather<D: FoldDataset>(data: &D, rows: &[usize], ncols: usize) -> Vec<f64> {
-    let mut feat = vec![0.0f64; rows.len() * ncols];
-    for (k, &i) in rows.iter().enumerate() {
-        data.get_values(i, &mut feat[k * ncols..(k + 1) * ncols]);
-    }
-    feat
-}
-
 /// A trained MLP plus THE input transform it was trained through.
 ///
 /// The two are one unit on purpose: the net's weights are only meaningful on
@@ -140,30 +127,17 @@ pub struct MlpFoldModel {
     /// Fitted on the TRAIN rows at `fit` time and never refitted. This is the
     /// field the whole leak argument rests on.
     transform: ColumnTransform,
-    /// Mean training loss of the epoch whose weights the net holds. Diagnostics
-    /// only — `fit` logs it, and [`MlpFoldModel::final_loss`] hands it to a
-    /// failing test's message.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Test diagnostics from the completed training run.
+    #[cfg(test)]
     final_loss: f32,
-    /// Rows that actually reached the optimizer: `train.len()` minus whatever
-    /// the inner-validation carve took. The ONE externally checkable statement
-    /// that the carve is excluded from training — see
-    /// `inner_validation_rows_are_withheld_from_the_optimizer`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     n_train_rows: usize,
-    /// What the training run did — epochs run, epoch kept, whether it rolled
-    /// back. `fit` logs it; the tests assert on it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     outcome: TrainOutcome,
     /// Bound inference storage to the same row count used for train chunks.
     inference_batch_size: usize,
 }
 
-// Both accessors are TEST SURFACE and are scoped to it. Nothing in the live path
-// reads either one, but the leak property this module exists to keep
-// (`transform` is fitted on the train rows and never refitted) is only checkable
-// from outside through `transform()`, and `final_loss()` is what makes a failing
-// convergence assertion diagnosable. `pub` would have advertised them as API.
 #[cfg(test)]
 impl MlpFoldModel {
     /// The transform fitted at `fit` time — the one `predict` uses.
@@ -358,7 +332,7 @@ fn visit_prefetched_batches<D: FoldDataset>(
                     transform.apply(&raw, batch.x.row_mut(k));
                     let decoy = data.is_decoy(i);
                     batch.y.push(if decoy { 0.0 } else { 1.0 });
-                    batch.w.push(if decoy { 1.0 } else { 0.5 });
+                    batch.w.push(class_weight(decoy));
                 }
                 ready_tx
                     .send(batch)
@@ -568,18 +542,7 @@ impl FoldModel for MlpFoldModel {
             epoch_finished,
         );
 
-        // ONE grep-able line per fold, at `info` — the summary a sweep reads.
-        //
-        // `info` and not `debug` because the per-epoch trace is already at
-        // `debug`: turning that on to find the stopping epoch means parsing
-        // `epochs` lines per fold to recover 5 numbers, which is exactly the
-        // thing this line exists to avoid. The cost is bounded and tiny —
-        // `N_RESCORE_FOLDS` lines per run, 3 today — and the CLI's default
-        // filter is `info`, so a sweep's run log carries them with no extra
-        // flags. Extract with:
-        //   grep -o 'MLP fold summary:.*' run.log
-        //
-        // 1-based epochs, matching the per-epoch trace. `kept_epoch` /
+        // Epoch numbers are 1-based, matching the per-epoch trace. `kept_epoch` /
         // `best_held_out_loss` are `none` when there was no held-out set (early
         // stopping off and the trace off) or when every measurement was NaN.
         let kept_epoch = match outcome.best_epoch {
@@ -610,8 +573,11 @@ impl FoldModel for MlpFoldModel {
         Ok(MlpFoldModel {
             net: RefCell::new(net),
             transform,
+            #[cfg(test)]
             final_loss: outcome.final_train_loss,
+            #[cfg(test)]
             n_train_rows: fit_rows.len(),
+            #[cfg(test)]
             outcome,
             inference_batch_size: cfg.batch_size.max(1),
         })
@@ -1250,13 +1216,22 @@ mod test {
                 model.transform().width(),
                 3,
                 "seed {seed}: three survivors and NO companion — a companion would mean the \
-                 fit saw the column as missable, which is the case `check_clean` skips"
+                 fit saw the column as missable, outside the clean-column diagnostic path"
             );
 
-            let dirty = model.transform().check_clean(
-                &gather(&data, &held, 3),
-                &(0..held.len()).collect::<Vec<_>>(),
-            );
+            let dirty = {
+                let mut raw = vec![0.0; 3];
+                let mut marked = vec![false; 3];
+                for &row in &held {
+                    data.get_values(row, &mut raw);
+                    model.transform().mark_dirty_clean(&raw, &mut marked);
+                }
+                marked
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(lane, &is_dirty)| is_dirty.then_some(lane))
+                    .collect::<Vec<_>>()
+            };
             assert_eq!(
                 dirty,
                 &[2],
@@ -1275,14 +1250,14 @@ mod test {
                 .copied()
                 .filter(|i| !dirty_rows.contains(i))
                 .collect();
+            let mut raw = vec![0.0; 3];
+            let mut marked = vec![false; 3];
+            for &row in &clean_rows {
+                data.get_values(row, &mut raw);
+                model.transform().mark_dirty_clean(&raw, &mut marked);
+            }
             assert!(
-                model
-                    .transform()
-                    .check_clean(
-                        &gather(&data, &clean_rows, 3),
-                        &(0..clean_rows.len()).collect::<Vec<_>>()
-                    )
-                    .is_empty(),
+                marked.iter().all(|&is_dirty| !is_dirty),
                 "seed {seed}: rows with no NaN must not be reported, else the assertion \
                  above holds for any input"
             );

@@ -109,6 +109,7 @@ pub enum TimsSeekError {
     },
     DataProcessingError(DataProcessingError),
     LibraryReadingError(LibraryReadingError),
+    Rescore(crate::ml::RescoreError),
 }
 
 impl std::fmt::Display for TimsSeekError {
@@ -160,6 +161,12 @@ impl From<DataProcessingError> for TimsSeekError {
 impl From<LibraryReadingError> for TimsSeekError {
     fn from(x: LibraryReadingError) -> Self {
         Self::LibraryReadingError(x)
+    }
+}
+
+impl From<crate::ml::RescoreError> for TimsSeekError {
+    fn from(error: crate::ml::RescoreError) -> Self {
+        Self::Rescore(error)
     }
 }
 
