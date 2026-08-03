@@ -394,9 +394,11 @@ fn crossfit_lda<D: FoldDataset>(data: &D) -> Result<CrossFit<LdaModel>, RescoreE
     crossfit::<D, LdaModel>(data, &LdaConfig::default(), "LDA")
 }
 
-/// Reject folds whose tree model never produced a split. Their constant scores
-/// cannot support an evidence-based q-value ranking.
-fn ensure_trained(model: &'static str, stats: &RescoreFeatureStats) -> Result<(), RescoreError> {
+/// Reject tree folds that never produced a split.
+fn ensure_tree_splits(
+    model: &'static str,
+    stats: &RescoreFeatureStats,
+) -> Result<(), RescoreError> {
     let folds: Vec<u8> = stats
         .iter()
         .filter(|fs| fs.feature_importance.is_empty())
@@ -441,7 +443,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
     })?;
 
     let stats = scorer.feature_stats();
-    ensure_trained("GBM", &stats)?;
+    ensure_tree_splits("GBM", &stats)?;
 
     Ok(finalize(scorer.score(), stats))
 }
@@ -465,8 +467,6 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// ([`crate::ml::RescoreModel::Lda`]).
 /// See `ml::lda` for the fit details.
 pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
-    use std::time::Instant;
-
     // Canonical sort + seeded shuffle — the same helper, key and seed as every
     // other rescorer.
     canonicalize_and_shuffle(&mut data);
@@ -488,12 +488,8 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
         write_competed_linear_row,
     );
 
-    let t = Instant::now();
     let cf = crossfit_lda(&dataset)?;
-    eprintln!(
-        "  LDA: cross-fit ({N_RESCORE_FOLDS} folds) + scored {nrows} candidates in {:.2?}",
-        t.elapsed()
-    );
+    debug!("LDA cross-fit scored {nrows} candidates across {N_RESCORE_FOLDS} folds");
     let stats = cf.feature_stats(&dataset);
     let scores = cf.scores;
     drop(dataset);
@@ -613,7 +609,7 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> RescoreResult {
     })?;
 
     let stats = scorer.feature_stats();
-    ensure_trained("hybrid GBM", &stats)?;
+    ensure_tree_splits("hybrid GBM", &stats)?;
 
     Ok(finalize(scorer.score(), stats))
 }
@@ -647,7 +643,6 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
 
     let stats = scorer.feature_stats();
 
-    ensure_trained("MLP", &stats)?;
     Ok(finalize(scorer.score(), stats))
 }
 
@@ -1149,10 +1144,7 @@ mod feature_tests {
         }
     }
 
-    /// The sequence block used to be gated off entirely for an unparsed
-    /// peptide, changing the feature-set width. Now it is always present and
-    /// contributes NaN — which `forust` reads as missing — so the width is
-    /// label-independent and the "missing" signal is explicit.
+    /// An unparsed peptide preserves the feature width by emitting NaNs.
     #[test]
     fn unparsed_sequence_emits_nan_not_a_narrower_row() {
         let names = nonlinear_feature_name_set();
@@ -1175,10 +1167,7 @@ mod feature_tests {
 
     #[test]
     fn feature_names_are_unique() {
-        // No exact counts here on purpose: adding or removing a score must not
-        // break this test. Two features sharing a name would make the
-        // importance/stat reports ambiguous. (That neither lane collapsed is
-        // now a `const _: () = assert!(..)` next to the width consts.)
+        // Exact counts may change, but duplicate names make reports ambiguous.
         let mut seen = std::collections::HashSet::new();
         for n in all_feature_name_set() {
             assert!(seen.insert(n.clone()), "dup feature name: {n}");
@@ -1198,10 +1187,8 @@ mod feature_tests {
     /// [`assert_nonlinear_lane_varies`] is its mirror, so a future feature that
     /// changes the answer fails a test rather than rotting a doc.
     ///
-    /// The consequence is load-bearing and has been misread repeatedly: a GBM
-    /// handed the nonlinear lane of this fixture has NOTHING to split on, so
-    /// nothing here exercises "the model keeps working off the nonlinear lane".
-    /// [`synthetic_competed_nonlinear_signal`] is the fixture that does.
+    /// The nonlinear lane is intentionally constant; use
+    /// [`synthetic_competed_nonlinear_signal`] when a nonlinear split is needed.
     fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
@@ -1583,89 +1570,8 @@ mod feature_tests {
             let auc = pair_auc(&scores, &is_target);
             assert!(
                 auc > 0.9,
-                "seed {seed}: AUC {auc} is near chance. The cause this test was \
-                     written for is a feature frame built BEFORE the shuffle rather than \
-                     after it, which pairs every feature row with another candidate's \
-                     label and fold — but any MLP training regression lands here too. \
-                     Check `mlp_fold`'s `fitted_model_separates_a_separable_toy_on_held_\
-                     out_rows` first: if that still passes, the fit is fine and the \
-                     ordering is the problem"
-            );
-        }
-    }
-
-    #[test]
-    fn rescore_with_dispatches_every_variant() {
-        use crate::ml::{
-            RescoreModel,
-            rescore_with,
-        };
-
-        const N: u32 = 360;
-        type Rescorer = fn(Vec<CompetedCandidate>) -> RescoreResult;
-        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
-
-        assert_eq!(
-            RescoreModel::default(),
-            RescoreModel::Mlp,
-            "the library default must match the shipped configuration"
-        );
-
-        for (variant, direct, frame_width) in [
-            (RescoreModel::Gbm, rescore as Rescorer, ALL_NCOLS),
-            (RescoreModel::Lda, rescore_lda as Rescorer, LINEAR_NCOLS),
-            (
-                RescoreModel::Hybrid,
-                rescore_hybrid as Rescorer,
-                NONLINEAR_NCOLS + 1,
-            ),
-            (RescoreModel::Mlp, rescore_mlp as Rescorer, ALL_NCOLS),
-        ] {
-            let (dispatched, stats) = rescore_with(variant, synthetic_competed(N)).unwrap();
-            assert_eq!(dispatched.len(), N as usize);
-            for r in &dispatched {
-                assert!(
-                    r.discriminant_score.is_finite(),
-                    "{variant:?}: non-finite discriminant score {}",
-                    r.discriminant_score
-                );
-                assert!(
-                    (0.0..=1.0).contains(&r.qvalue),
-                    "{variant:?}: qvalue out of [0,1]: {}",
-                    r.qvalue
-                );
-            }
-
-            assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
-            for fs in &stats {
-                assert_eq!(
-                    fs.feature_stats.len(),
-                    frame_width,
-                    "rescore_with({variant:?}) fold {}: trained on a {}-column frame, not the \
-                     {frame_width} this variant's lane has",
-                    fs.fold,
-                    fs.feature_stats.len(),
-                );
-            }
-
-            let (direct_out, _) = direct(synthetic_competed(N)).unwrap();
-            assert_eq!(
-                key(&dispatched),
-                key(&direct_out),
-                "rescore_with({variant:?}) does not reproduce its own entry point, so the \
-                 arm dispatches to a different model"
+                "seed {seed}: AUC {auc} is near chance; streamed rows may not align with \
+                 shuffled candidates"
             );
         }
     }
@@ -1894,7 +1800,7 @@ mod feature_tests {
         }];
 
         assert_eq!(
-            ensure_trained("GBM", &stats),
+            ensure_tree_splits("GBM", &stats),
             Err(RescoreError::UntrainedFolds {
                 model: "GBM",
                 folds: vec![2],

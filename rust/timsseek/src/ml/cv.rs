@@ -286,28 +286,17 @@ fn partition_rows(nrows: usize, n_folds: usize) -> Vec<Vec<usize>> {
 /// Read-only, random-access view of the rows being cross-fitted.
 ///
 /// Everything a [`FoldModel`] is allowed to know about the data: the width and
-/// names of the lane matrix, THE fold partition, one row's values, and one
-/// row's target/decoy label. Deliberately no `ncols` (it is
-/// `column_names().len()`) and no `names` argument threaded through the model
-/// impls — the dataset already knows both, so there is no second copy to drift.
+/// names of the lane matrix, the fold partition, one row's values, and one
+/// row's target/decoy label. The dataset owns the authoritative names list.
 pub(crate) trait FoldDataset: Sync {
     fn nrows(&self) -> usize;
     /// Lane column names; also defines the row width.
-    fn column_names(&self) -> Vec<Arc<str>>;
-    /// THE partition. One definition, one place.
+    fn column_names(&self) -> &[Arc<str>];
+    /// The row partition.
     fn get_fold(&self, i: usize) -> usize;
     /// Writes row `i` into `out` (`out.len() == column_names().len()`).
-    ///
-    /// EVERY element of `out` must be written, and that requirement acquired
-    /// teeth: it used to be a formality because callers handed over a freshly
-    /// zeroed buffer per row, so a partial write left `0.0` in the gap. The MLP's
-    /// validation pass now streams its held-out rows through ONE REUSED buffer
-    /// (see `MlpFoldModel::fit`), so a partial write there leaves the PREVIOUS
-    /// validation row's values in the gap instead — cross-row contamination of the
-    /// stopping decision rather than a zero, and equally silent. The only impl is
-    /// a `copy_from_slice`, which panics on a length mismatch rather than
-    /// half-filling, so nothing violates this today; a second impl is where it
-    /// would matter.
+    /// Implementations must overwrite every element because callers reuse the
+    /// output buffer across rows.
     fn get_values(&self, i: usize, out: &mut [f64]);
     fn is_decoy(&self, i: usize) -> bool;
 }
@@ -345,8 +334,8 @@ impl<T: FeatureLike + Sync> FoldDataset for StreamingDataset<'_, T> {
         self.data.len()
     }
 
-    fn column_names(&self) -> Vec<Arc<str>> {
-        self.names.clone()
+    fn column_names(&self) -> &[Arc<str>] {
+        &self.names
     }
 
     fn get_fold(&self, i: usize) -> usize {
@@ -422,13 +411,8 @@ pub(crate) trait FoldModel: Sized {
     /// * Any FINITE value, **including `0.0`**, is a reported measurement and
     ///   reaches the sidecar as-is.
     ///
-    /// The distinction is load-bearing and the two cases are NOT the same
-    /// thing. A tree model that never split on a column has measured nothing
-    /// about it (`NAN`); an LDA whose `|coef|` came out exactly `0.0` for a
-    /// dead or constant column has measured precisely that, and dropping it
-    /// would delete the columns an operator most wants to see. `0.0` used to
-    /// carry both meanings, and the `!= 0.0` filter at the [`fold_feature_stats`]
-    /// boundary silently applied the first model's semantics to every model.
+    /// A tree model that never split on a column reports `NAN`; a finite zero
+    /// remains a reported measurement and is retained in the sidecar.
     fn importance(&self) -> Vec<f32>;
 }
 
@@ -445,7 +429,7 @@ pub(crate) struct RowMajorDataset {
 }
 
 /// How a [`CrossValidatedScorer`] obtains feature rows. Tree/LDA callers keep
-/// their precomputed matrix; the MLP uses the streaming arm so the 128-wide raw
+/// their precomputed matrix; the MLP uses the streaming arm so the raw
 /// `f64` frame never exists. The function pointer writes one complete row into
 /// caller-owned scratch.
 enum FeatureSource<T> {
@@ -470,10 +454,10 @@ impl<T: FeatureLike + Sync> FoldDataset for ScorerDataset<'_, T> {
         self.data.len()
     }
 
-    fn column_names(&self) -> Vec<Arc<str>> {
+    fn column_names(&self) -> &[Arc<str>] {
         match self.source {
             FeatureSource::Precomputed(d) => d.column_names(),
-            FeatureSource::Streaming { names, .. } => names.clone(),
+            FeatureSource::Streaming { names, .. } => names,
         }
     }
 
@@ -507,9 +491,7 @@ impl RowMajorDataset {
             features.ncols,
             "column names must be one per matrix column"
         );
-        // `is_decoy` is the ONLY label channel the model traits get, so the
-        // labels have to be binary for it to be lossless. Both producers
-        // (`FeatureVector::get_y` walks and `from_row_major`) feed 0.0/1.0.
+        // Labels must be binary because `is_decoy` is the model's label channel.
         assert!(
             features.responses.iter().all(|&y| y == 0.0 || y == 1.0),
             "FoldDataset labels must be binary 0.0/1.0"
@@ -527,8 +509,8 @@ impl FoldDataset for RowMajorDataset {
         self.features.responses.len()
     }
 
-    fn column_names(&self) -> Vec<Arc<str>> {
-        self.names.clone()
+    fn column_names(&self) -> &[Arc<str>] {
+        &self.names
     }
 
     fn get_fold(&self, i: usize) -> usize {
@@ -823,10 +805,7 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
         // unmeasured columns would otherwise pad the averaging divisor with
         // values it never produced.
         //
-        // The filter is `is_finite`, NOT `!= 0.0`: the old rule was written for
-        // the tree model, where 0.0 did mean "never split on this", and then
-        // silently deleted an LDA's genuine zero-weight columns — exactly the
-        // dead/constant features an operator reads the sidecar to find.
+        // Retain finite zeroes: they are reported measurements.
         let importance: Vec<(Arc<str>, f32)> = match models.get(fold).copied().flatten() {
             Some(model) => {
                 let raw_imp = model.importance();
@@ -880,7 +859,7 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
                 .map(|(((name, s), fc), nc)| {
                     let mean = if *fc > 0 { *s / *fc as f64 } else { f64::NAN };
                     FeatureStat {
-                        name: name.clone(),
+                        name: Arc::clone(name),
                         mean: mean as f32,
                         nan_ratio: *nc as f32 / n as f32,
                     }

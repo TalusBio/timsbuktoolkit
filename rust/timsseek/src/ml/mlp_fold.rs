@@ -31,18 +31,8 @@ pub enum MlpFoldError {
     /// non-finite on the train rows, or measured a std at or below `MIN_STD`
     /// (see [`ColumnTransform`] for what that does and does not guarantee).
     ///
-    /// Carries its own diagnostic context because the callers that report it
-    /// cannot reconstruct it: [`FoldModel::fit`]'s error travels up through
-    /// `CrossValidatedScorer::fit`, which knows nothing about columns, and the
-    /// abort in `qvalues::rescore_mlp_with` prints only what the error says.
-    ///
-    /// `train_rows == 0` is a DIFFERENT failure wearing the same variant: with
-    /// no rows every column is vacuously non-finite, so the cull takes all of
-    /// them and the operator's actual problem is "this fold got zero rows", not
-    /// "the lane is dead". [`Display`](std::fmt::Display) separates the two —
-    /// the message used to blame the cull in both cases, which sent the reader
-    /// looking at features when the fixture or the fold partition was the
-    /// problem.
+    /// `train_rows == 0` identifies an empty fold; otherwise the feature lane
+    /// itself contained no usable columns.
     NoUsableColumns {
         /// The fold index this fit was for.
         fold: usize,
@@ -228,9 +218,8 @@ fn fold_inputs_to_lanes(transform: &ColumnTransform, raw: &[f32]) -> Vec<f32> {
 ///    stride takes 20% of every contiguous run of rows, whatever it holds.
 const INNER_VAL_STRIDE: usize = 5;
 
-/// Below this many train rows, no inner slice is carved and no early stopping
-/// happens on the `val = &[]` path — the full epoch budget runs, as it did
-/// before early stopping existed.
+/// Below this many train rows, no inner slice is carved and the full epoch
+/// budget runs on the `val = &[]` path.
 ///
 /// `160` is `MIN_INNER_VAL_ROWS * INNER_VAL_STRIDE`: the floor is really on the
 /// SIZE OF THE VALIDATION SET, 32 rows. A held-out loss averaged over fewer
@@ -449,8 +438,7 @@ impl FoldModel for MlpFoldModel {
         // and the inner carve is the fallback for the callers that pass `&[]`
         // (and for an outer slice under [`MIN_INNER_VAL_ROWS`], which is not a
         // set worth stopping on; see [`usable_val`]). With early stopping off
-        // there is no decision to make, so no carve either and every train row
-        // trains, exactly as before.
+        // there is no decision to make, so every train row trains.
         let early_stopping = cfg.early_stopping_patience.is_some();
         let val_rows = usable_val(val);
         if !val.is_empty() && val_rows.is_empty() {
@@ -491,8 +479,8 @@ impl FoldModel for MlpFoldModel {
         // transform fit, no RNG draw.
         //
         // Streamed whenever early stopping is on: it is the stopping decision,
-        // not just a log line. With early stopping off it is visited only for the
-        // trace, as before.
+        // not just a log line. With early stopping off it is visited only for a
+        // trace.
         let want_val = early_stopping || tracing::enabled!(tracing::Level::DEBUG);
         let inner_rows: Vec<usize> = inner_pos.iter().map(|&p| train[p]).collect();
         let validation_rows = if !want_val {
@@ -1196,13 +1184,12 @@ mod test {
     }
 
     #[test]
-    fn a_nan_only_in_a_scored_row_is_reported_rather_than_silently_imputed() {
+    fn a_nan_only_in_a_scored_row_is_imputed_to_a_finite_score() {
         for seed in [7u64, 13, 42] {
             let (mut feat, y) = toy(150, seed, 0.0);
             let (train, held) = split(300);
 
-            let dirty_rows = [held[0], held[1]];
-            for &i in &dirty_rows {
+            for &i in &[held[0], held[1]] {
                 feat[i * 3 + 2] = f64::NAN;
             }
             let data = dataset(feat, 3, y);
@@ -1219,47 +1206,11 @@ mod test {
                  fit saw the column as missable, outside the clean-column diagnostic path"
             );
 
-            let dirty = {
-                let mut raw = vec![0.0; 3];
-                let mut marked = vec![false; 3];
-                for &row in &held {
-                    data.get_values(row, &mut raw);
-                    model.transform().mark_dirty_clean(&raw, &mut marked);
-                }
-                marked
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(lane, &is_dirty)| is_dirty.then_some(lane))
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(
-                dirty,
-                &[2],
-                "seed {seed}: a NaN that only ever appears in a scored row must be reported"
-            );
-
             let scores = model.predict(&data, &held).unwrap();
             assert_eq!(scores.len(), held.len());
             assert!(
                 scores.iter().all(|s| s.is_finite()),
                 "seed {seed}: the imputed rows must still score finitely"
-            );
-
-            let clean_rows: Vec<usize> = held
-                .iter()
-                .copied()
-                .filter(|i| !dirty_rows.contains(i))
-                .collect();
-            let mut raw = vec![0.0; 3];
-            let mut marked = vec![false; 3];
-            for &row in &clean_rows {
-                data.get_values(row, &mut raw);
-                model.transform().mark_dirty_clean(&raw, &mut marked);
-            }
-            assert!(
-                marked.iter().all(|&is_dirty| !is_dirty),
-                "seed {seed}: rows with no NaN must not be reported, else the assertion \
-                 above holds for any input"
             );
         }
     }

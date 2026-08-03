@@ -45,8 +45,6 @@ pub enum RescoreModel {
 }
 
 /// Dispatch to the rescorer named by `model`.
-///
-/// Tests pin every arm against its direct entry point.
 pub fn rescore_with(model: RescoreModel, data: Vec<CompetedCandidate>) -> RescoreResult {
     match model {
         RescoreModel::Gbm => rescore(data),

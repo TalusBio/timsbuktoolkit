@@ -114,7 +114,19 @@ pub enum TimsSeekError {
 
 impl std::fmt::Display for TimsSeekError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        match self {
+            Self::Rescore(error) => error.fmt(f),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for TimsSeekError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Rescore(error) => Some(error),
+            _ => None,
+        }
     }
 }
 

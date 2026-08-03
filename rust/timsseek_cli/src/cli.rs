@@ -31,9 +31,7 @@ impl From<CliRescoreModel> for RescoreModel {
     }
 }
 
-// Keep the mirror exhaustive in both directions. Adding a variant to either
-// enum now requires updating a conversion rather than silently omitting a CLI
-// value.
+#[cfg(test)]
 impl From<RescoreModel> for CliRescoreModel {
     fn from(v: RescoreModel) -> Self {
         match v {

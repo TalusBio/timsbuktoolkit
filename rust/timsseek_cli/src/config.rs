@@ -151,9 +151,7 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
-    /// Serde and clap derive names independently, so verify the user-facing
-    /// spellings agree. Reciprocal conversions keep the variant sets exhaustive
-    /// in both directions.
+    /// Serde and clap derive names independently, so verify their spellings.
     #[test]
     fn rescore_model_spellings_agree_between_cli_and_toml() {
         use crate::cli::CliRescoreModel;
@@ -178,7 +176,6 @@ rt = "Unrestricted"
                  {model:?} differently"
             );
 
-            // ...and that spelling really does deserialize out of a config.
             let src = MINIMAL_TOML.replace(
                 "chunk_size = 20000",
                 &format!("chunk_size = 20000\nrescore_model = \"{toml_name}\""),

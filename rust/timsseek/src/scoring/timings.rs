@@ -15,8 +15,8 @@ use super::skip::SkipCounts;
 use serde::Serialize;
 use std::time::Duration;
 
-pub use timscentroid::{
-    ProgressGroup,
+pub(crate) use timscentroid::timings::ProgressGroup;
+pub use timscentroid::timings::{
     TimedStep,
     make_progress_bar,
 };

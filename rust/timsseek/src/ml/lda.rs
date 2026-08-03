@@ -1,10 +1,8 @@
 //! Sage-style two-class Fisher LDA (github.com/lazear/sage) with ridge
 //! shrinkage: `w = (Sw + lambda*I)^-1 (mu_t - mu_d)`, targets projecting high.
 //!
-//! Fits the LINEAR lane only (`LINEAR_NCOLS`, 101 columns today). That lane is
-//! NOT the GBM's input — the GBM sees the ALL lane (`ALL_NCOLS`, 128), including
-//! the 22-wide `sequence_counts` block, which has no linear lane and never
-//! reaches LDA.
+//! Fits the linear feature lane only. Sequence-count features have no linear
+//! representation and therefore never reach LDA.
 //!
 //! Features are z-standardized before the fit (Fisher LDA is scale-invariant,
 //! but the `lambda * I` term is not), and non-finite values are imputed to the
@@ -15,7 +13,6 @@ use crate::ml::cv::{
     FoldModel,
 };
 use crate::utils::maybe_par::chunked_fold_reduce;
-use std::time::Instant;
 
 /// Fraction of `mean(diag(Sw))` added to the diagonal as ridge shrinkage.
 /// Small enough to barely perturb a well-conditioned problem, large enough to
@@ -88,7 +85,6 @@ impl LdaModel {
         }
 
         // --- Standardization stats (finite values only), parallel reduce ---
-        let t = Instant::now();
         let (sum, sumsq, cnt) = chunked_fold_reduce(
             rows,
             CHUNK_ROWS,
@@ -162,15 +158,8 @@ impl LdaModel {
             let n = class_cnt[c] as f64;
             (0..ncols).map(|j| class_sum[c][j] / n).collect()
         });
-        eprintln!(
-            "  LDA: streamed standardization + class means ({} rows x {ncols} feats) in {:.2?}",
-            rows.len(),
-            t.elapsed()
-        );
-
         // --- Pass 3: pooled within-class scatter Sw (parallel, D x D) ---
         // Sw = sum_c (1/n_c) sum_{i in c} (z_i - mu_c)(z_i - mu_c)^T
-        let t = Instant::now();
         let dd = ncols * ncols;
         let mut sw = chunked_fold_reduce(
             rows,
@@ -222,8 +211,6 @@ impl LdaModel {
         for e in 0..ncols * ncols {
             sw_within[e] = sw[e] + sw[ncols * ncols + e];
         }
-        eprintln!("  LDA: within-class scatter in {:.2?}", t.elapsed());
-
         // --- Ridge shrinkage: Sw += lambda_eff * I ---
         let mut diag_sum = 0.0f64;
         for j in 0..ncols {
