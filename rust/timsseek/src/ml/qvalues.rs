@@ -591,14 +591,6 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, Resco
         write_competed_linear_row,
     );
 
-    // Optional raw-feature dump for offline feature-engineering iteration.
-    // `TIMSSEEK_LDA_DUMP=/prefix` streams `<prefix>.f64` row by row,
-    // `<prefix>.labels` (u8, 1=target), `<prefix>.names.txt`. This is the
-    // same on-disk row-major format as before, without an in-memory matrix.
-    if let Ok(prefix) = std::env::var("TIMSSEEK_LDA_DUMP") {
-        dump_streaming_feature_matrix(&prefix, &dataset, &names);
-    }
-
     let t = Instant::now();
     let (scores, stats) = match crossfit_lda(&dataset) {
         Some(cf) => {
@@ -945,45 +937,6 @@ fn rescore_mlp_with(
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> (Vec<FinalResult>, RescoreFeatureStats) {
     rescore_mlp_with(data, MlpConfig::default())
-}
-
-/// Stream raw feature rows + labels to the existing offline format. Best-effort:
-/// logs and returns on any I/O error rather than aborting the run or retaining a
-/// matrix merely because diagnostics were requested.
-fn dump_streaming_feature_matrix<D: FoldDataset>(prefix: &str, data: &D, names: &[Arc<str>]) {
-    use std::io::Write;
-    let write = || -> std::io::Result<()> {
-        let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{prefix}.f64"))?);
-        let mut labels =
-            std::io::BufWriter::new(std::fs::File::create(format!("{prefix}.labels"))?);
-        let nrows = data.nrows();
-        let ncols = names.len();
-        // Header: nrows, ncols as u64 little-endian, then row-major f64, also
-        // little-endian. The reader is offline python, which assumes LE.
-        f.write_all(&(nrows as u64).to_le_bytes())?;
-        f.write_all(&(ncols as u64).to_le_bytes())?;
-        let mut row = vec![0.0f64; ncols];
-        for i in 0..nrows {
-            data.get_values(i, &mut row);
-            for v in &row {
-                f.write_all(&v.to_le_bytes())?;
-            }
-            labels.write_all(&[u8::from(!data.is_decoy(i))])?;
-        }
-        f.flush()?;
-        labels.flush()?;
-        let names_txt = names
-            .iter()
-            .map(|s| s.as_ref())
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(format!("{prefix}.names.txt"), names_txt)?;
-        Ok(())
-    };
-    match write() {
-        Ok(()) => eprintln!("  LDA: dumped feature matrix to {prefix}.{{f64,labels,names.txt}}"),
-        Err(e) => tracing::error!("feature dump failed: {e}"),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,16 +1480,12 @@ mod feature_tests {
                 c.scoring.identity.library_id = i;
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
-                // Give the linear lane (counts) label-correlated variance.
                 let base: u8 = if is_target { 20 } else { 8 };
                 let jitter = (i % 5) as u8;
                 c.scoring.counts.rising_cycles = base + jitter;
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                // The two `ResultMeta` fields. Both are LINEAR-lane features
-                // (all-lane columns 90 and 91, inside `LINEAR_NCOLS`) — this is
-                // MORE linear signal, not nonlinear signal. See the doc above.
                 c.delta_group = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
                 c.delta_group_ratio = if is_target { 0.8 } else { 0.3 };
                 c
@@ -1544,23 +1493,6 @@ mod feature_tests {
             .collect()
     }
 
-    /// [`synthetic_competed`] with its two `ResultMeta` fields reset to the
-    /// sample defaults, which removes LINEAR-lane signal — NOT nonlinear signal.
-    ///
-    /// `delta_group` / `delta_group_ratio` are all-lane columns 90 and 91, i.e.
-    /// inside `LINEAR_NCOLS`, so this fixture's nonlinear lane is bit-constant
-    /// for exactly the reason `synthetic_competed`'s already is: nothing either
-    /// one varies reaches that lane. What resetting them buys is a NARROWER
-    /// linear lane — only the four count fields vary — so a hybrid's cross-fit
-    /// score column is the sole channel by which any signal at all can reach the
-    /// GBM.
-    ///
-    /// Built for the hybrid tests, where "the GBM cannot separate these rows
-    /// without the appended column" has to be a fact about the fixture rather
-    /// than a hope. That the nonlinear lane is flat is stated by MEASUREMENT at
-    /// the point of use ([`assert_nonlinear_lane_is_flat`]), not by this comment,
-    /// so a new nonlinear feature that varies with something set here fails
-    /// loudly instead of quietly weakening the test.
     fn synthetic_competed_linear_only(n: u32) -> Vec<CompetedCandidate> {
         synthetic_competed(n)
             .into_iter()
@@ -1573,8 +1505,6 @@ mod feature_tests {
             .collect()
     }
 
-    /// A peptide of exactly `len` residues, so a fixture can put label signal in
-    /// the `sequence_counts` block — the tail of the NONLINEAR lane.
     fn peptide_of_len(len: usize) -> Peptide {
         const ALPHABET: &[u8] = b"PEPTIDEKAVLGSR";
         let raw: String = (0..len)
@@ -1592,15 +1522,6 @@ mod feature_tests {
         }
     }
 
-    /// The fixture [`synthetic_competed`] is NOT: label signal in the NONLINEAR
-    /// lane, carried by peptide length (and therefore by the residue counts) so
-    /// that a GBM handed the nonlinear lane alone has something to split on.
-    ///
-    /// Needed because `synthetic_competed`'s nonlinear lane is entirely CONSTANT
-    /// — measured, not assumed: `delta_group` and `delta_group_ratio`, the fields
-    /// it varies for "GBM signal", are all-lane columns 90 and 91, i.e. inside
-    /// `LINEAR_NCOLS`. So no fixture in this file could exercise "the GBM keeps
-    /// working off the rest of the frame" before this one, at any row count.
     fn synthetic_competed_nonlinear_signal(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
@@ -1615,10 +1536,6 @@ mod feature_tests {
             .collect()
     }
 
-    /// EXACTLY what a hybrid's failure arm hands the GBM: the nonlinear lane plus
-    /// an all-zero score column, through the real [`hybrid_frame`] and the real
-    /// [`CrossValidatedScorer`]. The only thing not reproduced is the failing
-    /// cross-fit that would have produced those zeros.
     fn degraded_hybrid(
         mut data: Vec<CompetedCandidate>,
     ) -> (Vec<FinalResult>, RescoreFeatureStats) {
@@ -1639,9 +1556,6 @@ mod feature_tests {
         finalize(scorer.score(), stats)
     }
 
-    /// Not one nonlinear-lane column is constant across `fixture`'s rows — the
-    /// mirror of [`assert_nonlinear_lane_is_flat`], and the premise of the
-    /// benign-degradation half below.
     fn assert_nonlinear_lane_varies(fixture: &[CompetedCandidate]) {
         let nl = build_nonlinear_matrix(fixture);
         let varying = nonlinear_feature_name_set()
@@ -1662,32 +1576,8 @@ mod feature_tests {
         );
     }
 
-    /// THE PREMISE of the hybrid's failure policy: when a cross-fit fails, the
-    /// appended column goes uniformly zero and the GBM carries on off the rest of
-    /// the frame — so the run degrades to a weaker model rather than to a
-    /// meaningless one.
-    ///
-    /// That claim was shipped in `abort_standalone_mlp`'s doc as the whole reason
-    /// the hybrid may degrade where the standalone rescorer aborts, and it was
-    /// UNTESTED. This test pins both halves of it, because the claim is
-    /// CONDITIONAL and the condition is not decorative:
-    ///
-    /// * (a) with a trainable nonlinear lane, the degraded frame builds trees and
-    ///   ranks targets above decoys — the premise holds;
-    /// * (b) with `synthetic_competed`, whose nonlinear lane is entirely constant,
-    ///   the SAME degraded frame reports no importance on any fold and emits one
-    ///   score per fold. The q-values are then pure shuffle order — precisely the
-    ///   outcome the standalone abort exists to prevent.
-    ///
-    /// (b) is not a bug being documented as a feature: it is the boundary of the
-    /// premise, and `rescore_hybrid` detects that exact state at runtime (see
-    /// [`untrained_folds`]) and says so
-    /// in the log instead of returning it quietly. Do not delete (b) — without it
-    /// the next reader will believe the degradation is unconditionally benign,
-    /// which is the error this test was written to correct.
     #[test]
     fn degraded_hybrid_ranks_only_when_the_rest_of_the_frame_is_trainable() {
-        // (a) THE PREMISE, on a fixture whose nonlinear lane can be trained.
         let trainable = synthetic_competed_nonlinear_signal(360);
         assert_nonlinear_lane_varies(&trainable);
         let (out, stats) = degraded_hybrid(trainable);
@@ -1715,8 +1605,6 @@ mod feature_tests {
             "the runtime detector must not fire when every fold of the degraded frame trained"
         );
 
-        // (b) THE CONDITION, on the suite's main fixture: nonlinear lane constant,
-        // so the same degradation yields one constant score per fold.
         let flat = synthetic_competed(360);
         assert_nonlinear_lane_is_flat(&flat, "lda_score");
         let (out, stats) = degraded_hybrid(flat);
@@ -1748,254 +1636,6 @@ mod feature_tests {
         );
     }
 
-    /// THE WORST STATE, and the one a `all`-based detector was blind to: SOME
-    /// folds of a degraded frame build trees and some build none.
-    ///
-    /// Two thirds of the rows then carry a per-fold constant while one third
-    /// carries real discriminant values, so a row's score distribution is a
-    /// function of its POSITION IN THE SEEDED SHUFFLE. [`crossfit`]'s failure
-    /// policy names that exact shape as the one that "silently corrupts the
-    /// q-value ranking … in a way that no downstream check would catch", and it is
-    /// worse than the uniform case precisely because it is not uniform: uniform
-    /// scores are visibly degenerate, a fold-dependent mixture looks like a
-    /// working result.
-    ///
-    /// The row count is chosen from a measured plateau, not guessed:
-    /// `synthetic_competed_nonlinear_signal` through the degraded frame gives
-    /// `[0, 0, 0]` at 192-198, `[1, 0, 0]` at 200-206, `[1, 0, 1]` at 208 and
-    /// `[1, 2, 1]` at 210. 204 sits in the middle of the partial plateau. The
-    /// partial-ness is ASSERTED rather than assumed, so a shift in that boundary
-    /// fails here instead of quietly turning this into a second copy of the
-    /// uniform test.
-    #[test]
-    fn detector_fires_when_only_some_folds_of_a_degraded_frame_trained() {
-        let (_out, stats) = degraded_hybrid(synthetic_competed_nonlinear_signal(204));
-        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
-
-        let untrained = untrained_folds(&stats);
-        assert!(
-            untrained > 0 && untrained < stats.len(),
-            "fixture premise broken: this must be the PARTIAL state (some folds trained, some \
-             did not), or it does not distinguish `any` from `all`. importance lengths: {:?}",
-            stats
-                .iter()
-                .map(|fs| fs.feature_importance.len())
-                .collect::<Vec<_>>()
-        );
-
-        // THE ASSERTION, on the REPORTER and not just on the count: a threshold of
-        // `== stats.len()` would keep the worst outcome on the degraded path off
-        // the operator's log entirely.
-        let capture = |degraded: Option<&str>| -> String {
-            let log = ErrorLog::default();
-            tracing::subscriber::with_default(log.clone(), || {
-                report_untrained_folds("nonlinear + lda_score", degraded, &stats)
-            });
-            let msgs = log.messages();
-            msgs.iter()
-                .find(|m| m.contains("built no trees"))
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "a PARTIALLY untrained frame was not reported at all — the worst state \
-                         on this path reached an operator in silence. Captured: {msgs:#?}"
-                    )
-                })
-        };
-
-        // Both diagnoses must reach the log, and both must carry the count and
-        // the partial-ness — those are what separate the fold-dependent case
-        // from the uniform one.
-        let with_degradation = capture(Some("lda_score"));
-        let untrained_only = capture(None);
-        for hit in [&with_degradation, &untrained_only] {
-            assert!(
-                hit.contains(&format!("{untrained} of {} GBM folds", stats.len())),
-                "the message must say HOW MANY folds failed, or the operator cannot tell the \
-                 fold-dependent case from the uniform one: {hit}"
-            );
-            assert!(
-                hit.contains("fold-dependent"),
-                "a partial failure must be named as such — it is worse than the uniform case, \
-                 not better: {hit}"
-            );
-        }
-
-        // …and they must stay DISTINGUISHABLE: "the fallback column degraded AND
-        // nothing trained" is a different diagnosis from "nothing trained at
-        // all", and an operator acts on them differently.
-        assert!(
-            with_degradation.contains("lda_score")
-                && with_degradation.contains("zeroed by a failed cross-fit"),
-            "the degraded arm must name the zeroed column and say it was zeroed: \
-             {with_degradation}"
-        );
-        assert!(
-            !untrained_only.contains("zeroed by a failed cross-fit"),
-            "with no cross-fit failure the message must not invent one — that sends the reader \
-             looking at the wrong half of the pipeline: {untrained_only}"
-        );
-        assert!(
-            untrained_only.contains("no failed cross-fit"),
-            "the untrained-only arm has to say the cross-fit was fine, or it reads as the \
-             degraded one with a word missing: {untrained_only}"
-        );
-    }
-
-    /// A `tracing::Subscriber` that records ERROR-level messages, so a test can
-    /// assert an operator would actually SEE something rather than that a
-    /// predicate returned true.
-    ///
-    /// Hand-rolled: `tracing-subscriber` is not a dependency of this crate and
-    /// this work may not add one.
-    #[derive(Clone, Default)]
-    struct ErrorLog(Arc<std::sync::Mutex<Vec<String>>>);
-
-    impl ErrorLog {
-        fn messages(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl tracing::Subscriber for ErrorLog {
-        fn enabled(&self, md: &tracing::Metadata<'_>) -> bool {
-            *md.level() == tracing::Level::ERROR
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            if *event.metadata().level() != tracing::Level::ERROR {
-                return;
-            }
-            struct Msg(String);
-            impl tracing::field::Visit for Msg {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        self.0 = format!("{value:?}");
-                    }
-                }
-            }
-            let mut msg = Msg(String::new());
-            event.record(&mut msg);
-            self.0.lock().unwrap().push(msg.0);
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// THE WIRING for the hybrid: a degraded frame that trained nothing must
-    /// reach the LOG, not just a predicate.
-    ///
-    /// [`untrained_folds`] being right is worth nothing if the rescorer never calls
-    /// it, so this drives the real public entry point and asserts on captured ERROR
-    /// output.
-    ///
-    /// `indistinguishable_competed(24)` makes the LDA scatter matrix singular even
-    /// after shrinkage. The GBM then trains on a constant nonlinear lane, so no
-    /// fold builds a tree and the detector must fire.
-    #[test]
-    fn hybrid_logs_a_degraded_frame_that_trained_nothing() {
-        let column = "lda_score";
-        let log = ErrorLog::default();
-        tracing::subscriber::with_default(log.clone(), || {
-            rescore_hybrid(indistinguishable_competed(24));
-        });
-
-        let msgs = log.messages();
-        let hit = msgs.iter().find(|m| {
-            m.contains(column) && m.contains("built no trees") && m.contains("NOT usable")
-        });
-        assert!(hit.is_some(), "degraded hybrid was not logged: {msgs:#?}");
-        let hit = hit.unwrap();
-        assert!(hit.contains(&format!(
-            "{} of {} GBM folds",
-            N_RESCORE_FOLDS, N_RESCORE_FOLDS
-        )));
-    }
-
-    /// THE WIRING for the DEFAULT rescorer, which is the path most users run and
-    /// the one the detector was originally not pointed at.
-    ///
-    /// [`rescore`] has no cross-fit column, so under the old `degraded`-gated
-    /// check it could never report anything: a search below
-    /// `GBMConfig::default`'s `min_leaf_weight` floor emitted per-fold constants
-    /// and q-values that rank by shuffle order, silently. That is pre-existing
-    /// behavior rather than a regression, which is exactly why it needed a test —
-    /// nothing else on this branch would have noticed the omission.
-    ///
-    /// `indistinguishable_competed(24)` makes every ALL-lane column bit-constant,
-    /// so no fold builds a tree (see the fixture's doc). The message must ALSO not
-    /// blame a cross-fit failure, because there was no cross-fit: the two
-    /// diagnoses are different and an operator acts on them differently.
-    #[test]
-    fn plain_rescore_reports_a_frame_that_trained_nothing() {
-        let log = ErrorLog::default();
-        tracing::subscriber::with_default(log.clone(), || {
-            rescore(indistinguishable_competed(24));
-        });
-
-        let msgs = log.messages();
-        let hit = msgs
-            .iter()
-            .find(|m| m.contains("built no trees") && m.contains("NOT usable"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "the default rescorer trained nothing and said nothing — the detector is \
-                     not wired into the path most users run. Captured ERROR messages: {msgs:#?}"
-                )
-            });
-        assert!(
-            hit.contains(&format!(
-                "{} of {} GBM folds",
-                N_RESCORE_FOLDS, N_RESCORE_FOLDS
-            )),
-            "every fold was untrained here, so the message must say so: {hit}"
-        );
-        assert!(
-            !hit.contains("zeroed by a failed cross-fit"),
-            "`rescore` has no cross-fit column to zero, so blaming one sends the reader to a \
-             stage this path does not have: {hit}"
-        );
-    }
-
-    /// The cross-fit must actually HOLD OUT: a row's score has to come from a
-    /// model that never saw that row.
-    ///
-    /// Construction (60 rows, alternating target/decoy, 3 columns) — every
-    /// column is a label copy or label-balanced noise, arranged so the only
-    /// thing that could separate FOLD 0 is a column that is constant on every
-    /// other fold:
-    ///
-    /// * `col0` — a copy of the label on fold-0 rows (`i % N_RESCORE_FOLDS == 0`)
-    ///   and exactly `0.0` everywhere else.
-    /// * `col1` — the mirror: a copy of the label on non-fold-0 rows, `0.0` on
-    ///   fold-0 rows. Keeps the training folds separable so the fit is not
-    ///   degenerate.
-    /// * `col2` — varies per row but is label-balanced inside EVERY fold (each
-    ///   value appears once as a target and once as a decoy per fold), so it
-    ///   supplies within-class scatter — needed for a non-singular `Sw` — with
-    ///   no discriminative signal in any subset of folds.
-    ///
-    /// The model for fold 0 is fitted on folds 1..N only, where `col0` is
-    /// constant -> zero weight; and fold-0 rows all have `col1 == 0`. So every
-    /// held-out fold-0 score must collapse to the SAME value: zero separation.
-    /// An in-sample fit over all rows does see `col0` track the label and
-    /// separates those very rows cleanly. Both halves are asserted — the
-    /// in-sample control is what stops the first assertion from passing
-    /// vacuously (e.g. for a helper that returned all zeros).
     #[test]
     fn crossfit_lda_scores_are_held_out() {
         const N: usize = 60;
@@ -2009,17 +1649,10 @@ mod feature_tests {
             let in_fold0 = i % n_folds == 0;
             feat.push(if in_fold0 { label } else { 0.0 }); // col0
             feat.push(if in_fold0 { 0.0 } else { label }); // col1
-            // col2: constant within each block of 6 consecutive rows. A block of
-            // 6 holds exactly one target and one decoy of each fold, so this
-            // column's class means are equal in every fold and in every union of
-            // folds.
             feat.push(((i / (2 * n_folds)) % 5) as f64); // col2
             is_decoy.push(!is_target(i));
         }
 
-        // Same matrix, handed over as the dataset the cross-fit now reads
-        // through. `RowMajorDataset`'s `get_fold` IS `i % N_RESCORE_FOLDS`, so
-        // the fold-0 construction above still describes the partition exactly.
         let responses: Vec<f64> = is_decoy
             .iter()
             .map(|&d| if d { 0.0 } else { 1.0 })
@@ -2041,7 +1674,6 @@ mod feature_tests {
         let fold0: Vec<usize> = (0..N).step_by(n_folds).collect();
         assert!(fold0.iter().any(|&i| is_target(i)) && fold0.iter().any(|&i| !is_target(i)));
 
-        // (a) HELD OUT: fold-0 scores carry no information -> they are all equal.
         let held: Vec<f64> = fold0.iter().map(|&i| cf.scores[i]).collect();
         let spread = held.iter().cloned().fold(f64::MIN, f64::max)
             - held.iter().cloned().fold(f64::MAX, f64::min);
@@ -2050,9 +1682,6 @@ mod feature_tests {
             "held-out fold-0 scores must not separate; spread={spread} scores={held:?}"
         );
 
-        // (b) CONTROL: the same rows, scored by an in-sample fit over ALL rows,
-        // separate perfectly — so (a) is a property of the hold-out, not of the
-        // data being unlearnable.
         let insample = LdaModel::fit_matrix(&feat, N, 3, &is_decoy, DEFAULT_SHRINKAGE).unwrap();
         let (mut min_t, mut max_d) = (f64::MAX, f64::MIN);
         for &i in &fold0 {
@@ -2074,13 +1703,6 @@ mod feature_tests {
         );
     }
 
-    /// 90 rows, like `rescore_mlp_is_deterministic_on_both_lanes` and for the same
-    /// reason: `min_leaf_weight`'s no-trees trap is a property of `GBMConfig` and
-    /// this path trains no GBM. An LDA reports a finite `|coef|` for every linear
-    /// -lane column at any row count, so the non-empty assertions below cannot go
-    /// vacuous the way a GBM's sparse importance can. The row count is free here,
-    /// so it is small. (It sat at 360 for a while with no comment saying why, which
-    /// read as if the GBM trap applied.)
     #[test]
     fn rescore_lda_is_cross_fit_and_deterministic() {
         let n = 90;
@@ -2089,9 +1711,6 @@ mod feature_tests {
 
         assert_eq!(out_a.len(), n as usize);
 
-        // Per-fold stats, one FoldStats per fold (the GBM path's shape), which
-        // also proves every fold's LDA fit succeeded — the single-fit path used
-        // to emit exactly one `fold: 0` entry.
         assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
         for (f, fs) in stats_a.iter().enumerate() {
             assert_eq!(fs.fold, f as u8);
@@ -2126,19 +1745,6 @@ mod feature_tests {
         assert_eq!(key(&out_a), key(&out_b), "lda rescore not deterministic");
     }
 
-    /// The LDA sidecar is FULL WIDTH: one importance row per linear-lane
-    /// feature, per fold, including the features whose `|coef|` is exactly 0.0.
-    ///
-    /// An LDA looks at every column, so it has a measurement for every column —
-    /// a zero weight means "this feature is dead or constant in this fold",
-    /// which is a finding, not a gap. The sidecar used to lose those rows to a
-    /// `!= 0.0` filter meant for the tree model's "never split on this"
-    /// sentinel; under `synthetic_competed` most linear fields are constant, so
-    /// that filter dropped the large majority of the lane here.
-    ///
-    /// Both directions are pinned: the width, and that the zeros are really
-    /// present (a full-width vector of all-nonzero values would satisfy the
-    /// length check alone).
     #[test]
     fn lda_sidecar_reports_every_linear_feature_including_zero_weights() {
         let (_out, stats) = rescore_lda(synthetic_competed(90));
@@ -2164,7 +1770,6 @@ mod feature_tests {
             );
         }
 
-        // Names are the linear lane exactly — no duplicates, no strays.
         let lane: std::collections::HashSet<Arc<str>> =
             linear_feature_name_set().into_iter().collect();
         let reported: std::collections::HashSet<Arc<str>> = stats[0]
@@ -2175,34 +1780,6 @@ mod feature_tests {
         assert_eq!(reported, lane);
     }
 
-    // -----------------------------------------------------------------
-    // MLP rescorer
-    // -----------------------------------------------------------------
-
-    /// Test config for the MLP rescorer: same architecture family as
-    /// [`MlpConfig::default`], shrunk so the seed sweeps below stay fast, and
-    /// with the batch size cut so the fixtures here (90-360 rows) actually get
-    /// several minibatch steps per epoch instead of one full-batch step. The
-    /// default is left alone on purpose — tuning a production default for test
-    /// runtime is how a default stops meaning anything.
-    ///
-    /// # Why `lr` is pinned at `1e-3`
-    /// It is pinned rather than inherited because these fixtures MEASURABLY need
-    /// this value: `3e-4` (the default until the 2026-07 retune) under-trains at
-    /// this budget, and `mlp_crossfit_scores_are_held_out`'s leak control — which
-    /// has to reach AUC > 0.99 on a 30-row fold to keep the hold-out assertion it
-    /// guards non-vacuous — only reaches 0.92 there. So do not "align it with the
-    /// default" without re-running that test, in either direction: the default is
-    /// now `1.2e-3`, ABOVE this, and these fixtures are 90-360 rows rather than
-    /// the millions the default was tuned on.
-    ///
-    /// This also used to read as a contradiction of a warning on
-    /// [`MlpConfig::default`] that `1e-2`/`1e-3` "walked a 2-input ReLU net into a
-    /// dead-unit plateau". That warning has moved to the `MlpConfig::lr` field
-    /// docs, where it is now scoped to the regime it was observed in (the 2-input
-    /// XOR fixture, not a real rescore lane); 150 epochs at batch 16 is one to two
-    /// orders of magnitude more steps than the fixture that trapped, and the
-    /// plateau does not reproduce across the four-seed sweeps below.
     fn mlp_test_cfg(seed: u64) -> MlpConfig {
         MlpConfig {
             hidden: vec![16, 8],
@@ -2214,10 +1791,6 @@ mod feature_tests {
         }
     }
 
-    /// Fraction of (target, decoy) pairs ranked correctly, ties counted as half
-    /// a win. Threshold-free and invariant to the logit's offset and scale,
-    /// which is what makes it comparable between a held-out fit and an
-    /// in-sample one.
     fn pair_auc(scores: &[f64], is_target: &[bool]) -> f64 {
         let pick = |want: bool| -> Vec<f64> {
             scores
@@ -2242,10 +1815,6 @@ mod feature_tests {
         acc / (t.len() * d.len()) as f64
     }
 
-    /// A bare [`FeatureLike`] row: a label and a score slot, which is all
-    /// [`CrossValidatedScorer`] reads from `T` once the matrix is supplied
-    /// externally. Lets the leak test below drive the REAL scorer over a
-    /// hand-built matrix instead of re-deriving its partition.
     struct LabelRow {
         y: f64,
         score: f64,
@@ -2265,44 +1834,6 @@ mod feature_tests {
         }
     }
 
-    /// The MLP cross-fit must actually HOLD OUT: a row's score has to come from
-    /// a model that never saw that row.
-    ///
-    /// This re-points the `crossfit_lda_scores_are_held_out` construction at
-    /// [`CrossValidatedScorer`] + [`MlpFoldModel`], i.e. the exact pair
-    /// [`rescore_mlp_with`] uses. The re-pointing is not cosmetic: the two
-    /// partitions differ, and the fixture has to be built for the one under
-    /// test. Under `CrossValidatedScorer` with `N_RESCORE_FOLDS == 3`, model `f`
-    /// trains on fold `f`, early-stops on `f + 1` and scores fold `f + 2`, so
-    /// FOLD 0 IS SCORED BY MODEL 1 ALONE — trained on fold-1 rows only. (Under
-    /// `crossfit_lda` it would instead be scored by a model trained on folds 1
-    /// AND 2.)
-    ///
-    /// Construction (90 rows, alternating target/decoy, 3 columns):
-    ///
-    /// * `col0` — a copy of the label on fold-0 rows, exactly `0.0` elsewhere.
-    ///   Constant on fold-1 rows, so `ColumnTransform` CULLS it from model 1
-    ///   outright: the leaking column is not even an input to the model that
-    ///   scores fold 0.
-    /// * `col1` — the mirror: the label on non-fold-0 rows, `0.0` on fold-0
-    ///   rows. Keeps model 1 learnable (so the fit is not degenerate) while
-    ///   being a constant input on every row it scores.
-    /// * `col2` — constant within each block of `2 * n_folds` consecutive rows.
-    ///   A block holds exactly one target and one decoy of each fold, so within
-    ///   fold 0 the targets and the decoys carry the IDENTICAL multiset of
-    ///   values. It supplies genuine variance without discriminative signal.
-    ///
-    /// So the only input that varies across the fold-0 rows model 1 scores is
-    /// `col2`, whose values pair up exactly between the classes: the held-out
-    /// AUC must be exactly 0.5.
-    ///
-    /// NON-VACUITY is the in-sample control, and it is doing real work here:
-    /// fitted over ALL rows, `col0` is no longer constant, survives the cull,
-    /// and tracks the label on precisely the rows being scored — so the same
-    /// model class on the same data separates them perfectly. Without it, a
-    /// `predict` that returned a constant, a scorer that never fitted, or a
-    /// fixture whose data was simply unlearnable would all sail through the
-    /// first assertion.
     #[test]
     fn mlp_crossfit_scores_are_held_out() {
         const N: usize = 90;
@@ -2325,11 +1856,7 @@ mod feature_tests {
         let fold0_is_target: Vec<bool> = fold0.iter().map(|&i| is_target(i)).collect();
         assert!(fold0_is_target.iter().any(|&b| b) && fold0_is_target.iter().any(|&b| !b));
 
-        // Several seeds: the MLP's initialization is the one thing that varies
-        // run to run, and a single seed reports an init-dependent training trap
-        // as a clean pass or a leak purely on luck.
         for seed in [7u64, 13, 42, 1234] {
-            // (a) HELD OUT, through the real scorer and the real partition.
             let rows: Vec<LabelRow> = responses
                 .iter()
                 .map(|&y| LabelRow { y, score: 0.0 })
@@ -2354,8 +1881,6 @@ mod feature_tests {
                  scores them. AUC={held_auc} scores={held:?}"
             );
 
-            // (b) CONTROL: same model class, same data, fitted IN SAMPLE over
-            // every row, scoring those same fold-0 rows.
             let dataset = RowMajorDataset::new(
                 PrecomputedFeatures::from_row_major(feat.clone(), 3, responses.clone()),
                 names.clone(),
@@ -2378,10 +1903,6 @@ mod feature_tests {
                  (AUC={insample_auc}); without it the hold-out assertion is vacuous"
             );
 
-            // (c) THE LEAK, made concrete: this is the model a partition bug
-            // would hand fold 0 — trained on fold-0 rows, where `col0` is the
-            // label. It separates them perfectly. So (a) is measuring the
-            // partition, not a fixture that happens to be unlearnable.
             let leaky = MlpFoldModel::fit(&mlp_test_cfg(seed), &dataset, 0, &fold0, &[]).unwrap();
             let leaky_auc = pair_auc(&leaky.predict(&dataset, &fold0).unwrap(), &fold0_is_target);
             assert!(
@@ -2392,16 +1913,6 @@ mod feature_tests {
         }
     }
 
-    /// Determinism + the per-fold sidecar shape for the MLP rescorer over
-    /// several seeds. Bit-identical is the assertion, as in
-    /// `rescore_lda_is_cross_fit_and_deterministic`: the whole q-value pipeline
-    /// is a ranking of these scores, so "close" is not a property worth having.
-    ///
-    /// 90 rows, not the 360 the GBM-bearing tests need. `min_leaf_weight`'s
-    /// no-trees trap is a property of `GBMConfig`, and this path trains no GBM:
-    /// `MlpFoldModel` reports a finite importance for every lane column at any
-    /// row count, so the full-width assertions below cannot go vacuous the way a
-    /// GBM's sparse importance can. The row count is free here, so it is small.
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
@@ -2439,10 +1950,6 @@ mod feature_tests {
                 "seed {seed}: mlp rescore not deterministic"
             );
 
-            // One FoldStats per fold, FULL WIDTH on both halves. Stronger
-            // than the LDA path's non-empty checks, and it can be: the MLP
-            // measures every lane column (0.0 for the culled ones), so
-            // anything short of the lane width is a dropped row.
             assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
             for (f, fs) in stats_a.iter().enumerate() {
                 assert_eq!(fs.fold, f as u8);
@@ -2469,21 +1976,6 @@ mod feature_tests {
         }
     }
 
-    /// ROW ALIGNMENT: the streamed feature source must be read AFTER
-    /// [`canonicalize_and_shuffle`], so projected row `i` is `data[i]`.
-    ///
-    /// Nothing in the type system says so — both orders compile, both produce a
-    /// correctly-shaped feature stream, and both run to completion. What a pre-shuffle
-    /// build changes is which LABEL and which FOLD each feature row is paired
-    /// with: the shuffle is a permutation, so every row would carry another
-    /// candidate's label. The model then has nothing to learn and the scores
-    /// land at chance.
-    ///
-    /// `synthetic_competed` gives targets and decoys clearly different counts,
-    /// so a correctly-aligned fit ranks them apart; the assertion is that it
-    /// does, well above the 0.5 a misaligned build is pinned to. The upper
-    /// bound is not asserted — how WELL it separates is the model's business,
-    /// not this test's.
     #[test]
     fn mlp_streamed_rows_are_aligned_with_the_shuffled_data() {
         for seed in [7u64, 13, 42, 1234] {
@@ -2504,105 +1996,6 @@ mod feature_tests {
         }
     }
 
-    /// The public entry point uses the default [`MlpConfig`], stays deterministic,
-    /// and trains on the complete feature set.
-    #[test]
-    fn public_mlp_entry_point_trains_on_all_features() {
-        let (out_a, stats) = rescore_mlp(synthetic_competed(90));
-        let (out_b, _) = rescore_mlp(synthetic_competed(90));
-        assert_eq!(out_a.len(), 90);
-        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
-
-        let expected: std::collections::HashSet<Arc<str>> =
-            all_feature_name_set().into_iter().collect();
-        for fs in &stats {
-            let reported: std::collections::HashSet<Arc<str>> = fs
-                .feature_importance
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect();
-            assert_eq!(
-                reported, expected,
-                "fold {} used the wrong features",
-                fs.fold
-            );
-        }
-
-        let bits = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
-        assert_eq!(bits(&out_a), bits(&out_b));
-        assert!(out_a.iter().all(|r| r.discriminant_score.is_finite()));
-    }
-
-    /// The enum dispatch must reproduce the public MLP entry point exactly.
-    #[test]
-    fn rescore_with_dispatches_mlp() {
-        use crate::ml::{
-            RescoreModel,
-            rescore_with,
-        };
-
-        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
-
-        let (out, stats) = rescore_with(RescoreModel::Mlp, synthetic_competed(90));
-        assert_eq!(out.len(), 90);
-        assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
-        let direct = rescore_mlp(synthetic_competed(90)).0;
-        assert_eq!(key(&out), key(&direct));
-    }
-
-    /// THE DEFAULT PATH, plus the `Gbm` / `Lda` / `Hybrid` arms of
-    /// [`rescore_with`].
-    ///
-    /// [`rescore`] is what runs when nobody sets `rescore_model`, and nothing
-    /// called it before this test. Its three arms had nothing pinning their
-    /// mapping either: the same untype-checked dispatch that
-    /// `rescore_with_dispatches_mlp` covers for the MLP, and it matters more here,
-    /// because `Gbm` is the one that runs by
-    /// default.
-    ///
-    /// Pinned on BIT-IDENTICAL scores against the entry point each arm is
-    /// supposed to call. That is stronger than a sidecar-name comparison, which
-    /// pins only the FEATURE SET. Every path
-    /// here is deterministic run to run — pinned separately by
-    /// `rescore_lda_is_cross_fit_and_deterministic` and
-    /// `rescore_hybrid_smoke_and_determinism` — so bit-equality is a fair test.
-    ///
-    /// The frame WIDTH is checked too, off `feature_stats` (whose names come from
-    /// the dataset's columns rather than from the model, so they hold with or
-    /// without trees). The three widths are distinct — `ALL_NCOLS`,
-    /// `LINEAR_NCOLS`, `NONLINEAR_NCOLS + 1` — so this alone separates the three
-    /// arms' lanes.
-    ///
-    /// NON-VACUITY is the last block: the three arms must produce three DIFFERENT
-    /// score vectors, or "each arm calls its own entry point" would also hold for
-    /// a permutation of them. `n = 360` is what makes that true.
-    /// `GBMConfig::default`'s `min_leaf_weight` of 5.0 exceeds a 30-row fold's
-    /// total logloss hessian, so at 90 rows both GBM-bearing arms emit one
-    /// constant per fold and would be far harder to tell apart. Do not shrink it.
     #[test]
     fn rescore_with_dispatches_the_default_and_the_non_mlp_variants() {
         use crate::ml::{
@@ -2626,8 +2019,6 @@ mod feature_tests {
             v
         };
 
-        // The variant the config file advertises as the default really is the
-        // one `#[default]` selects — the flag being absent has to land on `Gbm`.
         assert_eq!(
             RescoreModel::default(),
             RescoreModel::Gbm,
@@ -2660,7 +2051,6 @@ mod feature_tests {
                 );
             }
 
-            // (a) THE FRAME the model was handed.
             assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
             for fs in &stats {
                 assert_eq!(
@@ -2673,7 +2063,6 @@ mod feature_tests {
                 );
             }
 
-            // (b) THE MODEL: bit-identical to the entry point this arm names.
             let (direct_out, _) = direct(synthetic_competed(N));
             assert_eq!(
                 key(&dispatched),
@@ -2685,7 +2074,6 @@ mod feature_tests {
             seen.push((variant, key(&dispatched)));
         }
 
-        // (c) NON-VACUITY: three distinct models, three distinct score vectors.
         for i in 0..seen.len() {
             for j in (i + 1)..seen.len() {
                 assert_ne!(
@@ -2698,34 +2086,12 @@ mod feature_tests {
         }
     }
 
-    /// Smoke + determinism for the LDA hybrid.
-    ///
-    /// # Why the importance assertion is here
-    /// Every OTHER assertion in this test holds in the regime where the GBM
-    /// builds no trees at all: a per-fold constant score is finite, its q-values
-    /// are in `[0, 1]`, and it is bit-identical run to run. `GBMConfig::default`'s
-    /// `min_leaf_weight` of 5.0 exceeds a 30-row fold's total logloss hessian, so
-    /// at `n = 90` this test would pass while measuring nothing but the
-    /// reproducibility of a constant — measured: `n = 90` gives per-fold
-    /// importance lengths `[0, 0, 0]`, `n = 360` gives `[1, 1, 1]`.
-    ///
-    /// `n = 360` is therefore load-bearing, and the non-empty importance check is
-    /// what makes it so: an empty importance means no tree was ever built, i.e.
-    /// the output does not depend on the features, the appended `lda_score`
-    /// column, or anything else this test names. Do not drop it, and do not
-    /// shrink `n` without watching it fail.
-    ///
-    /// It does NOT claim the output depends on `lda_score` specifically — that is
-    /// `hybrid_lda_score_carries_the_linear_lane_into_the_gbm`'s job, on a fixture
-    /// built so that nothing else could carry the signal.
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
         let n = 360;
         let (out_a, stats_a) = rescore_hybrid(synthetic_competed(n));
         let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n));
 
-        // NON-VACUITY, first: if this fails, every assertion below is about a
-        // per-fold constant rather than about a trained model.
         assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
         for fs in &stats_a {
             assert!(
@@ -2737,11 +2103,9 @@ mod feature_tests {
             );
         }
 
-        // (a) output length preserved
         assert_eq!(out_a.len(), n as usize);
         assert_eq!(out_b.len(), n as usize);
 
-        // (b) all discriminant scores finite, (c) qvalues in [0, 1]
         for r in &out_a {
             assert!(
                 r.discriminant_score.is_finite(),
@@ -2755,7 +2119,6 @@ mod feature_tests {
             );
         }
 
-        // (d) determinism: same seed + sort key -> identical scores per candidate.
         let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
             let mut v: Vec<(u32, u32)> = out
                 .iter()
@@ -2776,13 +2139,6 @@ mod feature_tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Hybrid fold-assignment contract
-    // -----------------------------------------------------------------
-
-    /// A [`FoldModel`] that fits nothing and records the row slice it was handed.
-    /// Lets a test read a partition's TRAIN set back out of the driver that built
-    /// it, without a real fit's cost or its failure modes.
     struct FoldSpy {
         train: Vec<usize>,
         ncols: usize,
@@ -2818,52 +2174,17 @@ mod feature_tests {
         }
     }
 
-    /// THE assertion the hybrid's leak-freedom rests on: [`crossfit`] and
-    /// [`CrossValidatedScorer`] must agree on the fold ASSIGNMENT.
-    ///
-    /// They deliberately DISAGREE on the train/score split — `crossfit` fits on
-    /// all-but-fold-`f` and scores fold `f`, the scorer fits on fold `f` alone
-    /// and scores the folds that are neither it nor its early-stopping
-    /// neighbour. Both are leak-free on their own. What is not safe is the two
-    /// slicing the rows into DIFFERENT folds: then a row's `lda_score` can come
-    /// from an LDA trained on rows the GBM is holding out, and because the
-    /// offending value sits in a FEATURE rather than in the score, the GBM's own
-    /// cross-validation cannot see it — the only symptom is an optimistically
-    /// wrong FDR.
-    ///
-    /// So the check is a set equality between the two sides, not each side
-    /// against a re-typed `i % N_RESCORE_FOLDS`: a repeated modulo is exactly
-    /// the arrangement that let them drift before, and this test would pass
-    /// against a drifted pair if it re-derived the answer itself.
-    ///
-    /// `N` is deliberately NOT a multiple of `N_RESCORE_FOLDS`, so a fold-size
-    /// off-by-one has somewhere to show up.
-    ///
-    /// Both sides go through THE HYBRID'S OWN HELPERS rather than a hand-built
-    /// `RowMajorDataset`: [`hybrid_linear_dataset`] for the cross-fit's dataset
-    /// and [`hybrid_frame`] for the scorer's. Each of those spells
-    /// `N_RESCORE_FOLDS as usize` in its own body, and an earlier version of this
-    /// test pinned the two DRIVERS while leaving those two literals uncompared —
-    /// so a hybrid could have handed one side a differently-folded dataset and
-    /// this test would still have passed.
     #[test]
     fn crossfit_holds_out_exactly_the_rows_the_gbm_scorer_trains_on() {
         const N: usize = 47;
 
-        // The real pre-rescore sequence, so the row order under test is the one a
-        // hybrid actually partitions.
         let mut data = synthetic_competed(N as u32);
         canonicalize_and_shuffle(&mut data);
         let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
 
-        // Side A: the cross-fit that produces `lda_score`, over the
-        // dataset `rescore_hybrid` builds for it.
         let lin_dataset = hybrid_linear_dataset(&data);
         let cf = crossfit::<_, FoldSpy>(&lin_dataset, &(), "spy").expect("the spy cannot fail");
 
-        // Side B: the GBM scorer the hybrid hands that column to, over the frame
-        // `hybrid_frame` builds. No fit needed — the partition is built in the
-        // constructor.
         let (precomputed, names) = hybrid_frame(&data, responses, "spy_score", cf.scores.clone());
         let scorer =
             CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
@@ -2874,9 +2195,6 @@ mod feature_tests {
                 names,
             );
 
-        // (a) SAME ASSIGNMENT. `cf.fold_rows[f]` is the rows model `f` SCORED,
-        // which under `crossfit` is exactly fold `f` — the same set the scorer
-        // TRAINS its model `f` on.
         assert_eq!(
             cf.fold_rows,
             scorer.fold_rows(),
@@ -2885,8 +2203,6 @@ mod feature_tests {
              the GBM is holding out"
         );
 
-        // (b) and the split really is the complement: model `f` trained on every
-        // row it did NOT score, so no row is scored by a model that saw it.
         for (f, model) in cf.models.iter().enumerate() {
             let scored = &cf.fold_rows[f];
             let expected: Vec<usize> = (0..N).filter(|i| !scored.contains(i)).collect();
@@ -2897,29 +2213,11 @@ mod feature_tests {
             );
         }
 
-        // (c) non-vacuity for (a): the partition is a real partition (every row
-        // in exactly one fold), so (a) is not comparing two empty shapes.
         let mut seen: Vec<usize> = cf.fold_rows.iter().flatten().copied().collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..N).collect::<Vec<_>>());
     }
 
-    /// `n` candidates that are IDENTICAL in every feature — only `library_id`
-    /// (a positional index, not a feature) and the label differ.
-    ///
-    /// Every lane column is therefore bit-constant, and at `n = 24` — the only
-    /// size any caller passes, in this module and above this definition as well as
-    /// below it — the variance `ColumnTransform` computes as `sumsq/n - mean^2`
-    /// comes out EXACTLY zero, so it culls all `ALL_NCOLS` of them and
-    /// `MlpFoldModel::fit` has nothing left to train on. A GBM handed the same
-    /// fixture likewise builds no trees, which is what the detector tests use it
-    /// for.
-    ///
-    /// THE ROW COUNT IS LOAD-BEARING and cannot be scaled freely: that expression
-    /// keeps a hair of floating-point residue on a constant column of realistic
-    /// magnitude once the row count gets large enough, and the residue clears
-    /// `MIN_STD` (1e-12). `n = 24` keeps the eight-row MLP training folds below
-    /// that numerical boundary.
     fn indistinguishable_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
@@ -2931,148 +2229,12 @@ mod feature_tests {
             .collect()
     }
 
-    /// FAILURE POLICY: a standalone MLP fold that cannot be fitted ABORTS the
-    /// run. It does not fall back to a uniform score.
-    ///
-    /// This is the decision the panic encodes, so it is pinned as a test rather
-    /// than left to a comment: a uniform fallback would give every row the same
-    /// discriminant and therefore q-values
-    /// that are a function of the seeded shuffle order alone — meaningless, and
-    /// indistinguishable from a real result in the output file. A future reader
-    /// "unifying" the two policies has to delete this test to do it.
-    ///
-    /// The `expected` substring covers the policy (aborted), the entry point and
-    /// the LANE. The diagnostic tail is `MlpFoldError`'s own `Display`, pinned in
-    /// `mlp_fold`'s `fit_rejects_a_fully_culled_matrix` and
-    /// `an_empty_train_slice_reports_zero_rows_rather_than_blaming_the_cull`; the
-    /// abort only interpolates it.
-    ///
-    /// The row count is not free — see [`indistinguishable_competed`].
     #[test]
     #[should_panic(expected = "MLP rescore aborted: all-feature lane")]
     fn standalone_mlp_aborts_rather_than_scoring_every_row_the_same() {
         rescore_mlp_with(indistinguishable_competed(24), mlp_test_cfg(7));
     }
 
-    /// The abort's three arms must say DIFFERENT things, and the difference is the
-    /// whole point of matching on the variant.
-    ///
-    /// `scorer.fit()` surfaces all three: `NoUsableColumns` from the fit, and
-    /// `WidthMismatch` / `NonFiniteScore` through `assign_scores` -> `get_scores`
-    /// -> `predict`. Only the first is a statement about the INPUT that a different
-    /// `rescore_model` could work around. A single message for all of them sent an
-    /// operator to their config over an internal invariant violation.
-    ///
-    /// Driven straight at [`abort_standalone_mlp`] because neither predict-side arm
-    /// is reachable from a fixture: [`rescore_mlp_with`] hands the scorer the very
-    /// dataset the scorer then predicts against (so a width mismatch would require
-    /// the bug the message exists for), and no input can make the net diverge on
-    /// demand — `mlp_fold`'s `predict_rejects_a_non_finite_logit_instead_of_
-    /// returning_it` covers that half by poisoning a fitted net. The
-    /// `NoUsableColumns` arm is covered end to end by
-    /// `standalone_mlp_aborts_rather_than_scoring_every_row_the_same`.
-    ///
-    /// Every panic reaches stderr while this runs — the default hook is left in
-    /// place on purpose rather than swapped out, since a `set_hook` here would
-    /// silence any concurrently-running test's panic message too.
-    #[test]
-    fn the_abort_blames_the_config_only_for_the_input_failure() {
-        let message = |e: MlpFoldError| -> String {
-            let payload = std::panic::catch_unwind(move || abort_standalone_mlp(24, e))
-                .expect_err("abort_standalone_mlp diverges");
-            payload
-                .downcast_ref::<String>()
-                .cloned()
-                .expect("panic! with a format string carries a String payload")
-        };
-
-        let dead_lane = message(MlpFoldError::NoUsableColumns {
-            fold: 2,
-            ncols: ALL_NCOLS,
-            train_rows: 16,
-        });
-        let bad_width = message(MlpFoldError::WidthMismatch {
-            fitted: ALL_NCOLS,
-            got: LINEAR_NCOLS,
-        });
-        let diverged = message(MlpFoldError::NonFiniteScore {
-            row: 17,
-            n_bad: 8,
-            scored: 24,
-        });
-
-        // Shared: all name the abort, the lane, and the error's own diagnostic.
-        for (what, msg) in [
-            ("dead lane", &dead_lane),
-            ("width", &bad_width),
-            ("diverged", &diverged),
-        ] {
-            assert!(
-                msg.contains("MLP rescore aborted: all-feature lane")
-                    && msg.contains(&format!("{ALL_NCOLS} columns"))
-                    && msg.contains("24 candidates"),
-                "{what}: the abort must place itself (lane, width, row count): {msg}"
-            );
-        }
-
-        // The INPUT failure points at the config, and names the fold — that comes
-        // from `MlpFoldError`'s own Display, which is why the variant carries it.
-        assert!(
-            dead_lane.contains("rescore_model") && dead_lane.contains("fold 2"),
-            "a dead lane is an input problem: say which fold, and offer the way out: {dead_lane}"
-        );
-
-        // The INVARIANT violation must NOT, and must say so in as many words.
-        assert!(
-            bad_width.contains("INTERNAL INVARIANT VIOLATION")
-                && bad_width.contains("will not help"),
-            "a width mismatch is a code defect, not a config problem, and the message has to \
-             say so rather than leaving the reader to infer it: {bad_width}"
-        );
-        assert!(
-            !bad_width.contains("no usable fallback"),
-            "the width arm must not reuse the dead-lane advice, which is what sent an \
-             operator to their config over a code defect: {bad_width}"
-        );
-        assert!(
-            bad_width.contains(&format!("{LINEAR_NCOLS} lane columns"))
-                && bad_width.contains(&format!("fitted on {ALL_NCOLS}")),
-            "the two widths are the only actionable content here: {bad_width}"
-        );
-
-        // The NUMERIC failure must name the discriminant — the whole reason this
-        // is an error rather than a value is that `assign_qval` would have blamed
-        // the sort instead.
-        assert!(
-            diverged.contains("DISCRIMINANT SCORE") && diverged.contains("sorted"),
-            "a non-finite logit has to say it IS the score and that the downstream abort \
-             would have blamed the sort, or the next reader re-diagnoses it from scratch: \
-             {diverged}"
-        );
-        assert!(
-            diverged.contains("dataset row 17") && diverged.contains("8 of 24"),
-            "the row and the count come from `MlpFoldError`'s Display, which is why the \
-             variant carries them: {diverged}"
-        );
-        assert!(
-            !diverged.contains("INTERNAL INVARIANT VIOLATION")
-                && !diverged.contains("no usable fallback"),
-            "a diverged fit is neither a code defect nor a dead lane, and reusing either \
-             arm's advice would misdirect: {diverged}"
-        );
-    }
-
-    /// The premise the hybrid score test rests on:
-    /// not one nonlinear-lane column varies across `fixture`'s rows, so a GBM
-    /// handed the nonlinear lane has literally nothing to split on and cannot
-    /// rank better than chance. Anything above chance downstream therefore had to
-    /// arrive through the appended `column` and nowhere else.
-    ///
-    /// Checked rather than assumed, and checked per-feature rather than by a
-    /// count, so a future nonlinear feature that happens to vary with something
-    /// `synthetic_competed_linear_only` sets fails loudly here instead of quietly
-    /// giving the GBM a second signal and turning both tests into "the GBM can
-    /// separate something".
     fn assert_nonlinear_lane_is_flat(fixture: &[CompetedCandidate], column: &str) {
         let nl = build_nonlinear_matrix(fixture);
         for (j, name) in nonlinear_feature_name_set().iter().enumerate() {
@@ -3086,28 +2248,6 @@ mod feature_tests {
         }
     }
 
-    /// `lda_score` is not decoration: it is the channel through which the LINEAR
-    /// lane reaches a GBM that is never shown it.
-    ///
-    /// This is the test that observes whether the shipping path's `lda_score` column is
-    /// CORRECT rather than merely present.
-    ///
-    /// `rescore_hybrid_smoke_and_determinism` gets part of the way and cannot
-    /// finish the job. It runs at 360 rows on `synthetic_competed`, whose
-    /// nonlinear lane is bit-constant, so `lda_score` is the GBM's only
-    /// splittable column and its non-vacuity check does catch a fully DEAD one:
-    /// measured, a zeroed column takes that fixture's per-fold importance from
-    /// `[1, 1, 1]` to `[0, 0, 0]` and the assertion fires. What it cannot catch is
-    /// a column that is alive but WRONG — row-permuted, truncated, or filled with
-    /// noise — because its only other assertions are that two runs of the same
-    /// function agree with each other. This fixture makes `lda_score` the sole
-    /// non-constant column and then asserts on the resulting AUC, so it is a
-    /// statement about the column's VALUES.
-    ///
-    /// No seed sweep: the LDA is a closed-form solve with no initialization to
-    /// vary, so there is no seed for the "sweep seeds where a model is trained"
-    /// rule to sweep — a rerun is bit-identical by construction, which
-    /// `rescore_lda_is_cross_fit_and_deterministic` already pins.
     #[test]
     fn hybrid_lda_score_carries_the_linear_lane_into_the_gbm() {
         assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "lda_score");

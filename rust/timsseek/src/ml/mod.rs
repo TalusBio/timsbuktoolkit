@@ -11,14 +11,6 @@ pub use qvalues::{
     rescore_mlp,
 };
 
-/// Parse and validate the dev-only `TIMSSEEK_MLP_*` overrides early.
-///
-/// The MLP configuration and implementation stay private; the CLI only needs
-/// this startup check so a malformed sweep variable fails before extraction.
-pub fn validate_mlp_env_overrides() {
-    let _ = mlp::MlpConfig::from_env();
-}
-
 use crate::scoring::results::{
     CompetedCandidate,
     FinalResult,

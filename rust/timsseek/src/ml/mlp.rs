@@ -1,27 +1,7 @@
-//! Small in-process MLP for rescoring, ported from `dev/mlp.rs`.
+//! Small in-process MLP for rescoring.
 //!
-//! Differences from the reference implementation, all deliberate:
-//!
-//!  * **Single-logit head with BCE-with-logits**, not a 2-class softmax. The
-//!    score handed to `assign_qval` only needs a monotone ranking, so the
-//!    probability transform is dead weight.
-//!  * **Per-row sample weights**, so the MLP inherits the same 0.5/1.0
-//!    target/decoy class balance the GBM uses (`cv.rs`).
-//!  * **No BatchNorm in the default architecture.** Inputs are standardized once
-//!    by [`ColumnTransform`], which is where the leading BatchNorm's job went.
-//!    `BatchNorm` is still ported and gradient-tested — it is the first thing to
-//!    try if training turns out unstable — but keeping it off the default path
-//!    means a non-finite value cannot poison a batch mean and corrupt every
-//!    other row in the batch.
-//!  * **Seeded `StdRng`** rather than the vendored xorshift, so the crate has
-//!    one RNG story.
-//!  * **No BatchNorm folding / `FoldedMlp` / `Sgd` / softmax / argmax**.
-//!    Inference here is batched and in-process, so folding buys nothing.
-//!
-//! All tensors are flat `Vec<f32>`, row-major, `[batch][features]`. The `Mlp`
-//! owns every activation and gradient buffer; buffers grow but never shrink, so
-//! steady-state training does no allocation. The public boundary is `f64`,
-//! matching the lane matrices the rest of `ml::` passes around.
+//! Tensors are flat row-major `f32` buffers. Training and scoring consume
+//! regenerated batches, so a full candidate or fold matrix is never retained.
 
 // Index-based loops are deliberate throughout. These are numeric kernels where
 // one index walks several parallel arrays at once (`w`/`gw`, `mean`/`var`/
@@ -35,10 +15,6 @@ use rand::rngs::StdRng;
 use rand::{
     Rng as _,
     SeedableRng,
-};
-use std::time::{
-    Duration,
-    Instant,
 };
 
 /// Checked, safe boundary around [`sgemm`] for the layouts used by this MLP.
@@ -117,23 +93,6 @@ fn gemm_f32(
     }
 }
 
-/// Opt-in production timing buckets. Durations are accumulated over every
-/// minibatch/epoch in one fold; `train_wall` and `validation_wall` are elapsed
-/// wall time, while their component buckets are consumer-thread CPU time.
-#[derive(Default)]
-pub(crate) struct MlpRuntimeProfile {
-    pub train_wall: Duration,
-    pub validation_wall: Duration,
-    pub train_forward: Duration,
-    pub train_loss: Duration,
-    pub train_backward: Duration,
-    pub adam: Duration,
-    pub validation_forward: Duration,
-    pub validation_loss: Duration,
-    pub train_batches: u64,
-    pub validation_batches: u64,
-}
-
 // ---------------------------------------------------------------- tensor
 
 /// Flat row-major `[rows][cols]` buffer.
@@ -163,6 +122,7 @@ impl Tensor {
         self.cols = cols;
     }
 
+    #[cfg(test)]
     pub fn rows(&self) -> usize {
         self.rows
     }
@@ -198,7 +158,7 @@ type ParamSlots<'a> = Vec<(&'a mut [f32], &'a mut [f32], bool)>;
 
 pub trait Layer: Send {
     fn out_dim(&self) -> usize;
-    fn forward(&mut self, x: &Tensor, out: &mut Tensor, training: bool);
+    fn forward(&mut self, x: &Tensor, out: &mut Tensor);
     /// `x` = layer input, `y` = layer output, `gy` = dL/dy, writes dL/dx into `gx`.
     fn backward(&mut self, x: &Tensor, y: &Tensor, gy: &Tensor, gx: &mut Tensor);
     fn params_and_grads(&mut self) -> ParamSlots<'_> {
@@ -260,7 +220,7 @@ impl Layer for Linear {
         self.n_out
     }
 
-    fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
+    fn forward(&mut self, x: &Tensor, out: &mut Tensor) {
         let (n, ni, no) = (x.rows, self.n_in, self.n_out);
         out.reshape(n, no);
         for row in out.data[..n * no].chunks_exact_mut(no) {
@@ -372,7 +332,7 @@ impl Layer for Relu {
         self.dim
     }
 
-    fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
+    fn forward(&mut self, x: &Tensor, out: &mut Tensor) {
         out.reshape(x.rows, x.cols);
         let (src, dst) = (x.live(), out.live_mut());
         for k in 0..src.len() {
@@ -399,331 +359,8 @@ impl Layer for Relu {
     }
 }
 
-// ---------------------------------------------------------------- square
-
-/// `f(x) = x^2`, as an alternative to the rectifier.
-///
-/// Reported to work well by the project owner in cases where DEAD UNITS were the
-/// problem, which is the case for it: `x^2` has zero gradient at exactly one
-/// point rather than over a whole half-line, so there is no absorbing dead state
-/// of the kind [`Relu`] documents. Nonlinear on its own — a single squaring layer
-/// already separates XOR — and even, so it responds to the MAGNITUDE of a
-/// standardized feature rather than its sign, which is a different inductive bias
-/// from a rectifier, not merely a smoother one.
-///
-/// # It is unbounded and even, and that is a real hazard
-/// A rectifier is 1-Lipschitz and cannot amplify its input; squaring can, and
-/// does. Inputs here are standardized, so |x| = 3 is an ordinary value, and one
-/// layer turns that into 9. Two stacked squaring layers compound it (9 -> 81
-/// before the second layer's weights are even applied), so the forward pass can
-/// reach a non-finite logit from a weight update that a rectifier would merely
-/// have made large. That is a live failure mode for this activation in a way it
-/// is not for [`Relu`].
-///
-/// The failure is DIAGNOSED rather than silent: `MlpFoldError::NonFiniteScore`
-/// checks every scored logit and aborts naming the row, so a diverged net does
-/// not reach `assign_qval`. But diagnosed is not prevented — expect to need a
-/// SMALLER `lr`, or a larger `weight_decay`, than the rectifier defaults in
-/// [`MlpConfig::compiled_default`], which were swept with a rectifier in place
-/// and carry no guarantee here.
-///
-/// Finite logits can still be badly overconfident, so the non-finite guard is
-/// not a substitute for tuning this activation on held-out data.
-pub struct Square {
-    dim: usize,
-}
-
-impl Square {
-    pub fn new(dim: usize) -> Self {
-        Square { dim }
-    }
-}
-
-impl Layer for Square {
-    fn out_dim(&self) -> usize {
-        self.dim
-    }
-
-    fn forward(&mut self, x: &Tensor, out: &mut Tensor, _training: bool) {
-        out.reshape(x.rows, x.cols);
-        let (src, dst) = (x.live(), out.live_mut());
-        for k in 0..src.len() {
-            dst[k] = src[k] * src[k];
-        }
-    }
-
-    /// `dL/dx = gy * 2x`, and it READS `x` — unlike [`Relu::backward`], which
-    /// deliberately ignores `x` because `y > 0` recovers its mask. Squaring
-    /// destroys the sign, so `y` alone cannot say whether the local slope is
-    /// `+2|x|` or `-2|x|`; `sqrt(y)` would recover the magnitude and lose the
-    /// sign, which is exactly the wrong half. The trait hands both in, so this
-    /// costs nothing but is worth naming: a future refactor that drops the `x`
-    /// argument because "`Relu` does not use it" would silently break this layer.
-    fn backward(&mut self, x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
-        gx.reshape(gy.rows, gy.cols);
-        let (xv, gv, dst) = (x.live(), gy.live(), gx.live_mut());
-        for k in 0..dst.len() {
-            dst[k] = gv[k] * 2.0 * xv[k];
-        }
-    }
-}
-
-/// Which activation [`Mlp::feedforward`] puts between hidden layers.
-///
-/// Default is [`Activation::LeakyRelu`] at [`LEAKY_SLOPE`], which is what every
-/// measurement in [`MlpConfig::compiled_default`] was taken with.
-/// [`Activation::Square`] is EXPERIMENTAL — see [`Square`] for the divergence
-/// hazard and the learning-rate caveat that comes with it.
-///
-/// Neither variant draws from the RNG, so switching between them does not move
-/// the initialization stream: a `LeakyRelu` fit is bit-identical to what it was
-/// before this choice existed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Activation {
-    #[default]
-    LeakyRelu,
-    Square,
-}
-
-impl Activation {
-    fn layer(self, dim: usize) -> Box<dyn Layer> {
-        match self {
-            Activation::LeakyRelu => Box::new(Relu::leaky(dim, LEAKY_SLOPE)),
-            Activation::Square => Box::new(Square::new(dim)),
-        }
-    }
-}
-
-// ---------------------------------------------------------------- batch norm
-
-/// Ported and gradient-tested, but NOT part of the default architecture — see
-/// the module docs. Kept as the first escalation if standardized inputs turn
-/// out not to be enough to train stably.
-#[cfg(test)]
-pub struct BatchNorm {
-    dim: usize,
-    gamma: Vec<f32>,
-    beta: Vec<f32>,
-    running_mean: Vec<f32>,
-    running_var: Vec<f32>,
-    momentum: f32,
-    eps: f32,
-    // caches / scratch, allocated once
-    xhat: Tensor,
-    inv_std: Vec<f32>,
-    mean: Vec<f32>,
-    var: Vec<f32>,
-    s1: Vec<f32>,
-    s2: Vec<f32>,
-    g_gamma: Vec<f32>,
-    g_beta: Vec<f32>,
-}
-
-#[cfg(test)]
-impl BatchNorm {
-    pub fn new(dim: usize) -> Self {
-        BatchNorm {
-            dim,
-            gamma: vec![1.0; dim],
-            beta: vec![0.0; dim],
-            running_mean: vec![0.0; dim],
-            running_var: vec![1.0; dim],
-            momentum: 0.1,
-            eps: 1e-5,
-            xhat: Tensor::new(0, dim),
-            inv_std: vec![0.0; dim],
-            mean: vec![0.0; dim],
-            var: vec![0.0; dim],
-            s1: vec![0.0; dim],
-            s2: vec![0.0; dim],
-            g_gamma: vec![0.0; dim],
-            g_beta: vec![0.0; dim],
-        }
-    }
-}
-
-#[cfg(test)]
-impl Layer for BatchNorm {
-    fn out_dim(&self) -> usize {
-        self.dim
-    }
-
-    fn forward(&mut self, x: &Tensor, out: &mut Tensor, training: bool) {
-        let (n, d) = (x.rows, self.dim);
-        out.reshape(n, d);
-
-        if !training {
-            for b in 0..n {
-                let (xr, or) = (x.row(b), out.row_mut(b));
-                for j in 0..d {
-                    let inv = 1.0 / (self.running_var[j] + self.eps).sqrt();
-                    or[j] = self.gamma[j] * (xr[j] - self.running_mean[j]) * inv + self.beta[j];
-                }
-            }
-            return;
-        }
-
-        let nf = n as f32;
-        // Inner loops run over features so every access is contiguous.
-        for v in self.mean.iter_mut() {
-            *v = 0.0;
-        }
-        for b in 0..n {
-            let xr = x.row(b);
-            for j in 0..d {
-                self.mean[j] += xr[j];
-            }
-        }
-        for v in self.mean.iter_mut() {
-            *v /= nf;
-        }
-
-        for v in self.var.iter_mut() {
-            *v = 0.0;
-        }
-        for b in 0..n {
-            let xr = x.row(b);
-            for j in 0..d {
-                let dv = xr[j] - self.mean[j];
-                self.var[j] += dv * dv;
-            }
-        }
-        for v in self.var.iter_mut() {
-            *v /= nf;
-        }
-
-        for j in 0..d {
-            self.inv_std[j] = 1.0 / (self.var[j] + self.eps).sqrt();
-            self.running_mean[j] =
-                (1.0 - self.momentum) * self.running_mean[j] + self.momentum * self.mean[j];
-            self.running_var[j] =
-                (1.0 - self.momentum) * self.running_var[j] + self.momentum * self.var[j];
-        }
-
-        self.xhat.reshape(n, d);
-        for b in 0..n {
-            let xr = x.row(b);
-            let hr = self.xhat.row_mut(b);
-            for j in 0..d {
-                hr[j] = (xr[j] - self.mean[j]) * self.inv_std[j];
-            }
-            let hr = self.xhat.row(b);
-            let or = out.row_mut(b);
-            for j in 0..d {
-                or[j] = self.gamma[j] * hr[j] + self.beta[j];
-            }
-        }
-    }
-
-    fn backward(&mut self, _x: &Tensor, _y: &Tensor, gy: &Tensor, gx: &mut Tensor) {
-        let (n, d) = (gy.rows, self.dim);
-        let nf = n as f32;
-        gx.reshape(n, d);
-
-        // Pass 1: per-feature reductions, feature-contiguous inner loop.
-        for j in 0..d {
-            self.s1[j] = 0.0;
-            self.s2[j] = 0.0;
-        }
-        for b in 0..n {
-            let (gr, hr) = (gy.row(b), self.xhat.row(b));
-            for j in 0..d {
-                let dxhat = gr[j] * self.gamma[j];
-                self.s1[j] += dxhat;
-                self.s2[j] += dxhat * hr[j];
-                self.g_gamma[j] += gr[j] * hr[j];
-                self.g_beta[j] += gr[j];
-            }
-        }
-
-        // Pass 2: dx = inv_std/N * (N*dxhat - sum(dxhat) - xhat*sum(dxhat*xhat))
-        for b in 0..n {
-            let (gr, hr) = (gy.row(b), self.xhat.row(b));
-            let gxr = gx.row_mut(b);
-            for j in 0..d {
-                let dxhat = gr[j] * self.gamma[j];
-                gxr[j] = self.inv_std[j] / nf * (nf * dxhat - self.s1[j] - hr[j] * self.s2[j]);
-            }
-        }
-    }
-
-    fn params_and_grads(&mut self) -> ParamSlots<'_> {
-        vec![
-            (
-                self.gamma.as_mut_slice(),
-                self.g_gamma.as_mut_slice(),
-                false,
-            ),
-            (self.beta.as_mut_slice(), self.g_beta.as_mut_slice(), false),
-        ]
-    }
-}
-
 // ---------------------------------------------------------------- loss
 
-/// Loss shape for the single-logit head.
-///
-/// [`MlpLoss::Focal`] at `gamma = 0, alpha = 0.5` is exactly [`MlpLoss::Bce`],
-/// so the focal form is a strict generalization and the default stays the plain
-/// loss.
-///
-/// # A removed variant, and why
-/// There used to be an `AsymFocal` here that weighted every row by
-/// `p^gamma_class` — by the predicted TARGET probability regardless of label,
-/// with a per-class exponent — on the argument that target labels are noisy
-/// positives, so a confidently-wrong target should be DISCOUNTED rather than
-/// emphasized. That argument is wrong for this pipeline: the rows it discounts
-/// are the marginal ones, and the 1% FDR cut lives exactly among them. Removing
-/// gradient signal from the decision boundary removes it from the only region
-/// that determines the identification count. The replacement is the STANDARD
-/// alpha-balanced focal loss, which up-weights hard examples on BOTH sides — the
-/// opposite of what the removed variant did on the target side.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum MlpLoss {
-    #[default]
-    Bce,
-    /// Standard alpha-balanced focal loss (Lin et al., 2017):
-    ///
-    /// ```text
-    ///   FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    ///   p_t     = p       if y == 1 else 1 - p
-    ///   alpha_t = alpha   if y == 1 else 1 - alpha
-    /// ```
-    ///
-    /// `1 - p_t` is the probability mass the model put on the WRONG class, so
-    /// `(1 - p_t)^gamma` is near 1 for a row the model gets wrong and near 0 for
-    /// one it gets easily right: `gamma` trades away the easy bulk to concentrate
-    /// the gradient on the hard rows, in both classes. `gamma = 0` disables the
-    /// modulation entirely.
-    ///
-    /// # `alpha` is normalized so `gamma = 0, alpha = 0.5` IS `Bce`
-    /// `alpha_t` is applied as `2 * alpha` (targets) / `2 * (1 - alpha)`
-    /// (decoys), not as the bare `alpha`. The textbook form would leave a
-    /// constant factor of 0.5 at the neutral setting; scaling by 2 makes the
-    /// neutral setting bit-identical to [`MlpLoss::Bce`] instead of merely
-    /// proportional to it. That matters because the loss is compared ACROSS
-    /// configurations here — the early-stopping rule and the per-fold summary
-    /// both read absolute loss values — so a silent 2x on the reported number
-    /// would make an `alpha`-sweep's rows incomparable. `alpha` still has its
-    /// usual meaning: `> 0.5` favors targets, `< 0.5` favors decoys.
-    ///
-    /// # `alpha` and the per-row sample weights MULTIPLY — tune them together
-    /// The MLP already receives per-row weights (`0.5` targets / `1.0` decoys,
-    /// inherited from the GBM's convention via `cv::fold_weights`), and those
-    /// weights multiply this `alpha_t`. They are two dials on the same quantity:
-    /// setting `alpha = 0.5` does NOT mean the classes are balanced, it means
-    /// they are balanced 0.5/1.0 by the sample weights alone. An `alpha` chosen
-    /// as if the weights were uniform will double-count the imbalance. Tune the
-    /// pair, never one in isolation.
-    ///
-    /// This is well-trodden in this domain rather than a novelty: Percolator
-    /// adapts a hinge loss with different target and decoy weights for the same
-    /// reason, so a class-asymmetric loss on top of class-asymmetric row weights
-    /// is the normal shape of a target/decoy discriminant, not an exotic one.
-    Focal { gamma: f32, alpha: f32 },
-}
-
-/// Numerically stable `sigma(z)`.
 #[inline]
 fn sigmoid(z: f32) -> f32 {
     if z >= 0.0 {
@@ -734,104 +371,28 @@ fn sigmoid(z: f32) -> f32 {
     }
 }
 
-/// Numerically stable `-[y log p + (1-y) log(1-p)]` from the logit.
 #[inline]
 fn bce_from_logit(z: f32, y: f32) -> f32 {
     z.max(0.0) - z * y + (-z.abs()).exp().ln_1p()
 }
 
-impl MlpLoss {
-    /// Weighted mean loss over the batch, writing `dL/dlogit` into `grad`.
-    ///
-    /// `logits` and `grad` are `[n][1]`. `y` is 0.0 (decoy) / 1.0 (target).
-    /// `w` is the per-row sample weight; the mean is taken over `sum(w)` so the
-    /// loss scale does not move when the class balance does.
-    ///
-    /// # Gradient of the focal form
-    /// Write `p = sigma(z)`, `p_t = p` for a target and `1 - p` for a decoy,
-    /// `q = 1 - p_t` (the wrong-class mass), `s = +1` for a target and `-1` for a
-    /// decoy, `bce = -log(p_t)`, and `m = alpha_t * q^gamma`, so `L_i = m * bce`.
-    ///
-    /// Two standard identities do the work. First `dp_t/dz = s * p_t * q`, since
-    /// `dp/dz = p(1-p) = p_t * q` and the decoy case flips the sign. Hence
-    ///
-    /// ```text
-    ///   d(bce)/dz = -(1/p_t) * dp_t/dz = -s * q = p - y
-    /// ```
-    ///
-    /// — the plain BCE-with-logits gradient. Second, the MODULATING FACTOR is
-    /// itself a function of `z`, so it contributes its own term:
-    ///
-    /// ```text
-    ///   dm/dz = alpha_t * gamma * q^(gamma-1) * (-dp_t/dz)
-    ///         = -gamma * s * p_t * m
-    /// ```
-    ///
-    /// Product rule:
-    ///
-    /// ```text
-    ///   dL/dz = m * [ (p - y) - gamma * s * p_t * bce ]
-    /// ```
-    ///
-    /// The `- gamma * s * p_t * bce` term is what makes this NOT a reweighted BCE
-    /// gradient: dropping it (the easy mistake) leaves a gradient that is wrong
-    /// everywhere `gamma != 0`, yet still trains, because it still points
-    /// downhill. Finite differences are the only cheap check — see the tests.
-    ///
-    /// At `gamma = 0` the bracket collapses to `p - y` and `q^0 = 1`, so with
-    /// `alpha = 0.5` (hence `alpha_t = 1`) both the loss and the gradient are the
-    /// `Bce` arm's, to the bit.
-    pub fn loss_and_grad(&self, logits: &Tensor, y: &[f32], w: &[f32], grad: &mut Tensor) -> f32 {
-        let n = logits.rows;
-        debug_assert_eq!(logits.cols, 1, "single-logit head");
-        debug_assert_eq!(y.len(), n);
-        debug_assert_eq!(w.len(), n);
-        grad.reshape(n, 1);
+/// Weighted BCE-with-logits, writing dL/dlogit into `grad`.
+fn loss_and_grad(logits: &Tensor, y: &[f32], w: &[f32], grad: &mut Tensor) -> f32 {
+    let n = logits.rows;
+    debug_assert_eq!(logits.cols, 1);
+    debug_assert_eq!(y.len(), n);
+    debug_assert_eq!(w.len(), n);
+    grad.reshape(n, 1);
 
-        let wsum: f32 = w.iter().sum();
-        let inv_w = if wsum > 0.0 { 1.0 / wsum } else { 0.0 };
-
-        let mut total = 0.0f32;
-        for b in 0..n {
-            let z = logits.row(b)[0];
-            let yi = y[b];
-            let bce = bce_from_logit(z, yi);
-
-            let (m, dm_term) = match *self {
-                MlpLoss::Bce => (1.0, 0.0),
-                MlpLoss::Focal { gamma, alpha } => {
-                    let target = yi > 0.5;
-                    // `p_t` and `q` are each taken from `sigmoid` DIRECTLY
-                    // rather than one from `1.0 - other`: at |z| ~ 20 one of
-                    // them rounds to 1.0 and the complement would come out as
-                    // exactly 0 instead of the ~1e-9 it is. `sigmoid(-z)`
-                    // keeps the small side's magnitude.
-                    let (p_t, q) = if target {
-                        (sigmoid(z), sigmoid(-z))
-                    } else {
-                        (sigmoid(-z), sigmoid(z))
-                    };
-                    // 2x, so `alpha = 0.5` is the neutral setting — see the
-                    // variant docs.
-                    let a_t = if target {
-                        2.0 * alpha
-                    } else {
-                        2.0 * (1.0 - alpha)
-                    };
-                    let s = if target { 1.0 } else { -1.0 };
-                    // `q.powf(0.0)` is exactly 1.0 for every `q`, including 0,
-                    // and `0.0 * anything_finite` is 0.0, so `gamma = 0` leaves
-                    // both of these at the `Bce` arm's values.
-                    (a_t * q.powf(gamma), -gamma * s * p_t * bce)
-                }
-            };
-
-            let p = sigmoid(z);
-            total += w[b] * m * bce;
-            grad.row_mut(b)[0] = w[b] * inv_w * (m * (p - yi) + m * dm_term);
-        }
-        total * inv_w
+    let wsum: f32 = w.iter().sum();
+    let inv_w = if wsum > 0.0 { 1.0 / wsum } else { 0.0 };
+    let mut total = 0.0;
+    for b in 0..n {
+        let z = logits.row(b)[0];
+        total += w[b] * bce_from_logit(z, y[b]);
+        grad.row_mut(b)[0] = w[b] * inv_w * (sigmoid(z) - y[b]);
     }
+    total * inv_w
 }
 
 // ---------------------------------------------------------------- optimizer
@@ -910,52 +471,6 @@ impl Adam {
     }
 }
 
-// ---------------------------------------------------------------- importance
-
-/// Which feature-importance metric a fitted net reports.
-///
-/// TWO METRICS EXIST SO THEY CAN BE COMPARED, not so one can replace the other.
-/// [`MlpImportance::W1`] is the DEFAULT and must stay the default: the per-fold
-/// TSV sidecar (`results.feature_importance.tsv`) is consumed outside this
-/// codebase, and silently changing what the numbers in it mean would invalidate
-/// every comparison anyone has already drawn from it.
-///
-/// Select the other one with `TIMSSEEK_MLP_IMPORTANCE=grad` — see
-/// [`MlpConfig::from_env`] — and diff the two rankings across two runs of the
-/// same search. Neither choice touches the RNG, the optimizer or the parameters,
-/// so the two runs produce BIT-IDENTICAL scores and differ only in the sidecar.
-///
-/// # What the two actually measure, and why the second exists
-/// `W1` is `sum_o |W1[j, o]|`, the absolute row sums of the FIRST `Linear`
-/// layer's weights. It is the closest analogue to LDA's `|coef|` that a net
-/// admits, and it is cheap — it reads weights and touches no data. What it cannot
-/// see is everything past the first activation: a feature the net amplifies
-/// downstream and one whose contribution a later layer cancels have the same
-/// first-layer row norm, and `W1` scores them identically.
-///
-/// `Grad` is input-gradient (saliency) attribution: the mean of `|dL/dx_j|` over
-/// rows, which propagates through the WHOLE net, so cancellation and
-/// amplification both reach the number. It costs one forward/backward pass over
-/// the train rows per fold (~1 epoch out of the ~20-30 a fold actually runs).
-///
-/// # What `Grad` still is NOT
-/// A `0.0` from `Grad` does not mean "the net ignores this feature", and a small
-/// value does not mean "nearly ignores". `dL/dx_j` for a `Linear` first layer is
-/// `sum_o (dL/dh_o) W1[j, o]`, which does not depend on `x_j` at all — a column
-/// the net makes no use of still receives whatever gradient its randomly
-/// initialized `W1` row carries, and nothing in this training setup drives that
-/// row to zero (weight decay is `1e-4` over a few hundred steps). Read `Grad` as a
-/// RANKING, the same way `W1` is read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MlpImportance {
-    /// `sum_o |W1[j, o]|`. The shipped metric; the sidecar's default content.
-    #[default]
-    W1,
-    /// Mean `|dL/dx_j|` over the train rows, at the TRUE labels. See
-    /// [`Mlp::input_grad_importance`].
-    Grad,
-}
-
 // ---------------------------------------------------------------- model
 
 pub struct Mlp {
@@ -985,32 +500,26 @@ impl Mlp {
         }
     }
 
-    /// `n_in -> hidden[0] -> ... -> 1`, `act` between hidden layers, single
-    /// logit out. No BatchNorm: inputs arrive standardized.
-    ///
-    /// `act` comes from [`MlpConfig::activation`] on every production path.
-    /// It is a positional argument rather than a builder default so that adding
-    /// [`Activation::Square`] could not leave a call site silently on the
-    /// rectifier while its config said otherwise.
-    pub fn feedforward(n_in: usize, hidden: &[usize], act: Activation, rng: &mut StdRng) -> Self {
+    /// `n_in -> hidden[0] -> ... -> 1`, with leaky ReLU hidden layers.
+    pub fn feedforward(n_in: usize, hidden: &[usize], rng: &mut StdRng) -> Self {
         let mut layers: Vec<Box<dyn Layer>> = Vec::new();
         let mut prev = n_in;
         for &h in hidden {
             layers.push(Box::new(Linear::new(prev, h, rng)));
-            layers.push(act.layer(h));
+            layers.push(Box::new(Relu::leaky(h, LEAKY_SLOPE)));
             prev = h;
         }
         layers.push(Box::new(Linear::new(prev, 1, rng)));
         Mlp::new(layers)
     }
 
-    pub fn forward(&mut self, x: &Tensor, training: bool) -> &Tensor {
+    pub fn forward(&mut self, x: &Tensor) -> &Tensor {
         for k in 0..self.layers.len() {
             if k == 0 {
-                self.layers[0].forward(x, &mut self.acts[0], training);
+                self.layers[0].forward(x, &mut self.acts[0]);
             } else {
                 let (prev, cur) = self.acts.split_at_mut(k);
-                self.layers[k].forward(&prev[k - 1], &mut cur[0], training);
+                self.layers[k].forward(&prev[k - 1], &mut cur[0]);
             }
         }
         self.acts.last().unwrap()
@@ -1038,55 +547,18 @@ impl Mlp {
     }
 
     /// One forward/backward/update over a batch. Returns the batch loss.
-    pub fn train_step(
-        &mut self,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        loss: &MlpLoss,
-        opt: &mut Adam,
-    ) -> f32 {
-        self.forward(x, true);
+    pub fn train_step(&mut self, x: &Tensor, y: &[f32], w: &[f32], opt: &mut Adam) -> f32 {
+        self.forward(x);
         let last = self.acts.len() - 1;
-        let l = loss.loss_and_grad(&self.acts[last], y, w, &mut self.grads[last]);
+        let l = loss_and_grad(&self.acts[last], y, w, &mut self.grads[last]);
         self.backward(x);
         opt.step(self.params_and_grads());
-        l
-    }
-
-    pub(crate) fn train_step_profiled(
-        &mut self,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        loss: &MlpLoss,
-        opt: &mut Adam,
-        profile: &mut MlpRuntimeProfile,
-    ) -> f32 {
-        let t = Instant::now();
-        self.forward(x, true);
-        profile.train_forward += t.elapsed();
-
-        let t = Instant::now();
-        let last = self.acts.len() - 1;
-        let l = loss.loss_and_grad(&self.acts[last], y, w, &mut self.grads[last]);
-        profile.train_loss += t.elapsed();
-
-        let t = Instant::now();
-        self.backward(x);
-        profile.train_backward += t.elapsed();
-
-        let t = Instant::now();
-        opt.step(self.params_and_grads());
-        profile.adam += t.elapsed();
-        profile.train_batches += 1;
         l
     }
 
     /// Mean loss over a set WITHOUT touching parameters, gradients, or the RNG.
     ///
-    /// Runs the forward pass in eval mode and reuses
-    /// [`MlpLoss::loss_and_grad`] rather than re-deriving the loss, so the
+    /// Reuses [`loss_and_grad`] rather than re-deriving the loss, so the
     /// reported number cannot drift from the one being optimized. The gradient
     /// it writes goes to a throwaway buffer; the caller's `grads` are untouched,
     /// and `train_step` overwrites `grads.last()` before every backward pass
@@ -1097,30 +569,10 @@ impl Mlp {
     /// the claim the module header makes. Reusing it cannot change the returned
     /// number: `loss_and_grad` reshapes the sink and writes every row of it
     /// before returning, and the loss it returns never reads the gradient.
-    pub fn eval_loss(&mut self, x: &Tensor, y: &[f32], w: &[f32], loss: &MlpLoss) -> f32 {
-        self.forward(x, false);
+    pub fn eval_loss(&mut self, x: &Tensor, y: &[f32], w: &[f32]) -> f32 {
+        self.forward(x);
         let last = self.acts.len() - 1;
-        loss.loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink)
-    }
-
-    pub(crate) fn eval_loss_profiled(
-        &mut self,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        loss: &MlpLoss,
-        profile: &mut MlpRuntimeProfile,
-    ) -> f32 {
-        let t = Instant::now();
-        self.forward(x, false);
-        profile.validation_forward += t.elapsed();
-
-        let t = Instant::now();
-        let last = self.acts.len() - 1;
-        let value = loss.loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink);
-        profile.validation_loss += t.elapsed();
-        profile.validation_batches += 1;
-        value
+        loss_and_grad(&self.acts[last], y, w, &mut self.eval_sink)
     }
 
     /// Copy every parameter into `out`, in [`Self::params_and_grads`] order.
@@ -1129,14 +581,6 @@ impl Mlp {
     /// allocation. The order is a pure function of the layer stack, which never
     /// changes after construction, so [`Self::load_params_from`] can walk it
     /// back with nothing but the length of each slot.
-    ///
-    /// **Parameters only.** [`BatchNorm`]'s running mean/variance are NOT
-    /// parameters and are therefore NOT snapshotted, so restoring a snapshot
-    /// into a net containing one would pair epoch-`k` weights with epoch-`n`
-    /// running stats. No architecture this crate builds contains a `BatchNorm`
-    /// ([`Self::feedforward`] emits `Linear` plus a parameterless activation —
-    /// [`Relu`] or [`Square`] — only) and the type is kept for gradient tests, so
-    /// this is documented rather than solved.
     fn snapshot_params_into(&mut self, out: &mut Vec<f32>) {
         out.clear();
         for (p, _, _) in self.params_and_grads() {
@@ -1159,209 +603,6 @@ impl Mlp {
         );
     }
 
-    /// Shuffled-minibatch training. Returns the mean loss of the final epoch.
-    ///
-    /// The per-epoch shuffle is seeded from the caller's RNG (which
-    /// [`MlpConfig::rng_for_fold`] derives from the config seed and the fold
-    /// index), so folds differ but a rerun of the same fold does not.
-    ///
-    /// Minibatching is not only a throughput choice: full-batch descent on a
-    /// ReLU net can settle into a dead-unit configuration and stay there,
-    /// because every step sees the identical gradient. The per-batch noise is
-    /// what walks it back out.
-    ///
-    /// No held-out set, therefore NO EARLY STOPPING regardless of
-    /// [`MlpConfig::early_stopping_patience`]: the stopping rule has nothing to
-    /// measure. Callers that want it go through [`Self::train_reporting`].
-    #[cfg(test)]
-    pub fn train(
-        &mut self,
-        cfg: &MlpConfig,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        opt: &mut Adam,
-        rng: &mut StdRng,
-    ) -> f32 {
-        self.train_reporting(cfg, x, y, w, opt, rng, None, "")
-            .final_train_loss
-    }
-
-    /// [`Self::train`] plus a per-epoch loss trace at `debug` level and,
-    /// when [`MlpConfig::early_stopping_patience`] is set and `val` is present,
-    /// EARLY STOPPING with best-weight restore.
-    ///
-    /// `val` is a HELD-OUT set. It reaches [`Self::eval_loss`] and nothing
-    /// else — never the optimizer, never the input transform, never the RNG —
-    /// so the only ways it can influence the result are the log and the choice
-    /// of WHICH epoch's weights are kept. Both are what early stopping is.
-    ///
-    /// Enable the trace with:
-    /// ```text
-    /// RUST_LOG=timsseek::ml::mlp=debug
-    /// ```
-    ///
-    /// The point of tracing BOTH curves is that they answer different
-    /// questions. Train loss still falling means the fixed epoch budget is the
-    /// binding constraint; held-out loss flattening or turning up while train
-    /// loss keeps falling means the budget is already too large and the epochs
-    /// after the turn are spent overfitting. Only the second reading justifies
-    /// early stopping, and it cannot be read off the train curve alone.
-    ///
-    /// # The stopping rule
-    /// After every epoch the held-out loss is measured. An epoch IMPROVES iff
-    /// `loss < best` — a STRICT comparison, so a tie is not an improvement.
-    /// Two consequences, both wanted: the EARLIEST epoch attaining the minimum
-    /// is the one kept (fewer epochs, and no dependence on how a later epoch's
-    /// rounding happens to land), and a dead-flat plateau still runs the
-    /// patience counter down instead of training forever. A `NaN` held-out loss
-    /// compares false and so counts as no improvement; if EVERY epoch is `NaN`
-    /// there is no snapshot to restore and the last weights stand.
-    ///
-    /// When `patience` epochs pass with no improvement, the best-seen weights
-    /// are restored and training stops. Restoring is not optional: stopping at
-    /// `best + patience` and keeping those weights leaves exactly the
-    /// overfitted parameters the rule exists to avoid. The restore also happens
-    /// when the epoch budget runs out before patience does, so with early
-    /// stopping on you always get the best-held-out-loss weights that were seen.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[cfg(test)]
-    pub fn train_reporting(
-        &mut self,
-        cfg: &MlpConfig,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        opt: &mut Adam,
-        rng: &mut StdRng,
-        val: Option<ValSet<'_>>,
-        tag: &str,
-    ) -> TrainOutcome {
-        let n = x.rows;
-        debug_assert_eq!(y.len(), n);
-        debug_assert_eq!(w.len(), n);
-
-        // Early stopping needs something to stop ON. With no held-out set the
-        // knob is inert, which is what makes `Mlp::train` and the `val = &[]`
-        // paths behave as they always did.
-        let patience = match (cfg.early_stopping_patience, val.is_some()) {
-            (Some(p), true) => Some(p),
-            _ => None,
-        };
-
-        let mut order: Vec<usize> = (0..n).collect();
-        let batch = cfg.batch_size.max(1);
-        let (mut xb, mut yb, mut wb) = (Tensor::default(), Vec::new(), Vec::new());
-        let mut last_epoch = 0.0;
-
-        let mut best_val = f32::INFINITY;
-        let mut best_epoch: Option<usize> = None;
-        let mut best_train = 0.0f32;
-        let mut best_params: Vec<f32> = Vec::new();
-        let mut stale = 0usize;
-        let mut epochs_run = 0usize;
-
-        for epoch in 0..cfg.epochs {
-            // Fisher-Yates, so the shuffle consumes a fixed number of draws
-            // per epoch and the sequence stays reproducible.
-            for i in (1..order.len()).rev() {
-                let j = rng.random_range(0..=i);
-                order.swap(i, j);
-            }
-
-            let (mut running, mut nb) = (0.0, 0);
-            for chunk in order.chunks(batch) {
-                xb.reshape(chunk.len(), x.cols);
-                yb.clear();
-                wb.clear();
-                for (bi, &i) in chunk.iter().enumerate() {
-                    xb.row_mut(bi).copy_from_slice(x.row(i));
-                    yb.push(y[i]);
-                    wb.push(w[i]);
-                }
-                running += self.train_step(&xb, &yb, &wb, &cfg.loss, opt);
-                nb += 1;
-            }
-            last_epoch = if nb > 0 { running / nb as f32 } else { 0.0 };
-            epochs_run = epoch + 1;
-
-            // The held-out forward pass runs when the STOPPING RULE needs it
-            // (every epoch, because it is the decision) or when the trace is on
-            // (a diagnostic nobody asked to see should not cost a forward pass).
-            // `tracing::enabled!` is still what gates the LOG, exactly as before.
-            let traced = tracing::enabled!(tracing::Level::DEBUG);
-            let val_loss = match (&val, patience.is_some() || traced) {
-                (Some(v), true) => Some(self.eval_loss(v.x, v.y, v.w, &cfg.loss)),
-                _ => None,
-            };
-
-            if traced {
-                match val_loss {
-                    Some(vl) => tracing::debug!(
-                        "{tag}epoch {}/{}: train_loss={:.6} held_out_loss={:.6}",
-                        epoch + 1,
-                        cfg.epochs,
-                        last_epoch,
-                        vl,
-                    ),
-                    None => tracing::debug!(
-                        "{tag}epoch {}/{}: train_loss={:.6} (no held-out set)",
-                        epoch + 1,
-                        cfg.epochs,
-                        last_epoch,
-                    ),
-                }
-            }
-
-            let Some(p) = patience else { continue };
-            // `val_loss` is `Some` whenever `patience` is: both arms of the
-            // match above require `val` to be present, and `patience` is only
-            // `Some` when it is.
-            let vl = val_loss.expect("early stopping requires a held-out measurement");
-            // STRICT: a tie is not an improvement. See the rule in the docs.
-            if vl < best_val {
-                best_val = vl;
-                best_epoch = Some(epoch);
-                best_train = last_epoch;
-                self.snapshot_params_into(&mut best_params);
-                stale = 0;
-            } else {
-                stale += 1;
-                if stale >= p {
-                    break;
-                }
-            }
-        }
-
-        // Restore whenever the kept epoch is not the one we happen to be
-        // standing on — i.e. after a patience stop, and also after a budget
-        // exhaustion whose last epochs were not improvements.
-        let restored = match best_epoch {
-            Some(b) if patience.is_some() && b + 1 != epochs_run => {
-                self.load_params_from(&best_params);
-                true
-            }
-            _ => false,
-        };
-        if restored {
-            tracing::debug!(
-                "{tag}early stop: ran {} of {} epochs, restored epoch {} (held_out_loss={:.6})",
-                epochs_run,
-                cfg.epochs,
-                best_epoch.unwrap() + 1,
-                best_val,
-            );
-        }
-
-        TrainOutcome {
-            final_train_loss: if restored { best_train } else { last_epoch },
-            epochs_run,
-            best_epoch,
-            best_val_loss: best_epoch.map(|_| best_val),
-            restored,
-        }
-    }
-
     /// Production training path over regenerated, batch-sized chunks. Candidate
     /// order was randomized before fold assignment, so each chunk already has
     /// random membership; epochs shuffle chunk IDs only. `visit_train` supplies
@@ -1377,7 +618,6 @@ impl Mlp {
         rng: &mut StdRng,
         tag: &str,
         epoch_finished: &(dyn Fn() + Sync),
-        mut profile: Option<&mut MlpRuntimeProfile>,
     ) -> TrainOutcome {
         let patience = match (cfg.early_stopping_patience, visit_val.is_some()) {
             (Some(p), true) => Some(p),
@@ -1400,21 +640,12 @@ impl Mlp {
 
             let mut running = 0.0f32;
             let mut seen = 0usize;
-            let pass_started = profile.is_some().then(Instant::now);
             {
                 let mut consume_train = |b: &MlpBatch| {
-                    running += match profile.as_deref_mut() {
-                        Some(profile) => {
-                            self.train_step_profiled(&b.x, &b.y, &b.w, &cfg.loss, opt, profile)
-                        }
-                        None => self.train_step(&b.x, &b.y, &b.w, &cfg.loss, opt),
-                    };
+                    running += self.train_step(&b.x, &b.y, &b.w, opt);
                     seen += 1;
                 };
                 visit_train(&order, &mut consume_train);
-            }
-            if let (Some(started), Some(profile)) = (pass_started, profile.as_deref_mut()) {
-                profile.train_wall += started.elapsed();
             }
             last_epoch = if seen == 0 {
                 0.0
@@ -1428,23 +659,14 @@ impl Mlp {
                 (Some(visit), true) => {
                     let mut weighted = 0.0f64;
                     let mut total_weight = 0.0f64;
-                    let pass_started = profile.is_some().then(Instant::now);
                     {
                         let mut consume_val = |b: &MlpBatch| {
                             let weight: f32 = b.w.iter().sum();
-                            let loss = match profile.as_deref_mut() {
-                                Some(profile) => {
-                                    self.eval_loss_profiled(&b.x, &b.y, &b.w, &cfg.loss, profile)
-                                }
-                                None => self.eval_loss(&b.x, &b.y, &b.w, &cfg.loss),
-                            };
+                            let loss = self.eval_loss(&b.x, &b.y, &b.w);
                             weighted += loss as f64 * weight as f64;
                             total_weight += weight as f64;
                         };
                         (**visit)(&mut consume_val);
-                    }
-                    if let (Some(started), Some(profile)) = (pass_started, profile.as_deref_mut()) {
-                        profile.validation_wall += started.elapsed();
                     }
                     Some(if total_weight > 0.0 {
                         (weighted / total_weight) as f32
@@ -1528,196 +750,6 @@ impl Mlp {
             .find_map(|l| l.abs_in_weights())
             .unwrap_or_default()
     }
-
-    /// Are every layer's parameter gradient buffers exactly zero?
-    ///
-    /// The invariant [`Adam::step`] leaves behind (it writes `g[i] = 0.0` as it
-    /// consumes each gradient) and the one [`Self::input_grad_importance`] must
-    /// restore. Not a diagnostic anybody displays — it exists so that the
-    /// stale-gradient hazard is CHECKABLE rather than argued about.
-    pub(crate) fn param_grads_all_zero(&mut self) -> bool {
-        self.params_and_grads()
-            .into_iter()
-            .all(|(_, g, _)| g.iter().all(|v| *v == 0.0))
-    }
-
-    /// Drop every accumulated parameter gradient on the floor.
-    fn zero_param_grads(&mut self) {
-        for (_, g, _) in self.params_and_grads() {
-            g.fill(0.0);
-        }
-    }
-
-    /// INPUT-GRADIENT (SALIENCY) ATTRIBUTION: mean `|dL/dx_j|` over `x`'s rows,
-    /// per transformed input column, at the labels given.
-    ///
-    /// Indexed by TRANSFORMED input, exactly like [`Self::input_importance`], so
-    /// callers map back through [`ColumnTransform::lane_of_input`] /
-    /// [`ColumnTransform::isna_lane_of_input`] to get a lane-indexed vector.
-    /// Every returned value is `>= 0` and finite for a finite net, so it is a
-    /// REPORTED measurement under the `FoldModel::importance` contract, never the
-    /// `NAN` "unreported" sentinel.
-    ///
-    /// # The gradient is already computed and was being thrown away
-    /// [`Self::backward`] writes layer 0's `dL/dx` into [`Self::scratch`] on every
-    /// single training step and nothing has ever read it. This is an accumulator
-    /// over that buffer; there is no new backward math here, which is why the
-    /// number cannot drift from the gradient the optimizer actually descends.
-    ///
-    /// # A DEDICATED PASS, not an accumulation over the last training epoch
-    /// Two reasons, the second decisive:
-    ///
-    ///  1. The last epoch's gradients are measured at a moving parameter vector —
-    ///     one `dL/dx` per minibatch, each from a different model. The average is
-    ///     then an attribution of no particular net.
-    ///  2. WITH EARLY STOPPING ON, THE LAST EPOCH'S WEIGHTS ARE NOT THE WEIGHTS
-    ///     THAT SHIP. `train_reporting` rolls back to the best held-out epoch,
-    ///     which on every fold ever instrumented is 5+ epochs earlier, so an
-    ///     accumulation during training would describe parameters that were
-    ///     deliberately thrown away.
-    ///
-    /// The cost is one forward/backward over `x` — roughly one epoch on top of the
-    /// ~20-30 a fold runs.
-    ///
-    /// # It must not perturb the fit, and here is how it does not
-    ///  * **No optimizer step**, so no parameter moves. Asserted bit-for-bit by
-    ///    `input_grad_importance_leaves_the_fit_untouched`.
-    ///  * **No RNG draw**, so a run with attribution on has the same
-    ///    initialization and the same shuffle sequence as one without.
-    ///  * **THE STALE-GRADIENT HAZARD, WHICH IS THE SHARP ONE.**
-    ///    [`Linear::backward`] ACCUMULATES into `gw`/`gb` (`+=`) and [`Adam::step`]
-    ///    is what zeroes them, so a backward pass with no matching step leaves
-    ///    gradients that the NEXT `train_step` would fold into its update — a
-    ///    silent perturbation of a later fit, not a crash. This function therefore
-    ///    zeroes every parameter gradient before returning, restoring exactly the
-    ///    post-`Adam::step` invariant it found (the `debug_assert!` below is what
-    ///    says it found it).
-    ///
-    /// # Labels: the TRUE ones, and why the flipped variant is a reweighting
-    /// For this single-logit head `dL/dx_j = (dL/dz) * (dz/dx_j)`, and `dz/dx_j`
-    /// does not involve the labels at all. The label enters through the SCALAR
-    /// `dL/dz` alone — `p - y` for BCE — so every label choice produces the same
-    /// per-row `|dz/dx_j|` profile under a different per-row weight:
-    ///
-    ///  * TRUE labels weight a row by `|p - y|`, i.e. by how wrong the model still
-    ///    is on it. The attribution is dominated by rows near the decision
-    ///    boundary, which is where the 1% FDR cut lives.
-    ///  * FLIPPED labels weight it by `|p - (1 - y)| = |1 - (p - y) * s|`, which is
-    ///    near 1 for the confidently-correct bulk. Same feature profile, opposite
-    ///    row emphasis.
-    ///
-    /// So the label-flipped difference is a CHOICE OF ROW WEIGHTS, not a second
-    /// source of information about a feature, and there is no argument here for
-    /// preferring it. Only the true-label form is implemented. The flipped form is
-    /// a small, well-defined addition if the boundary-row emphasis turns out to be
-    /// the wrong lens: pass `1.0 - y[i]` here and subtract. The label-free limit of
-    /// the same family is mean `|dz/dx_j|`, which would drop `dL/dz` entirely.
-    ///
-    /// # Batching, and why the chunk size does not (materially) change the answer
-    /// `x` is walked in `batch`-row chunks IN ORDER — no shuffle, no RNG — to bound
-    /// the activation buffers at production row counts. [`MlpLoss::loss_and_grad`]
-    /// normalizes its gradient by `1 / sum(w)` OVER THE CHUNK, which would make the
-    /// result depend on the chunk size, so each chunk's contribution is multiplied
-    /// back by its own `sum(w)`. What is accumulated is therefore
-    /// `|w_i * d(loss_i)/dx_ij|`, and the return value is that divided by the row
-    /// count: the mean per-row gradient of the WEIGHTED per-row loss, which is the
-    /// quantity the optimizer sees. Chunking changes only the summation order, so
-    /// two chunk sizes agree to float-accumulation error rather than exactly.
-    ///
-    /// The sample weights are deliberately kept in (`0.5` targets / `1.0` decoys,
-    /// from `cv::fold_weights`): they are part of the objective this net was
-    /// actually fitted to. They scale rows, not features, so they cannot reorder
-    /// the ranking on their own.
-    ///
-    /// # `BatchNorm` is not supported here
-    /// The forward pass runs in EVAL mode, so a `BatchNorm` in the stack would
-    /// leave `xhat` unwritten (or stale) and its `backward` would read it. No
-    /// architecture this crate builds contains one — [`Self::feedforward`] emits
-    /// `Linear` plus a parameterless activation only — so this is documented
-    /// rather than solved, exactly as [`Self::snapshot_params_into`] documents the
-    /// same gap.
-    pub fn input_grad_importance(
-        &mut self,
-        x: &Tensor,
-        y: &[f32],
-        w: &[f32],
-        loss: &MlpLoss,
-        batch: usize,
-    ) -> Vec<f32> {
-        let (n, cols) = (x.rows, x.cols);
-        debug_assert_eq!(y.len(), n);
-        debug_assert_eq!(w.len(), n);
-        // The invariant this function has to restore. If it does not hold on
-        // entry, someone ran a backward pass without a matching optimizer step
-        // and the zeroing below would silently discard a real gradient.
-        debug_assert!(
-            self.param_grads_all_zero(),
-            "input_grad_importance expects the post-Adam::step invariant (all parameter \
-             gradients zero); a stale gradient here would be discarded by the wipe below"
-        );
-        if n == 0 || cols == 0 {
-            return vec![0.0; cols];
-        }
-
-        // f64 accumulator: at 10^5-10^6 rows an f32 running sum of same-signed
-        // magnitudes loses low-order bits to the growing total, and this is a
-        // reported statistic that two runs have to agree on.
-        let mut acc = vec![0.0f64; cols];
-        let batch = batch.max(1);
-        let last = self.acts.len() - 1;
-        let (mut xb, mut yb, mut wb) = (Tensor::default(), Vec::new(), Vec::new());
-
-        for start in (0..n).step_by(batch) {
-            let end = (start + batch).min(n);
-            xb.reshape(end - start, cols);
-            yb.clear();
-            wb.clear();
-            for (bi, i) in (start..end).enumerate() {
-                xb.row_mut(bi).copy_from_slice(x.row(i));
-                yb.push(y[i]);
-                wb.push(w[i]);
-            }
-            // Undoes `loss_and_grad`'s per-chunk `1 / sum(w)`, so the chunk size
-            // is not baked into the answer. See the docs above.
-            let wsum: f32 = wb.iter().sum();
-
-            self.forward(&xb, false);
-            loss.loss_and_grad(&self.acts[last], &yb, &wb, &mut self.grads[last]);
-            self.backward(&xb);
-
-            for bi in 0..(end - start) {
-                let g = self.scratch.row(bi);
-                for j in 0..cols {
-                    acc[j] += (g[j] * wsum).abs() as f64;
-                }
-            }
-        }
-
-        // THE STALE-GRADIENT WIPE. `Linear::backward` accumulated into every
-        // `gw`/`gb` above and no `Adam::step` consumed them; leaving them would
-        // hand a later `train_step` a gradient from this reporting pass.
-        self.zero_param_grads();
-
-        let inv_n = 1.0 / n as f64;
-        acc.iter().map(|v| (v * inv_n) as f32).collect()
-    }
-}
-
-/// A held-out set for the per-epoch loss trace AND the early-stopping
-/// decision, borrowed for the call.
-///
-/// Deliberately a distinct type from the training triple so a caller cannot
-/// swap the two by argument order: handing the training set here would turn
-/// early stopping into "stop when the train loss stops falling", which on this
-/// net is never, and handing the held-out set to `train` would be an actual
-/// leak. The rows here reach nothing but [`Mlp::eval_loss`] — no optimizer
-/// step, no input transform, no RNG draw — so the only thing they can move is
-/// which epoch's weights are kept.
-#[cfg(test)]
-pub struct ValSet<'a> {
-    pub x: &'a Tensor,
-    pub y: &'a [f32],
-    pub w: &'a [f32],
 }
 
 /// One reusable transformed batch buffer. Production fitting owns exactly two:
@@ -1730,10 +762,6 @@ pub struct MlpBatch {
 }
 
 impl MlpBatch {
-    pub fn rows(&self) -> usize {
-        self.x.rows()
-    }
-
     /// Reusable producer/consumer buffer with capacity for one full batch and
     /// initially zero live rows.
     pub fn buffer(row_capacity: usize, cols: usize) -> Self {
@@ -1747,12 +775,7 @@ impl MlpBatch {
     }
 }
 
-/// What one [`Mlp::train_reporting`] call did.
-///
-/// A struct rather than the bare loss because with early stopping the loss no
-/// longer describes the run: the caller's log wants to say WHERE it stopped and
-/// which epoch it kept, and the tests need those two numbers to distinguish
-/// "stopped early" from "ran the budget and got lucky".
+/// Result of one streaming fit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrainOutcome {
     /// Mean training loss of the epoch whose weights the model now holds — the
@@ -2014,276 +1037,37 @@ impl ColumnTransform {
 
 // ---------------------------------------------------------------- config
 
-/// Hyperparameters. Not TOML-exposed, matching how `GBMConfig` is handled —
-/// only the input dimension is dynamic, and it is derived from the lane matrix
-/// at fit time rather than configured.
-///
-/// # Dev-only env overrides
-/// [`Self::default`] applies the `TIMSSEEK_MLP_*` overrides described on
-/// [`Self::from_env`]. That is an EXPERIMENT ESCAPE HATCH for sweeps, in the
-/// spirit of `TIMSSEEK_LDA_DUMP`, not a config surface: it is undocumented in
-/// `--help`, unsupported, and with nothing set the config is bit-identical to
-/// [`Self::compiled_default`].
+/// Fixed rescoring hyperparameters. The input width is derived at fit time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MlpConfig {
     pub hidden: Vec<usize>,
-    /// Adam step size. Coupled to [`Self::batch_size`]: tune the pair together,
-    /// because changing batch size also changes optimizer steps per epoch.
     pub lr: f32,
     pub weight_decay: f32,
-    /// UPPER BOUND on epochs, not a target: with
-    /// [`Self::early_stopping_patience`] set, training normally stops before
-    /// this.
     pub epochs: usize,
-    /// Minibatch size. COUPLED TO [`Self::lr`]: it sets how many optimizer steps
-    /// an epoch is worth, so changing it without rescaling the learning rate
-    /// changes the amount of training, not just its granularity. See
-    /// [`Self::compiled_default`] for the measurement.
     pub batch_size: usize,
-    pub loss: MlpLoss,
-    /// Activation between hidden layers. Defaults to
-    /// [`Activation::LeakyRelu`]. [`Activation::Square`] is an experiment, and
-    /// [`Square`] documents both what recommends it and its divergence hazard.
-    ///
-    /// NOT INDEPENDENT OF [`Self::lr`] AND [`Self::weight_decay`]. `x^2` can
-    /// amplify its input where a rectifier cannot, so the step size that is right
-    /// for one is not automatically right for the other. Changing this field alone
-    /// and reading the result as "the activation is worse" is the same mistake the
-    /// `lr`/`batch_size` coupling above warns about.
-    pub activation: Activation,
-    /// Which feature-importance metric the fitted fold model reports into the TSV
-    /// sidecar. Defaults to [`MlpImportance::W1`], the shipped metric, and THE
-    /// DEFAULT MUST NOT MOVE — see [`MlpImportance`] for why (the sidecar is
-    /// consumed outside this codebase).
-    ///
-    /// Purely a REPORTING choice: it reaches no weight, no RNG draw and no
-    /// optimizer step, so two runs that differ only in this field produce
-    /// bit-identical scores and differ only in the sidecar. That is what makes
-    /// "run the same search twice and diff the two rankings" a valid comparison,
-    /// and it is asserted in `mlp_fold`'s
-    /// `the_importance_metric_choice_does_not_move_the_scores`.
-    pub importance: MlpImportance,
     pub seed: u64,
-    /// Stop after this many consecutive epochs with no improvement in held-out
-    /// loss, and restore the best-seen weights. `None` disables the whole
-    /// mechanism: the full `epochs` budget runs, nothing is snapshotted, and
-    /// the fit is bit-identical to what it was before early stopping existed.
-    ///
-    /// A per-fold rule is preferable to lowering [`Self::epochs`]: different
-    /// folds turn at different times. The compiled patience is intentionally
-    /// short enough to avoid long memorizing tails while tolerating brief noise.
+    /// Stop after this many non-improving validation epochs and restore the best
+    /// weights. `None` runs the full epoch budget.
     pub early_stopping_patience: Option<usize>,
 }
 
 impl Default for MlpConfig {
-    /// [`Self::compiled_default`], plus the dev-only `TIMSSEEK_MLP_*` overrides
-    /// (see [`Self::from_env`]) in non-test builds.
-    ///
-    /// # Why `cfg(test)` skips the environment
-    /// This crate's tests run in-process and share one environment, and a large
-    /// number of them build their fixture config as `MlpConfig { .. ,
-    /// ..MlpConfig::default() }` — including the seed-sweeping learning tests,
-    /// whose whole job is to pin training behaviour at KNOWN hyperparameters. A
-    /// stray `TIMSSEEK_MLP_EPOCHS` in the developer's shell would silently
-    /// retune every one of them at once, so under `cfg(test)` `default()` is
-    /// exactly the compiled default and the environment is never read.
-    /// [`Self::apply_overrides`] is what the parsing tests exercise instead: it
-    /// takes the lookup as an argument, so the whole override path is testable
-    /// without a process-wide (and, in edition 2024, `unsafe`) `set_var`.
     fn default() -> Self {
-        #[cfg(test)]
-        {
-            Self::compiled_default()
-        }
-        #[cfg(not(test))]
-        {
-            Self::from_env()
-        }
+        Self::compiled_default()
     }
 }
 
-/// Gate for the once-per-process effective-config log in [`MlpConfig::from_env`].
-/// `default()` is called once per rescorer entry point, but tests can reach it
-/// more than once in a process and the sweep wants ONE line
-/// to grep, not one per call.
-static ENV_OVERRIDE_LOGGED: std::sync::Once = std::sync::Once::new();
-
 impl MlpConfig {
-    /// The hyperparameters AS COMPILED. No environment, no logging.
-    ///
-    /// This is the authoritative default — the values here are what a run with
-    /// no `TIMSSEEK_MLP_*` set trains with, and every override starts from this
-    /// struct and replaces individual fields.
-    /// These values are validated together on representative searches. Runtime
-    /// and sensitivity are dataset-dependent; benchmark artifacts belong with
-    /// the experiment or PR rather than in this maintained configuration.
     pub fn compiled_default() -> Self {
         MlpConfig {
             hidden: vec![32, 16],
-            // Keep learning rate and batch size coupled when tuning.
             lr: 1.2e-3,
             weight_decay: 1e-4,
-            // Generous ceiling; early stopping determines the actual work.
             epochs: 60,
             batch_size: 1024,
-            loss: MlpLoss::Bce,
-            // The rectifier the whole sweep above ran on. See `activation`.
-            activation: Activation::LeakyRelu,
-            // The metric the sidecar has always carried. An externally consumed
-            // file: changing what its numbers mean is not a default change, it
-            // invalidates every comparison already drawn from it.
-            importance: MlpImportance::W1,
             seed: 0x2545_F491_4F6C_DD1D,
             early_stopping_patience: Some(3),
         }
-    }
-
-    /// [`Self::compiled_default`] with the dev-only `TIMSSEEK_MLP_*` overrides
-    /// applied. **THE ONLY PLACE IN THE CRATE THAT READS THE ENVIRONMENT FOR
-    /// HYPERPARAMETERS** — one reader is what makes "which knobs exist" a
-    /// question with a single answer, in [`Self::apply_overrides`].
-    ///
-    /// This exists because `MlpConfig` is deliberately NOT TOML-exposed (see the
-    /// type docs), which makes every hyperparameter experiment a recompile —
-    /// unworkable for sweeping a 2M-candidate search. It is a dev affordance in
-    /// the spirit of `TIMSSEEK_LDA_DUMP`, NOT a supported interface, and it is
-    /// not a step towards putting these in the config file.
-    ///
-    /// | Variable | Field | Format |
-    /// |---|---|---|
-    /// | `TIMSSEEK_MLP_EPOCHS` | `epochs` | positive integer, e.g. `60` |
-    /// | `TIMSSEEK_MLP_LR` | `lr` | positive finite float, e.g. `1e-3` |
-    /// | `TIMSSEEK_MLP_BATCH_SIZE` | `batch_size` | positive integer, e.g. `512` |
-    /// | `TIMSSEEK_MLP_HIDDEN` | `hidden` | comma-separated positive integers (`64,32`), or `none` for no hidden layer |
-    /// | `TIMSSEEK_MLP_WEIGHT_DECAY` | `weight_decay` | non-negative finite float, e.g. `0` or `1e-3` |
-    /// | `TIMSSEEK_MLP_PATIENCE` | `early_stopping_patience` | positive integer, or `none`/`off` to disable early stopping entirely |
-    /// | `TIMSSEEK_MLP_ACTIVATION` | `activation` | `leaky_relu` or `square`, case-insensitive (`-` and `_` interchangeable) |
-    /// | `TIMSSEEK_MLP_IMPORTANCE` | `importance` | `w1` or `grad`, case-insensitive |
-    /// | `TIMSSEEK_MLP_SEED` | `seed` | `u64`, decimal or `0x`-prefixed hex |
-    /// | `TIMSSEEK_MLP_LOSS` | `loss` | `bce`, or `focal:GAMMA:ALPHA` (`focal:2:0.25`) |
-    ///
-    /// `TIMSSEEK_MLP_IMPORTANCE` is the ODD ONE OUT: every other variable here
-    /// retunes the FIT, and this one cannot touch it. It selects which of the two
-    /// feature-importance metrics lands in `results.feature_importance.tsv` (see
-    /// [`MlpImportance`]), so the intended use is to run the same search twice —
-    /// once unset, once `=grad` — and diff the two rankings, with the scores
-    /// guaranteed bit-identical between the runs.
-    ///
-    /// `TIMSSEEK_MLP_LOSS` spells BOTH focal parameters or none of them: they are
-    /// coupled to each other and to the per-row sample weights (see
-    /// [`MlpLoss::Focal`]), so there is no defensible default for one given the
-    /// other, and a bare `focal` that silently picked a `gamma` would be the
-    /// mislabelled sweep row this whole mechanism aborts to avoid. This is still
-    /// a sweep hatch and not the real config surface `MlpLoss` eventually wants.
-    ///
-    /// # Unset changes nothing
-    /// A variable that is not set is not read into anything — see
-    /// [`Self::apply_overrides`], which touches a field only on `Some`. With
-    /// none set this returns [`Self::compiled_default`] and logs nothing.
-    ///
-    /// # A malformed value ABORTS
-    /// `TIMSSEEK_MLP_LR=banana` panics with the variable name, the offending
-    /// value and the expected format. It does NOT warn-and-continue, because the
-    /// failure this override exists inside of is a SWEEP: a warned-past variable
-    /// produces a run that completes normally, lands in the results table under
-    /// the label the operator believes they set, and is indistinguishable from
-    /// the compiled-default row next to it. A `warn!` line is 1 of ~10^4 in a
-    /// full search log and would be found after the conclusion was drawn.
-    /// Aborting costs one re-run and cannot be missed.
-    ///
-    /// `timsseek_cli` calls this at startup when the selected rescore model uses
-    /// the MLP, so the abort lands in the first second rather than at Phase 5.
-    ///
-    /// # Determinism
-    /// Untouched: this only chooses the numbers. For a FIXED environment the fit
-    /// is the same pure function of (config, fold, rows) it was before — see
-    /// [`Self::rng_for_fold`].
-    pub fn from_env() -> Self {
-        let mut cfg = Self::compiled_default();
-        let applied = cfg.apply_overrides(|k| std::env::var(k).ok());
-        if !applied.is_empty() {
-            // Once per process, at `info`: the default filter is `info`, so a
-            // sweep's run log records WHAT ACTUALLY RAN with no extra flags,
-            // which is the whole point. Not `warn` — deliberately setting an
-            // override is not a problem, and the malformed case aborts instead.
-            ENV_OVERRIDE_LOGGED.call_once(|| {
-                tracing::info!(
-                    "MLP config: DEV OVERRIDE ACTIVE ({}); effective config: hidden={:?} \
-                     lr={:e} weight_decay={:e} epochs={} batch_size={} patience={:?} \
-                     activation={:?} seed={:#018x} loss={:?} importance={:?}",
-                    applied.join(" "),
-                    cfg.hidden,
-                    cfg.lr,
-                    cfg.weight_decay,
-                    cfg.epochs,
-                    cfg.batch_size,
-                    cfg.early_stopping_patience,
-                    cfg.activation,
-                    cfg.seed,
-                    cfg.loss,
-                    cfg.importance,
-                );
-            });
-        }
-        cfg
-    }
-
-    /// The pure core of [`Self::from_env`]: `get` stands in for
-    /// `std::env::var`, so the parsing, the validation and the "unset changes
-    /// nothing" property are all testable without mutating the process
-    /// environment (`unsafe` in edition 2024, and racy across parallel tests
-    /// regardless).
-    ///
-    /// Returns one `NAME=value` string per variable that was actually read, in
-    /// declaration order — the audit trail [`Self::from_env`] logs. Empty means
-    /// nothing was touched.
-    ///
-    /// # Panics
-    /// On any malformed or out-of-range value. See [`Self::from_env`].
-    fn apply_overrides(&mut self, get: impl Fn(&str) -> Option<String>) -> Vec<String> {
-        let mut applied = Vec::new();
-        // One closure per variable so a variable that is UNSET never reaches an
-        // assignment: `read` yields `None` and the `if let` body is skipped.
-        let mut read = |name: &str| -> Option<String> {
-            let raw = get(name)?;
-            // Quoted, so a value that contains a space or is empty is still
-            // unambiguous in the one-line audit trail.
-            applied.push(format!("{name}={raw:?}"));
-            Some(raw)
-        };
-
-        if let Some(raw) = read("TIMSSEEK_MLP_EPOCHS") {
-            self.epochs = parse_positive_usize("TIMSSEEK_MLP_EPOCHS", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_LR") {
-            self.lr = parse_float("TIMSSEEK_MLP_LR", &raw, false);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_BATCH_SIZE") {
-            self.batch_size = parse_positive_usize("TIMSSEEK_MLP_BATCH_SIZE", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_HIDDEN") {
-            self.hidden = parse_hidden("TIMSSEEK_MLP_HIDDEN", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_WEIGHT_DECAY") {
-            self.weight_decay = parse_float("TIMSSEEK_MLP_WEIGHT_DECAY", &raw, true);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_PATIENCE") {
-            self.early_stopping_patience = parse_patience("TIMSSEEK_MLP_PATIENCE", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_ACTIVATION") {
-            self.activation = parse_activation("TIMSSEEK_MLP_ACTIVATION", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_IMPORTANCE") {
-            self.importance = parse_importance("TIMSSEEK_MLP_IMPORTANCE", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_SEED") {
-            self.seed = parse_seed("TIMSSEEK_MLP_SEED", &raw);
-        }
-        if let Some(raw) = read("TIMSSEEK_MLP_LOSS") {
-            self.loss = parse_loss("TIMSSEEK_MLP_LOSS", &raw);
-        }
-
-        applied
     }
 
     /// Per-fold RNG: the configured seed mixed with the fold index, so folds
@@ -2291,180 +1075,6 @@ impl MlpConfig {
     pub fn rng_for_fold(&self, fold: usize) -> StdRng {
         StdRng::seed_from_u64(self.seed ^ (fold as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
-}
-
-/// The one abort message shape, so every malformed variable explains itself the
-/// same way and says why it is not continuing.
-fn bad_env(name: &str, raw: &str, expected: &str) -> ! {
-    panic!(
-        "{name}={raw:?} is not usable: expected {expected}.\n\
-         This is a DEV-ONLY MLP hyperparameter override and a malformed value ABORTS rather \
-         than falling back to the compiled default: a run that quietly used the default would \
-         land in your sweep table labelled with a value it never trained on. Fix the variable \
-         or unset it."
-    );
-}
-
-fn parse_positive_usize(name: &str, raw: &str) -> usize {
-    match raw.trim().parse::<usize>() {
-        Ok(v) if v > 0 => v,
-        _ => bad_env(name, raw, "a positive integer, e.g. `60`"),
-    }
-}
-
-/// `allow_zero` distinguishes `weight_decay` (0 disables it, a legitimate sweep
-/// arm) from `lr` (0 trains nothing and is never what anyone meant).
-fn parse_float(name: &str, raw: &str, allow_zero: bool) -> f32 {
-    let lo = if allow_zero {
-        "non-negative"
-    } else {
-        "positive"
-    };
-    match raw.trim().parse::<f32>() {
-        Ok(v) if v.is_finite() && (v > 0.0 || (allow_zero && v == 0.0)) => v,
-        _ => bad_env(name, raw, &format!("a finite {lo} float, e.g. `1e-3`")),
-    }
-}
-
-fn parse_hidden(name: &str, raw: &str) -> Vec<usize> {
-    let t = raw.trim();
-    // No hidden layer is a real sweep arm (`feedforward` then builds a single
-    // `n_in -> 1` linear layer), but it must be SPELLED: an empty string is
-    // indistinguishable from a shell that dropped the value.
-    if t.eq_ignore_ascii_case("none") {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for part in t.split(',') {
-        match part.trim().parse::<usize>() {
-            Ok(v) if v > 0 => out.push(v),
-            _ => bad_env(
-                name,
-                raw,
-                "a comma-separated list of positive integers, e.g. `64,32`, or `none` for no \
-                 hidden layer",
-            ),
-        }
-    }
-    if out.is_empty() {
-        bad_env(
-            name,
-            raw,
-            "a comma-separated list of positive integers, e.g. `64,32`, or `none` for no hidden \
-             layer",
-        );
-    }
-    out
-}
-
-fn parse_patience(name: &str, raw: &str) -> Option<usize> {
-    let t = raw.trim();
-    if t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("off") {
-        return None;
-    }
-    match t.parse::<usize>() {
-        // 0 is rejected rather than mapped to either meaning: as a number it
-        // would stop on the first non-improving epoch, and as a synonym for
-        // "off" it would silently disagree with the `none` spelling.
-        Ok(v) if v > 0 => Some(v),
-        _ => bad_env(
-            name,
-            raw,
-            "a positive integer, or `none`/`off` to disable early stopping",
-        ),
-    }
-}
-
-/// `leaky_relu` / `square`. Case is ignored and `-` normalizes to `_`, so the
-/// three spellings a shell script is likely to produce (`SQUARE`, `leaky-relu`,
-/// `leaky_relu`) all land; anything else ABORTS like every other malformed
-/// override, because "the activation I asked for was ignored" is invisible in a
-/// sweep table.
-fn parse_activation(name: &str, raw: &str) -> Activation {
-    let t = raw.trim().to_ascii_lowercase().replace('-', "_");
-    match t.as_str() {
-        "leaky_relu" => Activation::LeakyRelu,
-        "square" => Activation::Square,
-        _ => bad_env(name, raw, "`leaky_relu` or `square` (case-insensitive)"),
-    }
-}
-
-/// `w1` / `grad`. Case is ignored and `-` normalizes to `_`, matching
-/// [`parse_activation`]; anything else ABORTS like every other malformed
-/// override. Aborting matters here for a different reason than it does for the
-/// hyperparameters: a typo'd metric name would produce a sidecar full of the
-/// OTHER metric's numbers under the operator's label, and the whole point of the
-/// variable is to diff two rankings that must be correctly attributed.
-fn parse_importance(name: &str, raw: &str) -> MlpImportance {
-    let t = raw.trim().to_ascii_lowercase().replace('-', "_");
-    match t.as_str() {
-        "w1" => MlpImportance::W1,
-        "grad" => MlpImportance::Grad,
-        _ => bad_env(
-            name,
-            raw,
-            "`w1` (first-layer absolute weight row sums, the default) or `grad` (mean \
-             |dL/dx| input-gradient attribution), case-insensitive",
-        ),
-    }
-}
-
-fn parse_seed(name: &str, raw: &str) -> u64 {
-    let t = raw.trim();
-    // Hex accepted because the compiled default is written that way, so
-    // `TIMSSEEK_MLP_SEED=0x2545F4914F6CDD1D` reproduces it verbatim.
-    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => t.parse::<u64>(),
-    };
-    parsed.unwrap_or_else(|_| {
-        bad_env(
-            name,
-            raw,
-            "a u64, decimal (`12345`) or hex (`0x2545F4914F6CDD1D`)",
-        )
-    })
-}
-
-/// `bce` / `focal:GAMMA:ALPHA`. Case is ignored and whitespace around each field
-/// is trimmed, so `FOCAL: 2 : 0.25` lands like `focal:2:0.25`.
-///
-/// The focal arm takes EXACTLY two numbers, both spelled out: `focal` on its own
-/// aborts rather than filling in a `gamma`, because the two parameters are
-/// coupled to each other and to the per-row sample weights (see
-/// [`MlpLoss::Focal`]) and an invented value would land in the sweep table under
-/// the operator's label.
-///
-/// # The ranges
-/// `gamma >= 0` (finite): 0 disables the hard-example modulation, negative would
-/// invert it and up-weight the easy bulk. `alpha` strictly inside `(0, 1)`
-/// (finite): it is applied normalized, as `2 * alpha` for targets and
-/// `2 * (1 - alpha)` for decoys, so 0 or 1 would multiply one entire class by
-/// zero — training on one label, which is never what an `alpha` sweep means.
-/// `focal:0:0.5` is the neutral point and is bit-identical to `bce`.
-fn parse_loss(name: &str, raw: &str) -> MlpLoss {
-    const EXPECTED: &str = "`bce`, or `focal:GAMMA:ALPHA` with a finite GAMMA >= 0 and a finite \
-                            ALPHA strictly inside (0, 1) — e.g. `focal:2:0.25` (case-insensitive)";
-    let t = raw.trim().to_ascii_lowercase();
-    if t == "bce" {
-        return MlpLoss::Bce;
-    }
-    // The trailing `None` is what makes the field count exact: `focal:2` and
-    // `focal:2:0.25:9` both fall through to the abort.
-    let mut fields = t.split(':').map(str::trim);
-    let (gamma, alpha) = match (fields.next(), fields.next(), fields.next(), fields.next()) {
-        (Some("focal"), Some(g), Some(a), None) => (g, a),
-        _ => bad_env(name, raw, EXPECTED),
-    };
-    let gamma = match gamma.parse::<f32>() {
-        Ok(v) if v.is_finite() && v >= 0.0 => v,
-        _ => bad_env(name, raw, EXPECTED),
-    };
-    let alpha = match alpha.parse::<f32>() {
-        Ok(v) if v.is_finite() && v > 0.0 && v < 1.0 => v,
-        _ => bad_env(name, raw, EXPECTED),
-    };
-    MlpLoss::Focal { gamma, alpha }
 }
 
 // ---------------------------------------------------------------- rng helper
@@ -2480,1944 +1090,191 @@ fn normal(rng: &mut StdRng) -> f32 {
 mod test {
     use super::*;
 
-    /// Central-difference step. `f32` params with a `1e-2` step is the sweet
-    /// spot: smaller and catastrophic cancellation dominates, larger and the
-    /// second-order term does.
-    const H: f32 = 1e-2;
-    const TOL: f32 = 2e-2;
-
-    fn seeded() -> StdRng {
-        StdRng::seed_from_u64(42)
-    }
-
-    fn filled(rows: usize, cols: usize, rng: &mut StdRng) -> Tensor {
-        let mut t = Tensor::new(rows, cols);
-        for v in t.data.iter_mut() {
-            *v = normal(rng);
-        }
-        t
+    fn tensor(rows: usize, cols: usize, values: &[f32]) -> Tensor {
+        let mut out = Tensor::new(rows, cols);
+        out.live_mut().copy_from_slice(values);
+        out
     }
 
     #[test]
-    fn gemm_forward_matches_row_at_a_time() {
-        for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
-            let mut rng = seeded();
-            let mut layer = Linear::new(ni, no, &mut rng);
-            let x = filled(rows, ni, &mut rng);
-            let mut actual = Tensor::default();
-            layer.forward(&x, &mut actual, false);
+    fn gemm_handles_forward_and_transposed_layouts() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let mut c = vec![0.0; 4];
+        gemm_f32(2, 3, 2, &a, 3, 1, &b, 2, 1, 0.0, &mut c);
+        assert_eq!(c, vec![58.0, 64.0, 139.0, 154.0]);
 
-            let mut expected = Tensor::new(rows, no);
-            for b in 0..rows {
-                let xr = x.row(b);
-                let out = expected.row_mut(b);
-                out.copy_from_slice(&layer.b);
-                for (i, &xi) in xr.iter().enumerate() {
-                    let wr = &layer.w[i * no..(i + 1) * no];
-                    for (value, &weight) in out.iter_mut().zip(wr) {
-                        *value += xi * weight;
-                    }
-                }
-            }
-            for (&got, &want) in actual.live().iter().zip(expected.live()) {
-                let scale = got.abs().max(want.abs()).max(1.0);
-                assert!(
-                    (got - want).abs() <= 2e-5 * scale,
-                    "shape {rows}x{ni}x{no}: {got} vs {want}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn gemm_backward_matches_row_at_a_time() {
-        for (rows, ni, no) in [(1, 5, 3), (4, 7, 1), (7, 9, 5), (8, 11, 8)] {
-            let mut data_rng = seeded();
-            let x = filled(rows, ni, &mut data_rng);
-            let gy = filled(rows, no, &mut data_rng);
-            let mut actual = Linear::new(ni, no, &mut seeded());
-            let mut expected = Linear::new(ni, no, &mut seeded());
-            let mut actual_gx = Tensor::default();
-            let mut expected_gx = Tensor::new(rows, ni);
-            actual.backward(&x, &Tensor::default(), &gy, &mut actual_gx);
-
-            for b in 0..rows {
-                let gr = gy.row(b);
-                let xr = x.row(b);
-                let gxr = expected_gx.row_mut(b);
-                for o in 0..no {
-                    expected.gb[o] += gr[o];
-                }
-                for i in 0..ni {
-                    let gwr = &mut expected.gw[i * no..(i + 1) * no];
-                    for (g, d) in gwr.iter_mut().zip(gr) {
-                        *g += xr[i] * d;
-                    }
-                    gxr[i] = gr
-                        .iter()
-                        .zip(&expected.w[i * no..(i + 1) * no])
-                        .map(|(&d, &w)| d * w)
-                        .sum();
-                }
-            }
-
-            for (what, got, want) in [
-                ("gx", actual_gx.live(), expected_gx.live()),
-                ("gw", actual.gw.as_slice(), expected.gw.as_slice()),
-            ] {
-                for (&got, &want) in got.iter().zip(want) {
-                    let scale = got.abs().max(want.abs()).max(1.0);
-                    assert!(
-                        (got - want).abs() <= 2e-5 * scale,
-                        "{what} {rows}x{ni}x{no}: {got} vs {want}"
-                    );
-                }
-            }
-            assert_eq!(actual.gb, expected.gb, "gb {rows}x{ni}x{no}");
-        }
-    }
-
-    /// Scalar objective `L = sum(y .* gy)` for a fixed upstream gradient `gy`,
-    /// which makes `dL/dx` exactly what `backward` should write into `gx`.
-    fn scalar_loss(layer: &mut dyn Layer, x: &Tensor, gy: &Tensor) -> f32 {
-        let mut out = Tensor::default();
-        layer.forward(x, &mut out, true);
-        out.live().iter().zip(gy.live()).map(|(a, b)| a * b).sum()
-    }
-
-    fn check_input_grad(layer: &mut dyn Layer, mut x: Tensor, gy: &Tensor, what: &str) {
-        let mut out = Tensor::default();
-        layer.forward(&x, &mut out, true);
-        let mut gx = Tensor::default();
-        layer.backward(&x, &out, gy, &mut gx);
-        let analytic = gx.live().to_vec();
-
-        for k in 0..x.rows * x.cols {
-            let orig = x.data[k];
-            x.data[k] = orig + H;
-            let up = scalar_loss(layer, &x, gy);
-            x.data[k] = orig - H;
-            let dn = scalar_loss(layer, &x, gy);
-            x.data[k] = orig;
-            let numeric = (up - dn) / (2.0 * H);
-            let scale = analytic[k].abs().max(numeric.abs()).max(1.0);
-            assert!(
-                (analytic[k] - numeric).abs() / scale < TOL,
-                "{what}: dL/dx[{k}] analytic {} vs numeric {}",
-                analytic[k],
-                numeric
-            );
-        }
+        let mut ata = vec![0.0; 9];
+        gemm_f32(3, 2, 3, &a, 1, 3, &a, 3, 1, 0.0, &mut ata);
+        assert_eq!(
+            ata,
+            vec![17.0, 22.0, 27.0, 22.0, 29.0, 36.0, 27.0, 36.0, 45.0]
+        );
     }
 
     #[test]
     fn linear_input_gradient_matches_finite_differences() {
-        let mut rng = seeded();
-        let mut lin = Linear::new(5, 3, &mut rng);
-        let x = filled(4, 5, &mut rng);
-        let gy = filled(4, 3, &mut rng);
-        check_input_grad(&mut lin, x, &gy, "Linear");
-    }
-
-    #[test]
-    fn linear_weight_gradient_matches_finite_differences() {
-        let mut rng = seeded();
-        let mut lin = Linear::new(4, 3, &mut rng);
-        let x = filled(6, 4, &mut rng);
-        let gy = filled(6, 3, &mut rng);
-
-        let mut out = Tensor::default();
-        lin.forward(&x, &mut out, true);
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut layer = Linear::new(3, 2, &mut rng);
+        let x = tensor(2, 3, &[0.2, -0.7, 1.1, -0.4, 0.3, 0.9]);
+        let gy = tensor(2, 2, &[0.5, -0.2, 0.7, 0.1]);
+        let mut y = Tensor::default();
+        layer.forward(&x, &mut y);
         let mut gx = Tensor::default();
-        lin.backward(&x, &out, &gy, &mut gx);
-        let analytic = lin.gw.clone();
+        layer.backward(&x, &y, &gy, &mut gx);
 
-        for k in 0..lin.w.len() {
-            let orig = lin.w[k];
-            lin.w[k] = orig + H;
-            let up = scalar_loss(&mut lin, &x, &gy);
-            lin.w[k] = orig - H;
-            let dn = scalar_loss(&mut lin, &x, &gy);
-            lin.w[k] = orig;
-            let numeric = (up - dn) / (2.0 * H);
-            let scale = analytic[k].abs().max(numeric.abs()).max(1.0);
-            assert!(
-                (analytic[k] - numeric).abs() / scale < TOL,
-                "Linear: dL/dw[{k}] analytic {} vs numeric {}",
-                analytic[k],
-                numeric
-            );
+        let eps = 1e-3;
+        for i in 0..x.live().len() {
+            let mut plus = x.clone();
+            let mut minus = x.clone();
+            plus.live_mut()[i] += eps;
+            minus.live_mut()[i] -= eps;
+            let mut yp = Tensor::default();
+            let mut ym = Tensor::default();
+            layer.forward(&plus, &mut yp);
+            layer.forward(&minus, &mut ym);
+            let lp: f32 = yp.live().iter().zip(gy.live()).map(|(a, b)| a * b).sum();
+            let lm: f32 = ym.live().iter().zip(gy.live()).map(|(a, b)| a * b).sum();
+            let numerical = (lp - lm) / (2.0 * eps);
+            assert!((gx.live()[i] - numerical).abs() < 2e-3);
         }
     }
 
     #[test]
-    fn relu_gradient_matches_finite_differences() {
-        for slope in [0.0f32, LEAKY_SLOPE, 0.1] {
-            let mut rng = seeded();
-            let mut relu = Relu::leaky(4, slope);
-            // Offset away from 0 so no element sits on the kink, where the
-            // one-sided derivatives legitimately disagree.
-            let mut x = filled(5, 4, &mut rng);
-            for v in x.data.iter_mut() {
-                *v += if *v >= 0.0 { 1.0 } else { -1.0 };
-            }
-            let gy = filled(5, 4, &mut rng);
-            check_input_grad(&mut relu, x, &gy, &format!("Relu(slope={slope})"));
-        }
-    }
-
-    /// The property that makes the leaky form worth defaulting to: a saturated
-    /// unit still passes gradient, so it can come back. A pure ReLU cannot,
-    /// which is what makes its dead state absorbing rather than merely slow.
-    #[test]
-    fn leaky_relu_passes_gradient_where_pure_relu_does_not() {
-        let gy = {
-            let mut t = Tensor::new(1, 1);
-            t.row_mut(0)[0] = 1.0;
-            t
-        };
-        let mut x = Tensor::new(1, 1);
-        x.row_mut(0)[0] = -5.0; // deep in the dead region
-
-        let grad_at = |slope: f32| {
-            let mut act = Relu::leaky(1, slope);
-            let mut out = Tensor::default();
-            act.forward(&x, &mut out, true);
-            let mut gx = Tensor::default();
-            act.backward(&x, &out, &gy, &mut gx);
-            gx.row(0)[0]
-        };
-
-        assert_eq!(grad_at(0.0), 0.0, "pure ReLU: no way back");
-        assert_eq!(grad_at(LEAKY_SLOPE), LEAKY_SLOPE);
-    }
-
-    /// `dL/dx = gy * 2x`. Unlike [`Relu`], this needs the layer INPUT, so the
-    /// check is also what would catch a `backward` that tried to re-derive the
-    /// slope from `y = x^2` (which has lost the sign).
-    #[test]
-    fn square_gradient_matches_finite_differences() {
-        let mut rng = seeded();
-        let mut sq = Square::new(4);
-        // Both signs are present in the draw, which is the point: a
-        // `y`-derived implementation agrees on the positive half and is wrong
-        // on the negative one.
-        let x = filled(5, 4, &mut rng);
-        assert!(
-            x.live().iter().any(|v| *v < 0.0) && x.live().iter().any(|v| *v > 0.0),
-            "the fixture must straddle zero or it cannot see a sign error"
-        );
-        let gy = filled(5, 4, &mut rng);
-        check_input_grad(&mut sq, x, &gy, "Square");
-    }
-
-    /// The sign asymmetry, pinned directly: at `+a` and `-a` the OUTPUT is the
-    /// same and the gradient is opposite. This is the whole reason `Square`
-    /// reads `x` where `Relu` reads `y`.
-    #[test]
-    fn square_gradient_sign_follows_the_input_not_the_output() {
-        let mut gy = Tensor::new(1, 1);
-        gy.row_mut(0)[0] = 1.0;
-        let at = |xv: f32| {
-            let mut x = Tensor::new(1, 1);
-            x.row_mut(0)[0] = xv;
-            let mut sq = Square::new(1);
-            let mut out = Tensor::default();
-            sq.forward(&x, &mut out, true);
-            let mut gx = Tensor::default();
-            sq.backward(&x, &out, &gy, &mut gx);
-            (out.row(0)[0], gx.row(0)[0])
-        };
-        assert_eq!(at(3.0), (9.0, 6.0));
-        assert_eq!(at(-3.0), (9.0, -6.0));
-        // The one point with no gradient — a single point, not the half-line
-        // that makes a pure ReLU's dead state absorbing.
-        assert_eq!(at(0.0), (0.0, 0.0));
+    fn leaky_relu_preserves_a_negative_gradient() {
+        let x = tensor(1, 2, &[-2.0, 3.0]);
+        let gy = tensor(1, 2, &[4.0, 5.0]);
+        let mut relu = Relu::leaky(2, LEAKY_SLOPE);
+        let mut y = Tensor::default();
+        let mut gx = Tensor::default();
+        relu.forward(&x, &mut y);
+        relu.backward(&x, &y, &gy, &mut gx);
+        assert_eq!(y.live(), &[-2.0 * LEAKY_SLOPE, 3.0]);
+        assert_eq!(gx.live(), &[4.0 * LEAKY_SLOPE, 5.0]);
     }
 
     #[test]
-    fn batchnorm_gradient_matches_finite_differences() {
-        let mut rng = seeded();
-        let mut bn = BatchNorm::new(3);
-        let x = filled(8, 3, &mut rng);
-        let gy = filled(8, 3, &mut rng);
-        // BatchNorm's backward accumulates into g_gamma/g_beta and its forward
-        // updates running stats; neither affects dL/dx in training mode, which
-        // is what this checks.
-        check_input_grad(&mut bn, x, &gy, "BatchNorm");
-    }
-
-    // ------------------------------------------------------------ loss
-
-    fn loss_only(loss: &MlpLoss, z: &[f32], y: &[f32], w: &[f32]) -> f32 {
-        let mut logits = Tensor::new(z.len(), 1);
-        for (b, &v) in z.iter().enumerate() {
-            logits.row_mut(b)[0] = v;
-        }
+    fn bce_gradient_matches_finite_differences_and_stays_finite() {
+        let logits = tensor(4, 1, &[-20.0, -0.7, 0.9, 20.0]);
+        let y = [0.0, 1.0, 0.0, 1.0];
+        let w = [1.0, 0.5, 1.0, 0.5];
         let mut grad = Tensor::default();
-        loss.loss_and_grad(&logits, y, w, &mut grad)
-    }
+        let loss = loss_and_grad(&logits, &y, &w, &mut grad);
+        assert!(loss.is_finite());
+        assert!(grad.live().iter().all(|v| v.is_finite()));
 
-    fn loss_grad(loss: &MlpLoss, z: &[f32], y: &[f32], w: &[f32]) -> Vec<f32> {
-        let mut logits = Tensor::new(z.len(), 1);
-        for (b, &v) in z.iter().enumerate() {
-            logits.row_mut(b)[0] = v;
-        }
-        let mut grad = Tensor::default();
-        loss.loss_and_grad(&logits, y, w, &mut grad);
-        grad.live().to_vec()
-    }
-
-    fn check_loss_grad(loss: &MlpLoss, z: &[f32], y: &[f32], w: &[f32], what: &str) {
-        let analytic = loss_grad(loss, z, y, w);
-        let h = 1e-3;
-        for k in 0..z.len() {
-            let mut zp = z.to_vec();
-            let mut zm = z.to_vec();
-            zp[k] += h;
-            zm[k] -= h;
-            let numeric = (loss_only(loss, &zp, y, w) - loss_only(loss, &zm, y, w)) / (2.0 * h);
-            let scale = analytic[k].abs().max(numeric.abs()).max(1e-3);
-            assert!(
-                (analytic[k] - numeric).abs() / scale < 5e-2,
-                "{what}: dL/dz[{k}] analytic {} vs numeric {}",
-                analytic[k],
-                numeric
-            );
+        let eps = 1e-3;
+        for i in 0..4 {
+            let mut plus = logits.clone();
+            let mut minus = logits.clone();
+            plus.live_mut()[i] += eps;
+            minus.live_mut()[i] -= eps;
+            let mut sink = Tensor::default();
+            let lp = loss_and_grad(&plus, &y, &w, &mut sink);
+            let lm = loss_and_grad(&minus, &y, &w, &mut sink);
+            assert!((grad.live()[i] - (lp - lm) / (2.0 * eps)).abs() < 2e-3);
         }
     }
 
     #[test]
-    fn bce_gradient_matches_finite_differences() {
-        let z = [-2.0f32, -0.3, 0.0, 0.7, 3.1];
-        let y = [0.0f32, 1.0, 0.0, 1.0, 1.0];
-        let w = [1.0f32, 0.5, 1.0, 0.5, 0.5];
-        check_loss_grad(&MlpLoss::Bce, &z, &y, &w, "Bce");
-    }
-
-    /// The modulating factor depends on `p`, hence on the logit, so it
-    /// contributes its own term to `dL/dz` and the BCE-with-logits gradient does
-    /// NOT carry over. Finite differences are what catch a missing or
-    /// sign-flipped term — an analytically wrong gradient here still points
-    /// downhill and still trains, so no learning test would notice.
-    ///
-    /// `(0, 0.5)` is included so the degenerate arm is checked by the same
-    /// machinery as the rest, not only against `Bce`.
-    #[test]
-    fn focal_gradient_matches_finite_differences() {
-        let z = [-2.0f32, -0.3, 0.0, 0.7, 3.1];
-        let y = [0.0f32, 1.0, 0.0, 1.0, 1.0];
-        let w = [1.0f32, 0.5, 1.0, 0.5, 0.5];
-        for (gamma, alpha) in [
-            (0.0f32, 0.5f32),
-            (0.0, 0.25),
-            (1.0, 0.5),
-            (2.0, 0.5),
-            (2.0, 0.75),
-            (0.5, 0.25),
-            (5.0, 0.5),
-        ] {
-            let loss = MlpLoss::Focal { gamma, alpha };
-            check_loss_grad(&loss, &z, &y, &w, &format!("Focal(g={gamma},a={alpha})"));
-        }
-    }
-
-    /// The cheapest guard against a sign error in the modulating factor's
-    /// derivative: at `gamma = 0` with the neutral `alpha` the general case must
-    /// reproduce plain BCE, loss AND gradient. Asserted on the BITS, which the
-    /// 2x `alpha` normalization is what buys — see the [`MlpLoss::Focal`] docs.
-    #[test]
-    fn focal_at_zero_gamma_is_exactly_bce() {
-        let z = [-2.0f32, -0.3, 0.0, 0.7, 3.1];
-        let y = [0.0f32, 1.0, 0.0, 1.0, 1.0];
-        let w = [1.0f32, 0.5, 1.0, 0.5, 0.5];
-        let focal = MlpLoss::Focal {
-            gamma: 0.0,
-            alpha: 0.5,
-        };
-
-        let (lb, lf) = (
-            loss_only(&MlpLoss::Bce, &z, &y, &w),
-            loss_only(&focal, &z, &y, &w),
-        );
-        assert_eq!(lb.to_bits(), lf.to_bits(), "loss {lb} vs {lf}");
-
-        for (a, b) in loss_grad(&MlpLoss::Bce, &z, &y, &w)
-            .iter()
-            .zip(loss_grad(&focal, &z, &y, &w).iter())
-        {
-            assert!((a - b).abs() < 1e-7, "grad {a} vs {b}");
-        }
-    }
-
-    /// The property that replaced the removed `AsymFocal`: `gamma` up-weights
-    /// hard rows RELATIVE to easy ones on BOTH sides. Stated as a ratio of
-    /// ratios, because `(1 - p_t)^gamma <= 1` shrinks every row in absolute
-    /// terms — what focal changes is the balance between them.
-    ///
-    /// This is also where the sign convention is pinned: an implementation that
-    /// modulated by `p_t^gamma` instead of `(1 - p_t)^gamma` (i.e. the discount
-    /// the removed variant applied to targets) fails both halves.
-    #[test]
-    fn focal_up_weights_hard_examples_in_both_classes() {
-        let w = [1.0f32];
-        let at = |gamma: f32, z: f32, y: f32| {
-            loss_only(&MlpLoss::Focal { gamma, alpha: 0.5 }, &[z], &[y], &w)
-        };
-
-        // |z| = 2.1972246 is p = 0.9 / 0.1.
-        for (y, hard_z, easy_z) in [
-            (1.0f32, -2.1972246f32, 2.1972246f32),
-            (0.0, 2.1972246, -2.1972246),
-        ] {
-            let hard_ratio = at(2.0, hard_z, y) / at(0.0, hard_z, y);
-            let easy_ratio = at(2.0, easy_z, y) / at(0.0, easy_z, y);
-            let class = if y > 0.5 { "target" } else { "decoy" };
-            assert!(
-                hard_ratio > easy_ratio * 10.0,
-                "{class}: the confidently-wrong row must keep far more of its weight \
-                 than the easy one: hard {hard_ratio} vs easy {easy_ratio}"
-            );
-        }
-    }
-
-    /// `alpha` tilts the two classes against each other, and the neutral 0.5
-    /// really is neutral. Same logit magnitude on both sides, so the only
-    /// difference between the two numbers is `alpha_t`.
-    #[test]
-    fn alpha_tilts_the_class_balance() {
-        let w = [1.0f32];
-        let at = |alpha: f32, y: f32| {
-            loss_only(
-                &MlpLoss::Focal { gamma: 2.0, alpha },
-                &[if y > 0.5 { -1.0 } else { 1.0 }],
-                &[y],
-                &w,
-            )
-        };
-
-        assert_eq!(
-            at(0.5, 1.0).to_bits(),
-            at(0.5, 0.0).to_bits(),
-            "alpha 0.5 must treat the two classes identically"
-        );
-        assert!(
-            at(0.9, 1.0) > at(0.5, 1.0) && at(0.9, 0.0) < at(0.5, 0.0),
-            "alpha > 0.5 must favor targets"
-        );
-        assert!(
-            at(0.1, 1.0) < at(0.5, 1.0) && at(0.1, 0.0) > at(0.5, 0.0),
-            "alpha < 0.5 must favor decoys"
-        );
-    }
-
-    /// Extreme logits are where a naive `log(p)` or a `1 - p` complement would
-    /// give `inf`, `NaN` or a hard zero. `q` and `p_t` both come straight from
-    /// `sigmoid`, so the modulation stays finite and the loss stays ~linear in
-    /// `|z|` the way `bce_from_logit` is.
-    #[test]
-    fn focal_is_finite_at_extreme_logits() {
-        let w = [1.0f32];
-        for gamma in [0.0f32, 1.0, 2.0, 5.0] {
-            for z in [-90.0f32, -40.0, -20.0, 0.0, 20.0, 40.0, 90.0] {
-                for y in [0.0f32, 1.0] {
-                    let loss = MlpLoss::Focal { gamma, alpha: 0.6 };
-                    let l = loss_only(&loss, &[z], &[y], &w);
-                    let g = loss_grad(&loss, &[z], &[y], &w)[0];
-                    assert!(
-                        l.is_finite() && l >= 0.0 && g.is_finite(),
-                        "gamma {gamma} z {z} y {y}: loss {l} grad {g}"
-                    );
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------ transform
-
-    #[test]
-    fn transform_culls_dead_and_constant_columns() {
-        // col0 informative, col1 all-NaN, col2 constant, col3 informative.
-        let ncols = 4;
-        let feat: Vec<f64> = vec![
-            1.0,
-            f64::NAN,
-            7.0,
-            -1.0, //
-            2.0,
-            f64::NAN,
-            7.0,
-            0.5, //
-            3.0,
-            f64::NAN,
-            7.0,
-            2.0, //
-            4.0,
-            f64::NAN,
-            7.0,
-            9.0, //
-        ];
-        let rows: Vec<usize> = (0..4).collect();
-        let t = ColumnTransform::fit(&feat, ncols, &rows);
-
-        assert_eq!(t.culled(), &[1, 2]);
-        assert_eq!(t.width(), 2, "two survivors, neither missable");
-        assert_eq!(t.lane_of_input(0), Some(0));
-        assert_eq!(t.lane_of_input(1), Some(3));
+    fn adam_updates_parameters_and_clears_gradients() {
+        let mut p = vec![1.0, -1.0];
+        let mut g = vec![0.5, -0.25];
+        let mut adam = Adam::new(1e-2).with_weight_decay(1e-4);
+        adam.step(vec![(p.as_mut_slice(), g.as_mut_slice(), true)]);
+        assert_ne!(p, vec![1.0, -1.0]);
+        assert_eq!(g, vec![0.0, 0.0]);
     }
 
     #[test]
-    fn transform_imputes_missable_and_flags_companion() {
-        let ncols = 2;
-        // col0 clean, col1 missable (one NaN).
-        let feat: Vec<f64> = vec![
-            1.0,
-            10.0, //
-            2.0,
-            f64::NAN, //
-            3.0,
-            30.0, //
-            4.0,
-            40.0, //
-        ];
-        let rows: Vec<usize> = (0..4).collect();
-        let t = ColumnTransform::fit(&feat, ncols, &rows);
+    fn transform_culls_dead_columns_and_tracks_missingness() {
+        let feat = vec![1.0, 5.0, f64::NAN, 2.0, 5.0, 8.0, 3.0, 5.0, 10.0];
+        let tx = ColumnTransform::fit(&feat, 3, &[0, 1, 2]);
+        assert_eq!(tx.culled(), &[1]);
+        assert_eq!(tx.width(), 3);
+        assert_eq!(tx.lane_of_input(0), Some(0));
+        assert_eq!(tx.lane_of_input(1), Some(2));
+        assert_eq!(tx.isna_lane_of_input(2), Some(2));
 
-        assert!(t.culled().is_empty());
-        // 2 standardized + 1 companion for the missable column.
-        assert_eq!(t.width(), 3);
-
-        let mut out = vec![0.0f32; t.width()];
-        // Row 1 carries the NaN: imputed to the mean, i.e. 0 standardized, and
-        // the companion trips.
-        t.apply(&feat[2..4], &mut out);
-        assert_eq!(out[1], 0.0, "NaN imputes to the column mean");
-        assert_eq!(out[2], 1.0, "companion flags the imputation");
-
-        // Row 0 is finite: companion stays clear.
-        t.apply(&feat[0..2], &mut out);
-        assert_eq!(out[2], 0.0);
+        let mut out = vec![0.0; tx.width()];
+        tx.apply(&feat[..3], &mut out);
+        assert_eq!(out[1], 0.0);
+        assert_eq!(out[2], 1.0);
     }
 
-    /// `lane_of_input` / `isna_lane_of_input` must agree with the layout
-    /// `apply` actually writes, or a lane-indexed importance vector puts a
-    /// companion's weight on the wrong feature. Asserted against `apply`
-    /// itself rather than against a hand-copied layout: lane 1 is the only
-    /// missable column here, so the slot that trips when lane 1 is NaN IS its
-    /// companion by definition.
     #[test]
-    fn isna_companions_map_back_to_the_column_they_flag() {
-        let ncols = 3;
-        // col0 clean, col1 missable, col2 clean.
-        let feat: Vec<f64> = vec![
-            1.0,
-            10.0,
-            -1.0, //
-            2.0,
-            f64::NAN,
-            5.0, //
-            3.0,
-            30.0,
-            2.0, //
-            4.0,
-            40.0,
-            9.0, //
-        ];
-        let rows: Vec<usize> = (0..4).collect();
-        let t = ColumnTransform::fit(&feat, ncols, &rows);
-        assert_eq!(t.width(), 4, "three survivors + one companion");
-
-        // Standardized block: lanes, no companions.
-        assert_eq!(
-            (0..3).map(|k| t.lane_of_input(k)).collect::<Vec<_>>(),
-            vec![Some(0), Some(1), Some(2)]
-        );
-        assert_eq!(
-            (0..3).map(|k| t.isna_lane_of_input(k)).collect::<Vec<_>>(),
-            vec![None; 3]
-        );
-
-        // Companion block: the reverse.
-        assert_eq!(t.lane_of_input(3), None);
-        assert_eq!(t.isna_lane_of_input(3), Some(1));
-        // Past the end on both.
-        assert_eq!(t.lane_of_input(4), None);
-        assert_eq!(t.isna_lane_of_input(4), None);
-
-        // And slot 3 is the one `apply` actually trips for a NaN in lane 1.
-        let mut out = vec![0.0f32; t.width()];
-        t.apply(&feat[3..6], &mut out);
-        assert_eq!(out[3], 1.0);
-    }
-
-    /// The property the whole input transform rests on: statistics come from
-    /// the rows it was fitted with, never from the rows it will score.
-    #[test]
-    fn transform_statistics_ignore_held_out_rows() {
-        let ncols = 1;
-        // Train rows 0..4 are all ~1.0; held-out rows 4..8 are wildly larger.
-        let feat: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 1000.0, 2000.0, 3000.0, 4000.0];
-        let train: Vec<usize> = (0..4).collect();
-
-        let fitted = ColumnTransform::fit(&feat, ncols, &train);
-        let train_only: Vec<f64> = feat[..4].to_vec();
-        let reference = ColumnTransform::fit(&train_only, ncols, &train);
-
-        let mut a = vec![0.0f32; fitted.width()];
-        let mut b = vec![0.0f32; reference.width()];
-        fitted.apply(&feat[0..1], &mut a);
-        reference.apply(&feat[0..1], &mut b);
-        assert_eq!(a, b, "held-out rows must not move the standardization");
-    }
-
-    /// Compiles out in release if written as `debug_assert!`, which is exactly
-    /// where it would matter — so it is a returned count, and this test runs
-    /// under any profile.
-    #[test]
-    fn check_clean_catches_nan_in_a_column_fitted_as_clean() {
-        let ncols = 1;
-        let feat: Vec<f64> = vec![1.0, 2.0, 3.0, f64::NAN];
-        let train: Vec<usize> = (0..3).collect();
-        let t = ColumnTransform::fit(&feat, ncols, &train);
-
-        assert!(t.check_clean(&feat, &train).is_empty());
-        assert_eq!(
-            t.check_clean(&feat, &[3]),
-            vec![0],
-            "a NaN in a column fitted as clean must be reported"
-        );
-    }
-
-    // ------------------------------------------------------------ learning
-
-    /// Build the noisy-XOR fixture, train `cfg` on it from init seed `seed`, and
-    /// return `(accuracy, final_train_loss)`.
-    ///
-    /// ONE `StdRng`, consumed in a fixed order — 512 rows of data, then the
-    /// init, then the per-epoch shuffles. That order is load-bearing: it is what
-    /// makes a given `(cfg, seed)` a fixed experiment, so every caller here is
-    /// comparing the same trajectory.
-    fn xor_accuracy(cfg: &MlpConfig, seed: u64) -> (f32, f32) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let n = 512;
-        let mut x = Tensor::new(n, 2);
-        let mut y = vec![0.0f32; n];
-        for i in 0..n {
-            let a = if i % 2 == 0 { 1.0 } else { -1.0 };
-            let b = if (i / 2) % 2 == 0 { 1.0 } else { -1.0 };
-            let r = x.row_mut(i);
-            r[0] = a + 0.1 * normal(&mut rng);
-            r[1] = b + 0.1 * normal(&mut rng);
-            y[i] = if a * b > 0.0 { 1.0 } else { 0.0 };
-        }
-        let w = vec![1.0f32; n];
-
-        let mut model = Mlp::feedforward(2, &cfg.hidden, cfg.activation, &mut rng);
-        let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-        let loss = model.train(cfg, &x, &y, &w, &mut opt, &mut rng);
-
-        let out = model.forward(&x, false);
-        let correct = (0..n)
-            .filter(|&i| (out.row(i)[0] > 0.0) == (y[i] > 0.5))
-            .count();
-        (correct as f32 / n as f32, loss)
-    }
-
-    /// The XOR config the learning tests share: everything but the activation is
-    /// held fixed, `lr` and `weight_decay` INCLUDED FROM THE DEFAULT — see
-    /// [`mlp_learns_xor_which_no_linear_model_can`] for why the inheritance is
-    /// deliberate.
-    fn xor_cfg(activation: Activation) -> MlpConfig {
-        MlpConfig {
-            hidden: vec![16, 8],
-            epochs: 400,
-            batch_size: 64,
-            activation,
-            ..MlpConfig::default()
-        }
-    }
-
-    /// Without this, every other test still passes if the MLP silently
-    /// collapses to a linear map — XOR is the cheapest thing a linear
-    /// discriminant provably cannot separate.
-    ///
-    /// Run over several seeds on purpose. A single seed passing proves very
-    /// little here: full-batch descent on this net was observed settling into a
-    /// dead-ReLU plateau at exactly 0.75 accuracy / `ln(2)/2` loss for one
-    /// specific init, and a one-seed test would have called that either a pass
-    /// or a bug depending on luck.
-    ///
-    /// `lr` is INHERITED from [`MlpConfig::default`] rather than pinned, so the
-    /// test trains at whatever step size the crate ships (3e-4 until the 2026-07
-    /// retune, 1.2e-3 since, green across all eight seeds in both regimes).
-    /// Keep the inheritance: pinning `lr` would leave nothing exercising the
-    /// shipped value on a nonlinear problem at all.
-    ///
-    /// IT IS NOT A CANARY ON THE STEP SIZE, and an earlier version of this note
-    /// claiming otherwise was measured false. All eight seeds pass at `lr` =
-    /// 3e-4, 8e-4, 1.2e-3, 2e-3, 3e-3, 6e-3 and 1.2e-2 — insensitive across a 40x
-    /// range, including the 1e-2 an older dead-plateau warning here named as the
-    /// danger. A test that passes everywhere cannot detect a cliff, so a green run
-    /// says nothing about whether the default is well chosen; that question is
-    /// settled by the sweep in [`MlpConfig::compiled_default`], on real data.
-    /// What this test does still catch is the collapse it was written for: a net
-    /// degenerated to a linear map caps near 0.75 accuracy on XOR, well under the
-    /// 0.95 asserted below.
-    #[test]
-    fn mlp_learns_xor_which_no_linear_model_can() {
-        // Seed 7 is here on purpose: it is the init that trapped at exactly
-        // 0.75 / `ln(2)/2` back when biases initialized to zero.
-        // Verified green across 16 seeds; trimmed to 8 to keep the test under
-        // ~10s. Seeds 7 and 13 are pinned members, not arbitrary.
-        for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
-            let (acc, loss) = xor_accuracy(&xor_cfg(Activation::LeakyRelu), seed);
-            assert!(
-                acc > 0.95,
-                "seed {seed}: XOR accuracy {acc} (loss {loss}) — collapsed to linear?"
-            );
-        }
-    }
-
-    /// [`Activation::Square`] can fit something a linear model cannot, at the
-    /// SHIPPED `lr` — the same fixture, seed set and threshold as
-    /// [`mlp_learns_xor_which_no_linear_model_can`], with only the activation
-    /// changed, so the two are directly comparable.
-    ///
-    /// Swept over seeds for the reason every learning test here is: this module
-    /// has two documented init-dependent training traps, and `x^2` adds a third
-    /// hazard of its own — it is unbounded, so a bad init can diverge outright
-    /// rather than merely converge slowly (see [`Square`]). A single seed would
-    /// not distinguish "works" from "worked once".
-    ///
-    /// MEASURED, and the point of recording it: all eight seeds reach the same
-    /// threshold as the rectifier at the shipped `lr` of 1.2e-3, and the loss it
-    /// gets there is LOWER on every seed. That says the activation is usable on a
-    /// small nonlinear problem; it says nothing about the 101-column rescore
-    /// lanes, where the divergence hazard scales with the input dimension and
-    /// nothing has been measured at all.
-    #[test]
-    fn square_activation_learns_xor() {
-        for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
-            let cfg = xor_cfg(Activation::Square);
-            let (acc, loss) = xor_accuracy(&cfg, seed);
-            assert!(
-                loss.is_finite(),
-                "seed {seed}: the squaring net diverged (loss {loss}) at lr {}",
-                cfg.lr
-            );
-            assert!(
-                acc > 0.95,
-                "seed {seed}: XOR accuracy {acc} (loss {loss}) at lr {} — \
-                 report the lr it needs rather than retuning the default",
-                cfg.lr
-            );
-        }
-    }
-
-    /// The only test that the MLP's per-row weights do anything — this is what
-    /// carries the GBM's 0.5/1.0 target/decoy balance into the MLP.
-    ///
-    /// Swept over INIT seeds, like every other learning test here. It is a PAIRED
-    /// comparison with matched init (both arms start from the same
-    /// `StdRng::seed_from_u64(seed)`, so the two nets are bit-identical before the
-    /// first step and the only difference is the weight vector), which makes it far
-    /// more robust than an absolute-threshold test — but "robust" was an argument,
-    /// not a measurement, and this module has two documented init-dependent
-    /// training traps. The sweep is what turns it into a measurement.
-    ///
-    /// The DATA seed stays fixed at 11: varying the draws too would change what is
-    /// being asserted from "weights move the boundary" to "weights move the
-    /// boundary on any sample", which needs a tolerance rather than a strict
-    /// inequality.
-    /// THE `patience: None` contract: with early stopping off, handing
-    /// `train_reporting` a held-out set changes the LOG and nothing else. That
-    /// is the behavior the whole module had before early stopping existed, and
-    /// `None` has to reproduce it exactly.
-    ///
-    /// This is a leak assertion, not a tidiness one. The set passed here is by
-    /// construction rows the fitted model will later be asked to score, so if
-    /// reporting could nudge a weight — through the optimizer, the RNG stream, or
-    /// a stale gradient buffer left by `eval_loss` — the model would have been
-    /// fitted on rows it is scoring, and every downstream leak test would still
-    /// pass because they all check the PARTITION rather than the training loop.
-    /// Asserted on raw bits over the whole score vector, at several seeds.
-    ///
-    /// `patience: None` is EXPLICIT here rather than inherited: the default is
-    /// `Some(5)`, under which passing a held-out set is SUPPOSED to be able to
-    /// change the fit. The second half of this test asserts that it can, so a
-    /// `None` that silently early-stopped anyway — or a `Some` that silently did
-    /// not — fails one arm or the other.
-    #[test]
-    fn patience_none_makes_a_held_out_set_reporting_only() {
-        for seed in [7u64, 13, 42] {
-            let mut dr = StdRng::seed_from_u64(seed);
-            let n = 128;
-            let mut x = Tensor::new(n, 3);
-            let mut y = vec![0.0f32; n];
-            for i in 0..n {
-                let pos = i % 2 == 0;
-                let r = x.row_mut(i);
-                r[0] = if pos { 0.7 } else { -0.7 } + 0.5 * normal(&mut dr);
-                r[1] = normal(&mut dr);
-                r[2] = if pos { -0.3 } else { 0.3 } + 0.5 * normal(&mut dr);
-                y[i] = if pos { 1.0 } else { 0.0 };
-            }
-            let w = vec![1.0f32; n];
-            // A DIFFERENT set, standing in for the early-stop fold. Pure noise
-            // against alternating labels, so its loss cannot fall for long and
-            // the `Some` arm below is guaranteed something to stop on.
-            let mut vx = Tensor::new(32, 3);
-            for i in 0..32 {
-                for j in 0..3 {
-                    vx.row_mut(i)[j] = normal(&mut dr);
-                }
-            }
-            let vy: Vec<f32> = (0..32)
-                .map(|i| if i % 2 == 0 { 1.0 } else { 0.0 })
-                .collect();
-            let vw = vec![1.0f32; 32];
-
-            let cfg = MlpConfig {
-                hidden: vec![8],
-                // Long enough that the noise validation set has certainly
-                // turned by the end, which is what the control arm needs.
-                epochs: 400,
-                batch_size: 32,
-                early_stopping_patience: None,
-                ..MlpConfig::default()
-            };
-
-            let run = |cfg: &MlpConfig, val: Option<ValSet<'_>>| {
-                let mut r = StdRng::seed_from_u64(99);
-                let mut m = Mlp::feedforward(3, &cfg.hidden, cfg.activation, &mut r);
-                let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-                let out = m.train_reporting(cfg, &x, &y, &w, &mut o, &mut r, val, "t");
-                let p = m.forward(&x, false);
-                let bits = (0..n).map(|i| p.row(i)[0].to_bits()).collect::<Vec<u32>>();
-                (out, bits)
-            };
-            let vset = || {
-                Some(ValSet {
-                    x: &vx,
-                    y: &vy,
-                    w: &vw,
-                })
-            };
-
-            let (out_without, without) = run(&cfg, None);
-            let (out_with, with) = run(&cfg, vset());
-            assert_eq!(
-                without, with,
-                "seed {seed}: with patience None a held-out set moved the fit — it must only log"
-            );
-            // Non-vacuity: the fit is not a constant that any two runs would match.
-            assert!(
-                without
-                    .iter()
-                    .collect::<std::collections::HashSet<_>>()
-                    .len()
-                    > 1,
-                "seed {seed}: scores are all identical, so the comparison proves nothing"
-            );
-            // ...and `None` really means the whole budget, unsnapshotted.
-            for o in [out_without, out_with] {
-                assert_eq!(
-                    o.epochs_run, cfg.epochs,
-                    "seed {seed}: None must run the budget"
-                );
-                assert_eq!(
-                    o.best_epoch, None,
-                    "seed {seed}: None must not track a best"
-                );
-                assert!(!o.restored, "seed {seed}: None must not roll back");
-            }
-
-            // THE CONTROL: the same call with patience ON does change the fit,
-            // so the equality above is a property of `None` and not of a
-            // held-out set that could never matter.
-            let es = MlpConfig {
-                early_stopping_patience: Some(5),
-                ..cfg.clone()
-            };
-            let (out_es, es_bits) = run(&es, vset());
-            assert!(
-                out_es.epochs_run < es.epochs,
-                "seed {seed}: the fixture must overfit its noise validation set for the \
-                 control to mean anything (ran {} of {} epochs)",
-                out_es.epochs_run,
-                es.epochs
-            );
-            assert!(
-                es_bits != without,
-                "seed {seed}: early stopping produced the SAME weights as the full budget, \
-                 so `patience: None` reproducing them proves nothing"
-            );
-        }
-    }
-
-    // ------------------------------------------------------- early stopping
-
-    /// `(train x, y, w, validation x, y, w)` — see [`overfitting_fixture`].
-    type OverfitFixture = (Tensor, Vec<f32>, Vec<f32>, Tensor, Vec<f32>, Vec<f32>);
-
-    /// A fixture that MUST overfit: 48 training rows, 24 columns of which
-    /// exactly one carries a weak signal, against a 256-row validation set from
-    /// the same distribution. There is far more capacity than signal, so the
-    /// train loss walks to zero while the validation loss bottoms out early and
-    /// then climbs — which is the situation early stopping exists for.
-    fn overfitting_fixture(seed: u64) -> OverfitFixture {
-        const NCOLS: usize = 24;
-        let mut rng = StdRng::seed_from_u64(seed);
-        let mut make = |n: usize| {
-            let mut t = Tensor::new(n, NCOLS);
-            let mut labels = vec![0.0f32; n];
-            for i in 0..n {
-                let pos = i % 2 == 0;
-                let r = t.row_mut(i);
-                // Column 0 is weakly informative; 1..24 are pure noise the net
-                // can memorize the training rows with and nothing else.
-                r[0] = if pos { 0.6 } else { -0.6 } + normal(&mut rng);
-                for j in 1..NCOLS {
-                    r[j] = normal(&mut rng);
-                }
-                labels[i] = if pos { 1.0 } else { 0.0 };
-            }
-            let w = vec![1.0f32; n];
-            (t, labels, w)
-        };
-        let (x, y, w) = make(48);
-        let (vx, vy, vw) = make(256);
-        (x, y, w, vx, vy, vw)
-    }
-
-    fn overfitting_cfg(patience: Option<usize>) -> MlpConfig {
-        MlpConfig {
-            hidden: vec![32, 16],
-            lr: 1e-2,
-            weight_decay: 0.0,
-            epochs: 200,
-            batch_size: 16,
-            early_stopping_patience: patience,
-            ..MlpConfig::default()
-        }
-    }
-
-    /// Train the overfitting fixture and hand back the outcome plus the
-    /// validation loss OF THE WEIGHTS THE CALLER IS LEFT WITH.
-    fn run_overfit(
-        cfg: &MlpConfig,
-        init_seed: u64,
-        fx: &OverfitFixture,
-        with_val: bool,
-    ) -> (TrainOutcome, f32, Vec<u32>) {
-        let (x, y, w, vx, vy, vw) = fx;
-        let mut r = StdRng::seed_from_u64(init_seed);
-        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, cfg.activation, &mut r);
-        let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-        let val = with_val.then(|| ValSet {
-            x: vx,
-            y: vy,
-            w: vw,
+    fn streaming_transform_matches_materialized_fit() {
+        let feat = vec![1.0, 2.0, 3.0, 2.0, f64::NAN, 4.0, 4.0, 8.0, 9.0];
+        let rows = [0, 1, 2];
+        let expected = ColumnTransform::fit(&feat, 3, &rows);
+        let actual = ColumnTransform::fit_streaming(3, rows, |i, out| {
+            out.copy_from_slice(&feat[i * 3..i * 3 + 3]);
         });
-        let outcome = m.train_reporting(cfg, x, y, w, &mut o, &mut r, val, "es");
-        let vl = m.eval_loss(vx, vy, vw, &cfg.loss);
-        let bits = m
-            .params_and_grads()
-            .into_iter()
-            .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
-            .collect();
-        (outcome, vl, bits)
-    }
-
-    /// Early stopping stops BEFORE the budget on a fixture that overfits, and
-    /// the weights it leaves behind are no worse on the held-out set than the
-    /// ones the full budget produces.
-    ///
-    /// Swept over seeds, like every learning test in this module: this one is
-    /// doubly init-dependent, since both the training trap and the epoch the
-    /// validation curve turns at move with the initialization.
-    #[test]
-    fn early_stopping_stops_early_and_does_not_hurt_the_held_out_loss() {
-        for seed in [7u64, 13, 42, 1234, 31337] {
-            let fx = overfitting_fixture(seed ^ 0xF00D);
-            let es = overfitting_cfg(Some(5));
-            let full = overfitting_cfg(None);
-
-            let (out, es_val, _) = run_overfit(&es, seed, &fx, true);
-            let (full_out, full_val, _) = run_overfit(&full, seed, &fx, true);
-
-            assert_eq!(full_out.epochs_run, full.epochs);
-            assert!(
-                out.epochs_run < es.epochs,
-                "seed {seed}: ran the whole {} epoch budget, so nothing was stopped",
-                es.epochs
-            );
-            assert!(
-                out.restored,
-                "seed {seed}: a run that stopped early must roll back"
-            );
-            // The stop is exactly `patience` epochs after the best one.
-            assert_eq!(
-                out.epochs_run,
-                out.best_epoch.unwrap() + 1 + 5,
-                "seed {seed}: stopped somewhere other than best + patience"
-            );
-            assert!(
-                es_val <= full_val,
-                "seed {seed}: early stopping made the held-out loss WORSE \
-                 ({es_val} > {full_val}) — it is supposed to be the point"
-            );
-            // Non-vacuity: the full budget really does overfit here, so the
-            // comparison above is not two identical numbers.
-            assert!(
-                full_val > es_val,
-                "seed {seed}: the full budget did not overfit this fixture \
-                 (held-out {full_val} vs {es_val}), so there was nothing to stop"
-            );
+        assert_eq!(actual.width(), expected.width());
+        assert_eq!(actual.culled(), expected.culled());
+        for row in feat.chunks_exact(3) {
+            let mut a = vec![0.0; actual.width()];
+            let mut b = vec![0.0; expected.width()];
+            actual.apply(row, &mut a);
+            expected.apply(row, &mut b);
+            assert_eq!(a, b);
         }
     }
 
-    /// THE restore assertion: the weights left behind are the BEST-seen ones,
-    /// not the ones training was standing on when patience ran out.
-    ///
-    /// The comparison arm is the same trajectory truncated at the same epoch
-    /// WITHOUT a rollback — `patience: None` with `epochs` set to what the early
-    /// stopped run actually executed. Nothing else differs: the RNG feeds only
-    /// the init and the per-epoch shuffle, and `eval_loss` draws from it not at
-    /// all, so the two runs are bit-identical up to the point one of them rolls
-    /// back. An implementation that stopped without restoring would produce that
-    /// arm's weights and fail both assertions below.
     #[test]
-    fn early_stopping_restores_the_best_weights_not_the_last_ones() {
-        for seed in [7u64, 13, 42, 1234, 31337] {
-            let fx = overfitting_fixture(seed ^ 0xF00D);
-            let es = overfitting_cfg(Some(5));
-            let (out, es_val, es_bits) = run_overfit(&es, seed, &fx, true);
-
-            // The held-out loss of the restored weights IS the best one seen,
-            // to the bit — not merely close to it.
-            assert_eq!(
-                es_val.to_bits(),
-                out.best_val_loss.unwrap().to_bits(),
-                "seed {seed}: the restored weights do not reproduce the best held-out \
-                 loss ({es_val} vs {})",
-                out.best_val_loss.unwrap()
-            );
-
-            let stopped_here = MlpConfig {
-                epochs: out.epochs_run,
-                ..overfitting_cfg(None)
-            };
-            let (no_restore_out, no_restore_val, no_restore_bits) =
-                run_overfit(&stopped_here, seed, &fx, true);
-            assert_eq!(no_restore_out.epochs_run, out.epochs_run);
-            assert!(
-                es_bits != no_restore_bits,
-                "seed {seed}: restoring changed no weight, so this test cannot tell a \
-                 restoring implementation from a non-restoring one"
-            );
-            assert!(
-                es_val < no_restore_val,
-                "seed {seed}: stopping WITHOUT restoring would have left held-out loss \
-                 {no_restore_val}; the restore must beat it, got {es_val}"
-            );
-        }
-    }
-
-    /// TIES ARE NOT IMPROVEMENTS, pinned on the one fixture where every epoch
-    /// ties exactly: `lr = 0` freezes every parameter (both the Adam step and
-    /// the decoupled decay scale by `lr`), so the held-out loss is bit-identical
-    /// at every epoch.
-    ///
-    /// Under the strict `<` rule epoch 0 is the only improvement, the patience
-    /// counter then runs uninterrupted, and training stops at epoch `patience`.
-    /// Under a `<=` rule every epoch would improve, the counter would never
-    /// advance, and the run would train the full budget and keep the LAST epoch
-    /// — so this test distinguishes the two rules exactly.
-    #[test]
-    fn a_tie_is_not_an_improvement() {
-        for patience in [1usize, 3, 5] {
-            let fx = overfitting_fixture(11);
-            let cfg = MlpConfig {
-                lr: 0.0,
-                weight_decay: 0.0,
-                epochs: 100,
-                early_stopping_patience: Some(patience),
-                ..overfitting_cfg(Some(patience))
-            };
-            let (out, _, _) = run_overfit(&cfg, 5, &fx, true);
-            assert_eq!(
-                out.best_epoch,
-                Some(0),
-                "patience {patience}: with every epoch tied, the FIRST must be kept"
-            );
-            assert_eq!(
-                out.epochs_run,
-                patience + 1,
-                "patience {patience}: a dead-flat curve must still run the counter down"
-            );
-        }
-    }
-
-    /// Determinism, including the stopping decision: two runs of the same build
-    /// on the same input agree on the epoch they stopped at, the epoch they
-    /// kept, and every parameter bit.
-    #[test]
-    fn early_stopping_is_bit_reproducible() {
-        for seed in [7u64, 42, 31337] {
-            let fx = overfitting_fixture(seed ^ 0xF00D);
-            let cfg = overfitting_cfg(Some(5));
-            let (a_out, a_val, a_bits) = run_overfit(&cfg, seed, &fx, true);
-            let (b_out, b_val, b_bits) = run_overfit(&cfg, seed, &fx, true);
-            assert_eq!(a_out, b_out, "seed {seed}: the stopping decision moved");
-            assert_eq!(a_val.to_bits(), b_val.to_bits(), "seed {seed}");
-            assert_eq!(a_bits, b_bits, "seed {seed}: the restored weights moved");
-        }
-    }
-
-    /// With no held-out set the knob is INERT — there is nothing to measure a
-    /// stopping decision against, so the full budget runs and `Mlp::train`
-    /// behaves as it always did even on the default config.
-    #[test]
-    fn early_stopping_without_a_validation_set_is_a_no_op() {
-        let fx = overfitting_fixture(11);
-        let cfg = overfitting_cfg(Some(5));
-        let (out, _, with_knob) = run_overfit(&cfg, 7, &fx, false);
-        assert_eq!(out.epochs_run, cfg.epochs);
-        assert_eq!(out.best_epoch, None);
-        assert!(!out.restored);
-
-        let (_, _, without_knob) = run_overfit(&overfitting_cfg(None), 7, &fx, false);
-        assert_eq!(
-            with_knob, without_knob,
-            "with no validation set the patience knob must change nothing"
-        );
-    }
-
-    /// Every parameter as raw bits, in `params_and_grads` order. Bit equality is
-    /// the only useful notion of "untouched" for a parameter vector.
-    fn param_bits(m: &mut Mlp) -> Vec<u32> {
-        m.params_and_grads()
-            .into_iter()
-            .flat_map(|(p, _, _)| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
-            .collect()
+    fn transform_statistics_are_train_only() {
+        let feat = vec![0.0, 2.0, 1000.0];
+        let tx = ColumnTransform::fit(&feat, 1, &[0, 1]);
+        let mut out = [0.0];
+        tx.apply(&feat[2..], &mut out);
+        assert!(out[0] > 100.0);
     }
 
     #[test]
-    fn eval_loss_leaves_the_parameters_untouched() {
-        let mut rng = StdRng::seed_from_u64(5);
-        let mut m = Mlp::feedforward(4, &[6], Activation::default(), &mut rng);
-        let x = filled(16, 4, &mut rng);
-        let y: Vec<f32> = (0..16).map(|i| (i % 2) as f32).collect();
-        let w = vec![1.0f32; 16];
-
-        let before = param_bits(&mut m);
-        let l = m.eval_loss(&x, &y, &w, &MlpLoss::Bce);
-        let after = param_bits(&mut m);
-        assert_eq!(before, after, "eval_loss mutated a parameter");
-        assert!(l.is_finite() && l > 0.0, "eval_loss returned {l}");
+    fn feedforward_is_seed_reproducible() {
+        let x = tensor(2, 3, &[1.0, 2.0, 3.0, -1.0, 0.5, 2.0]);
+        let mut r1 = StdRng::seed_from_u64(9);
+        let mut r2 = StdRng::seed_from_u64(9);
+        let mut a = Mlp::feedforward(3, &[4, 2], &mut r1);
+        let mut b = Mlp::feedforward(3, &[4, 2], &mut r2);
+        assert_eq!(a.forward(&x).live(), b.forward(&x).live());
     }
 
-    // ------------------------------------------- input-gradient importance
-
-    /// `(x, y, w)` for the attribution tests: 4 columns against alternating
-    /// labels. Column 0 carries a STRONG signal, column 1 is PURE NOISE, column 2
-    /// carries a weak inverted signal, column 3 is CONSTANT. Standardized-ish
-    /// scales throughout, matching what [`ColumnTransform`] hands the net.
-    fn attribution_fixture(seed: u64) -> (Tensor, Vec<f32>, Vec<f32>) {
-        let mut dr = StdRng::seed_from_u64(seed ^ 0xDA7A);
-        let n = 512;
-        let mut x = Tensor::new(n, 4);
-        let mut y = vec![0.0f32; n];
-        for i in 0..n {
-            let pos = i % 2 == 0;
-            let r = x.row_mut(i);
-            r[0] = if pos { 1.2 } else { -1.2 } + 0.5 * normal(&mut dr);
-            r[1] = normal(&mut dr);
-            r[2] = if pos { -0.4 } else { 0.4 } + 0.9 * normal(&mut dr);
-            r[3] = 1.0;
-            y[i] = if pos { 1.0 } else { 0.0 };
-        }
-        (x, y, vec![1.0f32; n])
-    }
-
-    fn attribution_cfg(seed: u64) -> MlpConfig {
-        MlpConfig {
-            hidden: vec![16, 8],
-            epochs: 200,
-            batch_size: 64,
-            seed,
+    #[test]
+    fn streaming_training_learns_a_separable_batch() {
+        let batch = MlpBatch {
+            x: tensor(4, 1, &[-2.0, -1.0, 1.0, 2.0]),
+            y: vec![0.0, 0.0, 1.0, 1.0],
+            w: vec![1.0; 4],
+        };
+        let cfg = MlpConfig {
+            hidden: vec![4],
+            epochs: 80,
+            batch_size: 4,
+            early_stopping_patience: None,
             ..MlpConfig::default()
-        }
-    }
-
-    /// Train [`attribution_fixture`] to convergence and hand back the net.
-    fn trained_on_fixture(cfg: &MlpConfig, x: &Tensor, y: &[f32], w: &[f32]) -> Mlp {
-        let mut rng = StdRng::seed_from_u64(cfg.seed);
-        let mut m = Mlp::feedforward(x.cols, &cfg.hidden, cfg.activation, &mut rng);
-        let mut o = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-        m.train(cfg, x, y, w, &mut o, &mut rng);
-        m
-    }
-
-    /// THE SHARPEST HAZARD IN THE WHOLE ATTRIBUTION PASS, as a test.
-    ///
-    /// [`Linear::backward`] ACCUMULATES into `gw`/`gb` (`+=`) and [`Adam::step`] is
-    /// what zeroes them, so a backward pass with no matching step leaves gradients
-    /// that the next `train_step` folds into its update. That is not a crash and
-    /// not a wrong number in the report — it is a SILENT perturbation of a later
-    /// fit, and the only reason a reporting pass could move a score.
-    ///
-    /// Three assertions, in increasing strength:
-    ///
-    ///  1. No parameter moved (bits).
-    ///  2. Every parameter gradient is back to zero, the post-`Adam::step`
-    ///     invariant the pass found on entry.
-    ///  3. THE ONE WITH TEETH: a net that attributed and then took more steps is
-    ///     bit-identical to one that only took those steps. Assertion 2 is how the
-    ///     implementation happens to achieve this today; assertion 3 is the
-    ///     property, and it would fail for any other leak of state between the
-    ///     pass and a later step.
-    ///
-    /// The control arm in 3 is not optional: without it, deleting the wipe would
-    /// still pass 1 (a backward pass moves no parameter by itself).
-    #[test]
-    fn input_grad_importance_leaves_the_fit_untouched() {
-        for seed in [7u64, 13, 42] {
-            let cfg = attribution_cfg(seed);
-            let (x, y, w) = attribution_fixture(seed);
-            let mut m = trained_on_fixture(&cfg, &x, &y, &w);
-
-            let before = param_bits(&mut m);
-            assert!(
-                m.param_grads_all_zero(),
-                "seed {seed}: training must leave the post-Adam::step invariant"
-            );
-            let imp = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
-            assert_eq!(
-                before,
-                param_bits(&mut m),
-                "seed {seed}: the attribution pass moved a parameter"
-            );
-            assert!(
-                m.param_grads_all_zero(),
-                "seed {seed}: the attribution pass left a STALE GRADIENT that the next \
-                 train_step would apply"
-            );
-            assert!(
-                imp.iter().all(|v| v.is_finite() && *v >= 0.0),
-                "seed {seed}: {imp:?}"
-            );
-
-            // ...and the property, not just the mechanism: more training on top of
-            // an attributed net matches a net that never attributed.
-            let mut control = trained_on_fixture(&cfg, &x, &y, &w);
-            assert_eq!(
-                before,
-                param_bits(&mut control),
-                "seed {seed}: the two arms must start identical"
-            );
-            let mut o_a = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-            let mut o_b = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
-            for _ in 0..5 {
-                m.train_step(&x, &y, &w, &cfg.loss, &mut o_a);
-                control.train_step(&x, &y, &w, &cfg.loss, &mut o_b);
-            }
-            assert_eq!(
-                param_bits(&mut m),
-                param_bits(&mut control),
-                "seed {seed}: training after an attribution pass diverged from training \
-                 without one — a gradient leaked out of the reporting pass"
-            );
-        }
-    }
-
-    /// The reason the second metric exists: it can tell an informative column from
-    /// a noise one, and `W1` cannot.
-    ///
-    /// Swept over seeds, like every learning test in this module — it has two
-    /// documented init-dependent training traps, and an attribution is read off a
-    /// trained net, so a single seed would be measuring one init's luck.
-    ///
-    /// MEASURED on this fixture, all eight seeds (column 0 = strong signal,
-    /// column 1 = pure noise):
-    ///
-    /// | seed | grad[0] | grad[1] | ratio | w1[0] | w1[1] |
-    /// |------|---------|---------|-------|-------|-------|
-    /// | 7    | 0.1184  | 0.0044  | 27.0  | 12.07 | 12.64 |
-    /// | 13   | 0.1127  | 0.0114  | 9.8   | 12.58 |  9.79 |
-    /// | 42   | 0.0253  | 0.0024  | 10.7  | 12.15 |  9.15 |
-    /// | 99   | 0.0250  | 0.0033  |  7.7  | 10.35 |  6.86 |
-    /// | 1234 | 0.1013  | 0.0054  | 18.9  | 10.62 |  4.79 |
-    /// | 3    | 0.1211  | 0.0233  |  5.2  | 13.52 |  8.43 |
-    ///
-    /// The `w1` columns are the point of the table, not decoration: on SEED 7 the
-    /// first-layer row norm of the pure-noise column is LARGER than the signal
-    /// column's, i.e. `W1` ranks noise above signal, while the gradient separates
-    /// them by 27x. Nothing is wrong with `W1` — it is a weight norm, and a
-    /// randomly initialized row that the net never uses keeps whatever norm it
-    /// started with — but it is precisely why one metric is not enough.
-    ///
-    /// The bar is `3x` against a measured minimum of `5.2x`. Deliberately loose:
-    /// this asserts that the gradient ORDERS the two columns with room to spare,
-    /// not that it reproduces a particular ratio.
-    #[test]
-    fn input_grad_importance_separates_a_learned_column_from_a_noise_one() {
-        for seed in [7u64, 13, 42, 99, 1234, 20260728, 3, 31337] {
-            let cfg = attribution_cfg(seed);
-            let (x, y, w) = attribution_fixture(seed);
-            let mut m = trained_on_fixture(&cfg, &x, &y, &w);
-            let g = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
-
-            assert_eq!(g.len(), 4, "one value per transformed input");
-            assert!(g.iter().all(|v| v.is_finite() && *v >= 0.0), "{g:?}");
-            assert!(
-                g[0] > 3.0 * g[1],
-                "seed {seed}: the strong signal column must outrank the pure-noise one \
-                 by a wide margin: {g:?}"
-            );
-            assert!(
-                g[0] >= g[1].max(g[2]).max(g[3]),
-                "seed {seed}: the strong signal column must rank first: {g:?}"
-            );
-            // The documented caveat, asserted so it cannot quietly stop being
-            // true: a CONSTANT column still receives gradient, because `dL/dx_j`
-            // for a `Linear` first layer does not depend on `x_j`. `Grad` is a
-            // ranking, not a used/unused test — see [`MlpImportance`].
-            assert!(
-                g[3] > 0.0,
-                "seed {seed}: a constant column is expected to carry NONZERO gradient; \
-                 if this now fails, the caveat on `MlpImportance` is stale: {g:?}"
-            );
-        }
-    }
-
-    /// The one case where "the net ignores this feature" IS provable, and where
-    /// the metric must therefore report exactly `0.0`: a first-layer weight row of
-    /// zeros. `dL/dx_j = sum_o (dL/dh_o) * W1[j, o]`, so the gradient is
-    /// identically zero for every row, and a `0.0` here is a REPORTED measurement
-    /// under the `FoldModel::importance` contract, not the `NAN` sentinel.
-    ///
-    /// Constructed rather than trained, because training cannot produce it: weight
-    /// decay of `1e-4` over a few hundred steps does not drive an unused row to
-    /// zero, which is exactly the caveat
-    /// [`input_grad_importance_separates_a_learned_column_from_a_noise_one`]
-    /// asserts on its constant column. Both metrics are checked, since both must
-    /// agree in the one case where the answer is known.
-    #[test]
-    fn a_zeroed_first_layer_row_gets_exactly_zero_attribution() {
-        let mut rng = StdRng::seed_from_u64(5);
-        let (n_in, n_h) = (4usize, 6usize);
-        let mut lin = Linear::new(n_in, n_h, &mut rng);
-        // Column 1 is disconnected from the net entirely: `w` is row-major with
-        // stride `n_out`, so input `i`'s row is `w[i * n_out .. (i + 1) * n_out]`.
-        const DEAD: usize = 1;
-        lin.w[DEAD * n_h..(DEAD + 1) * n_h].fill(0.0);
-        let layers: Vec<Box<dyn Layer>> = vec![
-            Box::new(lin),
-            Box::new(Relu::leaky(n_h, LEAKY_SLOPE)),
-            Box::new(Linear::new(n_h, 1, &mut rng)),
-        ];
-        let mut m = Mlp::new(layers);
-
-        let x = filled(64, n_in, &mut rng);
-        let y: Vec<f32> = (0..64).map(|i| (i % 2) as f32).collect();
-        let w = vec![1.0f32; 64];
-
-        let g = m.input_grad_importance(&x, &y, &w, &MlpLoss::Bce, 16);
-        assert_eq!(
-            g[1], 0.0,
-            "a disconnected input must report exactly 0.0: {g:?}"
-        );
-        assert_eq!(
-            m.input_importance()[1],
-            0.0,
-            "the W1 metric must agree in the one case where the answer is known"
-        );
-        // NON-VACUITY: the connected columns are not zero, so the assertion above
-        // is about the zeroed row and not about a dead fixture.
-        assert!(
-            [0usize, 2, 3].iter().all(|&j| g[j] > 0.0),
-            "connected inputs must carry gradient: {g:?}"
-        );
-    }
-
-    /// Bit-for-bit reproducible, and essentially unmoved by the chunk size.
-    ///
-    /// Reproducibility is the load-bearing half: the sidecar is diffed across runs
-    /// (that is the entire purpose of `TIMSSEEK_MLP_IMPORTANCE`), so a metric that
-    /// wobbled would make every diff unreadable. It follows from the pass drawing
-    /// no RNG and reading no clock, and this is what pins it.
-    ///
-    /// The chunk size is checked as a RELATIVE tolerance rather than as bit
-    /// equality on purpose. [`Mlp::input_grad_importance`] multiplies each chunk's
-    /// contribution back by its own `sum(w)` so the chunking cannot enter the
-    /// ANSWER, but it still changes the summation ORDER, and float addition is not
-    /// associative. `1e-4` relative is float noise on a 512-row f64 accumulation;
-    /// a chunk size that leaked into the metric itself would be off by the ratio of
-    /// the chunk sums, i.e. by whole factors.
-    #[test]
-    fn input_grad_importance_is_reproducible_and_chunk_size_independent() {
-        let cfg = attribution_cfg(42);
-        let (x, y, w) = attribution_fixture(42);
-        let mut m = trained_on_fixture(&cfg, &x, &y, &w);
-
-        let a = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
-        let b = m.input_grad_importance(&x, &y, &w, &cfg.loss, cfg.batch_size);
-        assert_eq!(
-            a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            "two identical passes must agree to the bit"
-        );
-
-        for batch in [1usize, 7, 64, 512, 4096] {
-            let c = m.input_grad_importance(&x, &y, &w, &cfg.loss, batch);
-            for j in 0..a.len() {
-                let rel = (a[j] - c[j]).abs() / a[j].abs().max(1e-30);
-                assert!(
-                    rel < 1e-4,
-                    "batch {batch}: input {j} moved by {rel} relative — the chunk size \
-                     reached the metric instead of only the summation order ({a:?} vs {c:?})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn sample_weights_shift_the_decision_boundary() {
-        // Two overlapping classes; up-weighting one must move the fitted
-        // boundary toward the other.
-        let mut rng = StdRng::seed_from_u64(11);
-        let n = 400;
-        let mut x = Tensor::new(n, 1);
-        let mut y = vec![0.0f32; n];
-        for i in 0..n {
-            let pos = i % 2 == 0;
-            x.row_mut(i)[0] = if pos { 0.5 } else { -0.5 } + 0.8 * normal(&mut rng);
-            y[i] = if pos { 1.0 } else { 0.0 };
-        }
-
-        let mean_logit = |w: &[f32], rng: &mut StdRng| {
-            let mut m = Mlp::feedforward(1, &[8], Activation::default(), rng);
-            let mut o = Adam::new(1e-2);
-            for _ in 0..200 {
-                m.train_step(&x, &y, w, &MlpLoss::Bce, &mut o);
-            }
-            let out = m.forward(&x, false);
-            (0..n).map(|i| out.row(i)[0]).sum::<f32>() / n as f32
         };
-
-        let balanced = vec![1.0f32; n];
-        let decoy_heavy: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { 0.5 } else { 1.0 }).collect();
-
-        for seed in [3u64, 7, 42] {
-            // MATCHED INIT: same seed on both sides, so the two runs differ in
-            // nothing but `w`.
-            let mut r1 = StdRng::seed_from_u64(seed);
-            let mut r2 = StdRng::seed_from_u64(seed);
-            let m_bal = mean_logit(&balanced, &mut r1);
-            let m_dec = mean_logit(&decoy_heavy, &mut r2);
-            assert!(
-                m_dec < m_bal,
-                "seed {seed}: up-weighting decoys must pull logits down: {m_dec} !< {m_bal}"
-            );
-        }
-    }
-
-    // ------------------------------------------------- dev env overrides
-    //
-    // These drive `MlpConfig::apply_overrides` with a fake lookup instead of
-    // `std::env::set_var`. That is not a convenience: `set_var` is `unsafe` in
-    // edition 2024 and process-global, so a test that set `TIMSSEEK_MLP_LR`
-    // would be racing every other test in this binary. The lookup argument makes
-    // the whole override path a pure function.
-
-    /// Lookup over a fixed `(name, value)` table; everything else is unset.
-    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
-        move |k: &str| {
-            pairs
-                .iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| (*v).to_string())
-        }
-    }
-
-    /// THE LOAD-BEARING PROPERTY: with nothing set, the config is bit-identical
-    /// to the compiled default, so the override cannot perturb a production run
-    /// that did not ask for it.
-    ///
-    /// The literal values are re-asserted here on purpose. This affordance adds
-    /// a way to override the defaults and must not retune them; a diff that
-    /// changes one has to change this test and say so.
-    #[test]
-    fn unset_env_changes_nothing() {
-        let mut cfg = MlpConfig::compiled_default();
-        let applied = cfg.apply_overrides(env_of(&[]));
-        assert!(
-            applied.is_empty(),
-            "nothing was set, so nothing may be reported as applied: {applied:?}"
-        );
-        assert_eq!(cfg, MlpConfig::compiled_default());
-
-        // Retuned 2026-07 from the unmeasured `[64, 32]` / 3e-4 / 256 / 30 to
-        // the winning arm of the two-scale sweep documented on
-        // `compiled_default`. `lr` and `batch_size` are COUPLED there: a diff
-        // that touches one of these two literals without the other is a bug.
-        assert_eq!(cfg.hidden, vec![32, 16]);
-        assert_eq!(cfg.lr.to_bits(), 1.2e-3f32.to_bits());
-        assert_eq!(cfg.weight_decay.to_bits(), 1e-4f32.to_bits());
-        assert_eq!(cfg.epochs, 60);
-        assert_eq!(cfg.batch_size, 1024);
-        // `TIMSSEEK_MLP_LOSS` can SELECT the focal loss but must never make it
-        // the default: every number on `compiled_default` was measured on plain
-        // BCE, and `Focal` is an unswept experiment. Unit variant, so this
-        // equality is as exact as the `to_bits` pinning above.
-        assert_eq!(cfg.loss, MlpLoss::Bce);
-        assert_eq!(cfg.seed, 0x2545_F491_4F6C_DD1D);
-        assert_eq!(cfg.early_stopping_patience, Some(3));
-        // The rectifier every number on `compiled_default` was measured with.
-        // `Square` is an experiment and must never become the default by
-        // accident — see [`Square`] for the divergence hazard.
-        assert_eq!(cfg.activation, Activation::LeakyRelu);
-        // THE SIDECAR'S DEFAULT CONTENT. `results.feature_importance.tsv` is
-        // consumed outside this codebase, so `Grad` becoming the default is not a
-        // retune — it silently changes what every number in that file means. A
-        // diff that flips this has to say so out loud.
-        assert_eq!(cfg.importance, MlpImportance::W1);
-    }
-
-    /// An unrelated variable is not a read, and one variable moves ONE field.
-    #[test]
-    fn one_variable_moves_one_field() {
-        let base = MlpConfig::compiled_default();
-        let mut cfg = base.clone();
-        let applied = cfg.apply_overrides(env_of(&[
-            ("TIMSSEEK_MLP_LR", "1e-3"),
-            ("TIMSSEEK_MLP_NOT_A_KNOB", "7"),
-        ]));
-        assert_eq!(applied, vec!["TIMSSEEK_MLP_LR=\"1e-3\""]);
-        assert_eq!(cfg.lr.to_bits(), 1e-3f32.to_bits());
-        assert_eq!(
-            MlpConfig { lr: base.lr, ..cfg },
-            base,
-            "overriding `lr` moved some other field too"
-        );
-    }
-
-    /// Every documented variable is wired to its field, and the audit trail
-    /// lists them all. A knob that parses but is never assigned would otherwise
-    /// produce exactly the silent no-op sweep this whole affordance is meant to
-    /// prevent.
-    #[test]
-    fn every_documented_variable_reaches_its_field() {
-        let mut cfg = MlpConfig::compiled_default();
-        let applied = cfg.apply_overrides(env_of(&[
-            ("TIMSSEEK_MLP_EPOCHS", "77"),
-            ("TIMSSEEK_MLP_LR", "2.5e-3"),
-            ("TIMSSEEK_MLP_BATCH_SIZE", "512"),
-            ("TIMSSEEK_MLP_HIDDEN", "128,64,16"),
-            ("TIMSSEEK_MLP_WEIGHT_DECAY", "0"),
-            ("TIMSSEEK_MLP_PATIENCE", "9"),
-            ("TIMSSEEK_MLP_ACTIVATION", "square"),
-            ("TIMSSEEK_MLP_IMPORTANCE", "grad"),
-            ("TIMSSEEK_MLP_SEED", "12345"),
-            ("TIMSSEEK_MLP_LOSS", "focal:2:0.25"),
-        ]));
-        assert_eq!(cfg.epochs, 77);
-        assert_eq!(cfg.lr.to_bits(), 2.5e-3f32.to_bits());
-        assert_eq!(cfg.batch_size, 512);
-        assert_eq!(cfg.hidden, vec![128, 64, 16]);
-        assert_eq!(cfg.weight_decay, 0.0);
-        assert_eq!(cfg.early_stopping_patience, Some(9));
-        assert_eq!(cfg.activation, Activation::Square);
-        assert_eq!(cfg.importance, MlpImportance::Grad);
-        assert_eq!(cfg.seed, 12345);
-        assert_eq!(
-            cfg.loss,
-            MlpLoss::Focal {
-                gamma: 2.0,
-                alpha: 0.25
-            }
-        );
-        assert_eq!(
-            applied.len(),
-            10,
-            "every read must be reported: {applied:?}"
-        );
-    }
-
-    /// `TIMSSEEK_MLP_IMPORTANCE` is the one variable here that must NOT be able to
-    /// retune the fit — it selects a report. Asserted as "it moves that field and
-    /// no other", the same shape as [`one_variable_moves_one_field`]; the stronger
-    /// claim (the SCORES do not move either) is
-    /// `mlp_fold::test::the_importance_metric_choice_does_not_move_the_scores`.
-    #[test]
-    fn importance_spellings_parse_and_move_only_the_report() {
-        for (spelling, want) in [
-            ("w1", MlpImportance::W1),
-            ("W1", MlpImportance::W1),
-            ("grad", MlpImportance::Grad),
-            ("GRAD", MlpImportance::Grad),
-            (" grad ", MlpImportance::Grad),
-        ] {
-            let base = MlpConfig::compiled_default();
-            let mut cfg = base.clone();
-            let applied = cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_IMPORTANCE", spelling)]));
-            assert_eq!(cfg.importance, want, "{spelling:?}");
-            assert_eq!(applied.len(), 1);
-            assert_eq!(
-                MlpConfig {
-                    importance: base.importance,
-                    ..cfg
-                },
-                base,
-                "{spelling:?}: selecting an importance metric moved a HYPERPARAMETER"
-            );
-        }
-    }
-
-    /// The explicit spellings for the two fields that have an "off": `hidden`
-    /// can be empty (a bare linear model) and `patience` is an `Option`.
-    #[test]
-    fn the_off_spellings_parse() {
-        let mut cfg = MlpConfig::compiled_default();
-        cfg.apply_overrides(env_of(&[
-            ("TIMSSEEK_MLP_HIDDEN", "none"),
-            ("TIMSSEEK_MLP_PATIENCE", "off"),
-        ]));
-        assert!(cfg.hidden.is_empty());
-        assert_eq!(cfg.early_stopping_patience, None);
-
-        let mut cfg = MlpConfig::compiled_default();
-        cfg.apply_overrides(env_of(&[
-            ("TIMSSEEK_MLP_HIDDEN", "NONE"),
-            ("TIMSSEEK_MLP_PATIENCE", "None"),
-        ]));
-        assert!(cfg.hidden.is_empty(), "the spelling is case-insensitive");
-        assert_eq!(cfg.early_stopping_patience, None);
-
-        // `hidden = []` must still build a usable net, or the spelling is a trap.
-        let mut rng = seeded();
-        let mut net = Mlp::feedforward(4, &cfg.hidden, cfg.activation, &mut rng);
-        let x = filled(3, 4, &mut rng);
-        assert_eq!(net.forward(&x, false).rows(), 3);
-    }
-
-    /// Whitespace around a value survives a shell that added it.
-    #[test]
-    fn values_are_trimmed() {
-        let mut cfg = MlpConfig::compiled_default();
-        cfg.apply_overrides(env_of(&[
-            ("TIMSSEEK_MLP_EPOCHS", " 40 "),
-            ("TIMSSEEK_MLP_HIDDEN", " 32 , 8 "),
-        ]));
-        assert_eq!(cfg.epochs, 40);
-        assert_eq!(cfg.hidden, vec![32, 8]);
-    }
-
-    /// Hex, so the compiled default seed can be restated verbatim.
-    #[test]
-    fn seed_takes_decimal_or_hex() {
-        for spelling in [
-            "0x2545F4914F6CDD1D",
-            "0X2545f4914f6cdd1d",
-            "2685821657736338717",
-        ] {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.seed = 0;
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_SEED", spelling)]));
-            assert_eq!(
-                cfg.seed, 0x2545_F491_4F6C_DD1D,
-                "{spelling} must round-trip to the default seed"
-            );
-        }
-    }
-
-    /// A malformed value must ABORT, not fall back to the default. Each of these
-    /// would otherwise produce a sweep row labelled with a value that never
-    /// trained. One case per rejection rule.
-    macro_rules! rejects {
-        ($name:ident, $var:literal, $val:literal) => {
-            #[test]
-            #[should_panic(expected = "is not usable")]
-            fn $name() {
-                let mut cfg = MlpConfig::compiled_default();
-                cfg.apply_overrides(env_of(&[($var, $val)]));
+        let mut rng = cfg.rng_for_fold(0);
+        let mut net = Mlp::feedforward(1, &cfg.hidden, &mut rng);
+        let before = net.eval_loss(&batch.x, &batch.y, &batch.w);
+        let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
+        let mut visit = |order: &[usize], consume: &mut dyn FnMut(&MlpBatch)| {
+            for _ in order {
+                consume(&batch);
             }
         };
+        net.train_reporting_streaming(&cfg, 1, &mut visit, None, &mut opt, &mut rng, "", &|| {});
+        let after = net.eval_loss(&batch.x, &batch.y, &batch.w);
+        assert!(after < before, "{before} -> {after}");
     }
 
-    rejects!(rejects_non_numeric_lr, "TIMSSEEK_MLP_LR", "banana");
-    rejects!(rejects_zero_lr, "TIMSSEEK_MLP_LR", "0");
-    rejects!(rejects_negative_lr, "TIMSSEEK_MLP_LR", "-1e-3");
-    rejects!(rejects_nan_lr, "TIMSSEEK_MLP_LR", "NaN");
-    rejects!(rejects_zero_epochs, "TIMSSEEK_MLP_EPOCHS", "0");
-    rejects!(rejects_float_epochs, "TIMSSEEK_MLP_EPOCHS", "30.5");
-    rejects!(rejects_zero_batch_size, "TIMSSEEK_MLP_BATCH_SIZE", "0");
-    rejects!(
-        rejects_negative_weight_decay,
-        "TIMSSEEK_MLP_WEIGHT_DECAY",
-        "-1"
-    );
-    rejects!(rejects_empty_hidden, "TIMSSEEK_MLP_HIDDEN", "");
-    rejects!(rejects_zero_width_hidden, "TIMSSEEK_MLP_HIDDEN", "64,0");
-    rejects!(rejects_non_numeric_hidden, "TIMSSEEK_MLP_HIDDEN", "64x32");
-    rejects!(
-        rejects_trailing_comma_hidden,
-        "TIMSSEEK_MLP_HIDDEN",
-        "64,32,"
-    );
-    // 0 is neither a patience nor a synonym for `none` — see `parse_patience`.
-    rejects!(rejects_zero_patience, "TIMSSEEK_MLP_PATIENCE", "0");
-    rejects!(rejects_negative_patience, "TIMSSEEK_MLP_PATIENCE", "-1");
-    rejects!(rejects_non_numeric_seed, "TIMSSEEK_MLP_SEED", "0xZZ");
-    // A near-miss spelling is a rejection, not a silent fall back to the
-    // rectifier: a sweep arm labelled `square` that trained a ReLU is exactly
-    // the outcome this abort exists to prevent.
-    rejects!(
-        rejects_unknown_activation,
-        "TIMSSEEK_MLP_ACTIVATION",
-        "relu"
-    );
-    rejects!(rejects_empty_activation, "TIMSSEEK_MLP_ACTIVATION", "");
-    // A typo'd metric name would fill the sidecar with the OTHER metric's numbers
-    // under the operator's label, which is the mislabelled-comparison failure the
-    // whole abort convention exists to prevent.
-    rejects!(
-        rejects_unknown_importance,
-        "TIMSSEEK_MLP_IMPORTANCE",
-        "saliency"
-    );
-    rejects!(rejects_empty_importance, "TIMSSEEK_MLP_IMPORTANCE", "");
-    rejects!(rejects_unknown_loss, "TIMSSEEK_MLP_LOSS", "hinge");
-    rejects!(rejects_empty_loss, "TIMSSEEK_MLP_LOSS", "");
-    // Both focal parameters are spelled or neither is: an invented `gamma` is
-    // exactly the mislabelled sweep row the abort exists for.
-    rejects!(rejects_bare_focal, "TIMSSEEK_MLP_LOSS", "focal");
-    rejects!(rejects_focal_without_alpha, "TIMSSEEK_MLP_LOSS", "focal:2");
-    rejects!(
-        rejects_focal_with_extra_field,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:2:0.25:9"
-    );
-    rejects!(
-        rejects_non_numeric_focal_gamma,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:two:0.25"
-    );
-    rejects!(
-        rejects_negative_focal_gamma,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:-1:0.25"
-    );
-    rejects!(
-        rejects_non_finite_focal_gamma,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:inf:0.25"
-    );
-    // `alpha` is applied as `2*alpha` / `2*(1-alpha)`, so an endpoint zeroes one
-    // class out entirely — a rejection, not a boundary case.
-    rejects!(rejects_zero_focal_alpha, "TIMSSEEK_MLP_LOSS", "focal:2:0");
-    rejects!(rejects_one_focal_alpha, "TIMSSEEK_MLP_LOSS", "focal:2:1");
-    rejects!(
-        rejects_negative_focal_alpha,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:2:-0.25"
-    );
-    rejects!(
-        rejects_above_one_focal_alpha,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:2:1.5"
-    );
-    rejects!(
-        rejects_non_finite_focal_alpha,
-        "TIMSSEEK_MLP_LOSS",
-        "focal:2:nan"
-    );
-
-    /// The accepted spellings of the loss. `focal:0:0.5` is the neutral point —
-    /// see [`MlpLoss::Focal`] for why it is bit-identical to `Bce` rather than
-    /// merely proportional to it, which is what makes an `alpha` sweep's rows
-    /// comparable.
     #[test]
-    fn loss_spellings_parse() {
-        for spelling in ["bce", "BCE", " Bce "] {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.loss = MlpLoss::Focal {
-                gamma: 3.0,
-                alpha: 0.9,
-            };
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", spelling)]));
-            assert_eq!(cfg.loss, MlpLoss::Bce, "{spelling:?}");
-        }
-
-        for (spelling, gamma, alpha) in [
-            ("focal:2:0.25", 2.0f32, 0.25f32),
-            ("FOCAL:2:0.25", 2.0, 0.25),
-            (" focal : 2 : 0.25 ", 2.0, 0.25),
-            ("focal:2.0:2.5e-1", 2.0, 0.25),
-            // The neutral point, and the extremes of each range that ARE allowed.
-            ("focal:0:0.5", 0.0, 0.5),
-            ("focal:5:0.99", 5.0, 0.99),
-        ] {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", spelling)]));
-            assert_eq!(cfg.loss, MlpLoss::Focal { gamma, alpha }, "{spelling:?}");
-        }
-    }
-
-    /// Overriding the loss moves ONLY the loss, and the audit trail quotes the
-    /// value the operator actually set — the string a sweep table is labelled by.
-    #[test]
-    fn loss_override_moves_only_the_loss() {
-        let base = MlpConfig::compiled_default();
-        let mut cfg = base.clone();
-        let applied = cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", "focal:2:0.25")]));
-        assert_eq!(applied, vec!["TIMSSEEK_MLP_LOSS=\"focal:2:0.25\""]);
-        assert_eq!(
-            MlpConfig {
-                loss: base.loss,
-                ..cfg
-            },
-            base,
-            "overriding `loss` moved some other field too"
-        );
-    }
-
-    /// The loss abort names the variable, the offending value and the grammar,
-    /// including which of the two numbers has which range — a `focal:2:1` that
-    /// said only "malformed" would leave the operator re-reading the source.
-    #[test]
-    fn the_loss_abort_names_the_variable_the_value_and_the_format() {
-        let e = std::panic::catch_unwind(|| {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LOSS", "focal:2:1")]));
-        })
-        .expect_err("an out-of-range alpha must abort");
-        let msg = e
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .unwrap_or("<not a string payload>");
-        for needle in [
-            "TIMSSEEK_MLP_LOSS",
-            "focal:2:1",
-            "focal:GAMMA:ALPHA",
-            "GAMMA >= 0",
-            "(0, 1)",
-        ] {
-            assert!(
-                msg.contains(needle),
-                "abort message lacks {needle:?}: {msg}"
-            );
-        }
-    }
-
-    /// The tolerant spellings of the activation, which a shell script is likely
-    /// to produce. Everything outside this set aborts.
-    #[test]
-    fn activation_spellings_parse() {
-        for spelling in ["square", "SQUARE", " Square "] {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_ACTIVATION", spelling)]));
-            assert_eq!(cfg.activation, Activation::Square, "{spelling:?}");
-        }
-        for spelling in ["leaky_relu", "leaky-relu", "LEAKY_RELU"] {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.activation = Activation::Square;
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_ACTIVATION", spelling)]));
-            assert_eq!(cfg.activation, Activation::LeakyRelu, "{spelling:?}");
-        }
-    }
-
-    /// The configured activation reaches the BUILT NET, and each variant builds
-    /// the layer it names. Asserted against hand-assembled stacks rather than
-    /// against each other: the hand-built arm draws from the RNG in the same
-    /// order, so agreement is bit-exact and a plumbing mistake (either variant
-    /// wired to the other's layer, or the choice dropped on the floor) fails.
-    ///
-    /// This is also the DETERMINISM check for the new field. Neither activation
-    /// draws from the RNG, so the `LeakyRelu` stack is bit-identical to what
-    /// `feedforward` produced before the choice existed — which is what the
-    /// hand-built `Relu::leaky(_, LEAKY_SLOPE)` arm restates.
-    #[test]
-    fn the_configured_activation_reaches_the_built_net() {
-        let x = filled(4, 3, &mut StdRng::seed_from_u64(9));
-        let logits = |m: &mut Mlp| -> Vec<u32> {
-            let out = m.forward(&x, false);
-            (0..out.rows()).map(|i| out.row(i)[0].to_bits()).collect()
-        };
-
-        for (act, hand) in [
-            (
-                Activation::LeakyRelu,
-                Box::new(|d: usize| -> Box<dyn Layer> { Box::new(Relu::leaky(d, LEAKY_SLOPE)) })
-                    as Box<dyn Fn(usize) -> Box<dyn Layer>>,
-            ),
-            (
-                Activation::Square,
-                Box::new(|d: usize| -> Box<dyn Layer> { Box::new(Square::new(d)) }),
-            ),
-        ] {
-            let mut r1 = StdRng::seed_from_u64(5);
-            let mut built = Mlp::feedforward(3, &[8, 4], act, &mut r1);
-
-            let mut r2 = StdRng::seed_from_u64(5);
-            let mut expected = Mlp::new(vec![
-                Box::new(Linear::new(3, 8, &mut r2)),
-                hand(8),
-                Box::new(Linear::new(8, 4, &mut r2)),
-                hand(4),
-                Box::new(Linear::new(4, 1, &mut r2)),
-            ]);
-
-            assert_eq!(
-                logits(&mut built),
-                logits(&mut expected),
-                "{act:?} did not build the stack it names"
-            );
-        }
-
-        // Non-vacuity: the two stacks are not the same net, so the equalities
-        // above are not both true of everything.
-        let mut r = StdRng::seed_from_u64(5);
-        let mut leaky = Mlp::feedforward(3, &[8, 4], Activation::LeakyRelu, &mut r);
-        let mut r = StdRng::seed_from_u64(5);
-        let mut square = Mlp::feedforward(3, &[8, 4], Activation::Square, &mut r);
-        assert_ne!(logits(&mut leaky), logits(&mut square));
-    }
-
-    /// The abort names the variable, the offending value AND the expected
-    /// format. A panic that says only "invalid value" would leave an operator
-    /// guessing which of nine variables their sweep script mangled.
-    #[test]
-    fn the_abort_names_the_variable_the_value_and_the_format() {
-        let e = std::panic::catch_unwind(|| {
-            let mut cfg = MlpConfig::compiled_default();
-            cfg.apply_overrides(env_of(&[("TIMSSEEK_MLP_LR", "banana")]));
-        })
-        .expect_err("a malformed value must abort");
-        let msg = e
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .unwrap_or("<not a string payload>");
-        for needle in ["TIMSSEEK_MLP_LR", "banana", "finite positive float"] {
-            assert!(
-                msg.contains(needle),
-                "abort message lacks {needle:?}: {msg}"
-            );
-        }
-    }
-
-    /// Under `cfg(test)` — which is how this assertion is compiled —
-    /// `MlpConfig::default()` MUST NOT read the environment, so the many
-    /// fixtures built as `..MlpConfig::default()` cannot be retuned by a stray
-    /// variable in the developer's shell.
-    ///
-    /// A tripwire, not a proof: it is tautological while the `cfg(test)` arm
-    /// stands, and starts failing the moment someone removes that arm while a
-    /// `TIMSSEEK_MLP_*` is exported.
-    #[test]
-    fn default_ignores_the_environment_in_tests() {
-        assert_eq!(MlpConfig::default(), MlpConfig::compiled_default());
+    fn fold_rng_is_stable_and_fold_specific() {
+        let cfg = MlpConfig::default();
+        let mut a = cfg.rng_for_fold(2);
+        let mut b = cfg.rng_for_fold(2);
+        let mut c = cfg.rng_for_fold(3);
+        assert_eq!(a.random::<u64>(), b.random::<u64>());
+        assert_ne!(a.random::<u64>(), c.random::<u64>());
     }
 }
