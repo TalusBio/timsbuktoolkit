@@ -213,6 +213,17 @@ mod tests {
     }
 
     #[test]
+    fn delta_columns_name_their_ln1p_formulas() {
+        let batch = build_record_batch(&[]).expect("schema");
+        let schema = batch.schema();
+
+        assert!(schema.index_of("delta_group_ln1p_diff").is_ok());
+        assert!(schema.index_of("delta_group_ln1p_ratio").is_ok());
+        assert!(schema.index_of("delta_group").is_err());
+        assert!(schema.index_of("delta_group_ratio").is_err());
+    }
+
+    #[test]
     fn parsable_sequences_key_in_parquet_metadata() {
         let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
         let path = tmp.path().to_path_buf();

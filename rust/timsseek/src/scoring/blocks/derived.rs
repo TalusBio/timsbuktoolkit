@@ -19,8 +19,6 @@ pub struct Derived {
     #[feat(log2)]
     pub main_over_delta_next: f64,
     #[feat(raw, abs)]
-    pub rt_err: f64,
-    #[feat(raw)]
     pub ms2_intensity_ratios_max: f64,
     #[feat(log2)]
     pub main_times_delta_next: f64,
@@ -41,7 +39,6 @@ impl Derived {
     pub fn compute(s: &ScoringFields) -> Self {
         Self {
             main_over_delta_next: (s.primary.main_score / s.primary.delta_next) as f64,
-            rt_err: (s.rt.obs_rt_seconds - s.rt.calibrated_rt_seconds) as f64,
             ms2_intensity_ratios_max: s
                 .rel_intensities
                 .ms2_intensity_ratios

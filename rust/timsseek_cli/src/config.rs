@@ -145,9 +145,45 @@ rt = "Unrestricted"
     #[test]
     fn default_config_roundtrips_through_toml() {
         let a = Config::default_config();
+        assert_eq!(a.analysis.rescore_model, RescoreModel::Mlp);
         let s = toml::to_string(&a).unwrap();
         let b: Config = toml::from_str(&s).unwrap();
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
+    }
+
+    /// Serde and clap derive names independently, so verify their spellings.
+    #[test]
+    fn rescore_model_spellings_agree_between_cli_and_toml() {
+        use crate::cli::CliRescoreModel;
+        use clap::ValueEnum;
+
+        for cli_variant in CliRescoreModel::value_variants() {
+            let model: RescoreModel = (*cli_variant).into();
+            assert_eq!(CliRescoreModel::from(model), *cli_variant);
+
+            let cli_name = cli_variant
+                .to_possible_value()
+                .expect("no rescore model variant is #[value(skip)]ed")
+                .get_name()
+                .to_string();
+
+            let json = serde_json::to_string(&model).unwrap();
+            let toml_name = json.trim_matches('"');
+
+            assert_eq!(
+                cli_name, toml_name,
+                "`--rescore-model {cli_name}` and `rescore_model = \"{toml_name}\"` name \
+                 {model:?} differently"
+            );
+
+            let src = MINIMAL_TOML.replace(
+                "chunk_size = 20000",
+                &format!("chunk_size = 20000\nrescore_model = \"{toml_name}\""),
+            );
+            let c: Config = toml::from_str(&src)
+                .unwrap_or_else(|e| panic!("rescore_model = \"{toml_name}\" must parse: {e}"));
+            assert_eq!(c.analysis.rescore_model, model);
+        }
     }
 
     /// Template sanity guard. `default_config()` now *is* a parse of the

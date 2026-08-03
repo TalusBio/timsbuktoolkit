@@ -1,11 +1,5 @@
 use super::config::OutputConfig;
-use indicatif::{
-    ProgressBar,
-    ProgressFinish,
-    ProgressIterator,
-    ProgressStyle,
-};
-use std::io::IsTerminal;
+use indicatif::ProgressIterator;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -48,7 +42,10 @@ use timsseek::rt_calibration::{
 };
 use timsseek::scoring::offsets::MzMobilityOffsets;
 use timsseek::scoring::pipeline::Scorer;
-use timsseek::scoring::timings::TimedStep;
+use timsseek::scoring::timings::{
+    TimedStep,
+    make_progress_bar,
+};
 use timsseek::scoring::{
     CalibrantCandidate,
     CalibrantHeap,
@@ -274,22 +271,6 @@ mod calib_dash_hook {
         ) {
         }
     }
-}
-
-/// Create a progress bar that writes to stderr when it is a TTY, or a hidden
-/// (no-op) bar when stderr is not a terminal (e.g. piped / redirected).
-fn make_progress_bar(len: u64, label: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-    let style = ProgressStyle::with_template(&format!(
-        "{{spinner:.green}} {} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} ({{eta}})",
-        label
-    ))
-    .unwrap();
-    ProgressBar::new(len)
-        .with_style(style)
-        .with_finish(ProgressFinish::AndLeave)
 }
 
 /// Check that two speclibs are on a compatible RT scale.
@@ -618,11 +599,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 5: Rescore ===
     let step = TimedStep::begin("Phase 5: Rescore");
-    // Model selectable via the `rescore_model` config field / `--rescore-model`
-    // CLI flag (CLI wins); GBM is the default. Dispatch + per-model notes live
-    // in `timsseek::ml::rescore_with`.
+    // The CLI flag overrides the configured model; MLP is the default.
     info!("Phase 5 rescore model: {rescore_model:?}");
-    let (data, feature_stats) = rescore_with(rescore_model, competed);
+    let (data, feature_stats) = rescore_with(rescore_model, competed)?;
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -1191,10 +1170,10 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         results.len()
     );
 
-    // Calculate delta scores between consecutive target/decoy pairs
+    // Calculate log-space delta features between the two best group members.
     // Results are sorted by (decoy_group_id, precursor_charge, score desc)
-    // We store (group_id, charge, index, main_score) and the computed deltas per index.
-    let mut delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
+    // We store (group_id, charge, index, ln_1p(main_score)).
+    let mut ln1p_delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
     let mut previous: Option<(u32, u8, usize, f32)> = None;
 
     for (i, current) in results.iter().enumerate() {
@@ -1203,15 +1182,17 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             current.scoring.identity.precursor_charge,
         );
 
-        if let Some((prev_group_id, prev_charge, prev_index, prev_score)) = previous {
+        if let Some((prev_group_id, prev_charge, prev_index, ln1p_prev_score)) = previous {
             let prev_key = (prev_group_id, prev_charge);
 
             if current_key == prev_key {
                 // This is the second item in a target/decoy pair
-                let delta_score = current.scoring.primary.main_score - prev_score;
-                let delta_ratio = current.scoring.primary.main_score / prev_score;
+                let log_curr = current.scoring.primary.main_score.ln_1p();
+                let delta_group_ln1p_diff = ln1p_prev_score - log_curr;
+                let delta_group_ln1p_ratio = log_curr / ln1p_prev_score;
 
-                delta_map[prev_index] = (-delta_score, delta_ratio);
+                ln1p_delta_map[prev_index] =
+                    (delta_group_ln1p_diff, delta_group_ln1p_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -1223,7 +1204,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             current.scoring.identity.decoy_group_id,
             current.scoring.identity.precursor_charge,
             i,
-            current.scoring.primary.main_score,
+            current.scoring.primary.main_score.ln_1p(),
         ));
     }
 
@@ -1257,11 +1238,11 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     let competed: Vec<CompetedCandidate> = kept_indices
         .into_iter()
         .map(|i| {
-            let (dg, dgr) = delta_map[i];
+            let (delta_group_ln1p_diff, delta_group_ln1p_ratio) = ln1p_delta_map[i];
             results_opt[i]
                 .take()
                 .expect("index should be unique")
-                .into_competed(dg, dgr)
+                .into_competed(delta_group_ln1p_diff, delta_group_ln1p_ratio)
         })
         .collect();
 
@@ -1378,6 +1359,27 @@ mod tests {
                 ("PEPTIDEK".to_string(), 500.0f64.to_bits(), false),
                 ("PEPTIDEK".to_string(), 502.0f64.to_bits(), false),
             ]
+        );
+    }
+
+    #[test]
+    fn competition_features_match_their_ln1p_names() {
+        let mut best = candidate("BEST", 501.0, true, 7);
+        best.scoring.primary.main_score = 8.0;
+        let mut runner_up = candidate("RUNNER", 502.0, false, 7);
+        runner_up.scoring.primary.main_score = 3.0;
+
+        let competed = target_decoy_compete(vec![runner_up, best]);
+        assert_eq!(competed.len(), 1);
+        let winner = &competed[0];
+        let best_ln1p = 8.0f32.ln_1p();
+        let runner_up_ln1p = 3.0f32.ln_1p();
+
+        assert!(
+            (winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6
+        );
+        assert!(
+            (winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6
         );
     }
 }

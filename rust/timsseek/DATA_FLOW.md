@@ -13,11 +13,12 @@ hits, then re-extract everything with the calibrated windows.
 | 1. Prescore | `phase1_prescore` — `timsseek_cli/src/processing.rs` | Broad, uncalibrated extraction of the whole library; keeps the best-scoring peptides as calibrants. |
 | 2. Calibrate | `calibrate_from_phase1` | Fits the iRT→RT curve from the calibrants, measures m/z and mobility error, derives the narrow tolerances. |
 | 3. Score | `phase3_score` | Re-extracts every peptide at its calibrated RT with the derived tolerances and computes the full feature set. |
-| 4. Compete | `target_decoy_compete` | Dedups by sequence, competes within decoy groups, adds `delta_group`. |
-| 5. Rescore | `ml::rescore_with` — `timsseek/src/ml/mod.rs` | Fits a discriminant over the feature matrix and assigns q-values. |
+| 4. Compete | `target_decoy_compete` | Dedups by sequence, competes within decoy groups, adds log-space group-difference features. |
+| 5. Rescore | `ml::rescore_with` — `timsseek/src/ml/mod.rs` | Fits a discriminant over feature projections and assigns q-values. LDA/MLP stream raw rows; GBM retains its input frame. |
+| 6. Write | `execute_pipeline` — `timsseek_cli/src/processing.rs` | Writes filtered results and optional feature-statistics sidecars, then completes the performance report. |
 
 `main()` → `process_single_file()` loads the raw index, builds a `Scorer`, and
-calls `processing::run_pipeline()` → `execute_pipeline()`, which runs all five
+calls `processing::run_pipeline()` → `execute_pipeline()`, which runs all six
 phases and writes a performance report.
 
 The library is columnar: the scorer iterates `ReferenceLibrary` through a
@@ -47,23 +48,25 @@ re-query tightly around it for main and isotope patterns) and assembles
 
 ## Rescoring
 
-Three interchangeable rescorers in `ml/qvalues.rs`, selected by the
+Four interchangeable rescorers in `ml/qvalues.rs`, selected by the
 `rescore_model` config field / `--rescore-model` flag (CLI wins). All share the
 same input, the same canonical sort + seeded shuffle, and the same FDR tail
 (`q = cummin(decoys / targets)`); only the discriminant differs.
 
 | Model | Feature lane | Fit |
 |---|---|---|
-| `gbm` (default) | all | cross-validated gradient boosting (forust) |
+| `gbm` | all | cross-validated gradient boosting (forust) |
 | `lda` | linear | closed-form shrinkage LDA, cross-fit |
 | `hybrid` | nonlinear + `lda_score` | per-fold cross-fit LDA feeding the GBM |
+| `mlp` (default) | all | cross-validated MLP (`ml/mlp.rs`) |
 
-Features are extracted by a **lane walk**, not a per-result method: a flat
-row-major buffer built over the already-shuffled slice, so row *i* aligns with
-candidate *i*. Building it after the shuffle is load-bearing — fold assignment
-and labels are positional. Each row concatenates the contributing blocks'
-fixed-size lane arrays, so the width is a compile-time constant; names come
-from the same walk order.
+Features are extracted by a **lane walk**, not a per-result method. GBM retains
+the resulting flat row-major frame; LDA and MLP stream the same row projection
+through scratch buffers. Projection happens over the already-shuffled slice so
+row *i* aligns with candidate *i*, because fold assignment and labels are
+positional. Each row concatenates the contributing blocks' fixed-size lane
+arrays, so the width is a compile-time constant; names come from the same walk
+order.
 
 Walk order per lane: scoring blocks (composition order) → `ResultMeta` →
 `Derived` → (nonlinear only) `sequence_counts`. `sequence_counts` is
@@ -71,13 +74,16 @@ unconditional — an unparsed peptide contributes NaN rather than a shorter row,
 so every row is the same width. Those AA counts have no linear lane, so LDA
 never sees them.
 
-`hybrid` cross-fits on the same fold partition the GBM uses internally, so a
-candidate's `lda_score` never comes from an LDA that saw it. Those two
-partitions agreeing is what makes it leak-free, and nothing enforces it.
+The hybrid cross-fits its extra column under the same fold ASSIGNMENT the GBM
+uses internally, so a candidate's `lda_score` never comes from a
+model that saw it. The two train/score SPLITS deliberately differ (the cross-fit
+fits on all-but-one fold, the GBM scorer on one fold at a time) and both are
+leak-free; what has to agree is only which rows land in which fold, and both
+sides read that from `RowMajorDataset::get_fold`.
 
 ## The candidate chain
 
-`ScoredCandidate` (Phase 3) → `CompetedCandidate` (`+ delta_group`) →
+`ScoredCandidate` (Phase 3) → `CompetedCandidate` (`+ delta_group_ln1p_diff`, `+ delta_group_ln1p_ratio`) →
 `FinalResult` (`+ discriminant_score`, `qvalue`) → parquet. All three live in
 `scoring/results.rs`; `ScoringFields` is composed there from an ordered block
 list, and that order is what parquet columns and the ML lanes both follow.

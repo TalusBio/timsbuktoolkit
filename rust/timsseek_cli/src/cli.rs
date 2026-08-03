@@ -8,12 +8,16 @@ use timsseek::ml::RescoreModel;
 
 /// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
 /// trait, so it cannot be implemented for the lib-owned type from this crate.
+///
+/// `rename_all` matches `RescoreModel`'s serde spelling so model names are
+/// identical on the command line and in configuration files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[clap(rename_all = "lowercase")]
+#[clap(rename_all = "snake_case")]
 pub enum CliRescoreModel {
     Gbm,
     Lda,
     Hybrid,
+    Mlp,
 }
 
 impl From<CliRescoreModel> for RescoreModel {
@@ -22,6 +26,19 @@ impl From<CliRescoreModel> for RescoreModel {
             CliRescoreModel::Gbm => RescoreModel::Gbm,
             CliRescoreModel::Lda => RescoreModel::Lda,
             CliRescoreModel::Hybrid => RescoreModel::Hybrid,
+            CliRescoreModel::Mlp => RescoreModel::Mlp,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<RescoreModel> for CliRescoreModel {
+    fn from(v: RescoreModel) -> Self {
+        match v {
+            RescoreModel::Gbm => CliRescoreModel::Gbm,
+            RescoreModel::Lda => CliRescoreModel::Lda,
+            RescoreModel::Hybrid => CliRescoreModel::Hybrid,
+            RescoreModel::Mlp => CliRescoreModel::Mlp,
         }
     }
 }
@@ -94,7 +111,8 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub write_default_config: Option<PathBuf>,
 
-    /// Skip writing results.feature_stats.json sidecar after rescoring.
+    /// Skip writing the post-rescore sidecars (results.feature_stats.tsv and
+    /// results.feature_importance.tsv).
     #[arg(long)]
     pub no_feature_stats: bool,
 }

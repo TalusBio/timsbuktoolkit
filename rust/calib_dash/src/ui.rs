@@ -1771,8 +1771,7 @@ mod tests {
         let app = fixture_app_with_ridge();
         let dp = app.recording().dp();
         assert!(
-            dp.last()
-                .is_some_and(|last| !last.considered.is_empty()),
+            dp.last().is_some_and(|last| !last.considered.is_empty()),
             "fixture drifted: the last node must have weighed at least one edge"
         );
 

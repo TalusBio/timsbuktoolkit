@@ -10,11 +10,10 @@ use crate::scoring::apex_finding::PeptideMetadata;
 #[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
 pub struct Rt {
     pub library_rt: f32,
-    #[feat(round, raw, linear = false)]
+    #[feat(round, linear = false)]
     pub calibrated_rt_seconds: f32,
-    #[feat(raw, linear = false)]
     pub obs_rt_seconds: f32,
-    #[feat(raw, abs)]
+    #[feat(raw, abs, linear = true)]
     pub calibrated_delta_rt: f32,
 }
 
