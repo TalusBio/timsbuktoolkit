@@ -42,5 +42,8 @@ default = ["mzdata"]
 mzdata = ["timsquery/mzdata"]
 instrumentation = ["timsseek/instrumentation"]
 
-[target.'cfg(windows)'.dependencies]
-mimalloc = { workspace = true, features = ["secure"] }
+# Keep this cfg in sync with the `global_allocator` gate in src/main.rs.
+# musl's own allocator serialises every allocation on one lock, which dominates
+# a rayon-parallel run; the workspace dep already carries the `secure` feature.
+[target.'cfg(any(windows, target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }

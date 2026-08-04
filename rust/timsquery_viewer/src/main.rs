@@ -19,10 +19,10 @@ use std::fmt::Write as FMTWrite;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_env = "musl"))]
 use mimalloc::MiMalloc;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_env = "musl"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
