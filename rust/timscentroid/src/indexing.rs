@@ -558,24 +558,20 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
             .cycle_index
             .partition_point(|x| *x < cycle_range.start());
 
-        // The upper bound is found by galloping rather than a second full
-        // binary search. A bucket is mz-sliced, so its 256 rows span the whole
-        // acquisition, while a calibrated RT window covers a few percent of it
-        // -- the answer sits a handful of elements past `start_idx`, so
-        // doubling reaches it in ~2-4 probes where `partition_point` always
-        // pays ~8. Result is identical: both compute the number of trailing
-        // elements `<= cycle_range.end()`.
+        // Gallop for the upper bound instead of a second binary search: buckets
+        // are mz-sliced so their rows span the whole acquisition, while an RT
+        // window covers a few percent of it, putting the answer a handful of
+        // elements past `start_idx`.
         let rest = &self.cycle_index[start_idx..];
         let end = cycle_range.end();
-        let n = rest.len();
         let mut hi = 1usize;
-        while hi < n && rest[hi - 1] <= end {
+        while hi < rest.len() && rest[hi - 1] <= end {
             hi <<= 1;
         }
         // Everything below `lo` is known `<= end`; the answer is in [lo, hi).
         let lo = hi >> 1;
-        let hi = hi.min(n);
-        let end_idx = start_idx + lo + rest[lo..hi].partition_point(|x| *x <= end);
+        let end_idx =
+            start_idx + lo + rest[lo..hi.min(rest.len())].partition_point(|x| *x <= end);
         start_idx..end_idx
     }
 
@@ -1055,20 +1051,6 @@ fn apply_mob_mask<const N: usize>(
     }
 }
 
-/// Reinterpret an 8-lane boolean mask as its raw bytes.
-///
-/// Kept separate so the `SCAN_CHUNK` assumption is asserted in one place.
-#[inline(always)]
-fn mask_as_bytes(mask: &[bool; SCAN_CHUNK]) -> [u8; 8] {
-    const _: () = assert!(
-        SCAN_CHUNK == 8,
-        "the u64 mask walk in scan_bucket_slice assumes an 8-lane chunk"
-    );
-    // SAFETY: `bool` is a single byte with only 0 and 1 as valid values, so
-    // `[bool; 8]` has the same size and alignment (1) as `[u8; 8]`.
-    unsafe { *(mask.as_ptr() as *const [u8; 8]) }
-}
-
 #[inline(always)]
 fn scan_bucket_slice<T, F>(
     view: PeakColumnsView<'_, T>,
@@ -1098,19 +1080,12 @@ fn scan_bucket_slice<T, F>(
             apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
         }
         local.count_after_im_mask::<N>(&mask);
-        // Walk the mask as one integer rather than lane by lane.
-        //
-        // The mask is computed in a NEON register, but iterating it as
-        // `[bool; N]` made LLVM tear it back out with one `umov` lane extract
-        // and one `tbz` per lane -- eight of each per chunk, and at the
-        // measured 24.9% pass rate those branches are near worst case for the
-        // predictor. Reading all eight lanes as a single `u64` costs one load
-        // and then loops once per *passing* lane instead of once per lane.
-        //
-        // `bool` is one byte whose only valid values are 0 and 1, so a passing
-        // lane contributes exactly one set bit at position `8 * lane`, and
-        // `bits & (bits - 1)` clears it.
-        let mut bits = u64::from_le_bytes(mask_as_bytes(&mask));
+        // Walk the mask as one integer: one branch per *passing* lane instead
+        // of one per lane, which is what iterating `[bool; N]` compiles to.
+        // `bool` is one byte valued 0 or 1, so a passing lane is a single set
+        // bit at `8 * lane`, and `bits & (bits - 1)` clears it. The `[u8; N]`
+        // -> `u64` conversion is what pins `N` to 8.
+        let mut bits = u64::from_le_bytes(mask.map(u8::from));
         while bits != 0 {
             let i = (bits.trailing_zeros() >> 3) as usize;
             bits &= bits - 1;
@@ -1952,9 +1927,9 @@ mod tests {
         }
     }
 
-    /// `find_cycle_range` gallops for its upper bound instead of running a
-    /// second full binary search. It must return exactly what the two
-    /// straight `partition_point` calls returned.
+    /// `find_cycle_range` returns exactly the rows with cycle `>= start` and
+    /// `<= end`, checked over every window of every shape against a straight
+    /// double-`partition_point`.
     #[test]
     fn find_cycle_range_matches_double_binary_search() {
         fn reference(
@@ -1985,12 +1960,14 @@ mod tests {
         for shape in &shapes {
             let cycles: Vec<MS1CycleIndex> =
                 shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
-            let floats = vec![0.0f32; cycles.len()];
-            let mobs = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
+            // `find_cycle_range` reads only `cycle_index`; the other columns
+            // exist to build the view and are never inspected.
+            let ignored_f32 = vec![0.0f32; cycles.len()];
+            let ignored_mob = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
             let view = PeakColumnsView {
-                mz: &floats,
-                intensity: &floats,
-                mobility: &mobs,
+                mz: &ignored_f32,
+                intensity: &ignored_f32,
+                mobility: &ignored_mob,
                 cycle_index: &cycles,
             };
             let max = shape.iter().copied().max().unwrap_or(0) + 3;

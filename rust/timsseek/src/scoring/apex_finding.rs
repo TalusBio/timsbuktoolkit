@@ -585,6 +585,15 @@ impl TraceScorer {
     ) -> Result<(), DataProcessingError> {
         let collector = &scoring_ctx.chromatograms;
 
+        // The accumulation loops below `zip` the trace buffers against
+        // chromatogram rows, so a width mismatch would silently truncate
+        // instead of panicking. Establish the equality once, up front.
+        assert_eq!(
+            self.traces.ms2_lazyscore.len(),
+            collector.num_cycles(),
+            "traces were sized for a different extraction than the one being scored"
+        );
+
         // --- MS2 (Fragments) ---
         let ms2_dot_prod = &mut self.buffers.temp_ms2_dot_prod;
         let ms2_norm_sq_obs = &mut self.buffers.temp_ms2_norm_sq_obs;
@@ -640,7 +649,9 @@ impl TraceScorer {
             );
         }
 
-        // Finalize cosine, lazyscore, log-intensity
+        // Finalize cosine, lazyscore, log-intensity. Stays index-based, unlike
+        // the accumulation loops above: six buffers over three borrows of
+        // `self.traces` is worse as a zip chain than as an index.
         let norm_sqrt_exp = ms2_sum_exp.sqrt(); // ||sqrt(exp)|| = sqrt(sum(exp))
         let n = self.traces.cosine_trace.len();
         for i in 0..n {
@@ -715,12 +726,8 @@ impl TraceScorer {
             if *key < 0 {
                 continue; // Skip decoy isotope keys
             }
-            for (dst, &intensity) in self
-                .traces
-                .ms1_precursor_trace
-                .iter_mut()
-                .zip(chrom.iter())
-            {
+            let ms1_precursor_trace = &mut self.traces.ms1_precursor_trace;
+            for (dst, &intensity) in ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
                 if intensity > 0.0 {
                     *dst += intensity;
                 }

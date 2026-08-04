@@ -46,8 +46,8 @@ mzdata = ["timsquery/mzdata", "timscentroid/mzdata"]
 
 [lib]
 
-# A static musl target has no system sqlite3 to link against; build it from
-# source there. Feature unification keeps the host builds unchanged.
+# A static musl target has no system sqlite3 to link against, so build it from
+# source there. Target-gated, so host builds keep linking the system library.
 [target.'cfg(target_env = "musl")'.dependencies]
 rusqlite = { workspace = true, features = ["bundled"] }
 
