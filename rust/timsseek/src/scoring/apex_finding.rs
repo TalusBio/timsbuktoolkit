@@ -624,8 +624,7 @@ impl TraceScorer {
             // Lazyscore: gated on positive intensity; keep scalar because
             // the gate avoids expensive `logf` calls on zero-intensity
             // cycles. This is a small fraction of the inner-loop cost.
-            let ms2_lazyscore = &mut self.traces.ms2_lazyscore;
-            for (dst, &intensity) in ms2_lazyscore.iter_mut().zip(chrom.iter()) {
+            for (dst, &intensity) in self.traces.ms2_lazyscore.iter_mut().zip(chrom.iter()) {
                 if intensity > 0.0 {
                     *dst += intensity.max(1.0).ln();
                 }
@@ -638,7 +637,6 @@ impl TraceScorer {
             // matching the branched form exactly since chromatogram
             // intensities are always non-negative in practice.
             // Micro-benchmark: chunk-8 is ~6.6× faster than scalar.
-            // See `examples/scoring_loops_asm.rs` for parity + ASM.
             accumulate_pass1_chunks(
                 chrom,
                 sqrt_exp,
@@ -683,9 +681,12 @@ impl TraceScorer {
                     .fragments
                     .get_row_idx(row_idx)
                     .expect("row_idx from enumeration must be valid");
-                let scribe = &mut self.traces.ms2_scribe;
-                for ((dst, &intensity), &ss) in
-                    scribe.iter_mut().zip(row.iter()).zip(sqrt_sum.iter())
+                for ((dst, &intensity), &ss) in self
+                    .traces
+                    .ms2_scribe
+                    .iter_mut()
+                    .zip(row.iter())
+                    .zip(sqrt_sum.iter())
                 {
                     if ss == 0.0 {
                         continue;
@@ -724,8 +725,7 @@ impl TraceScorer {
             if *key < 0 {
                 continue; // Skip decoy isotope keys
             }
-            let ms1_precursor_trace = &mut self.traces.ms1_precursor_trace;
-            for (dst, &intensity) in ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
+            for (dst, &intensity) in self.traces.ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
                 if intensity > 0.0 {
                     *dst += intensity;
                 }

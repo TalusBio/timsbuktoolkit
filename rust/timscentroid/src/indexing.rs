@@ -569,8 +569,8 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
         }
         // Everything below `lo` is known `<= end`; the answer is in [lo, hi).
         let lo = hi >> 1;
-        let end_idx =
-            start_idx + lo + rest[lo..hi.min(rest.len())].partition_point(|x| *x <= end);
+        let hi = hi.min(rest.len());
+        let end_idx = start_idx + lo + rest[lo..hi].partition_point(|x| *x <= end);
         start_idx..end_idx
     }
 
@@ -1021,6 +1021,7 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
 /// reads a single field.
 /// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and
 /// unrolls NEON (4×f32 × 2). Remainder falls through to scalar tail.
+/// Pinned to 8: `scan_bucket_slice` walks the mask as a `u64`.
 const SCAN_CHUNK: usize = 8;
 
 #[inline(always)]
@@ -1925,9 +1926,7 @@ mod tests {
         }
     }
 
-    /// `find_cycle_range` returns exactly the rows with cycle `>= start` and
-    /// `<= end`, checked over every window of every shape against a straight
-    /// double-`partition_point`.
+    /// Every window of every shape matches a straight double-`partition_point`.
     #[test]
     fn find_cycle_range_matches_double_binary_search() {
         fn reference(
@@ -1941,8 +1940,7 @@ mod tests {
         }
 
         // Shapes chosen to exercise the doubling: empty, singleton, all-equal
-        // (answer runs to the end), dense, sparse, non-power-of-two lengths,
-        // and a full production bucket.
+        // (answer runs to the end), dense, sparse, and non-power-of-two lengths.
         let shapes: Vec<Vec<u32>> = vec![
             vec![],
             vec![5],
@@ -1958,8 +1956,7 @@ mod tests {
         for shape in &shapes {
             let cycles: Vec<MS1CycleIndex> =
                 shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
-            // `find_cycle_range` reads only `cycle_index`; the other columns
-            // exist to build the view and are never inspected.
+            // Only `cycle_index` is read; the other columns just build the view.
             let ignored_f32 = vec![0.0f32; cycles.len()];
             let ignored_mob = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
             let view = PeakColumnsView {
