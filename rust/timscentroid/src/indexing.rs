@@ -558,10 +558,9 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
             .cycle_index
             .partition_point(|x| *x < cycle_range.start());
 
-        // Gallop for the upper bound instead of a second binary search: buckets
-        // are mz-sliced so their rows span the whole acquisition, while an RT
-        // window covers a few percent of it, putting the answer a handful of
-        // elements past `start_idx`.
+        // Gallop for the upper bound: buckets are mz-sliced so their rows span
+        // the whole acquisition, while an RT window covers a few percent of it,
+        // putting the answer a handful of elements past `start_idx`.
         let rest = &self.cycle_index[start_idx..];
         let end = cycle_range.end();
         let mut hi = 1usize;
@@ -1080,11 +1079,10 @@ fn scan_bucket_slice<T, F>(
             apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
         }
         local.count_after_im_mask::<N>(&mask);
-        // Walk the mask as one integer: one branch per *passing* lane instead
-        // of one per lane, which is what iterating `[bool; N]` compiles to.
-        // `bool` is one byte valued 0 or 1, so a passing lane is a single set
-        // bit at `8 * lane`, and `bits & (bits - 1)` clears it. The `[u8; N]`
-        // -> `u64` conversion is what pins `N` to 8.
+        // Walk the mask as one integer: one branch per *passing* lane. `bool` is
+        // one byte valued 0 or 1, so a passing lane is a single set bit at
+        // `8 * lane`, and `bits & (bits - 1)` clears it. The `[u8; N]` -> `u64`
+        // conversion is what pins `N` to 8.
         let mut bits = u64::from_le_bytes(mask.map(u8::from));
         while bits != 0 {
             let i = (bits.trailing_zeros() >> 3) as usize;

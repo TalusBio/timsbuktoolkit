@@ -586,8 +586,8 @@ impl TraceScorer {
         let collector = &scoring_ctx.chromatograms;
 
         // The accumulation loops below `zip` the trace buffers against
-        // chromatogram rows, so a width mismatch would silently truncate
-        // instead of panicking. Establish the equality once, up front.
+        // chromatogram rows, which would silently truncate on a width mismatch.
+        // Establish the equality once, up front.
         assert_eq!(
             self.traces.ms2_lazyscore.len(),
             collector.num_cycles(),
@@ -649,9 +649,7 @@ impl TraceScorer {
             );
         }
 
-        // Finalize cosine, lazyscore, log-intensity. Stays index-based, unlike
-        // the accumulation loops above: six buffers over three borrows of
-        // `self.traces` is worse as a zip chain than as an index.
+        // Finalize cosine, lazyscore, log-intensity
         let norm_sqrt_exp = ms2_sum_exp.sqrt(); // ||sqrt(exp)|| = sqrt(sum(exp))
         let n = self.traces.cosine_trace.len();
         for i in 0..n {
