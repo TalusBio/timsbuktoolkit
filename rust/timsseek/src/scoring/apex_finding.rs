@@ -616,9 +616,9 @@ impl TraceScorer {
             // the gate avoids expensive `logf` calls on zero-intensity
             // cycles. This is a small fraction of the inner-loop cost.
             let ms2_lazyscore = &mut self.traces.ms2_lazyscore;
-            for (i, &intensity) in chrom.iter().enumerate() {
+            for (dst, &intensity) in ms2_lazyscore.iter_mut().zip(chrom.iter()) {
                 if intensity > 0.0 {
-                    ms2_lazyscore[i] += intensity.max(1.0).ln();
+                    *dst += intensity.max(1.0).ln();
                 }
             }
 
@@ -674,17 +674,20 @@ impl TraceScorer {
                     .fragments
                     .get_row_idx(row_idx)
                     .expect("row_idx from enumeration must be valid");
-                for (t, &intensity) in row.iter().enumerate() {
-                    if sqrt_sum[t] == 0.0 {
+                let scribe = &mut self.traces.ms2_scribe;
+                for ((dst, &intensity), &ss) in
+                    scribe.iter_mut().zip(row.iter()).zip(sqrt_sum.iter())
+                {
+                    if ss == 0.0 {
                         continue;
                     }
                     let obs_norm_i = if intensity > 0.0 {
-                        intensity.sqrt() / sqrt_sum[t]
+                        intensity.sqrt() / ss
                     } else {
                         0.0
                     };
                     let diff = obs_norm_i - pred_norm_i;
-                    self.traces.ms2_scribe[t] += diff * diff;
+                    *dst += diff * diff;
                 }
             }
 
@@ -712,9 +715,14 @@ impl TraceScorer {
             if *key < 0 {
                 continue; // Skip decoy isotope keys
             }
-            for (i, &intensity) in chrom.iter().enumerate() {
+            for (dst, &intensity) in self
+                .traces
+                .ms1_precursor_trace
+                .iter_mut()
+                .zip(chrom.iter())
+            {
                 if intensity > 0.0 {
-                    self.traces.ms1_precursor_trace[i] += intensity;
+                    *dst += intensity;
                 }
             }
         }
