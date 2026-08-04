@@ -38,10 +38,10 @@ path = "src/main.rs"
 name = "timsseek_sample_speclib"
 path = "src/sample_speclib.rs"
 
-# Keep this cfg in sync with the `global_allocator` gate in src/main.rs.
-# musl's own allocator serialises every allocation on one lock, which dominates
-# a rayon-parallel run; the workspace dep already carries the `secure` feature.
-[target.'cfg(any(windows, target_env = "musl"))'.dependencies]
+# Not using mimalloc on windows makes everything extremely slow; musl's own
+# allocator serialises every allocation on one lock, which dominates a
+# rayon-parallel run. Keep this cfg identical to the gate in src/main.rs.
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
 mimalloc = { workspace = true }
 
 [features]

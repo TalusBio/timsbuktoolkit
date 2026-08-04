@@ -20,9 +20,7 @@ use crate::commands::{
 };
 use crate::error::CliError;
 
-// mimalloc seems to work better for windows
-// ... more accurately ... not using it causes everything to
-// be extremely slow on windows...
+// Rationale for both gated platforms lives next to the dep in Cargo.toml.
 #[cfg(any(target_os = "windows", target_env = "musl"))]
 use mimalloc::MiMalloc;
 
