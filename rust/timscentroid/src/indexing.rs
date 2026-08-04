@@ -1055,6 +1055,20 @@ fn apply_mob_mask<const N: usize>(
     }
 }
 
+/// Reinterpret an 8-lane boolean mask as its raw bytes.
+///
+/// Kept separate so the `SCAN_CHUNK` assumption is asserted in one place.
+#[inline(always)]
+fn mask_as_bytes(mask: &[bool; SCAN_CHUNK]) -> [u8; 8] {
+    const _: () = assert!(
+        SCAN_CHUNK == 8,
+        "the u64 mask walk in scan_bucket_slice assumes an 8-lane chunk"
+    );
+    // SAFETY: `bool` is a single byte with only 0 and 1 as valid values, so
+    // `[bool; 8]` has the same size and alignment (1) as `[u8; 8]`.
+    unsafe { *(mask.as_ptr() as *const [u8; 8]) }
+}
+
 #[inline(always)]
 fn scan_bucket_slice<T, F>(
     view: PeakColumnsView<'_, T>,
@@ -1084,11 +1098,24 @@ fn scan_bucket_slice<T, F>(
             apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
         }
         local.count_after_im_mask::<N>(&mask);
-        for (i, &pass) in mask.iter().enumerate() {
-            if pass {
-                let peak = chunk.materialize(i);
-                f(&peak);
-            }
+        // Walk the mask as one integer rather than lane by lane.
+        //
+        // The mask is computed in a NEON register, but iterating it as
+        // `[bool; N]` made LLVM tear it back out with one `umov` lane extract
+        // and one `tbz` per lane -- eight of each per chunk, and at the
+        // measured 24.9% pass rate those branches are near worst case for the
+        // predictor. Reading all eight lanes as a single `u64` costs one load
+        // and then loops once per *passing* lane instead of once per lane.
+        //
+        // `bool` is one byte whose only valid values are 0 and 1, so a passing
+        // lane contributes exactly one set bit at position `8 * lane`, and
+        // `bits & (bits - 1)` clears it.
+        let mut bits = u64::from_le_bytes(mask_as_bytes(&mask));
+        while bits != 0 {
+            let i = (bits.trailing_zeros() >> 3) as usize;
+            bits &= bits - 1;
+            let peak = chunk.materialize(i);
+            f(&peak);
         }
     }
 
