@@ -41,6 +41,12 @@ path = "src/sample_speclib.rs"
 [target.'cfg(windows)'.dependencies]
 mimalloc = { workspace = true, features = ["secure"] }
 
+# Static musl builds otherwise get musl's allocator, which serialises every
+# allocation on one lock. That would dominate a rayon-parallel run and make
+# musl benchmark numbers say more about the allocator than about our code.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
+
 [features]
 default = ["parallel", "aws", "mzdata"]
 parallel = ["timsseek/rayon"]
