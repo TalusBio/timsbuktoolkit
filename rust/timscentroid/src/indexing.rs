@@ -557,8 +557,25 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
         let start_idx = self
             .cycle_index
             .partition_point(|x| *x < cycle_range.start());
-        let end_idx =
-            start_idx + self.cycle_index[start_idx..].partition_point(|x| *x <= cycle_range.end());
+
+        // The upper bound is found by galloping rather than a second full
+        // binary search. A bucket is mz-sliced, so its 256 rows span the whole
+        // acquisition, while a calibrated RT window covers a few percent of it
+        // -- the answer sits a handful of elements past `start_idx`, so
+        // doubling reaches it in ~2-4 probes where `partition_point` always
+        // pays ~8. Result is identical: both compute the number of trailing
+        // elements `<= cycle_range.end()`.
+        let rest = &self.cycle_index[start_idx..];
+        let end = cycle_range.end();
+        let n = rest.len();
+        let mut hi = 1usize;
+        while hi < n && rest[hi - 1] <= end {
+            hi <<= 1;
+        }
+        // Everything below `lo` is known `<= end`; the answer is in [lo, hi).
+        let lo = hi >> 1;
+        let hi = hi.min(n);
+        let end_idx = start_idx + lo + rest[lo..hi].partition_point(|x| *x <= end);
         start_idx..end_idx
     }
 
@@ -1904,6 +1921,66 @@ mod tests {
                     "Bucket size {} should fail the check",
                     bucket_size
                 );
+            }
+        }
+    }
+
+    /// `find_cycle_range` gallops for its upper bound instead of running a
+    /// second full binary search. It must return exactly what the two
+    /// straight `partition_point` calls returned.
+    #[test]
+    fn find_cycle_range_matches_double_binary_search() {
+        fn reference(
+            cycle_index: &[MS1CycleIndex],
+            lo: MS1CycleIndex,
+            hi: MS1CycleIndex,
+        ) -> std::ops::Range<usize> {
+            let start = cycle_index.partition_point(|x| *x < lo);
+            let end = start + cycle_index[start..].partition_point(|x| *x <= hi);
+            start..end
+        }
+
+        // Shapes chosen to exercise the doubling: empty, singleton, all-equal
+        // (answer runs to the end), dense, sparse, non-power-of-two lengths,
+        // and a full production bucket.
+        let shapes: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![5],
+            vec![5, 5, 5, 5],
+            (0..17u32).collect(),
+            (0..64u32).collect(),
+            (0..256u32).collect(),
+            (0..256u32).map(|i| i / 8).collect(),
+            (0..100u32).map(|i| i * 3).collect(),
+            vec![0, 0, 1, 1, 1, 9, 9, 40, 41, 41, 41, 90],
+        ];
+
+        for shape in &shapes {
+            let cycles: Vec<MS1CycleIndex> =
+                shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
+            let floats = vec![0.0f32; cycles.len()];
+            let mobs = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
+            let view = PeakColumnsView {
+                mz: &floats,
+                intensity: &floats,
+                mobility: &mobs,
+                cycle_index: &cycles,
+            };
+            let max = shape.iter().copied().max().unwrap_or(0) + 3;
+            for lo in 0..=max {
+                for hi in lo..=max {
+                    let range =
+                        TupleRange::try_new(MS1CycleIndex::new(lo), MS1CycleIndex::new(hi))
+                            .unwrap();
+                    assert_eq!(
+                        view.find_cycle_range(range),
+                        reference(&cycles, MS1CycleIndex::new(lo), MS1CycleIndex::new(hi)),
+                        "len {} window {}..={}",
+                        shape.len(),
+                        lo,
+                        hi
+                    );
+                }
             }
         }
     }
