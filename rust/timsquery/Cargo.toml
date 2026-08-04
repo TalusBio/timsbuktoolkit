@@ -38,8 +38,5 @@ tempfile = { workspace = true }
 
 [lib]
 
-[target.'cfg(windows)'.dependencies]
-mimalloc = { workspace = true, features = ["secure"] }
-
 [lints]
 workspace = true

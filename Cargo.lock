@@ -6268,7 +6268,6 @@ dependencies = [
  "half",
  "memmap2",
  "micromzpaf",
- "mimalloc",
  "parquet",
  "rayon",
  "serde",
