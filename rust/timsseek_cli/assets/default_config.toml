@@ -40,9 +40,9 @@ rescore_model = "mlp"
 ## Extraction tolerances for the broad first-pass scoring (pre-calibration).
 ## Each field is an externally-tagged enum:
 ##   ms       : { Ppm = [left, right] } | { Absolute = [left, right] }
-##   mobility : { Pct = [left, right] } | { Absolute = [left, right] }
+##   mobility : "Unrestricted" | { Pct = [left, right] } | { Absolute = [left, right] }
 ##   quad     : { Absolute = [left, right] }
-##   rt       : "Unrestricted" | { Minutes = [before, after] }
+##   rt       : "Unrestricted" | { Minutes = [before, after] } | { Pct = [before, after] }
 [analysis.tolerance]
 ms       = { Ppm = [15.0, 15.0] }
 # mobility = { Pct = [5.0, 5.0] }
