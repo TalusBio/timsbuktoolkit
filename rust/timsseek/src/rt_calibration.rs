@@ -335,12 +335,11 @@ impl CalibrationResult {
         n_scored: usize,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let saved = SavedCalibration {
-            version: CALIBRATION_FORMAT_VERSION.to_string(),
+        SavedCalibration::new(
             rt_range_seconds,
-            calibration: self.state.snapshot(),
-            rt_tolerance_minutes: self.rt_tolerance_minutes,
-            residuals: Some(ResidualBlock {
+            self.state.snapshot(),
+            self.rt_tolerance_minutes,
+            Some(ResidualBlock {
                 errors: self.errors.clone(),
                 derivation: self.derivation.clone().unwrap_or_default(),
                 mz_ppm: [self.mz_tolerance_ppm.0, self.mz_tolerance_ppm.1],
@@ -350,9 +349,8 @@ impl CalibrationResult {
                 ],
             }),
             n_scored,
-        };
-        let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        )
+        .write(path)
     }
 
     /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
@@ -410,6 +408,31 @@ pub struct ResidualBlock {
 }
 
 impl SavedCalibration {
+    /// Assemble a file record. The version is stamped here so no writer picks its
+    /// own, and `residuals` is `None` for a writer that measures none.
+    pub fn new(
+        rt_range_seconds: [f64; 2],
+        calibration: CalibrationSnapshot,
+        rt_tolerance_minutes: f32,
+        residuals: Option<ResidualBlock>,
+        n_scored: usize,
+    ) -> Self {
+        Self {
+            version: CALIBRATION_FORMAT_VERSION.to_string(),
+            rt_range_seconds,
+            calibration,
+            rt_tolerance_minutes,
+            residuals,
+            n_scored,
+        }
+    }
+
+    /// Serialize to `path` in the layout [`Self::read`] expects.
+    pub fn write(&self, path: &std::path::Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
     /// Parse a calibration file and check its provenance. The `Option<String>`
     /// is a human-readable reason to distrust the file, not an error: a
     /// calibration is only valid for the run it was fit on, and comparing RT

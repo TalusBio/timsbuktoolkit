@@ -601,22 +601,17 @@ impl ViewerCalibrationState {
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
-        use timsseek::rt_calibration::{
-            CALIBRATION_FORMAT_VERSION,
-            SavedCalibration,
-        };
+        use timsseek::rt_calibration::SavedCalibration;
 
         let tol = self.derived_tolerances.as_ref();
-        let saved = SavedCalibration {
-            version: CALIBRATION_FORMAT_VERSION.to_string(),
+        SavedCalibration::new(
             rt_range_seconds,
-            calibration: self.snapshot(),
-            rt_tolerance_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
-            residuals: self.residuals.clone(),
-            n_scored: self.n_scored,
-        };
-        let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+            self.snapshot(),
+            tol.map_or(0.0, |t| t.rt_tolerance_minutes),
+            self.residuals.clone(),
+            self.n_scored,
+        )
+        .write(path)
     }
 
     /// Deserialize calibration state from a saved calibration, returning the
@@ -1059,12 +1054,8 @@ impl ViewerCalibrationState {
         // Through the search's own rule, so the number shown is the window the
         // search would open. The search applies it per query at the interpolated
         // half-width; one number can only carry the weighted average.
-        let suggested = ridge_stats.map(|stats| {
-            (
-                rt_tolerance_from_ridge(stats.weighted_half_width),
-                stats,
-            )
-        });
+        let suggested =
+            ridge_stats.map(|stats| (rt_tolerance_from_ridge(stats.weighted_half_width), stats));
 
         if let Some((rt_min, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
