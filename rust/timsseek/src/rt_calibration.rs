@@ -100,6 +100,54 @@ pub struct DimensionErrors {
     pub rt_seconds: ErrorStats,
 }
 
+impl DimensionErrors {
+    /// The tolerance windows these residuals imply under `params`.
+    ///
+    /// Lives here rather than in whichever binary happens to measure the
+    /// residuals: [`DerivationParams`] describes this derivation and is written
+    /// into every saved calibration, so a second implementation of it would put
+    /// two different meanings behind one recorded `method`.
+    pub fn derive_windows(&self, params: &DerivationParams) -> DerivedWindows {
+        let (mz_left, mz_right) =
+            mad_symmetric_bounds(&self.mz_ppm, params.sigma.mz, params.floors.mz_ppm);
+        DerivedWindows {
+            // RT takes the half-width alone: these residuals are what is left
+            // after the curve, so they carry no offset for the median to preserve.
+            rt_minutes: (params.sigma.rt * 1.4826 * self.rt_seconds.mad / 60.0)
+                .max(params.floors.rt_minutes),
+            mz_ppm: (mz_left as f64, mz_right as f64),
+            mobility_pct: mad_symmetric_bounds(
+                &self.mobility_pct,
+                params.sigma.mobility,
+                params.floors.mobility_pct,
+            ),
+        }
+    }
+}
+
+/// The tolerance windows [`DimensionErrors::derive_windows`] produces, in the
+/// order [`CalibrationResult::new`] takes them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DerivedWindows {
+    pub rt_minutes: f32,
+    pub mz_ppm: (f64, f64),
+    pub mobility_pct: (f32, f32),
+}
+
+/// `median ± n_sigma * 1.4826 * MAD`, floored — the `"mad_symmetric"` method
+/// [`DerivationParams`] names. Robust to tails: equal to `mean ± n_sigma * stdev`
+/// for a Gaussian population, and it resists the outlier inflation that would
+/// widen a window around a handful of bad matches.
+pub fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
+    if stats.n == 0 {
+        return (min_val, min_val);
+    }
+    let sigma = 1.4826 * stats.mad;
+    let left = (-(stats.median - n_sigma * sigma)).max(min_val);
+    let right = (stats.median + n_sigma * sigma).max(min_val);
+    (left, right)
+}
+
 /// How tolerances are derived from `DimensionErrors`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivationParams {
@@ -570,6 +618,68 @@ mod tests {
                 rt.0
             );
         }
+    }
+
+    /// Pins the three rules `derive_windows` folds together, since it is now the
+    /// only place any of them is written.
+    #[test]
+    fn derive_windows_applies_each_dimensions_rule() {
+        let params = DerivationParams {
+            method: "mad_symmetric".to_string(),
+            sigma: SigmaTriplet {
+                mz: 2.0,
+                mobility: 2.0,
+                rt: 3.0,
+            },
+            floors: FloorsTriplet {
+                mz_ppm: 0.1,
+                mobility_pct: 0.1,
+                rt_minutes: 0.25,
+            },
+        };
+
+        // Symmetric about zero: median 0, MAD 1.
+        let symmetric = ErrorStats::from_slice(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
+        assert_eq!((symmetric.median, symmetric.mad), (0.0, 1.0));
+
+        // Offset by 10: the median rides along, so the window is not centred on
+        // zero — that offset is the systematic error the window has to cover.
+        let offset = ErrorStats::from_slice(&[8.0, 9.0, 10.0, 11.0, 12.0]);
+        assert_eq!((offset.median, offset.mad), (10.0, 1.0));
+
+        let rt_seconds = ErrorStats::from_slice(&[-60.0, 0.0, 60.0]);
+        assert_eq!(rt_seconds.mad, 60.0);
+
+        let w = DimensionErrors {
+            mz_ppm: offset,
+            mobility_pct: symmetric,
+            rt_seconds,
+        }
+        .derive_windows(&params);
+
+        // At MAD 1 the half-spread is `n_sigma * 1.4826`.
+        let spread: f32 = 2.0 * 1.4826;
+        // Left bound of the offset dimension lands under its floor: the median is
+        // further from zero than the spread, so the window does not reach back.
+        // The floor is an `f32`, so the comparison has to widen it the same way.
+        assert_eq!(
+            w.mz_ppm,
+            (params.floors.mz_ppm as f64, (10.0_f32 + spread) as f64)
+        );
+        assert_eq!(w.mobility_pct, (spread, spread));
+        // RT ignores the median and reports a half-width in minutes.
+        assert_eq!(w.rt_minutes, 3.0 * 1.4826 * 60.0 / 60.0);
+
+        // A dimension with nothing measured falls to its floor rather than zero,
+        // which would be a window no query could match inside.
+        let nothing = DimensionErrors::default().derive_windows(&params);
+        let mz_floor = params.floors.mz_ppm as f64;
+        assert_eq!(nothing.mz_ppm, (mz_floor, mz_floor));
+        assert_eq!(
+            nothing.mobility_pct,
+            (params.floors.mobility_pct, params.floors.mobility_pct)
+        );
+        assert_eq!(nothing.rt_minutes, params.floors.rt_minutes);
     }
 
     /// A calibration the viewer wrote has no residuals, and must still load.

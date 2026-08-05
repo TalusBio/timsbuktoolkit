@@ -951,41 +951,25 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
-    let (mz_left, mz_right) = mad_symmetric_bounds(
-        &errors.mz_ppm,
-        derivation.sigma.mz,
-        derivation.floors.mz_ppm,
-    );
-    let mz_tolerance_ppm = (mz_left as f64, mz_right as f64);
-    let mobility_tolerance_pct = mad_symmetric_bounds(
-        &errors.mobility_pct,
-        derivation.sigma.mobility,
-        derivation.floors.mobility_pct,
-    );
-
-    // RT tolerance: sigma * 1.4826 * MAD on the signed residuals, floored.
-    let rt_mad_seconds = errors.rt_seconds.mad;
-    let rt_tolerance_minutes =
-        (derivation.sigma.rt * 1.4826 * rt_mad_seconds / 60.0).max(derivation.floors.rt_minutes);
+    let windows = errors.derive_windows(&derivation);
     info!(
         "RT residuals: MAD={:.1}s, n={}",
-        rt_mad_seconds, errors.rt_seconds.n
+        errors.rt_seconds.mad, errors.rt_seconds.n
     );
-
     info!(
         "Calibration: RT tol={:.2} min, m/z tol=({:.1}, {:.1}) ppm, mob tol=({:.1}, {:.1}) %",
-        rt_tolerance_minutes,
-        mz_tolerance_ppm.0,
-        mz_tolerance_ppm.1,
-        mobility_tolerance_pct.0,
-        mobility_tolerance_pct.1,
+        windows.rt_minutes,
+        windows.mz_ppm.0,
+        windows.mz_ppm.1,
+        windows.mobility_pct.0,
+        windows.mobility_pct.1,
     );
 
     Ok(CalibrationResult::new(
         cal_state,
-        rt_tolerance_minutes,
-        mz_tolerance_ppm,
-        mobility_tolerance_pct,
+        windows.rt_minutes,
+        windows.mz_ppm,
+        windows.mobility_pct,
     )?
     .with_error_stats(errors)
     .with_derivation(derivation))
@@ -1033,19 +1017,6 @@ fn phase3_score<I: ScorerQueriable>(
     }
 
     (results, skips)
-}
-
-/// `median ± n_sigma * 1.4826 * MAD`, asymmetric, floored.
-/// Robust-to-tails tolerance derivation — matches `mean ± n_sigma * stdev`
-/// for Gaussian populations and resists outlier inflation for heavier tails.
-fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
-    if stats.n == 0 {
-        return (min_val, min_val);
-    }
-    let sigma = 1.4826 * stats.mad;
-    let left = (-(stats.median - n_sigma * sigma)).max(min_val);
-    let right = (stats.median + n_sigma * sigma).max(min_val);
-    (left, right)
 }
 
 #[cfg_attr(
