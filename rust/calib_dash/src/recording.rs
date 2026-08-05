@@ -13,16 +13,6 @@ use calibrt::{
     RidgeMeasurement,
 };
 
-#[derive(Debug, Clone)]
-pub struct DpDecision {
-    pub i: usize,
-    pub library: f64,
-    pub observed: f64,
-    pub chose: Option<usize>,
-    pub acc_weight: f64,
-    pub considered: Vec<(usize, f64)>,
-}
-
 #[derive(Clone)]
 pub struct FitRecording {
     geom: GridGeom,
@@ -37,9 +27,6 @@ pub struct FitRecording {
     /// re-deriving calibrt's interpolation.
     curve: Option<CalibrationCurve>,
     ridge: Vec<RidgeMeasurement>,
-    /// One entry per DP node visited. Same `bins`-capacity hint as
-    /// `path_indices` above.
-    dp: Vec<DpDecision>,
     /// Set when a fit starts, cleared by [`Self::set_fit`]. The fit's products are
     /// not events, so a caller that fits without calling `set_fit` leaves the four
     /// product buffers holding the *previous* fit — a wrong panel, not a blank
@@ -62,7 +49,6 @@ impl FitRecording {
             dp_range: 0..0,
             curve: None,
             ridge: Vec::with_capacity(bins),
-            dp: Vec::with_capacity(bins),
             // A recording that has seen no fit has nothing outstanding: Phase 1
             // draws an empty Fit tab before the first fit runs.
             unrecorded_fit: false,
@@ -123,10 +109,6 @@ impl FitRecording {
         self.unrecorded_fit = false;
     }
 
-    pub(crate) fn dp(&self) -> &[DpDecision] {
-        &self.dp
-    }
-
     pub(crate) fn weight(&self, row: usize, col: usize) -> f32 {
         self.weights
             .get(row * self.geom.bins + col)
@@ -158,7 +140,6 @@ impl FitObserver for FitRecording {
                 self.unrecorded_fit = true;
                 // `Suppressed` only ever sets bits, never clears them.
                 self.suppressed.fill(false);
-                self.dp.clear();
                 // `cells` is always `bins * bins` long, so every cell is
                 // rewritten and `weights` needs no separate clear.
                 for (i, n) in cells.iter().enumerate() {
@@ -172,22 +153,7 @@ impl FitObserver for FitRecording {
                     }
                 }
             }
-            FitEvent::DpNode {
-                i,
-                node,
-                chose,
-                acc_weight,
-                considered,
-            } => {
-                self.dp.push(DpDecision {
-                    i,
-                    library: node.center.library,
-                    observed: node.center.observed,
-                    chose,
-                    acc_weight,
-                    considered: considered.to_vec(),
-                });
-            }
+            FitEvent::DpNode { .. } => {}
         }
     }
 }
@@ -276,31 +242,6 @@ mod tests {
         assert!(rec.path_indices().is_empty());
         assert!(rec.curve().is_none());
         assert!(rec.ridge().is_empty());
-    }
-
-    #[test]
-    fn dp_decisions_are_recorded_only_when_enabled() {
-        let mut s = diagonal_state(10);
-
-        let mut off = FitRecording::new(10);
-        s.fit_with(&mut off, ObserveOpts::NONE);
-        assert!(off.dp().is_empty());
-
-        let mut on = FitRecording::new(10);
-        s.reset();
-        let pts: Vec<_> = (0..10)
-            .map(|i| {
-                let v = i as f64 + 0.5;
-                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
-            })
-            .collect();
-        s.update(pts.into_iter()).unwrap();
-        s.fit_with(&mut on, ObserveOpts { dp_nodes: true });
-        assert_eq!(on.dp().len(), 10);
-        assert!(
-            on.dp().iter().any(|d| d.chose.is_some()),
-            "some node picked a predecessor"
-        );
     }
 
     #[test]

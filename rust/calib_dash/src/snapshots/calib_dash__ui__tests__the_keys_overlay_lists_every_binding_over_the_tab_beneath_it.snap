@@ -22,8 +22,8 @@ expression: "render(&mut app, 100, 30)"
     │                   │Fit tab                                           │                       │
     │                   │  < >        scrub retained frames                │                       │
     │                   │  m M        cycle mark layer                     │                       │
-    │                   │  d          toggle DP pane                       │                       │
-  10┤                   └──────────────────────────────────────────────────┘                       │
+    │                   └──────────────────────────────────────────────────┘                       │
+  10┤                             ▓▓▓▓▓▓▓                                                          │
     │                 ▄▄▄▄▄▄▄▄▄▄▄▄▓▀▀▀▀▀▀                                                          │
     │                 ▒▒▒▒▒▒▒▒▒▒▒▒▒                                                                │
     │           ▒▒▒▒▒▒▒                                                                            │
@@ -31,4 +31,4 @@ expression: "render(&mut app, 100, 30)"
    0┤     ▒▒▒▒▒▒▒                                                                                  │
     └┴────────────────────────────┴────────────────────────────┴─────────────────────────────┴─────┘
      0                            5                           10                            15      
- b0 n next · r run · < > frame · m M layer · d dp · h l tab · q detach · ^C abort            ? keys
+ b0 n next · r run · < > frame · m M layer · h l tab · q detach · ^C abort                   ? keys
