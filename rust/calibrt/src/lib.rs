@@ -324,6 +324,10 @@ pub struct CalibrationState {
     /// wants another fraction calls [`Self::measure_ridge_width`] instead; that
     /// path leaves this alone.
     ridge_widths: Vec<RidgeMeasurement>,
+    /// The points fed through [`Self::update`] since the grid was last cleared.
+    /// Kept because the grid bins them on the way in: a fitted grid cannot say
+    /// what it was fit on, and that is what [`Self::snapshot`] has to persist.
+    fit_points: Vec<Point>,
     lookback: usize,
 }
 
@@ -341,6 +345,7 @@ impl CalibrationState {
             scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
             ridge_widths: Vec::new(),
+            fit_points: Vec::new(),
             lookback,
         })
     }
@@ -386,11 +391,13 @@ impl CalibrationState {
         points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
     ) -> Result<(), CalibRtError> {
         for (lib_rt, obs_rt, w) in points {
-            self.grid.add_point(&Point {
+            let point = Point {
                 library: lib_rt.0,
                 observed: obs_rt.0,
                 weight: w,
-            })?;
+            };
+            self.grid.add_point(&point)?;
+            self.fit_points.push(point);
         }
         Ok(())
     }
@@ -472,6 +479,7 @@ impl CalibrationState {
 
     pub fn reset(&mut self) {
         self.grid.reset();
+        self.fit_points.clear();
         self.clear_fit();
     }
 
@@ -484,6 +492,7 @@ impl CalibrationState {
         y_range: (f64, f64),
     ) -> Result<(), CalibRtError> {
         self.grid.reconfigure(bins, x_range, y_range)?;
+        self.fit_points.clear();
         self.clear_fit();
         Ok(())
     }
@@ -510,6 +519,28 @@ impl CalibrationState {
 
     pub fn curve(&self) -> Option<&CalibrationCurve> {
         self.curve.as_ref()
+    }
+
+    /// The points the grid currently holds, in the order [`Self::update`] took
+    /// them.
+    pub fn fit_points(&self) -> &[Point] {
+        &self.fit_points
+    }
+
+    /// Everything needed to rebuild an equal state: the points, and the grid
+    /// geometry they were binned under. Refitting a snapshot under its own
+    /// `(grid_size, lookback)` reproduces the curve, so this is the state's
+    /// persistent form — see [`Self::from_snapshot`].
+    pub fn snapshot(&self) -> CalibrationSnapshot {
+        CalibrationSnapshot {
+            points: self
+                .fit_points
+                .iter()
+                .map(|p| [p.library, p.observed, p.weight])
+                .collect(),
+            grid_size: self.grid_bins(),
+            lookback: self.lookback,
+        }
     }
 
     /// The current fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], in path
@@ -800,6 +831,57 @@ mod observer_tests {
             .collect();
         s.update(pts.into_iter()).unwrap();
         s
+    }
+
+    /// The grid bins its input, so a fitted grid cannot report what it was fit
+    /// on. The state keeps the points alongside it, and must clear them exactly
+    /// when the grid's accumulation is cleared — otherwise a snapshot persists
+    /// points the grid no longer holds.
+    #[test]
+    fn fit_points_track_the_grids_accumulation() {
+        let mut s = diagonal_state();
+        assert_eq!(s.fit_points().len(), 10);
+
+        // A second batch accumulates, matching `update`'s effect on the grid.
+        s.update(std::iter::once((LibraryRT(2.5), ObservedRTSeconds(2.5), 1.0)))
+            .unwrap();
+        assert_eq!(s.fit_points().len(), 11);
+
+        // A fit reads the points; it must not consume them.
+        s.fit();
+        assert!(s.curve().is_some(), "the diagonal must fit");
+        assert_eq!(s.fit_points().len(), 11, "fitting is not consuming");
+
+        let snap = s.snapshot();
+        assert_eq!(snap.points.len(), 11);
+        assert_eq!((snap.grid_size, snap.lookback), (10, 5));
+        assert_eq!(
+            snap.points[0],
+            [0.5, 0.5, 1.0],
+            "weights survive into the snapshot"
+        );
+
+        // Refitting the snapshot reproduces the curve it was taken from.
+        let rebuilt = CalibrationState::from_snapshot(&snap).unwrap();
+        let (orig, new) = (s.curve().unwrap(), rebuilt.curve().unwrap());
+        assert_eq!(orig.points().len(), new.points().len());
+        for x in [1.0, 3.3, 7.7] {
+            assert_eq!(
+                orig.predict(LibraryRT(x)).unwrap().0,
+                new.predict(LibraryRT(x)).unwrap().0,
+                "prediction diverged at {x}"
+            );
+        }
+
+        s.reconfigure(10, (0.0, 20.0), (0.0, 20.0)).unwrap();
+        assert!(
+            s.fit_points().is_empty(),
+            "reconfigure clears the grid, so it must clear the points"
+        );
+
+        let mut s = diagonal_state();
+        s.reset();
+        assert!(s.fit_points().is_empty(), "reset likewise");
     }
 
     #[test]
