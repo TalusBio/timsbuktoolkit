@@ -154,11 +154,11 @@ pub struct ApexBlocks {
     pub apex_lazy: ApexLazyScores,
 }
 
-/// Assert that an extraction-derived slice spans the cycle axis before it is
-/// zipped with a trace buffer. `zip` and the chunked loops truncate to the
-/// shortest side instead of complaining, so a mismatch would silently drop
-/// cycles from an accumulator. Only the extraction's rows are checked: the trace
-/// buffers are resized from the same `num_cycles()` in `compute_traces`.
+/// Assert that a slice spans the cycle axis before it is zipped with another.
+/// `zip` and the chunked loops truncate to the shortest side instead of
+/// complaining, so a mismatch would silently drop cycles from an accumulator.
+/// Both sides are checked: the extraction's rows and the trace buffers that
+/// receive them.
 #[inline]
 #[track_caller]
 fn assert_cycle_width(width: usize, n_cycles: usize) {
@@ -176,6 +176,8 @@ fn assert_cycle_width(width: usize, n_cycles: usize) {
 /// expected in the first place.
 ///
 /// Width 8 rather than 16: the micro-bench plateau starts at 8.
+///
+/// All five slices must span the cycle axis.
 #[inline]
 fn accumulate_pass1_chunks(
     chrom: &[f32],
@@ -185,6 +187,11 @@ fn accumulate_pass1_chunks(
     sqrt_sum: &mut [f32],
     raw_sum: &mut [f32],
 ) {
+    assert_cycle_width(ms2_dot_prod.len(), chrom.len());
+    assert_cycle_width(ms2_norm_sq_obs.len(), chrom.len());
+    assert_cycle_width(sqrt_sum.len(), chrom.len());
+    assert_cycle_width(raw_sum.len(), chrom.len());
+
     let (c_ch, c_tail) = chrom.as_chunks::<8>();
     let (d_ch, d_tail) = ms2_dot_prod.as_chunks_mut::<8>();
     let (n_ch, n_tail) = ms2_norm_sq_obs.as_chunks_mut::<8>();
