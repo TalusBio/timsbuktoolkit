@@ -39,8 +39,7 @@ use timsquery::models::tolerance::{
 };
 use timsquery::serde::IndexedPeaksHandle;
 use timsseek::rt_calibration::{
-    DerivationParams,
-    DimensionErrors,
+    ResidualBlock,
     rt_tolerance_from_ridge,
 };
 use timsseek::scoring::apex_finding::TraceScorer;
@@ -98,22 +97,6 @@ pub struct DerivedTolerances {
     pub rt_tolerance_minutes: f32,
 }
 
-/// Residual statistics and the mz/mobility windows derived from them. The
-/// viewer calibrates RT only, so it neither computes nor displays these — it
-/// holds them so that loading a search's calibration and saving it back does not
-/// drop the dimensions the search did measure. Default when the viewer fit the
-/// curve itself, which is the honest value: nothing measured them.
-#[derive(Debug, Clone, Default)]
-pub struct SearchResiduals {
-    pub errors: DimensionErrors,
-    pub derivation: DerivationParams,
-    pub mz_tolerance_ppm: [f64; 2],
-    pub mobility_tolerance_pct: [f64; 2],
-}
-
-// Save/load uses shared types from timsseek::rt_calibration:
-// SavedCalibration, SavedTolerances, CalibrationSnapshot
-
 /// Messages sent from the background thread to the UI.
 #[derive(Debug)]
 pub enum CalibrationMessage {
@@ -154,9 +137,11 @@ pub struct ViewerCalibrationState {
     pub heap_capacity: usize,
     pub elution_group_count: usize,
     pub derived_tolerances: Option<DerivedTolerances>,
-    /// Dimensions a search measured that the viewer only passes through. See
-    /// [`SearchResiduals`].
-    pub residuals: SearchResiduals,
+    /// What the loaded calibration's search measured. The viewer calibrates RT
+    /// only and measures no residuals, so it carries this untouched rather than
+    /// dropping the dimensions a search did measure. `None` whenever the curve on
+    /// screen was fit here.
+    pub residuals: Option<ResidualBlock>,
 
     thread_handle: Option<JoinHandle<()>>,
     thread_control: Arc<AtomicU8>,
@@ -177,7 +162,7 @@ impl Default for ViewerCalibrationState {
             heap_capacity: DEFAULT_HEAP_CAPACITY,
             elution_group_count: 0,
             derived_tolerances: None,
-            residuals: SearchResiduals::default(),
+            residuals: None,
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
@@ -218,7 +203,7 @@ impl ViewerCalibrationState {
             heap_capacity: DEFAULT_HEAP_CAPACITY,
             elution_group_count: 0,
             derived_tolerances: None,
-            residuals: SearchResiduals::default(),
+            residuals: None,
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
@@ -618,7 +603,6 @@ impl ViewerCalibrationState {
         use timsseek::rt_calibration::{
             CALIBRATION_FORMAT_VERSION,
             SavedCalibration,
-            SavedTolerances,
         };
 
         let tol = self.derived_tolerances.as_ref();
@@ -626,13 +610,8 @@ impl ViewerCalibrationState {
             version: CALIBRATION_FORMAT_VERSION.to_string(),
             rt_range_seconds,
             calibration: self.snapshot(),
-            errors: self.residuals.errors.clone(),
-            derivation: self.residuals.derivation.clone(),
-            tolerances: SavedTolerances {
-                rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
-                mz_ppm: self.residuals.mz_tolerance_ppm,
-                mobility_pct: self.residuals.mobility_tolerance_pct,
-            },
+            rt_tolerance_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
+            residuals: self.residuals.clone(),
             n_scored: self.n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
@@ -664,14 +643,9 @@ impl ViewerCalibrationState {
         self.n_calibrants = saved.n_calibrants();
         self.n_scored = saved.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
-            rt_tolerance_minutes: saved.tolerances.rt_minutes,
+            rt_tolerance_minutes: saved.rt_tolerance_minutes,
         });
-        self.residuals = SearchResiduals {
-            errors: saved.errors,
-            derivation: saved.derivation,
-            mz_tolerance_ppm: saved.tolerances.mz_ppm,
-            mobility_tolerance_pct: saved.tolerances.mobility_pct,
-        };
+        self.residuals = saved.residuals;
         self.phase = CalibrationPhase::Done;
 
         Ok(warning)

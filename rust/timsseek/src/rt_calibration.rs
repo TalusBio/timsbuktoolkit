@@ -277,68 +277,35 @@ impl CalibrationResult {
             .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
     }
 
-    /// Save calibration to JSON v2 format.
+    /// Write the calibration where a viewer or the dashboard can read it.
     ///
-    /// The grid's own snapshot carries the points and their geometry, so
-    /// [`Self::from_saved`] can refit an equal grid; the residual statistics and
-    /// tolerances are read back verbatim.
+    /// The grid's snapshot is the record of the fit — a reader refits it to get
+    /// the curve and the ridge widths back. Everything a search measured that the
+    /// grid does not know goes in [`ResidualBlock`].
     pub fn save_json(
         &self,
         rt_range_seconds: [f64; 2],
         n_scored: usize,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let derivation = self.derivation.clone().unwrap_or_default();
         let saved = SavedCalibration {
             version: CALIBRATION_FORMAT_VERSION.to_string(),
             rt_range_seconds,
             calibration: self.state.snapshot(),
-            errors: self.errors.clone(),
-            derivation,
-            tolerances: SavedTolerances {
-                rt_minutes: self.rt_tolerance_minutes,
+            rt_tolerance_minutes: self.rt_tolerance_minutes,
+            residuals: Some(ResidualBlock {
+                errors: self.errors.clone(),
+                derivation: self.derivation.clone().unwrap_or_default(),
                 mz_ppm: [self.mz_tolerance_ppm.0, self.mz_tolerance_ppm.1],
                 mobility_pct: [
                     self.mobility_tolerance_pct.0 as f64,
                     self.mobility_tolerance_pct.1 as f64,
                 ],
-            },
+            }),
             n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
-    }
-
-    /// Rebuild a `CalibrationResult` from a saved file. Refitting the persisted
-    /// points under their persisted geometry reproduces the grid, and with it the
-    /// curve and the ridge widths; every other field is read back verbatim.
-    pub fn from_saved(saved: &SavedCalibration) -> Result<Self, CalibRtError> {
-        let state = CalibratedGrid::from_snapshot(&saved.calibration)?;
-        Ok(Self::new(
-            state,
-            saved.tolerances.rt_minutes,
-            (saved.tolerances.mz_ppm[0], saved.tolerances.mz_ppm[1]),
-            (
-                saved.tolerances.mobility_pct[0] as f32,
-                saved.tolerances.mobility_pct[1] as f32,
-            ),
-        )?
-        .with_error_stats(saved.errors.clone())
-        .with_derivation(saved.derivation.clone()))
-    }
-
-    /// Read a saved calibration off disk and rebuild it, logging any
-    /// provenance warning. See [`SavedCalibration::read`] and
-    /// [`Self::from_saved`].
-    pub fn read_json(
-        path: &std::path::Path,
-        raw_rt_range: Option<[f64; 2]>,
-    ) -> Result<Self, String> {
-        let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
-        if let Some(warning) = warning {
-            tracing::warn!("{warning}");
-        }
-        Self::from_saved(&saved).map_err(|e| format!("{e:?}"))
     }
 
     /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
@@ -372,10 +339,27 @@ pub struct SavedCalibration {
     pub version: String,
     pub rt_range_seconds: [f64; 2],
     pub calibration: CalibrationSnapshot,
+    /// The uniform RT tolerance. Every writer has one — it is what a query falls
+    /// back to where the grid measured no ridge.
+    pub rt_tolerance_minutes: f32,
+    /// What a search measured beyond the curve. `None` when the calibration was
+    /// fit by a tool that measures no residuals, which is the truthful value: the
+    /// viewer has no m/z or mobility errors to report, and writing zeros there
+    /// would read as "measured, and tight".
+    #[serde(default)]
+    pub residuals: Option<ResidualBlock>,
+    pub n_scored: usize,
+}
+
+/// The residual statistics a search measures at its calibrant apexes, and the
+/// m/z and mobility windows derived from them. One block because the windows are
+/// meaningless without the statistics and the parameters that shaped them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResidualBlock {
     pub errors: DimensionErrors,
     pub derivation: DerivationParams,
-    pub tolerances: SavedTolerances,
-    pub n_scored: usize,
+    pub mz_ppm: [f64; 2],
+    pub mobility_pct: [f64; 2],
 }
 
 impl SavedCalibration {
@@ -388,8 +372,9 @@ impl SavedCalibration {
     /// used on; `None` means there is nothing to check against, which is itself
     /// worth warning about.
     ///
-    /// Every reader goes through here so the version gate and the provenance
-    /// check cannot drift between the CLI and the viewer.
+    /// The version gate and the provenance check live here so a reader cannot
+    /// skip them. `calib_dash` is the deliberate exception: it pulls `calibration`
+    /// out with plain `serde_json` rather than depend on this crate.
     pub fn read(
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
@@ -436,13 +421,6 @@ impl SavedCalibration {
             (overlap / span) * 100.0,
         ))
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SavedTolerances {
-    pub rt_minutes: f32,
-    pub mz_ppm: [f64; 2],
-    pub mobility_pct: [f64; 2],
 }
 
 /// Linearly interpolate the ridge half-width at a given library RT (seconds).
@@ -522,31 +500,57 @@ mod tests {
         dir
     }
 
+    /// The saved snapshot is the entire record of the fit, so refitting it has to
+    /// reproduce the curve and the ridge widths — that is what a reader does
+    /// instead of reading them back. Walks the path a reader really takes:
+    /// `read` -> `from_snapshot` -> `new`.
     #[test]
-    fn save_json_then_from_saved_is_lossless() {
+    fn a_saved_snapshot_refits_to_the_same_calibration() {
         let original = sample_calibration();
         let dir = save_fixture(&original);
         let path = dir.path().join("calibration.json");
 
-        let loaded = CalibrationResult::read_json(&path, Some([0.0, 1200.0])).unwrap();
-
-        assert_eq!(
-            loaded.rt_tolerance_minutes(),
-            original.rt_tolerance_minutes()
+        let (saved, warning) = SavedCalibration::read(&path, Some([0.0, 1200.0])).unwrap();
+        assert!(
+            warning.is_none(),
+            "the fixture's RT range is the one it claims: {warning:?}"
         );
-        assert_eq!(loaded.mz_tolerance(), original.mz_tolerance());
-        assert_eq!(loaded.mobility_tolerance(), original.mobility_tolerance());
-        assert_eq!(loaded.fit_points(), original.fit_points());
 
-        // The ridge is refit, not read back, so matching it is the claim that
-        // the persisted points and geometry reproduce the grid they came from.
-        let (loaded_ridge, orig_ridge) =
-            (loaded.state().ridge_widths(), original.state().ridge_widths());
-        assert_eq!(loaded_ridge.len(), orig_ridge.len(), "ridge width count");
-        for (loaded_w, orig_w) in loaded_ridge.iter().zip(orig_ridge.iter()) {
-            assert_eq!(loaded_w.library.0, orig_w.library.0);
-            assert_eq!(loaded_w.half_width, orig_w.half_width);
-            assert_eq!(loaded_w.ridge_weight, orig_w.ridge_weight);
+        let residuals = saved
+            .residuals
+            .expect("a search's calibration carries its residuals");
+        assert_eq!(residuals.mz_ppm, [7.5, 8.5]);
+        assert_eq!(residuals.mobility_pct, [2.5, 3.5]);
+        assert_eq!(
+            residuals.errors.rt_seconds.n,
+            original.errors().rt_seconds.n
+        );
+
+        let refit = CalibratedGrid::from_snapshot(&saved.calibration).unwrap();
+        assert_eq!(refit.fit_points(), original.fit_points());
+
+        let reloaded = CalibrationResult::new(
+            refit,
+            saved.rt_tolerance_minutes,
+            (residuals.mz_ppm[0], residuals.mz_ppm[1]),
+            (
+                residuals.mobility_pct[0] as f32,
+                residuals.mobility_pct[1] as f32,
+            ),
+        )
+        .unwrap();
+
+        // The ridge was refit, not read back, so matching it is the claim that the
+        // persisted points and geometry reproduce the grid they came from.
+        let (new_ridge, orig_ridge) = (
+            reloaded.state().ridge_widths(),
+            original.state().ridge_widths(),
+        );
+        assert_eq!(new_ridge.len(), orig_ridge.len(), "ridge width count");
+        for (a, b) in new_ridge.iter().zip(orig_ridge.iter()) {
+            assert_eq!(a.library.0, b.library.0);
+            assert_eq!(a.half_width, b.half_width);
+            assert_eq!(a.ridge_weight, b.ridge_weight);
         }
 
         // The tolerance getter folds the curve, the ridge widths and the floors
@@ -554,18 +558,38 @@ mod tests {
         for i in 0..=40 {
             let rt = LibraryRT(i as f32 * 10.0);
             assert_eq!(
-                loaded.get_tolerance(500.0, 1.0, rt),
+                reloaded.get_tolerance(500.0, 1.0, rt),
                 original.get_tolerance(500.0, 1.0, rt),
                 "tolerance mismatch at library RT {}",
                 rt.0
             );
             assert_eq!(
-                loaded.convert_irt(rt).0,
+                reloaded.convert_irt(rt).0,
                 original.convert_irt(rt).0,
                 "RT conversion mismatch at library RT {}",
                 rt.0
             );
         }
+    }
+
+    /// A calibration the viewer wrote has no residuals, and must still load.
+    #[test]
+    fn read_accepts_a_calibration_with_no_residuals() {
+        let dir = save_fixture(&sample_calibration());
+        let path = dir.path().join("calibration.json");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("residuals")
+            .expect("a search's save must have written residuals");
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let (saved, _) = SavedCalibration::read(&path, Some([0.0, 1200.0])).unwrap();
+        assert!(saved.residuals.is_none());
+        assert!(CalibratedGrid::from_snapshot(&saved.calibration).is_ok());
     }
 
     /// A file from an older writer must be refused, not silently reinterpreted:
