@@ -41,6 +41,7 @@ use timsquery::serde::IndexedPeaksHandle;
 use timsseek::rt_calibration::{
     DerivationParams,
     DimensionErrors,
+    rt_tolerance_from_ridge,
 };
 use timsseek::scoring::apex_finding::TraceScorer;
 use timsseek::scoring::extraction::build_extraction;
@@ -1080,13 +1081,19 @@ impl ViewerCalibrationState {
             summary.weighted_half_width.is_finite().then_some(summary)
         });
 
-        // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
-        let suggested =
-            ridge_stats.map(|stats| ((stats.weighted_half_width / 60.0).max(0.5), stats));
+        // Through the search's own rule, so the number shown is the window the
+        // search would open. The search applies it per query at the interpolated
+        // half-width; one number can only carry the weighted average.
+        let suggested = ridge_stats.map(|stats| {
+            (
+                rt_tolerance_from_ridge(stats.weighted_half_width),
+                stats,
+            )
+        });
 
         if let Some((rt_min, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
-                rt_tolerance_minutes: rt_min as f32,
+                rt_tolerance_minutes: rt_min,
             });
         }
 
@@ -1097,8 +1104,7 @@ impl ViewerCalibrationState {
                         "RT tol (fallback): \u{00B1}{rt_min:.2} min, uniform over all queries",
                     ));
                     if ui.button("Apply").clicked() {
-                        let rt_tol = rt_min as f32;
-                        tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
+                        tolerance.rt = RtTolerance::Minutes((rt_min, rt_min));
                     }
                 });
                 let RidgeSummary {

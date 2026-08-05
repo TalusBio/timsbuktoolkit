@@ -40,6 +40,16 @@ const MIN_RT_TOLERANCE_MINUTES: f32 = 0.5;
 /// writer and the reader's gate cannot disagree.
 pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
 
+/// The RT tolerance a ridge half-width implies, in minutes.
+///
+/// The one place the ridge-to-tolerance rule is written. The search applies it
+/// per query at the interpolated half-width; a UI showing a single number
+/// applies it to [`RidgeSummary::weighted_half_width`]. Both must agree, or the
+/// window a user is shown is not the window the search would open.
+pub fn rt_tolerance_from_ridge(half_width_seconds: f64) -> f32 {
+    ((half_width_seconds * RIDGE_WIDTH_MULTIPLIER / 60.0) as f32).max(MIN_RT_TOLERANCE_MINUTES)
+}
+
 /// Per-dimension residual statistics. `1.4826 * mad` is a robust stdev
 /// estimator (equals stdev for Gaussian data, resists outliers otherwise).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -225,11 +235,10 @@ impl CalibrationResult {
     /// falls back to uniform `rt_tolerance_minutes` otherwise.
     /// `rt` is the library RT in seconds (pre-calibration).
     pub fn get_tolerance(&self, _mz: f64, _mobility: f32, rt: LibraryRT<f32>) -> Tolerance {
-        let rt_tol_minutes = self
-            .ridge_half_width_at(LibraryRT(rt.0 as f64))
-            .map(|hw| (hw * RIDGE_WIDTH_MULTIPLIER / 60.0) as f32)
-            .unwrap_or(self.rt_tolerance_minutes)
-            .max(MIN_RT_TOLERANCE_MINUTES);
+        let rt_tol_minutes = match self.ridge_half_width_at(LibraryRT(rt.0 as f64)) {
+            Some(half_width) => rt_tolerance_from_ridge(half_width),
+            None => self.rt_tolerance_minutes.max(MIN_RT_TOLERANCE_MINUTES),
+        };
 
         Tolerance {
             ms: MzTolerance::Ppm(self.mz_tolerance_ppm),
