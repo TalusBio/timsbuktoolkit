@@ -621,13 +621,12 @@ impl TraceScorer {
             pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
-            // Lazyscore: gated on positive intensity; keep scalar because
-            // the gate avoids expensive `logf` calls on zero-intensity
-            // cycles. This is a small fraction of the inner-loop cost.
+            // Lazyscore. `max(1.0)` sends every non-positive cell to ln(1) = 0,
+            // so a positive-intensity gate here only skips `logf` calls, and at
+            // the ~69% occupancy real chromatograms have it costs more in
+            // mispredicts than it saves in calls.
             for (dst, &intensity) in self.traces.ms2_lazyscore.iter_mut().zip(chrom.iter()) {
-                if intensity > 0.0 {
-                    *dst += intensity.max(1.0).ln();
-                }
+                *dst += intensity.max(1.0).ln();
             }
 
             // 4 cheap accumulators vectorized via chunked loop. The
@@ -675,41 +674,46 @@ impl TraceScorer {
                 entry.1 /= pred_sqrt_sum;
             }
 
-            // Pass B: accumulate SSE
+            // Fold the per-cycle division out of the row loop below, which walks
+            // the same cycle axis once per retained fragment. Zero stays zero,
+            // so it still marks the cycles finalize floors.
+            for ss in sqrt_sum.iter_mut() {
+                if *ss != 0.0 {
+                    *ss = ss.recip();
+                }
+            }
+            let inv_sqrt_sum = sqrt_sum;
+
+            // Pass B: accumulate SSE. Branchless: `sqrt(max(0, x)) * 0.0` is the
+            // zero the gated form contributed, and empty cycles (`inv == 0`)
+            // accumulate `pred_norm_i^2` that finalize immediately discards for
+            // SCRIBE_FLOOR.
             for &(row_idx, pred_norm_i) in pred_norms.iter() {
                 let row = collector
                     .fragments
                     .get_row_idx(row_idx)
                     .expect("row_idx from enumeration must be valid");
-                for ((dst, &intensity), &ss) in self
+                for ((dst, &intensity), &inv) in self
                     .traces
                     .ms2_scribe
                     .iter_mut()
                     .zip(row.iter())
-                    .zip(sqrt_sum.iter())
+                    .zip(inv_sqrt_sum.iter())
                 {
-                    if ss == 0.0 {
-                        continue;
-                    }
-                    let obs_norm_i = if intensity > 0.0 {
-                        intensity.sqrt() / ss
-                    } else {
-                        0.0
-                    };
-                    let diff = obs_norm_i - pred_norm_i;
+                    let diff = intensity.max(0.0).sqrt() * inv - pred_norm_i;
                     *dst += diff * diff;
                 }
             }
 
             // Finalize scribe: -log(sse)
-            for (scribe, &ss) in self
+            for (scribe, &inv) in self
                 .traces
                 .ms2_scribe
                 .iter_mut()
-                .zip(sqrt_sum.iter())
+                .zip(inv_sqrt_sum.iter())
                 .take(n)
             {
-                if ss == 0.0 {
+                if inv == 0.0 {
                     *scribe = SCRIBE_FLOOR;
                 } else {
                     let sse = scribe.max(f32::EPSILON);
@@ -725,10 +729,9 @@ impl TraceScorer {
             if *key < 0 {
                 continue; // Skip decoy isotope keys
             }
+            // Branchless: adding a clamped zero is what the gate contributed.
             for (dst, &intensity) in self.traces.ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
-                if intensity > 0.0 {
-                    *dst += intensity;
-                }
+                *dst += intensity.max(0.0);
             }
         }
 
