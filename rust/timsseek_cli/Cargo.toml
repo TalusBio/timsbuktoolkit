@@ -38,7 +38,6 @@ path = "src/main.rs"
 name = "timsseek_sample_speclib"
 path = "src/sample_speclib.rs"
 
-# Both platform allocators are slower here; musl's serialises on one lock.
 [target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
 mimalloc = { workspace = true }
 

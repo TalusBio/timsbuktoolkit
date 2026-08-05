@@ -67,6 +67,9 @@ parquet_derive = { version = "57.1" }
 parquet = { version = "57.1" }
 arrow = { version = "57.1", default-features = false }
 
+# Set as the global allocator on windows and musl, whose own allocators are
+# slower here — musl's serialises on one lock. Every binary that wants it repeats
+# the same `cfg(any(target_os = "windows", target_env = "musl"))` gate.
 mimalloc = { version = "0.1.46", features = ["secure"] }
 thiserror = "2"
 insta = { version = "1.34.0" }
