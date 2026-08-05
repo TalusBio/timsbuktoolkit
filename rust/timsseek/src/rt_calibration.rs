@@ -34,13 +34,9 @@ pub const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
 
 /// The RT tolerance a ridge half-width implies, in minutes, floored at
 /// `floor_minutes` — the same [`FloorsTriplet::rt_minutes`] that
-/// [`DimensionErrors::derive_windows`] applies to the uniform fallback, so a
-/// query gets one configured floor whichever path it takes.
-///
-/// The one place the ridge-to-tolerance rule is written. The search applies it
-/// per query at the interpolated half-width; a UI showing a single number
-/// applies it to [`RidgeSummary::weighted_half_width`]. Both must agree, or the
-/// window a user is shown is not the window the search would open.
+/// [`DimensionErrors::derive_windows`] applies to the uniform fallback. The
+/// per-query search path and a single-number UI must both come through here, or
+/// the window a user is shown is not the window the search would open.
 pub fn rt_tolerance_from_ridge(half_width_seconds: f64, floor_minutes: f32) -> f32 {
     ((half_width_seconds / 60.0) as f32).max(floor_minutes)
 }
@@ -97,11 +93,6 @@ pub struct DimensionErrors {
 
 impl DimensionErrors {
     /// The tolerance windows these residuals imply under `params`.
-    ///
-    /// Lives here rather than in whichever binary happens to measure the
-    /// residuals: [`DerivationParams`] describes this derivation and is written
-    /// into every saved calibration, so a second implementation of it would put
-    /// two different meanings behind one recorded `method`.
     pub fn derive_windows(&self, params: &DerivationParams) -> DerivedWindows {
         let (mz_left, mz_right) =
             mad_symmetric_bounds(&self.mz_ppm, params.sigma.mz, params.floors.mz_ppm);
@@ -198,9 +189,8 @@ pub struct CalibrationResult {
 }
 
 impl CalibrationResult {
-    /// Wrap a fitted grid. `Err` when the grid has no curve: a result that
-    /// cannot convert an RT is not one Phase 3 can use, and rejecting it here
-    /// keeps [`Self::convert_irt`] infallible.
+    /// Wrap a fitted grid. `Err` when the grid has no curve, which keeps
+    /// [`Self::convert_irt`] infallible.
     pub fn new(
         state: CalibratedGrid,
         rt_tolerance_minutes: f32,
@@ -377,8 +367,7 @@ impl CalibrationResult {
 pub type SavedCalibration = calibrt::SavedCalibration<ResidualBlock>;
 
 /// The residual statistics a search measures at its calibrant apexes, and the
-/// m/z and mobility windows derived from them. One block because the windows are
-/// meaningless without the statistics and the parameters that shaped them.
+/// m/z and mobility windows derived from them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResidualBlock {
     pub errors: DimensionErrors,
