@@ -7,8 +7,6 @@ pub use calibrt::{
     CalibrationCurve as RTCalibration,
     CalibrationSnapshot,
     CalibrationState as CalibratedGrid,
-    FitEvent,
-    FitObserver,
     LibraryRT,
     ObservedRTSeconds,
     Point,
@@ -430,11 +428,7 @@ mod tests {
             .collect();
         let mut state = CalibratedGrid::deferred(grid_size, lookback).unwrap();
         state
-            .refit(
-                grid_size,
-                points.iter().map(|p| (p.library, p.observed)),
-                &mut (),
-            )
+            .refit(grid_size, points.iter().map(|p| (p.library, p.observed)))
             .unwrap();
         assert!(
             !state.ridge_widths().is_empty(),

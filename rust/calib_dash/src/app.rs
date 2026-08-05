@@ -467,10 +467,10 @@ impl App {
 /// `>= 2` is defined; this is high enough that a local kink is unlikely to hide.
 const CURVE_DELTA_SAMPLES: usize = 50;
 
-/// [`calibrt::CalibrationState::refit`] plus the ridge measurement the tabs read,
-/// against whichever state/recording pair the caller owns. The live fit and a
-/// scrubbed frame's replay sharing this is what makes a replayed frame show the
-/// fit that actually ran.
+/// [`calibrt::CalibrationState::refit`], replacing `recording` with what the fit
+/// left behind, against whichever state/recording pair the caller owns. The live
+/// fit and a scrubbed frame's replay sharing this is what makes a replayed frame
+/// show the fit that actually ran.
 ///
 /// `None` when `calibrt` refuses, logged at `warn` here: every caller treats a
 /// refusal the same way, as "no recording".
@@ -481,15 +481,11 @@ fn fit_points(
     points: &[CalibrantPoint],
 ) -> Option<(f64, f64)> {
     let (x_range, _) = state
-        .refit(
-            bins,
-            points.iter().map(|p| (p.library_rt, p.observed_rt)),
-            recording,
-        )
+        .refit(bins, points.iter().map(|p| (p.library_rt, p.observed_rt)))
         // `CalibRtError` has no `Display`.
         .inspect_err(|e| tracing::warn!("calib_dash: skipping this re-fit: {e:?}"))
         .ok()?;
-    recording.set_fit(state);
+    *recording = FitRecording::from_state(state);
     Some(x_range)
 }
 

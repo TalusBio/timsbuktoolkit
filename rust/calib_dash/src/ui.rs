@@ -1577,8 +1577,8 @@ mod tests {
         let mut app = App::new(bins);
         let mut state = CalibrationState::new(bins, (0.0, bins as f64), (0.0, 48.0), 1).unwrap();
         state.update(ridge_points().into_iter()).unwrap();
-        state.fit_with(app.recording_mut());
-        app.recording_mut().set_fit(&state);
+        state.fit();
+        *app.recording_mut() = FitRecording::from_state(&state);
         app
     }
 
@@ -1596,10 +1596,8 @@ mod tests {
             })
             .collect();
         state.update(pts.into_iter()).unwrap();
-        let mut rec = FitRecording::new(bins);
-        state.fit_with(&mut rec);
-        rec.set_fit(&state);
-        rec
+        state.fit();
+        FitRecording::from_state(&state)
     }
 
     /// Ten batches with a decaying `max_delta` and some churn, on top of
@@ -1757,10 +1755,8 @@ mod tests {
         let rec = {
             let mut state = CalibrationState::new(16, (0.0, 16.0), (0.0, 48.0), 1).unwrap();
             state.update(ridge_points().into_iter()).unwrap();
-            let mut rec = FitRecording::new(16);
-            state.fit_with(&mut rec);
-            rec.set_fit(&state);
-            rec
+            state.fit();
+            FitRecording::from_state(&state)
         };
         app.set_final(
             rec,

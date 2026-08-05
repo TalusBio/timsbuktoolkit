@@ -342,7 +342,7 @@ impl<R> SavedCalibration<R> {
     }
 }
 
-/// Grid geometry, emitted once per fit so a consumer can lay out `cells`
+/// Grid geometry, so a consumer can lay out [`CalibrationState::grid_cells`]
 /// without inferring it from the node coordinates (which is impossible for an
 /// empty or single-occupied grid).
 #[derive(Debug, Clone, Copy)]
@@ -350,30 +350,6 @@ pub struct GridGeom {
     pub bins: usize,
     pub x_range: (f64, f64),
     pub y_range: (f64, f64),
-}
-
-/// One step of the fit, borrowed from the state that produced it.
-///
-/// `cells` is `bins * bins` ROW-MAJOR: `index = row * bins + col`, where `row`
-/// indexes the observed-RT axis and `col` the library-RT axis. This matches
-/// `Grid::add_point`'s `gy * bins + gx`.
-pub enum FitEvent<'a> {
-    FitStarted {
-        geom: GridGeom,
-        cells: &'a [grid::Node],
-    },
-    Suppressed {
-        cells: &'a [grid::Node],
-    },
-}
-
-pub trait FitObserver {
-    fn on_event(&mut self, ev: FitEvent<'_>);
-}
-
-/// The no-op observer.
-impl FitObserver for () {
-    fn on_event(&mut self, _: FitEvent<'_>) {}
 }
 
 /// Reusable calibration state for incremental fitting. Keeps the grid and the
@@ -391,7 +367,7 @@ pub struct CalibrationState {
     scratch: pathfinding::PathfindingScratch,
     curve: Option<CalibrationCurve>,
     /// The fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], measured by
-    /// [`Self::fit_with`] so that reading them takes `&self`.
+    /// [`Self::fit`] so that reading them takes `&self`.
     ridge_widths: Vec<RidgeMeasurement>,
     /// The points fed through [`Self::update`] since the grid was last cleared.
     /// Kept because the grid bins them on the way in: a fitted grid cannot say
@@ -429,7 +405,7 @@ impl CalibrationState {
 
     /// The whole re-fit sequence, in the one place every consumer shares:
     /// derive the grid geometry from the points, `reconfigure` onto it, `update`,
-    /// then `fit_with`. Returns the [`GridRanges`] the fit actually ran on.
+    /// then `fit`. Returns the [`GridRanges`] the fit actually ran on.
     ///
     /// The geometry is derived *here*, by `point_ranges`, rather than passed in:
     /// a caller that supplies the acquisition RT range instead would clamp an
@@ -438,18 +414,17 @@ impl CalibrationState {
     ///
     /// On `Err` the previous fit is left alone: a later, larger point set may well
     /// span a usable range.
-    pub fn refit<O: FitObserver>(
+    pub fn refit(
         &mut self,
         bins: usize,
         points: impl Iterator<Item = (f64, f64)> + Clone,
-        obs: &mut O,
     ) -> Result<GridRanges, CalibRtError> {
         let (x_range, y_range) = point_ranges(points.clone())?;
         self.reconfigure(bins, x_range, y_range)?;
         self.update(
             points.map(|(lib, obs)| (LibraryRT(lib), ObservedRTSeconds(obs), CALIBRANT_WEIGHT)),
         )?;
-        self.fit_with(obs);
+        self.fit();
         Ok((x_range, y_range))
     }
 
@@ -472,24 +447,7 @@ impl CalibrationState {
     }
 
     pub fn fit(&mut self) {
-        self.fit_with(&mut ())
-    }
-
-    pub fn fit_with<O: FitObserver>(&mut self, obs: &mut O) {
-        obs.on_event(FitEvent::FitStarted {
-            geom: GridGeom {
-                bins: self.grid.bins,
-                x_range: self.grid.x_range,
-                y_range: self.grid.y_range,
-            },
-            cells: self.grid.grid_cells(),
-        });
-
-        let suppression_failed = self.grid.suppress_nonmax().is_err();
-        obs.on_event(FitEvent::Suppressed {
-            cells: self.grid.grid_cells(),
-        });
-        if suppression_failed {
+        if self.grid.suppress_nonmax().is_err() {
             self.clear_fit();
             return;
         }
@@ -553,6 +511,12 @@ impl CalibrationState {
         Ok(())
     }
 
+    /// The grid's nodes, `bins * bins` ROW-MAJOR: `index = row * bins + col`,
+    /// where `row` indexes the observed-RT axis and `col` the library-RT axis.
+    /// This matches `Grid::add_point`'s `gy * bins + gx`.
+    ///
+    /// After a fit each node carries both its accumulated weight and its
+    /// suppression flag.
     pub fn grid_cells(&self) -> &[grid::Node] {
         self.grid.grid_cells()
     }
@@ -755,27 +719,8 @@ fn point_ranges(
 }
 
 #[cfg(test)]
-mod observer_tests {
+mod fit_tests {
     use super::*;
-
-    /// Records event names plus the payloads the assertions need.
-    #[derive(Default)]
-    struct Recorder {
-        names: Vec<&'static str>,
-        geom: Option<GridGeom>,
-    }
-
-    impl FitObserver for Recorder {
-        fn on_event(&mut self, ev: FitEvent<'_>) {
-            match ev {
-                FitEvent::FitStarted { geom, .. } => {
-                    self.names.push("start");
-                    self.geom = Some(geom);
-                }
-                FitEvent::Suppressed { .. } => self.names.push("suppressed"),
-            }
-        }
-    }
 
     /// A clean diagonal ridge: 10 points on y = x, one per grid column.
     fn diagonal_state() -> CalibrationState {
@@ -842,20 +787,16 @@ mod observer_tests {
         assert!(s.fit_points().is_empty(), "reset likewise");
     }
 
+    /// The whole of what a fit leaves on the state, which is everything a
+    /// consumer reads afterwards.
     #[test]
-    fn events_arrive_in_pipeline_order() {
+    fn a_fit_leaves_its_geometry_path_curve_and_dp_range_on_the_state() {
         let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec);
-        assert_eq!(
-            rec.names,
-            vec!["start", "suppressed"],
-            "the fit's products are read off the state, not emitted"
-        );
-        let g = rec.geom.expect("FitStarted must be emitted");
-        assert_eq!(g.bins, 10);
-        assert_eq!(g.x_range, (0.0, 10.0));
-        assert_eq!(g.y_range, (0.0, 10.0));
+        s.fit();
+        assert_eq!(s.grid_bins(), 10);
+        assert_eq!(s.grid_x_range(), (0.0, 10.0));
+        assert_eq!(s.grid_y_range(), (0.0, 10.0));
+        assert_eq!(s.grid_cells().len(), 100);
         assert!(!s.path_indices().is_empty(), "the fit found a path");
         assert!(s.curve().is_some(), "the fit produced a curve");
         assert!(!s.dp_range().is_empty(), "the DP scored part of the path");

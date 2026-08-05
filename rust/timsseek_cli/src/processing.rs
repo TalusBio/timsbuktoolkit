@@ -32,7 +32,6 @@ use timsseek::rt_calibration::{
     DerivationParams,
     DimensionErrors,
     ErrorStats,
-    FitObserver,
     LibraryRT,
     Point,
     RidgeSummary,
@@ -91,10 +90,6 @@ mod calib_dash_hook {
             CalibrationResult,
         };
         use std::io::IsTerminal;
-        use timsseek::rt_calibration::{
-            FitEvent,
-            FitObserver,
-        };
 
         /// The dashboard for a whole run. Stays `None` inside unless
         /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
@@ -102,18 +97,6 @@ mod calib_dash_hook {
         /// anything else in this module that keys off it.
         pub struct Dash {
             inner: Option<calib_dash::CalibDash>,
-        }
-
-        /// The Phase 2 fit, recorded for the Tolerances tab. Only `Some` when
-        /// the dashboard is running.
-        pub struct Recording(Option<calib_dash::FitRecording>);
-
-        impl FitObserver for Recording {
-            fn on_event(&mut self, ev: FitEvent<'_>) {
-                if let Some(rec) = self.0.as_mut() {
-                    rec.on_event(ev);
-                }
-            }
         }
 
         fn dashboard_requested() -> bool {
@@ -174,14 +157,6 @@ mod calib_dash_hook {
             Dash { inner }
         }
 
-        pub fn start_recording(dash: &Dash, config: &CalibrationConfig) -> Recording {
-            Recording(
-                dash.inner
-                    .is_some()
-                    .then(|| calib_dash::FitRecording::new(config.grid_size)),
-            )
-        }
-
         /// Exits the process on `Ctrl-C` at a pause: raw mode swallows `SIGINT`,
         /// and returning to the pipeline would only run Phases 2 and 3 against a
         /// truncated calibrant heap.
@@ -215,17 +190,14 @@ mod calib_dash_hook {
 
         /// Wires the Phase 2 fit into the Tolerances tab, then pauses so the
         /// tabs and the batch scrubber are reachable before Phase 3 starts.
-        pub fn show_final(dash: &mut Dash, recording: Recording, calibration: &CalibrationResult) {
-            let (Some(d), Some(mut recording)) = (dash.inner.as_mut(), recording.0) else {
+        pub fn show_final(dash: &mut Dash, calibration: &CalibrationResult) {
+            let Some(d) = dash.inner.as_mut() else {
                 return;
             };
-            // The fit's products are not events, so the recording does not pick
-            // them up on its own — they come off the grid the fit left behind.
-            recording.set_fit(calibration.state());
             let mobility = calibration.mobility_tolerance();
             let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
             d.show_final(
-                recording,
+                calib_dash::FitRecording::from_state(calibration.state()),
                 calib_dash::ToleranceSummary {
                     mz_ppm: calibration.mz_tolerance(),
                     mobility_pct: (mobility.0 as f64, mobility.1 as f64),
@@ -247,14 +219,9 @@ mod calib_dash_hook {
 
         pub struct Dash;
 
-        /// `calibrt` already implements `FitObserver` for `()` as its no-op.
-        pub type Recording = ();
-
         pub fn attach(_n_chunks: usize, _config: &CalibrationConfig) -> Dash {
             Dash
         }
-
-        pub fn start_recording(_dash: &Dash, _config: &CalibrationConfig) -> Recording {}
 
         pub fn on_batch<'a>(
             _dash: &mut Dash,
@@ -265,12 +232,7 @@ mod calib_dash_hook {
 
         pub fn finish(_dash: &mut Dash) {}
 
-        pub fn show_final(
-            _dash: &mut Dash,
-            _recording: Recording,
-            _calibration: &CalibrationResult,
-        ) {
-        }
+        pub fn show_final(_dash: &mut Dash, _calibration: &CalibrationResult) {}
     }
 }
 
@@ -472,16 +434,12 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
-    // Unit-valued with the feature off, where `Recording` is calibrt's no-op `()`.
-    #[allow(clippy::let_unit_value)]
-    let mut phase2_recording = calib_dash_hook::start_recording(&calib_dash_state, calib_config);
     let calibration = match calibrate_from_phase1(
         calibrants,
         phase1_lib,
         main_lookup.as_ref(),
         pipeline,
         calib_config,
-        &mut phase2_recording,
     ) {
         Ok(calib) => {
             info!("Calibration succeeded");
@@ -544,7 +502,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         }
     }
 
-    calib_dash_hook::show_final(&mut calib_dash_state, phase2_recording, &calibration);
+    calib_dash_hook::show_final(&mut calib_dash_state, &calibration);
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
@@ -752,13 +710,12 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
+fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &Speclib,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-    observer: &mut O,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
@@ -852,7 +809,6 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     cal_state.refit(
         config.grid_size,
         points.iter().map(|p| (p.library, p.observed)),
-        observer,
     )?;
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?;
 

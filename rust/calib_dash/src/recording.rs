@@ -1,14 +1,12 @@
-//! Owned copies of the borrowed `FitEvent`s, filled in place, plus the fit's
-//! products copied off the state by [`FitRecording::set_fit`].
+//! An owned copy of everything a finished [`calibrt::CalibrationState`] holds
+//! that a panel draws: the grid it fit on, and the fit's products.
 //!
 //! `weights` are `f32` for storage and display only — every metric is computed
-//! from the `f64` values in the live events, never from this downcast copy.
+//! from the `f64` values on the state, never from this downcast copy.
 
 use calibrt::{
     CalibrationCurve,
     CalibrationState,
-    FitEvent,
-    FitObserver,
     GridGeom,
     RidgeMeasurement,
 };
@@ -27,11 +25,6 @@ pub struct FitRecording {
     /// re-deriving calibrt's interpolation.
     curve: Option<CalibrationCurve>,
     ridge: Vec<RidgeMeasurement>,
-    /// Set when a fit starts, cleared by [`Self::set_fit`]. The fit's products are
-    /// not events, so a caller that fits without calling `set_fit` leaves the four
-    /// product buffers holding the *previous* fit — a wrong panel, not a blank
-    /// one. Every product accessor refuses to read while this is set.
-    unrecorded_fit: bool,
 }
 
 impl FitRecording {
@@ -49,9 +42,26 @@ impl FitRecording {
             dp_range: 0..0,
             curve: None,
             ridge: Vec::with_capacity(bins),
-            // A recording that has seen no fit has nothing outstanding: Phase 1
-            // draws an empty Fit tab before the first fit runs.
-            unrecorded_fit: false,
+        }
+    }
+
+    /// Everything the panels draw, read off a state whose fit has finished. A
+    /// state whose fit failed carries an empty path, curve and ridge, and this
+    /// copies that emptiness through.
+    pub fn from_state(state: &CalibrationState) -> Self {
+        let cells = state.grid_cells();
+        Self {
+            geom: GridGeom {
+                bins: state.grid_bins(),
+                x_range: state.grid_x_range(),
+                y_range: state.grid_y_range(),
+            },
+            weights: cells.iter().map(|n| n.center.weight as f32).collect(),
+            suppressed: cells.iter().map(|n| n.suppressed).collect(),
+            path_indices: state.path_indices().to_vec(),
+            dp_range: state.dp_range(),
+            curve: state.curve().cloned(),
+            ridge: state.ridge_widths().to_vec(),
         }
     }
 
@@ -59,54 +69,21 @@ impl FitRecording {
         self.geom
     }
 
-    /// Panics when a fit ran without a following [`Self::set_fit`]. Guards each
-    /// accessor below, so the fault surfaces at the reader that would have drawn
-    /// the previous fit's data as this one's.
-    #[track_caller]
-    fn expect_fit_recorded(&self) {
-        assert!(
-            !self.unrecorded_fit,
-            "FitRecording holds an unrecorded fit: `fit_with` ran without a following \
-             `set_fit`, so the path, curve and ridge are the previous fit's"
-        );
-    }
-
-    #[track_caller]
     pub(crate) fn path_indices(&self) -> &[usize] {
-        self.expect_fit_recorded();
         &self.path_indices
     }
 
     /// See [`calibrt::CalibrationState::dp_range`].
-    #[track_caller]
     pub(crate) fn dp_range(&self) -> std::ops::Range<usize> {
-        self.expect_fit_recorded();
         self.dp_range.clone()
     }
 
-    #[track_caller]
     pub(crate) fn curve(&self) -> Option<&CalibrationCurve> {
-        self.expect_fit_recorded();
         self.curve.as_ref()
     }
 
-    #[track_caller]
     pub(crate) fn ridge(&self) -> &[RidgeMeasurement] {
-        self.expect_fit_recorded();
         &self.ridge
-    }
-
-    /// Copy the fit's products in: the path, its DP segment, the curve and the
-    /// ridge are not events, the state carries them after `fit_with` returns.
-    /// All four are replaced, so this is safe to call after any fit.
-    pub fn set_fit(&mut self, state: &CalibrationState) {
-        self.path_indices.clear();
-        self.path_indices.extend_from_slice(state.path_indices());
-        self.dp_range = state.dp_range();
-        self.curve = state.curve().cloned();
-        self.ridge.clear();
-        self.ridge.extend_from_slice(state.ridge_widths());
-        self.unrecorded_fit = false;
     }
 
     pub(crate) fn weight(&self, row: usize, col: usize) -> f32 {
@@ -121,39 +98,6 @@ impl FitRecording {
             .get(row * self.geom.bins + col)
             .copied()
             .unwrap_or(false)
-    }
-}
-
-impl FitObserver for FitRecording {
-    fn on_event(&mut self, ev: FitEvent<'_>) {
-        match ev {
-            FitEvent::FitStarted { geom, cells } => {
-                // A geometry change means the caller re-fit at a different
-                // `bins`; resize rather than silently mis-indexing.
-                if geom.bins != self.geom.bins {
-                    self.weights = vec![0.0; geom.bins * geom.bins];
-                    self.suppressed = vec![false; geom.bins * geom.bins];
-                }
-                self.geom = geom;
-                // The products this fit will leave on the state are not events;
-                // they arrive through `set_fit` or not at all.
-                self.unrecorded_fit = true;
-                // `Suppressed` only ever sets bits, never clears them.
-                self.suppressed.fill(false);
-                // `cells` is always `bins * bins` long, so every cell is
-                // rewritten and `weights` needs no separate clear.
-                for (i, n) in cells.iter().enumerate() {
-                    self.weights[i] = n.center.weight as f32;
-                }
-            }
-            FitEvent::Suppressed { cells } => {
-                for (slot, n) in self.suppressed.iter_mut().zip(cells) {
-                    if n.suppressed {
-                        *slot = true;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -195,9 +139,8 @@ mod tests {
             0.5,
         )))
         .unwrap();
-        let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec);
-        rec.set_fit(&s);
+        s.fit();
+        let rec = FitRecording::from_state(&s);
 
         assert_eq!(rec.geom().bins, 10);
         // The diagonal cell (row i, col i) carries weight 1 + i.
@@ -214,22 +157,6 @@ mod tests {
         );
         assert_eq!(rec.path_indices().len(), 10);
         assert_eq!(rec.curve().unwrap().points().len(), 10);
-    }
-
-    /// `set_fit` is manual, so forgetting it has to be loud: the products would
-    /// otherwise read as the previous fit's, which draws a plausible wrong panel.
-    #[test]
-    #[should_panic(expected = "unrecorded fit")]
-    fn reading_the_products_of_an_unrecorded_fit_panics() {
-        let mut s = diagonal_state(10);
-        let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec);
-        rec.set_fit(&s);
-        assert_eq!(rec.path_indices().len(), 10, "the recorded fit reads fine");
-
-        // A second fit, this time without the `set_fit` that copies its products.
-        s.fit_with(&mut rec);
-        let _ = rec.path_indices();
     }
 
     /// Nothing has been fit, so nothing is outstanding — Phase 1 draws an empty
@@ -256,15 +183,13 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        let mut rec = FitRecording::new(3);
-        s.fit_with(&mut rec);
+        s.fit();
         assert!(
-            rec.is_suppressed(1, 1),
+            FitRecording::from_state(&s).is_suppressed(1, 1),
             "A is dominated by B in its row on the first fit"
         );
 
-        // Fit 2, same `CalibrationState` (so `bins` is unchanged and
-        // `FitRecording` does not reallocate its mask): B is gone and A is
+        // Fit 2, same `CalibrationState` at the same `bins`: B is gone and A is
         // now the sole occupant of its row and column, so it survives.
         s.reset();
         s.update(std::iter::once((
@@ -273,25 +198,24 @@ mod tests {
             5.0,
         )))
         .unwrap();
-        s.fit_with(&mut rec);
+        s.fit();
         assert!(
-            !rec.is_suppressed(1, 1),
+            !FitRecording::from_state(&s).is_suppressed(1, 1),
             "A survives alone in its row/col on the second fit — a stale bit \
              from the first fit must not linger"
         );
     }
 
-    /// `CalibDash` reuses one `FitRecording` for every refit, and a scrubbed
-    /// frame or a replayed snapshot can arrive at a different `bins`: the grid
-    /// buffers must be resized (an unresized one reads as a blank heatmap, not a
-    /// panic) and the fit's products must hold the second fit's entries only.
+    /// A scrubbed frame or a replayed snapshot can arrive at a different `bins`
+    /// than the last one drawn, so the grid buffers must be sized to the state
+    /// they came from (an undersized one reads as a blank heatmap, not a panic)
+    /// and the products must hold that state's entries only.
     #[test]
-    fn a_refit_at_a_different_bins_resizes_the_grid_and_shows_only_the_second_fit() {
+    fn a_refit_at_a_different_bins_sizes_the_grid_and_shows_only_the_second_fit() {
         // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
         let mut small = diagonal_state(3);
-        let mut rec = FitRecording::new(3);
-        small.fit_with(&mut rec);
-        rec.set_fit(&small);
+        small.fit();
+        let rec = FitRecording::from_state(&small);
         assert_eq!(
             (
                 rec.geom().bins,
@@ -303,13 +227,13 @@ mod tests {
             "sanity: the small fit filled every buffer"
         );
 
-        // Fit 2, a 10x10 grid through the same recording.
+        // Fit 2, a 10x10 grid.
         let mut big = diagonal_state(10);
-        big.fit_with(&mut rec);
-        rec.set_fit(&big);
+        big.fit();
+        let rec = FitRecording::from_state(&big);
 
         assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
-        // Row 9 exists only in a resized buffer: at 3x3 the flat index 9*10+9
+        // Row 9 exists only in a 10x10 buffer: at 3x3 the flat index 9*10+9
         // is past the end of a 9-cell grid.
         assert!(
             (rec.weight(9, 9) - 10.0).abs() < 1e-6,
