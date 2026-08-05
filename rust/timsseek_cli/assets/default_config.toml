@@ -45,7 +45,6 @@ rescore_model = "mlp"
 ##   rt       : "Unrestricted" | { Minutes = [before, after] } | { Pct = [before, after] }
 [analysis.tolerance]
 ms       = { Ppm = [15.0, 15.0] }
-# mobility = { Pct = [5.0, 5.0] }
 mobility = "Unrestricted"
 quad     = { Absolute = [0.1, 0.1] }
 rt       = "Unrestricted"

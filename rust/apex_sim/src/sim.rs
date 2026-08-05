@@ -125,8 +125,8 @@ pub struct SimParams {
     pub n_isotopes: usize,
     pub precursor_intensity: f32,
     /// Per-cell noise scale for precursor rows, the counterpart of
-    /// [`FragmentSpec::noise_mult`]. Moves precursor density without touching
-    /// fragments'; see [`SimParams::with_measured_density`].
+    /// [`FragmentSpec::noise_mult`]. Moves precursor density without touching the
+    /// fragment rows; see [`SimParams::with_measured_density`].
     pub precursor_noise_mult: f32,
 
     /// Global additive noise scale (uniform 0..1 * this, per cell).
@@ -138,10 +138,9 @@ pub struct SimParams {
     /// interferent injection, so it bounds the cell's final content.
     ///
     /// At 0.0 (the default) every cell is populated, which is not what real
-    /// data looks like — see [`SimParams::with_measured_density`]. Because the
-    /// threshold is compared against the cell, dropped cells cluster in the peak
-    /// tails, which is what makes whole cycles go empty; per-cell random dropout
-    /// would not.
+    /// data looks like — see [`SimParams::with_measured_density`]. The threshold
+    /// is compared against the cell, so dropped cells cluster in the peak tails
+    /// and whole cycles go empty.
     pub detection_floor: f32,
 
     pub seed: u64,
@@ -199,12 +198,10 @@ impl SimParams {
     /// Every other scenario fills every cell, which hides how the scoring loops
     /// behave on sparse chromatograms.
     ///
-    /// The three knobs are tuned jointly and only make sense together, which is
-    /// why they live here rather than at each call site. `detection_floor` sets
-    /// fragment density; `precursor_noise_mult` then moves precursor density on
-    /// its own, because the floor is compared against the cell and so it is the
-    /// noise-to-floor ratio that decides how many cells survive. Pinned by
-    /// `tests::measured_density_scenarios_match_production`.
+    /// `detection_floor` sets fragment density; `precursor_noise_mult` then moves
+    /// precursor density on its own, because the floor is compared against the
+    /// cell and so it is the noise-to-floor ratio that decides how many cells
+    /// survive. Pinned by `tests::measured_density_scenarios_match_production`.
     pub fn with_measured_density(mut self) -> Self {
         self.noise_floor = 0.2;
         self.detection_floor = 0.097;
@@ -517,14 +514,17 @@ mod tests {
             .collect();
         assert_eq!(scenarios.len(), 2, "both suites must carry the scenario");
 
+        // The narrow suite's grid is far smaller, so its densities quantise
+        // coarsely; the tolerances are set by what both suites clear rather than by
+        // the broad suite alone.
         for (name, params) in scenarios {
             let (frag, prec) = cell_density(&params);
             assert!(
-                (0.67..0.70).contains(&frag),
+                (frag - 0.686).abs() < 0.01,
                 "{name} fragment density {frag}"
             );
             assert!(
-                (0.33..0.39).contains(&prec),
+                (prec - 0.366).abs() < 0.025,
                 "{name} precursor density {prec}"
             );
         }

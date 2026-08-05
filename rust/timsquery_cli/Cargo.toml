@@ -23,6 +23,6 @@ thiserror = { workspace = true } # User requested
 [dev-dependencies]
 tempfile = { workspace = true }
 
-# In windows seems to be faster.
+# Both platform allocators are slower here; musl's serialises on one lock.
 [target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
 mimalloc = { workspace = true }
