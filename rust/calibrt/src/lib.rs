@@ -319,6 +319,11 @@ pub struct CalibrationState {
     filtered: Vec<grid::Node>,
     scratch: pathfinding::PathfindingScratch,
     curve: Option<CalibrationCurve>,
+    /// The fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], measured by
+    /// [`Self::fit_with`] so that reading them takes `&self`. A consumer that
+    /// wants another fraction calls [`Self::measure_ridge_width`] instead; that
+    /// path leaves this alone.
+    ridge_widths: Vec<RidgeMeasurement>,
     lookback: usize,
 }
 
@@ -335,6 +340,7 @@ impl CalibrationState {
             filtered: Vec::with_capacity(grid_size),
             scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
+            ridge_widths: Vec::new(),
             lookback,
         })
     }
@@ -447,12 +453,21 @@ impl CalibrationState {
         if let Some(c) = self.curve.as_ref() {
             obs.on_event(FitEvent::CurveFit { curve: c });
         }
+
+        // Measure the ridge here so consumers read it through `&self`; the
+        // per-query RT tolerance needs it on every scoring thread. Deliberately
+        // silent: `FitEvent::RidgeMeasured` stays the explicit measurement's
+        // event, so a consumer that also measures at its own fraction records
+        // one ridge per fit rather than two.
+        let widths = self.measure_ridge_width_core(DEFAULT_RIDGE_FRACTION);
+        self.ridge_widths = widths;
     }
 
     /// Drop the previous fit's results, keeping the grid and the buffers.
     fn clear_fit(&mut self) {
         self.curve = None;
         self.path_indices.clear();
+        self.ridge_widths.clear();
     }
 
     pub fn reset(&mut self) {
@@ -497,6 +512,13 @@ impl CalibrationState {
         self.curve.as_ref()
     }
 
+    /// The current fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], in path
+    /// order. Empty until a fit succeeds, and again once one fails, which is the
+    /// "no ridge data" case consumers fall back from.
+    pub fn ridge_widths(&self) -> &[RidgeMeasurement] {
+        &self.ridge_widths
+    }
+
     /// Measure the width of the evidence "mountain" around the fitted path.
     ///
     /// For each grid column that contains a path cell, expands up and down
@@ -518,6 +540,18 @@ impl CalibrationState {
         fraction: f64,
         obs: &mut O,
     ) -> Vec<RidgeMeasurement> {
+        let widths = self.measure_ridge_width_core(fraction);
+        obs.on_event(FitEvent::RidgeMeasured { widths: &widths });
+        widths
+    }
+
+    /// The measurement itself. Reads the nodes into the blur buffers and walks
+    /// out from each path cell, so it is idempotent: the accumulated weights it
+    /// derives from are never written, and a later `update` can still add points
+    /// to the same grid.
+    ///
+    /// `&mut self` is for the two derived blur buffers, not for the fit.
+    fn measure_ridge_width_core(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
@@ -582,7 +616,6 @@ impl CalibrationState {
             });
         }
 
-        obs.on_event(FitEvent::RidgeMeasured { widths: &widths });
         widths
     }
 

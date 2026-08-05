@@ -528,7 +528,7 @@ mod tests {
             )
             .unwrap();
         let cal_curve = state.curve().unwrap().clone();
-        let ridge_widths = state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, &mut ());
+        let ridge_widths = state.ridge_widths().to_vec();
         assert!(
             !ridge_widths.is_empty(),
             "test fixture must produce ridge widths for the round-trip to be meaningful"

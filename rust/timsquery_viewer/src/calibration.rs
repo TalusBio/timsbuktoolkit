@@ -22,7 +22,6 @@ use eframe::egui;
 use calibrt::{
     CALIBRANT_WEIGHT,
     CalibrationState,
-    DEFAULT_RIDGE_FRACTION,
     LibraryRT,
     ObservedRTSeconds,
     RidgeSummary,
@@ -612,7 +611,7 @@ impl ViewerCalibrationState {
     /// than stored, which is what the plot and the tolerance suggestion also
     /// do — the file cannot then disagree with what the UI shows.
     pub fn save_to_file(
-        &mut self,
+        &self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
@@ -623,8 +622,8 @@ impl ViewerCalibrationState {
 
         let ridge_widths = self
             .calibration_state
-            .as_mut()
-            .map(|cs| cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION))
+            .as_ref()
+            .map(|cs| cs.ridge_widths().to_vec())
             .unwrap_or_default();
         let tol = self.derived_tolerances.as_ref();
         let saved = SavedCalibration {
@@ -978,7 +977,7 @@ impl ViewerCalibrationState {
                         }
 
                         // Ridge envelope: upper and lower boundary lines showing tolerance width
-                        let ridge = cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
+                        let ridge = cs.ridge_widths();
                         if ridge.len() >= 2 {
                             let ridge_color =
                                 egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
@@ -1081,9 +1080,9 @@ impl ViewerCalibrationState {
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
         // The weight-averaged half-width gives the global tolerance — heavy
         // columns count more.
-        let ridge_stats = self.calibration_state.as_mut().and_then(|cs| {
+        let ridge_stats = self.calibration_state.as_ref().and_then(|cs| {
             cs.curve()?; // ensure curve is fitted
-            let summary = RidgeSummary::of(&cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION))?;
+            let summary = RidgeSummary::of(cs.ridge_widths())?;
             summary.weighted_half_width.is_finite().then_some(summary)
         });
 
