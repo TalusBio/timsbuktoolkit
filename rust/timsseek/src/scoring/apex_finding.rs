@@ -154,34 +154,28 @@ pub struct ApexBlocks {
     pub apex_lazy: ApexLazyScores,
 }
 
-/// Assert that everything about to be walked together spans the cycle axis.
-/// `zip` and the chunked loops truncate to the shortest side instead of
-/// complaining, so a mismatch would silently drop cycles from an accumulator.
-/// Checked where the slices are zipped, not where they are sized: the widths
-/// come from two places — the trace buffers and the extraction being scored —
-/// and only the call site sees both.
+/// Assert that an extraction-derived slice spans the cycle axis before it is
+/// zipped with a trace buffer. `zip` and the chunked loops truncate to the
+/// shortest side instead of complaining, so a mismatch would silently drop
+/// cycles from an accumulator. Only the extraction's rows are checked: the trace
+/// buffers are resized from the same `num_cycles()` in `compute_traces`.
 #[inline]
 #[track_caller]
-fn assert_cycle_widths(widths: &[usize], n_cycles: usize) {
-    for &width in widths {
-        assert_eq!(
-            width, n_cycles,
-            "cycle-axis width mismatch: {width} != {n_cycles}"
-        );
-    }
+fn assert_cycle_width(width: usize, n_cycles: usize) {
+    assert_eq!(
+        width, n_cycles,
+        "cycle-axis width mismatch: {width} != {n_cycles}"
+    );
 }
 
 /// Chunk-8 vectorized accumulator for `compute_pass_1`'s 4 cheap
 /// per-cycle accumulators (dot-product, norm-sq, sqrt-sum, raw-sum).
 ///
-/// Parity with the scalar branched form (`if intensity > 0.0 { ... }`)
-/// holds because chromatogram intensities are non-negative in practice:
-/// for `intensity <= 0.0`, `v = intensity.max(0.0) == 0` makes every
-/// contribution zero, matching the branched form exactly. Zero negative
-/// intensities expected; chromatograms are peak-intensity sums.
+/// `v = intensity.max(0.0)` zeroes a non-positive cell's contribution to all
+/// four; chromatograms are peak-intensity sums, so negative cells are not
+/// expected in the first place.
 ///
-/// Chunk width chosen by micro-bench ... 16 can work too
-/// Width 8 picked as the plateau starts at 8 and 16 gains are noise.
+/// Width 8 rather than 16: the micro-bench plateau starts at 8.
 #[inline]
 fn accumulate_pass1_chunks(
     chrom: &[f32],
@@ -191,17 +185,6 @@ fn accumulate_pass1_chunks(
     sqrt_sum: &mut [f32],
     raw_sum: &mut [f32],
 ) {
-    let n = chrom.len();
-    assert_cycle_widths(
-        &[
-            ms2_dot_prod.len(),
-            ms2_norm_sq_obs.len(),
-            sqrt_sum.len(),
-            raw_sum.len(),
-        ],
-        n,
-    );
-
     let (c_ch, c_tail) = chrom.as_chunks::<8>();
     let (d_ch, d_tail) = ms2_dot_prod.as_chunks_mut::<8>();
     let (n_ch, n_tail) = ms2_norm_sq_obs.as_chunks_mut::<8>();
@@ -638,22 +621,16 @@ impl TraceScorer {
             pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
-            // Lazyscore. `max(1.0)` sends every non-positive cell to ln(1) = 0,
-            // so a positive-intensity gate here only skips `logf` calls, and at
-            // the ~69% occupancy real chromatograms have it costs more in
-            // mispredicts than it saves in calls.
-            assert_cycle_widths(&[self.traces.ms2_lazyscore.len(), chrom.len()], n_cycles);
+            // Lazyscore. `max(1.0)` sends every non-positive cell to ln(1) = 0.
+            assert_cycle_width(chrom.len(), n_cycles);
             for (dst, &intensity) in self.traces.ms2_lazyscore.iter_mut().zip(chrom.iter()) {
                 *dst += intensity.max(1.0).ln();
             }
 
-            // 4 cheap accumulators vectorized via chunked loop. The
-            // `if intensity > 0.0` branch is replaced by `v =
-            // intensity.max(0.0)`: for non-positive intensity every
-            // contribution is zero (0*x = 0, 0*0 = 0, sqrt(0) = 0),
-            // matching the branched form exactly since chromatogram
-            // intensities are always non-negative in practice.
-            // Micro-benchmark: chunk-8 is ~6.6× faster than scalar.
+            // 4 cheap accumulators vectorized via chunked loop. `v =
+            // intensity.max(0.0)` makes every contribution of a non-positive
+            // cell zero (0*x = 0, 0*0 = 0, sqrt(0) = 0), which is what the
+            // accumulators would take from it anyway.
             accumulate_pass1_chunks(
                 chrom,
                 sqrt_exp,
@@ -692,25 +669,24 @@ impl TraceScorer {
                 entry.1 /= pred_sqrt_sum;
             }
 
-            // Fold the per-cycle division out of the row loop below, which walks
-            // the same cycle axis once per retained fragment. Zero stays zero,
-            // so it still marks the cycles that finalize floors.
+            // One reciprocal per cycle, so the row loop below — which walks the
+            // cycle axis once per retained fragment — multiplies instead of
+            // dividing. Zero stays zero, marking the cycles that finalize floors.
             let inv_sqrt_sum = &mut self.buffers.temp_inv_sqrt_sum;
-            assert_cycle_widths(&[inv_sqrt_sum.len(), sqrt_sum.len()], n_cycles);
             for (inv, &ss) in inv_sqrt_sum.iter_mut().zip(sqrt_sum.iter()) {
                 *inv = if ss == 0.0 { 0.0 } else { ss.recip() };
             }
 
-            // Pass B: accumulate SSE. Branchless: `sqrt(max(0, x)) * 0.0` is the
-            // zero the gated form contributed, and empty cycles (`inv == 0`)
-            // accumulate `pred_norm_i^2` that finalize immediately discards for
+            // Pass B: accumulate SSE. A non-positive cell contributes
+            // `sqrt(max(0, x)) * inv == 0`, and empty cycles (`inv == 0`)
+            // accumulate `pred_norm_i^2` that finalize discards for
             // SCRIBE_FLOOR.
             for &(row_idx, pred_norm_i) in pred_norms.iter() {
                 let row = collector
                     .fragments
                     .get_row_idx(row_idx)
                     .expect("row_idx from enumeration must be valid");
-                assert_cycle_widths(&[self.traces.ms2_scribe.len(), row.len()], n_cycles);
+                assert_cycle_width(row.len(), n_cycles);
                 for ((dst, &intensity), &inv) in self
                     .traces
                     .ms2_scribe
@@ -724,7 +700,6 @@ impl TraceScorer {
             }
 
             // Finalize scribe: -log(sse)
-            assert_cycle_widths(&[self.traces.ms2_scribe.len()], n_cycles);
             for (scribe, &inv) in self.traces.ms2_scribe.iter_mut().zip(inv_sqrt_sum.iter()) {
                 if inv == 0.0 {
                     *scribe = SCRIBE_FLOOR;
@@ -742,11 +717,8 @@ impl TraceScorer {
             if *key < 0 {
                 continue; // Skip decoy isotope keys
             }
-            // Branchless: adding a clamped zero is what the gate contributed.
-            assert_cycle_widths(
-                &[self.traces.ms1_precursor_trace.len(), chrom.len()],
-                n_cycles,
-            );
+            // Clamped, so a non-positive cell adds nothing.
+            assert_cycle_width(chrom.len(), n_cycles);
             for (dst, &intensity) in self.traces.ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
                 *dst += intensity.max(0.0);
             }
