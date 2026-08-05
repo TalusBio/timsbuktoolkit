@@ -229,6 +229,119 @@ pub struct CalibrationSnapshot {
     pub lookback: usize,
 }
 
+/// The only version [`SavedCalibration`] reads or writes. Named once so the
+/// writer and the reader's gate cannot disagree.
+pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
+
+/// JSON v3 calibration file format — shared between CLI and viewer.
+///
+/// `calibration` is the grid's own snapshot and the only record of the fit: the
+/// curve and the ridge widths are recomputed by refitting it, so the file cannot
+/// carry a curve that disagrees with the points that produced it.
+///
+/// `R` is the residual block a writer measures beyond the curve. This crate does
+/// not interpret it; a reader that has no use for it can leave it opaque.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SavedCalibration<R = serde_json::Value> {
+    pub version: String,
+    pub rt_range_seconds: [f64; 2],
+    pub calibration: CalibrationSnapshot,
+    /// The uniform RT tolerance. Every writer has one — it is what a query falls
+    /// back to where the grid measured no ridge.
+    pub rt_tolerance_minutes: f32,
+    /// What a search measured beyond the curve. `None` for a writer that measures
+    /// no residuals — zeros there would read as "measured, and tight".
+    ///
+    /// The path is named because a bare `default` would demand `R: Default`.
+    #[serde(default = "Option::default")]
+    pub residuals: Option<R>,
+    pub n_scored: usize,
+}
+
+impl<R> SavedCalibration<R> {
+    /// Assemble a file record. The version is stamped here, not by callers.
+    pub fn new(
+        rt_range_seconds: [f64; 2],
+        calibration: CalibrationSnapshot,
+        rt_tolerance_minutes: f32,
+        residuals: Option<R>,
+        n_scored: usize,
+    ) -> Self {
+        Self {
+            version: CALIBRATION_FORMAT_VERSION.to_string(),
+            rt_range_seconds,
+            calibration,
+            rt_tolerance_minutes,
+            residuals,
+            n_scored,
+        }
+    }
+
+    /// Serialize to `path` in the layout [`Self::read`] expects.
+    pub fn write(&self, path: &std::path::Path) -> Result<(), String>
+    where
+        R: serde::Serialize,
+    {
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Parse a calibration file and check its provenance. The `Option<String>`
+    /// is a reason to distrust the file, not an error: a calibration is only
+    /// valid for the run it was fit on, and `raw_rt_range` — the RT span of the
+    /// run it is about to be used on — is the one cheap way to catch the wrong
+    /// file. `None` there means nothing verifies it, which also warns.
+    pub fn read(
+        path: &std::path::Path,
+        raw_rt_range: Option<[f64; 2]>,
+    ) -> Result<(Self, Option<String>), String>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if saved.version != CALIBRATION_FORMAT_VERSION {
+            return Err(format!(
+                "Unsupported calibration version: {} (expected {CALIBRATION_FORMAT_VERSION})",
+                saved.version
+            ));
+        }
+        let warning = saved.provenance_warning(raw_rt_range);
+        Ok((saved, warning))
+    }
+
+    /// Number of calibrant points the curve was fit on.
+    pub fn n_calibrants(&self) -> usize {
+        self.calibration.points.len()
+    }
+
+    fn provenance_warning(&self, raw_rt_range: Option<[f64; 2]>) -> Option<String> {
+        let Some(raw) = raw_rt_range else {
+            return Some(
+                "No raw RT range to check the calibration against — nothing verifies it was \
+                 fit on this run"
+                    .to_string(),
+            );
+        };
+        let overlap_lo = self.rt_range_seconds[0].max(raw[0]);
+        let overlap_hi = self.rt_range_seconds[1].min(raw[1]);
+        let overlap = (overlap_hi - overlap_lo).max(0.0);
+        let span = self.rt_range_seconds[1] - self.rt_range_seconds[0];
+        if span <= 0.0 || overlap / span >= 0.5 {
+            return None;
+        }
+        Some(format!(
+            "Calibration RT range [{:.1}, {:.1}]s overlaps the raw file's [{:.1}, {:.1}]s by \
+             {:.0}% — it may have been fit on a different run",
+            self.rt_range_seconds[0],
+            self.rt_range_seconds[1],
+            raw[0],
+            raw[1],
+            (overlap / span) * 100.0,
+        ))
+    }
+}
+
 /// Grid geometry, emitted once per fit so a consumer can lay out `cells`
 /// without inferring it from the node coordinates (which is impossible for an
 /// empty or single-occupied grid).
