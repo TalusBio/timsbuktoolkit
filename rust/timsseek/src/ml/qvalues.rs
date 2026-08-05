@@ -1014,16 +1014,11 @@ mod feature_tests {
     use super::*;
     use crate::ml::lda::DEFAULT_SHRINKAGE;
     use crate::models::DecoyMarking;
-    use crate::models::sequence::{
-        AminoAcid,
-        ParsedSequence,
-        Peptide,
-    };
+    use crate::models::sequence::Peptide;
     use crate::scoring::results::{
         CompetedCandidate,
         ScoringFields,
     };
-    use smallvec::smallvec;
     use std::sync::Arc;
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
@@ -1031,25 +1026,12 @@ mod feature_tests {
     }
 
     fn sample_competed_candidate_parsed() -> CompetedCandidate {
-        let parsed = ParsedSequence {
-            // PEPTIDEK — 8 residues
-            residues: smallvec![
-                AminoAcid::from_ascii(b'P'),
-                AminoAcid::from_ascii(b'E'),
-                AminoAcid::from_ascii(b'P'),
-                AminoAcid::from_ascii(b'T'),
-                AminoAcid::from_ascii(b'I'),
-                AminoAcid::from_ascii(b'D'),
-                AminoAcid::from_ascii(b'E'),
-                AminoAcid::from_ascii(b'K'),
-            ],
-            mods: smallvec![],
-        };
+        // `PEPTIDEK` — 8 residues, no mods, once `parse` runs over it.
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
-            parsed: Some(parsed),
             decoy: DecoyMarking::Target,
             decoy_group: 0,
+            sequence_features: true,
         };
         CompetedCandidate {
             scoring: base_scoring_fields(peptide),
@@ -1063,9 +1045,9 @@ mod feature_tests {
     fn sample_competed_candidate_unparsed() -> CompetedCandidate {
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
-            parsed: None,
             decoy: DecoyMarking::Target,
             decoy_group: 0,
+            sequence_features: false,
         };
         CompetedCandidate {
             scoring: base_scoring_fields(peptide),
@@ -1197,8 +1179,7 @@ mod feature_tests {
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                c.delta_group_ln1p_diff =
-                    if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
+                c.delta_group_ln1p_diff = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
                 c.delta_group_ln1p_ratio = if is_target { 0.8 } else { 0.3 };
                 c
             })

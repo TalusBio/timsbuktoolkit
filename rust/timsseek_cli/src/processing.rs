@@ -1293,9 +1293,9 @@ mod tests {
         };
         let peptide = Peptide {
             raw: Arc::from(seq),
-            parsed: None,
             decoy,
             decoy_group,
+            sequence_features: false,
         };
         let mut scoring = ScoringFields::sample(peptide);
         scoring.identity.precursor_mz = mz;

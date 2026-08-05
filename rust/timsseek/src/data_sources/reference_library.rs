@@ -17,11 +17,7 @@ use timsquery::utils::constants::PROTON_MASS;
 
 use crate::fragment_mass::isotope_dist_or_averagine;
 use crate::models::DecoyMarking;
-use crate::models::sequence::{
-    Peptide,
-    normalize_to_proforma,
-    parse_sequence,
-};
+use crate::models::sequence::Peptide;
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
@@ -122,12 +118,6 @@ impl<'a> RefQuery<'a> {
         let tgt = self.geom.target_idx();
         let coll = &self.lib.geom;
         let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
-        let parsed = if coll.caps.sequence_features == SeqFeatureState::Available {
-            let normalized = normalize_to_proforma(&raw);
-            parse_sequence(&normalized)
-        } else {
-            None
-        };
         let decoy = if self.geom.variant() == 0 {
             DecoyMarking::Target
         } else {
@@ -135,9 +125,9 @@ impl<'a> RefQuery<'a> {
         };
         Peptide {
             raw,
-            parsed,
             decoy,
             decoy_group,
+            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
         }
     }
 }

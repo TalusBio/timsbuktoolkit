@@ -27,10 +27,11 @@ pub const LEN: usize = CANONICAL_AA_LETTERS.len() + 2;
 /// slice is compile-time guaranteed to cover all 20 counts.
 pub fn nonlinear_feature_array(peptide: &Peptide) -> [f64; LEN] {
     let mut out = [f64::NAN; LEN];
-    if let Some(counts) = peptide.aa_counts() {
-        out[0] = peptide.length().unwrap() as f64;
+    if let Some(parsed) = peptide.parse() {
+        let counts = parsed.aa_counts();
+        out[0] = parsed.residues.len() as f64;
         out[1..1 + counts.len()].copy_from_slice(&counts);
-        out[LEN - 1] = peptide.n_mods().unwrap() as f64;
+        out[LEN - 1] = parsed.mods.len() as f64;
     }
     out
 }

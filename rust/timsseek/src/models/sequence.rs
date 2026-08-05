@@ -106,9 +106,11 @@ impl ParsedSequence {
 #[derive(Debug, Clone)]
 pub struct Peptide {
     pub raw: Arc<str>,
-    pub parsed: Option<ParsedSequence>,
     pub decoy: DecoyMarking,
     pub decoy_group: u32,
+    /// Whether the source library exposes sequence features. Gates [`Self::parse`]:
+    /// a library without them yields no residues, so the sequence lanes stay NaN.
+    pub sequence_features: bool,
 }
 
 impl Peptide {
@@ -130,16 +132,17 @@ impl Peptide {
         self.decoy.is_decoy()
     }
 
-    pub fn length(&self) -> Option<u8> {
-        self.parsed.as_ref().map(|p| p.residues.len() as u8)
-    }
-
-    pub fn aa_counts(&self) -> Option<[f64; 20]> {
-        self.parsed.as_ref().map(|p| p.aa_counts())
-    }
-
-    pub fn n_mods(&self) -> Option<u8> {
-        self.parsed.as_ref().map(|p| p.mods.len() as u8)
+    /// Normalize and parse `raw` into residues and mods. `None` when the library
+    /// exposes no sequence features, or when the sequence does not parse.
+    ///
+    /// Parsed on demand rather than stored: only the rescore's sequence lanes
+    /// read it, and they run on competed candidates — a third of what Phase 3
+    /// scores. Storing it put two `SmallVec`s in every scored candidate.
+    pub fn parse(&self) -> Option<ParsedSequence> {
+        if !self.sequence_features {
+            return None;
+        }
+        parse_sequence(&normalize_to_proforma(&self.raw))
     }
 }
 
