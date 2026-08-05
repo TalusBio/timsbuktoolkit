@@ -519,7 +519,6 @@ fn fit_points(
         // `CalibRtError` has no `Display`.
         .inspect_err(|e| tracing::warn!("calib_dash: skipping this re-fit: {e:?}"))
         .ok()?;
-    state.measure_ridge_width_with(calibrt::DEFAULT_RIDGE_FRACTION, recording);
     Some(x_range)
 }
 

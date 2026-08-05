@@ -29,7 +29,6 @@ use timsseek::rt_calibration::{
     CalibRtError,
     CalibratedGrid,
     CalibrationResult,
-    DEFAULT_RIDGE_FRACTION,
     DerivationParams,
     DimensionErrors,
     ErrorStats,
@@ -863,9 +862,9 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     )?;
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
 
-    // Measure ridge width for position-dependent RT tolerance.
-    let ridge_widths = cal_state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, observer);
-    if let Some(s) = RidgeSummary::of(&ridge_widths) {
+    // Position-dependent RT tolerance comes from the ridge the fit measured.
+    let ridge_widths = cal_state.ridge_widths();
+    if let Some(s) = RidgeSummary::of(ridge_widths) {
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",
             s.weighted_half_width, s.n_columns, s.min_half_width, s.max_half_width,
@@ -901,7 +900,7 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
             Err(_) => continue,
         };
         let rt_residual_signed = candidate.apex_rt.0 as f64 - predicted_rt;
-        let half_width = ridge_half_width_interp(&ridge_widths, library_rt_s);
+        let half_width = ridge_half_width_interp(ridge_widths, library_rt_s);
         let in_ridge = match half_width {
             Some(hw) => rt_residual_signed.abs() <= hw,
             None => true,

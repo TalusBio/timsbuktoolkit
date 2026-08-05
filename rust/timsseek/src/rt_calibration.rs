@@ -6,7 +6,6 @@ pub use calibrt::{
     CalibrationCurve as RTCalibration,
     CalibrationSnapshot,
     CalibrationState as CalibratedGrid,
-    DEFAULT_RIDGE_FRACTION,
     FitEvent,
     FitObserver,
     LibraryRT,

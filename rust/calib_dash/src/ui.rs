@@ -1674,7 +1674,6 @@ mod tests {
         let mut state = CalibrationState::new(bins, (0.0, bins as f64), (0.0, 48.0), 1).unwrap();
         state.update(ridge_points().into_iter()).unwrap();
         state.fit_with(app.recording_mut(), ObserveOpts { dp_nodes: true });
-        state.measure_ridge_width_with(0.3, app.recording_mut());
         app
     }
 
@@ -1869,7 +1868,6 @@ mod tests {
             state.update(ridge_points().into_iter()).unwrap();
             let mut rec = FitRecording::new(16);
             state.fit_with(&mut rec, ObserveOpts::NONE);
-            state.measure_ridge_width_with(0.3, &mut rec);
             rec
         };
         app.set_final(

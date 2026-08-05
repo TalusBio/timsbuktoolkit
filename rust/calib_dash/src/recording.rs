@@ -309,7 +309,6 @@ mod tests {
         let mut small = diagonal_state(3);
         let mut rec = FitRecording::new(3);
         small.fit_with(&mut rec, ObserveOpts::NONE);
-        small.measure_ridge_width_with(0.5, &mut rec);
         assert_eq!(
             (
                 rec.geom().bins,
@@ -324,7 +323,6 @@ mod tests {
         // Fit 2, a 10x10 grid through the same recording.
         let mut big = diagonal_state(10);
         big.fit_with(&mut rec, ObserveOpts::NONE);
-        big.measure_ridge_width_with(0.5, &mut rec);
 
         assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
         // Row 9 exists only in a resized buffer: at 3x3 the flat index 9*10+9
