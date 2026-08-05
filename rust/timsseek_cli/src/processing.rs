@@ -217,9 +217,12 @@ mod calib_dash_hook {
         /// Wires the Phase 2 fit into the Tolerances tab, then pauses so the
         /// tabs and the batch scrubber are reachable before Phase 3 starts.
         pub fn show_final(dash: &mut Dash, recording: Recording, calibration: &CalibrationResult) {
-            let (Some(d), Some(recording)) = (dash.inner.as_mut(), recording.0) else {
+            let (Some(d), Some(mut recording)) = (dash.inner.as_mut(), recording.0) else {
                 return;
             };
+            // The ridge is not a fit event, so the recording does not pick it up
+            // on its own — it comes off the grid the fit left behind.
+            recording.set_ridge(calibration.state().ridge_widths());
             let mobility = calibration.mobility_tolerance();
             let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
             d.show_final(
