@@ -186,6 +186,7 @@ pub struct CalibrationResult {
     mobility_tolerance_pct: (f32, f32),
     errors: DimensionErrors,
     derivation: Option<DerivationParams>,
+    fallback: bool,
 }
 
 impl CalibrationResult {
@@ -207,7 +208,15 @@ impl CalibrationResult {
             mobility_tolerance_pct,
             errors: DimensionErrors::default(),
             derivation: None,
+            fallback: false,
         })
+    }
+
+    /// A fallback is an identity RT mapping rather than a measurement of this run.
+    /// It must not be persisted as a calibration: its two identity endpoints are
+    /// non-empty like any real fit, so a reader could not tell the file apart.
+    pub fn is_fallback(&self) -> bool {
+        self.fallback
     }
 
     /// The grid this was fit on — the source for the curve, the ridge widths and
@@ -358,8 +367,10 @@ impl CalibrationResult {
             .expect("the identity endpoints are finite");
         state.fit();
 
-        Self::new(state, 1.0, (10.0, 10.0), (5.0, 5.0))
-            .expect("two identity endpoints always fit a two-point curve")
+        let mut out = Self::new(state, 1.0, (10.0, 10.0), (5.0, 5.0))
+            .expect("two identity endpoints always fit a two-point curve");
+        out.fallback = true;
+        out
     }
 }
 

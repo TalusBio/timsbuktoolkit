@@ -476,10 +476,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Unit-valued with the feature off, where `Recording` is calibrt's no-op `()`.
     #[allow(clippy::let_unit_value)]
     let mut phase2_recording = calib_dash_hook::start_recording(&calib_dash_state, calib_config);
-    // `calibrated` is false when the fallback stood in, which is an identity RT
-    // mapping rather than a measurement of this run. Nothing downstream may
-    // present it as a calibration.
-    let (calibration, calibrated) = match calibrate_from_phase1(
+    let calibration = match calibrate_from_phase1(
         calibrants,
         phase1_lib,
         main_lookup.as_ref(),
@@ -489,11 +486,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     ) {
         Ok(calib) => {
             info!("Calibration succeeded");
-            (calib, true)
+            calib
         }
         Err(e) => {
             tracing::error!("Calibration failed: {:?}. Using fallback.", e);
-            (CalibrationResult::fallback(pipeline), false)
+            CalibrationResult::fallback(pipeline)
         }
     };
     let phase2_ms = step
@@ -535,10 +532,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         );
     }
 
-    // Save the calibration for the viewer to load. Not written when the fallback
-    // stood in: its two identity endpoints are non-empty like any other fit, so a
-    // reader has no way to tell that file from a real calibration of this run.
-    if calibrated {
+    // Save the calibration for the viewer to load.
+    if !calibration.is_fallback() {
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
