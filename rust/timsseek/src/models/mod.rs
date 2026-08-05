@@ -25,7 +25,5 @@ pub use sequence::{
     POS_N_TERM,
     ParsedSequence,
     Peptide,
-    SeqFormat,
-    SpeclibMeta,
     UNKNOWN_AA,
 };

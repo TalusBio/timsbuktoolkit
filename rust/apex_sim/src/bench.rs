@@ -155,15 +155,13 @@ pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
         f.theo_intensity = 1.0;
     }
 
-    let measured_density = base().with_measured_density();
-
     vec![
         ("broad_clean", clean),
         ("broad_moderate_noise", moderate),
         ("broad_high_noise+interf", stress),
         ("broad_hard_3x_density", hard),
         ("broad_mismatched_library", mismatched),
-        ("broad_measured_density", measured_density),
+        ("broad_measured_density", base().with_measured_density()),
     ]
 }
 
@@ -206,15 +204,13 @@ pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
         f.theo_intensity = 1.0;
     }
 
-    let measured_density = base().with_measured_density();
-
     vec![
         ("narrow_clean", clean),
         ("narrow_moderate_noise", moderate),
         ("narrow_high_noise+interf", stress),
         ("narrow_hard_3x_density", hard),
         ("narrow_mismatched_library", mismatched),
-        ("narrow_measured_density", measured_density),
+        ("narrow_measured_density", base().with_measured_density()),
     ]
 }
 

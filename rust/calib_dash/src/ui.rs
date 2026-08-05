@@ -1694,6 +1694,7 @@ mod tests {
         state.update(pts.into_iter()).unwrap();
         let mut rec = FitRecording::new(bins);
         state.fit_with(&mut rec, ObserveOpts::NONE);
+        rec.set_fit(&state);
         rec
     }
 
@@ -1730,9 +1731,9 @@ mod tests {
     /// `Layer::Suppressed` and `Layer::Ridge` are deliberately not pinned: Suppressed
     /// only marks cells that already carry weight, so its glyph grid is
     /// byte-identical to `Layer::None`'s; Ridge's payload is a *structure* a picture
-    /// pins only by also re-pinning calibrt's blur kernel and
-    /// `DEFAULT_RIDGE_FRACTION` across a crate boundary. Both are asserted at the
-    /// mark-buffer level instead.
+    /// pins only by also re-pinning calibrt's blur kernel and ridge threshold
+    /// across a crate boundary. Both are asserted at the mark-buffer level
+    /// instead.
     #[test]
     fn fit_tab_renders_each_layer() {
         for layer in [Layer::None, Layer::Path, Layer::Curve] {

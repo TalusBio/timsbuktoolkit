@@ -135,9 +135,8 @@ impl Peptide {
     /// Normalize and parse `raw` into residues and mods. `None` when the library
     /// exposes no sequence features, or when the sequence does not parse.
     ///
-    /// Parsed on demand rather than stored: only the rescore's sequence lanes
-    /// read it, and they run on competed candidates — a third of what Phase 3
-    /// scores. Storing it put two `SmallVec`s in every scored candidate.
+    /// Parsed on demand rather than stored: only the rescore's sequence lanes read
+    /// it, and they run on competed candidates, not on everything Phase 3 scores.
     pub fn parse(&self) -> Option<ParsedSequence> {
         if !self.sequence_features {
             return None;
@@ -149,30 +148,6 @@ impl Peptide {
 impl Serialize for Peptide {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.raw)
-    }
-}
-
-/// Speclib-level metadata. Lives on `Speclib` struct.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SeqFormat {
-    /// Bare AA only, no mods (e.g. `PEPTIDEK`).
-    Plain,
-    /// Modified ProForma-able form (`[UNIMOD:4]`, `[+15.995]`, `_..._` OK).
-    Modified,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpeclibMeta {
-    pub parsable_sequences: bool,
-    pub sequence_format: SeqFormat,
-}
-
-impl Default for SpeclibMeta {
-    fn default() -> Self {
-        Self {
-            parsable_sequences: false,
-            sequence_format: SeqFormat::Plain,
-        }
     }
 }
 

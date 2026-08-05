@@ -27,26 +27,25 @@ use timsquery::models::tolerance::{
     RtTolerance,
 };
 
-/// Multiplier applied to the ridge half-width to get the query tolerance.
-/// 1.0 = use the FW@10%max directly (already generous).
-/// Increase for more conservative searches.
-const RIDGE_WIDTH_MULTIPLIER: f64 = 1.0;
-
-/// Minimum RT tolerance in minutes (prevents pathologically tight windows).
-const MIN_RT_TOLERANCE_MINUTES: f32 = 0.5;
-
 /// The only version [`SavedCalibration`] reads or writes. Named once so the
 /// writer and the reader's gate cannot disagree.
 pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
 
-/// The RT tolerance a ridge half-width implies, in minutes.
+/// RT tolerance floor used when nothing configured one. Keeps a window from
+/// closing to nothing where the ridge is narrow.
+pub const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
+
+/// The RT tolerance a ridge half-width implies, in minutes, floored at
+/// `floor_minutes` — the same [`FloorsTriplet::rt_minutes`] that
+/// [`DimensionErrors::derive_windows`] applies to the uniform fallback, so a
+/// query gets one configured floor whichever path it takes.
 ///
 /// The one place the ridge-to-tolerance rule is written. The search applies it
 /// per query at the interpolated half-width; a UI showing a single number
 /// applies it to [`RidgeSummary::weighted_half_width`]. Both must agree, or the
 /// window a user is shown is not the window the search would open.
-pub fn rt_tolerance_from_ridge(half_width_seconds: f64) -> f32 {
-    ((half_width_seconds * RIDGE_WIDTH_MULTIPLIER / 60.0) as f32).max(MIN_RT_TOLERANCE_MINUTES)
+pub fn rt_tolerance_from_ridge(half_width_seconds: f64, floor_minutes: f32) -> f32 {
+    ((half_width_seconds / 60.0) as f32).max(floor_minutes)
 }
 
 /// Per-dimension residual statistics. `1.4826 * mad` is a robust stdev
@@ -124,8 +123,7 @@ impl DimensionErrors {
     }
 }
 
-/// The tolerance windows [`DimensionErrors::derive_windows`] produces, in the
-/// order [`CalibrationResult::new`] takes them.
+/// The tolerance windows [`DimensionErrors::derive_windows`] produces.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DerivedWindows {
     pub rt_minutes: f32,
@@ -137,7 +135,7 @@ pub struct DerivedWindows {
 /// [`DerivationParams`] names. Robust to tails: equal to `mean ± n_sigma * stdev`
 /// for a Gaussian population, and it resists the outlier inflation that would
 /// widen a window around a handful of bad matches.
-pub fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
+fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
     if stats.n == 0 {
         return (min_val, min_val);
     }
@@ -182,7 +180,7 @@ impl Default for DerivationParams {
             floors: FloorsTriplet {
                 mz_ppm: 0.1,
                 mobility_pct: 0.1,
-                rt_minutes: 0.5,
+                rt_minutes: DEFAULT_RT_FLOOR_MINUTES,
             },
         }
     }
@@ -190,9 +188,8 @@ impl Default for DerivationParams {
 
 /// A fitted RT calibration plus the tolerance windows measured alongside it.
 ///
-/// Owns the [`CalibratedGrid`] rather than copies of its outputs, so the curve,
-/// the ridge widths and the points it was fit on cannot drift from each other or
-/// go stale. Taken by `&` on every scoring thread; nothing here refits.
+/// The grid is the source of truth for the curve, the ridge widths and the points
+/// they came from. Taken by `&` on every scoring thread; nothing here refits.
 pub struct CalibrationResult {
     state: CalibratedGrid,
     /// Fallback uniform RT tolerance, used where the grid measured no ridge.
@@ -230,10 +227,6 @@ impl CalibrationResult {
     /// the calibrant points.
     pub fn state(&self) -> &CalibratedGrid {
         &self.state
-    }
-
-    pub fn fit_points(&self) -> &[Point] {
-        self.state.fit_points()
     }
 
     pub fn with_error_stats(mut self, errors: DimensionErrors) -> Self {
@@ -278,13 +271,22 @@ impl CalibrationResult {
         self.rt_tolerance_minutes
     }
 
+    /// The configured RT floor. `rt_tolerance_minutes` was already floored at it
+    /// by [`DimensionErrors::derive_windows`]; the ridge path has to apply it
+    /// itself.
+    fn rt_floor_minutes(&self) -> f32 {
+        self.derivation
+            .as_ref()
+            .map_or(DEFAULT_RT_FLOOR_MINUTES, |d| d.floors.rt_minutes)
+    }
+
     /// Get per-query tolerance. Uses position-dependent ridge width when available,
     /// falls back to uniform `rt_tolerance_minutes` otherwise.
     /// `rt` is the library RT in seconds (pre-calibration).
     pub fn get_tolerance(&self, _mz: f64, _mobility: f32, rt: LibraryRT<f32>) -> Tolerance {
         let rt_tol_minutes = match self.ridge_half_width_at(LibraryRT(rt.0 as f64)) {
-            Some(half_width) => rt_tolerance_from_ridge(half_width),
-            None => self.rt_tolerance_minutes.max(MIN_RT_TOLERANCE_MINUTES),
+            Some(half_width) => rt_tolerance_from_ridge(half_width, self.rt_floor_minutes()),
+            None => self.rt_tolerance_minutes,
         };
 
         Tolerance {
@@ -387,10 +389,8 @@ pub struct SavedCalibration {
     /// The uniform RT tolerance. Every writer has one — it is what a query falls
     /// back to where the grid measured no ridge.
     pub rt_tolerance_minutes: f32,
-    /// What a search measured beyond the curve. `None` when the calibration was
-    /// fit by a tool that measures no residuals, which is the truthful value: the
-    /// viewer has no m/z or mobility errors to report, and writing zeros there
-    /// would read as "measured, and tight".
+    /// What a search measured beyond the curve. `None` for a writer that measures
+    /// no residuals — zeros there would read as "measured, and tight".
     #[serde(default)]
     pub residuals: Option<ResidualBlock>,
     pub n_scored: usize,
@@ -408,8 +408,7 @@ pub struct ResidualBlock {
 }
 
 impl SavedCalibration {
-    /// Assemble a file record. The version is stamped here so no writer picks its
-    /// own, and `residuals` is `None` for a writer that measures none.
+    /// Assemble a file record. The version is stamped here, not by callers.
     pub fn new(
         rt_range_seconds: [f64; 2],
         calibration: CalibrationSnapshot,
@@ -434,17 +433,13 @@ impl SavedCalibration {
     }
 
     /// Parse a calibration file and check its provenance. The `Option<String>`
-    /// is a human-readable reason to distrust the file, not an error: a
-    /// calibration is only valid for the run it was fit on, and comparing RT
-    /// spans is the one cheap way to catch the wrong file.
+    /// is a reason to distrust the file, not an error: a calibration is only
+    /// valid for the run it was fit on, and `raw_rt_range` — the RT span of the
+    /// run it is about to be used on — is the one cheap way to catch the wrong
+    /// file. `None` there means nothing verifies it, which also warns.
     ///
-    /// `raw_rt_range` is the RT span of the file the calibration is about to be
-    /// used on; `None` means there is nothing to check against, which is itself
-    /// worth warning about.
-    ///
-    /// The version gate and the provenance check live here so a reader cannot
-    /// skip them. `calib_dash` is the deliberate exception: it pulls `calibration`
-    /// out with plain `serde_json` rather than depend on this crate.
+    /// `calib_dash` is the deliberate exception to reading through here: it pulls
+    /// `calibration` out with plain `serde_json` rather than depend on this crate.
     pub fn read(
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
@@ -560,8 +555,6 @@ mod tests {
             .with_derivation(DerivationParams::default())
     }
 
-    /// Save the fixture to a fresh temp dir, returning the dir so it outlives
-    /// the path (dropping it removes the tree, including after a panic).
     fn save_fixture(calibration: &CalibrationResult) -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         calibration
@@ -570,9 +563,8 @@ mod tests {
         dir
     }
 
-    /// The saved snapshot is the entire record of the fit, so refitting it has to
-    /// reproduce the curve and the ridge widths — that is what a reader does
-    /// instead of reading them back. Walks the path a reader really takes:
+    /// The snapshot is the whole record of the fit, so refitting it must reproduce
+    /// the curve and the ridge widths. Walks a reader's real path:
     /// `read` -> `from_snapshot` -> `new`.
     #[test]
     fn a_saved_snapshot_refits_to_the_same_calibration() {
@@ -597,7 +589,7 @@ mod tests {
         );
 
         let refit = CalibratedGrid::from_snapshot(&saved.calibration).unwrap();
-        assert_eq!(refit.fit_points(), original.fit_points());
+        assert_eq!(refit.fit_points(), original.state().fit_points());
 
         let reloaded = CalibrationResult::new(
             refit,
@@ -642,8 +634,7 @@ mod tests {
         }
     }
 
-    /// Pins the three rules `derive_windows` folds together, since it is now the
-    /// only place any of them is written.
+    /// Pins the three per-dimension rules `derive_windows` folds together.
     #[test]
     fn derive_windows_applies_each_dimensions_rule() {
         let params = DerivationParams {
@@ -679,18 +670,25 @@ mod tests {
         }
         .derive_windows(&params);
 
-        // At MAD 1 the half-spread is `n_sigma * 1.4826`.
-        let spread: f32 = 2.0 * 1.4826;
-        // Left bound of the offset dimension lands under its floor: the median is
+        // Expectations are literals, not the implementation's own expression: at
+        // MAD 1 and 2 sigma the half-spread is 2 * 1.4826 = 2.9652.
+        //
+        // The offset dimension's left bound lands under its floor — its median is
         // further from zero than the spread, so the window does not reach back.
-        // The floor is an `f32`, so the comparison has to widen it the same way.
-        assert_eq!(
-            w.mz_ppm,
-            (params.floors.mz_ppm as f64, (10.0_f32 + spread) as f64)
+        assert_eq!(w.mz_ppm.0, params.floors.mz_ppm as f64);
+        assert!((w.mz_ppm.1 - 12.9652).abs() < 1e-4, "{:?}", w.mz_ppm);
+        assert!(
+            (w.mobility_pct.0 - 2.9652).abs() < 1e-4,
+            "{:?}",
+            w.mobility_pct
         );
-        assert_eq!(w.mobility_pct, (spread, spread));
-        // RT ignores the median and reports a half-width in minutes.
-        assert_eq!(w.rt_minutes, 3.0 * 1.4826 * 60.0 / 60.0);
+        assert!(
+            (w.mobility_pct.1 - 2.9652).abs() < 1e-4,
+            "{:?}",
+            w.mobility_pct
+        );
+        // RT ignores the median: 3 sigma over a 60s MAD, reported in minutes.
+        assert!((w.rt_minutes - 4.4478).abs() < 1e-4, "{}", w.rt_minutes);
 
         // A dimension with nothing measured falls to its floor rather than zero,
         // which would be a window no query could match inside.
@@ -704,40 +702,52 @@ mod tests {
         assert_eq!(nothing.rt_minutes, params.floors.rt_minutes);
     }
 
-    /// A calibration the viewer wrote has no residuals, and must still load.
+    /// A file with no `residuals` block, as a tool that measures none writes it.
+    /// Spelled out rather than round-tripped through our own writer, so the test
+    /// pins the layout a reader must accept.
+    fn foreign_file(version: &str) -> String {
+        format!(
+            r#"{{
+              "version": "{version}",
+              "rt_range_seconds": [0.0, 1200.0],
+              "calibration": {{
+                "points": [[0.0, 30.0, 1.0], [100.0, 200.0, 1.0],
+                           [200.0, 370.0, 1.0], [300.0, 540.0, 1.0]],
+                "grid_size": 16,
+                "lookback": 4
+              }},
+              "rt_tolerance_minutes": 1.25,
+              "n_scored": 999
+            }}"#
+        )
+    }
+
+    fn write_foreign(version: &str) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("calibration.json"), foreign_file(version)).unwrap();
+        dir
+    }
+
     #[test]
     fn read_accepts_a_calibration_with_no_residuals() {
-        let dir = save_fixture(&sample_calibration());
-        let path = dir.path().join("calibration.json");
+        let dir = write_foreign(CALIBRATION_FORMAT_VERSION);
+        let (saved, _) =
+            SavedCalibration::read(&dir.path().join("calibration.json"), Some([0.0, 1200.0]))
+                .unwrap();
 
-        let text = std::fs::read_to_string(&path).unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("residuals")
-            .expect("a search's save must have written residuals");
-        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
-
-        let (saved, _) = SavedCalibration::read(&path, Some([0.0, 1200.0])).unwrap();
         assert!(saved.residuals.is_none());
+        assert_eq!(saved.n_calibrants(), 4);
         assert!(CalibratedGrid::from_snapshot(&saved.calibration).is_ok());
     }
 
-    /// A file from an older writer must be refused, not silently reinterpreted:
-    /// v2 stored ridge widths alongside the points, and reading one as v3 would
-    /// take the stored widths for refit ones.
+    /// A foreign version must be refused rather than reinterpreted: the reader
+    /// refits the snapshot, so a layout whose fields mean something else would be
+    /// silently taken for this one.
     #[test]
     fn read_refuses_a_foreign_version() {
-        let dir = save_fixture(&sample_calibration());
-        let path = dir.path().join("calibration.json");
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        value.as_object_mut().unwrap()["version"] = serde_json::json!("v2");
-        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
-
-        let err = SavedCalibration::read(&path, Some([0.0, 1200.0])).unwrap_err();
+        let dir = write_foreign("v2");
+        let err = SavedCalibration::read(&dir.path().join("calibration.json"), Some([0.0, 1200.0]))
+            .unwrap_err();
         assert!(err.contains("v2") && err.contains("v3"), "{err}");
     }
 }

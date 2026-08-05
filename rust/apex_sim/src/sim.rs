@@ -133,14 +133,8 @@ pub struct SimParams {
     pub noise_floor: f32,
 
     /// Detection threshold as a fraction of `height`: a cell below it is
-    /// recorded as zero, the way an unextracted (mz, mobility, cycle) cell is
-    /// absent from a real chromatogram rather than small. Applied after
-    /// interferent injection, so it bounds the cell's final content.
-    ///
-    /// At 0.0 (the default) every cell is populated, which is not what real
-    /// data looks like — see [`SimParams::with_measured_density`]. The threshold
-    /// is compared against the cell, so dropped cells cluster in the peak tails
-    /// and whole cycles go empty.
+    /// recorded as zero. Applied after interferent injection, so it bounds the
+    /// cell's final content, not just the simulated signal.
     pub detection_floor: f32,
 
     pub seed: u64,
@@ -192,11 +186,21 @@ impl Default for SimParams {
     }
 }
 
+/// Fragment-cell occupancy [`SimParams::with_measured_density`] lands on.
+pub const MEASURED_FRAGMENT_DENSITY: f64 = 0.686;
+
+/// Precursor-cell occupancy [`SimParams::with_measured_density`] lands on.
+pub const MEASURED_PRECURSOR_DENSITY: f64 = 0.366;
+
 impl SimParams {
-    /// Populate cells at the rate production data does: a HeLa DIA Phase-1 run
-    /// measures 68.6% of fragment cells and 36.6% of precursor cells above zero.
-    /// Every other scenario fills every cell, which hides how the scoring loops
-    /// behave on sparse chromatograms.
+    /// Populate cells at roughly the rate production data does. Every other
+    /// scenario fills every cell, which hides how the scoring loops behave on
+    /// sparse chromatograms.
+    ///
+    /// The three values below were tuned by hand to approximate one HeLa DIA run
+    /// measured once; they are not derived from anything in the tree. The
+    /// occupancy they land on is [`MEASURED_FRAGMENT_DENSITY`] /
+    /// [`MEASURED_PRECURSOR_DENSITY`].
     ///
     /// `detection_floor` sets fragment density; `precursor_noise_mult` then moves
     /// precursor density on its own, because the floor is compared against the
@@ -252,10 +256,6 @@ pub fn build(params: &SimParams) -> SimData {
     // Realized apex, drawn BEFORE any signal/noise sampling. A real peak never
     // lands exactly on a cycle boundary, so the sub-cycle offset is ALWAYS
     // applied; `apex_jitter` adds coarse per-seed relocation on top of it.
-    // Draw order (coarse then sub-cycle) keeps JITTERED scenarios byte-identical
-    // to before the sub-cycle draw became unconditional. Non-jittered ones all
-    // shifted: that branch now consumes an rng draw where it previously
-    // consumed none, and pins to `apex_cycle` no longer.
     let realized_apex = {
         let lo = 3.0f32;
         let hi = (n as f32 - 4.0).max(lo);
@@ -451,8 +451,7 @@ fn sample_cell(rng: &mut ChaCha8Rng, signal: f32, noise: f32) -> f32 {
 }
 
 /// Zero every cell below `floor`, so it is absent from the chromatogram rather
-/// than small. Runs after interferent injection: what an extractor fails to
-/// record is the cell's final content, whatever put the signal there.
+/// than small.
 fn apply_detection_floor(rows: &mut [TransitionRow], floor: f32) {
     if floor <= 0.0 {
         return;
@@ -499,12 +498,9 @@ mod tests {
         (frac(&d.fragment_rows), frac(&d.precursor_rows))
     }
 
-    /// The `*_measured_density` scenarios must reach the occupancy their name
-    /// claims — 68.6% of fragment cells and 36.6% of precursor cells above zero
-    /// — since sparsity is what the per-cell work in `compute_pass_1` is
-    /// sensitive to. Asserted on the suite entries, not on a hand-built
-    /// `SimParams`: the tuning only holds under the interferent load the
-    /// benchmark actually runs, and interferents populate cells too.
+    /// Pins the `*_measured_density` scenarios to their tuned occupancy. Run on
+    /// the suite entries, not a hand-built `SimParams`: interferents populate
+    /// cells too, so the tuning only holds under the benchmark's own load.
     #[test]
     fn measured_density_scenarios_match_production() {
         let scenarios: Vec<_> = crate::bench::broad_suite()
@@ -520,11 +516,11 @@ mod tests {
         for (name, params) in scenarios {
             let (frag, prec) = cell_density(&params);
             assert!(
-                (frag - 0.686).abs() < 0.01,
+                (frag - MEASURED_FRAGMENT_DENSITY).abs() < 0.01,
                 "{name} fragment density {frag}"
             );
             assert!(
-                (prec - 0.366).abs() < 0.025,
+                (prec - MEASURED_PRECURSOR_DENSITY).abs() < 0.025,
                 "{name} precursor density {prec}"
             );
         }

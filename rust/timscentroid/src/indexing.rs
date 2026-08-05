@@ -1011,6 +1011,10 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
 /// (4×f32 × 2); the remainder falls through to a scalar tail. Pinned to 8
 /// because [`scan_bucket_slice`] walks the mask as a `u64`.
 const SCAN_CHUNK: usize = 8;
+const _: () = assert!(
+    SCAN_CHUNK == 8,
+    "scan_bucket_slice packs the lane mask into a u64"
+);
 
 #[inline(always)]
 fn apply_mz_mask<const N: usize>(
@@ -1080,8 +1084,7 @@ fn scan_bucket_slice<T, F>(
         local.count_after_im_mask::<N>(&mask);
         // Walk the mask as one integer: one branch per *passing* lane. `bool` is
         // one byte valued 0 or 1, so a passing lane is a single set bit at
-        // `8 * lane`, and `bits & (bits - 1)` clears it. The `[u8; N]` -> `u64`
-        // conversion is what pins `N` to 8.
+        // `8 * lane`, and `bits & (bits - 1)` clears it.
         let mut bits = u64::from_le_bytes(mask.map(u8::from));
         while bits != 0 {
             let i = (bits.trailing_zeros() >> 3) as usize;

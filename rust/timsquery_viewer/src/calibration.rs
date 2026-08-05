@@ -69,16 +69,6 @@ const CONTROL_STOP_REQUESTED: u8 = 2;
 /// it governs UI refresh, nothing the search does.
 const SNAPSHOT_INTERVAL: usize = 100;
 
-/// The search's calibration settings: grid geometry, DP lookback and calibrant
-/// budget. Read from the search rather than restated here — a viewer fitting on
-/// its own grid would draw a curve the search would not produce.
-///
-/// These are the defaults, not a user's configured values: the viewer has no
-/// config file, so it shows what an unconfigured search would do.
-fn search_calibration() -> CalibrationConfig {
-    CalibrationConfig::default()
-}
-
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -134,14 +124,13 @@ pub struct ViewerCalibrationState {
     pub calibration_state: Option<CalibrationState>,
     pub generation: u64,
     pub n_scored: usize,
-    pub n_calibrants: usize,
+    pub n_calibrants_found: usize,
     pub heap_capacity: usize,
     pub elution_group_count: usize,
     pub derived_tolerances: Option<DerivedTolerances>,
     /// What the loaded calibration's search measured. The viewer calibrates RT
-    /// only and measures no residuals, so it carries this untouched rather than
-    /// dropping the dimensions a search did measure. `None` whenever the curve on
-    /// screen was fit here.
+    /// only and measures no residuals, so it carries this untouched. `None`
+    /// whenever the curve on screen was fit here.
     pub residuals: Option<ResidualBlock>,
 
     thread_handle: Option<JoinHandle<()>>,
@@ -154,13 +143,16 @@ pub struct ViewerCalibrationState {
 
 impl Default for ViewerCalibrationState {
     fn default() -> Self {
+        // The search's own calibration settings, so the viewer does not fit on a
+        // grid the search would not use. Defaults: the viewer has no config file.
+        let search = CalibrationConfig::default();
         Self {
             phase: CalibrationPhase::Idle,
             calibration_state: None,
             generation: 0,
             n_scored: 0,
-            n_calibrants: 0,
-            heap_capacity: search_calibration().n_calibrants,
+            n_calibrants_found: 0,
+            heap_capacity: search.n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
             residuals: None,
@@ -187,9 +179,10 @@ impl ViewerCalibrationState {
             .iter()
             .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
             .collect();
-        let n_calibrants = snapshot_points.len();
+        let n_calibrants_found = snapshot_points.len();
 
         let calibration_state = calibrt::CalibrationState::from_snapshot(&snapshot).ok();
+        let search = CalibrationConfig::default();
 
         Self {
             phase: if calibration_state.is_some() {
@@ -199,9 +192,9 @@ impl ViewerCalibrationState {
             },
             calibration_state,
             generation: 0,
-            n_scored: n_calibrants,
-            n_calibrants,
-            heap_capacity: search_calibration().n_calibrants,
+            n_scored: n_calibrants_found,
+            n_calibrants_found,
+            heap_capacity: search.n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
             residuals: None,
@@ -222,13 +215,14 @@ impl ViewerCalibrationState {
 
     /// The calibration as a snapshot stores it: points plus grid config.
     fn snapshot(&self) -> calibrt::CalibrationSnapshot {
+        let search = CalibrationConfig::default();
         calibrt::CalibrationSnapshot {
             points: self.persisted_points(),
             grid_size: self
                 .calibration_state
                 .as_ref()
-                .map_or(search_calibration().grid_size, CalibrationState::grid_bins),
-            lookback: search_calibration().dp_lookback,
+                .map_or(search.grid_size, CalibrationState::grid_bins),
+            lookback: search.dp_lookback,
         }
     }
 
@@ -253,7 +247,7 @@ impl ViewerCalibrationState {
         // Increment generation to invalidate stale data.
         self.generation += 1;
         self.n_scored = 0;
-        self.n_calibrants = 0;
+        self.n_calibrants_found = 0;
         self.snapshot_points.clear();
         self.elution_group_count = elution_groups.len();
 
@@ -324,7 +318,7 @@ impl ViewerCalibrationState {
         }
         self.phase = CalibrationPhase::Idle;
         self.n_scored = 0;
-        self.n_calibrants = 0;
+        self.n_calibrants_found = 0;
         self.snapshot_points.clear();
         self.generation += 1;
         if let Some(cs) = &mut self.calibration_state {
@@ -360,7 +354,7 @@ impl ViewerCalibrationState {
                     points,
                 }) => {
                     self.n_scored = n_scored;
-                    self.n_calibrants = heap_len;
+                    self.n_calibrants_found = heap_len;
                     self.snapshot_points = points;
                     new_points = true;
                     changed = true;
@@ -404,13 +398,14 @@ impl ViewerCalibrationState {
     /// A geometry the points cannot support leaves the previous fit alone: a later
     /// snapshot with more calibrants may well span a usable range.
     fn refit(&mut self) {
+        let search = CalibrationConfig::default();
         let bins = self
             .calibration_state
             .as_ref()
-            .map_or(search_calibration().grid_size, CalibrationState::grid_bins);
+            .map_or(search.grid_size, CalibrationState::grid_bins);
         let cs = match self.calibration_state.as_mut() {
             Some(cs) => cs,
-            None => match CalibrationState::deferred(bins, search_calibration().dp_lookback) {
+            None => match CalibrationState::deferred(bins, search.dp_lookback) {
                 Ok(cs) => self.calibration_state.insert(cs),
                 Err(e) => {
                     tracing::warn!("Calibration refit skipped: no grid at {bins} bins: {e:?}");
@@ -440,7 +435,7 @@ impl ViewerCalibrationState {
         tracing::info!(
             "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={} x={:?} y={:?}",
             self.n_scored,
-            self.n_calibrants,
+            self.n_calibrants_found,
             n_retained,
             cs.path_indices().len(),
             cs.curve().is_some(),
@@ -636,7 +631,7 @@ impl ViewerCalibrationState {
             self.calibration_state = Some(cal);
         }
 
-        self.n_calibrants = saved.n_calibrants();
+        self.n_calibrants_found = saved.n_calibrants();
         self.n_scored = saved.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
             rt_tolerance_minutes: saved.rt_tolerance_minutes,
@@ -756,7 +751,7 @@ impl ViewerCalibrationState {
             ui.separator();
             ui.label(format!(
                 "Calibrants: {} / {}",
-                self.n_calibrants, self.heap_capacity
+                self.n_calibrants_found, self.heap_capacity
             ));
         });
 
@@ -1054,8 +1049,13 @@ impl ViewerCalibrationState {
         // Through the search's own rule, so the number shown is the window the
         // search would open. The search applies it per query at the interpolated
         // half-width; one number can only carry the weighted average.
-        let suggested =
-            ridge_stats.map(|stats| (rt_tolerance_from_ridge(stats.weighted_half_width), stats));
+        let search = CalibrationConfig::default();
+        let suggested = ridge_stats.map(|stats| {
+            (
+                rt_tolerance_from_ridge(stats.weighted_half_width, search.min_rt_tolerance_minutes),
+                stats,
+            )
+        });
 
         if let Some((rt_min, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {

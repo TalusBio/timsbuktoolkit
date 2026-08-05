@@ -28,22 +28,23 @@ pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
     suppressed: Vec<bool>,
-    /// Grid indices of the assembled path (DP chain plus greedy tails), as
-    /// `calibrt` reported them. The `bins` capacity is a hint, not a bound —
-    /// weight ties can push the survivor count past it.
+    /// See [`calibrt::CalibrationState::path_indices`]. The `bins` capacity is a
+    /// hint, not a bound — weight ties can push the survivor count past it.
     path_indices: Vec<usize>,
-    /// The DP-chosen segment within `path_indices`: `path_indices[..dp_range.start]`
-    /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
-    /// not scored by the DP recurrence.
+    /// See [`calibrt::CalibrationState::dp_range`].
     dp_range: std::ops::Range<usize>,
-    /// The fit's curve itself, not a copy of its points, so the overlay can
-    /// predict through it instead of re-deriving calibrt's interpolation.
-    /// `None` when the path was too short to interpolate.
+    /// The curve itself, so the overlay predicts through it instead of
+    /// re-deriving calibrt's interpolation.
     curve: Option<CalibrationCurve>,
     ridge: Vec<RidgeMeasurement>,
     /// One entry per DP node visited. Same `bins`-capacity hint as
     /// `path_indices` above.
     dp: Vec<DpDecision>,
+    /// Set when a fit starts, cleared by [`Self::set_fit`]. The fit's products are
+    /// not events, so a caller that fits without calling `set_fit` leaves the four
+    /// product buffers holding the *previous* fit — a wrong panel, not a blank
+    /// one. Every product accessor refuses to read while this is set.
+    unrecorded_fit: bool,
 }
 
 impl FitRecording {
@@ -62,6 +63,9 @@ impl FitRecording {
             curve: None,
             ridge: Vec::with_capacity(bins),
             dp: Vec::with_capacity(bins),
+            // A recording that has seen no fit has nothing outstanding: Phase 1
+            // draws an empty Fit tab before the first fit runs.
+            unrecorded_fit: false,
         }
     }
 
@@ -69,27 +73,46 @@ impl FitRecording {
         self.geom
     }
 
+    /// Panics when a fit ran without a following [`Self::set_fit`]. Guards each
+    /// accessor below, so the fault surfaces at the reader that would have drawn
+    /// the previous fit's data as this one's.
+    #[track_caller]
+    fn expect_fit_recorded(&self) {
+        assert!(
+            !self.unrecorded_fit,
+            "FitRecording holds an unrecorded fit: `fit_with` ran without a following \
+             `set_fit`, so the path, curve and ridge are the previous fit's"
+        );
+    }
+
+    #[track_caller]
     pub(crate) fn path_indices(&self) -> &[usize] {
+        self.expect_fit_recorded();
         &self.path_indices
     }
 
-    /// The DP-chosen slice of `path_indices`. Indices outside it were attached
-    /// by Pass 2's greedy extension.
+    /// See [`calibrt::CalibrationState::dp_range`].
+    #[track_caller]
     pub(crate) fn dp_range(&self) -> std::ops::Range<usize> {
+        self.expect_fit_recorded();
         self.dp_range.clone()
     }
 
+    #[track_caller]
     pub(crate) fn curve(&self) -> Option<&CalibrationCurve> {
+        self.expect_fit_recorded();
         self.curve.as_ref()
     }
 
+    #[track_caller]
     pub(crate) fn ridge(&self) -> &[RidgeMeasurement] {
+        self.expect_fit_recorded();
         &self.ridge
     }
 
     /// Copy the fit's products in: the path, its DP segment, the curve and the
     /// ridge are not events, the state carries them after `fit_with` returns.
-    /// Call once per fit, after the fit — `FitStarted` clears all four.
+    /// All four are replaced, so this is safe to call after any fit.
     pub fn set_fit(&mut self, state: &CalibrationState) {
         self.path_indices.clear();
         self.path_indices.extend_from_slice(state.path_indices());
@@ -97,6 +120,7 @@ impl FitRecording {
         self.curve = state.curve().cloned();
         self.ridge.clear();
         self.ridge.extend_from_slice(state.ridge_widths());
+        self.unrecorded_fit = false;
     }
 
     pub(crate) fn dp(&self) -> &[DpDecision] {
@@ -129,12 +153,11 @@ impl FitObserver for FitRecording {
                     self.suppressed = vec![false; geom.bins * geom.bins];
                 }
                 self.geom = geom;
+                // The products this fit will leave on the state are not events;
+                // they arrive through `set_fit` or not at all.
+                self.unrecorded_fit = true;
                 // `Suppressed` only ever sets bits, never clears them.
                 self.suppressed.fill(false);
-                self.path_indices.clear();
-                self.dp_range = 0..0;
-                self.curve = None;
-                self.ridge.clear();
                 self.dp.clear();
                 // `cells` is always `bins * bins` long, so every cell is
                 // rewritten and `weights` needs no separate clear.
@@ -229,6 +252,32 @@ mod tests {
         assert_eq!(rec.curve().unwrap().points().len(), 10);
     }
 
+    /// `set_fit` is manual, so forgetting it has to be loud: the products would
+    /// otherwise read as the previous fit's, which draws a plausible wrong panel.
+    #[test]
+    #[should_panic(expected = "unrecorded fit")]
+    fn reading_the_products_of_an_unrecorded_fit_panics() {
+        let mut s = diagonal_state(10);
+        let mut rec = FitRecording::new(10);
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        rec.set_fit(&s);
+        assert_eq!(rec.path_indices().len(), 10, "the recorded fit reads fine");
+
+        // A second fit, this time without the `set_fit` that copies its products.
+        s.fit_with(&mut rec, ObserveOpts::NONE);
+        let _ = rec.path_indices();
+    }
+
+    /// Nothing has been fit, so nothing is outstanding — Phase 1 draws an empty
+    /// Fit tab before the first fit runs.
+    #[test]
+    fn a_recording_with_no_fit_reads_as_empty() {
+        let rec = FitRecording::new(10);
+        assert!(rec.path_indices().is_empty());
+        assert!(rec.curve().is_none());
+        assert!(rec.ridge().is_empty());
+    }
+
     #[test]
     fn dp_decisions_are_recorded_only_when_enabled() {
         let mut s = diagonal_state(10);
@@ -293,21 +342,12 @@ mod tests {
         );
     }
 
-    /// A recording outlives the geometry it was built for: `CalibDash` reuses
-    /// one `FitRecording` for every refit, and a scrubbed frame or a replayed
-    /// snapshot can arrive at a different `bins`. Two claims, which the
-    /// unchanged-`bins` test above deliberately holds fixed:
-    ///
-    /// - the two grid buffers are reallocated, so `weight`/`is_suppressed` can
-    ///   still reach the far corner. Both bounds-check and answer `0.0`/`false`
-    ///   off the end, so an unresized buffer reads as "empty grid" rather than
-    ///   panicking — the failure mode is a silently blank heatmap.
-    /// - the fit's products hold this fit's entries only. `set_fit` replaces
-    ///   rather than appends, so a leftover from the previous fit would show up
-    ///   as a path, curve or ridge longer than the grid it was fit on — the Fit
-    ///   tab drawing two fits at once.
+    /// `CalibDash` reuses one `FitRecording` for every refit, and a scrubbed
+    /// frame or a replayed snapshot can arrive at a different `bins`: the grid
+    /// buffers must be resized (an unresized one reads as a blank heatmap, not a
+    /// panic) and the fit's products must hold the second fit's entries only.
     #[test]
-    fn a_refit_at_a_different_bins_resizes_the_grid_and_clears_the_appended_buffers() {
+    fn a_refit_at_a_different_bins_resizes_the_grid_and_shows_only_the_second_fit() {
         // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
         let mut small = diagonal_state(3);
         let mut rec = FitRecording::new(3);
@@ -353,7 +393,7 @@ mod tests {
             ),
             (10, 10, 10),
             "the refit's own entries only — 13 of each would mean the first \
-             fit's were never cleared"
+             fit's leaked through"
         );
     }
 }

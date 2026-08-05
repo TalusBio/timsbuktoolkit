@@ -499,7 +499,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase2_ms = step
         .finish_with(format_args!(
             "{} fit points → {} path nodes",
-            calibration.fit_points().len(),
+            calibration.state().fit_points().len(),
             calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
         ))
         .as_millis() as u64;
@@ -861,7 +861,7 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
         observer,
         ObserveOpts::NONE,
     )?;
-    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
+    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?;
 
     // Position-dependent RT tolerance comes from the ridge the fit measured.
     let ridge_widths = cal_state.ridge_widths();

@@ -5,10 +5,6 @@
 pub mod grid;
 mod pathfinding;
 pub mod types;
-use tracing::{
-    info,
-    warn,
-};
 pub use types::{
     LibraryRT,
     ObservedRTSeconds,
@@ -154,10 +150,9 @@ impl CalibrationCurve {
     }
 }
 
-/// The `fraction` every fit measures its ridge at: expand away from the path
-/// cell until the weight drops below 10% of it (FW@10%max). Public so a consumer
-/// reading [`CalibrationState::ridge_widths`] can see which width it got.
-pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
+/// The fraction every fit measures its ridge at: expand away from the path cell
+/// until the weight drops below 10% of it (FW@10%max).
+const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
 
 /// The grid weight one calibrant contributes. Every producer weighs calibrants
 /// equally: weight decides which nodes survive `suppress_nonmax` and scales every
@@ -425,10 +420,9 @@ impl CalibrationState {
             opts,
         );
 
-        // The path, the curve and the ridge are the fit's products, not events:
-        // the accessors read them afterwards, which is what the per-query RT
-        // tolerance needs on every scoring thread and all an overlay needs to
-        // draw them.
+        // The accessors read the path, the curve and the ridge afterwards: the
+        // per-query RT tolerance on every scoring thread, and an overlay drawing
+        // them.
         self.path_indices.clear();
         self.path_indices.extend(
             path_points
@@ -442,7 +436,7 @@ impl CalibrationState {
         self.dp_range = dp_range;
 
         self.curve = CalibrationCurve::new(path_points).ok();
-        self.ridge_widths = self.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
+        self.ridge_widths = self.measure_ridge_width();
     }
 
     /// Drop the previous fit's results, keeping the grid and the buffers.
@@ -530,9 +524,9 @@ impl CalibrationState {
         }
     }
 
-    /// The current fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], sorted by
-    /// library RT. Empty until a fit succeeds, and again once one fails, which is
-    /// the "no ridge data" case consumers fall back from.
+    /// The current fit's ridge widths (FW@10%max), sorted by library RT. Empty
+    /// until a fit succeeds, and again once one fails, which is the "no ridge
+    /// data" case consumers fall back from.
     pub fn ridge_widths(&self) -> &[RidgeMeasurement] {
         &self.ridge_widths
     }
@@ -540,14 +534,14 @@ impl CalibrationState {
     /// Measure the width of the evidence "mountain" around the fitted path.
     ///
     /// For each grid column holding a path cell, expands up and down from that
-    /// cell until the blurred weight drops below `fraction` of the path cell's
-    /// own — so `0.1` is the full width at 10% of maximum.
+    /// cell until the blurred weight drops below [`DEFAULT_RIDGE_FRACTION`] of
+    /// the path cell's own.
     ///
     /// Idempotent: it reads the accumulated node weights into the derived blur
     /// buffers without writing them back, so measuring twice gives the same
     /// answer and a later `update` can still add points to the same grid.
     /// `&mut self` is for those two buffers, not for the fit.
-    fn measure_ridge_width(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
+    fn measure_ridge_width(&mut self) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
@@ -566,7 +560,7 @@ impl CalibrationState {
                 continue;
             }
 
-            let threshold = path_weight * fraction;
+            let threshold = path_weight * DEFAULT_RIDGE_FRACTION;
 
             // Expand upward (increasing gy) from path cell
             let mut upper_gy = gy;
@@ -674,95 +668,6 @@ pub fn point_ranges(
     Ok((x, y))
 }
 
-/// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
-///
-/// This is the lower-level API that requires you to specify the x and y ranges explicitly.
-/// Consider using [`calibrate`] for automatic range detection.
-///
-/// # Arguments
-/// * `points` - A slice of `Point` structs representing the data.
-/// * `x_range` - The min and max values for the X dimension.
-/// * `y_range` - The min and max values for the Y dimension.
-/// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
-///
-/// # Returns
-/// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-pub fn calibrate_with_ranges(
-    points: &[Point],
-    x_range: (f64, f64),
-    y_range: (f64, f64),
-    grid_size: usize,
-    lookback: usize,
-) -> Result<CalibrationCurve, CalibRtError> {
-    let mut state = CalibrationState::new(grid_size, x_range, y_range, lookback)?;
-    state.update(points.iter().map(|p| {
-        (
-            LibraryRT(p.library),
-            ObservedRTSeconds(p.observed),
-            p.weight,
-        )
-    }))?;
-
-    state.fit();
-
-    // No path at all — including the suppression short-circuit, which never
-    // builds one — is `NoPoints`; a path too short to interpolate is not.
-    let calcurve = state
-        .curve()
-        .cloned()
-        .ok_or(if state.path_indices().is_empty() {
-            CalibRtError::NoPoints
-        } else {
-            CalibRtError::InsufficientPoints
-        });
-    match &calcurve {
-        Ok(c) => {
-            let wrmse = c.wrmse(points.iter().map(|p| {
-                (
-                    LibraryRT(p.library),
-                    ObservedRTSeconds(p.observed),
-                    p.weight,
-                )
-            }));
-            info!("Calibration successful, WRMSE: {}", wrmse);
-        }
-        Err(e) => {
-            warn!("Calibration failed: {:?}", e);
-        }
-    }
-
-    calcurve
-}
-
-/// Calibrates retention times using the Calib-RT algorithm with automatic range detection.
-///
-/// This is a convenience wrapper that automatically computes the x and y ranges from the input points.
-/// If you need explicit control over the ranges, use [`calibrate_with_ranges`] instead.
-///
-/// # Arguments
-/// * `points` - A slice of `Point` structs representing the data.
-/// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
-///
-/// # Returns
-/// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-///
-/// # Example
-/// ```
-/// use calibrt::{Point, calibrate};
-///
-/// let points = vec![
-///     Point { library: 1.0, observed: 1.5, weight: 1.0 },
-///     Point { library: 2.0, observed: 2.5, weight: 1.0 },
-///     Point { library: 3.0, observed: 3.5, weight: 1.0 },
-/// ];
-///
-/// let curve = calibrate(&points, 100).expect("Calibration failed");
-/// ```
-pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve, CalibRtError> {
-    let (x_range, y_range) = point_ranges(points.iter().map(|p| (p.library, p.observed)))?;
-    calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
-}
-
 #[cfg(test)]
 mod observer_tests {
     use super::*;
@@ -804,10 +709,7 @@ mod observer_tests {
         s
     }
 
-    /// The grid bins its input, so a fitted grid cannot report what it was fit
-    /// on. The state keeps the points alongside it, and must clear them exactly
-    /// when the grid's accumulation is cleared — otherwise a snapshot persists
-    /// points the grid no longer holds.
+    /// The kept points must clear exactly when the grid's accumulation does.
     #[test]
     fn fit_points_track_the_grids_accumulation() {
         let mut s = diagonal_state();
