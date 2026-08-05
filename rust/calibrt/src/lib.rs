@@ -166,7 +166,7 @@ pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
 pub const CALIBRANT_WEIGHT: f64 = 1.0;
 
 /// Measurement of the evidence ridge width at one grid column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RidgeMeasurement {
     /// Center library RT position.
     pub library: LibraryRT<f64>,

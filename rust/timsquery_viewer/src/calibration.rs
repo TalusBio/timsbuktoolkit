@@ -608,6 +608,7 @@ impl ViewerCalibrationState {
                 mz_ppm: [0.0, 0.0],
                 mobility_pct: [0.0, 0.0],
             },
+            ridge_widths: Vec::new(),
             n_calibrants: self.n_calibrants,
             n_scored: self.n_scored,
         };

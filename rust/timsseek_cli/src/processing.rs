@@ -469,12 +469,6 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         None
     };
 
-    // Snapshot calibrant points before calibration consumes them (for saving)
-    let calibrant_points: Vec<[f64; 3]> = calibrants
-        .iter()
-        .map(|c| [c.library_rt.0 as f64, c.apex_rt.0 as f64, 1.0])
-        .collect();
-
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
     // Unit-valued with the feature off, where `Recording` is calibrt's no-op `()`.
@@ -500,7 +494,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase2_ms = step
         .finish_with(format_args!(
             "{} calibrants → {} path nodes",
-            calibrant_points.len(),
+            calibration.fit_points().len(),
             calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
         ))
         .as_millis() as u64;
@@ -536,18 +530,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         );
     }
 
-    // Save calibration as JSON v1 (compatible with viewer load)
-    if !calibrant_points.is_empty() {
-        let cal_points_tuples: Vec<(f64, f64, f64)> = calibrant_points
-            .iter()
-            .map(|p| (p[0], p[1], p[2]))
-            .collect();
+    // Save calibration as JSON v2 (compatible with viewer load)
+    if !calibration.fit_points().is_empty() {
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
         let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
         if let Err(e) = calibration.save_json(
-            &cal_points_tuples,
             [rt_lo, rt_hi],
             calib_config.grid_size,
             calib_config.dp_lookback,
@@ -997,6 +986,7 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
         mz_tolerance_ppm,
         mobility_tolerance_pct,
     )
+    .with_fit_points(points)
     .with_ridge_widths(ridge_widths)
     .with_error_stats(errors)
     .with_derivation(derivation))
@@ -1191,8 +1181,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
                 let delta_group_ln1p_diff = ln1p_prev_score - log_curr;
                 let delta_group_ln1p_ratio = log_curr / ln1p_prev_score;
 
-                ln1p_delta_map[prev_index] =
-                    (delta_group_ln1p_diff, delta_group_ln1p_ratio);
+                ln1p_delta_map[prev_index] = (delta_group_ln1p_diff, delta_group_ln1p_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -1375,11 +1364,7 @@ mod tests {
         let best_ln1p = 8.0f32.ln_1p();
         let runner_up_ln1p = 3.0f32.ln_1p();
 
-        assert!(
-            (winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6
-        );
-        assert!(
-            (winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6
-        );
+        assert!((winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6);
+        assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
     }
 }
