@@ -269,6 +269,10 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams, dist: &mut DistControls) -> bo
         &mut changed,
         ui.add(egui::Slider::new(&mut p.noise_floor, 0.0..=1.0).text("noise floor")),
     );
+    chg(
+        &mut changed,
+        ui.add(egui::Slider::new(&mut p.detection_floor, 0.0..=0.5).text("detection floor")),
+    );
     if ui
         .add(egui::Slider::new(&mut p.seed, 0..=999).text("seed"))
         .changed()
@@ -287,6 +291,10 @@ fn controls(ui: &mut egui::Ui, p: &mut SimParams, dist: &mut DistControls) -> bo
         ui.add(
             egui::Slider::new(&mut p.precursor_intensity, 0.0..=2.0).text("precursor intensity"),
         ),
+    );
+    chg(
+        &mut changed,
+        ui.add(egui::Slider::new(&mut p.precursor_noise_mult, 0.0..=5.0).text("precursor noise x")),
     );
 
     ui.separator();
