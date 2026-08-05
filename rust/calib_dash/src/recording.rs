@@ -86,6 +86,14 @@ impl FitRecording {
         &self.ridge
     }
 
+    /// Copy the fit's ridge in, since it is not an event: the state carries it
+    /// after `fit_with` returns. Call once per fit, after the fit — `FitStarted`
+    /// clears it along with everything else a fit fills.
+    pub fn set_ridge(&mut self, widths: &[RidgeMeasurement]) {
+        self.ridge.clear();
+        self.ridge.extend_from_slice(widths);
+    }
+
     pub(crate) fn dp(&self) -> &[DpDecision] {
         &self.dp
     }
@@ -163,7 +171,6 @@ impl FitObserver for FitRecording {
                 self.path_indices.extend_from_slice(indices);
             }
             FitEvent::CurveFit { curve } => self.curve = Some(curve.clone()),
-            FitEvent::RidgeMeasured { widths } => self.ridge.extend_from_slice(widths),
         }
     }
 }
@@ -300,15 +307,18 @@ mod tests {
     ///   still reach the far corner. Both bounds-check and answer `0.0`/`false`
     ///   off the end, so an unresized buffer reads as "empty grid" rather than
     ///   panicking — the failure mode is a silently blank heatmap.
-    /// - everything a fit *appends* to is cleared first. Without that, the path,
-    ///   the curve and the ridge each carry the previous fit's entries in front
-    ///   of this one's, and the Fit tab draws two fits at once.
+    /// - everything a fit *appends* to is cleared first. Without that, the path
+    ///   and the curve carry the previous fit's entries in front of this one's,
+    ///   and the Fit tab draws two fits at once. `set_ridge` replaces rather than
+    ///   appends, so the ridge is checked here for the same guarantee by a
+    ///   different route.
     #[test]
     fn a_refit_at_a_different_bins_resizes_the_grid_and_clears_the_appended_buffers() {
         // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
         let mut small = diagonal_state(3);
         let mut rec = FitRecording::new(3);
         small.fit_with(&mut rec, ObserveOpts::NONE);
+        rec.set_ridge(small.ridge_widths());
         assert_eq!(
             (
                 rec.geom().bins,
@@ -323,6 +333,7 @@ mod tests {
         // Fit 2, a 10x10 grid through the same recording.
         let mut big = diagonal_state(10);
         big.fit_with(&mut rec, ObserveOpts::NONE);
+        rec.set_ridge(big.ridge_widths());
 
         assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
         // Row 9 exists only in a resized buffer: at 3x3 the flat index 9*10+9

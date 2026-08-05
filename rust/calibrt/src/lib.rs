@@ -282,9 +282,6 @@ pub enum FitEvent<'a> {
     CurveFit {
         curve: &'a CalibrationCurve,
     },
-    RidgeMeasured {
-        widths: &'a [RidgeMeasurement],
-    },
 }
 
 pub trait FitObserver {
@@ -458,11 +455,10 @@ impl CalibrationState {
             obs.on_event(FitEvent::CurveFit { curve: c });
         }
 
-        // The ridge is part of the fit: the per-query RT tolerance reads it on
-        // every scoring thread, and an observer needs it to draw the fit it just
-        // recorded. Measuring here is what makes both a `&self` read.
-        let widths = self.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, obs);
-        self.ridge_widths = widths;
+        // The ridge is part of the fit, not an event: `ridge_widths()` reads it
+        // afterwards, which is what the per-query RT tolerance needs on every
+        // scoring thread and all an overlay needs to draw it.
+        self.ridge_widths = self.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
     }
 
     /// Drop the previous fit's results, keeping the grid and the buffers.
@@ -545,19 +541,6 @@ impl CalibrationState {
         &self.ridge_widths
     }
 
-    /// Measure the ridge and report it through `obs`. Called by [`Self::fit_with`]
-    /// at [`DEFAULT_RIDGE_FRACTION`]; read the result back with
-    /// [`Self::ridge_widths`].
-    fn measure_ridge_width_with<O: FitObserver>(
-        &mut self,
-        fraction: f64,
-        obs: &mut O,
-    ) -> Vec<RidgeMeasurement> {
-        let widths = self.measure_ridge_width_core(fraction);
-        obs.on_event(FitEvent::RidgeMeasured { widths: &widths });
-        widths
-    }
-
     /// Measure the width of the evidence "mountain" around the fitted path.
     ///
     /// For each grid column holding a path cell, expands up and down from that
@@ -568,7 +551,7 @@ impl CalibrationState {
     /// buffers without writing them back, so measuring twice gives the same
     /// answer and a later `update` can still add points to the same grid.
     /// `&mut self` is for those two buffers, not for the fit.
-    fn measure_ridge_width_core(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
+    fn measure_ridge_width(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
@@ -810,7 +793,6 @@ mod observer_tests {
                 }
                 FitEvent::PathFound { .. } => self.names.push("path"),
                 FitEvent::CurveFit { .. } => self.names.push("curve"),
-                FitEvent::RidgeMeasured { .. } => self.names.push("ridge"),
             }
         }
     }
@@ -886,8 +868,8 @@ mod observer_tests {
         s.fit_with(&mut rec, ObserveOpts::NONE);
         assert_eq!(
             rec.names,
-            vec!["start", "suppressed", "path", "curve", "ridge"],
-            "no dp events when dp_nodes is off; the ridge closes the fit"
+            vec!["start", "suppressed", "path", "curve"],
+            "no dp events when dp_nodes is off; the ridge is not an event"
         );
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
