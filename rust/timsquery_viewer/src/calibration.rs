@@ -47,6 +47,8 @@ use timsseek::scoring::extraction::build_extraction;
 use timsseek::scoring::pipeline::{
     CalibrantCandidate,
     CalibrantHeap,
+    CalibrationConfig,
+    TOP_N_FRAGMENTS,
 };
 
 use crate::file_loader::ElutionGroupData;
@@ -63,20 +65,19 @@ const CONTROL_STOP_REQUESTED: u8 = 2;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Number of top fragments to keep per elution group during calibration scoring.
-const CALIBRATION_TOP_N_FRAGMENTS: usize = 8;
-
-/// How many scored elution groups between channel snapshots.
+/// How many scored elution groups between channel snapshots. The viewer's own —
+/// it governs UI refresh, nothing the search does.
 const SNAPSHOT_INTERVAL: usize = 100;
 
-/// Default CalibrantHeap capacity.
-const DEFAULT_HEAP_CAPACITY: usize = 2000;
-
-/// Default calibrt grid size.
-const DEFAULT_GRID_SIZE: usize = 100;
-
-/// Default DP lookback for calibrt pathfinding.
-const DEFAULT_LOOKBACK: usize = 30;
+/// The search's calibration settings: grid geometry, DP lookback and calibrant
+/// budget. Read from the search rather than restated here — a viewer fitting on
+/// its own grid would draw a curve the search would not produce.
+///
+/// These are the defaults, not a user's configured values: the viewer has no
+/// config file, so it shows what an unconfigured search would do.
+fn search_calibration() -> CalibrationConfig {
+    CalibrationConfig::default()
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -159,7 +160,7 @@ impl Default for ViewerCalibrationState {
             generation: 0,
             n_scored: 0,
             n_calibrants: 0,
-            heap_capacity: DEFAULT_HEAP_CAPACITY,
+            heap_capacity: search_calibration().n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
             residuals: None,
@@ -200,7 +201,7 @@ impl ViewerCalibrationState {
             generation: 0,
             n_scored: n_calibrants,
             n_calibrants,
-            heap_capacity: DEFAULT_HEAP_CAPACITY,
+            heap_capacity: search_calibration().n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
             residuals: None,
@@ -226,8 +227,8 @@ impl ViewerCalibrationState {
             grid_size: self
                 .calibration_state
                 .as_ref()
-                .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins),
-            lookback: DEFAULT_LOOKBACK,
+                .map_or(search_calibration().grid_size, CalibrationState::grid_bins),
+            lookback: search_calibration().dp_lookback,
         }
     }
 
@@ -406,10 +407,10 @@ impl ViewerCalibrationState {
         let bins = self
             .calibration_state
             .as_ref()
-            .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins);
+            .map_or(search_calibration().grid_size, CalibrationState::grid_bins);
         let cs = match self.calibration_state.as_mut() {
             Some(cs) => cs,
-            None => match CalibrationState::deferred(bins, DEFAULT_LOOKBACK) {
+            None => match CalibrationState::deferred(bins, search_calibration().dp_lookback) {
                 Ok(cs) => self.calibration_state.insert(cs),
                 Err(e) => {
                     tracing::warn!("Calibration refit skipped: no grid at {bins} bins: {e:?}");
@@ -523,7 +524,7 @@ impl ViewerCalibrationState {
                             expected_intensities,
                             index.as_ref(),
                             &tolerance,
-                            Some(CALIBRATION_TOP_N_FRAGMENTS),
+                            Some(TOP_N_FRAGMENTS),
                         ) {
                             Ok(ext) => ext,
                             Err(_) => return (scorer, local_heap),
