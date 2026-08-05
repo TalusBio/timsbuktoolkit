@@ -110,6 +110,11 @@ pub struct Peptide {
     pub decoy_group: u32,
     /// Whether the source library exposes sequence features. Gates [`Self::parse`]:
     /// a library without them yields no residues, so the sequence lanes stay NaN.
+    ///
+    /// TODO: carry `timsquery::models::capabilities::SeqFeatureState` instead.
+    /// The library-side state is a tri-state and this flattens it to
+    /// `== Available` at the arena boundary, so "the library has no sequences"
+    /// and "the library was built without them" arrive here indistinguishable.
     pub sequence_features: bool,
 }
 

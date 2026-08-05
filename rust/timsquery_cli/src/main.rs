@@ -20,7 +20,6 @@ use crate::commands::{
 };
 use crate::error::CliError;
 
-// Rationale for both gated platforms lives next to the dep in Cargo.toml.
 #[cfg(any(target_os = "windows", target_env = "musl"))]
 use mimalloc::MiMalloc;
 

@@ -1007,21 +1007,9 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
     res
 }
 
-/// Per-bucket inner scan for `for_each_peak`. `mz_filter =
-/// Unrestricted` means "the whole bucket is known to be inside the
-/// query mz range, skip the per-peak mz compare". With
-/// `#[inline(always)]` + the `OptionallyRestricted` split at each call
-/// site, LLVM specializes two code paths — one that branches on mz
-/// per peak, one that doesn't.
-///
-/// Filter reads only the column it needs (mz or mobility). Full
-/// `IndexedPeak<T>` is materialized on survivors before calling `f`,
-/// so the callback sees the same `&IndexedPeak<T>` API as the AoS
-/// version. LLVM SROA elides the temporary struct when the callback
-/// reads a single field.
-/// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and
-/// unrolls NEON (4×f32 × 2). Remainder falls through to scalar tail.
-/// Pinned to 8: `scan_bucket_slice` walks the mask as a `u64`.
+/// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and unrolls NEON
+/// (4×f32 × 2); the remainder falls through to a scalar tail. Pinned to 8
+/// because [`scan_bucket_slice`] walks the mask as a `u64`.
 const SCAN_CHUNK: usize = 8;
 
 #[inline(always)]
@@ -1051,6 +1039,16 @@ fn apply_mob_mask<const N: usize>(
     }
 }
 
+/// Per-bucket inner scan for `for_each_peak`. `mz_filter = Unrestricted` means
+/// "the whole bucket is known to be inside the query mz range, skip the per-peak
+/// mz compare". With `#[inline(always)]` + the `OptionallyRestricted` split at
+/// each call site, LLVM specializes two code paths — one that branches on mz per
+/// peak, one that doesn't.
+///
+/// Each filter reads only the column it needs (mz or mobility). The full
+/// `IndexedPeak<T>` is materialized on survivors before calling `f`, so the
+/// callback sees the same `&IndexedPeak<T>` API as the AoS version. LLVM SROA
+/// elides the temporary struct when the callback reads a single field.
 #[inline(always)]
 fn scan_bucket_slice<T, F>(
     view: PeakColumnsView<'_, T>,
@@ -1954,8 +1952,7 @@ mod tests {
         ];
 
         for shape in &shapes {
-            let cycles: Vec<MS1CycleIndex> =
-                shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
+            let cycles: Vec<MS1CycleIndex> = shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
             // Only `cycle_index` is read; the other columns just build the view.
             let ignored_f32 = vec![0.0f32; cycles.len()];
             let ignored_mob = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
@@ -1968,9 +1965,8 @@ mod tests {
             let max = shape.iter().copied().max().unwrap_or(0) + 3;
             for lo in 0..=max {
                 for hi in lo..=max {
-                    let range =
-                        TupleRange::try_new(MS1CycleIndex::new(lo), MS1CycleIndex::new(hi))
-                            .unwrap();
+                    let range = TupleRange::try_new(MS1CycleIndex::new(lo), MS1CycleIndex::new(hi))
+                        .unwrap();
                     assert_eq!(
                         view.find_cycle_range(range),
                         reference(&cycles, MS1CycleIndex::new(lo), MS1CycleIndex::new(hi)),

@@ -154,6 +154,23 @@ pub struct ApexBlocks {
     pub apex_lazy: ApexLazyScores,
 }
 
+/// Assert that everything about to be walked together spans the cycle axis.
+/// `zip` and the chunked loops truncate to the shortest side instead of
+/// complaining, so a mismatch would silently drop cycles from an accumulator.
+/// Checked where the slices are zipped, not where they are sized: the widths
+/// come from two places — the trace buffers and the extraction being scored —
+/// and only the call site sees both.
+#[inline]
+#[track_caller]
+fn assert_cycle_widths(widths: &[usize], n_cycles: usize) {
+    for &width in widths {
+        assert_eq!(
+            width, n_cycles,
+            "cycle-axis width mismatch: {width} != {n_cycles}"
+        );
+    }
+}
+
 /// Chunk-8 vectorized accumulator for `compute_pass_1`'s 4 cheap
 /// per-cycle accumulators (dot-product, norm-sq, sqrt-sum, raw-sum).
 ///
@@ -174,15 +191,16 @@ fn accumulate_pass1_chunks(
     sqrt_sum: &mut [f32],
     raw_sum: &mut [f32],
 ) {
-    // Invariant: all slices are sized to num_cycles and must match, else
-    // `zip` will silently truncate and downstream accumulators diverge
-    // from the reference impl. Programming error, not a recoverable
-    // condition — panic.
     let n = chrom.len();
-    assert_eq!(ms2_dot_prod.len(), n, "ms2_dot_prod length mismatch");
-    assert_eq!(ms2_norm_sq_obs.len(), n, "ms2_norm_sq_obs length mismatch");
-    assert_eq!(sqrt_sum.len(), n, "sqrt_sum length mismatch");
-    assert_eq!(raw_sum.len(), n, "raw_sum length mismatch");
+    assert_cycle_widths(
+        &[
+            ms2_dot_prod.len(),
+            ms2_norm_sq_obs.len(),
+            sqrt_sum.len(),
+            raw_sum.len(),
+        ],
+        n,
+    );
 
     let (c_ch, c_tail) = chrom.as_chunks::<8>();
     let (d_ch, d_tail) = ms2_dot_prod.as_chunks_mut::<8>();
@@ -293,6 +311,10 @@ struct TraceScorerBuffers {
     temp_ms2_norm_sq_obs: Vec<f32>,
     /// Scribe: sum(sqrt(obs)) per cycle.
     temp_sqrt_sum: Vec<f32>,
+    /// Reciprocal of `temp_sqrt_sum`, or 0.0 where that sum is 0.0 (an empty
+    /// cycle). Scribe's row loop walks the cycle axis once per retained
+    /// fragment, so the division is folded out into this buffer first.
+    temp_inv_sqrt_sum: Vec<f32>,
     /// Log-intensity: sum(obs) per cycle (finalized as log1p).
     temp_raw_intensity_sum: Vec<f32>,
     /// Scribe pred-norm list, one entry per active expected fragment.
@@ -306,6 +328,7 @@ impl TraceScorerBuffers {
             temp_ms2_dot_prod: vec![0.0f32; size],
             temp_ms2_norm_sq_obs: vec![0.0f32; size],
             temp_sqrt_sum: vec![0.0f32; size],
+            temp_inv_sqrt_sum: vec![0.0f32; size],
             temp_raw_intensity_sum: vec![0.0f32; size],
             pred_norms: Vec::with_capacity(max_frags),
         }
@@ -315,6 +338,7 @@ impl TraceScorerBuffers {
         self.temp_ms2_dot_prod.fill(0.0);
         self.temp_ms2_norm_sq_obs.fill(0.0);
         self.temp_sqrt_sum.fill(0.0);
+        self.temp_inv_sqrt_sum.fill(0.0);
         self.temp_raw_intensity_sum.fill(0.0);
         self.pred_norms.clear();
     }
@@ -323,6 +347,7 @@ impl TraceScorerBuffers {
         self.temp_ms2_dot_prod.resize(len, 0.0);
         self.temp_ms2_norm_sq_obs.resize(len, 0.0);
         self.temp_sqrt_sum.resize(len, 0.0);
+        self.temp_inv_sqrt_sum.resize(len, 0.0);
         self.temp_raw_intensity_sum.resize(len, 0.0);
     }
 }
@@ -584,15 +609,7 @@ impl TraceScorer {
         scoring_ctx: &Extraction<T>,
     ) -> Result<(), DataProcessingError> {
         let collector = &scoring_ctx.chromatograms;
-
-        // The accumulation loops below `zip` the trace buffers against
-        // chromatogram rows, which would silently truncate on a width mismatch.
-        // Establish the equality once, up front.
-        assert_eq!(
-            self.traces.ms2_lazyscore.len(),
-            collector.num_cycles(),
-            "traces were sized for a different extraction than the one being scored"
-        );
+        let n_cycles = collector.num_cycles();
 
         // --- MS2 (Fragments) ---
         let ms2_dot_prod = &mut self.buffers.temp_ms2_dot_prod;
@@ -625,6 +642,7 @@ impl TraceScorer {
             // so a positive-intensity gate here only skips `logf` calls, and at
             // the ~69% occupancy real chromatograms have it costs more in
             // mispredicts than it saves in calls.
+            assert_cycle_widths(&[self.traces.ms2_lazyscore.len(), chrom.len()], n_cycles);
             for (dst, &intensity) in self.traces.ms2_lazyscore.iter_mut().zip(chrom.iter()) {
                 *dst += intensity.max(1.0).ln();
             }
@@ -676,13 +694,12 @@ impl TraceScorer {
 
             // Fold the per-cycle division out of the row loop below, which walks
             // the same cycle axis once per retained fragment. Zero stays zero,
-            // so it still marks the cycles finalize floors.
-            for ss in sqrt_sum.iter_mut() {
-                if *ss != 0.0 {
-                    *ss = ss.recip();
-                }
+            // so it still marks the cycles that finalize floors.
+            let inv_sqrt_sum = &mut self.buffers.temp_inv_sqrt_sum;
+            assert_cycle_widths(&[inv_sqrt_sum.len(), sqrt_sum.len()], n_cycles);
+            for (inv, &ss) in inv_sqrt_sum.iter_mut().zip(sqrt_sum.iter()) {
+                *inv = if ss == 0.0 { 0.0 } else { ss.recip() };
             }
-            let inv_sqrt_sum = sqrt_sum;
 
             // Pass B: accumulate SSE. Branchless: `sqrt(max(0, x)) * 0.0` is the
             // zero the gated form contributed, and empty cycles (`inv == 0`)
@@ -693,6 +710,7 @@ impl TraceScorer {
                     .fragments
                     .get_row_idx(row_idx)
                     .expect("row_idx from enumeration must be valid");
+                assert_cycle_widths(&[self.traces.ms2_scribe.len(), row.len()], n_cycles);
                 for ((dst, &intensity), &inv) in self
                     .traces
                     .ms2_scribe
@@ -706,13 +724,8 @@ impl TraceScorer {
             }
 
             // Finalize scribe: -log(sse)
-            for (scribe, &inv) in self
-                .traces
-                .ms2_scribe
-                .iter_mut()
-                .zip(inv_sqrt_sum.iter())
-                .take(n)
-            {
+            assert_cycle_widths(&[self.traces.ms2_scribe.len()], n_cycles);
+            for (scribe, &inv) in self.traces.ms2_scribe.iter_mut().zip(inv_sqrt_sum.iter()) {
                 if inv == 0.0 {
                     *scribe = SCRIBE_FLOOR;
                 } else {
@@ -730,6 +743,10 @@ impl TraceScorer {
                 continue; // Skip decoy isotope keys
             }
             // Branchless: adding a clamped zero is what the gate contributed.
+            assert_cycle_widths(
+                &[self.traces.ms1_precursor_trace.len(), chrom.len()],
+                n_cycles,
+            );
             for (dst, &intensity) in self.traces.ms1_precursor_trace.iter_mut().zip(chrom.iter()) {
                 *dst += intensity.max(0.0);
             }

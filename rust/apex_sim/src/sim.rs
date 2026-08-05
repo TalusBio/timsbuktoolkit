@@ -125,25 +125,23 @@ pub struct SimParams {
     pub n_isotopes: usize,
     pub precursor_intensity: f32,
     /// Per-cell noise scale for precursor rows, the counterpart of
-    /// [`FragmentSpec::noise_mult`]. Only matters alongside `detection_floor`,
-    /// which compares against noise on all but the few cycles under the peak:
-    /// it is the noise-to-floor ratio that sets how many cells survive, so this
-    /// is the knob that moves precursor density independently of fragments'.
+    /// [`FragmentSpec::noise_mult`]. Moves precursor density without touching
+    /// fragments'; see [`SimParams::with_measured_density`].
     pub precursor_noise_mult: f32,
 
     /// Global additive noise scale (uniform 0..1 * this, per cell).
     pub noise_floor: f32,
 
-    /// Detection threshold as a fraction of `height`: a cell that samples below
-    /// it is recorded as zero, the way an unextracted (mz, mobility, cycle) cell
-    /// is absent from a real chromatogram rather than small.
+    /// Detection threshold as a fraction of `height`: a cell below it is
+    /// recorded as zero, the way an unextracted (mz, mobility, cycle) cell is
+    /// absent from a real chromatogram rather than small. Applied after
+    /// interferent injection, so it bounds the cell's final content.
     ///
-    /// At 0.0 (the default) every cell is populated, which is *not* what real
-    /// data looks like: a HeLa DIA Phase-1 run measures 68.6% of fragment cells
-    /// and 36.6% of precursor cells above zero, with 4.7% of cycles empty across
-    /// all retained fragments. Because the threshold is compared against the
-    /// signal, dropped cells cluster in the peak tails, which is what makes
-    /// whole cycles go empty — per-cell random dropout would not.
+    /// At 0.0 (the default) every cell is populated, which is not what real
+    /// data looks like — see [`SimParams::with_measured_density`]. Because the
+    /// threshold is compared against the cell, dropped cells cluster in the peak
+    /// tails, which is what makes whole cycles go empty; per-cell random dropout
+    /// would not.
     pub detection_floor: f32,
 
     pub seed: u64,
@@ -196,6 +194,24 @@ impl Default for SimParams {
 }
 
 impl SimParams {
+    /// Populate cells at the rate production data does: a HeLa DIA Phase-1 run
+    /// measures 68.6% of fragment cells and 36.6% of precursor cells above zero.
+    /// Every other scenario fills every cell, which hides how the scoring loops
+    /// behave on sparse chromatograms.
+    ///
+    /// The three knobs are tuned jointly and only make sense together, which is
+    /// why they live here rather than at each call site. `detection_floor` sets
+    /// fragment density; `precursor_noise_mult` then moves precursor density on
+    /// its own, because the floor is compared against the cell and so it is the
+    /// noise-to-floor ratio that decides how many cells survive. Pinned by
+    /// `tests::measured_density_scenarios_match_production`.
+    pub fn with_measured_density(mut self) -> Self {
+        self.noise_floor = 0.2;
+        self.detection_floor = 0.097;
+        self.precursor_noise_mult = 0.57;
+        self
+    }
+
     /// Linear cycle -> retention-time (ms) mapper, matching what the pipeline
     /// passes into `TraceScorer::suggest_apex` / `score_at`.
     pub fn rt_mapper(&self) -> impl Fn(usize) -> u32 + '_ {
@@ -281,7 +297,7 @@ pub fn build(params: &SimParams) -> SimData {
         let intensities = (0..n)
             .map(|c| {
                 let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
-                sample_cell(&mut rng, signal, noise, detection_floor)
+                sample_cell(&mut rng, signal, noise)
             })
             .collect();
         frag_order.push((f.label.clone(), dummy_mz));
@@ -301,7 +317,7 @@ pub fn build(params: &SimParams) -> SimData {
         let intensities = (0..n)
             .map(|c| {
                 let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
-                sample_cell(&mut rng, signal, noise, detection_floor)
+                sample_cell(&mut rng, signal, noise)
             })
             .collect();
         prec_order.push((iso, dummy_mz));
@@ -314,6 +330,9 @@ pub fn build(params: &SimParams) -> SimData {
 
     // --- Inject random peak-like objects onto existing rows ---
     inject_random_peaks(&mut rng, &mut frag_rows, &mut prec_rows, params);
+
+    apply_detection_floor(&mut frag_rows, detection_floor);
+    apply_detection_floor(&mut prec_rows, detection_floor);
 
     // --- Pack into MzMajorIntensityArrays (cycle_offset = 0) ---
     let mut fragments = MzMajorIntensityArray::<String, f32>::try_new_empty(frag_order, n, 0)
@@ -430,9 +449,24 @@ fn inject_random_peaks(
 }
 
 /// Sample one observed cell: signal + uniform noise floor, clamped >=0.
-fn sample_cell(rng: &mut ChaCha8Rng, signal: f32, noise: f32, detection_floor: f32) -> f32 {
-    let cell = (signal + rng.random::<f32>() * noise).max(0.0);
-    if cell < detection_floor { 0.0 } else { cell }
+fn sample_cell(rng: &mut ChaCha8Rng, signal: f32, noise: f32) -> f32 {
+    (signal + rng.random::<f32>() * noise).max(0.0)
+}
+
+/// Zero every cell below `floor`, so it is absent from the chromatogram rather
+/// than small. Runs after interferent injection: what an extractor fails to
+/// record is the cell's final content, whatever put the signal there.
+fn apply_detection_floor(rows: &mut [TransitionRow], floor: f32) {
+    if floor <= 0.0 {
+        return;
+    }
+    for row in rows.iter_mut() {
+        for cell in row.intensities.iter_mut() {
+            if *cell < floor {
+                *cell = 0.0;
+            }
+        }
+    }
 }
 
 /// Copy display rows into an [`MzMajorIntensityArray`] via `add_at_index`.
@@ -468,23 +502,32 @@ mod tests {
         (frac(&d.fragment_rows), frac(&d.precursor_rows))
     }
 
-    /// A HeLa DIA Phase-1 run measures 68.6% of fragment cells and 36.6% of
-    /// precursor cells above zero; the default params populate every cell. This
-    /// pins the settings that reach the measured occupancy, since sparsity is
-    /// what the `intensity > 0.0` gates in `compute_pass_1` are sensitive to.
+    /// The `*_measured_density` scenarios must reach the occupancy their name
+    /// claims — 68.6% of fragment cells and 36.6% of precursor cells above zero
+    /// — since sparsity is what the per-cell work in `compute_pass_1` is
+    /// sensitive to. Asserted on the suite entries, not on a hand-built
+    /// `SimParams`: the tuning only holds under the interferent load the
+    /// benchmark actually runs, and interferents populate cells too.
     #[test]
-    fn detection_floor_reaches_measured_cell_density() {
-        let p = SimParams {
-            n_cycles: 1695,
-            apex_cycle: 847.0,
-            noise_floor: 0.2,
-            detection_floor: 0.11,
-            precursor_noise_mult: 0.6,
-            ..Default::default()
-        };
-        let (frag, prec) = cell_density(&p);
-        assert!((0.66..0.71).contains(&frag), "fragment density {frag}");
-        assert!((0.34..0.40).contains(&prec), "precursor density {prec}");
+    fn measured_density_scenarios_match_production() {
+        let scenarios: Vec<_> = crate::bench::broad_suite()
+            .into_iter()
+            .chain(crate::bench::narrow_suite())
+            .filter(|(name, _)| name.ends_with("measured_density"))
+            .collect();
+        assert_eq!(scenarios.len(), 2, "both suites must carry the scenario");
+
+        for (name, params) in scenarios {
+            let (frag, prec) = cell_density(&params);
+            assert!(
+                (0.67..0.70).contains(&frag),
+                "{name} fragment density {frag}"
+            );
+            assert!(
+                (0.33..0.39).contains(&prec),
+                "{name} precursor density {prec}"
+            );
+        }
     }
 
     #[test]

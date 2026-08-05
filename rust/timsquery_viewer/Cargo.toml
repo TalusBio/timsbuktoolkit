@@ -42,8 +42,6 @@ default = ["mzdata"]
 mzdata = ["timsquery/mzdata"]
 instrumentation = ["timsseek/instrumentation"]
 
-# Not using mimalloc on windows makes everything extremely slow; musl's own
-# allocator serialises every allocation on one lock, which dominates a
-# rayon-parallel run. Keep this cfg identical to the gate in src/main.rs.
+# In windows seems to be faster.
 [target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
 mimalloc = { workspace = true }

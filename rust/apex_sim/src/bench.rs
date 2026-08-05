@@ -153,15 +153,7 @@ pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
         f.theo_intensity = 1.0;
     }
 
-    // Production cell occupancy: `detection_floor` and `precursor_noise_mult`
-    // calibrated to the 68.6% fragment / 36.6% precursor density measured on a
-    // HeLa DIA Phase-1 run (see `sim::tests::detection_floor_reaches_measured_cell_density`).
-    // The other scenarios populate every cell, which hides how the scoring loops
-    // behave on sparse chromatograms.
-    let mut sparse = base();
-    sparse.noise_floor = 0.2;
-    sparse.detection_floor = 0.11;
-    sparse.precursor_noise_mult = 0.6;
+    let sparse = base().with_measured_density();
 
     vec![
         ("broad_clean", clean),
@@ -212,11 +204,7 @@ pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
         f.theo_intensity = 1.0;
     }
 
-    // Measured production cell occupancy; see `broad_suite`.
-    let mut sparse = base();
-    sparse.noise_floor = 0.2;
-    sparse.detection_floor = 0.11;
-    sparse.precursor_noise_mult = 0.6;
+    let sparse = base().with_measured_density();
 
     vec![
         ("narrow_clean", clean),

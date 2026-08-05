@@ -305,7 +305,6 @@ impl CalibrationResult {
                 ],
             },
             ridge_widths: self.ridge_widths.clone(),
-            n_calibrants: self.fit_points.len(),
             n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
@@ -343,91 +342,18 @@ impl CalibrationResult {
         })
     }
 
-    /// Read a saved calibration off disk and rebuild it. See [`Self::from_saved`].
-    ///
-    /// `raw_rt_range` is the RT span of the file the calibration is about to be
-    /// used on. A calibration is only valid for the run it was fit on, and the
-    /// spans not overlapping is the one cheap way to catch the wrong file, so
-    /// passing `None` skips the only check there is.
+    /// Read a saved calibration off disk and rebuild it, logging any
+    /// provenance warning. See [`SavedCalibration::read`] and
+    /// [`Self::from_saved`].
     pub fn read_json(
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
     ) -> Result<Self, String> {
-        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let saved: SavedCalibration = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        if saved.version != "v2" {
-            return Err(format!(
-                "Unsupported calibration version: {} (expected v2)",
-                saved.version
-            ));
-        }
-        match raw_rt_range {
-            Some(raw) => {
-                let overlap_lo = saved.rt_range_seconds[0].max(raw[0]);
-                let overlap_hi = saved.rt_range_seconds[1].min(raw[1]);
-                let overlap = (overlap_hi - overlap_lo).max(0.0);
-                let span = saved.rt_range_seconds[1] - saved.rt_range_seconds[0];
-                if span > 0.0 && overlap / span < 0.5 {
-                    tracing::warn!(
-                        "Calibration RT range [{:.1}, {:.1}]s overlaps the raw file's \
-                         [{:.1}, {:.1}]s by {:.0}% — it may have been fit on a different run",
-                        saved.rt_range_seconds[0],
-                        saved.rt_range_seconds[1],
-                        raw[0],
-                        raw[1],
-                        (overlap / span) * 100.0,
-                    );
-                }
-            }
-            None => tracing::warn!(
-                "Loading a calibration without a raw RT range to check it against — \
-                 nothing verifies it was fit on this run"
-            ),
+        let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
+        if let Some(warning) = warning {
+            tracing::warn!("{warning}");
         }
         Self::from_saved(&saved).map_err(|e| format!("{e:?}"))
-    }
-
-    /// Load calibration from JSON v2 format.
-    pub fn load_json(
-        path: &std::path::Path,
-        raw_rt_range: Option<[f64; 2]>,
-    ) -> Result<LoadedCalibration, String> {
-        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let saved: SavedCalibration = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        if saved.version != "v2" {
-            return Err(format!(
-                "Unsupported calibration version: {} (expected v2)",
-                saved.version
-            ));
-        }
-
-        let warning = match raw_rt_range {
-            Some(raw) => {
-                let overlap_lo = saved.rt_range_seconds[0].max(raw[0]);
-                let overlap_hi = saved.rt_range_seconds[1].min(raw[1]);
-                let overlap = (overlap_hi - overlap_lo).max(0.0);
-                let span = saved.rt_range_seconds[1] - saved.rt_range_seconds[0];
-                if span > 0.0 && overlap / span < 0.5 {
-                    Some(
-                        "RT range mismatch — calibration may not be valid for this file"
-                            .to_string(),
-                    )
-                } else {
-                    None
-                }
-            }
-            None => Some("No raw file loaded — cannot verify RT range compatibility".to_string()),
-        };
-
-        Ok(LoadedCalibration {
-            snapshot: saved.calibration,
-            tolerances: saved.tolerances,
-            errors: saved.errors,
-            derivation: saved.derivation,
-            n_calibrants: saved.n_calibrants,
-            n_scored: saved.n_scored,
-            warning,
-        })
     }
 
     /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
@@ -480,8 +406,67 @@ pub struct SavedCalibration {
     /// widths were persisted; those load with the uniform `rt_minutes` fallback.
     #[serde(default)]
     pub ridge_widths: Vec<RidgeMeasurement>,
-    pub n_calibrants: usize,
     pub n_scored: usize,
+}
+
+impl SavedCalibration {
+    /// Parse a calibration file and check its provenance. The `Option<String>`
+    /// is a human-readable reason to distrust the file, not an error: a
+    /// calibration is only valid for the run it was fit on, and comparing RT
+    /// spans is the one cheap way to catch the wrong file.
+    ///
+    /// `raw_rt_range` is the RT span of the file the calibration is about to be
+    /// used on; `None` means there is nothing to check against, which is itself
+    /// worth warning about.
+    ///
+    /// Every reader goes through here so the version gate and the provenance
+    /// check cannot drift between the CLI and the viewer.
+    pub fn read(
+        path: &std::path::Path,
+        raw_rt_range: Option<[f64; 2]>,
+    ) -> Result<(Self, Option<String>), String> {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if saved.version != "v2" {
+            return Err(format!(
+                "Unsupported calibration version: {} (expected v2)",
+                saved.version
+            ));
+        }
+        let warning = saved.provenance_warning(raw_rt_range);
+        Ok((saved, warning))
+    }
+
+    /// Number of calibrant points the curve was fit on.
+    pub fn n_calibrants(&self) -> usize {
+        self.calibration.points.len()
+    }
+
+    fn provenance_warning(&self, raw_rt_range: Option<[f64; 2]>) -> Option<String> {
+        let Some(raw) = raw_rt_range else {
+            return Some(
+                "No raw RT range to check the calibration against — nothing verifies it was \
+                 fit on this run"
+                    .to_string(),
+            );
+        };
+        let overlap_lo = self.rt_range_seconds[0].max(raw[0]);
+        let overlap_hi = self.rt_range_seconds[1].min(raw[1]);
+        let overlap = (overlap_hi - overlap_lo).max(0.0);
+        let span = self.rt_range_seconds[1] - self.rt_range_seconds[0];
+        if span <= 0.0 || overlap / span >= 0.5 {
+            return None;
+        }
+        Some(format!(
+            "Calibration RT range [{:.1}, {:.1}]s overlaps the raw file's [{:.1}, {:.1}]s by \
+             {:.0}% — it may have been fit on a different run",
+            self.rt_range_seconds[0],
+            self.rt_range_seconds[1],
+            raw[0],
+            raw[1],
+            (overlap / span) * 100.0,
+        ))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -489,17 +474,6 @@ pub struct SavedTolerances {
     pub rt_minutes: f32,
     pub mz_ppm: [f64; 2],
     pub mobility_pct: [f64; 2],
-}
-
-/// Result of loading a calibration JSON file.
-pub struct LoadedCalibration {
-    pub snapshot: CalibrationSnapshot,
-    pub tolerances: SavedTolerances,
-    pub errors: DimensionErrors,
-    pub derivation: DerivationParams,
-    pub n_calibrants: usize,
-    pub n_scored: usize,
-    pub warning: Option<String>,
 }
 
 /// Linearly interpolate the ridge half-width at a given library RT (seconds).
@@ -527,6 +501,7 @@ pub fn ridge_half_width_interp(widths: &[RidgeMeasurement], library_rt_s: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// A curve with enough spread that the grid fit is non-degenerate, plus ridge
     /// widths and tolerances distinct from every default, so a field silently
@@ -572,15 +547,27 @@ mod tests {
         (calibration, grid_size, lookback)
     }
 
+    /// Save the fixture to a fresh temp dir, returning the dir so it outlives
+    /// the path (dropping it removes the tree, including after a panic).
+    fn save_fixture(calibration: &CalibrationResult, grid_size: usize, lookback: usize) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        calibration
+            .save_json(
+                [0.0, 1200.0],
+                grid_size,
+                lookback,
+                999,
+                &dir.path().join("calibration.json"),
+            )
+            .unwrap();
+        dir
+    }
+
     #[test]
     fn save_json_then_from_saved_is_lossless() {
         let (original, grid_size, lookback) = sample_calibration();
-        let dir = std::env::temp_dir().join("timsseek_calibration_roundtrip");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("calibration.json");
-        original
-            .save_json([0.0, 1200.0], grid_size, lookback, 999, &path)
-            .unwrap();
+        let dir = save_fixture(&original, grid_size, lookback);
+        let path = dir.path().join("calibration.json");
 
         let loaded = CalibrationResult::read_json(&path, Some([0.0, 1200.0])).unwrap();
 
@@ -590,25 +577,26 @@ mod tests {
         );
         assert_eq!(loaded.mz_tolerance(), original.mz_tolerance());
         assert_eq!(loaded.mobility_tolerance(), original.mobility_tolerance());
-        assert_eq!(loaded.fit_points().len(), original.fit_points().len());
+        assert_eq!(loaded.fit_points(), original.fit_points());
 
-        let orig_ridge = original.ridge_width_summary().unwrap();
-        let loaded_ridge = loaded.ridge_width_summary().unwrap();
-        assert_eq!(loaded_ridge.n_columns, orig_ridge.n_columns);
         assert_eq!(
-            loaded_ridge.weighted_half_width,
-            orig_ridge.weighted_half_width
+            loaded.ridge_widths.len(),
+            original.ridge_widths.len(),
+            "ridge width count"
         );
+        for (loaded_w, orig_w) in loaded.ridge_widths.iter().zip(original.ridge_widths.iter()) {
+            assert_eq!(loaded_w.library.0, orig_w.library.0);
+            assert_eq!(loaded_w.half_width, orig_w.half_width);
+            assert_eq!(loaded_w.ridge_weight, orig_w.ridge_weight);
+        }
 
         // The tolerance getter folds the curve, the ridge widths and the floors
         // together, so matching it across the library RT range covers all three.
         for i in 0..=40 {
             let rt = LibraryRT(i as f32 * 10.0);
-            let orig_tol = original.get_tolerance(500.0, 1.0, rt);
-            let loaded_tol = loaded.get_tolerance(500.0, 1.0, rt);
             assert_eq!(
-                format!("{:?}", loaded_tol),
-                format!("{:?}", orig_tol),
+                loaded.get_tolerance(500.0, 1.0, rt),
+                original.get_tolerance(500.0, 1.0, rt),
                 "tolerance mismatch at library RT {}",
                 rt.0
             );
@@ -619,8 +607,6 @@ mod tests {
                 rt.0
             );
         }
-
-        std::fs::remove_file(&path).unwrap();
     }
 
     /// Files written before ridge widths were persisted must still load, falling
@@ -628,12 +614,8 @@ mod tests {
     #[test]
     fn from_saved_tolerates_absent_ridge_widths() {
         let (original, grid_size, lookback) = sample_calibration();
-        let dir = std::env::temp_dir().join("timsseek_calibration_roundtrip_legacy");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("calibration.json");
-        original
-            .save_json([0.0, 1200.0], grid_size, lookback, 999, &path)
-            .unwrap();
+        let dir = save_fixture(&original, grid_size, lookback);
+        let path = dir.path().join("calibration.json");
 
         let text = std::fs::read_to_string(&path).unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -650,7 +632,5 @@ mod tests {
             loaded.rt_tolerance_minutes(),
             original.rt_tolerance_minutes()
         );
-
-        std::fs::remove_file(&path).unwrap();
     }
 }

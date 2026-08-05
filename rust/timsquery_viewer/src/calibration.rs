@@ -39,6 +39,10 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::IndexedPeaksHandle;
+use timsseek::rt_calibration::{
+    DerivationParams,
+    DimensionErrors,
+};
 use timsseek::scoring::apex_finding::TraceScorer;
 use timsseek::scoring::extraction::build_extraction;
 use timsseek::scoring::pipeline::{
@@ -94,8 +98,21 @@ pub struct DerivedTolerances {
     pub rt_tolerance_minutes: f32,
 }
 
+/// Residual statistics and the mz/mobility windows derived from them. The
+/// viewer calibrates RT only, so it neither computes nor displays these — it
+/// holds them so that loading a search's calibration and saving it back does not
+/// drop the dimensions the search did measure. Default when the viewer fit the
+/// curve itself, which is the honest value: nothing measured them.
+#[derive(Debug, Clone, Default)]
+pub struct SearchResiduals {
+    pub errors: DimensionErrors,
+    pub derivation: DerivationParams,
+    pub mz_tolerance_ppm: [f64; 2],
+    pub mobility_tolerance_pct: [f64; 2],
+}
+
 // Save/load uses shared types from timsseek::rt_calibration:
-// SavedCalibration, SavedTolerances, LoadedCalibration, CalibrationSnapshot
+// SavedCalibration, SavedTolerances, CalibrationSnapshot
 
 /// Messages sent from the background thread to the UI.
 #[derive(Debug)]
@@ -137,6 +154,9 @@ pub struct ViewerCalibrationState {
     pub heap_capacity: usize,
     pub elution_group_count: usize,
     pub derived_tolerances: Option<DerivedTolerances>,
+    /// Dimensions a search measured that the viewer only passes through. See
+    /// [`SearchResiduals`].
+    pub residuals: SearchResiduals,
 
     thread_handle: Option<JoinHandle<()>>,
     thread_control: Arc<AtomicU8>,
@@ -157,6 +177,7 @@ impl Default for ViewerCalibrationState {
             heap_capacity: DEFAULT_HEAP_CAPACITY,
             elution_group_count: 0,
             derived_tolerances: None,
+            residuals: SearchResiduals::default(),
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
@@ -197,6 +218,7 @@ impl ViewerCalibrationState {
             heap_capacity: DEFAULT_HEAP_CAPACITY,
             elution_group_count: 0,
             derived_tolerances: None,
+            residuals: SearchResiduals::default(),
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
@@ -583,54 +605,61 @@ impl ViewerCalibrationState {
     // -----------------------------------------------------------------------
 
     /// Serialize the current calibration state to a JSON v2 file.
-    /// Delegates to `CalibrationResult::save_json` format via shared serde types.
+    ///
+    /// Every field is either owned by the viewer or carried in
+    /// [`Self::residuals`], so writing back what [`Self::load_from_file`] read
+    /// changes nothing. The ridge widths are re-measured from the fit rather
+    /// than stored, which is what the plot and the tolerance suggestion also
+    /// do — the file cannot then disagree with what the UI shows.
     pub fn save_to_file(
-        &self,
+        &mut self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
         use timsseek::rt_calibration::{
-            DerivationParams,
-            DimensionErrors,
             SavedCalibration,
             SavedTolerances,
         };
 
+        let ridge_widths = self
+            .calibration_state
+            .as_mut()
+            .map(|cs| cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION))
+            .unwrap_or_default();
         let tol = self.derived_tolerances.as_ref();
         let saved = SavedCalibration {
             version: "v2".to_string(),
             rt_range_seconds,
             calibration: self.snapshot(),
-            errors: DimensionErrors::default(),
-            derivation: DerivationParams::default(),
+            errors: self.residuals.errors.clone(),
+            derivation: self.residuals.derivation.clone(),
             tolerances: SavedTolerances {
                 rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
-                mz_ppm: [0.0, 0.0],
-                mobility_pct: [0.0, 0.0],
+                mz_ppm: self.residuals.mz_tolerance_ppm,
+                mobility_pct: self.residuals.mobility_tolerance_pct,
             },
-            ridge_widths: Vec::new(),
-            n_calibrants: self.n_calibrants,
+            ridge_widths,
             n_scored: self.n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
-    /// Deserialize calibration state from a JSON v1 file.
-    /// Delegates to `CalibrationResult::load_json` + `CalibrationState::from_snapshot`.
+    /// Deserialize calibration state from a JSON v2 file, returning the
+    /// provenance warning if the file may not belong to the loaded raw run.
     pub fn load_from_file(
         &mut self,
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
     ) -> Result<Option<String>, String> {
-        use timsseek::rt_calibration::CalibrationResult;
+        use timsseek::rt_calibration::SavedCalibration;
 
-        let loaded = CalibrationResult::load_json(path, raw_rt_range)?;
+        let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
 
         // Reconstruct CalibrationState from the snapshot
-        if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&loaded.snapshot) {
-            self.snapshot_points = loaded
-                .snapshot
+        if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&saved.calibration) {
+            self.snapshot_points = saved
+                .calibration
                 .points
                 .iter()
                 .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
@@ -638,14 +667,20 @@ impl ViewerCalibrationState {
             self.calibration_state = Some(cal);
         }
 
-        self.n_calibrants = loaded.n_calibrants;
-        self.n_scored = loaded.n_scored;
+        self.n_calibrants = saved.n_calibrants();
+        self.n_scored = saved.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
-            rt_tolerance_minutes: loaded.tolerances.rt_minutes,
+            rt_tolerance_minutes: saved.tolerances.rt_minutes,
         });
+        self.residuals = SearchResiduals {
+            errors: saved.errors,
+            derivation: saved.derivation,
+            mz_tolerance_ppm: saved.tolerances.mz_ppm,
+            mobility_tolerance_pct: saved.tolerances.mobility_pct,
+        };
         self.phase = CalibrationPhase::Done;
 
-        Ok(loaded.warning)
+        Ok(warning)
     }
 
     // -----------------------------------------------------------------------
