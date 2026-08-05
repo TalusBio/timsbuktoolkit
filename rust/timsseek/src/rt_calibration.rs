@@ -10,7 +10,6 @@ pub use calibrt::{
     FitEvent,
     FitObserver,
     LibraryRT,
-    ObserveOpts,
     ObservedRTSeconds,
     Point,
     RidgeMeasurement,
@@ -435,7 +434,6 @@ mod tests {
                 grid_size,
                 points.iter().map(|p| (p.library, p.observed)),
                 &mut (),
-                ObserveOpts::NONE,
             )
             .unwrap();
         assert!(

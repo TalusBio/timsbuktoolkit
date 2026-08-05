@@ -421,7 +421,7 @@ impl ViewerCalibrationState {
             .snapshot_points
             .iter()
             .map(|&(lib_rt, apex_rt)| (lib_rt.0, apex_rt.0));
-        let (x_range, y_range) = match cs.refit(bins, points, &mut (), calibrt::ObserveOpts::NONE) {
+        let (x_range, y_range) = match cs.refit(bins, points, &mut ()) {
             Ok(ranges) => ranges,
             Err(e) => {
                 let n = self.snapshot_points.len();

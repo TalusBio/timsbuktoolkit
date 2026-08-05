@@ -12,8 +12,6 @@ const DISTANCE_THRESHOLD: f64 = 1e-6;
 pub(crate) struct PathfindingScratch {
     pub max_weights: Vec<f64>,
     pub prev_node_indices: Vec<Option<usize>>,
-    /// Filled only when `ObserveOpts::dp_nodes` is set.
-    pub considered: Vec<(usize, f64)>,
     /// The DP chain, appended to the assembled path once Pass 2 has laid the
     /// greedy prefix down ahead of it.
     pub path: Vec<crate::Point>,
@@ -26,7 +24,6 @@ impl PathfindingScratch {
         self.max_weights.resize(n, 0.0);
         self.prev_node_indices.clear();
         self.prev_node_indices.resize(n, None);
-        self.considered.clear();
         self.path.clear();
     }
 }
@@ -41,12 +38,10 @@ impl PathfindingScratch {
 /// Returns the assembled path (DP chain plus any greedily-attached prefix/suffix,
 /// see Pass 2 below) and the index range within it the DP itself chose
 /// (`path[..range.start]` and `path[range.end..]` are the greedy tails).
-pub(crate) fn find_optimal_path<O: crate::FitObserver>(
+pub(crate) fn find_optimal_path(
     nodes: &mut [crate::grid::Node],
     lookback: usize,
     scratch: &mut PathfindingScratch,
-    obs: &mut O,
-    opts: crate::ObserveOpts,
 ) -> (Vec<crate::Point>, std::ops::Range<usize>) {
     if nodes.is_empty() {
         return (Vec::new(), 0..0);
@@ -55,7 +50,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     let PathfindingScratch {
         max_weights,
         prev_node_indices,
-        considered,
         path,
     } = scratch;
     let mut out_path = Vec::new();
@@ -74,9 +68,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
     let n = nodes.len();
     for i in 0..n {
         max_weights[i] = nodes[i].center.weight; // Path can start at any node
-        if opts.dp_nodes {
-            considered.clear();
-        }
 
         let start = i.saturating_sub(lookback);
         for j in start..i {
@@ -95,9 +86,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
                     // - Division by distance: Penalizes long jumps, encouraging smooth curves
                     let edge_weight =
                         (nodes[i].center.weight.sqrt() * nodes[j].center.weight.sqrt()) / dist;
-                    if opts.dp_nodes {
-                        considered.push((j, edge_weight));
-                    }
                     let new_weight = max_weights[j] + edge_weight;
 
                     if new_weight > max_weights[i] {
@@ -106,16 +94,6 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
                     }
                 }
             }
-        }
-
-        if opts.dp_nodes {
-            obs.on_event(crate::FitEvent::DpNode {
-                i,
-                node: &nodes[i],
-                chose: prev_node_indices[i],
-                acc_weight: max_weights[i],
-                considered,
-            });
         }
     }
 
@@ -201,11 +179,8 @@ pub(crate) fn find_optimal_path<O: crate::FitObserver>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Point;
     use crate::grid::Node;
-    use crate::{
-        ObserveOpts,
-        Point,
-    };
 
     /// A `Node` at the given position and weight. `find_optimal_path` never
     /// reads `suppressed` or the `sum_*` accumulators, so this bypasses
@@ -247,8 +222,7 @@ mod tests {
             .collect();
         let mut scratch = PathfindingScratch::default();
 
-        let (path, dp_range) =
-            find_optimal_path(&mut nodes, 5, &mut scratch, &mut (), ObserveOpts::NONE);
+        let (path, dp_range) = find_optimal_path(&mut nodes, 5, &mut scratch);
 
         assert_eq!(
             path.len(),
@@ -284,8 +258,7 @@ mod tests {
         ];
         let mut scratch = PathfindingScratch::default();
 
-        let (path, dp_range) =
-            find_optimal_path(&mut nodes, 1, &mut scratch, &mut (), ObserveOpts::NONE);
+        let (path, dp_range) = find_optimal_path(&mut nodes, 1, &mut scratch);
 
         assert_eq!(
             path.len(),

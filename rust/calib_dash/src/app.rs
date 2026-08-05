@@ -19,7 +19,6 @@ use calibrt::{
     CalibrationCurve,
     CalibrationState,
     LibraryRT,
-    ObserveOpts,
     ObservedRTSeconds,
     RidgeSummary,
 };
@@ -480,14 +479,12 @@ fn fit_points(
     recording: &mut FitRecording,
     bins: usize,
     points: &[CalibrantPoint],
-    opts: ObserveOpts,
 ) -> Option<(f64, f64)> {
     let (x_range, _) = state
         .refit(
             bins,
             points.iter().map(|p| (p.library_rt, p.observed_rt)),
             recording,
-            opts,
         )
         // `CalibRtError` has no `Display`.
         .inspect_err(|e| tracing::warn!("calib_dash: skipping this re-fit: {e:?}"))
@@ -657,7 +654,6 @@ impl CalibDash {
             &mut self.refit_recording,
             self.bins,
             pts,
-            ObserveOpts::NONE,
         )?;
         Some((chunk, &self.refit_recording))
     }
@@ -678,7 +674,6 @@ impl CalibDash {
             self.app.recording_mut(),
             self.bins,
             &self.current_points,
-            ObserveOpts::NONE,
         ) {
             path_nodes = self.app.recording().path_indices().len();
             ridge_half_width = RidgeSummary::of(self.app.recording().ridge())

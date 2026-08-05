@@ -365,16 +365,6 @@ pub enum FitEvent<'a> {
     Suppressed {
         cells: &'a [grid::Node],
     },
-    /// Emitted once per DP node, only when `ObserveOpts::dp_nodes` is set.
-    /// `considered` holds every `(predecessor_index, edge_weight)` the node
-    /// evaluated, including the ones it rejected.
-    DpNode {
-        i: usize,
-        node: &'a grid::Node,
-        chose: Option<usize>,
-        acc_weight: f64,
-        considered: &'a [(usize, f64)],
-    },
 }
 
 pub trait FitObserver {
@@ -384,17 +374,6 @@ pub trait FitObserver {
 /// The no-op observer.
 impl FitObserver for () {
     fn on_event(&mut self, _: FitEvent<'_>) {}
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ObserveOpts {
-    /// Emit `DpNode` from the DP's inner loop. Off by default: it fires once
-    /// per node.
-    pub dp_nodes: bool,
-}
-
-impl ObserveOpts {
-    pub const NONE: Self = Self { dp_nodes: false };
 }
 
 /// Reusable calibration state for incremental fitting. Keeps the grid and the
@@ -464,14 +443,13 @@ impl CalibrationState {
         bins: usize,
         points: impl Iterator<Item = (f64, f64)> + Clone,
         obs: &mut O,
-        opts: ObserveOpts,
     ) -> Result<GridRanges, CalibRtError> {
         let (x_range, y_range) = point_ranges(points.clone())?;
         self.reconfigure(bins, x_range, y_range)?;
         self.update(
             points.map(|(lib, obs)| (LibraryRT(lib), ObservedRTSeconds(obs), CALIBRANT_WEIGHT)),
         )?;
-        self.fit_with(obs, opts);
+        self.fit_with(obs);
         Ok((x_range, y_range))
     }
 
@@ -494,10 +472,10 @@ impl CalibrationState {
     }
 
     pub fn fit(&mut self) {
-        self.fit_with(&mut (), ObserveOpts::NONE)
+        self.fit_with(&mut ())
     }
 
-    pub fn fit_with<O: FitObserver>(&mut self, obs: &mut O, opts: ObserveOpts) {
+    pub fn fit_with<O: FitObserver>(&mut self, obs: &mut O) {
         obs.on_event(FitEvent::FitStarted {
             geom: GridGeom {
                 bins: self.grid.bins,
@@ -525,13 +503,8 @@ impl CalibrationState {
                 .copied(),
         );
 
-        let (path_points, dp_range) = pathfinding::find_optimal_path(
-            &mut self.filtered,
-            self.lookback,
-            &mut self.scratch,
-            obs,
-            opts,
-        );
+        let (path_points, dp_range) =
+            pathfinding::find_optimal_path(&mut self.filtered, self.lookback, &mut self.scratch);
 
         // The accessors read the path, the curve and the ridge afterwards: the
         // per-query RT tolerance on every scoring thread, and an overlay drawing
@@ -790,7 +763,6 @@ mod observer_tests {
     struct Recorder {
         names: Vec<&'static str>,
         geom: Option<GridGeom>,
-        dp_edges: Vec<(usize, Option<usize>)>,
     }
 
     impl FitObserver for Recorder {
@@ -801,10 +773,6 @@ mod observer_tests {
                     self.geom = Some(geom);
                 }
                 FitEvent::Suppressed { .. } => self.names.push("suppressed"),
-                FitEvent::DpNode { i, chose, .. } => {
-                    self.names.push("dp");
-                    self.dp_edges.push((i, chose));
-                }
             }
         }
     }
@@ -878,12 +846,11 @@ mod observer_tests {
     fn events_arrive_in_pipeline_order() {
         let mut s = diagonal_state();
         let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         assert_eq!(
             rec.names,
             vec!["start", "suppressed"],
-            "no dp events when dp_nodes is off; the fit's products are read off \
-             the state, not emitted"
+            "the fit's products are read off the state, not emitted"
         );
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
@@ -892,15 +859,6 @@ mod observer_tests {
         assert!(!s.path_indices().is_empty(), "the fit found a path");
         assert!(s.curve().is_some(), "the fit produced a curve");
         assert!(!s.dp_range().is_empty(), "the DP scored part of the path");
-    }
-
-    #[test]
-    fn dp_events_appear_once_per_node_when_enabled() {
-        let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
-        assert!(rec.names.contains(&"dp"), "dp events must be emitted");
-        assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
     }
 }
 

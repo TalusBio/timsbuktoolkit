@@ -2,7 +2,6 @@ use calibrt::{
     CalibRtError,
     CalibrationState,
     LibraryRT,
-    ObserveOpts,
 };
 
 /// A degenerate range on *either* axis is an error. Both, because the two are
@@ -23,12 +22,7 @@ fn a_zero_range_on_either_axis_is_rejected() {
 fn predicting_outside_the_calibrated_range_is_out_of_bounds() {
     let mut state = CalibrationState::deferred(30, 30).unwrap();
     state
-        .refit(
-            30,
-            (0..50).map(|i| (i as f64, i as f64)),
-            &mut (),
-            ObserveOpts::NONE,
-        )
+        .refit(30, (0..50).map(|i| (i as f64, i as f64)), &mut ())
         .unwrap();
 
     let curve = state.curve().expect("the diagonal must fit");

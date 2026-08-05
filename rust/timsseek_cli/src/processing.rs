@@ -34,7 +34,6 @@ use timsseek::rt_calibration::{
     ErrorStats,
     FitObserver,
     LibraryRT,
-    ObserveOpts,
     Point,
     RidgeSummary,
     ridge_half_width_interp,
@@ -854,7 +853,6 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
         config.grid_size,
         points.iter().map(|p| (p.library, p.observed)),
         observer,
-        ObserveOpts::NONE,
     )?;
     let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?;
 

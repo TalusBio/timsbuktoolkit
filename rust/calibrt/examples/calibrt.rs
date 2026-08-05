@@ -1,7 +1,6 @@
 use calibrt::{
     CalibrationState,
     LibraryRT,
-    ObserveOpts,
 };
 use rand::Rng;
 
@@ -40,12 +39,7 @@ fn main() {
 
     // 3. Run the Calib-RT algorithm (ranges are derived from the points)
     let mut state = CalibrationState::deferred(grid_size, 30).unwrap();
-    match state.refit(
-        grid_size,
-        points.iter().copied(),
-        &mut (),
-        ObserveOpts::NONE,
-    ) {
+    match state.refit(grid_size, points.iter().copied(), &mut ()) {
         Ok(ranges) => {
             println!("Calibration successful over {ranges:?}!");
             let calibration_curve = state.curve().expect("a successful fit has a curve");
@@ -74,7 +68,7 @@ fn main() {
 
     // Example with no points
     println!("\n--- Testing error case (no points) ---");
-    match state.refit(grid_size, std::iter::empty(), &mut (), ObserveOpts::NONE) {
+    match state.refit(grid_size, std::iter::empty(), &mut ()) {
         Ok(_) => println!("This should have failed!"),
         Err(e) => eprintln!("Correctly failed with error: {:?}", e),
     }

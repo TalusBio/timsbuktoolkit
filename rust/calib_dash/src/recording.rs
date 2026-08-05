@@ -153,7 +153,6 @@ impl FitObserver for FitRecording {
                     }
                 }
             }
-            FitEvent::DpNode { .. } => {}
         }
     }
 }
@@ -164,7 +163,6 @@ mod tests {
     use calibrt::{
         CalibrationState,
         LibraryRT,
-        ObserveOpts,
         ObservedRTSeconds,
     };
 
@@ -198,7 +196,7 @@ mod tests {
         )))
         .unwrap();
         let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         rec.set_fit(&s);
 
         assert_eq!(rec.geom().bins, 10);
@@ -225,12 +223,12 @@ mod tests {
     fn reading_the_products_of_an_unrecorded_fit_panics() {
         let mut s = diagonal_state(10);
         let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         rec.set_fit(&s);
         assert_eq!(rec.path_indices().len(), 10, "the recorded fit reads fine");
 
         // A second fit, this time without the `set_fit` that copies its products.
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         let _ = rec.path_indices();
     }
 
@@ -259,7 +257,7 @@ mod tests {
         )
         .unwrap();
         let mut rec = FitRecording::new(3);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         assert!(
             rec.is_suppressed(1, 1),
             "A is dominated by B in its row on the first fit"
@@ -275,7 +273,7 @@ mod tests {
             5.0,
         )))
         .unwrap();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit_with(&mut rec);
         assert!(
             !rec.is_suppressed(1, 1),
             "A survives alone in its row/col on the second fit — a stale bit \
@@ -292,7 +290,7 @@ mod tests {
         // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
         let mut small = diagonal_state(3);
         let mut rec = FitRecording::new(3);
-        small.fit_with(&mut rec, ObserveOpts::NONE);
+        small.fit_with(&mut rec);
         rec.set_fit(&small);
         assert_eq!(
             (
@@ -307,7 +305,7 @@ mod tests {
 
         // Fit 2, a 10x10 grid through the same recording.
         let mut big = diagonal_state(10);
-        big.fit_with(&mut rec, ObserveOpts::NONE);
+        big.fit_with(&mut rec);
         rec.set_fit(&big);
 
         assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
