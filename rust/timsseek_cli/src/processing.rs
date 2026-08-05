@@ -530,19 +530,15 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         );
     }
 
-    // Save calibration as JSON v2 (compatible with viewer load)
+    // Save the calibration for the viewer to load.
     if !calibration.fit_points().is_empty() {
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
         let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
-        if let Err(e) = calibration.save_json(
-            [rt_lo, rt_hi],
-            calib_config.grid_size,
-            calib_config.dp_lookback,
-            phase1_lib.len(),
-            &cal_json_path,
-        ) {
+        if let Err(e) =
+            calibration.save_json([rt_lo, rt_hi], phase1_lib.len(), &cal_json_path)
+        {
             tracing::warn!("Failed to save calibration: {}", e);
         } else {
             info!("Saved calibration to {:?}", cal_json_path);
@@ -981,13 +977,11 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     );
 
     Ok(CalibrationResult::new(
-        cal_curve,
+        cal_state,
         rt_tolerance_minutes,
         mz_tolerance_ppm,
         mobility_tolerance_pct,
-    )
-    .with_fit_points(points)
-    .with_ridge_widths(ridge_widths)
+    )?
     .with_error_stats(errors)
     .with_derivation(derivation))
 }

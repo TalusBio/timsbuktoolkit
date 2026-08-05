@@ -166,7 +166,7 @@ pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
 pub const CALIBRANT_WEIGHT: f64 = 1.0;
 
 /// Measurement of the evidence ridge width at one grid column.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RidgeMeasurement {
     /// Center library RT position.
     pub library: LibraryRT<f64>,
@@ -543,9 +543,9 @@ impl CalibrationState {
         }
     }
 
-    /// The current fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], in path
-    /// order. Empty until a fit succeeds, and again once one fails, which is the
-    /// "no ridge data" case consumers fall back from.
+    /// The current fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], sorted by
+    /// library RT. Empty until a fit succeeds, and again once one fails, which is
+    /// the "no ridge data" case consumers fall back from.
     pub fn ridge_widths(&self) -> &[RidgeMeasurement] {
         &self.ridge_widths
     }
@@ -647,6 +647,15 @@ impl CalibrationState {
             });
         }
 
+        // Sorted by library RT because every consumer interpolates between
+        // adjacent columns, which is only meaningful in x order. The DP path is
+        // not guaranteed to arrive that way.
+        widths.sort_by(|a, b| {
+            a.library
+                .0
+                .partial_cmp(&b.library.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         widths
     }
 

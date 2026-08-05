@@ -15,8 +15,6 @@ pub use calibrt::{
     Point,
     RidgeMeasurement,
     RidgeSummary,
-    calibrate_with_ranges,
-    point_ranges,
 };
 use serde::{
     Deserialize,
@@ -37,6 +35,10 @@ const RIDGE_WIDTH_MULTIPLIER: f64 = 1.0;
 
 /// Minimum RT tolerance in minutes (prevents pathologically tight windows).
 const MIN_RT_TOLERANCE_MINUTES: f32 = 0.5;
+
+/// The only version [`SavedCalibration`] reads or writes. Named once so the
+/// writer and the reader's gate cannot disagree.
+pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
 
 /// Per-dimension residual statistics. `1.4826 * mad` is a robust stdev
 /// estimator (equals stdev for Gaussian data, resists outliers otherwise).
@@ -129,62 +131,52 @@ impl Default for DerivationParams {
     }
 }
 
-/// Immutable calibration result. Provides RT conversion and per-query tolerance
-/// without mutating the speclib.
+/// A fitted RT calibration plus the tolerance windows measured alongside it.
+///
+/// Owns the [`CalibratedGrid`] rather than copies of its outputs, so the curve,
+/// the ridge widths and the points it was fit on cannot drift from each other or
+/// go stale. Taken by `&` on every scoring thread; nothing here refits.
 pub struct CalibrationResult {
-    cal_curve: RTCalibration,
-    /// Fallback uniform RT tolerance (used when no ridge data available).
+    state: CalibratedGrid,
+    /// Fallback uniform RT tolerance, used where the grid measured no ridge.
     rt_tolerance_minutes: f32,
     mz_tolerance_ppm: (f64, f64),
     mobility_tolerance_pct: (f32, f32),
-    /// Position-dependent ridge widths (sorted by x). Empty = use uniform fallback.
-    ridge_widths: Vec<RidgeMeasurement>,
     errors: DimensionErrors,
     derivation: Option<DerivationParams>,
-    /// The `(library, observed, weight)` points `cal_curve` was fit on. Refitting
-    /// these under the same `(grid_size, lookback)` reproduces `cal_curve`, which
-    /// is what makes `save_json` -> `from_saved` lossless.
-    fit_points: Vec<Point>,
 }
 
 impl CalibrationResult {
+    /// Wrap a fitted grid. `Err` when the grid has no curve: a result that
+    /// cannot convert an RT is not one Phase 3 can use, and rejecting it here
+    /// keeps [`Self::convert_irt`] infallible.
     pub fn new(
-        cal_curve: RTCalibration,
+        state: CalibratedGrid,
         rt_tolerance_minutes: f32,
         mz_tolerance_ppm: (f64, f64),
         mobility_tolerance_pct: (f32, f32),
-    ) -> Self {
-        Self {
-            cal_curve,
+    ) -> Result<Self, CalibRtError> {
+        if state.curve().is_none() {
+            return Err(CalibRtError::NoPoints);
+        }
+        Ok(Self {
+            state,
             rt_tolerance_minutes,
             mz_tolerance_ppm,
             mobility_tolerance_pct,
-            ridge_widths: Vec::new(),
             errors: DimensionErrors::default(),
             derivation: None,
-            fit_points: Vec::new(),
-        }
+        })
     }
 
-    /// Record the points the curve was fit on, so `save_json` can persist them.
-    pub fn with_fit_points(mut self, points: Vec<Point>) -> Self {
-        self.fit_points = points;
-        self
+    /// The grid this was fit on — the source for the curve, the ridge widths and
+    /// the calibrant points.
+    pub fn state(&self) -> &CalibratedGrid {
+        &self.state
     }
 
     pub fn fit_points(&self) -> &[Point] {
-        &self.fit_points
-    }
-
-    pub fn with_ridge_widths(mut self, mut widths: Vec<RidgeMeasurement>) -> Self {
-        widths.sort_by(|a, b| {
-            a.library
-                .0
-                .partial_cmp(&b.library.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        self.ridge_widths = widths;
-        self
+        self.state.fit_points()
     }
 
     pub fn with_error_stats(mut self, errors: DimensionErrors) -> Self {
@@ -204,12 +196,20 @@ impl CalibrationResult {
     /// Interpolate ridge half-width at a given library RT (seconds).
     /// Returns the half-width in seconds, or None if no ridge data.
     fn ridge_half_width_at(&self, library_rt: LibraryRT<f64>) -> Option<f64> {
-        ridge_half_width_interp(&self.ridge_widths, library_rt.0)
+        ridge_half_width_interp(self.state.ridge_widths(), library_rt.0)
+    }
+
+    /// The fitted curve. Present for the lifetime of `self` — [`Self::new`]
+    /// rejects a grid without one.
+    fn curve(&self) -> &RTCalibration {
+        self.state
+            .curve()
+            .expect("CalibrationResult::new rejects a grid with no curve")
     }
 
     /// Convert indexed RT to calibrated absolute RT (seconds).
     pub fn convert_irt(&self, irt: LibraryRT<f32>) -> ObservedRTSeconds<f32> {
-        match self.cal_curve.predict(LibraryRT(irt.0 as f64)) {
+        match self.curve().predict(LibraryRT(irt.0 as f64)) {
             Ok(rt) => ObservedRTSeconds(rt.0 as f32),
             Err(CalibRtError::OutOfBounds(rt)) => ObservedRTSeconds(rt as f32),
             Err(_) => ObservedRTSeconds(irt.0),
@@ -249,7 +249,7 @@ impl CalibrationResult {
 
     /// Summary of ridge width measurements for reporting.
     pub fn ridge_width_summary(&self) -> Option<RidgeSummary> {
-        RidgeSummary::of(&self.ridge_widths)
+        RidgeSummary::of(self.state.ridge_widths())
     }
 
     /// Tolerance for the secondary spectral query at a detected apex.
@@ -270,30 +270,20 @@ impl CalibrationResult {
 
     /// Save calibration to JSON v2 format.
     ///
-    /// Persists the fit points, `(grid_size, lookback)`, ridge widths and
-    /// tolerances — everything [`CalibrationResult::from_saved`] needs to
-    /// rebuild an equal `CalibrationResult`.
+    /// The grid's own snapshot carries the points and their geometry, so
+    /// [`Self::from_saved`] can refit an equal grid; the residual statistics and
+    /// tolerances are read back verbatim.
     pub fn save_json(
         &self,
         rt_range_seconds: [f64; 2],
-        grid_size: usize,
-        lookback: usize,
         n_scored: usize,
         path: &std::path::Path,
     ) -> Result<(), String> {
         let derivation = self.derivation.clone().unwrap_or_default();
         let saved = SavedCalibration {
-            version: "v2".to_string(),
+            version: CALIBRATION_FORMAT_VERSION.to_string(),
             rt_range_seconds,
-            calibration: CalibrationSnapshot {
-                points: self
-                    .fit_points
-                    .iter()
-                    .map(|p| [p.library, p.observed, p.weight])
-                    .collect(),
-                grid_size,
-                lookback,
-            },
+            calibration: self.state.snapshot(),
             errors: self.errors.clone(),
             derivation,
             tolerances: SavedTolerances {
@@ -304,42 +294,28 @@ impl CalibrationResult {
                     self.mobility_tolerance_pct.1 as f64,
                 ],
             },
-            ridge_widths: self.ridge_widths.clone(),
             n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
-    /// Rebuild a `CalibrationResult` from a saved file. The curve is refit from
-    /// the persisted points under the persisted grid geometry, which reproduces
-    /// the original fit; every other field is read back verbatim.
+    /// Rebuild a `CalibrationResult` from a saved file. Refitting the persisted
+    /// points under their persisted geometry reproduces the grid, and with it the
+    /// curve and the ridge widths; every other field is read back verbatim.
     pub fn from_saved(saved: &SavedCalibration) -> Result<Self, CalibRtError> {
         let state = CalibratedGrid::from_snapshot(&saved.calibration)?;
-        let cal_curve = state.curve().ok_or(CalibRtError::NoPoints)?.clone();
-        let fit_points = saved
-            .calibration
-            .points
-            .iter()
-            .map(|p| Point {
-                library: p[0],
-                observed: p[1],
-                weight: p[2],
-            })
-            .collect();
-        Ok(Self {
-            cal_curve,
-            rt_tolerance_minutes: saved.tolerances.rt_minutes,
-            mz_tolerance_ppm: (saved.tolerances.mz_ppm[0], saved.tolerances.mz_ppm[1]),
-            mobility_tolerance_pct: (
+        Ok(Self::new(
+            state,
+            saved.tolerances.rt_minutes,
+            (saved.tolerances.mz_ppm[0], saved.tolerances.mz_ppm[1]),
+            (
                 saved.tolerances.mobility_pct[0] as f32,
                 saved.tolerances.mobility_pct[1] as f32,
             ),
-            ridge_widths: saved.ridge_widths.clone(),
-            errors: saved.errors.clone(),
-            derivation: Some(saved.derivation.clone()),
-            fit_points,
-        })
+        )?
+        .with_error_stats(saved.errors.clone())
+        .with_derivation(saved.derivation.clone()))
     }
 
     /// Read a saved calibration off disk and rebuild it, logging any
@@ -361,39 +337,27 @@ impl CalibrationResult {
         let range = pipeline.index.ms1_cycle_mapping().range_milis();
         let start = range.0 as f64 / 1000.0;
         let end = range.1 as f64 / 1000.0;
-        let points = vec![
-            Point {
-                library: start,
-                observed: start,
-                weight: 1.0,
-            },
-            Point {
-                library: end,
-                observed: end,
-                weight: 1.0,
-            },
-        ];
-        let cal_curve = calibrate_with_ranges(&points, (start, end), (start, end), 10, 10)
-            .expect("Identity calibration should not fail");
+        let mut state = CalibratedGrid::new(10, (start, end), (start, end), 10)
+            .expect("the run's own RT range is a valid grid geometry");
+        state
+            .update(
+                [start, end]
+                    .into_iter()
+                    .map(|rt| (LibraryRT(rt), ObservedRTSeconds(rt), CALIBRANT_WEIGHT)),
+            )
+            .expect("the identity endpoints are finite");
+        state.fit();
 
-        Self {
-            cal_curve,
-            rt_tolerance_minutes: 1.0,
-            mz_tolerance_ppm: (10.0, 10.0),
-            mobility_tolerance_pct: (5.0, 5.0),
-            ridge_widths: Vec::new(),
-            errors: DimensionErrors::default(),
-            derivation: None,
-            fit_points: points,
-        }
+        Self::new(state, 1.0, (10.0, 10.0), (5.0, 5.0))
+            .expect("two identity endpoints always fit a two-point curve")
     }
 }
 
-/// JSON v2 calibration file format — shared between CLI and viewer.
+/// JSON v3 calibration file format — shared between CLI and viewer.
 ///
-/// Schema breaking change from v1: residual statistics (`errors`) and
-/// derivation parameters (`derivation`) are now persisted, and `tolerances`
-/// is a derived/convenience view rather than the source of truth.
+/// `calibration` is the grid's own snapshot and the only record of the fit: the
+/// curve and the ridge widths are recomputed by refitting it, so the file cannot
+/// carry a curve that disagrees with the points that produced it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedCalibration {
     pub version: String,
@@ -402,10 +366,6 @@ pub struct SavedCalibration {
     pub errors: DimensionErrors,
     pub derivation: DerivationParams,
     pub tolerances: SavedTolerances,
-    /// Position-dependent ridge widths. Absent in files written before ridge
-    /// widths were persisted; those load with the uniform `rt_minutes` fallback.
-    #[serde(default)]
-    pub ridge_widths: Vec<RidgeMeasurement>,
     pub n_scored: usize,
 }
 
@@ -427,9 +387,9 @@ impl SavedCalibration {
     ) -> Result<(Self, Option<String>), String> {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        if saved.version != "v2" {
+        if saved.version != CALIBRATION_FORMAT_VERSION {
             return Err(format!(
-                "Unsupported calibration version: {} (expected v2)",
+                "Unsupported calibration version: {} (expected {CALIBRATION_FORMAT_VERSION})",
                 saved.version
             ));
         }
@@ -506,7 +466,7 @@ mod tests {
     /// A curve with enough spread that the grid fit is non-degenerate, plus ridge
     /// widths and tolerances distinct from every default, so a field silently
     /// dropped by the round-trip shows up as a mismatch.
-    fn sample_calibration() -> (CalibrationResult, usize, usize) {
+    fn sample_calibration() -> CalibrationResult {
         let (grid_size, lookback) = (16, 4);
         let points: Vec<Point> = (0..40)
             .map(|i| {
@@ -527,10 +487,8 @@ mod tests {
                 ObserveOpts::NONE,
             )
             .unwrap();
-        let cal_curve = state.curve().unwrap().clone();
-        let ridge_widths = state.ridge_widths().to_vec();
         assert!(
-            !ridge_widths.is_empty(),
+            !state.ridge_widths().is_empty(),
             "test fixture must produce ridge widths for the round-trip to be meaningful"
         );
 
@@ -539,34 +497,26 @@ mod tests {
             mobility_pct: ErrorStats::from_slice(&[0.5, 1.5]),
             rt_seconds: ErrorStats::from_slice(&[4.0, 6.0, 8.0]),
         };
-        let calibration = CalibrationResult::new(cal_curve, 1.25, (7.5, 8.5), (2.5, 3.5))
-            .with_fit_points(points)
-            .with_ridge_widths(ridge_widths)
+        CalibrationResult::new(state, 1.25, (7.5, 8.5), (2.5, 3.5))
+            .unwrap()
             .with_error_stats(errors)
-            .with_derivation(DerivationParams::default());
-        (calibration, grid_size, lookback)
+            .with_derivation(DerivationParams::default())
     }
 
     /// Save the fixture to a fresh temp dir, returning the dir so it outlives
     /// the path (dropping it removes the tree, including after a panic).
-    fn save_fixture(calibration: &CalibrationResult, grid_size: usize, lookback: usize) -> TempDir {
+    fn save_fixture(calibration: &CalibrationResult) -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         calibration
-            .save_json(
-                [0.0, 1200.0],
-                grid_size,
-                lookback,
-                999,
-                &dir.path().join("calibration.json"),
-            )
+            .save_json([0.0, 1200.0], 999, &dir.path().join("calibration.json"))
             .unwrap();
         dir
     }
 
     #[test]
     fn save_json_then_from_saved_is_lossless() {
-        let (original, grid_size, lookback) = sample_calibration();
-        let dir = save_fixture(&original, grid_size, lookback);
+        let original = sample_calibration();
+        let dir = save_fixture(&original);
         let path = dir.path().join("calibration.json");
 
         let loaded = CalibrationResult::read_json(&path, Some([0.0, 1200.0])).unwrap();
@@ -579,12 +529,12 @@ mod tests {
         assert_eq!(loaded.mobility_tolerance(), original.mobility_tolerance());
         assert_eq!(loaded.fit_points(), original.fit_points());
 
-        assert_eq!(
-            loaded.ridge_widths.len(),
-            original.ridge_widths.len(),
-            "ridge width count"
-        );
-        for (loaded_w, orig_w) in loaded.ridge_widths.iter().zip(original.ridge_widths.iter()) {
+        // The ridge is refit, not read back, so matching it is the claim that
+        // the persisted points and geometry reproduce the grid they came from.
+        let (loaded_ridge, orig_ridge) =
+            (loaded.state().ridge_widths(), original.state().ridge_widths());
+        assert_eq!(loaded_ridge.len(), orig_ridge.len(), "ridge width count");
+        for (loaded_w, orig_w) in loaded_ridge.iter().zip(orig_ridge.iter()) {
             assert_eq!(loaded_w.library.0, orig_w.library.0);
             assert_eq!(loaded_w.half_width, orig_w.half_width);
             assert_eq!(loaded_w.ridge_weight, orig_w.ridge_weight);
@@ -609,28 +559,20 @@ mod tests {
         }
     }
 
-    /// Files written before ridge widths were persisted must still load, falling
-    /// back to the uniform RT tolerance.
+    /// A file from an older writer must be refused, not silently reinterpreted:
+    /// v2 stored ridge widths alongside the points, and reading one as v3 would
+    /// take the stored widths for refit ones.
     #[test]
-    fn from_saved_tolerates_absent_ridge_widths() {
-        let (original, grid_size, lookback) = sample_calibration();
-        let dir = save_fixture(&original, grid_size, lookback);
+    fn read_refuses_a_foreign_version() {
+        let dir = save_fixture(&sample_calibration());
         let path = dir.path().join("calibration.json");
 
         let text = std::fs::read_to_string(&path).unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("ridge_widths")
-            .expect("save_json must have written ridge_widths");
+        value.as_object_mut().unwrap()["version"] = serde_json::json!("v2");
         std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
 
-        let loaded = CalibrationResult::read_json(&path, Some([0.0, 1200.0])).unwrap();
-        assert!(loaded.ridge_width_summary().is_none());
-        assert_eq!(
-            loaded.rt_tolerance_minutes(),
-            original.rt_tolerance_minutes()
-        );
+        let err = SavedCalibration::read(&path, Some([0.0, 1200.0])).unwrap_err();
+        assert!(err.contains("v2") && err.contains("v3"), "{err}");
     }
 }

@@ -603,31 +603,26 @@ impl ViewerCalibrationState {
     // Save / Load
     // -----------------------------------------------------------------------
 
-    /// Serialize the current calibration state to a JSON v2 file.
+    /// Write the current calibration where the search's reader can load it.
     ///
-    /// Every field is either owned by the viewer or carried in
-    /// [`Self::residuals`], so writing back what [`Self::load_from_file`] read
-    /// changes nothing. The ridge widths are re-measured from the fit rather
-    /// than stored, which is what the plot and the tolerance suggestion also
-    /// do — the file cannot then disagree with what the UI shows.
+    /// The points and their geometry come from the fitted grid, so a reader
+    /// refits the same curve and the same ridge widths the viewer is showing.
+    /// The residual statistics are the ones this file was loaded with, since the
+    /// viewer measures no residuals of its own — see [`Self::residuals`].
     pub fn save_to_file(
         &self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
         use timsseek::rt_calibration::{
+            CALIBRATION_FORMAT_VERSION,
             SavedCalibration,
             SavedTolerances,
         };
 
-        let ridge_widths = self
-            .calibration_state
-            .as_ref()
-            .map(|cs| cs.ridge_widths().to_vec())
-            .unwrap_or_default();
         let tol = self.derived_tolerances.as_ref();
         let saved = SavedCalibration {
-            version: "v2".to_string(),
+            version: CALIBRATION_FORMAT_VERSION.to_string(),
             rt_range_seconds,
             calibration: self.snapshot(),
             errors: self.residuals.errors.clone(),
@@ -637,14 +632,13 @@ impl ViewerCalibrationState {
                 mz_ppm: self.residuals.mz_tolerance_ppm,
                 mobility_pct: self.residuals.mobility_tolerance_pct,
             },
-            ridge_widths,
             n_scored: self.n_scored,
         };
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
-    /// Deserialize calibration state from a JSON v2 file, returning the
+    /// Deserialize calibration state from a saved calibration, returning the
     /// provenance warning if the file may not belong to the loaded raw run.
     pub fn load_from_file(
         &mut self,
