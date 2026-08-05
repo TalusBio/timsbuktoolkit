@@ -8,8 +8,8 @@
 //! constant like every other block's. Emitted LAST, so these names stay at the
 //! tail.
 
-use crate::models::AA_COUNT_NAMES;
 use crate::models::sequence::{
+    AA_COUNT_NAMES,
     CANONICAL_AA_LETTERS,
     Peptide,
 };

@@ -30,7 +30,7 @@ use timsquery::models::tolerance::{
 
 /// RT tolerance floor used when nothing configured one. Keeps a window from
 /// closing to nothing where the ridge is narrow.
-pub const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
+const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
 
 /// The RT tolerance a ridge half-width implies, in minutes, floored at
 /// `floor_minutes` — the same [`FloorsTriplet::rt_minutes`] that

@@ -452,7 +452,7 @@ impl CalibrationState {
     /// derive the grid geometry from the points, `reconfigure` onto it, `update`,
     /// then `fit_with`. Returns the [`GridRanges`] the fit actually ran on.
     ///
-    /// The geometry is derived *here*, by [`point_ranges`], rather than passed in:
+    /// The geometry is derived *here*, by `point_ranges`, rather than passed in:
     /// a caller that supplies the acquisition RT range instead would clamp an
     /// iRT-scaled library — whose RTs fall entirely outside it — into one edge
     /// column. Every calibrant weighs [`CALIBRANT_WEIGHT`].
@@ -760,7 +760,7 @@ pub type GridRanges = ((f64, f64), (f64, f64));
 /// comes out empty or inverted on either axis is `Err(ZeroRange)` here rather
 /// than later out of `Grid::new`, so a caller that only wants to know whether
 /// a grid is configurable never has to build one.
-pub fn point_ranges(
+fn point_ranges(
     points: impl IntoIterator<Item = (f64, f64)>,
 ) -> Result<GridRanges, CalibRtError> {
     let mut x = (f64::INFINITY, f64::NEG_INFINITY);
