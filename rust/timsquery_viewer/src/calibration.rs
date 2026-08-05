@@ -139,12 +139,14 @@ pub struct ViewerCalibrationState {
 
     /// Latest calibrant points: (library_rt, apex_rt).
     pub snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)>,
+
+    /// The search's own calibration settings, so the viewer does not fit on a
+    /// grid the search would not use. Defaults: the viewer has no config file.
+    search: CalibrationConfig,
 }
 
 impl Default for ViewerCalibrationState {
     fn default() -> Self {
-        // The search's own calibration settings, so the viewer does not fit on a
-        // grid the search would not use. Defaults: the viewer has no config file.
         let search = CalibrationConfig::default();
         Self {
             phase: CalibrationPhase::Idle,
@@ -160,6 +162,7 @@ impl Default for ViewerCalibrationState {
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
             snapshot_points: Vec::new(),
+            search,
         }
     }
 }
@@ -202,6 +205,7 @@ impl ViewerCalibrationState {
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
             snapshot_points,
+            search,
         }
     }
 
@@ -215,14 +219,13 @@ impl ViewerCalibrationState {
 
     /// The calibration as a snapshot stores it: points plus grid config.
     fn snapshot(&self) -> calibrt::CalibrationSnapshot {
-        let search = CalibrationConfig::default();
         calibrt::CalibrationSnapshot {
             points: self.persisted_points(),
             grid_size: self
                 .calibration_state
                 .as_ref()
-                .map_or(search.grid_size, CalibrationState::grid_bins),
-            lookback: search.dp_lookback,
+                .map_or(self.search.grid_size, CalibrationState::grid_bins),
+            lookback: self.search.dp_lookback,
         }
     }
 
@@ -398,14 +401,14 @@ impl ViewerCalibrationState {
     /// A geometry the points cannot support leaves the previous fit alone: a later
     /// snapshot with more calibrants may well span a usable range.
     fn refit(&mut self) {
-        let search = CalibrationConfig::default();
+        let lookback = self.search.dp_lookback;
         let bins = self
             .calibration_state
             .as_ref()
-            .map_or(search.grid_size, CalibrationState::grid_bins);
+            .map_or(self.search.grid_size, CalibrationState::grid_bins);
         let cs = match self.calibration_state.as_mut() {
             Some(cs) => cs,
-            None => match CalibrationState::deferred(bins, search.dp_lookback) {
+            None => match CalibrationState::deferred(bins, lookback) {
                 Ok(cs) => self.calibration_state.insert(cs),
                 Err(e) => {
                     tracing::warn!("Calibration refit skipped: no grid at {bins} bins: {e:?}");
@@ -1038,6 +1041,8 @@ impl ViewerCalibrationState {
 
     /// Render tolerance suggestion and Apply button.
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
+        let floor = self.search.min_rt_tolerance_minutes;
+
         // The weight-averaged half-width gives the global tolerance — heavy
         // columns count more.
         let ridge_stats = self.calibration_state.as_ref().and_then(|cs| {
@@ -1049,10 +1054,9 @@ impl ViewerCalibrationState {
         // Through the search's own rule, so the number shown is the window the
         // search would open. The search applies it per query at the interpolated
         // half-width; one number can only carry the weighted average.
-        let search = CalibrationConfig::default();
         let suggested = ridge_stats.map(|stats| {
             (
-                rt_tolerance_from_ridge(stats.weighted_half_width, search.min_rt_tolerance_minutes),
+                rt_tolerance_from_ridge(stats.weighted_half_width, floor),
                 stats,
             )
         });
