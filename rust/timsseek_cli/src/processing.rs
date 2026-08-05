@@ -220,9 +220,9 @@ mod calib_dash_hook {
             let (Some(d), Some(mut recording)) = (dash.inner.as_mut(), recording.0) else {
                 return;
             };
-            // The ridge is not a fit event, so the recording does not pick it up
-            // on its own — it comes off the grid the fit left behind.
-            recording.set_ridge(calibration.state().ridge_widths());
+            // The fit's products are not events, so the recording does not pick
+            // them up on its own — they come off the grid the fit left behind.
+            recording.set_fit(calibration.state());
             let mobility = calibration.mobility_tolerance();
             let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
             d.show_final(
@@ -543,9 +543,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
         let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
-        if let Err(e) =
-            calibration.save_json([rt_lo, rt_hi], phase1_lib.len(), &cal_json_path)
-        {
+        if let Err(e) = calibration.save_json([rt_lo, rt_hi], phase1_lib.len(), &cal_json_path) {
             tracing::warn!("Failed to save calibration: {}", e);
         } else {
             info!("Saved calibration to {:?}", cal_json_path);

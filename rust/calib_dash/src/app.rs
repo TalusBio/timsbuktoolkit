@@ -519,7 +519,7 @@ fn fit_points(
         // `CalibRtError` has no `Display`.
         .inspect_err(|e| tracing::warn!("calib_dash: skipping this re-fit: {e:?}"))
         .ok()?;
-    recording.set_ridge(state.ridge_widths());
+    recording.set_fit(state);
     Some(x_range)
 }
 

@@ -267,21 +267,6 @@ pub enum FitEvent<'a> {
         acc_weight: f64,
         considered: &'a [(usize, f64)],
     },
-    PathFound {
-        path: &'a [Point],
-        /// `path`'s cells as row-major grid indices, one per point, from the
-        /// grid's own [`GridGeom`] arithmetic — so an overlay never has to
-        /// re-derive them and risk landing in a different cell.
-        indices: &'a [usize],
-        /// The DP-chosen segment within `path`: `path[..dp_range.start]` is a
-        /// greedily attached prefix and `path[dp_range.end..]` a greedily
-        /// attached suffix (Pass 2's monotonic extension beyond what the DP
-        /// itself scored).
-        dp_range: std::ops::Range<usize>,
-    },
-    CurveFit {
-        curve: &'a CalibrationCurve,
-    },
 }
 
 pub trait FitObserver {
@@ -309,6 +294,9 @@ impl ObserveOpts {
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
+    /// The DP-chosen segment within [`Self::path_indices`] — see
+    /// [`Self::dp_range`].
+    dp_range: std::ops::Range<usize>,
     /// Survivors of suppression, refilled per fit. Sized at `bins`, which is a
     /// hint and not a bound: `suppress_nonmax` keeps every node tied for a
     /// row/column max, so ties can legitimately exceed `bins`.
@@ -335,6 +323,7 @@ impl CalibrationState {
         Ok(Self {
             grid: grid::Grid::new(grid_size, x_range, y_range)?,
             path_indices: Vec::new(),
+            dp_range: 0..0,
             filtered: Vec::with_capacity(grid_size),
             scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
@@ -436,28 +425,23 @@ impl CalibrationState {
             opts,
         );
 
+        // The path, the curve and the ridge are the fit's products, not events:
+        // the accessors read them afterwards, which is what the per-query RT
+        // tolerance needs on every scoring thread and all an overlay needs to
+        // draw them.
         self.path_indices.clear();
         self.path_indices.extend(
             path_points
                 .iter()
                 .map(|p| self.grid.cell_of(p.library, p.observed)),
         );
-
-        obs.on_event(FitEvent::PathFound {
-            path: &path_points,
-            indices: &self.path_indices,
-            dp_range,
-        });
+        debug_assert!(
+            dp_range.end <= self.path_indices.len(),
+            "dp_range must fall within the assembled path"
+        );
+        self.dp_range = dp_range;
 
         self.curve = CalibrationCurve::new(path_points).ok();
-
-        if let Some(c) = self.curve.as_ref() {
-            obs.on_event(FitEvent::CurveFit { curve: c });
-        }
-
-        // The ridge is part of the fit, not an event: `ridge_widths()` reads it
-        // afterwards, which is what the per-query RT tolerance needs on every
-        // scoring thread and all an overlay needs to draw it.
         self.ridge_widths = self.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
     }
 
@@ -465,6 +449,7 @@ impl CalibrationState {
     fn clear_fit(&mut self) {
         self.curve = None;
         self.path_indices.clear();
+        self.dp_range = 0..0;
         self.ridge_widths.clear();
     }
 
@@ -504,8 +489,19 @@ impl CalibrationState {
         self.grid.y_range
     }
 
+    /// The assembled path as row-major grid indices, one per point, from the
+    /// grid's own arithmetic — so an overlay never has to re-derive them and risk
+    /// landing in a different cell.
     pub fn path_indices(&self) -> &[usize] {
         &self.path_indices
+    }
+
+    /// The DP-chosen segment within [`Self::path_indices`]: the indices before
+    /// `start` are a greedily attached prefix and those from `end` a greedily
+    /// attached suffix, Pass 2's monotonic extension beyond what the DP itself
+    /// scored.
+    pub fn dp_range(&self) -> std::ops::Range<usize> {
+        self.dp_range.clone()
     }
 
     pub fn curve(&self) -> Option<&CalibrationCurve> {
@@ -791,8 +787,6 @@ mod observer_tests {
                     self.names.push("dp");
                     self.dp_edges.push((i, chose));
                 }
-                FitEvent::PathFound { .. } => self.names.push("path"),
-                FitEvent::CurveFit { .. } => self.names.push("curve"),
             }
         }
     }
@@ -820,8 +814,12 @@ mod observer_tests {
         assert_eq!(s.fit_points().len(), 10);
 
         // A second batch accumulates, matching `update`'s effect on the grid.
-        s.update(std::iter::once((LibraryRT(2.5), ObservedRTSeconds(2.5), 1.0)))
-            .unwrap();
+        s.update(std::iter::once((
+            LibraryRT(2.5),
+            ObservedRTSeconds(2.5),
+            1.0,
+        )))
+        .unwrap();
         assert_eq!(s.fit_points().len(), 11);
 
         // A fit reads the points; it must not consume them.
@@ -868,13 +866,17 @@ mod observer_tests {
         s.fit_with(&mut rec, ObserveOpts::NONE);
         assert_eq!(
             rec.names,
-            vec!["start", "suppressed", "path", "curve"],
-            "no dp events when dp_nodes is off; the ridge is not an event"
+            vec!["start", "suppressed"],
+            "no dp events when dp_nodes is off; the fit's products are read off \
+             the state, not emitted"
         );
         let g = rec.geom.expect("FitStarted must be emitted");
         assert_eq!(g.bins, 10);
         assert_eq!(g.x_range, (0.0, 10.0));
         assert_eq!(g.y_range, (0.0, 10.0));
+        assert!(!s.path_indices().is_empty(), "the fit found a path");
+        assert!(s.curve().is_some(), "the fit produced a curve");
+        assert!(!s.dp_range().is_empty(), "the DP scored part of the path");
     }
 
     #[test]
