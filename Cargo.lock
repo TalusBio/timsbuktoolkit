@@ -1411,7 +1411,7 @@ name = "calibrt"
 version = "0.33.0"
 dependencies = [
  "array2d",
- "rand 0.8.7",
+ "rand 0.9.3",
  "serde",
  "serde_json",
  "tracing",
