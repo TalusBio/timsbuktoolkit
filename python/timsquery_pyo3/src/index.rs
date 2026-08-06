@@ -53,7 +53,7 @@ pub(crate) enum ResolvedTolerances {
 
 impl ResolvedTolerances {
     /// Extract from a Python object: either a PyTolerance or a list of PyTolerance.
-    pub fn from_py(py: Python<'_>, obj: &PyObject, expected_len: Option<usize>) -> PyResult<Self> {
+    pub fn from_py(py: Python<'_>, obj: &Py<PyAny>, expected_len: Option<usize>) -> PyResult<Self> {
         // Try single PyTolerance first
         if let Ok(tol) = obj.extract::<PyRef<'_, PyTolerance>>(py) {
             return Ok(Self::Single(tol.inner.clone()));
@@ -228,7 +228,7 @@ impl PyTimsIndex {
         &self,
         py: Python<'_>,
         elution_groups: Vec<PyRef<'_, PyElutionGroup>>,
-        tolerance: PyObject,
+        tolerance: Py<PyAny>,
     ) -> PyResult<Vec<PyChromatogramResult>> {
         let n = elution_groups.len();
         let tolerances = ResolvedTolerances::from_py(py, &tolerance, Some(n))?;
@@ -250,7 +250,7 @@ impl PyTimsIndex {
 
         // Release GIL for the parallel query work
         let handle = &*self.handle;
-        py.allow_threads(|| match &tolerances {
+        py.detach(|| match &tolerances {
             ResolvedTolerances::Single(tol) => {
                 handle.par_add_query_multi(&mut collectors[..], rayon::iter::repeat_n(tol, n));
             }
@@ -283,8 +283,8 @@ impl PyTimsIndex {
     fn query_chromatograms_iter(
         &self,
         py: Python<'_>,
-        elution_groups: PyObject,
-        tolerance: PyObject,
+        elution_groups: Py<PyAny>,
+        tolerance: Py<PyAny>,
         chunk_size: Option<usize>,
     ) -> PyResult<PyChromatogramIterator> {
         let eg_iter = elution_groups.call_method0(py, "__iter__")?;

@@ -13,8 +13,8 @@ timsquery = { path = "../../rust/timsquery" }
 timscentroid = { path = "../../rust/timscentroid" }
 
 rayon = { workspace = true }
-pyo3 = { version = "0.25" }
-numpy = "0.25"
+pyo3 = { version = "0.29" }
+numpy = "0.29"
 
 [features]
 default = []

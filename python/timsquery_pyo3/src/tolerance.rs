@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyMzTolerance {
     pub(crate) inner: timsquery::models::tolerance::MzTolerance,
@@ -29,7 +29,7 @@ impl PyMzTolerance {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyRtTolerance {
     pub(crate) inner: timsquery::models::tolerance::RtTolerance,
@@ -66,7 +66,7 @@ impl PyRtTolerance {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyMobilityTolerance {
     pub(crate) inner: timsquery::models::tolerance::MobilityTolerance,
@@ -103,7 +103,7 @@ impl PyMobilityTolerance {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyQuadTolerance {
     pub(crate) inner: timsquery::models::tolerance::QuadTolerance,
@@ -124,7 +124,7 @@ impl PyQuadTolerance {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyTolerance {
     pub(crate) inner: timsquery::Tolerance,
