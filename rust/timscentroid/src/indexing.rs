@@ -557,8 +557,20 @@ impl<'a, T: RTIndex> PeakColumnsView<'a, T> {
         let start_idx = self
             .cycle_index
             .partition_point(|x| *x < cycle_range.start());
-        let end_idx =
-            start_idx + self.cycle_index[start_idx..].partition_point(|x| *x <= cycle_range.end());
+
+        // Gallop for the upper bound: buckets are mz-sliced so their rows span
+        // the whole acquisition, while an RT window covers a few percent of it,
+        // putting the answer a handful of elements past `start_idx`.
+        let rest = &self.cycle_index[start_idx..];
+        let end = cycle_range.end();
+        let mut hi = 1usize;
+        while hi < rest.len() && rest[hi - 1] <= end {
+            hi <<= 1;
+        }
+        // Everything below `lo` is known `<= end`; the answer is in [lo, hi).
+        let lo = hi >> 1;
+        let hi = hi.min(rest.len());
+        let end_idx = start_idx + lo + rest[lo..hi].partition_point(|x| *x <= end);
         start_idx..end_idx
     }
 
@@ -995,21 +1007,14 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
     res
 }
 
-/// Per-bucket inner scan for `for_each_peak`. `mz_filter =
-/// Unrestricted` means "the whole bucket is known to be inside the
-/// query mz range, skip the per-peak mz compare". With
-/// `#[inline(always)]` + the `OptionallyRestricted` split at each call
-/// site, LLVM specializes two code paths — one that branches on mz
-/// per peak, one that doesn't.
-///
-/// Filter reads only the column it needs (mz or mobility). Full
-/// `IndexedPeak<T>` is materialized on survivors before calling `f`,
-/// so the callback sees the same `&IndexedPeak<T>` API as the AoS
-/// version. LLVM SROA elides the temporary struct when the callback
-/// reads a single field.
-/// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and
-/// unrolls NEON (4×f32 × 2). Remainder falls through to scalar tail.
+/// Chunk size for the staged autovec path. 8 hits AVX2 (8×f32) and unrolls NEON
+/// (4×f32 × 2); the remainder falls through to a scalar tail. Pinned to 8
+/// because [`scan_bucket_slice`] walks the mask as a `u64`.
 const SCAN_CHUNK: usize = 8;
+const _: () = assert!(
+    SCAN_CHUNK == 8,
+    "scan_bucket_slice packs the lane mask into a u64"
+);
 
 #[inline(always)]
 fn apply_mz_mask<const N: usize>(
@@ -1038,6 +1043,16 @@ fn apply_mob_mask<const N: usize>(
     }
 }
 
+/// Per-bucket inner scan for `for_each_peak`. `mz_filter = Unrestricted` means
+/// "the whole bucket is known to be inside the query mz range, skip the per-peak
+/// mz compare". With `#[inline(always)]` + the `OptionallyRestricted` split at
+/// each call site, LLVM specializes two code paths — one that branches on mz per
+/// peak, one that doesn't.
+///
+/// Each filter reads only the column it needs (mz or mobility). The full
+/// `IndexedPeak<T>` is materialized on survivors before calling `f`, so the
+/// callback sees the same `&IndexedPeak<T>` API as the AoS version. LLVM SROA
+/// elides the temporary struct when the callback reads a single field.
 #[inline(always)]
 fn scan_bucket_slice<T, F>(
     view: PeakColumnsView<'_, T>,
@@ -1067,11 +1082,15 @@ fn scan_bucket_slice<T, F>(
             apply_mob_mask::<N>(&mut mask, chunk.mobility(), lo, hi);
         }
         local.count_after_im_mask::<N>(&mask);
-        for (i, &pass) in mask.iter().enumerate() {
-            if pass {
-                let peak = chunk.materialize(i);
-                f(&peak);
-            }
+        // Walk the mask as one integer: one branch per *passing* lane. `bool` is
+        // one byte valued 0 or 1, so a passing lane is a single set bit at
+        // `8 * lane`, and `bits & (bits - 1)` clears it.
+        let mut bits = u64::from_le_bytes(mask.map(u8::from));
+        while bits != 0 {
+            let i = (bits.trailing_zeros() >> 3) as usize;
+            bits &= bits - 1;
+            let peak = chunk.materialize(i);
+            f(&peak);
         }
     }
 
@@ -1904,6 +1923,62 @@ mod tests {
                     "Bucket size {} should fail the check",
                     bucket_size
                 );
+            }
+        }
+    }
+
+    /// Every window of every shape matches a straight double-`partition_point`.
+    #[test]
+    fn find_cycle_range_matches_double_binary_search() {
+        fn reference(
+            cycle_index: &[MS1CycleIndex],
+            lo: MS1CycleIndex,
+            hi: MS1CycleIndex,
+        ) -> std::ops::Range<usize> {
+            let start = cycle_index.partition_point(|x| *x < lo);
+            let end = start + cycle_index[start..].partition_point(|x| *x <= hi);
+            start..end
+        }
+
+        // Shapes chosen to exercise the doubling: empty, singleton, all-equal
+        // (answer runs to the end), dense, sparse, and non-power-of-two lengths.
+        let shapes: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![5],
+            vec![5, 5, 5, 5],
+            (0..17u32).collect(),
+            (0..64u32).collect(),
+            (0..256u32).collect(),
+            (0..256u32).map(|i| i / 8).collect(),
+            (0..100u32).map(|i| i * 3).collect(),
+            vec![0, 0, 1, 1, 1, 9, 9, 40, 41, 41, 41, 90],
+        ];
+
+        for shape in &shapes {
+            let cycles: Vec<MS1CycleIndex> = shape.iter().map(|&c| MS1CycleIndex::new(c)).collect();
+            // Only `cycle_index` is read; the other columns just build the view.
+            let ignored_f32 = vec![0.0f32; cycles.len()];
+            let ignored_mob = vec![MobInt::from_f16(f16::from_f32(0.8)).unwrap(); cycles.len()];
+            let view = PeakColumnsView {
+                mz: &ignored_f32,
+                intensity: &ignored_f32,
+                mobility: &ignored_mob,
+                cycle_index: &cycles,
+            };
+            let max = shape.iter().copied().max().unwrap_or(0) + 3;
+            for lo in 0..=max {
+                for hi in lo..=max {
+                    let range = TupleRange::try_new(MS1CycleIndex::new(lo), MS1CycleIndex::new(hi))
+                        .unwrap();
+                    assert_eq!(
+                        view.find_cycle_range(range),
+                        reference(&cycles, MS1CycleIndex::new(lo), MS1CycleIndex::new(hi)),
+                        "len {} window {}..={}",
+                        shape.len(),
+                        lo,
+                        hi
+                    );
+                }
             }
         }
     }

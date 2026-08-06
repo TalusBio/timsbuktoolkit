@@ -35,10 +35,7 @@ use crate::app::{
     Tab,
 };
 use crate::metrics::BatchMetrics;
-use crate::recording::{
-    DpDecision,
-    FitRecording,
-};
+use crate::recording::FitRecording;
 use calibrt::{
     LibraryRT,
     RidgeSummary,
@@ -81,7 +78,6 @@ const EPS: f64 = 1e-9;
 /// border columns, and the longest help text lands well inside this.
 const KEYS_OVERLAY_WIDTH: u16 = 52;
 
-const DP_TITLE: &str = "DP";
 const TOLERANCES_TITLE: &str = "Tolerances";
 const FIT_TITLE: &str = "Fit";
 
@@ -161,7 +157,6 @@ const KEYS_OVERLAY_KEY: Binding = Binding::new("?", "keys", "this screen");
 const FIT_KEYS: &[Binding] = &[
     Binding::new("< >", "frame", "scrub retained frames"),
     Binding::new("m M", "layer", "cycle mark layer"),
-    Binding::new("d", "dp", "toggle DP pane"),
 ];
 
 /// The tab-local bindings to advertise: the Fit tab's keys do nothing elsewhere.
@@ -287,13 +282,6 @@ fn draw_keys_overlay(frame: &mut Frame, area: Rect) {
 // Fit tab
 // ---------------------------------------------------------------------
 
-/// Minimum body size for the DP pane to be worth carving out: below this the
-/// split leaves two useless slivers, so a narrow terminal keeps the whole grid.
-const DP_PANE_MIN: (u16, u16) = (40, 3);
-
-/// The DP pane's share of the Fit tab's width; the heatmap keeps the rest.
-const DP_PANE_PERCENT: u16 = 35;
-
 fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
     if area.is_empty() {
         return;
@@ -316,31 +304,7 @@ fn draw_fit_tab(frame: &mut Frame, area: Rect, app: &App) {
         None => area,
     };
 
-    let show_dp = app.dp_pane() && area.width >= DP_PANE_MIN.0 && area.height >= DP_PANE_MIN.1;
-    let (grid_area, dp_area) = if show_dp {
-        let cols = Layout::horizontal([
-            Constraint::Percentage(100 - DP_PANE_PERCENT),
-            Constraint::Percentage(DP_PANE_PERCENT),
-        ])
-        .split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
-
-    draw_heatmap(frame, grid_area, app);
-    if let Some(dp_area) = dp_area {
-        // The pane needs a recording fit with `dp_nodes: true`. A scrubbed `rec`
-        // always is one; the live batch fits with `ObserveOpts::NONE` to keep that
-        // cost off the hot path, so it reads `sync_dp`'s on-demand recording,
-        // falling back to `rec` (which renders "no DP trace").
-        let dp_rec = if app.scrub_frame().is_some() {
-            rec
-        } else {
-            app.live_dp_recording().unwrap_or(rec)
-        };
-        draw_dp_pane(frame, dp_area, dp_rec);
-    }
+    draw_heatmap(frame, area, app);
 }
 
 /// The "you are not looking at live data" banner, `REVERSED` because it is a
@@ -1033,65 +997,6 @@ fn empty_panel(frame: &mut Frame, area: Rect, title: &'static str, text: &str) {
     );
 }
 
-fn draw_dp_pane(frame: &mut Frame, area: Rect, rec: &FitRecording) {
-    let dp = rec.dp();
-    if dp.is_empty() {
-        empty_panel(
-            frame,
-            area,
-            DP_TITLE,
-            "No DP node trace recorded for this batch (re-fit with dp_nodes enabled).",
-        );
-        return;
-    }
-
-    frame.render_widget(
-        Paragraph::new(dp_lines(dp))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(DP_TITLE)),
-        area,
-    );
-}
-
-/// The DP pane's body: the last node's decision and the edges it weighed, then the
-/// whole chain one line per node. `dp` must be non-empty.
-fn dp_lines(dp: &[DpDecision]) -> Vec<Line<'static>> {
-    let last = &dp[dp.len() - 1];
-    let mut lines: Vec<Line> = Vec::with_capacity(dp.len() + 4);
-    lines.push(Line::styled(
-        format!(
-            "last node: chose={} acc_w={:.3}",
-            last.chose
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            last.acc_weight,
-        ),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    if last.considered.is_empty() {
-        lines.push(Line::raw("  considered: (none)"));
-    } else {
-        lines.push(Line::raw("  considered:"));
-        for (j, w) in &last.considered {
-            lines.push(Line::raw(format!("    j={j} edge_w={w:.3}")));
-        }
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::raw("path:"));
-    for d in dp {
-        // `root` is the absent predecessor — the chain's start, not a failure.
-        let edge = match d.chose {
-            Some(j) => format!("<-{j:<3}"),
-            None => "root ".to_string(),
-        };
-        lines.push(Line::raw(format!(
-            "i={:>3} lib={:.2} obs={:.2} {edge}",
-            d.i, d.library, d.observed
-        )));
-    }
-    lines
-}
-
 /// Resamples `rec`'s `bins x bins` weight grid to `area_w * area_h * 2` values: two
 /// half-rows per terminal line, so the cell at row `y`, column `x` reads its upper
 /// grid row from `cells[(y * area_w + x) * 2]` and its lower one from the next slot.
@@ -1483,7 +1388,6 @@ mod tests {
     use crate::frames::FrameSummary;
     use calibrt::{
         CalibrationState,
-        ObserveOpts,
         ObservedRTSeconds,
     };
     use ratatui::Terminal;
@@ -1506,18 +1410,18 @@ mod tests {
     /// The width thresholds the layout branches at, and their neighbours: the
     /// unframed fallback (`area.width < 3`), the y-tick gutter's `gutter_w + 3`
     /// (`y_gutter_width` clamps to 4..=8, so 7 and 11 are the only widths that
-    /// boundary sits at), `DP_PANE_MIN.0` and `KEYS_OVERLAY_WIDTH`.
-    const SWEEP_WIDTHS: [u16; 12] = [0, 1, 2, 3, 6, 7, 11, 12, 39, 40, 51, 52];
+    /// boundary sits at) and `KEYS_OVERLAY_WIDTH`.
+    const SWEEP_WIDTHS: [u16; 10] = [0, 1, 2, 3, 6, 7, 11, 12, 51, 52];
 
     /// The height thresholds: two chrome rows come off before the body sees anything,
-    /// then `area.height >= 4` (the x-tick row), `block_h < 3`, `inner.height >= 2`
-    /// (the subtitle row) and `DP_PANE_MIN.1` — one row later again with the banner.
+    /// then `area.height >= 4` (the x-tick row), `block_h < 3` and `inner.height >= 2`
+    /// (the subtitle row) — one row later again with the banner.
     const SWEEP_HEIGHTS: [u16; 7] = [0, 1, 2, 3, 4, 5, 6];
 
     /// Both dimensions inside their smallest thresholds, then where two thresholds
     /// cross.
     const SWEEP_TINY: [(u16, u16); 3] = [(0, 0), (1, 1), (2, 2)];
-    const SWEEP_CROSSINGS: [(u16, u16); 4] = [(3, 4), (7, 4), (39, 3), (40, 3)];
+    const SWEEP_CROSSINGS: [(u16, u16); 2] = [(3, 4), (7, 4)];
 
     /// Larger terminals, including two extreme aspect ratios.
     const SWEEP_OVERSIZED: [(u16, u16); 5] = [(1, 40), (40, 1), (60, 16), (100, 30), (200, 60)];
@@ -1673,8 +1577,8 @@ mod tests {
         let mut app = App::new(bins);
         let mut state = CalibrationState::new(bins, (0.0, bins as f64), (0.0, 48.0), 1).unwrap();
         state.update(ridge_points().into_iter()).unwrap();
-        state.fit_with(app.recording_mut(), ObserveOpts { dp_nodes: true });
-        state.measure_ridge_width_with(0.3, app.recording_mut());
+        state.fit();
+        *app.recording_mut() = FitRecording::from_state(&state);
         app
     }
 
@@ -1692,9 +1596,8 @@ mod tests {
             })
             .collect();
         state.update(pts.into_iter()).unwrap();
-        let mut rec = FitRecording::new(bins);
-        state.fit_with(&mut rec, ObserveOpts::NONE);
-        rec
+        state.fit();
+        FitRecording::from_state(&state)
     }
 
     /// Ten batches with a decaying `max_delta` and some churn, on top of
@@ -1730,9 +1633,9 @@ mod tests {
     /// `Layer::Suppressed` and `Layer::Ridge` are deliberately not pinned: Suppressed
     /// only marks cells that already carry weight, so its glyph grid is
     /// byte-identical to `Layer::None`'s; Ridge's payload is a *structure* a picture
-    /// pins only by also re-pinning calibrt's blur kernel and
-    /// `DEFAULT_RIDGE_FRACTION` across a crate boundary. Both are asserted at the
-    /// mark-buffer level instead.
+    /// pins only by also re-pinning calibrt's blur kernel and ridge threshold
+    /// across a crate boundary. Both are asserted at the mark-buffer level
+    /// instead.
     #[test]
     fn fit_tab_renders_each_layer() {
         for layer in [Layer::None, Layer::Path, Layer::Curve] {
@@ -1762,21 +1665,6 @@ mod tests {
                 "expected the {layer:?} layer's subtitle to name it:\n{out}"
             );
         }
-    }
-
-    /// The DP pane's content: the header reports the *last* node's decision, the
-    /// considered list one line per weighed edge, the path list one per node.
-    #[test]
-    fn dp_lines_report_the_last_nodes_decision_and_considered_list() {
-        let app = fixture_app_with_ridge();
-        let dp = app.recording().dp();
-        assert!(
-            dp.last().is_some_and(|last| !last.considered.is_empty()),
-            "fixture drifted: the last node must have weighed at least one edge"
-        );
-
-        let text: Vec<String> = dp_lines(dp).iter().map(line_text).collect();
-        insta::assert_snapshot!(text.join("\n"));
     }
 
     /// `App::set_scrub_recording` is what `CalibDash::sync_scrub` calls once `<`/`>`
@@ -1867,10 +1755,8 @@ mod tests {
         let rec = {
             let mut state = CalibrationState::new(16, (0.0, 16.0), (0.0, 48.0), 1).unwrap();
             state.update(ridge_points().into_iter()).unwrap();
-            let mut rec = FitRecording::new(16);
-            state.fit_with(&mut rec, ObserveOpts::NONE);
-            state.measure_ridge_width_with(0.3, &mut rec);
-            rec
+            state.fit();
+            FitRecording::from_state(&state)
         };
         app.set_final(
             rec,
@@ -2040,40 +1926,6 @@ mod tests {
         );
     }
 
-    /// Below `DP_PANE_MIN` the pane must be *hidden* — the heatmap keeps the whole
-    /// body — which is what `>` for `>=` in either comparison would break.
-    #[test]
-    fn a_body_narrower_than_dp_pane_min_hides_the_pane_instead_of_splitting() {
-        let mut app = fixture_app_with_ridge();
-        press(&mut app, 'd');
-        assert!(
-            app.dp_pane(),
-            "the pane must be requested for this to mean anything"
-        );
-
-        // One `┌` when the heatmap has the body to itself, two once the pane is out.
-        let blocks_at = |app: &mut App, w: u16| -> usize {
-            render(app, w, 30)
-                .lines()
-                .nth(1)
-                .expect("the Fit tab's block starts on the row under the tab bar")
-                .matches('\u{250c}')
-                .count()
-        };
-
-        assert_eq!(
-            blocks_at(&mut app, DP_PANE_MIN.0),
-            2,
-            "at exactly DP_PANE_MIN width the pane must be carved out"
-        );
-        assert_eq!(
-            blocks_at(&mut app, DP_PANE_MIN.0 - 1),
-            1,
-            "one column below DP_PANE_MIN the heatmap must keep the whole body, \
-             not share it with a sliver of a DP pane"
-        );
-    }
-
     // ---- axis helpers: a plausible-but-wrong axis is a snapshot diff a reviewer
     // waves through, so every expected value here is derived by hand. -------------
 
@@ -2235,7 +2087,7 @@ mod tests {
         let mut app = App::new(10);
         goto_tab(&mut app, Tab::Convergence);
         let status = status_line(&mut app, 200);
-        for word in ["frame", "layer", "dp"] {
+        for word in ["frame", "layer"] {
             assert!(
                 !status.contains(word),
                 "Convergence must not advertise Fit-only bindings that do \
@@ -2342,9 +2194,8 @@ mod tests {
         assert_eq!(title, "max_delta  peak —  now —  (NaN holds)");
     }
 
-    /// Every tab, every mark layer, both DP-pane states, a scrubbed frame, an
-    /// empty app and the keys overlay, drawn at every size the layout branches
-    /// differently at.
+    /// Every tab, every mark layer, a scrubbed frame, an empty app and the keys
+    /// overlay, drawn at every size the layout branches differently at.
     ///
     /// A panic here is not cosmetic: `[profile.release]` sets `panic = "abort"`, so a
     /// user who shrinks their terminal during a pause kills the search, and terminal
@@ -2388,13 +2239,7 @@ mod tests {
         press(&mut keys_open, '?');
         sweep_painted(&mut keys_open);
 
-        for dp in [false, true] {
-            let mut app = fixture_app_with_metrics();
-            if dp {
-                press(&mut app, 'd');
-            }
-            sweep_painted(&mut app);
-        }
+        sweep_painted(&mut fixture_app_with_metrics());
 
         // A scrubbed frame is `draw_fit_tab`'s `Length(1), Min(0)` split — the one
         // path that deliberately hands the heatmap zero rows.

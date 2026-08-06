@@ -106,9 +106,11 @@ impl ParsedSequence {
 #[derive(Debug, Clone)]
 pub struct Peptide {
     pub raw: Arc<str>,
-    pub parsed: Option<ParsedSequence>,
     pub decoy: DecoyMarking,
     pub decoy_group: u32,
+    /// Whether the source library exposes sequence features. Gates [`Self::parse`]:
+    /// a library without them yields no residues, so the sequence lanes stay NaN.
+    pub sequence_features: bool,
 }
 
 impl Peptide {
@@ -130,46 +132,22 @@ impl Peptide {
         self.decoy.is_decoy()
     }
 
-    pub fn length(&self) -> Option<u8> {
-        self.parsed.as_ref().map(|p| p.residues.len() as u8)
-    }
-
-    pub fn aa_counts(&self) -> Option<[f64; 20]> {
-        self.parsed.as_ref().map(|p| p.aa_counts())
-    }
-
-    pub fn n_mods(&self) -> Option<u8> {
-        self.parsed.as_ref().map(|p| p.mods.len() as u8)
+    /// Normalize and parse `raw` into residues and mods. `None` when the library
+    /// exposes no sequence features, or when the sequence does not parse.
+    ///
+    /// Parsed on demand rather than stored: only the rescore's sequence lanes read
+    /// it, and they run on competed candidates, not on everything Phase 3 scores.
+    pub fn parse(&self) -> Option<ParsedSequence> {
+        if !self.sequence_features {
+            return None;
+        }
+        parse_sequence(&normalize_to_proforma(&self.raw))
     }
 }
 
 impl Serialize for Peptide {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.raw)
-    }
-}
-
-/// Speclib-level metadata. Lives on `Speclib` struct.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SeqFormat {
-    /// Bare AA only, no mods (e.g. `PEPTIDEK`).
-    Plain,
-    /// Modified ProForma-able form (`[UNIMOD:4]`, `[+15.995]`, `_..._` OK).
-    Modified,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpeclibMeta {
-    pub parsable_sequences: bool,
-    pub sequence_format: SeqFormat,
-}
-
-impl Default for SpeclibMeta {
-    fn default() -> Self {
-        Self {
-            parsable_sequences: false,
-            sequence_format: SeqFormat::Plain,
-        }
     }
 }
 

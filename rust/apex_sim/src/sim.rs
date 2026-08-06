@@ -124,9 +124,18 @@ pub struct SimParams {
     /// Number of precursor isotopes (keys 0..n, all positive => scored).
     pub n_isotopes: usize,
     pub precursor_intensity: f32,
+    /// Per-cell noise scale for precursor rows, the counterpart of
+    /// [`FragmentSpec::noise_mult`]. Moves precursor density without touching the
+    /// fragment rows; see [`SimParams::with_measured_density`].
+    pub precursor_noise_mult: f32,
 
     /// Global additive noise scale (uniform 0..1 * this, per cell).
     pub noise_floor: f32,
+
+    /// Detection threshold as a fraction of `height`: a cell below it is
+    /// recorded as zero. Applied after interferent injection, so it bounds the
+    /// cell's final content, not just the simulated signal.
+    pub detection_floor: f32,
 
     pub seed: u64,
 
@@ -167,7 +176,9 @@ impl Default for SimParams {
             random_peaks: RandomPeaks::default(),
             n_isotopes: 3,
             precursor_intensity: 0.7,
+            precursor_noise_mult: 1.0,
             noise_floor: 0.02,
+            detection_floor: 0.0,
             seed: 42,
             rt_start_ms: 60_000,
             cycle_period_ms: 1_000,
@@ -176,6 +187,18 @@ impl Default for SimParams {
 }
 
 impl SimParams {
+    /// Populate cells at roughly the rate real data does (~0.7 fragment, ~0.4
+    /// precursor), where every other scenario fills every cell. The three numbers
+    /// are eyeballed from one real run: `detection_floor` sets fragment density,
+    /// and `precursor_noise_mult` moves precursor density separately, the floor
+    /// being compared against the cell so the noise-to-floor ratio decides survival.
+    pub fn with_measured_density(mut self) -> Self {
+        self.noise_floor = 0.2;
+        self.detection_floor = 0.097;
+        self.precursor_noise_mult = 0.57;
+        self
+    }
+
     /// Linear cycle -> retention-time (ms) mapper, matching what the pipeline
     /// passes into `TraceScorer::suggest_apex` / `score_at`.
     pub fn rt_mapper(&self) -> impl Fn(usize) -> u32 + '_ {
@@ -219,10 +242,6 @@ pub fn build(params: &SimParams) -> SimData {
     // Realized apex, drawn BEFORE any signal/noise sampling. A real peak never
     // lands exactly on a cycle boundary, so the sub-cycle offset is ALWAYS
     // applied; `apex_jitter` adds coarse per-seed relocation on top of it.
-    // Draw order (coarse then sub-cycle) keeps JITTERED scenarios byte-identical
-    // to before the sub-cycle draw became unconditional. Non-jittered ones all
-    // shifted: that branch now consumes an rng draw where it previously
-    // consumed none, and pins to `apex_cycle` no longer.
     let realized_apex = {
         let lo = 3.0f32;
         let hi = (n as f32 - 4.0).max(lo);
@@ -246,6 +265,8 @@ pub fn build(params: &SimParams) -> SimData {
         }),
     )
     .expect("labels are unique by construction");
+
+    let detection_floor = params.detection_floor * params.height;
 
     // --- Fragment rows: OBSERVED = theo * obs_scale (co-eluting). ---
     let mut frag_order: Vec<(String, f64)> = Vec::new();
@@ -275,7 +296,7 @@ pub fn build(params: &SimParams) -> SimData {
     let mut prec_rows: Vec<TransitionRow> = Vec::new();
     for iso in 0..params.n_isotopes as i8 {
         let peak = params.height * params.precursor_intensity * 0.6_f32.powi(iso as i32);
-        let noise = params.noise_floor * params.height;
+        let noise = params.noise_floor * params.height * params.precursor_noise_mult;
         let intensities = (0..n)
             .map(|c| {
                 let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
@@ -292,6 +313,9 @@ pub fn build(params: &SimParams) -> SimData {
 
     // --- Inject random peak-like objects onto existing rows ---
     inject_random_peaks(&mut rng, &mut frag_rows, &mut prec_rows, params);
+
+    apply_detection_floor(&mut frag_rows, detection_floor);
+    apply_detection_floor(&mut prec_rows, detection_floor);
 
     // --- Pack into MzMajorIntensityArrays (cycle_offset = 0) ---
     let mut fragments = MzMajorIntensityArray::<String, f32>::try_new_empty(frag_order, n, 0)
@@ -412,6 +436,21 @@ fn sample_cell(rng: &mut ChaCha8Rng, signal: f32, noise: f32) -> f32 {
     (signal + rng.random::<f32>() * noise).max(0.0)
 }
 
+/// Zero every cell below `floor`, so it is absent from the chromatogram rather
+/// than small.
+fn apply_detection_floor(rows: &mut [TransitionRow], floor: f32) {
+    if floor <= 0.0 {
+        return;
+    }
+    for row in rows.iter_mut() {
+        for cell in row.intensities.iter_mut() {
+            if *cell < floor {
+                *cell = 0.0;
+            }
+        }
+    }
+}
+
 /// Copy display rows into an [`MzMajorIntensityArray`] via `add_at_index`.
 fn fill_array<K: timsquery::KeyLike>(
     arr: &mut MzMajorIntensityArray<K, f32>,
@@ -430,6 +469,37 @@ fn fill_array<K: timsquery::KeyLike>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fraction of cells above zero, fragments then precursors.
+    fn cell_density(params: &SimParams) -> (f64, f64) {
+        let d = build(params);
+        let frac = |rows: &[TransitionRow]| {
+            let cells: usize = rows.iter().map(|r| r.intensities.len()).sum();
+            let pos: usize = rows
+                .iter()
+                .map(|r| r.intensities.iter().filter(|v| **v > 0.0).count())
+                .sum();
+            pos as f64 / cells as f64
+        };
+        (frac(&d.fragment_rows), frac(&d.precursor_rows))
+    }
+
+    /// The `*_measured_density` scenarios leave cells empty without emptying the grid.
+    #[test]
+    fn measured_density_scenarios_are_sparse() {
+        let scenarios: Vec<_> = crate::bench::broad_suite()
+            .into_iter()
+            .chain(crate::bench::narrow_suite())
+            .filter(|(name, _)| name.ends_with("measured_density"))
+            .collect();
+        assert_eq!(scenarios.len(), 2, "both suites must carry the scenario");
+
+        for (name, params) in scenarios {
+            let (frag, prec) = cell_density(&params);
+            assert!(frag > 0.15 && frag < 0.9, "{name} fragment density {frag}");
+            assert!(prec > 0.15 && prec < 0.9, "{name} precursor density {prec}");
+        }
+    }
 
     #[test]
     fn density_scales_interferent_count_with_window() {

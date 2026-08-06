@@ -42,5 +42,5 @@ default = ["mzdata"]
 mzdata = ["timsquery/mzdata"]
 instrumentation = ["timsseek/instrumentation"]
 
-[target.'cfg(windows)'.dependencies]
-mimalloc = { workspace = true, features = ["secure"] }
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }

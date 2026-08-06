@@ -1,10 +1,6 @@
 //! Standalone replay of a saved `calibration.json` — the RT calibration
 //! dashboard without a live Phase 1 search behind it.
 //!
-//! The JSON file's `"calibration"` field is read with `serde_json` alone rather
-//! than through `timsseek`'s wrapper type: `calib_dash` must not pull in a whole
-//! search engine crate to read three fields back out of its own save format.
-//!
 //! The loaded points become a single Phase-1-shaped batch (chunk 0, one frame),
 //! so the batch scrubber shows one frame and the Convergence tab's history is a
 //! single point — a Phase 2 snapshot is one fit, not a run's sequence of batches.
@@ -70,16 +66,12 @@ fn main() {
     dash.finish();
 }
 
-/// Reads `path` and pulls `CalibrationSnapshot` out of its `"calibration"`
-/// field without deserializing (or depending on the type of) the rest of
-/// the saved file.
+/// Reads `path` and keeps only the snapshot. The residual block is left opaque —
+/// nothing here reads it — and the provenance warning is dropped: there is no raw
+/// file to check the calibration against.
 fn load_snapshot(path: &Path) -> Result<CalibrationSnapshot, String> {
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let calibration = value
-        .get("calibration")
-        .ok_or_else(|| "missing top-level \"calibration\" field".to_string())?;
-    serde_json::from_value(calibration.clone()).map_err(|e| e.to_string())
+    let (saved, _) = calibrt::SavedCalibration::<serde_json::Value>::read(path, None)?;
+    Ok(saved.calibration)
 }
 
 /// Rejects the two shapes a syntactically valid `calibration.json` can still
@@ -106,17 +98,32 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// A file whose layout parses but whose version is not the current one is
+    /// refused: its fields may mean something else, and the snapshot is refit
+    /// here rather than validated field by field.
     #[test]
-    fn a_file_without_a_calibration_field_names_the_missing_field() {
+    fn a_file_of_a_foreign_version_is_refused() {
         // The handle is held (not just its path) because dropping it is what
         // deletes the file — including when the test fails.
         let mut f = NamedTempFile::new().expect("a writable temp dir");
-        f.write_all(br#"{"version": 1, "other": {}}"#)
-            .expect("write the fixture");
-        let err = load_snapshot(f.path()).expect_err("there is no \"calibration\" field");
+        f.write_all(
+            br#"{
+              "version": "v2",
+              "rt_range_seconds": [0.0, 1200.0],
+              "calibration": {
+                "points": [[0.0, 30.0, 1.0], [100.0, 200.0, 1.0]],
+                "grid_size": 16,
+                "lookback": 4
+              },
+              "rt_tolerance_minutes": 1.25,
+              "n_scored": 999
+            }"#,
+        )
+        .expect("write the fixture");
+        let err = load_snapshot(f.path()).expect_err("v2 is not the current format");
         assert!(
-            err.contains("calibration"),
-            "message must name the missing field: {err}"
+            err.contains("v2") && err.contains(calibrt::CALIBRATION_FORMAT_VERSION),
+            "message must name both versions: {err}"
         );
     }
 

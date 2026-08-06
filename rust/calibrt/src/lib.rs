@@ -5,10 +5,6 @@
 pub mod grid;
 mod pathfinding;
 pub mod types;
-use tracing::{
-    info,
-    warn,
-};
 pub use types::{
     LibraryRT,
     ObservedRTSeconds,
@@ -154,11 +150,9 @@ impl CalibrationCurve {
     }
 }
 
-/// Default `fraction` for [`CalibrationState::measure_ridge_width`]: expand
-/// away from the path cell until the weight drops below 10% of it (FW@10%max).
-/// Lives here because calibrt owns the measurement — every consumer that wants
-/// "the" ridge width must read this rather than spell `0.1` again.
-pub const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
+/// The fraction every fit measures its ridge at: expand away from the path cell
+/// until the weight drops below 10% of it (FW@10%max).
+const DEFAULT_RIDGE_FRACTION: f64 = 0.1;
 
 /// The grid weight one calibrant contributes. Every producer weighs calibrants
 /// equally: weight decides which nodes survive `suppress_nonmax` and scales every
@@ -235,7 +229,120 @@ pub struct CalibrationSnapshot {
     pub lookback: usize,
 }
 
-/// Grid geometry, emitted once per fit so a consumer can lay out `cells`
+/// The only version [`SavedCalibration`] reads or writes. Named once so the
+/// writer and the reader's gate cannot disagree.
+pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
+
+/// JSON v3 calibration file format — shared between CLI and viewer.
+///
+/// `calibration` is the grid's own snapshot and the only record of the fit: the
+/// curve and the ridge widths are recomputed by refitting it, so the file cannot
+/// carry a curve that disagrees with the points that produced it.
+///
+/// `R` is the residual block a writer measures beyond the curve. This crate does
+/// not interpret it; a reader that has no use for it can leave it opaque.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SavedCalibration<R = serde_json::Value> {
+    pub version: String,
+    pub rt_range_seconds: [f64; 2],
+    pub calibration: CalibrationSnapshot,
+    /// The uniform RT tolerance. Every writer has one — it is what a query falls
+    /// back to where the grid measured no ridge.
+    pub rt_tolerance_minutes: f32,
+    /// What a search measured beyond the curve. `None` for a writer that measures
+    /// no residuals — zeros there would read as "measured, and tight".
+    ///
+    /// The path is named because a bare `default` would demand `R: Default`.
+    #[serde(default = "Option::default")]
+    pub residuals: Option<R>,
+    pub n_scored: usize,
+}
+
+impl<R> SavedCalibration<R> {
+    /// Assemble a file record. The version is stamped here, not by callers.
+    pub fn new(
+        rt_range_seconds: [f64; 2],
+        calibration: CalibrationSnapshot,
+        rt_tolerance_minutes: f32,
+        residuals: Option<R>,
+        n_scored: usize,
+    ) -> Self {
+        Self {
+            version: CALIBRATION_FORMAT_VERSION.to_string(),
+            rt_range_seconds,
+            calibration,
+            rt_tolerance_minutes,
+            residuals,
+            n_scored,
+        }
+    }
+
+    /// Serialize to `path` in the layout [`Self::read`] expects.
+    pub fn write(&self, path: &std::path::Path) -> Result<(), String>
+    where
+        R: serde::Serialize,
+    {
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Parse a calibration file and check its provenance. The `Option<String>`
+    /// is a reason to distrust the file, not an error: a calibration is only
+    /// valid for the run it was fit on, and `raw_rt_range` — the RT span of the
+    /// run it is about to be used on — is the one cheap way to catch the wrong
+    /// file. `None` there means nothing verifies it, which also warns.
+    pub fn read(
+        path: &std::path::Path,
+        raw_rt_range: Option<[f64; 2]>,
+    ) -> Result<(Self, Option<String>), String>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if saved.version != CALIBRATION_FORMAT_VERSION {
+            return Err(format!(
+                "Unsupported calibration version: {} (expected {CALIBRATION_FORMAT_VERSION})",
+                saved.version
+            ));
+        }
+        let warning = saved.provenance_warning(raw_rt_range);
+        Ok((saved, warning))
+    }
+
+    /// Number of calibrant points the curve was fit on.
+    pub fn n_calibrants(&self) -> usize {
+        self.calibration.points.len()
+    }
+
+    fn provenance_warning(&self, raw_rt_range: Option<[f64; 2]>) -> Option<String> {
+        let Some(raw) = raw_rt_range else {
+            return Some(
+                "No raw RT range to check the calibration against — nothing verifies it was \
+                 fit on this run"
+                    .to_string(),
+            );
+        };
+        let overlap_lo = self.rt_range_seconds[0].max(raw[0]);
+        let overlap_hi = self.rt_range_seconds[1].min(raw[1]);
+        let overlap = (overlap_hi - overlap_lo).max(0.0);
+        let span = self.rt_range_seconds[1] - self.rt_range_seconds[0];
+        if span <= 0.0 || overlap / span >= 0.5 {
+            return None;
+        }
+        Some(format!(
+            "Calibration RT range [{:.1}, {:.1}]s overlaps the raw file's [{:.1}, {:.1}]s by \
+             {:.0}% — it may have been fit on a different run",
+            self.rt_range_seconds[0],
+            self.rt_range_seconds[1],
+            raw[0],
+            raw[1],
+            (overlap / span) * 100.0,
+        ))
+    }
+}
+
+/// Grid geometry, so a consumer can lay out [`CalibrationState::grid_cells`]
 /// without inferring it from the node coordinates (which is impossible for an
 /// empty or single-occupied grid).
 #[derive(Debug, Clone, Copy)]
@@ -245,80 +352,27 @@ pub struct GridGeom {
     pub y_range: (f64, f64),
 }
 
-/// One step of the fit, borrowed from the state that produced it.
-///
-/// `cells` is `bins * bins` ROW-MAJOR: `index = row * bins + col`, where `row`
-/// indexes the observed-RT axis and `col` the library-RT axis. This matches
-/// `Grid::add_point`'s `gy * bins + gx`.
-pub enum FitEvent<'a> {
-    FitStarted {
-        geom: GridGeom,
-        cells: &'a [grid::Node],
-    },
-    Suppressed {
-        cells: &'a [grid::Node],
-    },
-    /// Emitted once per DP node, only when `ObserveOpts::dp_nodes` is set.
-    /// `considered` holds every `(predecessor_index, edge_weight)` the node
-    /// evaluated, including the ones it rejected.
-    DpNode {
-        i: usize,
-        node: &'a grid::Node,
-        chose: Option<usize>,
-        acc_weight: f64,
-        considered: &'a [(usize, f64)],
-    },
-    PathFound {
-        path: &'a [Point],
-        /// `path`'s cells as row-major grid indices, one per point, from the
-        /// grid's own [`GridGeom`] arithmetic — so an overlay never has to
-        /// re-derive them and risk landing in a different cell.
-        indices: &'a [usize],
-        /// The DP-chosen segment within `path`: `path[..dp_range.start]` is a
-        /// greedily attached prefix and `path[dp_range.end..]` a greedily
-        /// attached suffix (Pass 2's monotonic extension beyond what the DP
-        /// itself scored).
-        dp_range: std::ops::Range<usize>,
-    },
-    CurveFit {
-        curve: &'a CalibrationCurve,
-    },
-    RidgeMeasured {
-        widths: &'a [RidgeMeasurement],
-    },
-}
-
-pub trait FitObserver {
-    fn on_event(&mut self, ev: FitEvent<'_>);
-}
-
-/// The no-op observer.
-impl FitObserver for () {
-    fn on_event(&mut self, _: FitEvent<'_>) {}
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ObserveOpts {
-    /// Emit `DpNode` from the DP's inner loop. Off by default: it fires once
-    /// per node.
-    pub dp_nodes: bool,
-}
-
-impl ObserveOpts {
-    pub const NONE: Self = Self { dp_nodes: false };
-}
-
 /// Reusable calibration state for incremental fitting. Keeps the grid and the
 /// pathfinding buffers across fits; the path itself is allocated per fit.
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
+    /// The DP-chosen segment within [`Self::path_indices`] — see
+    /// [`Self::dp_range`].
+    dp_range: std::ops::Range<usize>,
     /// Survivors of suppression, refilled per fit. Sized at `bins`, which is a
     /// hint and not a bound: `suppress_nonmax` keeps every node tied for a
     /// row/column max, so ties can legitimately exceed `bins`.
     filtered: Vec<grid::Node>,
     scratch: pathfinding::PathfindingScratch,
     curve: Option<CalibrationCurve>,
+    /// The fit's ridge widths at [`DEFAULT_RIDGE_FRACTION`], measured by
+    /// [`Self::fit`] so that reading them takes `&self`.
+    ridge_widths: Vec<RidgeMeasurement>,
+    /// The points fed through [`Self::update`] since the grid was last cleared.
+    /// Kept because the grid bins them on the way in: a fitted grid cannot say
+    /// what it was fit on, and that is what [`Self::snapshot`] has to persist.
+    fit_points: Vec<Point>,
     lookback: usize,
 }
 
@@ -332,9 +386,12 @@ impl CalibrationState {
         Ok(Self {
             grid: grid::Grid::new(grid_size, x_range, y_range)?,
             path_indices: Vec::new(),
+            dp_range: 0..0,
             filtered: Vec::with_capacity(grid_size),
             scratch: pathfinding::PathfindingScratch::default(),
             curve: None,
+            ridge_widths: Vec::new(),
+            fit_points: Vec::new(),
             lookback,
         })
     }
@@ -348,28 +405,26 @@ impl CalibrationState {
 
     /// The whole re-fit sequence, in the one place every consumer shares:
     /// derive the grid geometry from the points, `reconfigure` onto it, `update`,
-    /// then `fit_with`. Returns the [`GridRanges`] the fit actually ran on.
+    /// then `fit`. Returns the [`GridRanges`] the fit actually ran on.
     ///
-    /// The geometry is derived *here*, by [`point_ranges`], rather than passed in:
+    /// The geometry is derived *here*, by `point_ranges`, rather than passed in:
     /// a caller that supplies the acquisition RT range instead would clamp an
     /// iRT-scaled library — whose RTs fall entirely outside it — into one edge
     /// column. Every calibrant weighs [`CALIBRANT_WEIGHT`].
     ///
     /// On `Err` the previous fit is left alone: a later, larger point set may well
     /// span a usable range.
-    pub fn refit<O: FitObserver>(
+    pub fn refit(
         &mut self,
         bins: usize,
         points: impl Iterator<Item = (f64, f64)> + Clone,
-        obs: &mut O,
-        opts: ObserveOpts,
     ) -> Result<GridRanges, CalibRtError> {
         let (x_range, y_range) = point_ranges(points.clone())?;
         self.reconfigure(bins, x_range, y_range)?;
         self.update(
             points.map(|(lib, obs)| (LibraryRT(lib), ObservedRTSeconds(obs), CALIBRANT_WEIGHT)),
         )?;
-        self.fit_with(obs, opts);
+        self.fit();
         Ok((x_range, y_range))
     }
 
@@ -380,34 +435,19 @@ impl CalibrationState {
         points: impl Iterator<Item = (LibraryRT<f64>, ObservedRTSeconds<f64>, f64)>,
     ) -> Result<(), CalibRtError> {
         for (lib_rt, obs_rt, w) in points {
-            self.grid.add_point(&Point {
+            let point = Point {
                 library: lib_rt.0,
                 observed: obs_rt.0,
                 weight: w,
-            })?;
+            };
+            self.grid.add_point(&point)?;
+            self.fit_points.push(point);
         }
         Ok(())
     }
 
     pub fn fit(&mut self) {
-        self.fit_with(&mut (), ObserveOpts::NONE)
-    }
-
-    pub fn fit_with<O: FitObserver>(&mut self, obs: &mut O, opts: ObserveOpts) {
-        obs.on_event(FitEvent::FitStarted {
-            geom: GridGeom {
-                bins: self.grid.bins,
-                x_range: self.grid.x_range,
-                y_range: self.grid.y_range,
-            },
-            cells: self.grid.grid_cells(),
-        });
-
-        let suppression_failed = self.grid.suppress_nonmax().is_err();
-        obs.on_event(FitEvent::Suppressed {
-            cells: self.grid.grid_cells(),
-        });
-        if suppression_failed {
+        if self.grid.suppress_nonmax().is_err() {
             self.clear_fit();
             return;
         }
@@ -421,42 +461,39 @@ impl CalibrationState {
                 .copied(),
         );
 
-        let (path_points, dp_range) = pathfinding::find_optimal_path(
-            &mut self.filtered,
-            self.lookback,
-            &mut self.scratch,
-            obs,
-            opts,
-        );
+        let (path_points, dp_range) =
+            pathfinding::find_optimal_path(&mut self.filtered, self.lookback, &mut self.scratch);
 
+        // The accessors read the path, the curve and the ridge afterwards: the
+        // per-query RT tolerance on every scoring thread, and an overlay drawing
+        // them.
         self.path_indices.clear();
         self.path_indices.extend(
             path_points
                 .iter()
                 .map(|p| self.grid.cell_of(p.library, p.observed)),
         );
-
-        obs.on_event(FitEvent::PathFound {
-            path: &path_points,
-            indices: &self.path_indices,
-            dp_range,
-        });
+        debug_assert!(
+            dp_range.end <= self.path_indices.len(),
+            "dp_range must fall within the assembled path"
+        );
+        self.dp_range = dp_range;
 
         self.curve = CalibrationCurve::new(path_points).ok();
-
-        if let Some(c) = self.curve.as_ref() {
-            obs.on_event(FitEvent::CurveFit { curve: c });
-        }
+        self.ridge_widths = self.measure_ridge_width();
     }
 
     /// Drop the previous fit's results, keeping the grid and the buffers.
     fn clear_fit(&mut self) {
         self.curve = None;
         self.path_indices.clear();
+        self.dp_range = 0..0;
+        self.ridge_widths.clear();
     }
 
     pub fn reset(&mut self) {
         self.grid.reset();
+        self.fit_points.clear();
         self.clear_fit();
     }
 
@@ -469,10 +506,17 @@ impl CalibrationState {
         y_range: (f64, f64),
     ) -> Result<(), CalibRtError> {
         self.grid.reconfigure(bins, x_range, y_range)?;
+        self.fit_points.clear();
         self.clear_fit();
         Ok(())
     }
 
+    /// The grid's nodes, `bins * bins` ROW-MAJOR: `index = row * bins + col`,
+    /// where `row` indexes the observed-RT axis and `col` the library-RT axis.
+    /// This matches `Grid::add_point`'s `gy * bins + gx`.
+    ///
+    /// After a fit each node carries both its accumulated weight and its
+    /// suppression flag.
     pub fn grid_cells(&self) -> &[grid::Node] {
         self.grid.grid_cells()
     }
@@ -489,35 +533,65 @@ impl CalibrationState {
         self.grid.y_range
     }
 
+    /// The assembled path as row-major grid indices, one per point, from the
+    /// grid's own arithmetic — so an overlay never has to re-derive them and risk
+    /// landing in a different cell.
     pub fn path_indices(&self) -> &[usize] {
         &self.path_indices
+    }
+
+    /// The DP-chosen segment within [`Self::path_indices`]: the indices before
+    /// `start` are a greedily attached prefix and those from `end` a greedily
+    /// attached suffix, Pass 2's monotonic extension beyond what the DP itself
+    /// scored.
+    pub fn dp_range(&self) -> std::ops::Range<usize> {
+        self.dp_range.clone()
     }
 
     pub fn curve(&self) -> Option<&CalibrationCurve> {
         self.curve.as_ref()
     }
 
-    /// Measure the width of the evidence "mountain" around the fitted path.
-    ///
-    /// For each grid column that contains a path cell, expands up and down
-    /// from the path cell until cell weight drops below `fraction` of the
-    /// path cell's weight. Returns `(column_center_x, half_width_y, total_weight)`.
-    ///
-    /// `fraction`: weight threshold as a fraction of the path cell's weight
-    /// (e.g., 0.1 = expand until weight < 10% of path cell).
-    /// `total_weight`: sum of all cell weights in the expanded range — heavier
-    /// columns should carry more authority in tolerance estimation.
-    pub fn measure_ridge_width(&mut self, fraction: f64) -> Vec<RidgeMeasurement> {
-        self.measure_ridge_width_with(fraction, &mut ())
+    /// The points the grid currently holds, in the order [`Self::update`] took
+    /// them.
+    pub fn fit_points(&self) -> &[Point] {
+        &self.fit_points
     }
 
-    /// As [`Self::measure_ridge_width`], but reports the measurements through
-    /// `obs` once they're computed.
-    pub fn measure_ridge_width_with<O: FitObserver>(
-        &mut self,
-        fraction: f64,
-        obs: &mut O,
-    ) -> Vec<RidgeMeasurement> {
+    /// Everything needed to rebuild an equal state: the points, and the grid
+    /// geometry they were binned under. Refitting a snapshot under its own
+    /// `(grid_size, lookback)` reproduces the curve, so this is the state's
+    /// persistent form — see [`Self::from_snapshot`].
+    pub fn snapshot(&self) -> CalibrationSnapshot {
+        CalibrationSnapshot {
+            points: self
+                .fit_points
+                .iter()
+                .map(|p| [p.library, p.observed, p.weight])
+                .collect(),
+            grid_size: self.grid_bins(),
+            lookback: self.lookback,
+        }
+    }
+
+    /// The current fit's ridge widths (FW@10%max), sorted by library RT. Empty
+    /// until a fit succeeds, and again once one fails, which is the "no ridge
+    /// data" case consumers fall back from.
+    pub fn ridge_widths(&self) -> &[RidgeMeasurement] {
+        &self.ridge_widths
+    }
+
+    /// Measure the width of the evidence "mountain" around the fitted path.
+    ///
+    /// For each grid column holding a path cell, expands up and down from that
+    /// cell until the blurred weight drops below [`DEFAULT_RIDGE_FRACTION`] of
+    /// the path cell's own.
+    ///
+    /// Idempotent: it reads the accumulated node weights into the derived blur
+    /// buffers without writing them back, so measuring twice gives the same
+    /// answer and a later `update` can still add points to the same grid.
+    /// `&mut self` is for those two buffers, not for the fit.
+    fn measure_ridge_width(&mut self) -> Vec<RidgeMeasurement> {
         let bins = self.grid.bins;
         let y_span = self.grid.y_range.1 - self.grid.y_range.0;
         let cell_h = y_span / bins as f64;
@@ -536,7 +610,7 @@ impl CalibrationState {
                 continue;
             }
 
-            let threshold = path_weight * fraction;
+            let threshold = path_weight * DEFAULT_RIDGE_FRACTION;
 
             // Expand upward (increasing gy) from path cell
             let mut upper_gy = gy;
@@ -582,7 +656,15 @@ impl CalibrationState {
             });
         }
 
-        obs.on_event(FitEvent::RidgeMeasured { widths: &widths });
+        // Sorted by library RT because every consumer interpolates between
+        // adjacent columns, which is only meaningful in x order. The DP path is
+        // not guaranteed to arrive that way.
+        widths.sort_by(|a, b| {
+            a.library
+                .0
+                .partial_cmp(&b.library.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         widths
     }
 
@@ -615,7 +697,7 @@ pub type GridRanges = ((f64, f64), (f64, f64));
 /// comes out empty or inverted on either axis is `Err(ZeroRange)` here rather
 /// than later out of `Grid::new`, so a caller that only wants to know whether
 /// a grid is configurable never has to build one.
-pub fn point_ranges(
+fn point_ranges(
     points: impl IntoIterator<Item = (f64, f64)>,
 ) -> Result<GridRanges, CalibRtError> {
     let mut x = (f64::INFINITY, f64::NEG_INFINITY);
@@ -636,125 +718,9 @@ pub fn point_ranges(
     Ok((x, y))
 }
 
-/// Calibrates retention times using the Calib-RT algorithm with explicit ranges.
-///
-/// This is the lower-level API that requires you to specify the x and y ranges explicitly.
-/// Consider using [`calibrate`] for automatic range detection.
-///
-/// # Arguments
-/// * `points` - A slice of `Point` structs representing the data.
-/// * `x_range` - The min and max values for the X dimension.
-/// * `y_range` - The min and max values for the Y dimension.
-/// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
-///
-/// # Returns
-/// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-pub fn calibrate_with_ranges(
-    points: &[Point],
-    x_range: (f64, f64),
-    y_range: (f64, f64),
-    grid_size: usize,
-    lookback: usize,
-) -> Result<CalibrationCurve, CalibRtError> {
-    let mut state = CalibrationState::new(grid_size, x_range, y_range, lookback)?;
-    state.update(points.iter().map(|p| {
-        (
-            LibraryRT(p.library),
-            ObservedRTSeconds(p.observed),
-            p.weight,
-        )
-    }))?;
-
-    state.fit();
-
-    // No path at all — including the suppression short-circuit, which never
-    // builds one — is `NoPoints`; a path too short to interpolate is not.
-    let calcurve = state
-        .curve()
-        .cloned()
-        .ok_or(if state.path_indices().is_empty() {
-            CalibRtError::NoPoints
-        } else {
-            CalibRtError::InsufficientPoints
-        });
-    match &calcurve {
-        Ok(c) => {
-            let wrmse = c.wrmse(points.iter().map(|p| {
-                (
-                    LibraryRT(p.library),
-                    ObservedRTSeconds(p.observed),
-                    p.weight,
-                )
-            }));
-            info!("Calibration successful, WRMSE: {}", wrmse);
-        }
-        Err(e) => {
-            warn!("Calibration failed: {:?}", e);
-        }
-    }
-
-    calcurve
-}
-
-/// Calibrates retention times using the Calib-RT algorithm with automatic range detection.
-///
-/// This is a convenience wrapper that automatically computes the x and y ranges from the input points.
-/// If you need explicit control over the ranges, use [`calibrate_with_ranges`] instead.
-///
-/// # Arguments
-/// * `points` - A slice of `Point` structs representing the data.
-/// * `grid_size` - The size of the grid for initial filtering (e.g., 100).
-///
-/// # Returns
-/// A `Result` containing a `CalibrationCurve` or a `CalibRtError`.
-///
-/// # Example
-/// ```
-/// use calibrt::{Point, calibrate};
-///
-/// let points = vec![
-///     Point { library: 1.0, observed: 1.5, weight: 1.0 },
-///     Point { library: 2.0, observed: 2.5, weight: 1.0 },
-///     Point { library: 3.0, observed: 3.5, weight: 1.0 },
-/// ];
-///
-/// let curve = calibrate(&points, 100).expect("Calibration failed");
-/// ```
-pub fn calibrate(points: &[Point], grid_size: usize) -> Result<CalibrationCurve, CalibRtError> {
-    let (x_range, y_range) = point_ranges(points.iter().map(|p| (p.library, p.observed)))?;
-    calibrate_with_ranges(points, x_range, y_range, grid_size, 30)
-}
-
 #[cfg(test)]
-mod observer_tests {
+mod fit_tests {
     use super::*;
-
-    /// Records event names plus the payloads the assertions need.
-    #[derive(Default)]
-    struct Recorder {
-        names: Vec<&'static str>,
-        geom: Option<GridGeom>,
-        dp_edges: Vec<(usize, Option<usize>)>,
-    }
-
-    impl FitObserver for Recorder {
-        fn on_event(&mut self, ev: FitEvent<'_>) {
-            match ev {
-                FitEvent::FitStarted { geom, .. } => {
-                    self.names.push("start");
-                    self.geom = Some(geom);
-                }
-                FitEvent::Suppressed { .. } => self.names.push("suppressed"),
-                FitEvent::DpNode { i, chose, .. } => {
-                    self.names.push("dp");
-                    self.dp_edges.push((i, chose));
-                }
-                FitEvent::PathFound { .. } => self.names.push("path"),
-                FitEvent::CurveFit { .. } => self.names.push("curve"),
-                FitEvent::RidgeMeasured { .. } => self.names.push("ridge"),
-            }
-        }
-    }
 
     /// A clean diagonal ridge: 10 points on y = x, one per grid column.
     fn diagonal_state() -> CalibrationState {
@@ -769,33 +735,71 @@ mod observer_tests {
         s
     }
 
+    /// The kept points must clear exactly when the grid's accumulation does.
     #[test]
-    fn events_arrive_in_pipeline_order() {
+    fn fit_points_track_the_grids_accumulation() {
         let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
-        assert_eq!(
-            rec.names,
-            vec!["start", "suppressed", "path", "curve"],
-            "no dp events when dp_nodes is off, and no ridge event from the fit"
-        );
-        let g = rec.geom.expect("FitStarted must be emitted");
-        assert_eq!(g.bins, 10);
-        assert_eq!(g.x_range, (0.0, 10.0));
-        assert_eq!(g.y_range, (0.0, 10.0));
+        assert_eq!(s.fit_points().len(), 10);
 
-        // And the ridge call is where it does come from.
-        s.measure_ridge_width_with(0.1, &mut rec);
-        assert_eq!(rec.names.last(), Some(&"ridge"));
+        // A second batch accumulates, matching `update`'s effect on the grid.
+        s.update(std::iter::once((
+            LibraryRT(2.5),
+            ObservedRTSeconds(2.5),
+            1.0,
+        )))
+        .unwrap();
+        assert_eq!(s.fit_points().len(), 11);
+
+        // A fit reads the points; it must not consume them.
+        s.fit();
+        assert!(s.curve().is_some(), "the diagonal must fit");
+        assert_eq!(s.fit_points().len(), 11, "fitting is not consuming");
+
+        let snap = s.snapshot();
+        assert_eq!(snap.points.len(), 11);
+        assert_eq!((snap.grid_size, snap.lookback), (10, 5));
+        assert_eq!(
+            snap.points[0],
+            [0.5, 0.5, 1.0],
+            "weights survive into the snapshot"
+        );
+
+        // Refitting the snapshot reproduces the curve it was taken from.
+        let rebuilt = CalibrationState::from_snapshot(&snap).unwrap();
+        let (orig, new) = (s.curve().unwrap(), rebuilt.curve().unwrap());
+        assert_eq!(orig.points().len(), new.points().len());
+        for x in [1.0, 3.3, 7.7] {
+            assert_eq!(
+                orig.predict(LibraryRT(x)).unwrap().0,
+                new.predict(LibraryRT(x)).unwrap().0,
+                "prediction diverged at {x}"
+            );
+        }
+
+        s.reconfigure(10, (0.0, 20.0), (0.0, 20.0)).unwrap();
+        assert!(
+            s.fit_points().is_empty(),
+            "reconfigure clears the grid, so it must clear the points"
+        );
+
+        let mut s = diagonal_state();
+        s.reset();
+        assert!(s.fit_points().is_empty(), "reset likewise");
     }
 
+    /// The whole of what a fit leaves on the state, which is everything a
+    /// consumer reads afterwards.
     #[test]
-    fn dp_events_appear_once_per_node_when_enabled() {
+    fn a_fit_leaves_its_geometry_path_curve_and_dp_range_on_the_state() {
         let mut s = diagonal_state();
-        let mut rec = Recorder::default();
-        s.fit_with(&mut rec, ObserveOpts { dp_nodes: true });
-        assert!(rec.names.contains(&"dp"), "dp events must be emitted");
-        assert_eq!(rec.dp_edges.len(), 10, "one event per DP node");
+        s.fit();
+        assert_eq!(s.grid_bins(), 10);
+        assert_eq!(s.grid_x_range(), (0.0, 10.0));
+        assert_eq!(s.grid_y_range(), (0.0, 10.0));
+        assert_eq!(s.grid_cells().len(), 100);
+        assert!(!s.path_indices().is_empty(), "the fit found a path");
+        assert!(s.curve().is_some(), "the fit produced a curve");
+        assert!(!s.dp_range().is_empty(), "the DP scored part of the path");
     }
 }
 

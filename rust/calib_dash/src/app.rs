@@ -19,7 +19,6 @@ use calibrt::{
     CalibrationCurve,
     CalibrationState,
     LibraryRT,
-    ObserveOpts,
     ObservedRTSeconds,
     RidgeSummary,
 };
@@ -174,11 +173,10 @@ impl Stepper {
     }
 }
 
-/// Dashboard state for one pause: the tab, the DP pane toggle, the batch number,
-/// the recording of the fit that ran at it, and the pending count prefix.
+/// Dashboard state for one pause: the tab, the batch number, the recording of the
+/// fit that ran at it, and the pending count prefix.
 pub(crate) struct App {
     tab: Tab,
-    dp_pane: bool,
     batch: u32,
     recording: FitRecording,
     /// The post-Phase-2 recording, `None` for the whole of Phase 1: the Tolerances
@@ -207,10 +205,6 @@ pub(crate) struct App {
     /// also momentarily after `scrub_frame` moves and before the next `sync_scrub`
     /// catches up — `active_recording` falls back to the live view for that gap.
     scrub_recording: Option<FitRecording>,
-    /// The live batch's on-demand, `dp_nodes`-observed recording — what the DP pane
-    /// reads while the Fit tab shows the live batch. `None` when the pane is off, the
-    /// tab is scrubbed, or the batch's points were too degenerate to refit.
-    live_dp_recording: Option<FitRecording>,
     /// Whether the `?` key-map overlay is open. Modal: while it shows, every keypress
     /// (digits and `Ctrl-C` included) only dismisses it.
     show_keys: bool,
@@ -220,7 +214,6 @@ impl App {
     pub(crate) fn new(bins: usize) -> Self {
         Self {
             tab: Tab::Fit,
-            dp_pane: false,
             batch: 0,
             recording: FitRecording::new(bins),
             real_fit: None,
@@ -236,7 +229,6 @@ impl App {
             scrub_frame: None,
             scrub_chunk: None,
             scrub_recording: None,
-            live_dp_recording: None,
             show_keys: false,
         }
     }
@@ -282,10 +274,6 @@ impl App {
 
     pub(crate) fn batch(&self) -> u32 {
         self.batch
-    }
-
-    pub(crate) fn dp_pane(&self) -> bool {
-        self.dp_pane
     }
 
     pub(crate) fn layer(&self) -> Layer {
@@ -335,12 +323,6 @@ impl App {
         self.scrub_frame = None;
         self.scrub_chunk = None;
         self.scrub_recording = None;
-    }
-
-    /// The Fit tab falls back to `active_recording()` (which renders "no DP trace" on
-    /// its own) when this is `None`.
-    pub(crate) fn live_dp_recording(&self) -> Option<&FitRecording> {
-        self.live_dp_recording.as_ref()
     }
 
     pub(crate) fn pending_count(&self) -> Option<u32> {
@@ -446,16 +428,6 @@ impl App {
                 self.clear_scrub();
                 PauseAction::Next(n)
             }
-            'd' => {
-                self.dp_pane = !self.dp_pane;
-                if !self.dp_pane {
-                    // Closing the pane leaves the last recording with no reader; drop
-                    // it so `sync_dp` cannot serve a stale one on a reopen.
-                    self.live_dp_recording = None;
-                }
-                self.count = None;
-                PauseAction::Stay
-            }
             'l' => {
                 self.tab = cycle(&Tab::ALL, self.tab, self.take_count(), true);
                 PauseAction::Stay
@@ -495,10 +467,10 @@ impl App {
 /// `>= 2` is defined; this is high enough that a local kink is unlikely to hide.
 const CURVE_DELTA_SAMPLES: usize = 50;
 
-/// [`calibrt::CalibrationState::refit`] plus the ridge measurement the tabs read,
-/// against whichever state/recording pair the caller owns. The live fit and a
-/// scrubbed frame's replay sharing this is what makes a replayed frame show the
-/// fit that actually ran.
+/// [`calibrt::CalibrationState::refit`], replacing `recording` with what the fit
+/// left behind, against whichever state/recording pair the caller owns. The live
+/// fit and a scrubbed frame's replay sharing this is what makes a replayed frame
+/// show the fit that actually ran.
 ///
 /// `None` when `calibrt` refuses, logged at `warn` here: every caller treats a
 /// refusal the same way, as "no recording".
@@ -507,19 +479,13 @@ fn fit_points(
     recording: &mut FitRecording,
     bins: usize,
     points: &[CalibrantPoint],
-    opts: ObserveOpts,
 ) -> Option<(f64, f64)> {
     let (x_range, _) = state
-        .refit(
-            bins,
-            points.iter().map(|p| (p.library_rt, p.observed_rt)),
-            recording,
-            opts,
-        )
+        .refit(bins, points.iter().map(|p| (p.library_rt, p.observed_rt)))
         // `CalibRtError` has no `Display`.
         .inspect_err(|e| tracing::warn!("calib_dash: skipping this re-fit: {e:?}"))
         .ok()?;
-    state.measure_ridge_width_with(calibrt::DEFAULT_RIDGE_FRACTION, recording);
+    *recording = FitRecording::from_state(state);
     Some(x_range)
 }
 
@@ -580,19 +546,10 @@ pub struct CalibDash {
     prev_curve: Option<CalibrationCurve>,
     /// Held so `refit_frame` can reconfigure `refit_state` to the live grid size.
     bins: usize,
-    /// A separate `CalibrationState`/`FitRecording` pair for the on-demand re-fits —
-    /// a scrubbed frame's replay and the DP pane's `dp_nodes` fit of the live batch —
-    /// so neither perturbs the live recording. `sync_scrub` and `sync_dp` each
-    /// early-return when the other applies, so they never share the buffer at once.
+    /// A separate `CalibrationState`/`FitRecording` pair for a scrubbed frame's
+    /// replay, so replaying does not perturb the live recording.
     refit_state: CalibrationState,
     refit_recording: FitRecording,
-    /// Which batch the DP pane's recording was last computed for, so `sync_dp`
-    /// can skip the refit on every keystroke of the same pause.
-    dp_recording_batch: Option<u32>,
-    /// Counts `dp_refit_current` calls — test-only, since `sync_dp`'s
-    /// `dp_recording_batch` cache has no other observable.
-    #[cfg(test)]
-    dp_refit_calls: u32,
 }
 
 impl CalibDash {
@@ -622,9 +579,6 @@ impl CalibDash {
             bins,
             refit_state: new_state(),
             refit_recording: FitRecording::new(bins),
-            dp_recording_batch: None,
-            #[cfg(test)]
-            dp_refit_calls: 0,
         }
     }
 
@@ -696,7 +650,6 @@ impl CalibDash {
             &mut self.refit_recording,
             self.bins,
             pts,
-            ObserveOpts { dp_nodes: true },
         )?;
         Some((chunk, &self.refit_recording))
     }
@@ -717,7 +670,6 @@ impl CalibDash {
             self.app.recording_mut(),
             self.bins,
             &self.current_points,
-            ObserveOpts::NONE,
         ) {
             path_nodes = self.app.recording().path_indices().len();
             ridge_half_width = RidgeSummary::of(self.app.recording().ridge())
@@ -778,43 +730,6 @@ impl CalibDash {
         }
     }
 
-    /// Re-fits `current_points` into `refit_state`/`refit_recording` with
-    /// `ObserveOpts { dp_nodes: true }`, so the DP pane has decisions to show. Only
-    /// ever called from `sync_dp`, never from `on_batch`: that keeps the per-node
-    /// observation cost off the per-batch hot path.
-    fn dp_refit_current(&mut self) -> Option<&FitRecording> {
-        #[cfg(test)]
-        {
-            self.dp_refit_calls += 1;
-        }
-        fit_points(
-            &mut self.refit_state,
-            &mut self.refit_recording,
-            self.bins,
-            &self.current_points,
-            ObserveOpts { dp_nodes: true },
-        )?;
-        Some(&self.refit_recording)
-    }
-
-    /// Keeps `App::live_dp_recording` in sync with `App::dp_pane`, re-fitting once per
-    /// batch rather than once per draw. A no-op whenever the pane is off, or the Fit
-    /// tab shows a scrubbed frame — `refit_frame` already observes DP nodes.
-    fn sync_dp(&mut self) {
-        if !self.app.dp_pane() || self.app.scrub_frame().is_some() {
-            return;
-        }
-        // Closing the pane drops the recording the cache names, so a reopen within
-        // the same batch has to refit rather than serve an entry pointing at nothing.
-        if self.dp_recording_batch == Some(self.app.batch())
-            && self.app.live_dp_recording().is_some()
-        {
-            return;
-        }
-        let refit = self.dp_refit_current().cloned();
-        self.app.live_dp_recording = refit;
-        self.dp_recording_batch = Some(self.app.batch());
-    }
 }
 
 /// Pauses the batch loop to render one interactive frame and block until the user's
@@ -855,7 +770,6 @@ fn event_loop<B: ratatui::backend::Backend>(
     loop {
         // Before every draw, not just after a scrub keypress: a no-op when `None`.
         dash.sync_scrub();
-        dash.sync_dp();
         if let Err(e) = terminal.draw(|f| crate::ui::draw(f, &mut dash.app)) {
             tracing::warn!("calib_dash failed to draw a frame: {e}");
             return PauseAction::Detach;
@@ -995,16 +909,16 @@ mod tests {
         assert_eq!(app.pending_count(), Some(u32::MAX));
     }
 
-    /// Both halves of "only a motion consumes a count": a bound non-motion (`d`) and
+    /// Both halves of "only a motion consumes a count": a bound non-motion (`r`) and
     /// an unbound key (`Esc`, `handle_key`'s catch-all arm) each clear it.
     #[test]
     fn a_non_motion_key_clears_a_pending_count() {
         let mut app = App::new(10);
-        press(&mut app, "42d");
+        press(&mut app, "42r");
         assert_eq!(
             app.pending_count(),
             None,
-            "`d` toggles the DP pane, not a motion"
+            "`r` detaches, it is not a motion"
         );
 
         press(&mut app, "42");
@@ -1053,7 +967,7 @@ mod tests {
         assert_eq!(
             app.pending_count(),
             None,
-            "`?` is a non-motion key, like `d`/`r`/`q`, so it clears a pending count"
+            "`?` is a non-motion key, like `r`/`q`, so it clears a pending count"
         );
     }
 
@@ -1356,121 +1270,6 @@ mod tests {
         assert!(
             !curve_of(d.app.recording()).is_empty(),
             "sanity: batch 2 produced a real curve too"
-        );
-    }
-
-    /// A *live* `on_batch` followed by pressing `d` must leave the pane with decisions
-    /// to show. The live re-fit uses `ObserveOpts::NONE`, so `recording().dp()` staying
-    /// empty is expected; the DP data comes from `sync_dp`'s separate refit, called
-    /// directly since there is no terminal to run `event_loop` under `cargo test`.
-    #[test]
-    fn d_on_a_live_batch_refits_with_dp_nodes_so_the_pane_has_decisions() {
-        let mut d = dash(2, 8, 10, 5);
-        d.on_batch(0, points(8, 1.0, 0).into_iter());
-
-        assert!(
-            d.app.recording().dp().is_empty(),
-            "sanity: the live per-batch fit must not pay the DP-node cost"
-        );
-        assert!(
-            d.app.live_dp_recording().is_none(),
-            "sanity: nothing has refit on demand yet"
-        );
-
-        assert_eq!(press(&mut d.app, "d"), PauseAction::Stay);
-        assert!(d.app.dp_pane(), "d must turn the pane on");
-
-        d.sync_dp();
-
-        let rec = d
-            .app
-            .live_dp_recording()
-            .expect("d on the live batch must have triggered an on-demand refit");
-        assert!(
-            !rec.dp().is_empty(),
-            "the DP pane must have decisions to show after pressing d on a live batch, \
-             not an empty recording"
-        );
-    }
-
-    /// Pressing `d` while scrubbed to an earlier frame must not trigger the on-demand
-    /// live refit at all — `active_recording()` already carries DP data, and `sync_dp`
-    /// recomputing from `current_points` would show the *live* batch's decisions on a
-    /// Fit tab showing a different, scrubbed one.
-    #[test]
-    fn d_while_scrubbed_does_not_touch_the_live_on_demand_recording() {
-        let mut d = dash(2, 8, 10, 5);
-        for chunk in 0..2 {
-            let slope = 1.0 + chunk as f64 * 0.1;
-            d.on_batch(chunk, points(8, slope, chunk).into_iter());
-        }
-        d.finish();
-
-        press(&mut d.app, "<");
-        d.sync_scrub();
-        assert_eq!(
-            d.app.scrub_frame(),
-            Some(1),
-            "sanity: one step back from live lands on the last retained frame (index 1 of 2)"
-        );
-        // `active_recording()` already has DP data (`refit_frame` always observes it).
-        assert!(!d.app.active_recording().dp().is_empty());
-
-        press(&mut d.app, "d");
-        d.sync_dp();
-        assert!(
-            d.app.live_dp_recording().is_none(),
-            "sync_dp must stay a no-op while scrubbed, not refit the live batch"
-        );
-    }
-
-    /// `sync_dp` runs once per keystroke of a pause but must refit at most once per
-    /// batch — and that cache must not serve batch N's DP trace at batch N+1.
-    #[test]
-    fn sync_dp_refits_once_per_batch_and_never_serves_a_stale_trace() {
-        let mut d = dash(3, 8, 10, 5);
-        d.on_batch(0, points(8, 1.0, 0).into_iter());
-        press(&mut d.app, "d");
-
-        for _ in 0..3 {
-            d.sync_dp();
-        }
-        assert_eq!(
-            d.dp_refit_calls, 1,
-            "three draws within one pause must share one refit"
-        );
-
-        // A new batch invalidates the cache: for a different slope the pane's curve is
-        // visibly different.
-        d.on_batch(1, points(8, 2.0, 1).into_iter());
-        d.sync_dp();
-        assert_eq!(d.dp_refit_calls, 2, "a new batch must refit again");
-        assert_same_curve(
-            &curve_of(d.app.live_dp_recording().expect("batch 1 refit")),
-            &curve_of(d.app.recording()),
-        );
-
-        press(&mut d.app, "d");
-        assert!(!d.app.dp_pane());
-        assert!(d.app.live_dp_recording().is_none());
-        d.sync_dp();
-        assert_eq!(
-            d.dp_refit_calls, 2,
-            "sync_dp must not refit for a pane that is off"
-        );
-
-        // Reopening within the same batch: the cache still names batch 1, but the
-        // recording it named was dropped on the way out.
-        press(&mut d.app, "d");
-        d.sync_dp();
-        assert_eq!(
-            d.dp_refit_calls, 3,
-            "a reopened pane must refit rather than trust a cache whose \
-             recording was dropped"
-        );
-        assert!(
-            d.app.live_dp_recording().is_some(),
-            "a reopened pane must have a DP trace to show"
         );
     }
 

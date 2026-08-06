@@ -69,9 +69,9 @@ impl Identity {
         Self {
             peptide: Peptide {
                 raw: Arc::from("PEPTIDEK"),
-                parsed: None,
                 decoy: DecoyMarking::Target,
                 decoy_group: 0,
+                sequence_features: false,
             },
             library_id: 1,
             decoy_group_id: 0,

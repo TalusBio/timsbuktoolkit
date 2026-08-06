@@ -1,48 +1,30 @@
-//! Owned copies of the borrowed `FitEvent`s, filled in place.
+//! An owned copy of everything a finished [`calibrt::CalibrationState`] holds
+//! that a panel draws: the grid it fit on, and the fit's products.
 //!
 //! `weights` are `f32` for storage and display only — every metric is computed
-//! from the `f64` values in the live events, never from this downcast copy.
+//! from the `f64` values on the state, never from this downcast copy.
 
 use calibrt::{
     CalibrationCurve,
-    FitEvent,
-    FitObserver,
+    CalibrationState,
     GridGeom,
     RidgeMeasurement,
 };
-
-#[derive(Debug, Clone)]
-pub struct DpDecision {
-    pub i: usize,
-    pub library: f64,
-    pub observed: f64,
-    pub chose: Option<usize>,
-    pub acc_weight: f64,
-    pub considered: Vec<(usize, f64)>,
-}
 
 #[derive(Clone)]
 pub struct FitRecording {
     geom: GridGeom,
     weights: Vec<f32>,
     suppressed: Vec<bool>,
-    /// Grid indices of the assembled path (DP chain plus greedy tails), as
-    /// `calibrt` reported them. The `bins` capacity is a hint, not a bound —
-    /// weight ties can push the survivor count past it.
+    /// See [`calibrt::CalibrationState::path_indices`]. The `bins` capacity is a
+    /// hint, not a bound — weight ties can push the survivor count past it.
     path_indices: Vec<usize>,
-    /// The DP-chosen segment within `path_indices`: `path_indices[..dp_range.start]`
-    /// and `path_indices[dp_range.end..]` were greedily attached by Pass 2,
-    /// not scored by the DP recurrence.
+    /// See [`calibrt::CalibrationState::dp_range`].
     dp_range: std::ops::Range<usize>,
-    /// The fit's curve itself, not a copy of its points, so the overlay can
-    /// predict through it instead of re-deriving calibrt's interpolation.
-    /// `None` until a `CurveFit` arrives — a path too short to interpolate
-    /// emits none.
+    /// The curve itself, so the overlay predicts through it instead of
+    /// re-deriving calibrt's interpolation.
     curve: Option<CalibrationCurve>,
     ridge: Vec<RidgeMeasurement>,
-    /// One entry per DP node visited. Same `bins`-capacity hint as
-    /// `path_indices` above.
-    dp: Vec<DpDecision>,
 }
 
 impl FitRecording {
@@ -60,7 +42,26 @@ impl FitRecording {
             dp_range: 0..0,
             curve: None,
             ridge: Vec::with_capacity(bins),
-            dp: Vec::with_capacity(bins),
+        }
+    }
+
+    /// Everything the panels draw, read off a state whose fit has finished. A
+    /// state whose fit failed carries an empty path, curve and ridge, and this
+    /// copies that emptiness through.
+    pub fn from_state(state: &CalibrationState) -> Self {
+        let cells = state.grid_cells();
+        Self {
+            geom: GridGeom {
+                bins: state.grid_bins(),
+                x_range: state.grid_x_range(),
+                y_range: state.grid_y_range(),
+            },
+            weights: cells.iter().map(|n| n.center.weight as f32).collect(),
+            suppressed: cells.iter().map(|n| n.suppressed).collect(),
+            path_indices: state.path_indices().to_vec(),
+            dp_range: state.dp_range(),
+            curve: state.curve().cloned(),
+            ridge: state.ridge_widths().to_vec(),
         }
     }
 
@@ -72,8 +73,7 @@ impl FitRecording {
         &self.path_indices
     }
 
-    /// The DP-chosen slice of `path_indices`. Indices outside it were attached
-    /// by Pass 2's greedy extension.
+    /// See [`calibrt::CalibrationState::dp_range`].
     pub(crate) fn dp_range(&self) -> std::ops::Range<usize> {
         self.dp_range.clone()
     }
@@ -84,10 +84,6 @@ impl FitRecording {
 
     pub(crate) fn ridge(&self) -> &[RidgeMeasurement] {
         &self.ridge
-    }
-
-    pub(crate) fn dp(&self) -> &[DpDecision] {
-        &self.dp
     }
 
     pub(crate) fn weight(&self, row: usize, col: usize) -> f32 {
@@ -105,76 +101,12 @@ impl FitRecording {
     }
 }
 
-impl FitObserver for FitRecording {
-    fn on_event(&mut self, ev: FitEvent<'_>) {
-        match ev {
-            FitEvent::FitStarted { geom, cells } => {
-                // A geometry change means the caller re-fit at a different
-                // `bins`; resize rather than silently mis-indexing.
-                if geom.bins != self.geom.bins {
-                    self.weights = vec![0.0; geom.bins * geom.bins];
-                    self.suppressed = vec![false; geom.bins * geom.bins];
-                }
-                self.geom = geom;
-                // `Suppressed` only ever sets bits, never clears them.
-                self.suppressed.fill(false);
-                self.path_indices.clear();
-                self.dp_range = 0..0;
-                self.curve = None;
-                self.ridge.clear();
-                self.dp.clear();
-                // `cells` is always `bins * bins` long, so every cell is
-                // rewritten and `weights` needs no separate clear.
-                for (i, n) in cells.iter().enumerate() {
-                    self.weights[i] = n.center.weight as f32;
-                }
-            }
-            FitEvent::Suppressed { cells } => {
-                for (slot, n) in self.suppressed.iter_mut().zip(cells) {
-                    if n.suppressed {
-                        *slot = true;
-                    }
-                }
-            }
-            FitEvent::DpNode {
-                i,
-                node,
-                chose,
-                acc_weight,
-                considered,
-            } => {
-                self.dp.push(DpDecision {
-                    i,
-                    library: node.center.library,
-                    observed: node.center.observed,
-                    chose,
-                    acc_weight,
-                    considered: considered.to_vec(),
-                });
-            }
-            FitEvent::PathFound {
-                indices, dp_range, ..
-            } => {
-                debug_assert!(
-                    dp_range.end <= indices.len(),
-                    "dp_range must fall within the assembled path"
-                );
-                self.dp_range = dp_range;
-                self.path_indices.extend_from_slice(indices);
-            }
-            FitEvent::CurveFit { curve } => self.curve = Some(curve.clone()),
-            FitEvent::RidgeMeasured { widths } => self.ridge.extend_from_slice(widths),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use calibrt::{
         CalibrationState,
         LibraryRT,
-        ObserveOpts,
         ObservedRTSeconds,
     };
 
@@ -207,8 +139,8 @@ mod tests {
             0.5,
         )))
         .unwrap();
-        let mut rec = FitRecording::new(10);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit();
+        let rec = FitRecording::from_state(&s);
 
         assert_eq!(rec.geom().bins, 10);
         // The diagonal cell (row i, col i) carries weight 1 + i.
@@ -227,29 +159,14 @@ mod tests {
         assert_eq!(rec.curve().unwrap().points().len(), 10);
     }
 
+    /// Nothing has been fit, so nothing is outstanding — Phase 1 draws an empty
+    /// Fit tab before the first fit runs.
     #[test]
-    fn dp_decisions_are_recorded_only_when_enabled() {
-        let mut s = diagonal_state(10);
-
-        let mut off = FitRecording::new(10);
-        s.fit_with(&mut off, ObserveOpts::NONE);
-        assert!(off.dp().is_empty());
-
-        let mut on = FitRecording::new(10);
-        s.reset();
-        let pts: Vec<_> = (0..10)
-            .map(|i| {
-                let v = i as f64 + 0.5;
-                (LibraryRT(v), ObservedRTSeconds(v), 1.0 + i as f64)
-            })
-            .collect();
-        s.update(pts.into_iter()).unwrap();
-        s.fit_with(&mut on, ObserveOpts { dp_nodes: true });
-        assert_eq!(on.dp().len(), 10);
-        assert!(
-            on.dp().iter().any(|d| d.chose.is_some()),
-            "some node picked a predecessor"
-        );
+    fn a_recording_with_no_fit_reads_as_empty() {
+        let rec = FitRecording::new(10);
+        assert!(rec.path_indices().is_empty());
+        assert!(rec.curve().is_none());
+        assert!(rec.ridge().is_empty());
     }
 
     #[test]
@@ -266,15 +183,13 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        let mut rec = FitRecording::new(3);
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit();
         assert!(
-            rec.is_suppressed(1, 1),
+            FitRecording::from_state(&s).is_suppressed(1, 1),
             "A is dominated by B in its row on the first fit"
         );
 
-        // Fit 2, same `CalibrationState` (so `bins` is unchanged and
-        // `FitRecording` does not reallocate its mask): B is gone and A is
+        // Fit 2, same `CalibrationState` at the same `bins`: B is gone and A is
         // now the sole occupant of its row and column, so it survives.
         s.reset();
         s.update(std::iter::once((
@@ -283,33 +198,24 @@ mod tests {
             5.0,
         )))
         .unwrap();
-        s.fit_with(&mut rec, ObserveOpts::NONE);
+        s.fit();
         assert!(
-            !rec.is_suppressed(1, 1),
+            !FitRecording::from_state(&s).is_suppressed(1, 1),
             "A survives alone in its row/col on the second fit — a stale bit \
              from the first fit must not linger"
         );
     }
 
-    /// A recording outlives the geometry it was built for: `CalibDash` reuses
-    /// one `FitRecording` for every refit, and a scrubbed frame or a replayed
-    /// snapshot can arrive at a different `bins`. Two claims, which the
-    /// unchanged-`bins` test above deliberately holds fixed:
-    ///
-    /// - the two grid buffers are reallocated, so `weight`/`is_suppressed` can
-    ///   still reach the far corner. Both bounds-check and answer `0.0`/`false`
-    ///   off the end, so an unresized buffer reads as "empty grid" rather than
-    ///   panicking — the failure mode is a silently blank heatmap.
-    /// - everything a fit *appends* to is cleared first. Without that, the path,
-    ///   the curve and the ridge each carry the previous fit's entries in front
-    ///   of this one's, and the Fit tab draws two fits at once.
+    /// A scrubbed frame or a replayed snapshot can arrive at a different `bins`
+    /// than the last one drawn, so the grid buffers must be sized to the state
+    /// they came from (an undersized one reads as a blank heatmap, not a panic)
+    /// and the products must hold that state's entries only.
     #[test]
-    fn a_refit_at_a_different_bins_resizes_the_grid_and_clears_the_appended_buffers() {
+    fn a_refit_at_a_different_bins_sizes_the_grid_and_shows_only_the_second_fit() {
         // Fit 1, a 3x3 grid: 3 path indices, 3 curve points, 3 measurements.
         let mut small = diagonal_state(3);
-        let mut rec = FitRecording::new(3);
-        small.fit_with(&mut rec, ObserveOpts::NONE);
-        small.measure_ridge_width_with(0.5, &mut rec);
+        small.fit();
+        let rec = FitRecording::from_state(&small);
         assert_eq!(
             (
                 rec.geom().bins,
@@ -321,13 +227,13 @@ mod tests {
             "sanity: the small fit filled every buffer"
         );
 
-        // Fit 2, a 10x10 grid through the same recording.
+        // Fit 2, a 10x10 grid.
         let mut big = diagonal_state(10);
-        big.fit_with(&mut rec, ObserveOpts::NONE);
-        big.measure_ridge_width_with(0.5, &mut rec);
+        big.fit();
+        let rec = FitRecording::from_state(&big);
 
         assert_eq!(rec.geom().bins, 10, "the geometry follows the refit");
-        // Row 9 exists only in a resized buffer: at 3x3 the flat index 9*10+9
+        // Row 9 exists only in a 10x10 buffer: at 3x3 the flat index 9*10+9
         // is past the end of a 9-cell grid.
         assert!(
             (rec.weight(9, 9) - 10.0).abs() < 1e-6,
@@ -350,7 +256,7 @@ mod tests {
             ),
             (10, 10, 10),
             "the refit's own entries only — 13 of each would mean the first \
-             fit's were never cleared"
+             fit's leaked through"
         );
     }
 }

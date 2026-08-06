@@ -20,13 +20,10 @@ use crate::commands::{
 };
 use crate::error::CliError;
 
-// mimalloc seems to work better for windows
-// ... more accurately ... not using it causes everything to
-// be extremely slow on windows...
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_env = "musl"))]
 use mimalloc::MiMalloc;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_env = "musl"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 

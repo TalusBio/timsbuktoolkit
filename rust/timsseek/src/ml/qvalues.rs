@@ -1014,58 +1014,26 @@ mod feature_tests {
     use super::*;
     use crate::ml::lda::DEFAULT_SHRINKAGE;
     use crate::models::DecoyMarking;
-    use crate::models::sequence::{
-        AminoAcid,
-        ParsedSequence,
-        Peptide,
-    };
+    use crate::models::sequence::Peptide;
     use crate::scoring::results::{
         CompetedCandidate,
         ScoringFields,
     };
-    use smallvec::smallvec;
     use std::sync::Arc;
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
         ScoringFields::sample(peptide)
     }
 
-    fn sample_competed_candidate_parsed() -> CompetedCandidate {
-        let parsed = ParsedSequence {
-            // PEPTIDEK — 8 residues
-            residues: smallvec![
-                AminoAcid::from_ascii(b'P'),
-                AminoAcid::from_ascii(b'E'),
-                AminoAcid::from_ascii(b'P'),
-                AminoAcid::from_ascii(b'T'),
-                AminoAcid::from_ascii(b'I'),
-                AminoAcid::from_ascii(b'D'),
-                AminoAcid::from_ascii(b'E'),
-                AminoAcid::from_ascii(b'K'),
-            ],
-            mods: smallvec![],
-        };
+    /// A target candidate over `PEPTIDEK` — 8 residues, no mods. With
+    /// `sequence_features` set the sequence lanes carry those counts; without it
+    /// they stay NaN, which is the only difference between the two cases.
+    fn sample_competed_candidate(sequence_features: bool) -> CompetedCandidate {
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
-            parsed: Some(parsed),
             decoy: DecoyMarking::Target,
             decoy_group: 0,
-        };
-        CompetedCandidate {
-            scoring: base_scoring_fields(peptide),
-            delta_group_ln1p_diff: 1.0,
-            delta_group_ln1p_ratio: 0.5,
-            discriminant_score: 0.0,
-            qvalue: 1.0,
-        }
-    }
-
-    fn sample_competed_candidate_unparsed() -> CompetedCandidate {
-        let peptide = Peptide {
-            raw: Arc::from("PEPTIDEK"),
-            parsed: None,
-            decoy: DecoyMarking::Target,
-            decoy_group: 0,
+            sequence_features,
         };
         CompetedCandidate {
             scoring: base_scoring_fields(peptide),
@@ -1090,8 +1058,8 @@ mod feature_tests {
     #[test]
     fn lane_matrix_widths_match_name_sets() {
         for data in [
-            vec![sample_competed_candidate_parsed()],
-            vec![sample_competed_candidate_unparsed()],
+            vec![sample_competed_candidate(true)],
+            vec![sample_competed_candidate(false)],
         ] {
             assert_eq!(linear_feature_name_set().len(), LINEAR_NCOLS);
             assert_eq!(nonlinear_feature_name_set().len(), NONLINEAR_NCOLS);
@@ -1109,8 +1077,8 @@ mod feature_tests {
     #[test]
     fn all_matrix_is_linear_then_nonlinear_per_row() {
         let data = vec![
-            sample_competed_candidate_parsed(),
-            sample_competed_candidate_unparsed(),
+            sample_competed_candidate(true),
+            sample_competed_candidate(false),
         ];
         let lin = build_linear_matrix(&data);
         let nl = build_nonlinear_matrix(&data);
@@ -1152,14 +1120,14 @@ mod feature_tests {
         assert_eq!(&*names[seq_start], "peptide_length");
         assert_eq!(&*names[NONLINEAR_NCOLS - 1], "peptide_n_mods");
 
-        let unparsed = build_nonlinear_matrix(&[sample_competed_candidate_unparsed()]);
+        let unparsed = build_nonlinear_matrix(&[sample_competed_candidate(false)]);
         assert!(
             unparsed[seq_start..].iter().all(|v| v.is_nan()),
             "unparsed sequence features must all be NaN: {:?}",
             &unparsed[seq_start..]
         );
 
-        let parsed = build_nonlinear_matrix(&[sample_competed_candidate_parsed()]);
+        let parsed = build_nonlinear_matrix(&[sample_competed_candidate(true)]);
         // PEPTIDEK: 8 residues, no mods.
         assert_eq!(parsed[seq_start], 8.0);
         assert_eq!(parsed[NONLINEAR_NCOLS - 1], 0.0);
@@ -1187,7 +1155,7 @@ mod feature_tests {
     fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
-                let mut c = sample_competed_candidate_parsed();
+                let mut c = sample_competed_candidate(true);
                 c.scoring.identity.library_id = i;
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
@@ -1197,8 +1165,7 @@ mod feature_tests {
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                c.delta_group_ln1p_diff =
-                    if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
+                c.delta_group_ln1p_diff = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
                 c.delta_group_ln1p_ratio = if is_target { 0.8 } else { 0.3 };
                 c
             })
@@ -1209,7 +1176,7 @@ mod feature_tests {
         synthetic_competed(n)
             .into_iter()
             .map(|mut c| {
-                let sample = sample_competed_candidate_parsed();
+                let sample = sample_competed_candidate(true);
                 c.delta_group_ln1p_diff = sample.delta_group_ln1p_diff;
                 c.delta_group_ln1p_ratio = sample.delta_group_ln1p_ratio;
                 c
@@ -1756,7 +1723,7 @@ mod feature_tests {
     fn indistinguishable_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
-                let mut c = sample_competed_candidate_parsed();
+                let mut c = sample_competed_candidate(true);
                 c.scoring.identity.library_id = i;
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
@@ -1863,9 +1830,9 @@ mod feature_tests {
         //       never NaN, so demanding NaN there would be wrong);
         //   (b) every non-mobility feature is bit-for-bit unchanged. Without (b)
         //       an impl that NaN'd the whole record would pass (a).
-        let before = build_all_matrix(competed_rows(&[sample_competed_candidate_parsed()]));
+        let before = build_all_matrix(competed_rows(&[sample_competed_candidate(true)]));
 
-        let mut cand = sample_competed_candidate_parsed();
+        let mut cand = sample_competed_candidate(true);
         cand.scoring.neutralize_mobility();
         let after = build_all_matrix(competed_rows(&[cand]));
 
@@ -1929,7 +1896,7 @@ mod feature_tests {
         let rows: Vec<_> = [1.0f32, 2.0, 3.0]
             .into_iter()
             .map(|delta_group_ln1p_diff| {
-                let mut c = sample_competed_candidate_parsed();
+                let mut c = sample_competed_candidate(true);
                 c.delta_group_ln1p_diff = delta_group_ln1p_diff;
                 c.into_final()
             })

@@ -3,8 +3,8 @@ source: rust/calib_dash/src/ui.rs
 expression: "render_body(&mut app, 100, 12)"
 ---
 ┌Tolerances────────────────────────────────────────────────────────────────────────────────────────┐
-│RT residual: weighted half-width 6.5281s over 12 ridge column(s)                                  │
-│  range: 3.0000s .. 9.0000s                                                                       │
+│RT residual: weighted half-width 7.5944s over 12 ridge column(s)                                  │
+│  range: 4.5000s .. 9.0000s                                                                       │
 │                                                                                                  │
 │m/z tolerance: -8.5 .. +9.5 ppm                                                                   │
 │mobility tolerance: ±3.0 %                                                                        │

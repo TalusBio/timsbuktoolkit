@@ -22,7 +22,6 @@ use eframe::egui;
 use calibrt::{
     CALIBRANT_WEIGHT,
     CalibrationState,
-    DEFAULT_RIDGE_FRACTION,
     LibraryRT,
     ObservedRTSeconds,
     RidgeSummary,
@@ -39,11 +38,17 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::IndexedPeaksHandle;
+use timsseek::rt_calibration::{
+    ResidualBlock,
+    rt_tolerance_from_ridge,
+};
 use timsseek::scoring::apex_finding::TraceScorer;
 use timsseek::scoring::extraction::build_extraction;
 use timsseek::scoring::pipeline::{
     CalibrantCandidate,
     CalibrantHeap,
+    CalibrationConfig,
+    TOP_N_FRAGMENTS,
 };
 
 use crate::file_loader::ElutionGroupData;
@@ -60,20 +65,9 @@ const CONTROL_STOP_REQUESTED: u8 = 2;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Number of top fragments to keep per elution group during calibration scoring.
-const CALIBRATION_TOP_N_FRAGMENTS: usize = 8;
-
-/// How many scored elution groups between channel snapshots.
+/// How many scored elution groups between channel snapshots. The viewer's own —
+/// it governs UI refresh, nothing the search does.
 const SNAPSHOT_INTERVAL: usize = 100;
-
-/// Default CalibrantHeap capacity.
-const DEFAULT_HEAP_CAPACITY: usize = 2000;
-
-/// Default calibrt grid size.
-const DEFAULT_GRID_SIZE: usize = 100;
-
-/// Default DP lookback for calibrt pathfinding.
-const DEFAULT_LOOKBACK: usize = 30;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -93,9 +87,6 @@ pub enum CalibrationPhase {
 pub struct DerivedTolerances {
     pub rt_tolerance_minutes: f32,
 }
-
-// Save/load uses shared types from timsseek::rt_calibration:
-// SavedCalibration, SavedTolerances, LoadedCalibration, CalibrationSnapshot
 
 /// Messages sent from the background thread to the UI.
 #[derive(Debug)]
@@ -133,10 +124,14 @@ pub struct ViewerCalibrationState {
     pub calibration_state: Option<CalibrationState>,
     pub generation: u64,
     pub n_scored: usize,
-    pub n_calibrants: usize,
+    pub n_calibrants_found: usize,
     pub heap_capacity: usize,
     pub elution_group_count: usize,
     pub derived_tolerances: Option<DerivedTolerances>,
+    /// What the loaded calibration's search measured. The viewer calibrates RT
+    /// only and measures no residuals, so it carries this untouched. `None`
+    /// whenever the curve on screen was fit here.
+    pub residuals: Option<ResidualBlock>,
 
     thread_handle: Option<JoinHandle<()>>,
     thread_control: Arc<AtomicU8>,
@@ -144,23 +139,30 @@ pub struct ViewerCalibrationState {
 
     /// Latest calibrant points: (library_rt, apex_rt).
     pub snapshot_points: Vec<(LibraryRT<f64>, ObservedRTSeconds<f64>)>,
+
+    /// The search's own calibration settings, so the viewer does not fit on a
+    /// grid the search would not use. Defaults: the viewer has no config file.
+    search: CalibrationConfig,
 }
 
 impl Default for ViewerCalibrationState {
     fn default() -> Self {
+        let search = CalibrationConfig::default();
         Self {
             phase: CalibrationPhase::Idle,
             calibration_state: None,
             generation: 0,
             n_scored: 0,
-            n_calibrants: 0,
-            heap_capacity: DEFAULT_HEAP_CAPACITY,
+            n_calibrants_found: 0,
+            heap_capacity: search.n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
+            residuals: None,
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
             snapshot_points: Vec::new(),
+            search,
         }
     }
 }
@@ -180,9 +182,10 @@ impl ViewerCalibrationState {
             .iter()
             .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
             .collect();
-        let n_calibrants = snapshot_points.len();
+        let n_calibrants_found = snapshot_points.len();
 
         let calibration_state = calibrt::CalibrationState::from_snapshot(&snapshot).ok();
+        let search = CalibrationConfig::default();
 
         Self {
             phase: if calibration_state.is_some() {
@@ -192,15 +195,17 @@ impl ViewerCalibrationState {
             },
             calibration_state,
             generation: 0,
-            n_scored: n_calibrants,
-            n_calibrants,
-            heap_capacity: DEFAULT_HEAP_CAPACITY,
+            n_scored: n_calibrants_found,
+            n_calibrants_found,
+            heap_capacity: search.n_calibrants,
             elution_group_count: 0,
             derived_tolerances: None,
+            residuals: None,
             thread_handle: None,
             thread_control: Arc::new(AtomicU8::new(CONTROL_STOP_REQUESTED)),
             receiver: None,
             snapshot_points,
+            search,
         }
     }
 
@@ -219,8 +224,8 @@ impl ViewerCalibrationState {
             grid_size: self
                 .calibration_state
                 .as_ref()
-                .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins),
-            lookback: DEFAULT_LOOKBACK,
+                .map_or(self.search.grid_size, CalibrationState::grid_bins),
+            lookback: self.search.dp_lookback,
         }
     }
 
@@ -245,7 +250,7 @@ impl ViewerCalibrationState {
         // Increment generation to invalidate stale data.
         self.generation += 1;
         self.n_scored = 0;
-        self.n_calibrants = 0;
+        self.n_calibrants_found = 0;
         self.snapshot_points.clear();
         self.elution_group_count = elution_groups.len();
 
@@ -316,7 +321,7 @@ impl ViewerCalibrationState {
         }
         self.phase = CalibrationPhase::Idle;
         self.n_scored = 0;
-        self.n_calibrants = 0;
+        self.n_calibrants_found = 0;
         self.snapshot_points.clear();
         self.generation += 1;
         if let Some(cs) = &mut self.calibration_state {
@@ -352,7 +357,7 @@ impl ViewerCalibrationState {
                     points,
                 }) => {
                     self.n_scored = n_scored;
-                    self.n_calibrants = heap_len;
+                    self.n_calibrants_found = heap_len;
                     self.snapshot_points = points;
                     new_points = true;
                     changed = true;
@@ -396,13 +401,14 @@ impl ViewerCalibrationState {
     /// A geometry the points cannot support leaves the previous fit alone: a later
     /// snapshot with more calibrants may well span a usable range.
     fn refit(&mut self) {
+        let lookback = self.search.dp_lookback;
         let bins = self
             .calibration_state
             .as_ref()
-            .map_or(DEFAULT_GRID_SIZE, CalibrationState::grid_bins);
+            .map_or(self.search.grid_size, CalibrationState::grid_bins);
         let cs = match self.calibration_state.as_mut() {
             Some(cs) => cs,
-            None => match CalibrationState::deferred(bins, DEFAULT_LOOKBACK) {
+            None => match CalibrationState::deferred(bins, lookback) {
                 Ok(cs) => self.calibration_state.insert(cs),
                 Err(e) => {
                     tracing::warn!("Calibration refit skipped: no grid at {bins} bins: {e:?}");
@@ -415,7 +421,7 @@ impl ViewerCalibrationState {
             .snapshot_points
             .iter()
             .map(|&(lib_rt, apex_rt)| (lib_rt.0, apex_rt.0));
-        let (x_range, y_range) = match cs.refit(bins, points, &mut (), calibrt::ObserveOpts::NONE) {
+        let (x_range, y_range) = match cs.refit(bins, points) {
             Ok(ranges) => ranges,
             Err(e) => {
                 let n = self.snapshot_points.len();
@@ -432,7 +438,7 @@ impl ViewerCalibrationState {
         tracing::info!(
             "Calibration refit: scored={} calibrants={} retained_cells={} path_nodes={} curve={} x={:?} y={:?}",
             self.n_scored,
-            self.n_calibrants,
+            self.n_calibrants_found,
             n_retained,
             cs.path_indices().len(),
             cs.curve().is_some(),
@@ -516,7 +522,7 @@ impl ViewerCalibrationState {
                             expected_intensities,
                             index.as_ref(),
                             &tolerance,
-                            Some(CALIBRATION_TOP_N_FRAGMENTS),
+                            Some(TOP_N_FRAGMENTS),
                         ) {
                             Ok(ext) => ext,
                             Err(_) => return (scorer, local_heap),
@@ -582,54 +588,45 @@ impl ViewerCalibrationState {
     // Save / Load
     // -----------------------------------------------------------------------
 
-    /// Serialize the current calibration state to a JSON v2 file.
-    /// Delegates to `CalibrationResult::save_json` format via shared serde types.
+    /// Write the current calibration where the search's reader can load it.
+    ///
+    /// The points and their geometry come from the fitted grid, so a reader
+    /// refits the same curve and the same ridge widths the viewer is showing.
+    /// The residual statistics are the ones this file was loaded with, since the
+    /// viewer measures no residuals of its own — see [`Self::residuals`].
     pub fn save_to_file(
         &self,
         path: &std::path::Path,
         rt_range_seconds: [f64; 2],
     ) -> Result<(), String> {
-        use timsseek::rt_calibration::{
-            DerivationParams,
-            DimensionErrors,
-            SavedCalibration,
-            SavedTolerances,
-        };
+        use timsseek::rt_calibration::SavedCalibration;
 
         let tol = self.derived_tolerances.as_ref();
-        let saved = SavedCalibration {
-            version: "v2".to_string(),
+        SavedCalibration::new(
             rt_range_seconds,
-            calibration: self.snapshot(),
-            errors: DimensionErrors::default(),
-            derivation: DerivationParams::default(),
-            tolerances: SavedTolerances {
-                rt_minutes: tol.map_or(0.0, |t| t.rt_tolerance_minutes),
-                mz_ppm: [0.0, 0.0],
-                mobility_pct: [0.0, 0.0],
-            },
-            n_calibrants: self.n_calibrants,
-            n_scored: self.n_scored,
-        };
-        let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+            self.snapshot(),
+            tol.map_or(0.0, |t| t.rt_tolerance_minutes),
+            self.residuals.clone(),
+            self.n_scored,
+        )
+        .write(path)
     }
 
-    /// Deserialize calibration state from a JSON v1 file.
-    /// Delegates to `CalibrationResult::load_json` + `CalibrationState::from_snapshot`.
+    /// Deserialize calibration state from a saved calibration, returning the
+    /// provenance warning if the file may not belong to the loaded raw run.
     pub fn load_from_file(
         &mut self,
         path: &std::path::Path,
         raw_rt_range: Option<[f64; 2]>,
     ) -> Result<Option<String>, String> {
-        use timsseek::rt_calibration::CalibrationResult;
+        use timsseek::rt_calibration::SavedCalibration;
 
-        let loaded = CalibrationResult::load_json(path, raw_rt_range)?;
+        let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
 
         // Reconstruct CalibrationState from the snapshot
-        if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&loaded.snapshot) {
-            self.snapshot_points = loaded
-                .snapshot
+        if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&saved.calibration) {
+            self.snapshot_points = saved
+                .calibration
                 .points
                 .iter()
                 .map(|p| (LibraryRT(p[0]), ObservedRTSeconds(p[1])))
@@ -637,14 +634,15 @@ impl ViewerCalibrationState {
             self.calibration_state = Some(cal);
         }
 
-        self.n_calibrants = loaded.n_calibrants;
-        self.n_scored = loaded.n_scored;
+        self.n_calibrants_found = saved.n_calibrants();
+        self.n_scored = saved.n_scored;
         self.derived_tolerances = Some(DerivedTolerances {
-            rt_tolerance_minutes: loaded.tolerances.rt_minutes,
+            rt_tolerance_minutes: saved.rt_tolerance_minutes,
         });
+        self.residuals = saved.residuals;
         self.phase = CalibrationPhase::Done;
 
-        Ok(loaded.warning)
+        Ok(warning)
     }
 
     // -----------------------------------------------------------------------
@@ -756,7 +754,7 @@ impl ViewerCalibrationState {
             ui.separator();
             ui.label(format!(
                 "Calibrants: {} / {}",
-                self.n_calibrants, self.heap_capacity
+                self.n_calibrants_found, self.heap_capacity
             ));
         });
 
@@ -942,7 +940,7 @@ impl ViewerCalibrationState {
                         }
 
                         // Ridge envelope: upper and lower boundary lines showing tolerance width
-                        let ridge = cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION);
+                        let ridge = cs.ridge_widths();
                         if ridge.len() >= 2 {
                             let ridge_color =
                                 egui::Color32::from_rgba_unmultiplied(0, 220, 220, 100);
@@ -1043,21 +1041,29 @@ impl ViewerCalibrationState {
 
     /// Render tolerance suggestion and Apply button.
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
+        let floor = self.search.min_rt_tolerance_minutes;
+
         // The weight-averaged half-width gives the global tolerance — heavy
         // columns count more.
-        let ridge_stats = self.calibration_state.as_mut().and_then(|cs| {
+        let ridge_stats = self.calibration_state.as_ref().and_then(|cs| {
             cs.curve()?; // ensure curve is fitted
-            let summary = RidgeSummary::of(&cs.measure_ridge_width(DEFAULT_RIDGE_FRACTION))?;
+            let summary = RidgeSummary::of(cs.ridge_widths())?;
             summary.weighted_half_width.is_finite().then_some(summary)
         });
 
-        // Suggested RT tolerance from weighted ridge half-width, floored at 0.5 min.
-        let suggested =
-            ridge_stats.map(|stats| ((stats.weighted_half_width / 60.0).max(0.5), stats));
+        // Through the search's own rule, so the number shown is the window the
+        // search would open. The search applies it per query at the interpolated
+        // half-width; one number can only carry the weighted average.
+        let suggested = ridge_stats.map(|stats| {
+            (
+                rt_tolerance_from_ridge(stats.weighted_half_width, floor),
+                stats,
+            )
+        });
 
         if let Some((rt_min, _)) = suggested {
             self.derived_tolerances = Some(DerivedTolerances {
-                rt_tolerance_minutes: rt_min as f32,
+                rt_tolerance_minutes: rt_min,
             });
         }
 
@@ -1068,8 +1074,7 @@ impl ViewerCalibrationState {
                         "RT tol (fallback): \u{00B1}{rt_min:.2} min, uniform over all queries",
                     ));
                     if ui.button("Apply").clicked() {
-                        let rt_tol = rt_min as f32;
-                        tolerance.rt = RtTolerance::Minutes((rt_tol, rt_tol));
+                        tolerance.rt = RtTolerance::Minutes((rt_min, rt_min));
                     }
                 });
                 let RidgeSummary {

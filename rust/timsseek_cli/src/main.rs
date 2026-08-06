@@ -43,10 +43,16 @@ use config::{
 };
 // use tracing_profile::PerfettoLayer;
 
-#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
+#[cfg(all(
+    any(target_os = "windows", target_env = "musl"),
+    not(feature = "track-alloc")
+))]
 use mimalloc::MiMalloc;
 
-#[cfg(all(target_os = "windows", not(feature = "track-alloc")))]
+#[cfg(all(
+    any(target_os = "windows", target_env = "musl"),
+    not(feature = "track-alloc")
+))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 

@@ -23,5 +23,5 @@ thiserror = { workspace = true } # User requested
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[target.'cfg(windows)'.dependencies]
-mimalloc = { workspace = true, features = ["secure"] }
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }

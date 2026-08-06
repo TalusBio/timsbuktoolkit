@@ -14,18 +14,3 @@ pub use digest::{
     deduplicate_digests,
 };
 pub use query_item::ExpectedIntensities;
-pub use sequence::{
-    AA_COUNT_NAMES,
-    AminoAcid,
-    CANONICAL_AA_INDICES,
-    CANONICAL_AA_LETTERS,
-    Mod,
-    ModEntry,
-    POS_C_TERM,
-    POS_N_TERM,
-    ParsedSequence,
-    Peptide,
-    SeqFormat,
-    SpeclibMeta,
-    UNKNOWN_AA,
-};

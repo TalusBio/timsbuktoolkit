@@ -38,8 +38,8 @@ path = "src/main.rs"
 name = "timsseek_sample_speclib"
 path = "src/sample_speclib.rs"
 
-[target.'cfg(windows)'.dependencies]
-mimalloc = { workspace = true, features = ["secure"] }
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }
 
 [features]
 default = ["parallel", "aws", "mzdata"]

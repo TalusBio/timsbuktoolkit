@@ -35,6 +35,8 @@ pub struct SensitivityReport {
     pub n_cycles: usize,
     pub width_sigma: f32,
     pub noise_floor: f32,
+    pub detection_floor: f32,
+    pub precursor_noise_mult: f32,
     pub random_peaks: usize,
 }
 
@@ -159,6 +161,7 @@ pub fn broad_suite() -> Vec<(&'static str, SimParams)> {
         ("broad_high_noise+interf", stress),
         ("broad_hard_3x_density", hard),
         ("broad_mismatched_library", mismatched),
+        ("broad_measured_density", base().with_measured_density()),
     ]
 }
 
@@ -207,6 +210,7 @@ pub fn narrow_suite() -> Vec<(&'static str, SimParams)> {
         ("narrow_high_noise+interf", stress),
         ("narrow_hard_3x_density", hard),
         ("narrow_mismatched_library", mismatched),
+        ("narrow_measured_density", base().with_measured_density()),
     ]
 }
 
@@ -270,6 +274,8 @@ pub fn run_sensitivity(base: &SimParams, n_runs: usize, tol: i64) -> Sensitivity
         n_cycles: base.n_cycles,
         width_sigma: base.width_sigma,
         noise_floor: base.noise_floor,
+        detection_floor: base.detection_floor,
+        precursor_noise_mult: base.precursor_noise_mult,
         random_peaks: base.random_peaks.count,
     }
 }
@@ -313,8 +319,15 @@ impl SensitivityReport {
 
         println!("=== {title} ===");
         println!(
-            "  config: n_cycles={} sigma={} noise_floor={} random_peaks={} true_apex={}",
-            self.n_cycles, self.width_sigma, self.noise_floor, self.random_peaks, self.true_apex,
+            "  config: n_cycles={} sigma={} noise_floor={} detection_floor={} \
+             prec_noise_mult={} random_peaks={} true_apex={}",
+            self.n_cycles,
+            self.width_sigma,
+            self.noise_floor,
+            self.detection_floor,
+            self.precursor_noise_mult,
+            self.random_peaks,
+            self.true_apex,
         );
         println!("  runs={} tol=±{} cycles", self.n, self.tol);
         println!(

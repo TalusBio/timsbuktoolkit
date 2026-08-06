@@ -29,13 +29,10 @@ use timsseek::rt_calibration::{
     CalibRtError,
     CalibratedGrid,
     CalibrationResult,
-    DEFAULT_RIDGE_FRACTION,
     DerivationParams,
     DimensionErrors,
     ErrorStats,
-    FitObserver,
     LibraryRT,
-    ObserveOpts,
     Point,
     RidgeSummary,
     ridge_half_width_interp,
@@ -93,10 +90,6 @@ mod calib_dash_hook {
             CalibrationResult,
         };
         use std::io::IsTerminal;
-        use timsseek::rt_calibration::{
-            FitEvent,
-            FitObserver,
-        };
 
         /// The dashboard for a whole run. Stays `None` inside unless
         /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
@@ -104,18 +97,6 @@ mod calib_dash_hook {
         /// anything else in this module that keys off it.
         pub struct Dash {
             inner: Option<calib_dash::CalibDash>,
-        }
-
-        /// The Phase 2 fit, recorded for the Tolerances tab. Only `Some` when
-        /// the dashboard is running.
-        pub struct Recording(Option<calib_dash::FitRecording>);
-
-        impl FitObserver for Recording {
-            fn on_event(&mut self, ev: FitEvent<'_>) {
-                if let Some(rec) = self.0.as_mut() {
-                    rec.on_event(ev);
-                }
-            }
         }
 
         fn dashboard_requested() -> bool {
@@ -176,14 +157,6 @@ mod calib_dash_hook {
             Dash { inner }
         }
 
-        pub fn start_recording(dash: &Dash, config: &CalibrationConfig) -> Recording {
-            Recording(
-                dash.inner
-                    .is_some()
-                    .then(|| calib_dash::FitRecording::new(config.grid_size)),
-            )
-        }
-
         /// Exits the process on `Ctrl-C` at a pause: raw mode swallows `SIGINT`,
         /// and returning to the pipeline would only run Phases 2 and 3 against a
         /// truncated calibrant heap.
@@ -217,14 +190,14 @@ mod calib_dash_hook {
 
         /// Wires the Phase 2 fit into the Tolerances tab, then pauses so the
         /// tabs and the batch scrubber are reachable before Phase 3 starts.
-        pub fn show_final(dash: &mut Dash, recording: Recording, calibration: &CalibrationResult) {
-            let (Some(d), Some(recording)) = (dash.inner.as_mut(), recording.0) else {
+        pub fn show_final(dash: &mut Dash, calibration: &CalibrationResult) {
+            let Some(d) = dash.inner.as_mut() else {
                 return;
             };
             let mobility = calibration.mobility_tolerance();
             let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
             d.show_final(
-                recording,
+                calib_dash::FitRecording::from_state(calibration.state()),
                 calib_dash::ToleranceSummary {
                     mz_ppm: calibration.mz_tolerance(),
                     mobility_pct: (mobility.0 as f64, mobility.1 as f64),
@@ -246,14 +219,9 @@ mod calib_dash_hook {
 
         pub struct Dash;
 
-        /// `calibrt` already implements `FitObserver` for `()` as its no-op.
-        pub type Recording = ();
-
         pub fn attach(_n_chunks: usize, _config: &CalibrationConfig) -> Dash {
             Dash
         }
-
-        pub fn start_recording(_dash: &Dash, _config: &CalibrationConfig) -> Recording {}
 
         pub fn on_batch<'a>(
             _dash: &mut Dash,
@@ -264,12 +232,7 @@ mod calib_dash_hook {
 
         pub fn finish(_dash: &mut Dash) {}
 
-        pub fn show_final(
-            _dash: &mut Dash,
-            _recording: Recording,
-            _calibration: &CalibrationResult,
-        ) {
-        }
+        pub fn show_final(_dash: &mut Dash, _calibration: &CalibrationResult) {}
     }
 }
 
@@ -469,24 +432,14 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         None
     };
 
-    // Snapshot calibrant points before calibration consumes them (for saving)
-    let calibrant_points: Vec<[f64; 3]> = calibrants
-        .iter()
-        .map(|c| [c.library_rt.0 as f64, c.apex_rt.0 as f64, 1.0])
-        .collect();
-
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
-    // Unit-valued with the feature off, where `Recording` is calibrt's no-op `()`.
-    #[allow(clippy::let_unit_value)]
-    let mut phase2_recording = calib_dash_hook::start_recording(&calib_dash_state, calib_config);
     let calibration = match calibrate_from_phase1(
         calibrants,
         phase1_lib,
         main_lookup.as_ref(),
         pipeline,
         calib_config,
-        &mut phase2_recording,
     ) {
         Ok(calib) => {
             info!("Calibration succeeded");
@@ -499,8 +452,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     };
     let phase2_ms = step
         .finish_with(format_args!(
-            "{} calibrants → {} path nodes",
-            calibrant_points.len(),
+            "{} fit points → {} path nodes",
+            calibration.state().fit_points().len(),
             calibration.ridge_width_summary().map_or(0, |s| s.n_columns),
         ))
         .as_millis() as u64;
@@ -536,31 +489,20 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         );
     }
 
-    // Save calibration as JSON v1 (compatible with viewer load)
-    if !calibrant_points.is_empty() {
-        let cal_points_tuples: Vec<(f64, f64, f64)> = calibrant_points
-            .iter()
-            .map(|p| (p[0], p[1], p[2]))
-            .collect();
+    // Save the calibration for the viewer to load.
+    if !calibration.is_fallback() {
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;
         let cal_json_path = std::path::Path::new(&out_path.uri).join("calibration.json");
-        if let Err(e) = calibration.save_json(
-            &cal_points_tuples,
-            [rt_lo, rt_hi],
-            calib_config.grid_size,
-            calib_config.dp_lookback,
-            phase1_lib.len(),
-            &cal_json_path,
-        ) {
+        if let Err(e) = calibration.save_json([rt_lo, rt_hi], phase1_lib.len(), &cal_json_path) {
             tracing::warn!("Failed to save calibration: {}", e);
         } else {
             info!("Saved calibration to {:?}", cal_json_path);
         }
     }
 
-    calib_dash_hook::show_final(&mut calib_dash_state, phase2_recording, &calibration);
+    calib_dash_hook::show_final(&mut calib_dash_state, &calibration);
 
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
@@ -768,13 +710,12 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
+fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &Speclib,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-    observer: &mut O,
 ) -> Result<CalibrationResult, CalibRtError> {
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
@@ -868,14 +809,12 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     cal_state.refit(
         config.grid_size,
         points.iter().map(|p| (p.library, p.observed)),
-        observer,
-        ObserveOpts::NONE,
     )?;
-    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?.clone();
+    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?;
 
-    // Measure ridge width for position-dependent RT tolerance.
-    let ridge_widths = cal_state.measure_ridge_width_with(DEFAULT_RIDGE_FRACTION, observer);
-    if let Some(s) = RidgeSummary::of(&ridge_widths) {
+    // Position-dependent RT tolerance comes from the ridge the fit measured.
+    let ridge_widths = cal_state.ridge_widths();
+    if let Some(s) = RidgeSummary::of(ridge_widths) {
         info!(
             "Ridge width: weighted avg {:.1}s across {} columns (min {:.1}s, max {:.1}s)",
             s.weighted_half_width, s.n_columns, s.min_half_width, s.max_half_width,
@@ -911,7 +850,7 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
             Err(_) => continue,
         };
         let rt_residual_signed = candidate.apex_rt.0 as f64 - predicted_rt;
-        let half_width = ridge_half_width_interp(&ridge_widths, library_rt_s);
+        let half_width = ridge_half_width_interp(ridge_widths, library_rt_s);
         let in_ridge = match half_width {
             Some(hw) => rt_residual_signed.abs() <= hw,
             None => true,
@@ -961,43 +900,26 @@ fn calibrate_from_phase1<I: ScorerQueriable, O: FitObserver>(
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
-    let (mz_left, mz_right) = mad_symmetric_bounds(
-        &errors.mz_ppm,
-        derivation.sigma.mz,
-        derivation.floors.mz_ppm,
-    );
-    let mz_tolerance_ppm = (mz_left as f64, mz_right as f64);
-    let mobility_tolerance_pct = mad_symmetric_bounds(
-        &errors.mobility_pct,
-        derivation.sigma.mobility,
-        derivation.floors.mobility_pct,
-    );
-
-    // RT tolerance: sigma * 1.4826 * MAD on the signed residuals, floored.
-    let rt_mad_seconds = errors.rt_seconds.mad;
-    let rt_tolerance_minutes =
-        (derivation.sigma.rt * 1.4826 * rt_mad_seconds / 60.0).max(derivation.floors.rt_minutes);
+    let windows = errors.derive_windows(&derivation);
     info!(
         "RT residuals: MAD={:.1}s, n={}",
-        rt_mad_seconds, errors.rt_seconds.n
+        errors.rt_seconds.mad, errors.rt_seconds.n
     );
-
     info!(
         "Calibration: RT tol={:.2} min, m/z tol=({:.1}, {:.1}) ppm, mob tol=({:.1}, {:.1}) %",
-        rt_tolerance_minutes,
-        mz_tolerance_ppm.0,
-        mz_tolerance_ppm.1,
-        mobility_tolerance_pct.0,
-        mobility_tolerance_pct.1,
+        windows.rt_minutes,
+        windows.mz_ppm.0,
+        windows.mz_ppm.1,
+        windows.mobility_pct.0,
+        windows.mobility_pct.1,
     );
 
     Ok(CalibrationResult::new(
-        cal_curve,
-        rt_tolerance_minutes,
-        mz_tolerance_ppm,
-        mobility_tolerance_pct,
-    )
-    .with_ridge_widths(ridge_widths)
+        cal_state,
+        windows.rt_minutes,
+        windows.mz_ppm,
+        windows.mobility_pct,
+    )?
     .with_error_stats(errors)
     .with_derivation(derivation))
 }
@@ -1044,19 +966,6 @@ fn phase3_score<I: ScorerQueriable>(
     }
 
     (results, skips)
-}
-
-/// `median ± n_sigma * 1.4826 * MAD`, asymmetric, floored.
-/// Robust-to-tails tolerance derivation — matches `mean ± n_sigma * stdev`
-/// for Gaussian populations and resists outlier inflation for heavier tails.
-fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
-    if stats.n == 0 {
-        return (min_val, min_val);
-    }
-    let sigma = 1.4826 * stats.mad;
-    let left = (-(stats.median - n_sigma * sigma)).max(min_val);
-    let right = (stats.median + n_sigma * sigma).max(min_val);
-    (left, right)
 }
 
 #[cfg_attr(
@@ -1191,8 +1100,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
                 let delta_group_ln1p_diff = ln1p_prev_score - log_curr;
                 let delta_group_ln1p_ratio = log_curr / ln1p_prev_score;
 
-                ln1p_delta_map[prev_index] =
-                    (delta_group_ln1p_diff, delta_group_ln1p_ratio);
+                ln1p_delta_map[prev_index] = (delta_group_ln1p_diff, delta_group_ln1p_ratio);
 
                 // Skip updating previous - we only compare first two items per group
                 continue;
@@ -1304,9 +1212,9 @@ mod tests {
         };
         let peptide = Peptide {
             raw: Arc::from(seq),
-            parsed: None,
             decoy,
             decoy_group,
+            sequence_features: false,
         };
         let mut scoring = ScoringFields::sample(peptide);
         scoring.identity.precursor_mz = mz;
@@ -1375,11 +1283,7 @@ mod tests {
         let best_ln1p = 8.0f32.ln_1p();
         let runner_up_ln1p = 3.0f32.ln_1p();
 
-        assert!(
-            (winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6
-        );
-        assert!(
-            (winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6
-        );
+        assert!((winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6);
+        assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
     }
 }
