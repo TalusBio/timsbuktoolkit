@@ -30,6 +30,9 @@ use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata,
     RowFilter,
 };
+// `ParquetObjectReader` is deprecated upstream in favour of a hand-written
+// `AsyncFileReader`; see https://github.com/apache/arrow-rs/issues/10308.
+#[allow(deprecated)]
 use parquet::arrow::async_reader::{
     ParquetObjectReader,
     ParquetRecordBatchStreamBuilder,
@@ -122,6 +125,7 @@ impl ParquetQuerier {
     /// This async method fetches the parquet file metadata once and caches it for reuse in subsequent queries.
     /// This eliminates the need to refetch metadata on every query, significantly improving performance
     /// for cloud storage where each metadata fetch can add 50-100ms of latency.
+    #[allow(deprecated)]
     pub async fn new_async(
         storage: StorageProvider,
         relative_path: &str,
@@ -170,6 +174,7 @@ impl ParquetQuerier {
     /// 1. Skip row groups based on statistics
     /// 2. Fetch only needed row groups via concurrent HTTP range requests
     /// 3. Apply predicates during decoding
+    #[allow(deprecated)]
     pub async fn query_async(
         &self,
         mz_range: Range<f32>,

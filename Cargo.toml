@@ -63,9 +63,9 @@ indicatif = { version = "0.18.0", features = ["rayon"] }
 
 # Keep versions in sync. arrow drops csv/ipc/json; parquet keeps every codec so
 # any speclib reads.
-parquet_derive = { version = "57.1" }
-parquet = { version = "57.1" }
-arrow = { version = "57.1", default-features = false }
+parquet_derive = { version = "59.2" }
+parquet = { version = "59.2" }
+arrow = { version = "59.2", default-features = false }
 
 # Set as the global allocator on windows and musl, whose own allocators are
 # slower here — musl's serialises on one lock. Every binary that wants it repeats

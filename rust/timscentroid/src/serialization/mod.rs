@@ -611,7 +611,7 @@ fn write_peaks_to_parquet_bytes<T: RTIndex>(
 
     let props = WriterProperties::builder()
         .set_compression(config.compression)
-        .set_max_row_group_size(config.row_group_size)
+        .set_max_row_group_row_count(Some(config.row_group_size))
         .set_statistics_enabled(EnabledStatistics::Page)
         .set_column_encoding(ColumnPath::from("mz"), Encoding::RLE)
         .set_column_encoding(ColumnPath::from("intensity"), Encoding::BYTE_STREAM_SPLIT)
