@@ -8,7 +8,7 @@ use timsquery::tinyvec::tiny_vec;
 /// simplification — the Rust side is generic over `T: KeyLike` but we monomorphize
 /// to `usize` here for a clean Python interface. Other key types (e.g. `IonAnnot`)
 /// may be added in future versions.
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElutionGroup {
     pub(crate) inner: TimsElutionGroup<usize>,

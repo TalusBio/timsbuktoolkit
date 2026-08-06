@@ -14,10 +14,11 @@
 //! remain accurate regardless of concurrency.
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use object_store::path::Path;
 use object_store::{
+    CopyOptions,
     GetOptions,
     GetResult,
     ListResult,
@@ -28,10 +29,10 @@ use object_store::{
     PutOptions,
     PutPayload,
     PutResult,
+    RenameOptions,
     Result,
 };
 use std::fmt::Display;
-use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{
     AtomicU64,
@@ -239,24 +240,6 @@ impl Display for InstrumentedStore {
 
 #[async_trait]
 impl ObjectStore for InstrumentedStore {
-    async fn put(&self, location: &Path, payload: PutPayload) -> Result<PutResult> {
-        let start = std::time::Instant::now();
-        let bytes_len = payload.content_length();
-
-        let result = self.inner.put(location, payload).await;
-
-        let elapsed = start.elapsed();
-        self.metrics.put_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics
-            .bytes_written
-            .fetch_add(bytes_len as u64, Ordering::SeqCst);
-        self.metrics
-            .put_time_us
-            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
-
-        result
-    }
-
     async fn put_opts(
         &self,
         location: &Path,
@@ -280,32 +263,11 @@ impl ObjectStore for InstrumentedStore {
         result
     }
 
-    async fn get(&self, location: &Path) -> Result<GetResult> {
-        let start = std::time::Instant::now();
-
-        // Simulate latency first (included in timing)
-        self.simulate_latency().await;
-
-        let result = self.inner.get(location).await;
-        let elapsed = start.elapsed();
-
-        self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics
-            .get_time_us
-            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
-
-        // Track bytes read when the result is consumed
-        if let Ok(get_result) = &result {
-            let bytes_len = get_result.meta.size;
-            self.metrics
-                .bytes_read
-                .fetch_add(bytes_len, Ordering::SeqCst);
-        }
-
-        result
-    }
-
+    /// Every read funnels through here: `get`, `get_range` and `head` are
+    /// `ObjectStoreExt` methods that call `get_opts` with the matching options,
+    /// so a metadata-only request is the one carrying `options.head`.
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        let is_head = options.head;
         let start = std::time::Instant::now();
 
         // Simulate latency first (included in timing)
@@ -314,13 +276,23 @@ impl ObjectStore for InstrumentedStore {
         let result = self.inner.get_opts(location, options).await;
         let elapsed = start.elapsed();
 
+        if is_head {
+            self.metrics.head_count.fetch_add(1, Ordering::SeqCst);
+            self.metrics
+                .head_time_us
+                .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
+            return result;
+        }
+
         self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
         self.metrics
             .get_time_us
             .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
 
+        // `range` is what this request returns, which for a ranged read is a
+        // slice of `meta.size`.
         if let Ok(get_result) = &result {
-            let bytes_len = get_result.meta.size;
+            let bytes_len = get_result.range.end - get_result.range.start;
             self.metrics
                 .bytes_read
                 .fetch_add(bytes_len, Ordering::SeqCst);
@@ -329,49 +301,19 @@ impl ObjectStore for InstrumentedStore {
         result
     }
 
-    async fn get_range(&self, location: &Path, range: Range<u64>) -> Result<Bytes> {
-        let start = std::time::Instant::now();
-
-        // Simulate latency first (included in timing)
-        self.simulate_latency().await;
-
-        let result = self.inner.get_range(location, range.clone()).await;
-        let elapsed = start.elapsed();
-
-        self.metrics.get_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics
-            .get_time_us
-            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
-
-        if let Ok(bytes) = &result {
-            self.metrics
-                .bytes_read
-                .fetch_add(bytes.len() as u64, Ordering::SeqCst);
-        }
-
-        result
-    }
-
-    async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        let start = std::time::Instant::now();
-
-        // Simulate latency first (included in timing)
-        self.simulate_latency().await;
-
-        let result = self.inner.head(location).await;
-        let elapsed = start.elapsed();
-
-        self.metrics.head_count.fetch_add(1, Ordering::SeqCst);
-        self.metrics
-            .head_time_us
-            .fetch_add(elapsed.as_micros() as u64, Ordering::SeqCst);
-
-        result
-    }
-
-    async fn delete(&self, location: &Path) -> Result<()> {
-        self.metrics.delete_count.fetch_add(1, Ordering::SeqCst);
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        let metrics = self.metrics.clone();
+        self.inner
+            .delete_stream(locations)
+            .inspect(move |result| {
+                if result.is_ok() {
+                    metrics.delete_count.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
@@ -393,21 +335,14 @@ impl ObjectStore for InstrumentedStore {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        self.inner.copy(from, to).await
+    async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
-    }
-
-    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        self.inner.rename_if_not_exists(from, to).await
-    }
-
-    async fn put_multipart(&self, location: &Path) -> Result<Box<dyn MultipartUpload>> {
-        self.metrics.put_count.fetch_add(1, Ordering::SeqCst);
-        self.inner.put_multipart(location).await
+    /// Delegated rather than left to the default copy-then-delete, so a store
+    /// with a native atomic rename keeps using it.
+    async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> Result<()> {
+        self.inner.rename_opts(from, to, options).await
     }
 
     async fn put_multipart_opts(
@@ -417,5 +352,81 @@ impl ObjectStore for InstrumentedStore {
     ) -> Result<Box<dyn MultipartUpload>> {
         self.metrics.put_count.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, opts).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::ObjectStoreExt;
+    use object_store::memory::InMemory;
+
+    /// The counters an operation is expected to move. Only `get_opts`,
+    /// `delete_stream` and the `list*` methods are instrumented, so each
+    /// convenience call has to land on the right one.
+    fn store() -> (InstrumentedStore, Arc<StorageMetrics>) {
+        let metrics = Arc::new(StorageMetrics::new());
+        let store = InstrumentedStore::new(Arc::new(InMemory::new()), metrics.clone(), "test");
+        (store, metrics)
+    }
+
+    #[tokio::test]
+    async fn put_and_get_count_full_payload() {
+        let (store, metrics) = store();
+        let path = Path::from("a.bin");
+
+        store.put(&path, vec![7u8; 100].into()).await.unwrap();
+        store.get(&path).await.unwrap().bytes().await.unwrap();
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.put_count, 1);
+        assert_eq!(snap.bytes_written, 100);
+        assert_eq!(snap.get_count, 1);
+        assert_eq!(snap.bytes_read, 100);
+    }
+
+    /// A ranged read must bill the range, not the whole object.
+    #[tokio::test]
+    async fn get_range_counts_only_the_range() {
+        let (store, metrics) = store();
+        let path = Path::from("a.bin");
+        store.put(&path, vec![7u8; 100].into()).await.unwrap();
+
+        let bytes = store.get_range(&path, 10..25).await.unwrap();
+        assert_eq!(bytes.len(), 15);
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.get_count, 1);
+        assert_eq!(snap.bytes_read, 15);
+    }
+
+    /// `head` routes through `get_opts` too, so it must stay distinguishable
+    /// from a real read and must not bill any bytes.
+    #[tokio::test]
+    async fn head_counts_separately_from_get() {
+        let (store, metrics) = store();
+        let path = Path::from("a.bin");
+        store.put(&path, vec![7u8; 100].into()).await.unwrap();
+
+        store.head(&path).await.unwrap();
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.head_count, 1);
+        assert_eq!(snap.get_count, 0);
+        assert_eq!(snap.bytes_read, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_and_list_are_counted() {
+        let (store, metrics) = store();
+        let path = Path::from("a.bin");
+        store.put(&path, vec![7u8; 10].into()).await.unwrap();
+
+        let _ = store.list(None).collect::<Vec<_>>().await;
+        store.delete(&path).await.unwrap();
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.list_count, 1);
+        assert_eq!(snap.delete_count, 1);
     }
 }

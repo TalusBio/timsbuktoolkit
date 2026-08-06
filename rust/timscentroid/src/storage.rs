@@ -49,7 +49,10 @@
 //! - **Azure**: `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY` environment variables
 
 use bytes::Bytes;
-use object_store::ObjectStore;
+use object_store::{
+    ObjectStore,
+    ObjectStoreExt,
+};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use once_cell::sync::Lazy;
@@ -569,12 +572,16 @@ impl StorageProvider {
     /// Uses `ParquetObjectReader` with async streaming for both local and cloud storage.
     /// Validates mobility invariants (non-negative, non-NaN) at the boundary.
     #[instrument(skip(self), fields(path = %path))]
+    #[allow(deprecated)]
     pub(crate) fn read_parquet_peaks<T: crate::rt_mapping::RTIndex>(
         &self,
         path: &str,
     ) -> Result<crate::indexing::PeakColumns<T>, SerializationError> {
         use futures::stream::StreamExt;
         use parquet::arrow::ParquetRecordBatchStreamBuilder;
+        // Deprecated upstream in favour of a hand-written `AsyncFileReader`;
+        // see https://github.com/apache/arrow-rs/issues/10308.
+        #[allow(deprecated)]
         use parquet::arrow::async_reader::ParquetObjectReader;
 
         let full_path = self.build_path(path);

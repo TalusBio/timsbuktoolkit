@@ -17,7 +17,7 @@ use crate::tolerance::PyTolerance;
 /// Source of tolerances: either one shared or one per query from a Python iterator.
 pub enum ToleranceSource {
     Single(Tolerance),
-    PerQuery(PyObject),
+    PerQuery(Py<PyAny>),
 }
 
 /// Lightweight result yielded by the streaming iterator.
@@ -28,8 +28,8 @@ pub enum ToleranceSource {
 pub struct PyChromatogramArrays {
     #[pyo3(get)]
     id: u64,
-    precursor_intensities: PyObject,
-    fragment_intensities: PyObject,
+    precursor_intensities: Py<PyAny>,
+    fragment_intensities: Py<PyAny>,
     #[pyo3(get)]
     precursor_labels: Vec<(i8, f64)>,
     #[pyo3(get)]
@@ -97,7 +97,7 @@ fn extract_arrays(
 pub struct PyChromatogramIterator {
     handle: Arc<IndexedPeaksHandle>,
     tol_source: ToleranceSource,
-    eg_source: PyObject,
+    eg_source: Py<PyAny>,
     pool: Vec<ChromatogramCollector<usize, f32>>,
     chunk_tolerances: Vec<Tolerance>,
     buffer: VecDeque<PyChromatogramArrays>,
@@ -109,7 +109,7 @@ impl PyChromatogramIterator {
     pub fn new(
         handle: Arc<IndexedPeaksHandle>,
         tol_source: ToleranceSource,
-        eg_source: PyObject,
+        eg_source: Py<PyAny>,
         chunk_size: usize,
     ) -> Self {
         Self {
@@ -191,7 +191,7 @@ impl PyChromatogramIterator {
         let pool_slice = &mut self.pool[..n_this_chunk];
         let tol_slice = &self.chunk_tolerances[..];
         let handle = &self.handle;
-        py.allow_threads(|| {
+        py.detach(|| {
             handle.par_add_query_multi(pool_slice, tol_slice);
         });
 

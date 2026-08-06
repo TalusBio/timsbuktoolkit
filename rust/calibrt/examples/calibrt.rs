@@ -17,8 +17,8 @@ fn main() {
     setup_tracing();
 
     // 1. Generate some sample data
-    let mut rng = rand::thread_rng();
-    let mut real_x_to_y = |x| -> f64 { x + 10. + rng.gen_range(-5.0..5.0) };
+    let mut rng = rand::rng();
+    let mut real_x_to_y = |x| -> f64 { x + 10. + rng.random_range(-5.0..5.0) };
     let mut points = Vec::new();
     // Generate some points along a rough line y = x + 10
     for i in 0..500 {
@@ -27,9 +27,9 @@ fn main() {
         points.push((x, y));
     }
     // Add some random noise points
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..50 {
-        points.push((rng.gen_range(0.0..100.0), rng.gen_range(0.0..150.0)));
+        points.push((rng.random_range(0.0..100.0), rng.random_range(0.0..150.0)));
     }
 
     println!("Generated {} initial data points.", points.len());

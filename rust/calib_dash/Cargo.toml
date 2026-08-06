@@ -11,7 +11,7 @@ path = "src/bin/calib_dash.rs"
 
 [dependencies]
 calibrt = { path = "../calibrt" }
-ratatui = "0.29"
+ratatui = "0.30"
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
