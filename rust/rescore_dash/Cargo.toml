@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30"
 rayon = { workspace = true }
 tracing = { workspace = true }
 

@@ -346,7 +346,10 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-fn event_loop<B: ratatui::backend::Backend>(
+/// `Error = std::io::Error` pins the backend to one whose draw failures are
+/// already `io::Error`, matching `event::read`. `ratatui::try_init` returns
+/// such a backend.
+fn event_loop<B: ratatui::backend::Backend<Error = std::io::Error>>(
     terminal: &mut ratatui::Terminal<B>,
     app: &mut App,
 ) -> std::io::Result<()> {
