@@ -29,6 +29,12 @@
 //! assert_eq!(ion.get_charge(), 3);
 //! ```
 
+pub mod loss;
+
+pub use loss::{
+    Composition,
+    NeutralLoss,
+};
 use serde::{
     Deserialize,
     Serialize,
