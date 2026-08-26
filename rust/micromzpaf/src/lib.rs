@@ -29,7 +29,6 @@
 //! assert_eq!(ion.get_charge(), 3);
 //! ```
 
-use rustyms::fragment::FragmentType;
 use serde::{
     Deserialize,
     Serialize,
@@ -102,18 +101,6 @@ impl IonAnnot {
     ) -> Result<Self, IonParsingError> {
         Ok(Self {
             series_ordinal: IonSeriesOrdinal::try_new(ion_type, ordinal)?,
-            charge,
-            isotope,
-        })
-    }
-
-    pub fn from_fragment(
-        frag: FragmentType,
-        charge: i8,
-        isotope: i8,
-    ) -> Result<Self, IonParsingError> {
-        Ok(Self {
-            series_ordinal: IonSeriesOrdinal::try_from(frag)?,
             charge,
             isotope,
         })
@@ -398,57 +385,6 @@ impl FromStr for IonSeriesOrdinal {
                 context: Some("Unable to parse the ordinal number"),
             }),
         }
-    }
-}
-
-impl TryFrom<FragmentType> for IonSeriesOrdinal {
-    type Error = IonParsingError;
-
-    fn try_from(value: FragmentType) -> Result<Self, Self::Error> {
-        fn try_convert_ordinal(ordinal: usize, series: char) -> Result<u8, IonParsingError> {
-            ordinal
-                .try_into()
-                .map_err(|_| IonParsingError::OrdinalOutOfRange {
-                    ordinal: ordinal as i32,
-                    series: Some(series),
-                })
-        }
-        let tmp = match value {
-            FragmentType::a(ordinal, _) => IonSeriesOrdinal::a {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'a')?,
-            },
-            FragmentType::b(ordinal, _) => IonSeriesOrdinal::b {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'b')?,
-            },
-            FragmentType::c(ordinal, _) => IonSeriesOrdinal::c {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'c')?,
-            },
-            FragmentType::d(ordinal, _, _, _, _) => IonSeriesOrdinal::d {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'd')?,
-            },
-            FragmentType::v(ordinal, _, _, _) => IonSeriesOrdinal::v {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'v')?,
-            },
-            FragmentType::w(ordinal, _, _, _, _) => IonSeriesOrdinal::w {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'w')?,
-            },
-            FragmentType::x(ordinal, _) => IonSeriesOrdinal::x {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'x')?,
-            },
-            FragmentType::y(ordinal, _) => IonSeriesOrdinal::y {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'y')?,
-            },
-            FragmentType::z(ordinal, _) => IonSeriesOrdinal::z {
-                ordinal: try_convert_ordinal(ordinal.series_number, 'z')?,
-            },
-            FragmentType::Precursor => IonSeriesOrdinal::precursor,
-            _ => {
-                return Err(IonParsingError::Custom {
-                    error: format!("Unsupported fragment type: {value:?}"),
-                });
-            }
-        };
-        Ok(tmp)
     }
 }
 

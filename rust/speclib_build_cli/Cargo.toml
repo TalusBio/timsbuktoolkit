@@ -16,7 +16,7 @@ path = "src/main.rs"
 timsseek = { path = "../timsseek" }
 micromzpaf = { path = "../micromzpaf" }
 tims_stage = { path = "../tims_stage" }
-rustyms = { workspace = true }
+mzcore = { workspace = true }
 
 clap = { workspace = true }
 serde = { workspace = true }

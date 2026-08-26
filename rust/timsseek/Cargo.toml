@@ -23,7 +23,8 @@ array2d = { path = "../array2d" }
 timsseek_macros = { path = "../timsseek_macros" }
 
 # Workspace-inherited deps
-rustyms = { workspace = true }
+mzcore = { workspace = true }
+mzcv = { workspace = true }
 timsrust = { workspace = true }
 rusqlite = {workspace = true }
 serde = { workspace = true }

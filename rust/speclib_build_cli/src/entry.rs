@@ -49,12 +49,13 @@ pub fn strip_mods(seq: &str) -> String {
 
 use timsseek::models::sequence::normalize_to_proforma;
 
-/// Compute the monoisotopic precursor m/z using rustyms.
+/// Compute the monoisotopic precursor m/z using mzcore.
 /// Input should be the modified sequence (mods included in mass).
 fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
-    use rustyms::prelude::*;
+    use mzcore::prelude::*;
     let proforma = normalize_to_proforma(modified_seq);
-    let peptide = Peptidoform::pro_forma(&proforma, None).ok()?;
+    // `pro_forma` also returns non-fatal warnings; only the peptidoform matters.
+    let (peptide, _warnings) = Peptidoform::pro_forma(&proforma, timsseek::ontologies()).ok()?;
     let linear = peptide.as_linear()?;
     let formulas = linear.formulas();
     if formulas.is_empty() {
@@ -223,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_precursor_mz_includes_mod_mass() {
-        // to_proforma converts [U:4] → [UNIMOD:4] before rustyms
+        // to_proforma converts [U:4] → [UNIMOD:4] before mzcore
         let mz_unmod = compute_precursor_mz("PEPTCIDEK", 2).unwrap();
         let mz_mod = compute_precursor_mz("PEPTC[U:4]IDEK", 2).unwrap();
         let diff = mz_mod - mz_unmod;
