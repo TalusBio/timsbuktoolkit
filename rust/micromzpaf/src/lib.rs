@@ -1,19 +1,52 @@
 //! Compact representation of fragment ion annotations for mass spectrometry.
 //!
-//! This crate provides a minimal, memory-efficient encoding of fragment ion annotations
-//! that pack ion series, charge state, ordinal position, and isotope offset into a
-//! compact structure suitable for high-throughput proteomics workflows.
+//! A spectral library carries one annotation per fragment, so this type is
+//! replicated millions of times in a loaded arena and compared on the scoring
+//! hot path. It is therefore a packed `u32` rather than a struct of fields:
+//! equality is a single word compare, and `(IonAnnot, f32)` stays 8 bytes with
+//! no padding.
 //!
-//! # mzPAF Format Compliance
+//! # Bit layout
 //!
-//! This implementation supports a subset of the mzPAF annotation format:
-//! - Common ion series (a, b, c, d, v, w, x, y, z, precursor)
-//! - Charge states (^N notation)
-//! - Positive isotope offsets (+Ni notation)
+//! ```text
+//! bit: 31 30  29           18 17      12 11     8 7      4 3     0
+//!     ┌──┬──┬────────────────┬──────────┬────────┬────────┬───────┐
+//!     │▒▒│R │    payload     │   loss   │isotope │ charge │ kind  │
+//!     │1b│1b│      12b       │    6b    │ 4b zz  │ 4b zz  │  4b   │
+//!     └──┴──┴────────────────┴──────────┴────────┴────────┴───────┘
+//! ```
 //!
-//! NOTABLY boes not support:
-//! - Negative isotope offsets (not yet implemented)
-//! - Complex neutral losses or modifications
+//! `payload` is reinterpreted per `kind` — a tagged union inside the word:
+//!
+//! | kind | payload |
+//! |---|---|
+//! | backbone (a/b/c/d/v/w/x/y/z), unknown | ordinal, 8b (0..=255) |
+//! | internal | start 6b │ end 6b (peptides to 63 residues) |
+//! | immonium | residue index 5b |
+//! | precursor | unused |
+//!
+//! `charge` and `isotope` are zigzag-encoded so they stay signed in 4 bits.
+//! Their ranges (±7) are far wider than anything observed: the HUPO-PSI corpus
+//! tops out at charge 3 and isotope 3, with no negative charges at all. Because
+//! the field truncates rather than wrapping loudly, every constructor
+//! range-checks — see [`IonAnnot::try_new`].
+//!
+//! Bit 30 is reserved: when set, `loss` would be an index into a growable
+//! registry instead of a [`NeutralLoss`] discriminant. Nothing sets it today
+//! and constructors assert it stays clear; it exists so an esoteric loss can be
+//! added later without another layout change.
+//!
+//! # mzPAF compliance
+//!
+//! Supported: the a/b/c/d/v/w/x/y/z series, precursor (`p`), unknown (`?`),
+//! internal fragments (`m<start>:<end>`), bare immonium (`IA`), charge (`^N`),
+//! positive isotopes (`+Ni`), neutral losses from [`NeutralLoss`], and the
+//! mass-error suffix (`/-0.0003`, `/1.2ppm`).
+//!
+//! Not supported: negative isotope offsets, modified immonium
+//! (`IC[Carbamidomethyl]` carries an arbitrary mod string), and losses outside
+//! the [`NeutralLoss`] table. These are reported as errors, never coerced into
+//! a nearby representable ion.
 //!
 //! # Examples
 //!
@@ -44,34 +77,147 @@ use std::hash::Hash;
 use std::str::FromStr;
 use thiserror::Error;
 
+// ── Bit layout ───────────────────────────────────────────────────────────────
+
+const KIND_SHIFT: u32 = 0;
+const KIND_BITS: u32 = 4;
+const CHARGE_SHIFT: u32 = 4;
+const CHARGE_BITS: u32 = 4;
+const ISOTOPE_SHIFT: u32 = 8;
+const ISOTOPE_BITS: u32 = 4;
+const LOSS_SHIFT: u32 = 12;
+const LOSS_BITS: u32 = 6;
+const PAYLOAD_SHIFT: u32 = 18;
+const PAYLOAD_BITS: u32 = 12;
+/// Reserved: set would mean `loss` is a registry index. Always clear today.
+const REGISTRY_BIT: u32 = 1 << 30;
+
+/// Widest charge the 4-bit zigzag field holds. Observed maximum is 3.
+pub const CHARGE_MIN: i8 = -7;
+pub const CHARGE_MAX: i8 = 7;
+/// Widest isotope offset the 4-bit zigzag field holds. Observed maximum is 3.
+pub const ISOTOPE_MIN: i8 = -7;
+pub const ISOTOPE_MAX: i8 = 7;
+/// Widest residue index an internal fragment endpoint holds (6 bits).
+pub const INTERNAL_POS_MAX: u8 = 63;
+
+#[inline]
+const fn mask(bits: u32) -> u32 {
+    (1u32 << bits) - 1
+}
+/// Zigzag: map a small signed value onto an unsigned one without losing the
+/// sign bit to the field width.
+#[inline]
+const fn zigzag(v: i8) -> u32 {
+    (((v as i32) << 1) ^ ((v as i32) >> 31)) as u32
+}
+#[inline]
+const fn unzigzag(u: u32) -> i8 {
+    (((u >> 1) as i32) ^ -((u & 1) as i32)) as i8
+}
+
+/// Discriminants for the `kind` field. Not public: the public view is
+/// [`IonSeriesOrdinal`], which fuses kind with its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Kind {
+    None = 0,
+    A = 1,
+    B = 2,
+    C = 3,
+    D = 4,
+    V = 5,
+    W = 6,
+    X = 7,
+    Y = 8,
+    Z = 9,
+    Precursor = 10,
+    Unknown = 11,
+    Internal = 12,
+    Immonium = 13,
+}
+
+impl Kind {
+    const fn from_raw(v: u32) -> Kind {
+        match v {
+            1 => Kind::A,
+            2 => Kind::B,
+            3 => Kind::C,
+            4 => Kind::D,
+            5 => Kind::V,
+            6 => Kind::W,
+            7 => Kind::X,
+            8 => Kind::Y,
+            9 => Kind::Z,
+            10 => Kind::Precursor,
+            11 => Kind::Unknown,
+            12 => Kind::Internal,
+            13 => Kind::Immonium,
+            _ => Kind::None,
+        }
+    }
+
+    const fn series_char(self) -> char {
+        match self {
+            Kind::A => 'a',
+            Kind::B => 'b',
+            Kind::C => 'c',
+            Kind::D => 'd',
+            Kind::V => 'v',
+            Kind::W => 'w',
+            Kind::X => 'x',
+            Kind::Y => 'y',
+            Kind::Z => 'z',
+            Kind::Precursor => 'p',
+            Kind::Unknown => '?',
+            Kind::Internal => 'm',
+            Kind::Immonium => 'I',
+            Kind::None => '\0',
+        }
+    }
+
+    const fn from_series_char(c: char) -> Option<Kind> {
+        match c {
+            'a' => Some(Kind::A),
+            'b' => Some(Kind::B),
+            'c' => Some(Kind::C),
+            'd' => Some(Kind::D),
+            'v' => Some(Kind::V),
+            'w' => Some(Kind::W),
+            'x' => Some(Kind::X),
+            'y' => Some(Kind::Y),
+            'z' => Some(Kind::Z),
+            'p' => Some(Kind::Precursor),
+            '?' => Some(Kind::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Does this kind carry an 8-bit ordinal in its payload?
+    const fn has_ordinal(self) -> bool {
+        matches!(
+            self,
+            Kind::A
+                | Kind::B
+                | Kind::C
+                | Kind::D
+                | Kind::V
+                | Kind::W
+                | Kind::X
+                | Kind::Y
+                | Kind::Z
+                | Kind::Unknown
+        )
+    }
+}
+
 /// Compact representation of fragment annotations.
 ///
-/// This is a very compressed representation of a fragment
-/// ion annotation. Essentially we are packing in 32 bytes
-/// the ion series (b, y, ...), charge (+1 / -1 ...),
-/// ordinal (12 in the ion series) and isotope.
-///
-/// It is not meant to represent all possible ions but rather have
-/// a very compact representation of the common ones.
-///
-/// # Invariants
-///
-/// - **charge**: Must be non-zero (±1 to ±127). Zero charge is invalid and rejected by constructors.
-/// - **ordinal**: Limited to u8 range (1-255). Peptides with >255 residues cannot be represented.
-/// - **isotope**: Isotope offset relative to monoisotopic peak (M+0), range -128 to +127.
-///
-/// # Memory Layout
-///
-/// The struct fits in 32 bytes with optimal packing:
-/// - `IonSeriesOrdinal`: 2 bytes (enum discriminant + u8 ordinal)
-/// - `charge`: 1 byte (i8)
-/// - `isotope`: 1 byte (i8)
+/// A packed `u32`; see the crate docs for the bit layout. Ordering is by the
+/// packed word rather than field-by-field — nothing depends on the previous
+/// ordering (only tests sorted these), but it is not the same order.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct IonAnnot {
-    series_ordinal: IonSeriesOrdinal,
-    charge: i8,
-    isotope: i8,
-}
+pub struct IonAnnot(u32);
 
 impl Serialize for IonAnnot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -88,6 +234,9 @@ impl Serialize for IonAnnot {
 /// b12+i^3 -> b12 charge 3 isotope 1
 /// b12+3i^3 -> b12 charge 3 isotope 2
 /// b13 -> b13 (implicit charge 1 and isotope 0)
+///
+/// The wire format is the mzPAF string, not the packed word, so the bit layout
+/// can change without breaking existing files.
 impl<'de> Deserialize<'de> for IonAnnot {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -99,54 +248,325 @@ impl<'de> Deserialize<'de> for IonAnnot {
 }
 
 impl IonAnnot {
+    /// Build a backbone / precursor / unknown annotation.
+    ///
+    /// Errors when `charge` is zero or either of `charge`/`isotope` falls
+    /// outside the packed field's range. That range check is load-bearing: the
+    /// bit field truncates silently, so an unchecked value would corrupt the
+    /// annotation rather than fail.
     pub fn try_new(
         ion_type: char,
         ordinal: Option<u8>,
         charge: i8,
         isotope: i8,
     ) -> Result<Self, IonParsingError> {
-        Ok(Self {
-            series_ordinal: IonSeriesOrdinal::try_new(ion_type, ordinal)?,
-            charge,
-            isotope,
-        })
+        Self::try_new_with_loss(ion_type, ordinal, charge, isotope, NeutralLoss::None)
+    }
+
+    /// As [`Self::try_new`], carrying a neutral loss.
+    pub fn try_new_with_loss(
+        ion_type: char,
+        ordinal: Option<u8>,
+        charge: i8,
+        isotope: i8,
+        loss: NeutralLoss,
+    ) -> Result<Self, IonParsingError> {
+        let kind =
+            Kind::from_series_char(ion_type).ok_or(IonParsingError::UnsupportedFragmentType {
+                fragment_type: ion_type,
+            })?;
+        let payload = match (kind, ordinal) {
+            (k, Some(o)) if k.has_ordinal() => o as u32,
+            (Kind::Precursor, None) => 0,
+            (Kind::Precursor, Some(o)) => {
+                return Err(IonParsingError::OrdinalOutOfRange {
+                    ordinal: o as i32,
+                    series: Some(ion_type),
+                });
+            }
+            (_, None) => {
+                return Err(IonParsingError::OrdinalOutOfRange {
+                    ordinal: -1,
+                    series: Some(ion_type),
+                });
+            }
+            (_, Some(o)) => {
+                return Err(IonParsingError::OrdinalOutOfRange {
+                    ordinal: o as i32,
+                    series: Some(ion_type),
+                });
+            }
+        };
+        Self::pack(kind, payload, loss, charge, isotope)
+    }
+
+    /// Build an internal fragment spanning residues `start..=end`.
+    ///
+    /// Endpoints are capped at [`INTERNAL_POS_MAX`], narrower than a backbone
+    /// ordinal, because two of them share the 12-bit payload. Internal
+    /// fragments are bounded by peptide length, so 63 is well past tryptic.
+    pub fn try_new_internal(
+        start: u8,
+        end: u8,
+        charge: i8,
+        isotope: i8,
+        loss: NeutralLoss,
+    ) -> Result<Self, IonParsingError> {
+        if start > INTERNAL_POS_MAX || end > INTERNAL_POS_MAX {
+            return Err(IonParsingError::OrdinalOutOfRange {
+                ordinal: start.max(end) as i32,
+                series: Some('m'),
+            });
+        }
+        let payload = (start as u32) | ((end as u32) << 6);
+        Self::pack(Kind::Internal, payload, loss, charge, isotope)
+    }
+
+    /// Build a bare immonium ion for an uppercase residue code.
+    ///
+    /// Modified immonium (`IC[Carbamidomethyl]`) is not representable at any
+    /// field width and is rejected by the parser rather than silently losing
+    /// the modification.
+    pub fn try_new_immonium(
+        residue: char,
+        charge: i8,
+        isotope: i8,
+        loss: NeutralLoss,
+    ) -> Result<Self, IonParsingError> {
+        if !residue.is_ascii_uppercase() {
+            return Err(IonParsingError::UnsupportedFragmentType {
+                fragment_type: residue,
+            });
+        }
+        let payload = (residue as u8 - b'A') as u32;
+        Self::pack(Kind::Immonium, payload, loss, charge, isotope)
+    }
+
+    fn pack(
+        kind: Kind,
+        payload: u32,
+        loss: NeutralLoss,
+        charge: i8,
+        isotope: i8,
+    ) -> Result<Self, IonParsingError> {
+        if charge == 0 {
+            return Err(IonParsingError::ParsingError {
+                error: format!("{}", kind.series_char()),
+                context: Some("Charge cannot be 0"),
+            });
+        }
+        if !(CHARGE_MIN..=CHARGE_MAX).contains(&charge) {
+            return Err(IonParsingError::ChargeOutOfRange { charge });
+        }
+        if !(ISOTOPE_MIN..=ISOTOPE_MAX).contains(&isotope) {
+            return Err(IonParsingError::IsotopeOutOfRange { isotope });
+        }
+        debug_assert!(payload <= mask(PAYLOAD_BITS), "payload overflows its field");
+        debug_assert!(
+            (loss as u32) <= mask(LOSS_BITS),
+            "loss discriminant overflows its field"
+        );
+        Ok(IonAnnot(
+            ((kind as u32) << KIND_SHIFT)
+                | ((zigzag(charge) & mask(CHARGE_BITS)) << CHARGE_SHIFT)
+                | ((zigzag(isotope) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT)
+                | ((loss as u32 & mask(LOSS_BITS)) << LOSS_SHIFT)
+                | ((payload & mask(PAYLOAD_BITS)) << PAYLOAD_SHIFT),
+        ))
+    }
+
+    #[inline]
+    fn kind(self) -> Kind {
+        Kind::from_raw((self.0 >> KIND_SHIFT) & mask(KIND_BITS))
+    }
+
+    #[inline]
+    fn payload(self) -> u32 {
+        (self.0 >> PAYLOAD_SHIFT) & mask(PAYLOAD_BITS)
+    }
+
+    #[inline]
+    pub fn get_charge(&self) -> i8 {
+        unzigzag((self.0 >> CHARGE_SHIFT) & mask(CHARGE_BITS))
+    }
+
+    #[inline]
+    pub fn get_isotope(&self) -> i8 {
+        unzigzag((self.0 >> ISOTOPE_SHIFT) & mask(ISOTOPE_BITS))
+    }
+
+    /// The neutral loss this ion carries, [`NeutralLoss::None`] if any.
+    #[inline]
+    pub fn loss(&self) -> NeutralLoss {
+        debug_assert!(
+            self.0 & REGISTRY_BIT == 0,
+            "registry-backed losses are reserved but not implemented"
+        );
+        match (self.0 >> LOSS_SHIFT) & mask(LOSS_BITS) {
+            0 => NeutralLoss::None,
+            1 => NeutralLoss::Water,
+            2 => NeutralLoss::Ammonia,
+            3 => NeutralLoss::CarbonMonoxide,
+            4 => NeutralLoss::CarbonDioxide,
+            5 => NeutralLoss::WaterX2,
+            6 => NeutralLoss::AmmoniaX2,
+            7 => NeutralLoss::WaterAmmonia,
+            8 => NeutralLoss::Methanesulfenic,
+            9 => NeutralLoss::Carbamidomethylthiol,
+            10 => NeutralLoss::PhosphoricAcid,
+            11 => NeutralLoss::Metaphosphoric,
+            12 => NeutralLoss::PhosphoricAcidWater,
+            _ => NeutralLoss::None,
+        }
     }
 
     pub fn terminality(&self) -> IonSeriesTerminality {
-        self.series_ordinal.terminality()
+        match self.kind() {
+            Kind::A | Kind::B | Kind::C | Kind::D => IonSeriesTerminality::NTerm,
+            Kind::V | Kind::W | Kind::X | Kind::Y | Kind::Z => IonSeriesTerminality::CTerm,
+            _ => IonSeriesTerminality::None,
+        }
     }
 
+    /// Shift the isotope by `offset_neutrons`.
+    ///
+    /// Errors when the result leaves [`ISOTOPE_MIN`]..=[`ISOTOPE_MAX`]. That
+    /// bound is narrower than the `i8` this used to hold, but an order of
+    /// magnitude past any observed isotope offset.
     pub fn try_with_offset_neutrons(&self, offset_neutrons: i8) -> Result<Self, IonParsingError> {
-        let new_isotope =
-            self.isotope
-                .checked_add(offset_neutrons)
-                .ok_or_else(|| IonParsingError::Custom {
-                    error: format!(
-                        "Isotope offset overflow: {} + {} exceeds i8 range",
-                        self.isotope, offset_neutrons
-                    ),
-                })?;
-
-        Ok(Self {
-            series_ordinal: self.series_ordinal,
-            charge: self.charge,
-            isotope: new_isotope,
-        })
+        let new_isotope = self
+            .get_isotope()
+            .checked_add(offset_neutrons)
+            .ok_or_else(|| IonParsingError::Custom {
+                error: format!(
+                    "Isotope offset overflow: {} + {} exceeds i8 range",
+                    self.get_isotope(),
+                    offset_neutrons
+                ),
+            })?;
+        if !(ISOTOPE_MIN..=ISOTOPE_MAX).contains(&new_isotope) {
+            return Err(IonParsingError::IsotopeOutOfRange {
+                isotope: new_isotope,
+            });
+        }
+        Ok(IonAnnot(
+            (self.0 & !(mask(ISOTOPE_BITS) << ISOTOPE_SHIFT))
+                | ((zigzag(new_isotope) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT),
+        ))
     }
 
-    pub fn get_charge(&self) -> i8 {
-        self.charge
-    }
-
+    /// The series ordinal, for the kinds that have one.
+    ///
+    /// `None` for precursor, unknown, internal and immonium: `?1` is a
+    /// uniqueness counter, not a position in a ladder.
     pub fn try_get_ordinal(&self) -> Option<u8> {
-        self.series_ordinal.try_get_ordinal()
+        let k = self.kind();
+        if k.has_ordinal() && k != Kind::Unknown {
+            Some(self.payload() as u8)
+        } else {
+            None
+        }
+    }
+
+    /// The logical series-and-payload view of this annotation.
+    pub fn series_ordinal(&self) -> IonSeriesOrdinal {
+        let k = self.kind();
+        let p = self.payload();
+        match k {
+            Kind::A => IonSeriesOrdinal::a { ordinal: p as u8 },
+            Kind::B => IonSeriesOrdinal::b { ordinal: p as u8 },
+            Kind::C => IonSeriesOrdinal::c { ordinal: p as u8 },
+            Kind::D => IonSeriesOrdinal::d { ordinal: p as u8 },
+            Kind::V => IonSeriesOrdinal::v { ordinal: p as u8 },
+            Kind::W => IonSeriesOrdinal::w { ordinal: p as u8 },
+            Kind::X => IonSeriesOrdinal::x { ordinal: p as u8 },
+            Kind::Y => IonSeriesOrdinal::y { ordinal: p as u8 },
+            Kind::Z => IonSeriesOrdinal::z { ordinal: p as u8 },
+            Kind::Unknown => IonSeriesOrdinal::unknown { ordinal: p as u8 },
+            Kind::Precursor => IonSeriesOrdinal::precursor,
+            Kind::Internal => IonSeriesOrdinal::internal {
+                start: (p & mask(6)) as u8,
+                end: ((p >> 6) & mask(6)) as u8,
+            },
+            Kind::Immonium => IonSeriesOrdinal::immonium {
+                residue: (b'A' + (p & mask(5)) as u8) as char,
+            },
+            Kind::None => IonSeriesOrdinal::None,
+        }
     }
 }
 
-impl TryFrom<&str> for IonAnnot {
-    type Error = IonParsingError;
+/// A mass-error suffix on an mzPAF annotation: observed minus theoretical.
+///
+/// mzSpecLib peak lists carry *observed* m/z, so the theoretical value a
+/// library reader wants is `observed - error`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MassError {
+    /// Absolute, in daltons.
+    Da(f64),
+    /// Relative, in parts per million.
+    Ppm(f64),
+}
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+impl MassError {
+    /// Recover the theoretical m/z from the observed one.
+    pub fn theoretical_from_observed(&self, observed: f64) -> f64 {
+        match self {
+            MassError::Da(d) => observed - d,
+            MassError::Ppm(p) => observed / (1.0 + p * 1e-6),
+        }
+    }
+}
+
+/// One parsed mzPAF annotation plus its optional mass-error suffix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParsedAnnotation {
+    pub ion: IonAnnot,
+    pub mass_error: Option<MassError>,
+}
+
+/// Split the trailing `/<error>[ppm]` off an annotation, if present.
+///
+/// Care is needed because `/` does not otherwise appear, but the numeric part
+/// may be signed and the `ppm` suffix optional.
+fn split_mass_error(s: &str) -> Result<(&str, Option<MassError>), IonParsingError> {
+    let Some((head, tail)) = s.rsplit_once('/') else {
+        return Ok((s, None));
+    };
+    let (num, is_ppm) = match tail.strip_suffix("ppm") {
+        Some(n) => (n, true),
+        None => (tail, false),
+    };
+    let v: f64 = num.parse().map_err(|_| IonParsingError::ParsingError {
+        error: s.to_string(),
+        context: Some("Unable to parse the mass-error suffix"),
+    })?;
+    Ok((
+        head,
+        Some(if is_ppm {
+            MassError::Ppm(v)
+        } else {
+            MassError::Da(v)
+        }),
+    ))
+}
+
+impl IonAnnot {
+    /// Parse a full mzPAF annotation, including any mass-error suffix.
+    ///
+    /// A comma-separated list of alternatives is NOT handled here — that is
+    /// ambiguity, and resolving it needs the caller's policy. Split on `,` and
+    /// parse each alternative.
+    pub fn parse_mzpaf(value: &str) -> Result<ParsedAnnotation, IonParsingError> {
+        let (rest, mass_error) = split_mass_error(value)?;
+        Ok(ParsedAnnotation {
+            ion: Self::parse_ion(rest)?,
+            mass_error,
+        })
+    }
+
+    fn parse_ion(value: &str) -> Result<Self, IonParsingError> {
+        // charge: trailing ^N
         let (rest, charge) = match value.split_once('^') {
             Some((rest, charge)) => {
                 let charge = charge
@@ -160,20 +580,15 @@ impl TryFrom<&str> for IonAnnot {
             None => (value, 1),
         };
 
-        // TODO: Implement 'negative isotopes' parsing ... right now I dont use them
-        // for serialization ...
-        // Note that this is not 100% compliant with mzPAF
+        // isotope: +Ni. Negative isotope offsets are not supported.
         let (rest, isotope) = match rest.split_once('+') {
             Some((rest, adducts)) => {
-                // Make sure the adduct is only +{number}?i
                 let adducts = adducts
                     .strip_suffix('i')
                     .ok_or(IonParsingError::ParsingError {
                         error: adducts.to_string(),
                         context: Some("Unsupported adduct found"),
                     })?;
-                // If its empty its an implicit 1 isotope
-                // Since we stripped the 'i' from '+i'
                 let isotope = if adducts.is_empty() {
                     1
                 } else {
@@ -188,33 +603,83 @@ impl TryFrom<&str> for IonAnnot {
             }
             None => (rest, 0),
         };
-        let series_ord = IonSeriesOrdinal::from_str(rest)?;
-        if charge == 0 {
-            return Err(IonParsingError::ParsingError {
+
+        // neutral loss: everything from the first '-'. Internal fragments use
+        // 'm<start>:<end>' and never contain '-' before the loss, so splitting
+        // at the first '-' is unambiguous.
+        let (core, loss) = match rest.split_once('-') {
+            Some((core, loss_expr)) => {
+                let loss = NeutralLoss::from_expression(loss_expr)?.ok_or_else(|| {
+                    IonParsingError::UnsupportedNeutralLoss {
+                        loss: loss_expr.to_string(),
+                    }
+                })?;
+                (core, loss)
+            }
+            None => (rest, NeutralLoss::None),
+        };
+
+        // internal fragment: m<start>:<end>
+        if let Some(spans) = core.strip_prefix('m')
+            && let Some((a, b)) = spans.split_once(':')
+        {
+            let start = a.parse::<u8>().map_err(|_| IonParsingError::ParsingError {
                 error: value.to_string(),
-                context: Some("Charge cannot be 0"),
-            });
+                context: Some("Unable to parse internal-fragment start"),
+            })?;
+            let end = b.parse::<u8>().map_err(|_| IonParsingError::ParsingError {
+                error: value.to_string(),
+                context: Some("Unable to parse internal-fragment end"),
+            })?;
+            return Self::try_new_internal(start, end, charge, isotope, loss);
         }
-        Ok(Self {
-            series_ordinal: series_ord,
-            charge,
-            isotope,
-        })
+
+        // immonium: I<residue>, bare only.
+        if let Some(res) = core.strip_prefix('I') {
+            let mut ch = res.chars();
+            return match (ch.next(), ch.next()) {
+                (Some(r), None) => Self::try_new_immonium(r, charge, isotope, loss),
+                // `IC[Carbamidomethyl]` and friends carry a mod string that no
+                // fixed-width field can hold.
+                _ => Err(IonParsingError::UnsupportedModifiedImmonium {
+                    annotation: value.to_string(),
+                }),
+            };
+        }
+
+        let series_ord = IonSeriesOrdinal::from_str(core)?;
+        let (ion_type, ordinal) = series_ord.as_char_and_ordinal();
+        Self::try_new_with_loss(ion_type, ordinal, charge, isotope, loss)
+    }
+}
+
+impl TryFrom<&str> for IonAnnot {
+    type Error = IonParsingError;
+
+    /// Parses an annotation, discarding any mass-error suffix. Use
+    /// [`IonAnnot::parse_mzpaf`] to keep it.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(Self::parse_mzpaf(value)?.ion)
     }
 }
 
 impl Display for IonAnnot {
+    /// Renders the canonical mzPAF spelling. Not byte-inverse to parsing: a
+    /// non-canonical loss spelling (`-CH3SOH`) renders canonically (`-CH4OS`).
+    /// The mass-error suffix is not part of the annotation and is not rendered.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.series_ordinal)?;
+        write!(f, "{}", self.series_ordinal())?;
+        write!(f, "{}", self.loss())?;
 
-        match self.isotope {
+        match self.get_isotope() {
             0 => {}
             1 => write!(f, "+i")?,
             i => write!(f, "+{}i", i)?,
         }
 
-        if self.charge != 1 {
-            write!(f, "^{}", self.charge)?;
+        let charge = self.get_charge();
+        if charge != 1 {
+            write!(f, "^{}", charge)?;
         }
 
         Ok(())
@@ -227,6 +692,14 @@ pub enum IonParsingError {
     OrdinalOutOfRange { ordinal: i32, series: Option<char> },
     #[error("Unsupported fragment type: '{fragment_type}'")]
     UnsupportedFragmentType { fragment_type: char },
+    #[error("Charge {charge} outside the representable range")]
+    ChargeOutOfRange { charge: i8 },
+    #[error("Isotope offset {isotope} outside the representable range")]
+    IsotopeOutOfRange { isotope: i8 },
+    #[error("Neutral loss '{loss}' is not representable")]
+    UnsupportedNeutralLoss { loss: String },
+    #[error("Modified immonium ions are not representable: '{annotation}'")]
+    UnsupportedModifiedImmonium { annotation: String },
     #[error("Parsing error: {error}{}", .context.map(|c| format!(" ({})", c)).unwrap_or_default())]
     ParsingError {
         error: String,
@@ -245,6 +718,10 @@ pub enum IonSeriesTerminality {
     None,
 }
 
+/// The logical series-and-payload view of an [`IonAnnot`].
+///
+/// This is a *view*: `IonAnnot` stores a packed word and reconstructs this on
+/// demand. Constructing one directly does not allocate an annotation.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy, Default)]
 #[allow(non_camel_case_types)]
 pub enum IonSeriesOrdinal {
@@ -279,6 +756,15 @@ pub enum IonSeriesOrdinal {
         ordinal: u8,
     },
     precursor,
+    /// An internal fragment spanning residues `start..=end`.
+    internal {
+        start: u8,
+        end: u8,
+    },
+    /// A bare immonium ion for an uppercase residue code.
+    immonium {
+        residue: char,
+    },
 
     /// This variant should not be used directly ... its mainly added to satisfy trait constraints by TinyVec
     #[default]
@@ -315,38 +801,62 @@ impl IonSeriesOrdinal {
         Ok(tmp)
     }
 
+    /// Series character and ordinal, for handing back to [`IonAnnot::try_new`].
+    fn as_char_and_ordinal(&self) -> (char, Option<u8>) {
+        match self {
+            Self::a { ordinal } => ('a', Some(*ordinal)),
+            Self::b { ordinal } => ('b', Some(*ordinal)),
+            Self::c { ordinal } => ('c', Some(*ordinal)),
+            Self::d { ordinal } => ('d', Some(*ordinal)),
+            Self::v { ordinal } => ('v', Some(*ordinal)),
+            Self::w { ordinal } => ('w', Some(*ordinal)),
+            Self::x { ordinal } => ('x', Some(*ordinal)),
+            Self::y { ordinal } => ('y', Some(*ordinal)),
+            Self::z { ordinal } => ('z', Some(*ordinal)),
+            Self::unknown { ordinal } => ('?', Some(*ordinal)),
+            Self::precursor => ('p', None),
+            Self::internal { start, .. } => ('m', Some(*start)),
+            Self::immonium { residue } => (*residue, None),
+            Self::None => ('\0', None),
+        }
+    }
+
     pub fn terminality(&self) -> IonSeriesTerminality {
         match self {
-            IonSeriesOrdinal::a { ordinal: _ } => IonSeriesTerminality::NTerm,
-            IonSeriesOrdinal::b { ordinal: _ } => IonSeriesTerminality::NTerm,
-            IonSeriesOrdinal::c { ordinal: _ } => IonSeriesTerminality::NTerm,
-            IonSeriesOrdinal::d { ordinal: _ } => IonSeriesTerminality::NTerm,
-            IonSeriesOrdinal::v { ordinal: _ } => IonSeriesTerminality::CTerm,
-            IonSeriesOrdinal::w { ordinal: _ } => IonSeriesTerminality::CTerm,
-            IonSeriesOrdinal::x { ordinal: _ } => IonSeriesTerminality::CTerm,
-            IonSeriesOrdinal::y { ordinal: _ } => IonSeriesTerminality::CTerm,
-            IonSeriesOrdinal::z { ordinal: _ } => IonSeriesTerminality::CTerm,
-            IonSeriesOrdinal::unknown { ordinal: _ } => IonSeriesTerminality::None,
-            IonSeriesOrdinal::precursor => IonSeriesTerminality::None,
+            IonSeriesOrdinal::a { .. }
+            | IonSeriesOrdinal::b { .. }
+            | IonSeriesOrdinal::c { .. }
+            | IonSeriesOrdinal::d { .. } => IonSeriesTerminality::NTerm,
+            IonSeriesOrdinal::v { .. }
+            | IonSeriesOrdinal::w { .. }
+            | IonSeriesOrdinal::x { .. }
+            | IonSeriesOrdinal::y { .. }
+            | IonSeriesOrdinal::z { .. } => IonSeriesTerminality::CTerm,
+            IonSeriesOrdinal::unknown { .. }
+            | IonSeriesOrdinal::precursor
+            | IonSeriesOrdinal::internal { .. }
+            | IonSeriesOrdinal::immonium { .. } => IonSeriesTerminality::None,
             IonSeriesOrdinal::None => panic!("IonSeriesOrdinal::None should not be used directly"),
         }
     }
 
     pub fn try_get_ordinal(&self) -> Option<u8> {
         match self {
-            IonSeriesOrdinal::a { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::b { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::c { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::d { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::v { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::w { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::x { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::y { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::z { ordinal } => Some(*ordinal),
-            IonSeriesOrdinal::unknown { .. } => None,
+            IonSeriesOrdinal::a { ordinal }
+            | IonSeriesOrdinal::b { ordinal }
+            | IonSeriesOrdinal::c { ordinal }
+            | IonSeriesOrdinal::d { ordinal }
+            | IonSeriesOrdinal::v { ordinal }
+            | IonSeriesOrdinal::w { ordinal }
+            | IonSeriesOrdinal::x { ordinal }
+            | IonSeriesOrdinal::y { ordinal }
+            | IonSeriesOrdinal::z { ordinal } => Some(*ordinal),
             // ?1 does not mean its an ordinal, just a placeholder
-            IonSeriesOrdinal::precursor => None,
-            IonSeriesOrdinal::None => None,
+            IonSeriesOrdinal::unknown { .. }
+            | IonSeriesOrdinal::precursor
+            | IonSeriesOrdinal::internal { .. }
+            | IonSeriesOrdinal::immonium { .. }
+            | IonSeriesOrdinal::None => None,
         }
     }
 }
@@ -365,6 +875,8 @@ impl Display for IonSeriesOrdinal {
             IonSeriesOrdinal::z { ordinal } => write!(f, "z{}", ordinal),
             IonSeriesOrdinal::unknown { ordinal } => write!(f, "?{}", ordinal),
             IonSeriesOrdinal::precursor => write!(f, "p"),
+            IonSeriesOrdinal::internal { start, end } => write!(f, "m{}:{}", start, end),
+            IonSeriesOrdinal::immonium { residue } => write!(f, "I{}", residue),
             IonSeriesOrdinal::None => panic!("IonSeriesOrdinal::None should not be used directly"),
         }
     }
@@ -375,6 +887,12 @@ impl FromStr for IonSeriesOrdinal {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // "b12" split into "b" and "12"
+        if s.is_empty() {
+            return Err(IonParsingError::ParsingError {
+                error: s.to_string(),
+                context: Some("Empty string"),
+            });
+        }
         let (series_chunk, ordinal_chunk) = s.split_at(1);
         let series_id = series_chunk.chars().next();
         let series_ordinal = ordinal_chunk.parse::<u8>();
@@ -398,6 +916,19 @@ impl FromStr for IonSeriesOrdinal {
 mod tests {
     use super::*;
 
+    fn ion(s: &str) -> IonAnnot {
+        IonAnnot::try_from(s).unwrap_or_else(|e| panic!("{s:?} must parse: {e}"))
+    }
+
+    /// The whole point of the packed representation.
+    #[test]
+    fn packs_into_one_word() {
+        assert_eq!(size_of::<IonAnnot>(), 4);
+        // Paired with an intensity on the scoring hot path; padding here would
+        // grow the inline TinyVec storage in `ExpectedIntensities`.
+        assert_eq!(size_of::<(IonAnnot, f32)>(), 8);
+    }
+
     #[test]
     fn test_ion_series_ord_from_str() {
         let ion: IonSeriesOrdinal = IonSeriesOrdinal::from_str("b12").unwrap();
@@ -406,88 +937,165 @@ mod tests {
 
     #[test]
     fn test_deserialize() {
-        let serde_pairs = vec![
-            (
-                "b12",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::b { ordinal: 12 },
-                    charge: 1,
-                    isotope: 0,
-                },
-            ),
-            (
-                "b12^3",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::b { ordinal: 12 },
-                    charge: 3,
-                    isotope: 0,
-                },
-            ),
-            (
-                "y12^3",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::y { ordinal: 12 },
-                    charge: 3,
-                    isotope: 0,
-                },
-            ),
-            (
-                "b12+i^3",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::b { ordinal: 12 },
-                    charge: 3,
-                    isotope: 1,
-                },
-            ),
-            (
-                "b12+3i^3",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::b { ordinal: 12 },
-                    charge: 3,
-                    isotope: 3,
-                },
-            ),
-            (
-                "b13",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::b { ordinal: 13 },
-                    charge: 1,
-                    isotope: 0,
-                },
-            ),
-            (
-                "p^2",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::precursor,
-                    charge: 2,
-                    isotope: 0,
-                },
-            ),
-            (
-                "p",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::precursor,
-                    charge: 1,
-                    isotope: 0,
-                },
-            ),
-            (
-                "?12^2",
-                IonAnnot {
-                    series_ordinal: IonSeriesOrdinal::unknown { ordinal: 12 },
-                    charge: 2,
-                    isotope: 0,
-                },
-            ),
+        let cases = [
+            ("b12", 'b', Some(12u8), 1i8, 0i8),
+            ("b12^3", 'b', Some(12), 3, 0),
+            ("y12^3", 'y', Some(12), 3, 0),
+            ("b12+i^3", 'b', Some(12), 3, 1),
+            ("b12+3i^3", 'b', Some(12), 3, 3),
+            ("b13", 'b', Some(13), 1, 0),
+            ("p^2", 'p', None, 2, 0),
+            ("p", 'p', None, 1, 0),
+            ("?12^2", '?', Some(12), 2, 0),
         ];
 
-        for (input, expected) in serde_pairs {
-            let annot = IonAnnot::try_from(input).unwrap();
-            assert_eq!(annot, expected);
-
-            // Re-serialize and check that its the same
-            let serialized = format!("{}", annot);
-            assert_eq!(serialized, input);
+        for (input, series, ordinal, charge, isotope) in cases {
+            let annot = ion(input);
+            let expected = IonAnnot::try_new(series, ordinal, charge, isotope).unwrap();
+            assert_eq!(annot, expected, "{input}");
+            assert_eq!(annot.get_charge(), charge, "{input}");
+            assert_eq!(annot.get_isotope(), isotope, "{input}");
+            // Round-trips byte-identically when no loss is involved.
+            assert_eq!(format!("{}", annot), input);
         }
+    }
+
+    /// Every field must survive the pack/unpack at its extremes. The bit
+    /// fields truncate rather than wrap, so a missing range check corrupts
+    /// silently — this is the test that catches it.
+    #[test]
+    fn every_field_round_trips_at_its_extremes() {
+        for charge in CHARGE_MIN..=CHARGE_MAX {
+            if charge == 0 {
+                continue;
+            }
+            for isotope in ISOTOPE_MIN..=ISOTOPE_MAX {
+                for ordinal in [1u8, 2, 127, 255] {
+                    for loss in [
+                        NeutralLoss::None,
+                        NeutralLoss::Water,
+                        NeutralLoss::PhosphoricAcidWater,
+                    ] {
+                        let a =
+                            IonAnnot::try_new_with_loss('y', Some(ordinal), charge, isotope, loss)
+                                .expect("in range");
+                        assert_eq!(a.get_charge(), charge);
+                        assert_eq!(a.get_isotope(), isotope);
+                        assert_eq!(a.try_get_ordinal(), Some(ordinal));
+                        assert_eq!(a.loss(), loss);
+                        assert_eq!(a.terminality(), IonSeriesTerminality::CTerm);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_is_rejected_not_truncated() {
+        assert!(matches!(
+            IonAnnot::try_new('y', Some(1), CHARGE_MAX + 1, 0),
+            Err(IonParsingError::ChargeOutOfRange { .. })
+        ));
+        assert!(matches!(
+            IonAnnot::try_new('y', Some(1), 1, ISOTOPE_MAX + 1),
+            Err(IonParsingError::IsotopeOutOfRange { .. })
+        ));
+        assert!(IonAnnot::try_new('y', Some(1), 0, 0).is_err());
+        assert!(matches!(
+            IonAnnot::try_new_internal(INTERNAL_POS_MAX + 1, 1, 1, 0, NeutralLoss::None),
+            Err(IonParsingError::OrdinalOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn isotope_offset_respects_the_field_bound() {
+        let a = ion("y5");
+        assert_eq!(a.try_with_offset_neutrons(2).unwrap().get_isotope(), 2);
+        assert!(a.try_with_offset_neutrons(ISOTOPE_MAX + 1).is_err());
+    }
+
+    #[test]
+    fn parses_neutral_losses() {
+        let a = ion("y5-H2O");
+        assert_eq!(a.loss(), NeutralLoss::Water);
+        assert_eq!(a.try_get_ordinal(), Some(5));
+        assert_eq!(format!("{}", a), "y5-H2O");
+
+        // Non-canonical spelling resolves to the same annotation, and renders
+        // canonically -- so this pair is equal, which is the property that
+        // keeps per-precursor label uniqueness honest.
+        assert_eq!(ion("y5-CH3SOH"), ion("y5-CH4OS"));
+        assert_eq!(format!("{}", ion("y5-CH3SOH")), "y5-CH4OS");
+
+        // Loss combines with charge and isotope.
+        let b = ion("y10-NH3+i^2");
+        assert_eq!(b.loss(), NeutralLoss::Ammonia);
+        assert_eq!(b.get_isotope(), 1);
+        assert_eq!(b.get_charge(), 2);
+    }
+
+    #[test]
+    fn parses_internal_fragments() {
+        let a = ion("m2:11");
+        assert_eq!(
+            a.series_ordinal(),
+            IonSeriesOrdinal::internal { start: 2, end: 11 }
+        );
+        // An internal fragment has no ladder position.
+        assert_eq!(a.try_get_ordinal(), None);
+        assert_eq!(format!("{}", a), "m2:11");
+
+        let b = ion("m11:12-CO");
+        assert_eq!(b.loss(), NeutralLoss::CarbonMonoxide);
+        assert_eq!(format!("{}", b), "m11:12-CO");
+    }
+
+    #[test]
+    fn parses_bare_immonium_and_rejects_modified() {
+        let a = ion("IA");
+        assert_eq!(
+            a.series_ordinal(),
+            IonSeriesOrdinal::immonium { residue: 'A' }
+        );
+        assert_eq!(format!("{}", a), "IA");
+
+        // Carries an arbitrary mod string -- no field width represents it, so
+        // it must fail rather than silently degrade to a bare immonium.
+        assert!(matches!(
+            IonAnnot::try_from("IC[Carbamidomethyl]"),
+            Err(IonParsingError::UnsupportedModifiedImmonium { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_and_applies_the_mass_error_suffix() {
+        let p = IonAnnot::parse_mzpaf("y1/-0.0005").unwrap();
+        assert_eq!(p.ion, ion("y1"));
+        assert_eq!(p.mass_error, Some(MassError::Da(-0.0005)));
+        // theoretical = observed - error; verified against a real SpectraST
+        // peak: y1 for C-terminal R, observed 175.1184, theoretical 175.11895.
+        let theo = p.mass_error.unwrap().theoretical_from_observed(175.1184);
+        assert!((theo - 175.1189).abs() < 1e-9, "got {theo}");
+
+        let q = IonAnnot::parse_mzpaf("y6/1.2ppm").unwrap();
+        assert_eq!(q.mass_error, Some(MassError::Ppm(1.2)));
+        let theo = q.mass_error.unwrap().theoretical_from_observed(700.0);
+        assert!((theo - 699.99916).abs() < 1e-4, "got {theo}");
+
+        // Absent suffix is not an error.
+        assert_eq!(IonAnnot::parse_mzpaf("y6").unwrap().mass_error, None);
+        // TryFrom discards it rather than failing.
+        assert_eq!(IonAnnot::try_from("y1/-0.0005").unwrap(), ion("y1"));
+    }
+
+    /// An unrepresentable loss must fail loudly. Parsing `y1-HCOOH` as plain
+    /// `y1` would put a loss peak's m/z on the `y1` label and collide with the
+    /// real `y1`.
+    #[test]
+    fn unrepresentable_loss_is_rejected_not_stripped() {
+        assert!(matches!(
+            IonAnnot::try_from("y1-HCOOH"),
+            Err(IonParsingError::UnsupportedNeutralLoss { .. })
+        ));
     }
 }

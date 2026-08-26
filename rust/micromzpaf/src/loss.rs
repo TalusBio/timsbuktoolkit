@@ -5,10 +5,10 @@
 //!
 //! | written | library | composition |
 //! |---|---|---|
-//! | `-CH3SOH` | NIST | C₁H₄O₁S₁ |
-//! | `-CH4OS` | SpectraST | C₁H₄O₁S₁ |
-//! | `-NH2-CO-CH2SH` | NIST | C₂H₅N₁O₁S₁ |
-//! | `-C2H5NOS` | SpectraST | C₂H₅N₁O₁S₁ |
+//! | `-CH3SOH` | NIST | C1H4O1S1 |
+//! | `-CH4OS` | SpectraST | C1H4O1S1 |
+//! | `-NH2-CO-CH2SH` | NIST | C2H5N1O1S1 |
+//! | `-C2H5NOS` | SpectraST | C2H5N1O1S1 |
 //!
 //! Keying on the string would make `y5-CH4OS` and `y5-CH3SOH` distinct labels
 //! for one ion. Since fragment labels must be unique within a precursor (see
@@ -163,29 +163,29 @@ impl Composition {
 pub enum NeutralLoss {
     #[default]
     None = 0,
-    /// H₂O
+    /// H2O
     Water = 1,
-    /// NH₃
+    /// NH3
     Ammonia = 2,
     /// CO
     CarbonMonoxide = 3,
-    /// CO₂
+    /// CO2
     CarbonDioxide = 4,
-    /// 2 H₂O
+    /// 2 H2O
     WaterX2 = 5,
-    /// 2 NH₃
+    /// 2 NH3
     AmmoniaX2 = 6,
-    /// H₂O + NH₃
+    /// H2O + NH3
     WaterAmmonia = 7,
-    /// CH₄OS — methanesulfenic acid, off oxidized Met. Also spelled `CH3SOH`.
+    /// CH4OS — methanesulfenic acid, off oxidized Met. Also spelled `CH3SOH`.
     Methanesulfenic = 8,
-    /// C₂H₅NOS — also spelled `NH2-CO-CH2SH`.
+    /// C2H5NOS — also spelled `NH2-CO-CH2SH`.
     Carbamidomethylthiol = 9,
-    /// H₃PO₄ — phospho-Ser/Thr.
+    /// H3PO4 — phospho-Ser/Thr.
     PhosphoricAcid = 10,
-    /// HPO₃ — phospho-Tyr, and phospho-Ser/Thr.
+    /// HPO3 — phospho-Tyr, and phospho-Ser/Thr.
     Metaphosphoric = 11,
-    /// H₃PO₄ + H₂O
+    /// H3PO4 + H2O
     PhosphoricAcidWater = 12,
 }
 
