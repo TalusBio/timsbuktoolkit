@@ -49,12 +49,12 @@
 //! - **Azure**: `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY` environment variables
 
 use bytes::Bytes;
+use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjectPath;
 use object_store::{
     ObjectStore,
     ObjectStoreExt,
 };
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::Arc;

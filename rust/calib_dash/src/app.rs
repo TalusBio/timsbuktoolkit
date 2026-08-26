@@ -729,7 +729,6 @@ impl CalibDash {
             None => self.app.clear_scrub(),
         }
     }
-
 }
 
 /// Pauses the batch loop to render one interactive frame and block until the user's

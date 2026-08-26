@@ -697,9 +697,7 @@ pub type GridRanges = ((f64, f64), (f64, f64));
 /// comes out empty or inverted on either axis is `Err(ZeroRange)` here rather
 /// than later out of `Grid::new`, so a caller that only wants to know whether
 /// a grid is configurable never has to build one.
-fn point_ranges(
-    points: impl IntoIterator<Item = (f64, f64)>,
-) -> Result<GridRanges, CalibRtError> {
+fn point_ranges(points: impl IntoIterator<Item = (f64, f64)>) -> Result<GridRanges, CalibRtError> {
     let mut x = (f64::INFINITY, f64::NEG_INFINITY);
     let mut y = x;
     for (px, py) in points {
