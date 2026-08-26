@@ -59,6 +59,27 @@ impl From<IonParsingError> for SkylinePrecursorParsingError {
     }
 }
 
+/// Advance the per-precursor `?`-ordinal counter, refusing to wrap.
+///
+/// `IonAnnot` ordinals are `u8`, so a precursor can carry at most
+/// [`u8::MAX`] distinguishable unknown ions. Past that there is no way to keep
+/// labels unique, and a silently reused ordinal corrupts scoring
+/// (`linear_get` is first-match). Fail here, where the row index is still in
+/// hand, rather than downstream in `try_from_pairs`.
+///
+/// This previously used `saturating_add`, which does not wrap but still pins
+/// every ordinal past the limit to [`u8::MAX`] — producing the same duplicate
+/// labels, just more quietly.
+fn next_unknown_ordinal(current: u8) -> Result<u8, SkylinePrecursorParsingError> {
+    current.checked_add(1).ok_or_else(|| {
+        error!(
+            "More than {} unknown-ion fragments in a single precursor; cannot assign unique labels",
+            u8::MAX
+        );
+        SkylinePrecursorParsingError::IonOverCapacity
+    })
+}
+
 impl From<SkylinePrecursorParsingError> for SkylineReadingError {
     fn from(_err: SkylinePrecursorParsingError) -> Self {
         SkylineReadingError::SkylinePrecursorParsingError
@@ -351,7 +372,7 @@ fn parse_precursor_group(
                      falling back to unknown ion",
                     frag_type, i
                 );
-                num_unknown_losses = num_unknown_losses.saturating_add(1);
+                num_unknown_losses = next_unknown_ordinal(num_unknown_losses)?;
                 IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?
             }
         };

@@ -61,6 +61,23 @@ impl From<IonParsingError> for DiannPrecursorParsingError {
     }
 }
 
+/// Advance the per-precursor `?`-ordinal counter, refusing to wrap.
+///
+/// `IonAnnot` ordinals are `u8`, so a precursor can carry at most
+/// [`u8::MAX`] distinguishable unknown ions. Past that there is no way to keep
+/// labels unique, and a silently reused ordinal corrupts scoring
+/// (`linear_get` is first-match). Fail here, where the row index is still in
+/// hand, rather than downstream in `try_from_pairs`.
+fn next_unknown_ordinal(current: u8) -> Result<u8, DiannPrecursorParsingError> {
+    current.checked_add(1).ok_or_else(|| {
+        error!(
+            "More than {} unknown-ion fragments in a single precursor; cannot assign unique labels",
+            u8::MAX
+        );
+        DiannPrecursorParsingError::IonOverCapacity
+    })
+}
+
 impl From<DiannPrecursorParsingError> for DiannReadingError {
     fn from(_err: DiannPrecursorParsingError) -> Self {
         DiannReadingError::DiannPrecursorParsingError
@@ -344,7 +361,12 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(rows.len());
-    let mut num_unknown_losses = 0;
+    // `?` labels are distinguished only by their ordinal, used here as a
+    // per-precursor counter. That counter IS what upholds the per-precursor
+    // label-uniqueness invariant (see `ExpectedIntensities::try_from_pairs`):
+    // wrapping past `u8::MAX` would re-emit `?1` and fail the load much later
+    // with a duplicate-key error pointing at the symptom, not at this row.
+    let mut num_unknown_losses: u8 = 0;
 
     for (i, row) in rows.iter().enumerate() {
         let fragment_mz = row.fragment_mz;
@@ -364,7 +386,7 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            num_unknown_losses += 1;
+            num_unknown_losses = next_unknown_ordinal(num_unknown_losses)?;
             let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
@@ -658,7 +680,8 @@ fn parse_precursor_group_from_parquet(
     let mut fragment_mzs = Vec::with_capacity(indices.len());
     buffers.fragment_labels.clear();
     let mut rel_intensities = Vec::with_capacity(indices.len());
-    let mut num_unknown_losses = 0;
+    // Per-precursor `?` counter — see `next_unknown_ordinal`.
+    let mut num_unknown_losses: u8 = 0;
 
     for (i, &idx) in indices.iter().enumerate() {
         let fragment_mz = columns.product_mzs[idx] as f64;
@@ -680,7 +703,7 @@ fn parse_precursor_group_from_parquet(
                 columns.fragment_loss_types[idx], i
             );
 
-            num_unknown_losses += 1;
+            num_unknown_losses = next_unknown_ordinal(num_unknown_losses)?;
             let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
