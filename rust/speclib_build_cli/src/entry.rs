@@ -4,11 +4,7 @@ use timsseek::data_sources::speclib::{
     ReferenceEG,
     SerSpeclibElement,
 };
-use timsseek::fragment_mass::elution_group_converter::{
-    count_carbon_sulphur_in_sequence,
-    supersimpleprediction,
-};
-use timsseek::isotopes::peptide_isotopes;
+use timsseek::fragment_mass::elution_group_converter::supersimpleprediction;
 
 use crate::koina::models::{
     FragmentPrediction,
@@ -28,29 +24,13 @@ pub struct EntryFilters {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Strip bracket-enclosed modifications from a sequence.
-///
-/// "PEPTC[U:4]IDEK" → "PEPTCIDEK"
-pub fn strip_mods(seq: &str) -> String {
-    let mut out = String::with_capacity(seq.len());
-    let mut depth = 0usize;
-    for ch in seq.chars() {
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth = depth.saturating_sub(1);
-            }
-            _ if depth == 0 => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
 use timsseek::models::sequence::normalize_to_proforma;
 
 /// Compute the monoisotopic precursor m/z using mzcore.
 /// Input should be the modified sequence (mods included in mass).
+///
+/// This is the only mzcore parse per library entry, and it doubles as the
+/// malformed-sequence gate: anything it cannot parse is dropped here.
 fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
     use mzcore::prelude::*;
     let proforma = normalize_to_proforma(modified_seq);
@@ -65,12 +45,6 @@ fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
     Some((mass + proton_mass * charge as f64) / charge as f64)
 }
 
-/// Count carbon and sulphur from modified sequence (mods affect formula).
-fn count_cs_modified(modified_seq: &str) -> Option<(u16, u16)> {
-    let proforma = normalize_to_proforma(modified_seq);
-    count_carbon_sulphur_in_sequence(&proforma).ok()
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Convert Koina predictions + metadata into a [`SerSpeclibElement`].
@@ -83,28 +57,23 @@ pub fn build_entry(
     sequence: &str,
     charge: u8,
     decoy: bool,
-    decoy_group: u32,
-    id: u32,
     fragment: &FragmentPrediction,
     rt: &RtPrediction,
     filters: &EntryFilters,
 ) -> Option<SerSpeclibElement> {
-    // 1. Carbon / sulphur count from modified sequence (includes mod contributions).
-    let (ncarbon, nsulphur) = count_cs_modified(sequence)?;
-    let iso = peptide_isotopes(ncarbon, nsulphur);
-
-    // 2. Precursor m/z from modified sequence (includes mod masses).
+    // 1. Precursor m/z from modified sequence (includes mod masses). Also the
+    //    malformed-sequence gate.
     let precursor_mz = compute_precursor_mz(sequence, charge)?;
 
-    // 4. Filter by precursor m/z range.
+    // 2. Filter by precursor m/z range.
     if precursor_mz < filters.min_mz as f64 || precursor_mz > filters.max_mz as f64 {
         return None;
     }
 
-    // 5. Ion mobility prediction.
+    // 3. Ion mobility prediction.
     let mobility = supersimpleprediction(precursor_mz, charge as i32) as f32;
 
-    // 6. Filter fragments: keep those within ion m/z bounds.
+    // 4. Filter fragments: keep those within ion m/z bounds.
     let min_ion = filters.min_ion_mz as f64;
     let max_ion = filters.max_ion_mz as f64;
 
@@ -150,19 +119,16 @@ pub fn build_entry(
         return None;
     }
 
-    // 10. Build precursor labels and intensities from the isotope distribution.
-    let precursor_labels: Vec<i8> = vec![0i8, 1i8, 2i8];
-    let precursor_intensities: Vec<f32> = vec![iso[0], iso[1], iso[2]];
-
-    // 11. Assemble the element.
-    let precursor = PrecursorEntry::new(sequence.to_owned(), charge, decoy, decoy_group);
+    // 8. Assemble the element. The precursor isotope envelope is NOT stored:
+    //    the loader recomputes it from composition
+    //    (`IsotopeStrategy::FromComposition`), so writing it here would cost a
+    //    second mzcore parse per entry to produce bytes nobody reads — and
+    //    would give isotopes two sources of truth.
+    let precursor = PrecursorEntry::new(sequence.to_owned(), charge, decoy);
     let elution_group = ReferenceEG::new(
-        id,
         precursor_mz,
-        precursor_labels,
         fragment_mzs,
         fragment_labels,
-        precursor_intensities,
         fragment_intensities,
         mobility,
         rt.irt,
@@ -206,13 +172,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_mods() {
-        assert_eq!(strip_mods("PEPTC[U:4]IDEK"), "PEPTCIDEK");
-        assert_eq!(strip_mods("PEPTM[+15.995]IDEK"), "PEPTMIDEK");
-        assert_eq!(strip_mods("PEPTIDEK"), "PEPTIDEK");
-    }
-
-    #[test]
     fn test_compute_precursor_mz() {
         let mz = compute_precursor_mz("PEPTIDEK", 2).unwrap();
         assert!(
@@ -240,7 +199,7 @@ mod tests {
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry("PEPTIDEK", 2, false, 0, 42, &fragment, &rt, &filters);
+        let result = build_entry("PEPTIDEK", 2, false, &fragment, &rt, &filters);
 
         assert!(result.is_some(), "Expected Some but got None");
     }
@@ -256,7 +215,7 @@ mod tests {
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry("PEPTIDEK", 2, false, 0, 1, &fragment, &rt, &filters);
+        let result = build_entry("PEPTIDEK", 2, false, &fragment, &rt, &filters);
 
         assert!(result.is_none(), "Expected None but got Some");
     }
@@ -275,7 +234,7 @@ mod tests {
             min_ions: 3,
         };
 
-        let result = build_entry("PEPTIDEK", 2, false, 0, 2, &fragment, &rt, &filters);
+        let result = build_entry("PEPTIDEK", 2, false, &fragment, &rt, &filters);
 
         assert!(
             result.is_none(),
@@ -289,7 +248,7 @@ mod tests {
         let rt = RtPrediction { irt: 30.0 };
         let filters = make_filters(3);
 
-        let result = build_entry("KEDITREP", 2, true, 99, 7, &fragment, &rt, &filters);
+        let result = build_entry("KEDITREP", 2, true, &fragment, &rt, &filters);
 
         // Decoy peptide should still build an entry if the mz/ions pass filters
         // (KEDITREP ~476 should pass default 400–2000 window).

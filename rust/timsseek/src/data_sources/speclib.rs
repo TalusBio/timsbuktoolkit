@@ -46,34 +46,38 @@ impl SerSpeclibElement {
     }
 }
 
+/// Only the fields the loader reads are in the format.
+///
+/// `id`, `decoy_group`, `precursor_labels` and `precursor_intensities` used to
+/// be written here and dropped at read time — the isotope envelope is
+/// recomputed from composition (`IsotopeStrategy::FromComposition`), so storing
+/// it cost the writer a full ProForma parse per entry and gave isotopes two
+/// sources of truth. Serde ignores unknown fields, so libraries that still
+/// carry them load unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrecursorEntry {
     sequence: String,
     charge: u8,
     decoy: bool,
-    decoy_group: u32,
 }
 
 impl PrecursorEntry {
-    pub fn new(sequence: String, charge: u8, decoy: bool, decoy_group: u32) -> Self {
+    pub fn new(sequence: String, charge: u8, decoy: bool) -> Self {
         Self {
             sequence,
             charge,
             decoy,
-            decoy_group,
         }
     }
 }
 
+/// See [`PrecursorEntry`] for why the precursor-isotope fields are absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceEG {
-    id: u32,
     precursor_mz: f64,
-    precursor_labels: Vec<i8>,
     #[serde(alias = "fragment_mz")]
     fragment_mzs: Vec<f64>,
     fragment_labels: Vec<IonAnnot>,
-    precursor_intensities: Vec<f32>,
     fragment_intensities: Vec<f32>,
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
@@ -81,25 +85,18 @@ pub struct ReferenceEG {
 }
 
 impl ReferenceEG {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: u32,
         precursor_mz: f64,
-        precursor_labels: Vec<i8>,
         fragment_mzs: Vec<f64>,
         fragment_labels: Vec<IonAnnot>,
-        precursor_intensities: Vec<f32>,
         fragment_intensities: Vec<f32>,
         mobility_ook0: f32,
         rt_seconds: f32,
     ) -> Self {
         Self {
-            id,
             precursor_mz,
-            precursor_labels,
             fragment_mzs,
             fragment_labels,
-            precursor_intensities,
             fragment_intensities,
             mobility_ook0,
             rt_seconds,
@@ -534,35 +531,48 @@ mod tests {
         RefQuery,
     };
 
+    /// One native-format element. Fragment m/z are positional stand-ins; no
+    /// test here asserts on them, only on labels, intensities and the row
+    /// metadata.
+    fn element(
+        sequence: &str,
+        decoy: bool,
+        precursor_mz: f64,
+        labels: &[&str],
+        intensities: &[f32],
+    ) -> SerSpeclibElement {
+        assert_eq!(labels.len(), intensities.len());
+        SerSpeclibElement::new(
+            PrecursorEntry::new(sequence.to_string(), 2, decoy),
+            ReferenceEG::new(
+                precursor_mz,
+                (0..labels.len())
+                    .map(|i| 300.0 + 100.0 * i as f64)
+                    .collect(),
+                labels
+                    .iter()
+                    .map(|l| IonAnnot::try_from(*l).expect("valid annotation"))
+                    .collect(),
+                intensities.to_vec(),
+                0.75,
+                120.0,
+            ),
+        )
+    }
+
     /// `speclib_build_cli` writes with [`SpeclibWriter`] and timsseek reads
     /// with [`SpeclibReader`]; nothing else checks that the two agree, and a
     /// mismatch only shows up as an unreadable library at the end of a long
     /// Koina run.
     #[test]
     fn writer_output_reads_back_through_the_reader() {
-        let element = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                7,
-                450.5,
-                vec![0, 1],
-                vec![175.1, 288.2],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("b3^2").unwrap(),
-                ],
-                vec![1.0, 0.5],
-                vec![0.9, 0.4],
-                0.95,
-                1234.5,
-            ),
-        );
+        let record = element("PEPTIDEK", false, 450.5, &["y1", "b3^2"], &[0.9, 0.4]);
 
         let mut writer = SpeclibWriter::new_ndjson_zstd(Vec::new()).expect("encoder");
-        writer.append(&element).expect("append");
+        writer.append(&record).expect("append");
         // Twice, so the newline separator is exercised rather than the file
         // happening to hold one record.
-        writer.append(&element).expect("append");
+        writer.append(&record).expect("append");
         let bytes = writer.finish().expect("finish");
 
         let read: Vec<SerSpeclibElement> = SpeclibReader::new(bytes.as_slice())
@@ -572,7 +582,13 @@ mod tests {
 
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].precursor.sequence, "PEPTIDEK");
-        assert_eq!(read[0].elution_group.fragment_mzs, vec![175.1, 288.2]);
+        assert_eq!(
+            read[0].elution_group.fragment_mzs,
+            element("PEPTIDEK", false, 450.5, &["y1", "b3^2"], &[0.9, 0.4])
+                .elution_group
+                .fragment_mzs,
+            "fragment m/z must survive the round trip"
+        );
         let labels: Vec<String> = read[0]
             .elution_group
             .fragment_labels
@@ -1079,40 +1095,8 @@ mod tests {
     fn native_ndjson_load_builds_lazy_arena() {
         use crate::data_sources::reference_library::ScoredIdentity;
 
-        let target = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
-        let decoy = SerSpeclibElement::new(
-            PrecursorEntry::new("KEDITPEP".to_string(), 2, true, 0),
-            ReferenceEG::new(
-                1,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.6, 0.4],
-                0.75,
-                120.0,
-            ),
-        );
+        let target = element("PEPTIDEK", false, 500.0, &["y1", "y2"], &[0.8, 0.3]);
+        let decoy = element("KEDITPEP", true, 500.0, &["y1", "y2"], &[0.6, 0.4]);
 
         let mut ndjson = String::new();
         ndjson.push_str(&serde_json::to_string(&target).unwrap());
@@ -1156,42 +1140,10 @@ mod tests {
     /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
     #[test]
     fn from_file_native_ndjson_poisoned_row_disables_sequence_features() {
-        let good = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
+        let good = element("PEPTIDEK", false, 500.0, &["y1", "y2"], &[0.8, 0.3]);
         // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
         // (`_ => return None`) and by the mzcore pro_forma fallback.
-        let poisoned = SerSpeclibElement::new(
-            PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
-            ReferenceEG::new(
-                1,
-                600.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.7, 0.4],
-                0.75,
-                120.0,
-            ),
-        );
+        let poisoned = element("GARBAGE!!!", false, 600.0, &["y1", "y2"], &[0.7, 0.4]);
 
         let mut ndjson = String::new();
         ndjson.push_str(&serde_json::to_string(&good).unwrap());

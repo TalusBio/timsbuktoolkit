@@ -45,7 +45,6 @@ struct BatchItem {
     sequence: String,
     charge: u8,
     decoy: bool,
-    decoy_group: u32,
 }
 
 // ── flush_batch ─────────────────────────────────────────────────────────────
@@ -93,8 +92,6 @@ async fn flush_batch(
             &item.sequence,
             item.charge,
             item.decoy,
-            item.decoy_group,
-            *entry_id,
             fragment,
             rt,
             filters,
@@ -309,7 +306,6 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
     let mut batch: Vec<BatchItem> = Vec::with_capacity(batch_size);
     let mut entry_id: u32 = 0;
-    let mut decoy_group: u32 = 0;
 
     for digest_slice in &base_peptides {
         let base_seq = digest_slice.as_str();
@@ -335,7 +331,6 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                     sequence: variant.clone(),
                     charge,
                     decoy: false,
-                    decoy_group,
                 });
 
                 // Decoy
@@ -345,7 +340,6 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                         sequence: decoy_seq,
                         charge,
                         decoy: true,
-                        decoy_group,
                     });
                 }
 
@@ -366,8 +360,6 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                 }
             }
         }
-
-        decoy_group += 1;
     }
 
     // Flush remaining items.
