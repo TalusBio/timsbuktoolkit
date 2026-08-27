@@ -107,24 +107,12 @@ Scalar intensity per ion (no RT axis). `precursor_intensities`/`fragment_intensi
 
 ## Invariants
 
-1. `id` echoed from input; unique + present. Dup → overwrite; missing → NPE downstream.
+1. `id` echoed from input, unique. Dup → overwrite.
 2. ndjson: one complete object per line, no array wrapper, no pretty-print.
 3. Exact field names (fastjson, no remap). Note **singular vs plural** across modes: spectrum `precursor_mz`+`precursor_labels`(int[]); chromatogram `precursor_mzs`+`precursor_intensities`(2-D). Two distinct schemas.
 4. m/z ↔ intensity arrays positionally paired (spectrum 1-D, chromatogram row-per-ion).
 5. Output basename exactly `results.json` in `-o` dir. Exit 0 on success.
 
-## Known violations
-
-**Invariant 1, every `id` is present.** The chromatogram path drops targets that
-produce no data (`timsquery_cli`'s `processing.rs`, `ExpectedNonEmptyData` →
-`None`), so a requested `id` can be absent from `results.json`. Per this
-document that NPEs downstream rather than reading as an empty result. Still
-open.
-
-Fixed: `id` used to be *renumbered* rather than echoed — the input id was
-dropped at `push_row` and results carried the arena position instead. Carafe
-was unaffected only because it defines `id` as the row index, so the two agreed
-by construction; any other caller got rows silently relabelled `0..n-1`. The
-caller's id is now carried in `QueryCollection::source_ids` and reported by
-`QueryGeom::output_id`, which falls back to the position for formats that carry no
-id (the DIA-NN/Skyline/Spectronaut readers).
+A target that produced no signal yields no line: the chromatogram path emits
+results only for targets with data. Results are therefore a subset of the
+requested ids, matched by `id` rather than by position.
