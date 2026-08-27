@@ -113,7 +113,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
 
     fn precursor_mz_limits(&self) -> (f64, f64) {
         // Span the isotope envelope the item is actually scored with, mirroring
-        // `TimsElutionGroup::precursor_mz_limits`: isotopes are `0..n`, all
+        // `Target::precursor_mz_limits`: isotopes are `0..n`, all
         // non-negative, so the min is the mono and the max is the top isotope.
         let mono = self.mono_precursor_mz();
         let top = self.n_isotopes().saturating_sub(1) as f64;

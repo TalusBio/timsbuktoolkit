@@ -1,4 +1,4 @@
-use crate::models::elution_group::tims_elution_group_builder::{
+use crate::models::target::target_builder::{
     SetPrecursorCharge,
     SetPrecursorMonoMz,
 };
@@ -10,14 +10,12 @@ use serde::{
 };
 use tinyvec::TinyVec;
 
-/// A struct that represents an elution group.
-///
-/// The elution group is a single precursor ion that is framented.
-/// The fragments m/z values are stored in a Vec where each element
-/// contains the ion annotation and its m/z value.
+/// One analyte's constraints in (m/z, RT, mobility) space, plus the fragment
+/// m/z values to extract. The row form, as opposed to the columnar
+/// [`crate::models::TargetColumns`].
 #[derive(Debug, Serialize, Deserialize, Clone, bon::Builder)]
 #[builder(finish_fn(vis = "", name = try_build_internal))]
-pub struct TimsElutionGroup<T: KeyLike> {
+pub struct Target<T: KeyLike> {
     id: u64,
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
@@ -45,7 +43,7 @@ pub struct TimsElutionGroup<T: KeyLike> {
     // regardless of the types (bc those are just fat pointers)
     //
     // Changing the labels to TinyVec with capaciry of 13 makes the struct 144 bytes for
-    // the concrete type TimsElutionGroup<IonAnnot> but 408 bytes for TimsElutionGroup<String>
+    // the concrete type Target<IonAnnot> but 408 bytes for Target<String>
     //
     // In theory I can make this lighter if it was a genetic ...
     #[serde(alias = "fragments")]
@@ -55,10 +53,8 @@ pub struct TimsElutionGroup<T: KeyLike> {
     precursor_labels: TinyVec<[i8; 13]>,
 }
 
-impl<T: KeyLike + Default, S: tims_elution_group_builder::IsComplete>
-    TimsElutionGroupBuilder<T, S>
-{
-    pub fn try_build(self) -> Result<TimsElutionGroup<T>, crate::errors::DataProcessingError> {
+impl<T: KeyLike + Default, S: target_builder::IsComplete> TargetBuilder<T, S> {
+    pub fn try_build(self) -> Result<Target<T>, crate::errors::DataProcessingError> {
         let candidate = self.try_build_internal();
         if candidate.fragment_labels.is_empty() | candidate.precursor_labels.is_empty() {
             return Err(crate::DataProcessingError::ExpectedNonEmptyData);
@@ -71,25 +67,25 @@ impl<T: KeyLike + Default, S: tims_elution_group_builder::IsComplete>
     }
 }
 
-impl<T: KeyLike + Default, S: tims_elution_group_builder::State> TimsElutionGroupBuilder<T, S> {
+impl<T: KeyLike + Default, S: target_builder::State> TargetBuilder<T, S> {
     pub fn precursor(
         self,
         mz_mono: f64,
         charge: u8,
-    ) -> TimsElutionGroupBuilder<T, SetPrecursorCharge<SetPrecursorMonoMz<S>>>
+    ) -> TargetBuilder<T, SetPrecursorCharge<SetPrecursorMonoMz<S>>>
     where
-        S::PrecursorCharge: tims_elution_group_builder::IsUnset,
-        S::PrecursorMonoMz: tims_elution_group_builder::IsUnset,
+        S::PrecursorCharge: target_builder::IsUnset,
+        S::PrecursorMonoMz: target_builder::IsUnset,
     {
         self.precursor_mono_mz(mz_mono).precursor_charge(charge)
     }
 }
 
-impl<T: KeyLike + Default> TimsElutionGroup<T> {
+impl<T: KeyLike + Default> Target<T> {
     /// Build an empty scratch group DIRECTLY (bypassing the `bon` builder,
     /// which rejects empty fragment/precursor label sets). All scalars are
     /// zeroed and all vecs empty; the intended use is a reuse-in-place scratch
-    /// buffer that gets refilled via [`TimsElutionGroup::reset_from`] before
+    /// buffer that gets refilled via [`Target::reset_from`] before
     /// every query, so the zeroed initial state is never observed.
     pub fn empty_like() -> Self {
         Self {
@@ -105,7 +101,7 @@ impl<T: KeyLike + Default> TimsElutionGroup<T> {
     }
 }
 
-impl<T: KeyLike> TimsElutionGroup<T> {
+impl<T: KeyLike> Target<T> {
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -230,11 +226,11 @@ impl<T: KeyLike> TimsElutionGroup<T> {
             .map(|(label, mz)| (label, *mz))
     }
 
-    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> TimsElutionGroup<U> {
+    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> Target<U> {
         let fragment_labels_converted: TinyVec<[U; 13]> =
             self.fragment_labels.iter().map(f).collect();
 
-        TimsElutionGroup {
+        Target {
             id: self.id,
             mobility_ook0: self.mobility_ook0,
             rt_seconds: self.rt_seconds,

@@ -1,4 +1,4 @@
-use crate::TimsElutionGroup;
+use crate::Target;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
@@ -266,7 +266,7 @@ struct ParquetColumnData<'a> {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -317,7 +317,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[DiannLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -412,7 +412,7 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    let eg = TimsElutionGroup::builder()
+    let eg = Target::builder()
         .id(id)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
@@ -429,7 +429,7 @@ fn parse_precursor_group(
 /// Read a DIA-NN spectral library from a parquet file (DiaNN 2.2+ format)
 pub fn read_parquet_library_file<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -635,7 +635,7 @@ fn parse_precursor_group_from_parquet(
     indices: &[usize],
     columns: &ParquetColumnData,
     buffers: &mut ParsingBuffers,
-) -> Result<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
     if indices.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -728,7 +728,7 @@ fn parse_precursor_group_from_parquet(
         relative_intensities: rel_intensities,
     };
 
-    let eg = TimsElutionGroup::builder()
+    let eg = Target::builder()
         .id(id)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(elution_groups.len(), 2, "Expected 2 elution groups");
 
         // Find the MGRYSGK group (should be first if sorted, but let's be safe)
-        // Since we don't have access to peptide sequence in TimsElutionGroup,
+        // Since we don't have access to peptide sequence in Target,
         // we identify by known properties from the sample data
 
         // MGRYSGK: PrecursorMz=399.699980472937, IonMobility=0.7825, Tr=3.78, 5 fragments

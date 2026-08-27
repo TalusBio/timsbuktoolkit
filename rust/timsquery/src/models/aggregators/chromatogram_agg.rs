@@ -21,7 +21,7 @@ use timscentroid::utils::TupleRange;
 
 // TODO: rename to `ChromatogramAccumulator` — struct carries query scalars
 // (id, mobility_ook0, etc.) alongside the accumulated chromatograms, but the
-// "Collector" name dates from when it owned a full TimsElutionGroup. The query
+// "Collector" name dates from when it owned a full Target. The query
 // and accumulator roles are now structurally separated; a rename would match.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
@@ -31,7 +31,7 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `TimsElutionGroup::precursor_mz_limits()` at reset
+    /// Cached from `Target::precursor_mz_limits()` at reset
     /// (skips negative-isotope labels — do not derive from mono_mz + charge alone).
     pub precursor_mz_limits: (f64, f64),
 
@@ -250,12 +250,12 @@ impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TimsElutionGroup;
+    use crate::Target;
     use tinyvec::tiny_vec;
 
     #[test]
     fn test_filter_ions_with_custom_predicate() {
-        let eg = TimsElutionGroup::builder()
+        let eg = Target::builder()
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)

@@ -47,7 +47,7 @@ use timsquery::{
     KeyLike,
     MzMobilityStatsCollector,
     SpectralCollector,
-    TimsElutionGroup,
+    Target,
     Tolerance,
 };
 
@@ -87,14 +87,14 @@ use tracing::warn;
 /// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
 /// - `inner_collector` / `isotope_collector` reused across Phase 3 secondary queries
 /// - `isotope_scratch_eg` holds the neutron-offset-applied eg; `Option<>` because
-///   `TimsElutionGroup` has no `Default` (bon builder with required fields) —
+///   `Target` has no `Default` (bon builder with required fields) —
 ///   init lazily on first peptide.
 pub struct ScoringWorker {
     pub scorer: TraceScorer,
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
     pub isotope_collector: Option<SpectralCollector<IonAnnot, f32>>,
-    pub isotope_scratch_eg: Option<timsquery::TimsElutionGroup<IonAnnot>>,
+    pub isotope_scratch_eg: Option<timsquery::Target<IonAnnot>>,
 }
 
 impl ScoringWorker {
@@ -261,10 +261,7 @@ fn gate_expected_fragments(expected: &ExpectedIntensities<IonAnnot>) -> Result<(
 /// work is needed. It also sets the precursor labels to the isotope-envelope
 /// indices via the flyweight's `iter_precursors` (`0..n_isotopes`), which match
 /// `expected_precursor_envelope`'s indices, so no separate label pass is needed.
-pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(
-    dst: &mut TimsElutionGroup<IonAnnot>,
-    q: &Q,
-) {
+pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(dst: &mut Target<IonAnnot>, q: &Q) {
     dst.reset_from(q);
 }
 
@@ -274,14 +271,14 @@ pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(
 /// Kept OUTSIDE `ScoringWorker` so the filled scratch can be borrowed
 /// immutably while the worker is borrowed mutably by the scoring calls.
 pub struct ScratchBufs {
-    pub eg: TimsElutionGroup<IonAnnot>,
+    pub eg: Target<IonAnnot>,
     pub expected: ExpectedIntensities<IonAnnot>,
 }
 
 impl ScratchBufs {
     fn new() -> Self {
         Self {
-            eg: TimsElutionGroup::empty_like(),
+            eg: Target::empty_like(),
             expected: ExpectedIntensities::default(),
         }
     }
@@ -474,7 +471,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     fn execute_secondary_query(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         apex: &ApexBlocks,
         spectral_tol: &Tolerance,
         isotope_tol: &Tolerance,
@@ -561,7 +558,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Reuses the worker's backing `ChromatogramCollector` storage.
     fn build_calibrated_extraction_into(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -608,7 +605,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     pub fn score_calibrated_extraction(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -784,7 +781,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     pub fn prescore(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         expected: &ExpectedIntensities<IonAnnot>,
         worker: &mut ScoringWorker,
         timings: &mut PrescoreTimings,
@@ -947,7 +944,7 @@ mod tests {
         ExpectedIntensity,
         ReferenceLibrary,
     };
-    use timsquery::TimsElutionGroup;
+    use timsquery::Target;
     use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::TargetCapabilities;
 
@@ -979,7 +976,7 @@ mod tests {
         // Variant 1 (+decoy): geometry is mass-shifted, so this exercises the
         // by-value shifted-fragment path through reset_from.
         let q = lib.item_at(1);
-        let mut scratch = TimsElutionGroup::<IonAnnot>::empty_like();
+        let mut scratch = Target::<IonAnnot>::empty_like();
         fill_scratch_from(&mut scratch, &q);
 
         assert!((scratch.mono_precursor_mz() - q.mono_precursor_mz()).abs() < 1e-9);

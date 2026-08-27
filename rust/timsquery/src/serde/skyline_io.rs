@@ -1,4 +1,4 @@
-use crate::TimsElutionGroup;
+use crate::Target;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
@@ -221,7 +221,7 @@ struct ParsingBuffers {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SkylinePrecursorExtras)>, SkylineReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, SkylinePrecursorExtras)>, SkylineReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -274,10 +274,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SkylineLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<
-    Option<(TimsElutionGroup<IonAnnot>, SkylinePrecursorExtras)>,
-    SkylinePrecursorParsingError,
-> {
+) -> Result<Option<(Target<IonAnnot>, SkylinePrecursorExtras)>, SkylinePrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SkylinePrecursorParsingError::Other);
@@ -372,7 +369,7 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    let eg = TimsElutionGroup::builder()
+    let eg = Target::builder()
         .id(id)
         .mobility_ook0(0.0)
         .rt_seconds(0.0)

@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use timsquery::TimsElutionGroup;
+use timsquery::Target;
 use timsquery::tinyvec::tiny_vec;
 
 /// An elution group defines a query target: one precursor and its fragments.
@@ -11,7 +11,7 @@ use timsquery::tinyvec::tiny_vec;
 #[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyElutionGroup {
-    pub(crate) inner: TimsElutionGroup<usize>,
+    pub(crate) inner: Target<usize>,
 }
 
 #[pymethods]
@@ -45,7 +45,7 @@ impl PyElutionGroup {
         };
         let fragment_labels_tv = fragment_labels.into_iter().collect();
 
-        let eg = TimsElutionGroup::builder()
+        let eg = Target::builder()
             .id(id)
             .precursor(precursor_mz, precursor_charge)
             .mobility_ook0(mobility)

@@ -5,7 +5,7 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::elution_group::TimsElutionGroup;
+use crate::models::target::Target;
 use crate::{
     KeyLike,
     Tolerance,
@@ -20,7 +20,7 @@ use timscentroid::rt_mapping::RTIndex;
 /// Exposes exactly what `QueryRanges::from_query_data` and per-aggregator
 /// `add_query` impls read — scalars for range building + iterators for
 /// precursor and fragment m/z windows. A fully immutable view, implemented
-/// by `TimsElutionGroup` as well as by aggregators that carry their own
+/// by `Target` as well as by aggregators that carry their own
 /// query scalars.
 pub trait HasQueryData<FH: KeyLike> {
     fn id(&self) -> u64;
@@ -41,9 +41,9 @@ pub trait HasQueryData<FH: KeyLike> {
         FH: 'a;
 }
 
-impl<FH: KeyLike> HasQueryData<FH> for TimsElutionGroup<FH> {
+impl<FH: KeyLike> HasQueryData<FH> for Target<FH> {
     fn id(&self) -> u64 {
-        TimsElutionGroup::id(self)
+        Target::id(self)
     }
 
     fn precursor_mz_limits(&self) -> (f64, f64) {
@@ -51,15 +51,15 @@ impl<FH: KeyLike> HasQueryData<FH> for TimsElutionGroup<FH> {
     }
 
     fn mobility_ook0(&self) -> f32 {
-        TimsElutionGroup::mobility_ook0(self)
+        Target::mobility_ook0(self)
     }
 
     fn rt_seconds(&self) -> f32 {
-        TimsElutionGroup::rt_seconds(self)
+        Target::rt_seconds(self)
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
-        TimsElutionGroup::iter_precursors(self)
+        Target::iter_precursors(self)
     }
 
     fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a

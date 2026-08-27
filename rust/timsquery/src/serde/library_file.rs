@@ -32,7 +32,7 @@ use crate::models::{
 };
 use crate::{
     KeyLike,
-    TimsElutionGroup,
+    Target,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -78,10 +78,10 @@ pub enum FileReadingExtras {
 
 #[derive(Debug)]
 pub enum ElutionGroupCollection {
-    StringLabels(Vec<TimsElutionGroup<String>>, Option<FileReadingExtras>),
-    MzpafLabels(Vec<TimsElutionGroup<IonAnnot>>, Option<FileReadingExtras>),
-    TinyIntLabels(Vec<TimsElutionGroup<u8>>, Option<FileReadingExtras>),
-    IntLabels(Vec<TimsElutionGroup<u32>>, Option<FileReadingExtras>),
+    StringLabels(Vec<Target<String>>, Option<FileReadingExtras>),
+    MzpafLabels(Vec<Target<IonAnnot>>, Option<FileReadingExtras>),
+    TinyIntLabels(Vec<Target<u8>>, Option<FileReadingExtras>),
+    IntLabels(Vec<Target<u32>>, Option<FileReadingExtras>),
 }
 
 impl ElutionGroupCollection {
@@ -129,27 +129,27 @@ impl ElutionGroupCollection {
                 Ok(eg_inputs)
             };
 
-            let out: Result<Vec<TimsElutionGroup<u8>>, ElutionGroupInputError> = eg_inputs?
+            let out: Result<Vec<Target<u8>>, ElutionGroupInputError> = eg_inputs?
                 .into_iter()
-                .map(<ElutionGroupInput<u8> as TryInto<TimsElutionGroup<u8>>>::try_into)
+                .map(<ElutionGroupInput<u8> as TryInto<Target<u8>>>::try_into)
                 .collect();
             return Ok(ElutionGroupCollection::TinyIntLabels(out?, None));
         }
         debug!("Attempting to deserialize elution group inputs with int labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u32>>>(content) {
-            let out: Result<Vec<TimsElutionGroup<u32>>, ElutionGroupInputError> =
+            let out: Result<Vec<Target<u32>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::IntLabels(out?, None));
         }
         debug!("Attempting to deserialize elution group inputs with mzpaf labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<IonAnnot>>>(content) {
-            let out: Result<Vec<TimsElutionGroup<IonAnnot>>, ElutionGroupInputError> =
+            let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
         }
         debug!("Attempting to deserialize elution group inputs with string labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<String>>>(content) {
-            let out: Result<Vec<TimsElutionGroup<String>>, ElutionGroupInputError> =
+            let out: Result<Vec<Target<String>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::StringLabels(out?, None));
         }
@@ -162,19 +162,19 @@ impl ElutionGroupCollection {
         // u8 -> u32 -> IonAnnot -> String
         debug!("Attempting direct deserialization of elution groups");
         debug!("Attempting to deserialize elution groups with tiny int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u8>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<Target<u8>>>(content) {
             return Ok(ElutionGroupCollection::TinyIntLabels(egs, None));
         }
         debug!("Attempting to deserialize elution groups with int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u32>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<Target<u32>>>(content) {
             return Ok(ElutionGroupCollection::IntLabels(egs, None));
         }
         debug!("Attempting to deserialize elution groups with mzpaf labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<Target<IonAnnot>>>(content) {
             return Ok(ElutionGroupCollection::MzpafLabels(egs, None));
         }
         debug!("Attempting to deserialize elution groups with string labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<String>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<Target<String>>>(content) {
             return Ok(ElutionGroupCollection::StringLabels(egs, None));
         }
         Err(TargetReadingError::UnableToParseElutionGroups)
@@ -260,7 +260,7 @@ impl TargetTable {
     /// too, so `seal()` sees shipped decoys and the timsseek parse gate sees the
     /// modified sequence.
     fn mzpaf_with_intensities(
-        egs: Vec<TimsElutionGroup<IonAnnot>>,
+        egs: Vec<Target<IonAnnot>>,
         extras: FileReadingExtras,
     ) -> Result<Self, TargetReadingError> {
         let rows: Vec<PrecursorExtrasRow> = match extras {
@@ -407,7 +407,7 @@ impl TargetTable {
 /// (DIA-NN's `transition_group_id`) or not at all, and neither is stored yet.
 fn set_source_ids_from<L: KeyLike, T: KeyLike>(
     geom: &mut TargetColumns<L>,
-    egs: &[TimsElutionGroup<T>],
+    egs: &[Target<T>],
 ) -> Result<(), TargetReadingError> {
     let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();
     geom.set_source_ids(ids)

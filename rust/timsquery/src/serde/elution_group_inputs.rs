@@ -5,7 +5,7 @@ use crate::tinyvec::{
 };
 use crate::{
     KeyLike,
-    TimsElutionGroup,
+    Target,
 };
 
 #[derive(Debug)]
@@ -81,11 +81,11 @@ impl<T: KeyLike> ElutionGroupInput<T> {
     }
 }
 
-impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for TimsElutionGroup<T> {
+impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for Target<T> {
     type Error = ElutionGroupInputError;
 
     fn try_from(val: ElutionGroupInput<U>) -> Result<Self, Self::Error> {
-        let builder = TimsElutionGroup::builder()
+        let builder = Target::builder()
             .id(val.id)
             .mobility_ook0(val.mobility)
             .rt_seconds(val.rt_seconds)

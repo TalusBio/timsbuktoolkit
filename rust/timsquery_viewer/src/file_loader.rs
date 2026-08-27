@@ -9,7 +9,7 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
-use timsquery::TimsElutionGroup;
+use timsquery::Target;
 use timsquery::ion::IonAnnot;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
@@ -235,7 +235,7 @@ impl ElutionGroupData {
     pub fn get_elem(
         &self,
         index: usize,
-    ) -> Result<(TimsElutionGroup<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
+    ) -> Result<(Target<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
         if index >= self.len() {
             return Err(ViewerError::General(format!(
                 "Elution group index {index} out of bounds"
@@ -248,7 +248,7 @@ impl ElutionGroupData {
         // `expected_precursor_envelope()`, which routes through
         // `isotope_dist_or_averagine` — no `[1.0, 0.0, 0.0]` fallback.
         let q = self.item_at(index);
-        let mut eg = TimsElutionGroup::empty_like();
+        let mut eg = Target::empty_like();
         fill_scratch_from(&mut eg, &q);
         let expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),

@@ -671,8 +671,8 @@ mod mobility_gate_tests {
     fn ctor_unrestricts_im_range_for_non_ook0_run() {
         use crate::Tolerance;
         use crate::models::aggregators::PointIntensityAggregator;
-        use crate::models::elution_group::TimsElutionGroup;
         use crate::models::indexed_data::QueryRanges;
+        use crate::models::target::Target;
         use timscentroid::rt_mapping::{
             MS1CycleIndex,
             RTIndex,
@@ -680,7 +680,7 @@ mod mobility_gate_tests {
         use timscentroid::utils::OptionallyRestricted;
         use tinyvec::tiny_vec;
 
-        let eg = TimsElutionGroup::<usize>::builder()
+        let eg = Target::<usize>::builder()
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)

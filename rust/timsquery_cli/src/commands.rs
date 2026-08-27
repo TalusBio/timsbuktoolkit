@@ -376,7 +376,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use timsquery::models::elution_group::TimsElutionGroup;
+    use timsquery::models::target::Target;
     use timsquery::models::tolerance::{
         MobilityTolerance,
         MzTolerance,
@@ -449,8 +449,7 @@ mod tests {
     fn test_elution_group_template_deserializable() {
         use timsquery::IonAnnot;
         let elution_groups =
-            serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(ELUTION_GROUP_TEMPLATE)
-                .unwrap();
+            serde_json::from_str::<Vec<Target<IonAnnot>>>(ELUTION_GROUP_TEMPLATE).unwrap();
         assert!(elution_groups.len() == 2);
         // Write to a temp file ... while I implement direct reading api
         let tmp_file = tempfile::NamedTempFile::new().unwrap();

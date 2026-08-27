@@ -1,11 +1,11 @@
 pub mod aggregators;
 pub mod base;
 pub mod capabilities;
-pub mod elution_group;
 pub mod indexed_data;
 mod lazy;
 pub mod query_handle;
 pub mod source_id;
+pub mod target;
 pub mod target_columns;
 pub mod tolerance;
 
