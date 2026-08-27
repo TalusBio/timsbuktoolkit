@@ -181,6 +181,9 @@ anomaly_counters! {
     /// Peaks dropped because the precursor had already spent all 255 unknown
     /// labels, so no distinct one was left.
     dropped_unknown_over_capacity => "dropped with the unknown labels exhausted",
+    /// Spectra with no `MS:1000888` stripped sequence, whose bare residues
+    /// were derived from the proforma instead. Not required by mzSpecLib.
+    stripped_sequence_derived => "spectra with a derived stripped sequence",
     /// Spectra with no retention-time term at all.
     spectra_without_rt => "spectra without an RT",
     /// Spectra whose mobility came from a drift time rather than 1/K0.
@@ -498,23 +501,28 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
         },
     };
 
-    let stripped = raw
-        .attrs
-        .find(STRIPPED_SEQ_TERM)
-        .map(|a| a.value.clone())
-        .unwrap_or_default();
     // The proforma term carries a trailing `/charge` that is not part of the
     // peptidoform.
-    let modified = raw
-        .attrs
-        .find(PROFORMA_TERM)
-        .map(|a| {
-            a.value
-                .rsplit_once('/')
-                .map(|(p, _)| p.to_string())
-                .unwrap_or_else(|| a.value.clone())
-        })
-        .unwrap_or_else(|| stripped.clone());
+    let modified = raw.attrs.find(PROFORMA_TERM).map(|a| {
+        a.value
+            .rsplit_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| a.value.clone())
+    });
+
+    // `MS:1000888` is not required by mzSpecLib. Deriving the stripped form
+    // from the proforma is better than defaulting to "", which reads as a
+    // zero-residue peptide and silently routes the row to averagine isotopes
+    // — tallied downstream as `n_averagine_fallback`, at a layer that can no
+    // longer say the sequence was simply absent.
+    let stripped = match raw.attrs.find(STRIPPED_SEQ_TERM) {
+        Some(a) => a.value.clone(),
+        None => {
+            stats.stripped_sequence_derived += 1;
+            crate::utils::sequence::strip_mods(modified.as_deref()?)
+        }
+    };
+    let modified = modified.unwrap_or_else(|| stripped.clone());
     if stripped.is_empty() && modified.is_empty() {
         return None;
     }

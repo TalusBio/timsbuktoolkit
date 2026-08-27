@@ -155,23 +155,6 @@ impl SkylineLibraryRow {
     }
 }
 
-/// Remove bracketed modification annotations, e.g. `C[+57.02]AM` -> `CAM`.
-fn strip_modifications(modified_seq: &str) -> String {
-    let mut out = String::with_capacity(modified_seq.len());
-    let mut depth: i32 = 0;
-    for ch in modified_seq.chars() {
-        match ch {
-            '[' | '(' | '{' => depth += 1,
-            ']' | ')' | '}' if depth > 0 => {
-                depth -= 1;
-            }
-            _ if depth == 0 => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Check if a file is a Skyline Peptide Transition List CSV.
 pub fn sniff_skyline_library_file<T: AsRef<Path>>(file: T) -> Result<(), SkylineSniffError> {
     let file_handle = std::fs::File::open(file.as_ref()).map_err(|e| {
@@ -362,7 +345,7 @@ fn parse_precursor_group(
     }
 
     let modified_peptide = first_row.peptide_modified_sequence.clone();
-    let stripped_peptide = strip_modifications(&modified_peptide);
+    let stripped_peptide = crate::utils::sequence::strip_mods(&modified_peptide);
 
     let precursor_extras = SkylinePrecursorExtras {
         modified_peptide,
@@ -407,10 +390,13 @@ mod tests {
 
     #[test]
     fn test_strip_modifications() {
-        assert_eq!(strip_modifications("PEPTIDE"), "PEPTIDE");
-        assert_eq!(strip_modifications("C[+57.021]AM"), "CAM");
-        assert_eq!(strip_modifications("P[UniMod:35]IDE"), "PIDE");
-        assert_eq!(strip_modifications("[+42]AB"), "AB");
+        assert_eq!(crate::utils::sequence::strip_mods("PEPTIDE"), "PEPTIDE");
+        assert_eq!(crate::utils::sequence::strip_mods("C[+57.021]AM"), "CAM");
+        assert_eq!(
+            crate::utils::sequence::strip_mods("P[UniMod:35]IDE"),
+            "PIDE"
+        );
+        assert_eq!(crate::utils::sequence::strip_mods("[+42]AB"), "AB");
     }
 
     #[test]

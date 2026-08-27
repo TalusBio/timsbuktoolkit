@@ -31,6 +31,20 @@ pub enum LibrarySniffError {
     MissingColumns(Vec<String>),
 }
 
+impl std::fmt::Display for LibrarySniffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IoError(e) => write!(f, "could not be read: {e}"),
+            Self::InvalidFormat(e) => write!(f, "headers did not parse: {e}"),
+            // The columns are the actionable part: a near-miss export is a
+            // settings problem, not a wrong-format one.
+            Self::MissingColumns(cols) => {
+                write!(f, "missing required columns: {}", cols.join(", "))
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for SpectronautReadingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

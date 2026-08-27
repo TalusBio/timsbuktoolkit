@@ -604,22 +604,6 @@ impl SpeclibDecodeStats {
     }
 }
 
-/// Strip DIA-NN mod annotations — anything inside `(...)` or `[...]` — leaving
-/// the bare residue string.
-fn strip_mods(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut depth: i32 = 0;
-    for c in s.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Residue count of a mod-stripped sequence.
 fn residue_count(stripped: &str) -> usize {
     stripped.chars().filter(|c| c.is_ascii_alphabetic()).count()
@@ -718,7 +702,7 @@ fn map_entry(
             name.clone()
         }
     };
-    let stripped_peptide = strip_mods(&modified_peptide);
+    let stripped_peptide = crate::utils::sequence::strip_mods(&modified_peptide);
 
     // `Peptide.length` may be 0 in some libraries; recover it from the sequence
     // when needed (b/a/c series don't need it, y/x/z series do).

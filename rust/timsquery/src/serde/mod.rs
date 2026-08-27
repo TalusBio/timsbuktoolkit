@@ -10,14 +10,12 @@ mod spectronaut_io;
 
 pub use chromatogram_output::*;
 pub use index_serde::*;
+// The reader-internal types (`ElutionGroupCollection`, `FileReadingExtras`, the
+// per-format `*PrecursorExtras`, `LibrarySniffError`) are deliberately NOT
+// re-exported: they had no consumers outside this module, and every format
+// already funnels into `LibraryArena`, which is the boundary worth supporting.
 pub use library_file::{
-    DiannPrecursorExtras,
-    ElutionGroupCollection,
-    FileReadingExtras,
     LibraryArena,
     LibraryReadingError,
-    SkylinePrecursorExtras,
-    SpectronautPrecursorExtras,
     read_library_file,
 };
-pub use spectronaut_io::LibrarySniffError;

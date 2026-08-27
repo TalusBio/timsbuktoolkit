@@ -104,24 +104,6 @@ impl ReferenceEG {
     }
 }
 
-/// Strip mod annotations — anything inside `(...)` or `[...]` — from a
-/// sequence, leaving the bare residue string. The native format ships one
-/// (modified) sequence per precursor; the arena's composition-isotope path
-/// needs the stripped residues.
-fn strip_mods(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut depth: i32 = 0;
-    for c in s.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Summary of a [`finalize_reference_library`] call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
@@ -189,14 +171,17 @@ fn finalize_reference_library(
             }
         }
     }
-    let mut all_parsable = true;
+    // The first row that fails to parse, kept so the warning can name it. One
+    // bad row anywhere disables sequence-derived scoring for the WHOLE library,
+    // so "which row" is the only actionable part of that news.
+    let mut first_unparsable: Option<String> = None;
     let mut n_averagine_fallback = 0usize;
     for tgt in 0..n_rows {
-        if all_parsable {
+        if first_unparsable.is_none() {
             let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
             let normalized = normalize_to_proforma(modified);
             if parse_sequence(&normalized).is_none() {
-                all_parsable = false;
+                first_unparsable = Some(modified.to_string());
             }
         }
         let stripped = &geom.seq_strip_blob[geom.seq_strip_range(tgt)];
@@ -208,10 +193,16 @@ fn finalize_reference_library(
         }
     }
 
-    let sequence_features = if all_parsable {
-        SeqFeatureState::Available
-    } else {
-        SeqFeatureState::Unavailable
+    let sequence_features = match &first_unparsable {
+        None => SeqFeatureState::Available,
+        Some(sequence) => {
+            tracing::warn!(
+                "Sequence-derived scoring features are DISABLED for this entire library: \
+                 {sequence:?} could not be parsed. Any non-Unimod modification \
+                 (PSI-MOD, RESID, XL-MOD, cross-links) has this effect."
+            );
+            SeqFeatureState::Unavailable
+        }
     };
     geom.caps.sequence_features = sequence_features;
 
@@ -492,7 +483,7 @@ impl Speclib {
             // The native format ships a single (modified) sequence; strip mod
             // annotations for the composition-isotope path.
             let modified = &elem.precursor.sequence;
-            let stripped = strip_mods(modified);
+            let stripped = timsquery::utils::sequence::strip_mods(modified);
             geom.push_row(
                 eg.precursor_mz,
                 elem.precursor.charge,

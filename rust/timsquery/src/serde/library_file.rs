@@ -75,18 +75,13 @@ pub enum FileReadingExtras {
 
 #[derive(Debug)]
 pub enum ElutionGroupCollection {
-    StringLabels(Vec<TimsElutionGroup<String>>, Option<FileReadingExtras>),
+    /// No reader supplies extras for string labels: they carry no ion
+    /// chemistry, so there are no reference intensities to thread through.
+    StringLabels(Vec<TimsElutionGroup<String>>),
     MzpafLabels(Vec<TimsElutionGroup<IonAnnot>>, Option<FileReadingExtras>),
 }
 
 impl ElutionGroupCollection {
-    pub fn len(&self) -> usize {
-        match self {
-            ElutionGroupCollection::StringLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::MzpafLabels(egs, _) => egs.len(),
-        }
-    }
-
     fn try_read_json(path: &Path) -> Result<Self, LibraryReadingError> {
         let file_content = std::fs::read_to_string(path).map_err(LibraryReadingError::IoError)?;
         info!("Read file content from {}", path.display());
@@ -117,7 +112,7 @@ impl ElutionGroupCollection {
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<String>>>(content) {
             let out: Result<Vec<TimsElutionGroup<String>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
-            return Ok(ElutionGroupCollection::StringLabels(out?, None));
+            return Ok(ElutionGroupCollection::StringLabels(out?));
         }
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
@@ -131,7 +126,7 @@ impl ElutionGroupCollection {
         }
         debug!("Attempting to deserialize elution groups with string labels");
         if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<String>>>(content) {
-            return Ok(ElutionGroupCollection::StringLabels(egs, None));
+            return Ok(ElutionGroupCollection::StringLabels(egs));
         }
         Err(LibraryReadingError::UnableToParseElutionGroups)
     }
@@ -324,7 +319,7 @@ impl LibraryArena {
                     frag_intens: None,
                 })
             }
-            ElutionGroupCollection::StringLabels(egs, _) => {
+            ElutionGroupCollection::StringLabels(egs) => {
                 // String-labelled arenas carry no ion chemistry and ship no
                 // decoys: sequence/fragment features unavailable, decoys off.
                 let mut geom =
@@ -557,7 +552,16 @@ impl LibraryReader for SpectronautReader {
     }
 
     fn sniff(&self, path: &Path) -> bool {
-        sniff_spectronaut_library_file(path).is_ok()
+        // Logged rather than discarded: `MissingColumns` names the columns a
+        // near-miss Spectronaut export lacks, which is the difference between
+        // "wrong format" and "right format, wrong export settings".
+        match sniff_spectronaut_library_file(path) {
+            Ok(()) => true,
+            Err(e) => {
+                debug!("not a Spectronaut TSV: {e}");
+                false
+            }
+        }
     }
 
     fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
