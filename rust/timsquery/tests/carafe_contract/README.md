@@ -11,7 +11,7 @@ Refs: `util/CallTimsQuery.java`, `ai/AIGear.java`, `dia/{PSMQuery,PSMQueryResult
 > commit above line 6660. Search for the symbol instead. If you re-verify this
 > contract against Carafe, record the commit you checked below.
 >
-> Last verified against Carafe: _(unrecorded — add the SHA when you next check)_
+> Last verified against Carafe: `db81731e9efd644b942dece5827cb86eed46fad0`
 >
 > Two test modules pin the mechanically checkable parts against the literal
 > JSON in this document. If you edit a payload here, edit it there:
@@ -112,3 +112,25 @@ Scalar intensity per ion (no RT axis). `precursor_intensities`/`fragment_intensi
 3. Exact field names (fastjson, no remap). Note **singular vs plural** across modes: spectrum `precursor_mz`+`precursor_labels`(int[]); chromatogram `precursor_mzs`+`precursor_intensities`(2-D). Two distinct schemas.
 4. m/z ↔ intensity arrays positionally paired (spectrum 1-D, chromatogram row-per-ion).
 5. Output basename exactly `results.json` in `-o` dir. Exit 0 on success.
+
+## Known violations
+
+This section describes what Carafe assumes, not what timsquery currently does.
+Two invariants above are known to be broken. They are pre-existing, not
+introduced by the tests here, and neither is caught by them — the tests assert
+on the serializer, which never sees the arena.
+
+**Invariant 1, `id` is echoed.** It is not. Input `id` is parsed into
+`ElutionGroupInput` and dropped at `QueryCollection::push_row`, which has no id
+parameter; `Query::id()` returns the positional target index. Carafe is
+unaffected only because it defines `id` as the row index, so positional and
+input agree by construction. Any other caller — anyone filtering a target list
+and keeping the original ids — gets rows silently relabelled `0..n-1`.
+
+**Invariant 1, every `id` is present.** The chromatogram path drops targets that
+produce no data (`timsquery_cli`'s `processing.rs`, `ExpectedNonEmptyData` →
+`None`), so a requested `id` can be absent from `results.json`. Per this
+document that NPEs downstream rather than reading as an empty result.
+
+Both are being fixed by the `ArenaIndex` / source-id work; update this section
+when they land.
