@@ -62,7 +62,7 @@ fn default_min_ions() -> usize {
     3
 }
 fn default_output() -> String {
-    "library.mzSpecLib.txt".to_string()
+    "library.ndjson.zst".to_string()
 }
 
 // ── Sub-structs ──────────────────────────────────────────────────────────────

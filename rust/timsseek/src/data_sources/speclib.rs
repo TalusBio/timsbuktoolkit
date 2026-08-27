@@ -17,6 +17,7 @@ use std::io::{
     BufRead,
     BufReader,
     Read,
+    Write,
 };
 use std::path::{
     Path,
@@ -254,10 +255,7 @@ pub enum SpeclibFormat {
 impl SpeclibFormat {
     /// Detect a native timsseek format by EXTENSION ONLY. Returns `None` for
     /// anything else (including `.speclib` and `.mzSpecLib.txt`), which routes
-    /// to the timsquery bridge.
-    ///
-    /// Matched by extension rather than content; anything unmatched routes to
-    /// the timsquery bridge, which sniffs properly.
+    /// to the timsquery bridge — that is where content sniffing happens.
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
@@ -277,8 +275,11 @@ impl SpeclibFormat {
 /// The native path builds the columnar arena directly from these elements (see
 /// `Speclib::from_file_with_format`), so the reader stays at the serializable
 /// element and does not eagerly build per-row scoring items.
+///
+/// Both formats are NDJSON; zstd only adds a decoder underneath, so the
+/// boxing is over the byte source rather than over the line parser.
 pub struct SpeclibReader<'a> {
-    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send + 'a>,
+    reader: Box<dyn BufRead + Send + 'a>,
 }
 
 impl<'a> SpeclibReader<'a> {
@@ -286,24 +287,23 @@ impl<'a> SpeclibReader<'a> {
         reader: R,
         format: SpeclibFormat,
     ) -> Result<Self, LibraryReadingError> {
-        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send> =
-            match format {
-                SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
-                SpeclibFormat::NdJsonZstd => {
-                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
-                            source: serde_json::Error::io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            )),
-                            context: "Error creating ZSTD decoder",
-                        }
-                    })?;
-                    Box::new(NdJsonReader::new(BufReader::new(decoder)))
-                }
-            };
+        let reader: Box<dyn BufRead + Send + 'a> = match format {
+            SpeclibFormat::NdJson => Box::new(BufReader::new(reader)),
+            SpeclibFormat::NdJsonZstd => {
+                let decoder = zstd::Decoder::new(reader).map_err(|e| {
+                    LibraryReadingError::SpeclibParsingError {
+                        source: serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            e,
+                        )),
+                        context: "Error creating ZSTD decoder",
+                    }
+                })?;
+                Box::new(BufReader::new(decoder))
+            }
+        };
 
-        Ok(SpeclibReader { inner })
+        Ok(SpeclibReader { reader })
     }
 }
 
@@ -311,50 +311,70 @@ impl Iterator for SpeclibReader<'_> {
     type Item = Result<SerSpeclibElement, LibraryReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
-
-struct NdJsonReader<R: BufRead> {
-    reader: R,
-}
-
-impl<R: BufRead> NdJsonReader<R> {
-    fn new(reader: R) -> Self {
-        Self { reader }
-    }
-}
-
-impl<R: BufRead> Iterator for NdJsonReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None, // EOF
-            Ok(_) => {
-                if line.trim().is_empty() {
-                    return self.next(); // Skip empty lines
-                }
-
-                let elem: SerSpeclibElement = match serde_json::from_str(&line) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        return Some(Err(LibraryReadingError::SpeclibParsingError {
+        // Looping rather than recursing: a file with a long run of blank lines
+        // would otherwise recurse once per line and blow the stack.
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return None, // EOF
+                Ok(_) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    return Some(serde_json::from_str(&line).map_err(|e| {
+                        LibraryReadingError::SpeclibParsingError {
                             source: e,
                             context: "Error parsing NDJSON line",
-                        }));
-                    }
-                };
-
-                Some(Ok(elem))
+                        }
+                    }));
+                }
+                Err(e) => {
+                    return Some(Err(LibraryReadingError::FileReadingError {
+                        source: e,
+                        context: "Error reading line",
+                        path: PathBuf::new(),
+                    }));
+                }
             }
-            Err(e) => Some(Err(LibraryReadingError::FileReadingError {
-                source: e,
-                context: "Error reading line",
-                path: PathBuf::new(),
-            })),
         }
+    }
+}
+
+/// Writes a native timsseek library: one JSON object per line, zstd-wrapped.
+///
+/// The exact inverse of [`SpeclibReader`] on [`SpeclibFormat::NdJsonZstd`], so
+/// what `speclib_build_cli` emits is what `Speclib::from_file` reads back.
+pub struct SpeclibWriter<W: Write> {
+    encoder: zstd::Encoder<'static, W>,
+}
+
+impl<W: Write> SpeclibWriter<W> {
+    pub fn new_ndjson_zstd(writer: W) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            encoder: zstd::Encoder::new(writer, 3)?,
+        })
+    }
+
+    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), LibraryReadingError> {
+        let io_err = |e: std::io::Error| LibraryReadingError::FileReadingError {
+            source: e,
+            context: "Error writing NDJSON",
+            path: PathBuf::new(),
+        };
+        serde_json::to_writer(&mut self.encoder, elem).map_err(|e| {
+            LibraryReadingError::SpeclibParsingError {
+                source: e,
+                context: "Error serializing NDJSON line",
+            }
+        })?;
+        // The newline is the record separator; without it the whole library is
+        // one unreadable line.
+        self.encoder.write_all(b"\n").map_err(io_err)
+    }
+
+    /// Flushes the zstd frame. Skipping this truncates the library.
+    pub fn finish(self) -> Result<W, std::io::Error> {
+        self.encoder.finish()
     }
 }
 
@@ -505,6 +525,55 @@ mod tests {
         RefQuery,
     };
 
+    /// `speclib_build_cli` writes with [`SpeclibWriter`] and timsseek reads
+    /// with [`SpeclibReader`]; nothing else checks that the two agree, and a
+    /// mismatch only shows up as an unreadable library at the end of a long
+    /// Koina run.
+    #[test]
+    fn writer_output_reads_back_through_the_reader() {
+        let element = SerSpeclibElement::new(
+            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
+            ReferenceEG::new(
+                7,
+                450.5,
+                vec![0, 1],
+                vec![175.1, 288.2],
+                vec![
+                    IonAnnot::try_from("y1").unwrap(),
+                    IonAnnot::try_from("b3^2").unwrap(),
+                ],
+                vec![1.0, 0.5],
+                vec![0.9, 0.4],
+                0.95,
+                1234.5,
+            ),
+        );
+
+        let mut writer = SpeclibWriter::new_ndjson_zstd(Vec::new()).expect("encoder");
+        writer.append(&element).expect("append");
+        // Twice, so the newline separator is exercised rather than the file
+        // happening to hold one record.
+        writer.append(&element).expect("append");
+        let bytes = writer.finish().expect("finish");
+
+        let read: Vec<SerSpeclibElement> =
+            SpeclibReader::new(bytes.as_slice(), SpeclibFormat::NdJsonZstd)
+                .expect("reader")
+                .collect::<Result<_, _>>()
+                .expect("every record must parse");
+
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].precursor.sequence, "PEPTIDEK");
+        assert_eq!(read[0].elution_group.fragment_mzs, vec![175.1, 288.2]);
+        let labels: Vec<String> = read[0]
+            .elution_group
+            .fragment_labels
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(labels, vec!["y1".to_string(), "b3^2".to_string()]);
+    }
+
     #[test]
     fn test_detect_native_format_by_extension() {
         use std::path::Path;
@@ -515,21 +584,18 @@ mod tests {
                 Some(SpeclibFormat::NdJsonZstd)
             ));
         }
-        // msgpack is gone: these must fall through to the timsquery bridge
-        // rather than matching a native reader.
-        for ext in ["lib.msgpack", "lib.msgpack.zst", "lib.msgpack.zstd"] {
-            assert!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)).is_none(),
-                "{ext} must no longer be claimed as a native format"
-            );
-        }
         assert!(matches!(
             SpeclibFormat::detect_from_extension(Path::new("lib.ndjson")),
             Some(SpeclibFormat::NdJson)
         ));
-        // A .speclib must NOT be claimed as native -> routes to the bridge.
-        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.speclib")).is_none());
-        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.tsv")).is_none());
+        // Everything else routes to the timsquery bridge, which sniffs by
+        // content. Claiming one of these here would bypass that.
+        for ext in ["lib.speclib", "lib.mzSpecLib.txt", "lib.tsv"] {
+            assert!(
+                SpeclibFormat::detect_from_extension(Path::new(ext)).is_none(),
+                "{ext} must not be claimed as a native format"
+            );
+        }
     }
 
     /// `Speclib` is now a type alias for `ReferenceLibrary` (Task 9 collapsed

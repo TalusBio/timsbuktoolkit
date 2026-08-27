@@ -268,13 +268,13 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     // Keep the tempfile handle alive until after upload so the file isn't
     // dropped out from under us.
     let output_tempfile: Option<tempfile::NamedTempFile> = if remote_output {
-        let ext = std::path::Path::new(output_uri.trim_end_matches('/'))
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mzSpecLib.txt");
+        // Fixed rather than derived from the destination URI: the writer only
+        // emits zstd-wrapped NDJSON, and the upload below carries the caller's
+        // own name anyway. (`Path::extension` would have yielded `zst` for
+        // `lib.ndjson.zst`, losing the part that identifies the format.)
         let tf = tempfile::Builder::new()
             .prefix("speclib-out-")
-            .suffix(&format!(".{ext}"))
+            .suffix(".ndjson.zst")
             .tempfile()?;
         Some(tf)
     } else {
@@ -293,7 +293,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     };
 
     let out_file = std::fs::File::create(&working_path)?;
-    let mut writer = SpeclibWriter::new_msgpack_zstd(out_file)?;
+    let mut writer = SpeclibWriter::new_ndjson_zstd(out_file)?;
 
     // Estimate total items for progress bar: peptides * mod_variants * charges * (1 + decoy)
     let decoy_mult: u64 = if decoy_mode != DecoyMode::None { 2 } else { 1 };

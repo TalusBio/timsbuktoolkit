@@ -85,11 +85,11 @@ Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.
 
 ```bash
 timsseek --raw-inputs s3://bkt/sample.d.tar \
-         --speclib-uri s3://bkt/lib.mzSpecLib.txt \
+         --speclib-uri s3://bkt/lib.ndjson.zst \
          --output-uri s3://bkt/runs/out
 
 speclib_build_cli --fasta s3://bkt/proteome.fasta \
-                  --output s3://bkt/lib.mzSpecLib.txt
+                  --output s3://bkt/lib.ndjson.zst
 ```
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
@@ -97,6 +97,11 @@ Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/developm
 ## Development
 
 See [docs/development.md](docs/development.md) for dev utilities, compile flags, env vars, Taskfile targets, and scripts.
+
+[docs/CARAFE_CONTRACT.md](docs/CARAFE_CONTRACT.md) pins the CLI surface
+[Carafe](https://github.com/Noble-Lab/Carafe) drives as a subprocess — read it
+before renaming a JSON field or an output path. It is enforced by
+`rust/timsquery/tests/carafe_contract.rs`.
 
 ## License
 

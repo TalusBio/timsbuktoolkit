@@ -72,3 +72,6 @@ scratchpad_ab/
 ab_bench.out
 # Local bench outputs, logs, feature dumps (repo-local, never tracked)
 bench_out/
+
+# In-place-edit artifacts
+*.bak

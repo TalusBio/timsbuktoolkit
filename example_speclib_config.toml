@@ -5,8 +5,8 @@
 # All fields are optional — omit a section or key to use the compiled-in default.
 
 # ── Output ────────────────────────────────────────────────────────────────────
-# Path for the output spectral library (mzSpecLib text).
-output = "library.mzSpecLib.txt"
+# Path for the output spectral library (zstd-compressed NDJSON).
+output = "library.ndjson.zst"
 
 # ── Digestion ─────────────────────────────────────────────────────────────────
 [digestion]

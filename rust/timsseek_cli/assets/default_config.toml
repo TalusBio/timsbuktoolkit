@@ -13,7 +13,7 @@
 ## Input spectral library (optional — `--speclib-uri` overrides this).
 # [input]
 # type = "speclib"
-# uri = "path/to/library.mzSpecLib.txt"
+# uri = "path/to/library.ndjson.zst"
 
 
 [analysis]
