@@ -39,7 +39,14 @@ pub enum LibraryReadingError {
     FileReadingError {
         source: std::io::Error,
         context: &'static str,
-        path: PathBuf,
+        /// `None` where the failure happens on an already-open stream, which
+        /// no longer knows where it came from.
+        path: Option<PathBuf>,
+    },
+    /// The zstd frame could not be opened or decoded. Distinct from
+    /// [`Self::SpeclibParsingError`]: the bytes never became text.
+    Decompression {
+        source: std::io::Error,
     },
     TimsQueryLibraryError {
         source: timsquery::serde::LibraryReadingError,

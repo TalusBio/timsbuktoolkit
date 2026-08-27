@@ -30,7 +30,7 @@ use timsquery::utils::constants::PROTON_MASS;
 
 /// The serializable, on-disk form of a native speclib element. Kept backwards
 /// compatible; the load path builds the columnar `ReferenceLibrary` arena
-/// directly from these elements (see `Speclib::from_file_with_format`).
+/// directly from these elements (see `Speclib::from_native_file`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerSpeclibElement {
     precursor: PrecursorEntry,
@@ -246,61 +246,60 @@ fn finalize_reference_library(
 /// iterates `RefQuery` flyweights via [`ReferenceLibrary::item_at`].
 pub type Speclib = ReferenceLibrary;
 
-#[derive(Debug, Clone, Copy)]
-pub enum SpeclibFormat {
-    NdJson,
-    NdJsonZstd,
-}
-
-impl SpeclibFormat {
-    /// Detect a native timsseek format by EXTENSION ONLY. Returns `None` for
-    /// anything else (including `.speclib` and `.mzSpecLib.txt`), which routes
-    /// to the timsquery bridge — that is where content sniffing happens.
-    pub fn detect_from_extension(path: &Path) -> Option<Self> {
-        let path_str = path.to_string_lossy().to_lowercase();
-
-        // Accept both `.zst` and `.zstd` — DIA-NN/user pipelines use either.
-        if path_str.ends_with(".ndjson.zst") || path_str.ends_with(".ndjson.zstd") {
-            Some(SpeclibFormat::NdJsonZstd)
-        } else if path_str.ends_with(".ndjson") {
-            Some(SpeclibFormat::NdJson)
-        } else {
-            None
-        }
-    }
+/// Whether `path` names a native timsseek library, by EXTENSION ONLY.
+///
+/// This answers *which reader family*, not *which encoding*. Content sniffing
+/// cannot answer it: a DIA-NN `.speclib` and a native library are both opaque
+/// byte streams, and the point of the extension rule is that a native extension
+/// commits to the native reader and surfaces its error rather than falling
+/// through the timsquery registry to report some other reader's complaint.
+/// Whether the bytes are zstd-wrapped is a separate question, and
+/// [`SpeclibReader`] answers that one from the magic number.
+fn is_native_extension(path: &Path) -> bool {
+    let path_str = path.to_string_lossy().to_lowercase();
+    // `.zst` and `.zstd` are both in the wild.
+    let stem = path_str
+        .strip_suffix(".zst")
+        .or_else(|| path_str.strip_suffix(".zstd"))
+        .unwrap_or(path_str.as_str());
+    stem.ends_with(".ndjson")
 }
 
 /// Streams raw `SerSpeclibElement`s out of a native timsseek library file.
 ///
 /// The native path builds the columnar arena directly from these elements (see
-/// `Speclib::from_file_with_format`), so the reader stays at the serializable
+/// `Speclib::from_native_file`), so the reader stays at the serializable
 /// element and does not eagerly build per-row scoring items.
 ///
-/// Both formats are NDJSON; zstd only adds a decoder underneath, so the
+/// The payload is always NDJSON; zstd only adds a decoder underneath, so the
 /// boxing is over the byte source rather than over the line parser.
 pub struct SpeclibReader<'a> {
     reader: Box<dyn BufRead + Send + 'a>,
 }
 
+/// Leading bytes of a zstd frame.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
 impl<'a> SpeclibReader<'a> {
-    pub fn new<R: Read + Send + 'a>(
-        reader: R,
-        format: SpeclibFormat,
-    ) -> Result<Self, LibraryReadingError> {
-        let reader: Box<dyn BufRead + Send + 'a> = match format {
-            SpeclibFormat::NdJson => Box::new(BufReader::new(reader)),
-            SpeclibFormat::NdJsonZstd => {
-                let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                    LibraryReadingError::SpeclibParsingError {
-                        source: serde_json::Error::io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            e,
-                        )),
-                        context: "Error creating ZSTD decoder",
-                    }
-                })?;
-                Box::new(BufReader::new(decoder))
-            }
+    /// Compression is detected from the first four bytes, not the file name, so
+    /// a mislabelled `.ndjson` that is really zstd (or the reverse) still reads.
+    pub fn new<R: Read + Send + 'a>(reader: R) -> Result<Self, LibraryReadingError> {
+        let mut buffered = BufReader::new(reader);
+        let compressed = buffered
+            .fill_buf()
+            .map_err(|source| LibraryReadingError::FileReadingError {
+                source,
+                context: "Error reading the start of the speclib",
+                path: None,
+            })?
+            .starts_with(&ZSTD_MAGIC);
+
+        let reader: Box<dyn BufRead + Send + 'a> = if compressed {
+            let decoder = zstd::Decoder::with_buffer(buffered)
+                .map_err(|source| LibraryReadingError::Decompression { source })?;
+            Box::new(BufReader::new(decoder))
+        } else {
+            Box::new(buffered)
         };
 
         Ok(SpeclibReader { reader })
@@ -332,7 +331,7 @@ impl Iterator for SpeclibReader<'_> {
                     return Some(Err(LibraryReadingError::FileReadingError {
                         source: e,
                         context: "Error reading line",
-                        path: PathBuf::new(),
+                        path: None,
                     }));
                 }
             }
@@ -342,7 +341,7 @@ impl Iterator for SpeclibReader<'_> {
 
 /// Writes a native timsseek library: one JSON object per line, zstd-wrapped.
 ///
-/// The exact inverse of [`SpeclibReader`] on [`SpeclibFormat::NdJsonZstd`], so
+/// The exact inverse of [`SpeclibReader`], so
 /// what `speclib_build_cli` emits is what `Speclib::from_file` reads back.
 pub struct SpeclibWriter<W: Write> {
     encoder: zstd::Encoder<'static, W>,
@@ -359,7 +358,7 @@ impl<W: Write> SpeclibWriter<W> {
         let io_err = |e: std::io::Error| LibraryReadingError::FileReadingError {
             source: e,
             context: "Error writing NDJSON",
-            path: PathBuf::new(),
+            path: None,
         };
         serde_json::to_writer(&mut self.encoder, elem).map_err(|e| {
             LibraryReadingError::SpeclibParsingError {
@@ -401,17 +400,26 @@ impl Speclib {
         path: &Path,
         decoy_policy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
-        // Native timsseek formats are matched by EXTENSION ONLY: a native
-        // extension commits to the native reader and surfaces its error. A
-        // `.speclib` matches no native extension and falls through to the
-        // bridge -> timsquery registry -> binary reader.
-        if let Some(format) = SpeclibFormat::detect_from_extension(path) {
-            tracing::info!(
-                "Loading native speclib format ({:?}) from {}",
-                format,
-                path.display()
-            );
-            return Self::from_file_with_format(path, format, decoy_policy);
+        // msgpack was removed in the mzcore migration. Without this arm the
+        // file reaches the JSON reader and is reported as invalid UTF-8, which
+        // names neither the real problem nor the fix.
+        let path_str = path.to_string_lossy().to_lowercase();
+        if path_str.contains(".msgpack") {
+            return Err(LibraryReadingError::UnsupportedFormat {
+                message: format!(
+                    "{}: msgpack speclibs are no longer supported. Rebuild with \
+                     speclib_build_cli, which now emits .ndjson.zst",
+                    path.display()
+                ),
+            });
+        }
+
+        // See `is_native_extension`: a native extension commits to the native
+        // reader and surfaces its error. A `.speclib` matches no native
+        // extension and falls through to the bridge -> timsquery registry.
+        if is_native_extension(path) {
+            tracing::info!("Loading native speclib from {}", path.display());
+            return Self::from_native_file(path, decoy_policy);
         }
 
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
@@ -435,19 +443,20 @@ impl Speclib {
         Ok(lib)
     }
 
-    pub fn from_file_with_format(
+    /// Load a native timsseek library (NDJSON, optionally zstd-wrapped —
+    /// [`SpeclibReader`] sniffs which).
+    fn from_native_file(
         path: &Path,
-        format: SpeclibFormat,
         decoy_policy: crate::models::DecoyPolicy,
     ) -> Result<Self, LibraryReadingError> {
         let file =
             std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
                 source: e,
                 context: "Error opening speclib file",
-                path: PathBuf::from(path),
+                path: Some(PathBuf::from(path)),
             })?;
 
-        let reader = SpeclibReader::new(file, format)?;
+        let reader = SpeclibReader::new(file)?;
 
         // Build the columnar arena directly from the streamed elements (same
         // lazy shape as the `.speclib` path), instead of collecting per-row
@@ -556,11 +565,10 @@ mod tests {
         writer.append(&element).expect("append");
         let bytes = writer.finish().expect("finish");
 
-        let read: Vec<SerSpeclibElement> =
-            SpeclibReader::new(bytes.as_slice(), SpeclibFormat::NdJsonZstd)
-                .expect("reader")
-                .collect::<Result<_, _>>()
-                .expect("every record must parse");
+        let read: Vec<SerSpeclibElement> = SpeclibReader::new(bytes.as_slice())
+            .expect("reader")
+            .collect::<Result<_, _>>()
+            .expect("every record must parse");
 
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].precursor.sequence, "PEPTIDEK");
@@ -575,26 +583,70 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_native_format_by_extension() {
+    fn native_extensions_route_to_the_native_reader() {
         use std::path::Path;
-        // Both .zst and .zstd must map to the native zstd readers.
-        for ext in ["lib.ndjson.zst", "lib.ndjson.zstd"] {
-            assert!(matches!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)),
-                Some(SpeclibFormat::NdJsonZstd)
-            ));
+        for ext in [
+            "lib.ndjson",
+            "lib.ndjson.zst",
+            "lib.ndjson.zstd",
+            "LIB.NDJSON",
+        ] {
+            assert!(is_native_extension(Path::new(ext)), "{ext} is native");
         }
-        assert!(matches!(
-            SpeclibFormat::detect_from_extension(Path::new("lib.ndjson")),
-            Some(SpeclibFormat::NdJson)
-        ));
         // Everything else routes to the timsquery bridge, which sniffs by
         // content. Claiming one of these here would bypass that.
-        for ext in ["lib.speclib", "lib.mzSpecLib.txt", "lib.tsv"] {
+        for ext in ["lib.speclib", "lib.mzSpecLib.txt", "lib.tsv", "lib.zst"] {
             assert!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)).is_none(),
+                !is_native_extension(Path::new(ext)),
                 "{ext} must not be claimed as a native format"
             );
+        }
+    }
+
+    /// Compression is decided by the magic number, so the two encodings are
+    /// interchangeable regardless of what the file is called.
+    #[test]
+    fn the_reader_sniffs_zstd_rather_than_trusting_the_name() {
+        let plain = b"{\"precursor\":{\"sequence\":\"PEPTIDEK\",\"charge\":2,\"decoy\":false,\
+                      \"decoy_group\":0},\"elution_group\":{\"id\":0,\"precursor_mz\":500.0,\
+                      \"precursor_labels\":[],\"fragment_mzs\":[175.1],\
+                      \"fragment_labels\":[\"y1\"],\"precursor_intensities\":[],\
+                      \"fragment_intensities\":[1.0],\"mobility_ook0\":0.9,\
+                      \"rt_seconds\":10.0}}\n";
+
+        let from_plain: Vec<SerSpeclibElement> = SpeclibReader::new(&plain[..])
+            .expect("uncompressed reader")
+            .collect::<Result<_, _>>()
+            .expect("plain NDJSON parses");
+
+        let compressed = zstd::encode_all(&plain[..], 3).expect("encode");
+        assert!(compressed.starts_with(&ZSTD_MAGIC));
+        let from_zstd: Vec<SerSpeclibElement> = SpeclibReader::new(compressed.as_slice())
+            .expect("compressed reader")
+            .collect::<Result<_, _>>()
+            .expect("zstd NDJSON parses");
+
+        assert_eq!(from_plain.len(), 1);
+        assert_eq!(
+            from_plain[0].precursor.sequence,
+            from_zstd[0].precursor.sequence
+        );
+    }
+
+    /// A leftover `.msgpack.zst` must say what happened, not "invalid UTF-8".
+    #[test]
+    fn msgpack_libraries_report_the_format_removal() {
+        let err = Speclib::from_file(
+            Path::new("/nonexistent/lib.msgpack.zst"),
+            crate::models::DecoyPolicy::default(),
+        )
+        .expect_err("msgpack is no longer supported");
+        match err {
+            LibraryReadingError::UnsupportedFormat { message } => {
+                assert!(message.contains("msgpack"), "{message}");
+                assert!(message.contains("speclib_build_cli"), "{message}");
+            }
+            other => panic!("expected UnsupportedFormat, got {other:?}"),
         }
     }
 
@@ -1024,7 +1076,7 @@ mod tests {
     /// native path produces a lazy `ReferenceLibrary` with the right length, target/
     /// decoy flags, and per-fragment reference intensities.
     #[test]
-    fn from_file_with_format_native_ndjson_builds_lazy_arena() {
+    fn native_ndjson_load_builds_lazy_arena() {
         use crate::data_sources::reference_library::ScoredIdentity;
 
         let target = SerSpeclibElement::new(

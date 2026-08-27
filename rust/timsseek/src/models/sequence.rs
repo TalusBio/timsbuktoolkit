@@ -235,7 +235,14 @@ pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
 /// which forces the mzcore fallback in [`parse_sequence`].
 fn classify_mod(body: &str) -> Option<Mod> {
     let body = body.trim();
-    if body.len() >= 7 && body[..7].eq_ignore_ascii_case("UNIMOD:") {
+    // Match on bytes: `body` is arbitrary text from the library, so `body[..7]`
+    // would panic on a multi-byte char straddling byte 7. Once the prefix
+    // matches it is ASCII, so byte 7 is a char boundary and `body[7..]` is safe.
+    if body
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"UNIMOD:"))
+    {
         return body[7..].trim().parse::<u16>().ok().map(Mod::Unimod);
     }
     match body.as_bytes().first() {
@@ -802,6 +809,26 @@ mod tests {
         let named = parse_sequence("PEPTC[Carbamidomethyl]IDEK").expect("named form parses");
         let numeric = parse_sequence("PEPTC[UNIMOD:4]IDEK").expect("numeric form parses");
         assert_eq!(named, numeric);
+    }
+
+    #[test]
+    fn non_ascii_bracket_bodies_are_rejected_not_panicked_on() {
+        // Bracket bodies come straight from the library file, so they can hold
+        // any UTF-8. A verdict of `None` is fine; aborting the search is not.
+        for s in [
+            "PEPT[abcdef√]IDEK",
+            "PEPT[√]IDEK",
+            "[abcdef√]-PEPTIDEK",
+            "PEPTIDEK-[abcdef√]",
+            "PEPT[unimod:√]IDEK",
+        ] {
+            assert!(parse_sequence_fast(s).is_none(), "{s:?} must defer");
+        }
+        // The prefix match stays case-insensitive over the ASCII it accepts.
+        assert_eq!(
+            parse_sequence("PEPTC[unimod:4]IDEK"),
+            parse_sequence("PEPTC[UNIMOD:4]IDEK")
+        );
     }
 
     #[test]
