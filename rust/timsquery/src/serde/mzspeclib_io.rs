@@ -17,27 +17,26 @@
 //!
 //! # Peak resolution
 //!
-//! An mzSpecLib peak list carries *observed* m/z; the annotation's mass-error
-//! suffix is what recovers the theoretical value the arena wants
-//! (`theoretical = observed - error`). Two properties follow, and they drive
-//! the whole policy:
+//! Peak lists carry *observed* m/z; the annotation's mass-error suffix recovers
+//! the theoretical value the arena wants (`theoretical = observed - error`). So
+//! a theoretical mass only exists once a single identity is pinned, which sorts
+//! peaks three ways:
 //!
-//! 1. A theoretical m/z only exists once a single ion identity is pinned down.
-//!    A peak with no annotation (`?`) or an unresolvable ambiguity has no
-//!    error to subtract, so it is **skipped** rather than stored at its
-//!    observed m/z. Mixing observed and theoretical masses in one arena would
-//!    be invisible downstream.
-//! 2. "Identity known" and "identity representable" are different. `y1-HCOOH`
-//!    has a known identity and therefore a computable theoretical mass, even
-//!    though [`IonAnnot`] cannot spell the loss. Those peaks are **kept** with
-//!    an unknown label: the mass stays exact, only the label is erased.
+//! | | kept | m/z |
+//! |---|---|---|
+//! | resolved, representable | real label | theoretical |
+//! | resolved, not representable (`y1-HCOOH`) | unknown label | theoretical |
+//! | unannotated (`?`) or tied ambiguity | no | — |
 //!
-//! Ambiguous (comma-separated) annotations resolve to the alternative with the
-//! smallest absolute mass error. If that alternative is not representable the
-//! peak takes an unknown label — it is deliberately NOT downgraded to a
-//! worse-matching but representable alternative, which would assign a wrong
-//! chemical identity *and* a wrong theoretical mass. An exact tie pins no
-//! identity at all, so it is skipped.
+//! Row three is skipped rather than stored at observed m/z: an arena mixing
+//! observed and theoretical masses would be invisible downstream. Row two is
+//! kept because a known-but-unspellable identity still has an exact mass — only
+//! the label is lost.
+//!
+//! Ambiguous (comma-separated) annotations take the alternative with the
+//! smallest absolute mass error. If that one is unrepresentable the peak gets an
+//! unknown label rather than falling back to a worse-matching representable
+//! alternative, which would assign both a wrong identity and a wrong mass.
 
 use crate::ion::IonAnnot;
 use crate::models::{
@@ -65,9 +64,7 @@ use tracing::{
 /// First non-empty line of an mzSpecLib text file.
 const MAGIC: &str = "<mzSpecLib>";
 
-// ── CV term ladders ──────────────────────────────────────────────────────────
-//
-// Ordered most- to least-specific. The first term present wins.
+// CV term ladders, ordered most- to least-specific; the first present wins.
 
 /// Precursor m/z. Experimental monoisotopic is preferred over `selected ion
 /// m/z`, which on a quadrupole instrument is the isolation-window centre and
@@ -253,51 +250,47 @@ fn resolve_annotation(annotation: &str) -> (Resolved, Option<MassError>) {
         return (Resolved::SkipUnannotated, None);
     }
 
-    let alternatives: Vec<&str> = annotation.split(',').map(str::trim).collect();
-
-    // Split the mass error off every alternative first. This works even when
-    // the ion itself will not parse, which is exactly the case that still
-    // needs an exact mass.
-    let split: Vec<(&str, Option<MassError>)> = alternatives
-        .iter()
-        .filter_map(|a| split_mass_error(a).ok())
-        .collect();
-    if split.is_empty() {
-        return (Resolved::SkipUnannotated, None);
+    // Splitting the error off comes first: it works even when the ion will not
+    // parse, which is exactly the case that still needs an exact mass. A
+    // malformed suffix on ANY alternative makes the whole peak unresolvable —
+    // dropping just that one would silently turn an ambiguous peak into an
+    // unambiguous one.
+    let mut alternatives = Vec::new();
+    for alt in annotation.split(',') {
+        let Ok(parsed) = split_mass_error(alt.trim()) else {
+            return (Resolved::SkipAmbiguous, None);
+        };
+        alternatives.push(parsed);
     }
 
-    let chosen = if split.len() == 1 {
-        split[0]
+    let (ion_str, mass_error) = if let [single] = alternatives[..] {
+        single
     } else {
-        // Ambiguous: the alternative whose observed mass sits closest to its
-        // own theoretical. A tie pins no identity, so nothing can be stored.
+        // Closest by absolute mass error. Comparing a Da magnitude against a
+        // ppm one would be meaningless, but a library uses one unit
+        // throughout. Errors are parsed decimal literals, so equal ones
+        // compare exactly and a tie pins no identity.
         let magnitude = |m: &Option<MassError>| match m {
-            Some(MassError::Da(d)) => d.abs(),
-            Some(MassError::Ppm(p)) => p.abs(),
+            Some(MassError::Da(v) | MassError::Ppm(v)) => v.abs(),
             None => f64::INFINITY,
         };
-        let best = split
+        let best = alternatives
             .iter()
             .map(|(_, e)| magnitude(e))
             .fold(f64::INFINITY, f64::min);
-        let tied = split
-            .iter()
-            .filter(|(_, e)| (magnitude(e) - best).abs() <= f64::EPSILON)
-            .count();
-        if tied != 1 || !best.is_finite() {
+        if !best.is_finite() {
             return (Resolved::SkipAmbiguous, None);
         }
-        *split
-            .iter()
-            .find(|(_, e)| (magnitude(e) - best).abs() <= f64::EPSILON)
-            .expect("a unique minimum was just counted")
+        let mut winners = alternatives.iter().filter(|(_, e)| magnitude(e) == best);
+        let winner = *winners.next().expect("the minimum came from this iterator");
+        if winners.next().is_some() {
+            return (Resolved::SkipAmbiguous, None);
+        }
+        winner
     };
-
-    let (ion_str, mass_error) = chosen;
     match IonAnnot::try_from(ion_str) {
         Ok(ion) => (Resolved::Annotated(ion), mass_error),
-        // Known identity, unrepresentable spelling: keep the peak and its exact
-        // mass, lose only the label.
+        // Keep the peak and its exact mass, lose only the label.
         Err(_) => (Resolved::UnknownLabel, mass_error),
     }
 }
@@ -339,12 +332,14 @@ fn convert_spectrum(
     };
 
     let mobility = match raw.attrs.find(MOBILITY_INVERSE_REDUCED) {
-        Some(a) => a.value.parse().unwrap_or(0.0),
+        Some(a) => a.value.parse().ok()?,
         None => match raw.attrs.find(MOBILITY_DRIFT_TIME) {
             Some(a) => {
                 stats.spectra_with_drift_time_mobility += 1;
-                a.value.parse().unwrap_or(0.0)
+                a.value.parse().ok()?
             }
+            // Absent is fine — an unset mobility is 0.0, same as DIA-NN writes.
+            // A *present but malformed* one drops the spectrum instead.
             None => 0.0,
         },
     };
@@ -411,7 +406,6 @@ fn convert_spectrum(
             }
         };
 
-        // Peak lists carry observed m/z; the arena wants theoretical.
         let mz = match mass_error {
             Some(e) => e.theoretical_from_observed(*observed_mz),
             None => *observed_mz,

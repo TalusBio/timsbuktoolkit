@@ -32,9 +32,9 @@
 //! range-checks — see [`IonAnnot::try_new`].
 //!
 //! Bit 30 is reserved: when set, `loss` would be an index into a growable
-//! registry instead of a [`NeutralLoss`] discriminant. Nothing sets it today
-//! and constructors assert it stays clear; it exists so an esoteric loss can be
-//! added later without another layout change.
+//! registry instead of a [`NeutralLoss`] discriminant. Nothing reads or writes
+//! it today; it exists so an esoteric loss can be added later without another
+//! layout change.
 //!
 //! # mzPAF compliance
 //!
@@ -89,8 +89,6 @@ const LOSS_SHIFT: u32 = 12;
 const LOSS_BITS: u32 = 6;
 const PAYLOAD_SHIFT: u32 = 18;
 const PAYLOAD_BITS: u32 = 12;
-/// Reserved: set would mean `loss` is a registry index. Always clear today.
-const REGISTRY_BIT: u32 = 1 << 30;
 
 /// Widest charge the 4-bit zigzag field holds. Observed maximum is 3.
 pub const CHARGE_MIN: i8 = -7;
@@ -362,10 +360,6 @@ impl IonAnnot {
             return Err(IonParsingError::IsotopeOutOfRange { isotope });
         }
         debug_assert!(payload <= mask(PAYLOAD_BITS), "payload overflows its field");
-        debug_assert!(
-            (loss as u32) <= mask(LOSS_BITS),
-            "loss discriminant overflows its field"
-        );
         Ok(IonAnnot(
             ((kind as u32) << KIND_SHIFT)
                 | ((zigzag(charge) & mask(CHARGE_BITS)) << CHARGE_SHIFT)
@@ -395,29 +389,11 @@ impl IonAnnot {
         unzigzag((self.0 >> ISOTOPE_SHIFT) & mask(ISOTOPE_BITS))
     }
 
-    /// The neutral loss this ion carries, [`NeutralLoss::None`] if any.
+    /// The neutral loss this ion carries, [`NeutralLoss::None`] if it carries
+    /// none.
     #[inline]
     pub fn loss(&self) -> NeutralLoss {
-        debug_assert!(
-            self.0 & REGISTRY_BIT == 0,
-            "registry-backed losses are reserved but not implemented"
-        );
-        match (self.0 >> LOSS_SHIFT) & mask(LOSS_BITS) {
-            0 => NeutralLoss::None,
-            1 => NeutralLoss::Water,
-            2 => NeutralLoss::Ammonia,
-            3 => NeutralLoss::CarbonMonoxide,
-            4 => NeutralLoss::CarbonDioxide,
-            5 => NeutralLoss::WaterX2,
-            6 => NeutralLoss::AmmoniaX2,
-            7 => NeutralLoss::WaterAmmonia,
-            8 => NeutralLoss::Methanesulfenic,
-            9 => NeutralLoss::Carbamidomethylthiol,
-            10 => NeutralLoss::PhosphoricAcid,
-            11 => NeutralLoss::Metaphosphoric,
-            12 => NeutralLoss::PhosphoricAcidWater,
-            _ => NeutralLoss::None,
-        }
+        NeutralLoss::from_discriminant(((self.0 >> LOSS_SHIFT) & mask(LOSS_BITS)) as u8)
     }
 
     pub fn terminality(&self) -> IonSeriesTerminality {

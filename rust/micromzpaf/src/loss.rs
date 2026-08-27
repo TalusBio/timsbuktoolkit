@@ -258,6 +258,29 @@ const TABLE: &[(Composition, NeutralLoss, &str)] = &[
 ];
 
 impl NeutralLoss {
+    /// Inverse of the `#[repr(u8)]` discriminant, for unpacking out of a bit
+    /// field. Lives next to the enum so the two cannot drift apart.
+    ///
+    /// An unrecognized value maps to [`Self::None`]: the only way to produce
+    /// one is a reserved discriminant, which no constructor emits.
+    pub(crate) fn from_discriminant(d: u8) -> Self {
+        match d {
+            1 => Self::Water,
+            2 => Self::Ammonia,
+            3 => Self::CarbonMonoxide,
+            4 => Self::CarbonDioxide,
+            5 => Self::WaterX2,
+            6 => Self::AmmoniaX2,
+            7 => Self::WaterAmmonia,
+            8 => Self::Methanesulfenic,
+            9 => Self::Carbamidomethylthiol,
+            10 => Self::PhosphoricAcid,
+            11 => Self::Metaphosphoric,
+            12 => Self::PhosphoricAcidWater,
+            _ => Self::None,
+        }
+    }
+
     /// Resolve a loss expression (without the leading `-`) to a discriminant.
     ///
     /// `None` means "parsed as a valid composition, but not one we represent" —
