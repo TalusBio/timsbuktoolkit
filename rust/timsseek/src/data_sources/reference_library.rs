@@ -162,8 +162,12 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
 impl<'a> QueryGeom for RefQuery<'a> {
     type Label = IonAnnot;
 
-    fn id(&self) -> u32 {
-        self.geom.id()
+    fn source_id(&self) -> Option<timsquery::models::LibraryId> {
+        self.geom.source_id()
+    }
+
+    fn output_id(&self) -> u64 {
+        self.geom.output_id()
     }
 
     fn mono_precursor_mz(&self) -> f64 {
@@ -209,7 +213,8 @@ impl<'a> QueryGeom for RefQuery<'a> {
 /// zero-heap) over the concrete type — see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
-    /// Positional library id: lazy target index, or the materialized eg's id.
+    /// Positional library id: the row's position, never a caller-supplied id.
+    /// It anchors decoy grouping and the q-value determinism sort.
     fn library_id(&self) -> u32;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
@@ -221,7 +226,8 @@ pub trait ScoredIdentity {
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
     fn library_id(&self) -> u32 {
-        self.geom().id()
+        u32::try_from(self.geom().target_idx())
+            .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)")
     }
 
     fn is_target(&self) -> bool {
@@ -232,8 +238,8 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
     }
 
     fn decoy_group(&self) -> u32 {
-        u32::try_from(self.geom().target_idx())
-            .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)")
+        // One stored row competes as one group, so the group is the row position.
+        self.library_id()
     }
 
     fn materialize_peptide(&self) -> Peptide {
@@ -351,7 +357,7 @@ mod tests {
         let lib = tiny_ref_lib();
         let scored = lib.item_at(0);
         assert!(scored.is_target());
-        assert_eq!(scored.library_id(), QueryGeom::id(&scored));
+        assert_eq!(scored.library_id(), 0); // flat index 0 -> target 0
         assert_eq!(scored.decoy_group(), 0);
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
         assert_eq!(got_frags.len(), 2);

@@ -223,7 +223,13 @@ impl ElutionGroupData {
         buffer.clear();
         let q = self.item_at(idx);
         let peptide = ScoredIdentity::materialize_peptide(&q);
-        let _ = write!(buffer, "{}|{}|{}", q.id(), peptide.raw, !q.is_target());
+        let _ = write!(
+            buffer,
+            "{}|{}|{}",
+            q.output_id(),
+            peptide.raw,
+            !q.is_target()
+        );
     }
 
     pub fn get_elem(
@@ -354,7 +360,7 @@ impl ElutionGroupData {
         };
 
         table_row.col(|ui| {
-            add_col(ui, &q.id().to_string());
+            add_col(ui, &q.output_id().to_string());
         });
         table_row.col(|ui| {
             add_col(ui, &peptide.raw);
