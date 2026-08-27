@@ -17,26 +17,43 @@
 //!
 //! # Peak resolution
 //!
-//! Peak lists carry *observed* m/z; the annotation's mass-error suffix recovers
-//! the theoretical value the arena wants (`theoretical = observed - error`). So
-//! a theoretical mass only exists once a single identity is pinned, which sorts
-//! peaks three ways:
+//! The arena wants *theoretical* m/z. A peak list may carry either: whether it
+//! does is declared by `MS:1003072|spectrum origin type`, which this reader
+//! does not consult (see below). What it uses instead is the annotation's
+//! mass-error suffix, `theoretical = observed - error` — correct for an
+//! observed list, and a no-op on a theoretical one, where the error is `0.0`.
 //!
-//! | | kept | m/z |
+//! So a theoretical mass exists only once a single identity is pinned:
+//!
+//! | annotation | kept | m/z |
 //! |---|---|---|
 //! | resolved, representable | real label | theoretical |
 //! | resolved, not representable (`y1-HCOOH`) | unknown label | theoretical |
-//! | unannotated (`?`) or tied ambiguity | no | — |
+//! | resolved, no `/error` suffix | as above | observed, and counted |
+//! | unannotated (`?`), tied ambiguity, malformed suffix | no | — |
 //!
-//! Row three is skipped rather than stored at observed m/z: an arena mixing
-//! observed and theoretical masses would be invisible downstream. Row two is
-//! kept because a known-but-unspellable identity still has an exact mass — only
-//! the label is lost.
+//! A peak with no single identity is skipped rather than stored at observed
+//! m/z: an arena mixing observed and theoretical masses would be invisible
+//! downstream. A known-but-unspellable identity is kept because it still has an
+//! exact mass — only the label is lost. The suffix is optional in mzPAF, so the
+//! third row is possible and is the one case where the mixture does happen;
+//! `kept_at_observed_mz` is how it shows up.
 //!
 //! Ambiguous (comma-separated) annotations take the alternative with the
 //! smallest absolute mass error. If that one is unrepresentable the peak gets an
 //! unknown label rather than falling back to a worse-matching representable
 //! alternative, which would assign both a wrong identity and a wrong mass.
+//!
+//! # Not implemented
+//!
+//! - **`MS:1003072|spectrum origin type`.** It distinguishes `MS:1003073`
+//!   (observed), `MS:1003074` (predicted) and `MS:1003424` (theoretical m/z,
+//!   observed intensity), i.e. exactly whether the subtraction above is needed.
+//!   Both vendored fixtures write `/0.0` throughout, so the subtraction is a
+//!   no-op on them either way.
+//! - **Decoys.** `<AttributeSet Spectrum=DECOY>` + `MS:1003212` marks decoy
+//!   spectra in SpectraST exports. Every row here is pushed as a target; see
+//!   `ignored_attribute_set_entries`.
 
 use crate::ion::{
     IonAnnot,
@@ -128,6 +145,14 @@ macro_rules! anomaly_counters {
             fn anomalies(&self) -> impl Iterator<Item = (&'static str, usize)> {
                 [ $( ($label, self.$field), )+ ].into_iter()
             }
+
+            /// Fold `other` in. Used to hold a spectrum's counts aside until
+            /// it is known to be kept, so a dropped spectrum does not also
+            /// report the peaks it would have contributed.
+            fn merge(&mut self, other: &Self) {
+                self.kept_annotated += other.kept_annotated;
+                $( self.$field += other.$field; )+
+            }
         }
     };
 }
@@ -140,6 +165,14 @@ anomaly_counters! {
     skipped_unannotated => "skipped as unannotated",
     /// Comma-separated alternatives that tied on absolute mass error.
     skipped_ambiguous => "skipped as ambiguous",
+    /// An `/error` suffix that would not parse. The peak has no recoverable
+    /// mass, so it cannot be stored at any label.
+    skipped_malformed_mass_error => "skipped for a malformed mass error",
+    /// Peaks kept at their OBSERVED m/z because the annotation carried no
+    /// `/error` suffix (which mzPAF makes optional). Everything else in the
+    /// arena is theoretical, so this is the one counter that means the arena
+    /// mixes the two.
+    kept_at_observed_mz => "kept at observed m/z (no mass-error suffix)",
     /// Peaks dropped because their label collided with one already in the
     /// precursor.
     dropped_duplicate_label => "dropped for a duplicate label",
@@ -157,6 +190,11 @@ anomaly_counters! {
     dropped_malformed_spectrum => "spectra dropped as malformed",
     /// Precursors dropped for having no usable peak left.
     dropped_empty_precursors => "precursors dropped as empty",
+    /// Attributes inside an `<AttributeSet ...>` block, which this reader does
+    /// not apply. Both vendored fixtures have these blocks empty; a writer
+    /// that hoists an RT unit group or a DECOY marker into one would otherwise
+    /// lose it with no trace.
+    ignored_attribute_set_entries => "attribute-set entries ignored",
 }
 
 /// One spectrum converted into the shape [`QueryCollection::push_row`] takes.
@@ -195,20 +233,51 @@ impl MzSpecLibStats {
     }
 }
 
-/// One `ACC|name=value` attribute, with its optional `[n]` group tag.
+/// Which `<...>` block an attribute was written in.
+///
+/// `[n]` group ids are scoped to their block, so two blocks can both use `[2]`
+/// for unrelated groups — `spectronaut.mzSpecLib.txt` already does. Carrying
+/// the block makes a group id unique within a spectrum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockId {
+    Spectrum,
+    Analyte(u32),
+    Interpretation(u32),
+}
+
+impl BlockId {
+    /// Parse a `<Analyte=1>`-style header. `None` for a header that opens no
+    /// attribute block (`<Peaks>`, `<AttributeSet ...>`).
+    fn parse(header: &str) -> Option<Self> {
+        let inner = header.strip_prefix('<')?.strip_suffix('>')?;
+        if inner == "Spectrum" || inner.starts_with("Spectrum=") {
+            return Some(Self::Spectrum);
+        }
+        let (kind, id) = inner.split_once('=')?;
+        let id = id.parse().ok()?;
+        match kind {
+            "Analyte" => Some(Self::Analyte(id)),
+            "Interpretation" => Some(Self::Interpretation(id)),
+            _ => None,
+        }
+    }
+}
+
+/// One `ACC|name=value` attribute, with its `[n]` group tag scoped to the
+/// block it was written in.
 #[derive(Debug, Clone)]
 struct Attr {
-    group: Option<u32>,
+    group: Option<(BlockId, u32)>,
     accession: String,
     value: String,
 }
 
 impl Attr {
-    fn parse(line: &str) -> Option<Attr> {
+    fn parse(line: &str, block: BlockId) -> Option<Attr> {
         let (group, rest) = match line.strip_prefix('[') {
             Some(r) => {
                 let (g, r) = r.split_once(']')?;
-                (Some(g.parse().ok()?), r)
+                (Some((block, g.parse().ok()?)), r)
             }
             None => (None, line),
         };
@@ -233,8 +302,13 @@ impl Attr {
 struct AttrBag(Vec<Attr>);
 
 impl AttrBag {
+    /// Spectrum-block attributes win over Analyte/Interpretation ones. Without
+    /// this the answer would depend on which block the writer emitted first.
     fn find(&self, accession: &str) -> Option<&Attr> {
-        self.0.iter().find(|a| a.accession == accession)
+        let matching = || self.0.iter().filter(|a| a.accession == accession);
+        matching()
+            .find(|a| a.group.is_none_or(|(b, _)| b == BlockId::Spectrum))
+            .or_else(|| matching().next())
     }
 
     fn first_of(&self, accessions: &[&str]) -> Option<&Attr> {
@@ -246,6 +320,10 @@ impl AttrBag {
     }
 
     /// The unit term attached to `attr` via its `[n]` group, if any.
+    ///
+    /// The group is matched on `(block, id)`, not `id` alone: an unrelated
+    /// `[2]` in the Analyte block must not supply the unit for a `[2]` in the
+    /// Spectrum block. Getting that wrong is a silent 60x RT error.
     fn unit_for(&self, attr: &Attr) -> Option<&str> {
         let group = attr.group?;
         self.0
@@ -271,6 +349,9 @@ enum SkipReason {
     /// Alternatives that pin no single identity, so likewise no theoretical
     /// m/z. Storing the observed one would mix the two.
     Ambiguous,
+    /// The `/error` suffix was present but unparseable. Distinct from
+    /// `Ambiguous`: one malformed annotation is malformed, not ambiguous.
+    MalformedMassError,
 }
 
 /// What resolving one peak's annotation produced.
@@ -302,7 +383,7 @@ fn resolve_annotation(annotation: &str) -> Resolved {
     let mut alternatives = Vec::new();
     for alt in annotation.split(',') {
         let Ok(parsed) = split_mass_error(alt.trim()) else {
-            return Resolved::Skip(SkipReason::Ambiguous);
+            return Resolved::Skip(SkipReason::MalformedMassError);
         };
         alternatives.push(parsed);
     }
@@ -347,10 +428,20 @@ fn resolve_annotation(annotation: &str) -> Resolved {
 /// spectra for a missing charge still reports "all annotated and
 /// representable", which is the one thing this module exists to prevent.
 fn convert_spectrum(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRow> {
-    let Some(row) = spectrum_row(raw, stats) else {
+    // A malformed spectrum bails out of `spectrum_row` via `?`, possibly after
+    // incrementing RT/mobility counters on the way. Those are held aside and
+    // discarded on the bail-out, so it is reported once as malformed rather
+    // than also as "without an RT" and "using a drift time".
+    //
+    // An *empty* precursor is structurally fine, so its per-peak counts are
+    // kept: they are the explanation for why it came out empty.
+    let mut local = MzSpecLibStats::default();
+    let Some(row) = spectrum_row(raw, &mut local) else {
         stats.dropped_malformed_spectrum += 1;
         return None;
     };
+    stats.merge(&local);
+
     if row.frags.is_empty() {
         stats.dropped_empty_precursors += 1;
         return None;
@@ -390,8 +481,15 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
         Some(a) => a.value.parse().ok()?,
         None => match raw.attrs.find(MOBILITY_DRIFT_TIME) {
             Some(a) => {
-                stats.spectra_with_drift_time_mobility += 1;
-                a.value.parse().ok()?
+                let drift: f32 = a.value.parse().ok()?;
+                // DIA-NN writes `MS:1002476|ion mobility drift time=0.0` on
+                // every spectrum, meaning "unset". Counting that as a real
+                // drift time warns on every DIA-NN load and buries the case
+                // this counter exists for.
+                if drift != 0.0 {
+                    stats.spectra_with_drift_time_mobility += 1;
+                }
+                drift
             }
             // Absent is fine — an unset mobility is 0.0, same as DIA-NN writes.
             // A *present but malformed* one drops the spectrum instead.
@@ -425,16 +523,10 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
     let mut unknown_ions = UnknownIonCounter::new();
 
     for (observed_mz, intensity, annotation) in &raw.peaks {
-        let (label, mass_error) = match resolve_annotation(annotation) {
-            Resolved::Annotated(ion, error) => {
-                stats.kept_annotated += 1;
-                (ion, error)
-            }
+        let (label, mass_error, annotated) = match resolve_annotation(annotation) {
+            Resolved::Annotated(ion, error) => (ion, error, true),
             Resolved::UnknownLabel(error) => match unknown_ions.next(1) {
-                Ok(ion) => {
-                    stats.kept_unknown_label += 1;
-                    (ion, error)
-                }
+                Ok(ion) => (ion, error, false),
                 Err(_) => {
                     stats.dropped_unknown_over_capacity += 1;
                     continue;
@@ -448,20 +540,38 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
                 stats.skipped_ambiguous += 1;
                 continue;
             }
-        };
-
-        let mz = match mass_error {
-            Some(e) => e.theoretical_from_observed(*observed_mz),
-            None => *observed_mz,
+            Resolved::Skip(SkipReason::MalformedMassError) => {
+                stats.skipped_malformed_mass_error += 1;
+                continue;
+            }
         };
 
         // Labels must stay unique within the precursor (`linear_get` is
-        // first-match), so a collision drops the later peak. Unknown labels
-        // come off a monotonic counter and cannot collide; this only ever
-        // fires for annotated ones.
+        // first-match), so a collision drops the later peak. Checked before
+        // the kept counters: otherwise a collided peak is tallied as both
+        // kept and dropped. Unknown labels come off a monotonic counter and
+        // cannot collide; this only ever fires for annotated ones.
         if frags.iter().any(|(l, _)| *l == label) {
             stats.dropped_duplicate_label += 1;
             continue;
+        }
+
+        let mz = match mass_error {
+            Some(e) => e.theoretical_from_observed(*observed_mz),
+            // The `/error` suffix is optional in mzPAF. Without it the
+            // observed m/z is the best available value, but it is NOT the
+            // theoretical one the rest of the arena holds, so the mixture is
+            // counted rather than passed off as exact.
+            None => {
+                stats.kept_at_observed_mz += 1;
+                *observed_mz
+            }
+        };
+
+        if annotated {
+            stats.kept_annotated += 1;
+        } else {
+            stats.kept_unknown_label += 1;
         }
         frags.push((label, mz));
         intens.push(*intensity);
@@ -538,6 +648,10 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
 
     let mut current: Option<RawSpectrum> = None;
     let mut section = Section::Attributes;
+    // Which block the attributes now being read belong to. `[n]` group ids are
+    // scoped to it, so it has to be threaded into every `Attr::parse`.
+    let mut block = BlockId::Spectrum;
+    let mut in_attribute_set = false;
 
     for line in reader.lines() {
         let line = line.map_err(LibraryReadingError::IoError)?;
@@ -545,7 +659,8 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
 
         // Any `<...>` header ends the peak list; only `<Peaks>` opens one.
         // `<Analyte=n>` and `<Interpretation=n>` attributes are folded into
-        // the spectrum's bag: this reader wants the union, not the hierarchy.
+        // the spectrum's bag: this reader wants the union, not the hierarchy,
+        // but each keeps its own group scope.
         if trimmed.starts_with('<') {
             if trimmed.starts_with("<Spectrum=") {
                 flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
@@ -556,6 +671,12 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
             } else {
                 Section::Attributes
             };
+            // `<AttributeSet ...>` declares defaults applied to whole classes
+            // of spectra by name. Honouring them is not implemented, so a
+            // non-empty one is counted rather than silently dropped: it can
+            // carry the RT unit, or the DECOY marker.
+            in_attribute_set = trimmed.starts_with("<AttributeSet");
+            block = BlockId::parse(trimmed).unwrap_or(block);
             continue;
         }
         if trimmed.is_empty() {
@@ -564,6 +685,9 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
         }
 
         let Some(spec) = current.as_mut() else {
+            if in_attribute_set && Attr::parse(trimmed, BlockId::Spectrum).is_some() {
+                stats.ignored_attribute_set_entries += 1;
+            }
             continue; // library-level header
         };
 
@@ -582,7 +706,7 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
                 spec.peaks.push((mz, intensity, annotation));
             }
             Section::Attributes => {
-                if let Some(attr) = Attr::parse(trimmed) {
+                if let Some(attr) = Attr::parse(trimmed, block) {
                     spec.attrs.0.push(attr);
                 }
             }
@@ -686,6 +810,142 @@ mod tests {
             (rt - 28.658491 * 60.0).abs() < 0.01,
             "expected minutes converted to seconds, got {rt}"
         );
+    }
+
+    /// `[n]` group ids are scoped to their block, so an Analyte `[2]` must not
+    /// supply the unit for a Spectrum `[2]`.
+    ///
+    /// `spectronaut.mzSpecLib.txt` already carries both: `[2]` is the RT +
+    /// unit pair in its Spectrum block and the NCBI TaxID in its Analyte
+    /// block. It survives today only because the Analyte's `[2]` happens to
+    /// carry no unit term. If it did, the RT would be read in the wrong unit —
+    /// a silent 60x error in the value the extraction window is built on.
+    #[test]
+    fn group_ids_do_not_leak_between_blocks() {
+        let grouped = |block: BlockId, id: u32, accession: &str, value: &str| Attr {
+            group: Some((block, id)),
+            accession: accession.to_string(),
+            value: value.to_string(),
+        };
+        let rt = grouped(BlockId::Spectrum, 2, RT_TERMS[1], "10.0");
+        let bag = AttrBag(vec![
+            rt.clone(),
+            // Same group id, different block, and it does carry a unit.
+            grouped(BlockId::Analyte(1), 2, "MS:1001467", "9606"),
+            grouped(BlockId::Analyte(1), 2, UNIT_TERM, UNIT_SECOND),
+        ]);
+
+        assert_eq!(
+            bag.unit_for(&rt),
+            None,
+            "the Analyte block's unit must not reach the Spectrum block's group"
+        );
+
+        // And when the unit is in the same block, it is found.
+        let mut same_block = bag;
+        same_block
+            .0
+            .push(grouped(BlockId::Spectrum, 2, UNIT_TERM, UNIT_SECOND));
+        assert_eq!(same_block.unit_for(&rt), Some(UNIT_SECOND));
+    }
+
+    /// The `/error` suffix is optional in mzPAF, so a bare `y5` is legal and
+    /// its m/z stays observed while the rest of the arena is theoretical.
+    /// Both vendored fixtures write `/0.0` everywhere, so nothing else covers
+    /// this. A malformed suffix is a different verdict from an ambiguous one.
+    #[test]
+    fn a_missing_mass_error_is_counted_and_a_malformed_one_is_skipped() {
+        assert!(matches!(
+            resolve_annotation("y5"),
+            Resolved::Annotated(_, None)
+        ));
+        assert!(matches!(
+            resolve_annotation("y5/not-a-number"),
+            Resolved::Skip(SkipReason::MalformedMassError)
+        ));
+
+        let attr = |accession: &str, value: &str| Attr {
+            group: None,
+            accession: accession.to_string(),
+            value: value.to_string(),
+        };
+        let raw = RawSpectrum {
+            attrs: AttrBag(vec![
+                attr(PRECURSOR_MZ_TERMS[0], "500.25"),
+                attr(CHARGE_TERM, "2"),
+                attr(STRIPPED_SEQ_TERM, "PEPTIDEK"),
+                attr(RT_TERMS[0], "10.0"),
+            ]),
+            peaks: vec![
+                (175.1, 1.0, "y1/0.0".to_string()),
+                (288.2, 1.0, "y2".to_string()),
+            ],
+        };
+
+        let mut stats = MzSpecLibStats::default();
+        let row = convert_spectrum(&raw, &mut stats).expect("both peaks are usable");
+        assert_eq!(row.frags.len(), 2);
+        assert_eq!(stats.kept_annotated, 2);
+        assert_eq!(
+            stats.kept_at_observed_mz, 1,
+            "only the suffix-less peak keeps its observed m/z"
+        );
+    }
+
+    /// A collided peak must be reported once, as dropped — not as kept AND
+    /// dropped, which is what counting before the uniqueness check produced.
+    #[test]
+    fn a_duplicate_label_is_counted_once_as_dropped() {
+        let attr = |accession: &str, value: &str| Attr {
+            group: None,
+            accession: accession.to_string(),
+            value: value.to_string(),
+        };
+        let raw = RawSpectrum {
+            attrs: AttrBag(vec![
+                attr(PRECURSOR_MZ_TERMS[0], "500.25"),
+                attr(CHARGE_TERM, "2"),
+                attr(STRIPPED_SEQ_TERM, "PEPTIDEK"),
+                attr(RT_TERMS[0], "10.0"),
+            ]),
+            peaks: vec![
+                (175.1, 1.0, "y1/0.0".to_string()),
+                (175.2, 2.0, "y1/0.0".to_string()),
+            ],
+        };
+
+        let mut stats = MzSpecLibStats::default();
+        let row = convert_spectrum(&raw, &mut stats).expect("the first peak is usable");
+        assert_eq!(row.frags.len(), 1);
+        assert_eq!(stats.kept_annotated, 1);
+        assert_eq!(stats.dropped_duplicate_label, 1);
+    }
+
+    /// DIA-NN writes `MS:1002476|ion mobility drift time=0.0` on every
+    /// spectrum, meaning "unset". Counting that warns on every DIA-NN load.
+    #[test]
+    fn a_zero_drift_time_is_absent_not_a_drift_time() {
+        let mut stats = MzSpecLibStats::default();
+        let attr = |accession: &str, value: &str| Attr {
+            group: None,
+            accession: accession.to_string(),
+            value: value.to_string(),
+        };
+        let with_drift = |drift: &str| RawSpectrum {
+            attrs: AttrBag(vec![
+                attr(PRECURSOR_MZ_TERMS[0], "500.25"),
+                attr(CHARGE_TERM, "2"),
+                attr(STRIPPED_SEQ_TERM, "PEPTIDEK"),
+                attr(RT_TERMS[0], "10.0"),
+                attr(MOBILITY_DRIFT_TIME, drift),
+            ]),
+            peaks: vec![(175.1, 1.0, "y1/0.0".to_string())],
+        };
+
+        assert!(convert_spectrum(&with_drift("0.0"), &mut stats).is_some());
+        assert_eq!(stats.spectra_with_drift_time_mobility, 0);
+        assert!(convert_spectrum(&with_drift("0.85"), &mut stats).is_some());
+        assert_eq!(stats.spectra_with_drift_time_mobility, 1);
     }
 
     /// A spectrum missing a structural field is dropped by `?` deep inside
