@@ -85,12 +85,12 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> Query<Lib
 impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
     type Label = L;
 
-    fn id(&self) -> u32 {
-        self.target_idx() as u32 // positional library_id
-    }
-
     fn source_id(&self) -> Option<crate::models::LibraryId> {
         self.geom().source_id(self.target_idx())
+    }
+
+    fn output_id(&self) -> u64 {
+        self.geom().output_id(self.target_idx())
     }
 
     fn mono_precursor_mz(&self) -> f64 {
@@ -189,7 +189,7 @@ mod tests {
     fn target_variant_is_unshifted() {
         let lib = one_target_lib();
         let q = Query::new(&lib, 0, 0);
-        assert_eq!(q.id(), 0);
+        assert_eq!(q.output_id(), 0);
         assert!((q.mono_precursor_mz() - 654.855).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[1].1 - 896.5).abs() < 1e-9);

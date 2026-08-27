@@ -11,6 +11,30 @@ use crate::models::source_id::{
 };
 use crate::traits::DecoyShift;
 
+/// The arena's own row addressing. Not exported: outside the arena a position
+/// is not an identifier, and every consumer that wants to name a row wants
+/// [`LibraryId`] instead.
+mod index {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(super) struct ArenaIndex(u32);
+
+    impl ArenaIndex {
+        /// Narrows here rather than at the call site: the downstream columns
+        /// (`library_id`, decoy group) are u32, so a wider position is a bug we
+        /// want surfaced instead of wrapped.
+        pub(super) fn new(row: usize) -> Self {
+            Self(u32::try_from(row).expect("arena row exceeds u32::MAX"))
+        }
+
+        /// The one way a position leaves the arena: as the `id` of a result
+        /// whose source carried none. See `QueryGeom::output_id`.
+        pub(super) fn as_output_id(self) -> u64 {
+            self.0 as u64
+        }
+    }
+}
+use index::ArenaIndex;
+
 #[derive(Debug, Clone)]
 pub struct ModDefinition {
     pub token: String, // verbatim, e.g. "[UNIMOD:4]"
@@ -158,6 +182,14 @@ impl<L: KeyLike> QueryCollection<L> {
 
     pub fn source_id(&self, tgt: usize) -> Option<LibraryId> {
         self.source_ids.get(tgt)
+    }
+
+    /// The id a result for row `tgt` carries: its source id, or the arena
+    /// position when the format carried none. Resolved here so the position is
+    /// converted where it is still known to be one, never handed out as an id.
+    pub fn output_id(&self, tgt: usize) -> u64 {
+        self.source_id(tgt)
+            .map_or_else(|| ArenaIndex::new(tgt).as_output_id(), |id| id.get())
     }
 
     pub fn frag_range(&self, tgt: usize) -> std::ops::Range<usize> {

@@ -147,7 +147,7 @@ impl<T: KeyLike> TimsElutionGroup<T> {
     /// flyweight), not necessarily `Self` — the body reads `src` only
     /// through trait methods.
     pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
-        self.set_id_internal(src.id() as u64);
+        self.set_id_internal(src.output_id());
         self.mobility_ook0 = src.mobility_ook0();
         self.rt_seconds = src.rt_seconds();
         self.precursor_mono_mz = src.mono_precursor_mz();

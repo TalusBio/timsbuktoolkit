@@ -1,9 +1,9 @@
 //! Source ids, as opposed to arena positions.
 //!
-//! `QueryGeom::id()` is the arena position: self-incremental, feeds decoy
-//! grouping and the q-value determinism key. [`LibraryId`] is what the source
-//! file called the row. Separate types so user-supplied values cannot reach
-//! the machinery that needs positions.
+//! The arena position is self-incremental and feeds decoy grouping and the
+//! q-value determinism key, so it stays private to the arena. [`LibraryId`] is
+//! what the source file called the row. Separate types so user-supplied values
+//! cannot reach the machinery that needs positions.
 
 use serde::{
     Deserialize,

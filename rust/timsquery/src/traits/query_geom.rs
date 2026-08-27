@@ -7,24 +7,16 @@ use crate::traits::KeyLike;
 pub trait QueryGeom {
     type Label: KeyLike;
 
-    /// Position in the arena. Feeds decoy grouping and the q-value determinism
-    /// key, so it is never caller-supplied. For what the source file called the
-    /// row, see [`QueryGeom::source_id`].
-    fn id(&self) -> u32;
-
     /// What the source file called this row, when it said. `None` for formats
     /// that carry no id.
     fn source_id(&self) -> Option<crate::models::LibraryId> {
         None
     }
 
-    /// The id a result carries: the source id, falling back to the arena
-    /// position. Carafe requires `id` to be present and keys results by it, so
-    /// an absent source id becomes the position rather than a null — which is
-    /// what was emitted before source ids existed.
-    fn output_id(&self) -> u64 {
-        self.source_id().map_or(self.id() as u64, |id| id.get())
-    }
+    /// The id a result carries; always present, since callers key results by
+    /// it. Not defaulted: a default would need a position accessor on this
+    /// trait, and the position belongs to whoever stores the row.
+    fn output_id(&self) -> u64;
     fn mono_precursor_mz(&self) -> f64;
     fn precursor_charge(&self) -> u8;
     fn rt_seconds(&self) -> f32;
@@ -45,11 +37,8 @@ impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
         Some(crate::models::LibraryId::new(self.id()))
     }
 
-    fn id(&self) -> u32 {
-        // Fail loud rather than silently truncate: the library_id column and the
-        // q-value determinism anchor are u32; an id beyond u32::MAX is a bug we
-        // want surfaced, not wrapped.
-        u32::try_from(self.id()).expect("TimsElutionGroup id exceeds u32::MAX")
+    fn output_id(&self) -> u64 {
+        self.id()
     }
 
     fn mono_precursor_mz(&self) -> f64 {
@@ -96,12 +85,12 @@ mod tests {
     use super::*;
     use crate::models::elution_group::TimsElutionGroup;
 
-    fn geom_id<G: QueryGeom>(g: &G) -> u32 {
-        g.id()
+    fn via_trait<G: QueryGeom>(g: &G) -> u64 {
+        g.output_id()
     }
 
     #[test]
-    fn blanket_impl_exposes_id_as_u32() {
+    fn elution_group_output_id_is_its_source_id() {
         let eg: TimsElutionGroup<crate::IonAnnot> = TimsElutionGroup::builder()
             .id(7)
             .mobility_ook0(0.75)
@@ -112,7 +101,7 @@ mod tests {
             .precursor(500.0, 2)
             .try_build()
             .unwrap();
-        assert_eq!(geom_id(&eg), 7u32);
+        assert_eq!(via_trait(&eg), 7);
     }
 
     #[test]
