@@ -119,7 +119,7 @@ pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), St
 
 fn count_carbon_sulphur_in_sequence_mzcore(sequence: &str) -> Result<(u16, u16), String> {
     let peptide = crate::models::sequence::parse_proforma(sequence)
-        .ok_or_else(|| format!("Error parsing peptide sequence {sequence}"))?;
+        .map_err(|e| format!("Error parsing peptide sequence {sequence}: {e}"))?;
     let peptide = match peptide.as_linear() {
         Some(pep) => pep,
         None => return Err("Peptide is not linear.".to_string()),

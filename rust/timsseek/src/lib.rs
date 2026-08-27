@@ -11,7 +11,6 @@ pub mod scoring;
 pub mod traits;
 pub mod utils;
 pub use micromzpaf;
-pub use models::sequence::ontologies;
 
 pub use data_sources::{
     ExpectedIntensity,

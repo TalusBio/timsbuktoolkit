@@ -5,38 +5,39 @@
 use crate::models::decoy::DecoyMarking;
 use serde::Serialize;
 use smallvec::SmallVec;
-use std::sync::{
-    Arc,
-    OnceLock,
-};
+use std::sync::Arc;
 
-/// Process-wide modification ontologies, built on first use.
+/// Parse a ProForma string against mzcore's shared ontologies.
 ///
-/// mzcore requires an explicit `Ontologies` value at every `pro_forma` call.
-/// Building it costs ~210 ms and ~200 MB, so it is deliberately behind a
-/// `OnceLock` reached ONLY from [`parse_sequence_mzcore`] — the fallback past
-/// the byte-walk fast path. A library whose sequences all match the fast
-/// grammar never pays it; a real DIA-NN `.speclib` load peaks at ~10 MB and
-/// never initializes this.
-pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
-    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
-    ONTOLOGIES.get_or_init(|| {
-        tracing::debug!("initializing mzcore ontologies (first non-fast-path sequence)");
-        mzcore::ontology::Ontologies::init_static()
-    })
-}
-
-/// Parse a ProForma string against the shared [`ontologies`].
+/// mzcore requires an explicit `Ontologies` value at every `pro_forma` call and
+/// ships `STATIC_ONTOLOGIES` for exactly this; it is a `LazyLock`, so the
+/// ~210 ms / ~200 MB build happens on first use and only on a path that gets
+/// here. That matters: this is the fallback *past* the byte-walk fast path in
+/// [`parse_sequence`], so a library whose sequences all match the fast grammar
+/// never pays it (a real DIA-NN `.speclib` load peaks at ~10 MB and never
+/// touches this). The two other callers — `count_carbon_sulphur_in_sequence`'s
+/// mzcore fallback and `speclib_build_cli` — do pay it.
 ///
-/// mzcore returns non-fatal parse warnings alongside the peptidoform; none of
-/// the callers can act on them, so they are dropped in one place instead of
-/// each site carrying its own `(pep, _warnings)` destructure.
+/// Most of that footprint is GNOme glycan data that [`modification_to_mod`]
+/// discards, and mzcore can build a Unimod-only index. Not done here: dropping
+/// an ontology also drops the sequences that reference it, turning a mod this
+/// code already ignores into a peptide it cannot parse at all.
+///
+/// mzcore also returns non-fatal parse warnings alongside the peptidoform; none
+/// of the callers can act on them, so they are dropped in one place rather than
+/// at each site.
 pub fn parse_proforma(
     sequence: &str,
-) -> Option<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>> {
-    let (peptidoform, _warnings) =
-        mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies()).ok()?;
-    Some(peptidoform)
+) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {
+    mzcore::sequence::Peptidoform::pro_forma(sequence, &mzcore::ontology::STATIC_ONTOLOGIES)
+        .map(|(peptidoform, _warnings)| peptidoform)
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
 }
 
 /// Amino acid stored as alphabet offset `c - b'A'` (0..=25). `u8::MAX`
@@ -291,7 +292,7 @@ fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
 fn parse_sequence_mzcore(normalized: &str) -> Option<ParsedSequence> {
     use mzcore::prelude::IsAminoAcid;
 
-    let pf = parse_proforma(normalized)?;
+    let pf = parse_proforma(normalized).ok()?;
     let linear = pf.into_linear()?;
 
     let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
@@ -339,8 +340,6 @@ fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
         _ => return None, // Cross-link / ambiguous — out of v1 scope
     };
     match simple.as_ref() {
-        // mzcore carries the mass tag and the source digit count alongside the
-        // mass itself; only the mass matters here.
         SimpleModificationInner::Mass(_tag, mass, _digits) => Some(Mod::Mass(mass.value as f32)),
         SimpleModificationInner::Database { id, .. } => {
             if id.ontology != Ontology::Unimod {
@@ -699,7 +698,7 @@ mod tests {
     /// through the UNIMOD ontology to the same numeric id the `[UNIMOD:n]`
     /// spelling yields. This is the one behavior that has no fast-path
     /// equivalent, so nothing else covers it; it is also the only test that
-    /// forces `ontologies()` to actually initialize.
+    /// forces mzcore's `STATIC_ONTOLOGIES` to actually initialize.
     #[test]
     fn mzcore_fallback_resolves_named_mods_via_ontology() {
         for (named, expected) in [
