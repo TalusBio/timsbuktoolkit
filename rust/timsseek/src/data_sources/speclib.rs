@@ -297,26 +297,21 @@ pub type Speclib = ReferenceLibrary;
 pub enum SpeclibFormat {
     NdJson,
     NdJsonZstd,
-    MessagePack,
-    MessagePackZstd,
 }
 
 impl SpeclibFormat {
     /// Detect a native timsseek format by EXTENSION ONLY. Returns `None` for
-    /// anything else (including `.speclib`), which routes to the timsquery
-    /// bridge.
+    /// anything else (including `.speclib` and `.mzSpecLib.txt`), which routes
+    /// to the timsquery bridge.
     ///
-    /// Extension-only is deliberate: msgpack has no reliable magic byte, so a
-    /// content sniff would misclaim raw binaries like `.speclib` as msgpack.
+    /// Extension-only is a leftover from the msgpack era, where a content
+    /// sniff would have misclaimed raw binaries. ndjson could be sniffed, but
+    /// the bridge already handles anything this returns `None` for.
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
         // Accept both `.zst` and `.zstd` — DIA-NN/user pipelines use either.
-        if path_str.ends_with(".msgpack.zst") || path_str.ends_with(".msgpack.zstd") {
-            Some(SpeclibFormat::MessagePackZstd)
-        } else if path_str.ends_with(".msgpack") {
-            Some(SpeclibFormat::MessagePack)
-        } else if path_str.ends_with(".ndjson.zst") || path_str.ends_with(".ndjson.zstd") {
+        if path_str.ends_with(".ndjson.zst") || path_str.ends_with(".ndjson.zstd") {
             Some(SpeclibFormat::NdJsonZstd)
         } else if path_str.ends_with(".ndjson") {
             Some(SpeclibFormat::NdJson)
@@ -354,19 +349,6 @@ impl<'a> SpeclibReader<'a> {
                         }
                     })?;
                     Box::new(NdJsonReader::new(BufReader::new(decoder)))
-                }
-                SpeclibFormat::MessagePack => Box::new(MessagePackReader::new(reader)),
-                SpeclibFormat::MessagePackZstd => {
-                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
-                            source: serde_json::Error::io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            )),
-                            context: "Error creating ZSTD decoder",
-                        }
-                    })?;
-                    Box::new(MessagePackReader::new(decoder))
                 }
             };
 
@@ -420,47 +402,6 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                 source: e,
                 context: "Error reading line",
                 path: PathBuf::new(),
-            })),
-        }
-    }
-}
-
-struct MessagePackReader<R: Read> {
-    deserializer: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<R>>,
-}
-
-impl<R: Read> MessagePackReader<R> {
-    fn new(reader: R) -> Self {
-        Self {
-            deserializer: rmp_serde::Deserializer::new(reader),
-        }
-    }
-}
-
-impl<R: Read> Iterator for MessagePackReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        use serde::Deserialize;
-
-        match SerSpeclibElement::deserialize(&mut self.deserializer) {
-            Ok(elem) => Some(Ok(elem)),
-            Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                None
-            } // EOF
-            Err(rmp_serde::decode::Error::InvalidDataRead(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                None
-            } // EOF
-            Err(e) => Some(Err(LibraryReadingError::SpeclibParsingError {
-                source: serde_json::Error::io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                )),
-                context: "Error reading MessagePack",
             })),
         }
     }
@@ -605,47 +546,6 @@ impl Speclib {
         );
     }
 }
-
-pub struct SpeclibWriter<W: std::io::Write> {
-    inner: SpeclibWriterInner<W>,
-}
-
-enum SpeclibWriterInner<W: std::io::Write> {
-    MsgpackZstd(zstd::Encoder<'static, W>),
-}
-
-impl<W: std::io::Write> SpeclibWriter<W> {
-    pub fn new_msgpack_zstd(writer: W) -> Result<Self, std::io::Error> {
-        let encoder = zstd::Encoder::new(writer, 3)?;
-        Ok(Self {
-            inner: SpeclibWriterInner::MsgpackZstd(encoder),
-        })
-    }
-
-    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), LibraryReadingError> {
-        match &mut self.inner {
-            SpeclibWriterInner::MsgpackZstd(encoder) => {
-                rmp_serde::encode::write(encoder, elem).map_err(|e| {
-                    LibraryReadingError::SpeclibParsingError {
-                        source: serde_json::Error::io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            e,
-                        )),
-                        context: "Error writing MessagePack",
-                    }
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn finish(self) -> Result<W, std::io::Error> {
-        match self.inner {
-            SpeclibWriterInner::MsgpackZstd(encoder) => encoder.finish(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,22 +558,20 @@ mod tests {
     fn test_detect_native_format_by_extension() {
         use std::path::Path;
         // Both .zst and .zstd must map to the native zstd readers.
-        for ext in ["lib.msgpack.zst", "lib.msgpack.zstd"] {
-            assert!(matches!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)),
-                Some(SpeclibFormat::MessagePackZstd)
-            ));
-        }
         for ext in ["lib.ndjson.zst", "lib.ndjson.zstd"] {
             assert!(matches!(
                 SpeclibFormat::detect_from_extension(Path::new(ext)),
                 Some(SpeclibFormat::NdJsonZstd)
             ));
         }
-        assert!(matches!(
-            SpeclibFormat::detect_from_extension(Path::new("lib.msgpack")),
-            Some(SpeclibFormat::MessagePack)
-        ));
+        // msgpack is gone: these must fall through to the timsquery bridge
+        // rather than matching a native reader.
+        for ext in ["lib.msgpack", "lib.msgpack.zst", "lib.msgpack.zstd"] {
+            assert!(
+                SpeclibFormat::detect_from_extension(Path::new(ext)).is_none(),
+                "{ext} must no longer be claimed as a native format"
+            );
+        }
         assert!(matches!(
             SpeclibFormat::detect_from_extension(Path::new("lib.ndjson")),
             Some(SpeclibFormat::NdJson)
@@ -1069,22 +967,6 @@ mod tests {
                 assert!(intensity > 0.0, "Fragment intensities should be positive");
             }
         }
-    }
-
-    #[test]
-    fn test_speclib_writer_roundtrip() {
-        let elem = SerSpeclibElement::sample();
-        let mut buf = Vec::new();
-        {
-            let mut writer = SpeclibWriter::new_msgpack_zstd(&mut buf).unwrap();
-            writer.append(&elem).unwrap();
-            writer.append(&elem).unwrap();
-            writer.finish().unwrap();
-        }
-        let reader =
-            SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd).unwrap();
-        let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(items.len(), 2);
     }
 
     /// End-to-end `Speclib::from_file` over the real DIA-NN HeLa `.speclib`

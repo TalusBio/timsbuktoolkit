@@ -85,11 +85,11 @@ Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.
 
 ```bash
 timsseek --raw-inputs s3://bkt/sample.d.tar \
-         --speclib-uri s3://bkt/lib.msgpack.zst \
+         --speclib-uri s3://bkt/lib.mzSpecLib.txt \
          --output-uri s3://bkt/runs/out
 
 speclib_build_cli --fasta s3://bkt/proteome.fasta \
-                  --output s3://bkt/lib.msgpack.zst
+                  --output s3://bkt/lib.mzSpecLib.txt
 ```
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.

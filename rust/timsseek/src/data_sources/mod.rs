@@ -11,5 +11,4 @@ pub use speclib::{
     ReferenceEG,
     SerSpeclibElement,
     Speclib,
-    SpeclibWriter,
 };

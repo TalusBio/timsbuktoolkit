@@ -527,9 +527,10 @@ pub struct ParsedAnnotation {
 
 /// Split the trailing `/<error>[ppm]` off an annotation, if present.
 ///
-/// Care is needed because `/` does not otherwise appear, but the numeric part
-/// may be signed and the `ppm` suffix optional.
-fn split_mass_error(s: &str) -> Result<(&str, Option<MassError>), IonParsingError> {
+/// Public because a library reader needs the error even when the ion itself is
+/// unrepresentable: the error is what recovers theoretical m/z, so a peak that
+/// ends up with an unknown label still gets a correct mass.
+pub fn split_mass_error(s: &str) -> Result<(&str, Option<MassError>), IonParsingError> {
     let Some((head, tail)) = s.rsplit_once('/') else {
         return Ok((s, None));
     };
