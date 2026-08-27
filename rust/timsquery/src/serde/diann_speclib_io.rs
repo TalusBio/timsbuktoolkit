@@ -26,6 +26,8 @@
 //! than exposed as a random-access view.
 
 use super::library_file::{
+    FragmentSet,
+    Inserted,
     LibraryArena,
     LibraryReadingError,
     finish_mzpaf_arena,
@@ -487,7 +489,7 @@ impl SpecLib {
                         ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
-                        Vec::new(),
+                        FragmentSet::default(),
                     )
                 },
                 |(mut geom, mut frag_intens, mut stats, mut scratch),
@@ -508,7 +510,7 @@ impl SpecLib {
                         ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
-                        Vec::new(),
+                        FragmentSet::default(),
                     )
                 },
                 |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
@@ -688,7 +690,7 @@ fn map_entry(
     geom: &mut QueryCollection<IonAnnot>,
     frag_intens: &mut Vec<f32>,
     stats: &mut SpeclibDecodeStats,
-    scratch: &mut Vec<(IonAnnot, f64, f32)>,
+    scratch: &mut FragmentSet,
 ) -> Result<(), LibraryReadingError> {
     let pep = &entry.peptide;
     let name = entry.name;
@@ -726,9 +728,9 @@ fn map_entry(
         residue_count(&stripped_peptide)
     };
 
-    // (IonAnnot, fragment mz as f64, height). Dedup by IonAnnot keeping max
-    // height so a duplicate label can't fail the whole load via
-    // `ExpectedIntensities::try_from_pairs`. Reuses the caller's scratch buffer.
+    // `FragmentSet` owns the per-precursor label-uniqueness invariant that
+    // `ExpectedIntensities::try_from_pairs` depends on. Reuses the caller's
+    // scratch buffer so the allocation is per worker, not per entry.
     scratch.clear();
     let kept = scratch;
 
@@ -795,25 +797,15 @@ fn map_entry(
             }
         };
 
-        if let Some(slot) = kept.iter_mut().find(|(k, _, _)| *k == ion) {
+        if kept.insert(ion, f.mz() as f64, f.height()) == Inserted::Collapsed {
             stats.dedup_dropped += 1;
-            if f.height() > slot.2 {
-                slot.1 = f.mz() as f64;
-                slot.2 = f.height();
-            }
-        } else {
-            kept.push((ion, f.mz() as f64, f.height()));
         }
     }
 
-    // (label, mz) pairs for the arena, with the parallel reference-intensity
-    // sidecar filled in the same order — dedup already collapsed duplicate
-    // labels, so this order is what lands in `geom.frag_labels`.
-    let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(kept.len());
-    for &(ion, mz, height) in kept.iter() {
-        frags.push((ion, mz));
-        frag_intens.push(height);
-    }
+    // The reference-intensity sidecar is filled in the same order the labels
+    // land in `geom.frag_labels`.
+    kept.extend_sidecar(frag_intens);
+    let frags = kept.frags();
 
     // Record charge is i32; `push_target` wants u8. Charge was range-checked to
     // 1..=255 above, so the cast is safe.

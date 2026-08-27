@@ -238,32 +238,45 @@ impl LibraryArena {
         let mut geom =
             QueryCollection::with_capabilities(LibCapabilities::default_diann_no_decoys());
         let mut frag_intens: Vec<f32> = Vec::new();
+        let mut n_collapsed = 0usize;
 
         for (eg, row) in egs.iter().zip(rows) {
             // Reference intensities keyed by fragment label (see fn docs).
             let lookup: std::collections::HashMap<IonAnnot, f32> =
                 row.relative_intensities.into_iter().collect();
-            let frags: Vec<(IonAnnot, f64)> = eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
-            for (label, _) in &frags {
+
+            // Through `FragmentSet` rather than straight into a Vec: two TSV
+            // rows with the same series + ordinal + charge for one precursor
+            // produce two identical labels, which panics in scoring.
+            let mut set = FragmentSet::with_capacity(eg.iter_fragments().count());
+            for (label, mz) in eg.iter_fragments() {
                 let intensity = lookup.get(label).ok_or_else(|| {
                     LibraryReadingError::SpeclibParse(format!(
                         "fragment {label:?} of precursor {:?} has no reference intensity",
                         row.modified
                     ))
                 })?;
-                frag_intens.push(*intensity);
+                if set.insert(*label, mz, *intensity) == Inserted::Collapsed {
+                    n_collapsed += 1;
+                }
             }
+
+            set.extend_sidecar(&mut frag_intens);
             geom.push_row(
                 eg.precursor_mz(),
                 eg.precursor_charge(),
                 eg.rt_seconds(),
                 eg.mobility_ook0(),
-                &frags,
+                set.frags(),
                 &row.stripped,
                 &row.modified,
                 &[],
                 row.is_decoy,
             );
+        }
+
+        if n_collapsed > 0 {
+            warn!("{n_collapsed} fragments collapsed onto a duplicate label");
         }
 
         finish_mzpaf_arena(geom, frag_intens)
@@ -336,6 +349,83 @@ impl LibraryArena {
                 Ok(LibraryArena::Str { geom })
             }
         }
+    }
+}
+
+/// What [`FragmentSet::insert`] did with a fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Inserted {
+    /// A label not yet in this precursor; stored.
+    Added,
+    /// The label was already present, so the two peaks were collapsed onto the
+    /// more intense one. The caller counts this under its own name.
+    Collapsed,
+}
+
+/// The fragments of one precursor, with labels unique by construction.
+///
+/// Fragment labels MUST be unique within a precursor. `linear_get` is
+/// first-match, so a duplicate silently shadows one peak — and
+/// `ExpectedIntensities::try_from_pairs` rejects duplicates outright, which
+/// timsseek's scoring pipeline `.expect()`s. A duplicate reaching the arena is
+/// therefore a panic mid-search, per candidate.
+///
+/// Every reader that builds an mzpaf arena goes through this type, so the
+/// invariant holds in one place instead of being re-derived (or, in the TSV
+/// readers' case, forgotten) at each site. Collisions collapse onto the more
+/// intense peak rather than keeping whichever came first: intensity is the
+/// signal being scored, and file order is not meaningful.
+#[derive(Debug, Default)]
+pub(super) struct FragmentSet {
+    frags: Vec<(IonAnnot, f64)>,
+    intensities: Vec<f32>,
+}
+
+impl FragmentSet {
+    pub(super) fn with_capacity(n: usize) -> Self {
+        Self {
+            frags: Vec::with_capacity(n),
+            intensities: Vec::with_capacity(n),
+        }
+    }
+
+    pub(super) fn insert(&mut self, label: IonAnnot, mz: f64, intensity: f32) -> Inserted {
+        if let Some(idx) = self.frags.iter().position(|(l, _)| *l == label) {
+            if intensity > self.intensities[idx] {
+                self.frags[idx].1 = mz;
+                self.intensities[idx] = intensity;
+            }
+            return Inserted::Collapsed;
+        }
+        self.frags.push((label, mz));
+        self.intensities.push(intensity);
+        Inserted::Added
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.frags.is_empty()
+    }
+
+    /// Empty without releasing the allocation, so one set can be reused across
+    /// entries (the DIA-NN `.speclib` reader keeps one per rayon worker).
+    pub(super) fn clear(&mut self) {
+        self.frags.clear();
+        self.intensities.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.frags.len()
+    }
+
+    pub(super) fn frags(&self) -> &[(IonAnnot, f64)] {
+        &self.frags
+    }
+
+    /// Append this precursor's intensities to a whole-library sidecar, in the
+    /// same order `frags()` will be pushed.
+    pub(super) fn extend_sidecar(&self, sidecar: &mut Vec<f32>) {
+        sidecar.extend_from_slice(&self.intensities);
     }
 }
 
@@ -565,4 +655,55 @@ pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, Librar
     // Dead default in practice (JsonReader always sniffs true) — a harmless
     // defensive fallback.
     Err(last_err.unwrap_or(LibraryReadingError::UnableToParseElutionGroups))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ion(s: &str) -> IonAnnot {
+        IonAnnot::try_from(s).expect("valid annotation")
+    }
+
+    /// Fragment labels must be unique within a precursor: `linear_get` is
+    /// first-match, and `ExpectedIntensities::try_from_pairs` rejects
+    /// duplicates outright — which timsseek's scoring pipeline `.expect()`s.
+    /// A duplicate reaching the arena is a panic mid-search, so this is the
+    /// invariant that stops it.
+    #[test]
+    fn duplicate_labels_collapse_onto_the_more_intense_peak() {
+        let mut set = FragmentSet::with_capacity(3);
+        assert_eq!(set.insert(ion("y1"), 175.1, 0.5), Inserted::Added);
+        assert_eq!(set.insert(ion("b3^2"), 200.0, 0.9), Inserted::Added);
+
+        // Weaker duplicate: kept peak is unchanged.
+        assert_eq!(set.insert(ion("y1"), 999.9, 0.1), Inserted::Collapsed);
+        assert_eq!(set.frags()[0], (ion("y1"), 175.1));
+
+        // Stronger duplicate: takes over both m/z and intensity.
+        assert_eq!(set.insert(ion("y1"), 175.2, 0.8), Inserted::Collapsed);
+        assert_eq!(set.frags()[0], (ion("y1"), 175.2));
+
+        assert_eq!(set.len(), 2, "a collision must not grow the set");
+        let mut sidecar = vec![0.0];
+        set.extend_sidecar(&mut sidecar);
+        assert_eq!(
+            sidecar,
+            vec![0.0, 0.8, 0.9],
+            "the sidecar stays parallel to frags(), appended in order"
+        );
+
+        // Charge is part of the label, so these do not collide.
+        assert_eq!(set.insert(ion("y1^2"), 88.0, 0.3), Inserted::Added);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn clear_keeps_the_set_reusable() {
+        let mut set = FragmentSet::with_capacity(2);
+        set.insert(ion("y1"), 175.1, 1.0);
+        set.clear();
+        assert!(set.is_empty());
+        assert_eq!(set.insert(ion("y1"), 175.1, 1.0), Inserted::Added);
+    }
 }

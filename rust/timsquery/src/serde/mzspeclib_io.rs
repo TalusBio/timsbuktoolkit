@@ -64,6 +64,8 @@ use crate::models::{
     QueryCollection,
 };
 use crate::serde::library_file::{
+    FragmentSet,
+    Inserted,
     LibraryArena,
     LibraryReadingError,
     finish_mzpaf_arena,
@@ -203,8 +205,7 @@ struct ArenaRow {
     charge: u8,
     rt_seconds: f32,
     mobility: f32,
-    frags: Vec<(IonAnnot, f64)>,
-    intensities: Vec<f32>,
+    frags: FragmentSet,
     stripped: String,
     modified: String,
 }
@@ -518,8 +519,7 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
         return None;
     }
 
-    let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(raw.peaks.len());
-    let mut intens: Vec<f32> = Vec::with_capacity(raw.peaks.len());
+    let mut frags = FragmentSet::with_capacity(raw.peaks.len());
     let mut unknown_ions = UnknownIonCounter::new();
 
     for (observed_mz, intensity, annotation) in &raw.peaks {
@@ -546,35 +546,31 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
             }
         };
 
-        // Labels must stay unique within the precursor (`linear_get` is
-        // first-match), so a collision drops the later peak. Checked before
-        // the kept counters: otherwise a collided peak is tallied as both
-        // kept and dropped. Unknown labels come off a monotonic counter and
-        // cannot collide; this only ever fires for annotated ones.
-        if frags.iter().any(|(l, _)| *l == label) {
+        // The `/error` suffix is optional in mzPAF. Without it the observed
+        // m/z is the best available value, but it is NOT the theoretical one
+        // the rest of the arena holds.
+        let mz = match mass_error {
+            Some(e) => e.theoretical_from_observed(*observed_mz),
+            None => *observed_mz,
+        };
+
+        // `FragmentSet` owns the per-precursor uniqueness invariant; a
+        // collision collapses onto the more intense peak. Unknown labels come
+        // off a monotonic counter and cannot collide, so this only ever fires
+        // for annotated ones. Every kept counter is behind this check, so a
+        // collided peak is tallied once, as dropped.
+        if frags.insert(label, mz, *intensity) == Inserted::Collapsed {
             stats.dropped_duplicate_label += 1;
             continue;
         }
-
-        let mz = match mass_error {
-            Some(e) => e.theoretical_from_observed(*observed_mz),
-            // The `/error` suffix is optional in mzPAF. Without it the
-            // observed m/z is the best available value, but it is NOT the
-            // theoretical one the rest of the arena holds, so the mixture is
-            // counted rather than passed off as exact.
-            None => {
-                stats.kept_at_observed_mz += 1;
-                *observed_mz
-            }
-        };
-
+        if mass_error.is_none() {
+            stats.kept_at_observed_mz += 1;
+        }
         if annotated {
             stats.kept_annotated += 1;
         } else {
             stats.kept_unknown_label += 1;
         }
-        frags.push((label, mz));
-        intens.push(*intensity);
     }
 
     Some(ArenaRow {
@@ -583,7 +579,6 @@ fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRo
         rt_seconds: rt_seconds as f32,
         mobility,
         frags,
-        intensities: intens,
         stripped,
         modified,
     })
@@ -620,13 +615,13 @@ fn flush(
     let Some(row) = convert_spectrum(&raw, stats) else {
         return;
     };
-    frag_intens.extend_from_slice(&row.intensities);
+    row.frags.extend_sidecar(frag_intens);
     geom.push_row(
         row.precursor_mz,
         row.charge,
         row.rt_seconds,
         row.mobility,
-        &row.frags,
+        row.frags.frags(),
         &row.stripped,
         &row.modified,
         &[],
