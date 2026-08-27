@@ -14,9 +14,9 @@ pub use library_file::{
     ElutionGroupCollection,
     FileReadingExtras,
     LibraryArena,
-    LibraryReadingError,
     SkylinePrecursorExtras,
     SpectronautPrecursorExtras,
+    TargetReadingError,
     read_library_file,
 };
 pub use spectronaut_io::LibrarySniffError;

@@ -31,7 +31,7 @@ pub enum DataProcessingError {
 }
 
 #[derive(Debug)]
-pub enum LibraryReadingError {
+pub enum TargetReadingError {
     SpeclibParsingError {
         source: serde_json::Error,
         context: &'static str,
@@ -42,15 +42,15 @@ pub enum LibraryReadingError {
         path: PathBuf,
     },
     TimsQueryLibraryError {
-        source: timsquery::serde::LibraryReadingError,
+        source: timsquery::serde::TargetReadingError,
     },
     UnsupportedFormat {
         message: String,
     },
 }
 
-impl From<timsquery::serde::LibraryReadingError> for LibraryReadingError {
-    fn from(source: timsquery::serde::LibraryReadingError) -> Self {
+impl From<timsquery::serde::TargetReadingError> for TargetReadingError {
+    fn from(source: timsquery::serde::TargetReadingError) -> Self {
         Self::TimsQueryLibraryError { source }
     }
 }
@@ -108,7 +108,7 @@ pub enum TimsSeekError {
         msg: String,
     },
     DataProcessingError(DataProcessingError),
-    LibraryReadingError(LibraryReadingError),
+    TargetReadingError(TargetReadingError),
     Rescore(crate::ml::RescoreError),
 }
 
@@ -170,9 +170,9 @@ impl From<DataProcessingError> for TimsSeekError {
     }
 }
 
-impl From<LibraryReadingError> for TimsSeekError {
-    fn from(x: LibraryReadingError) -> Self {
-        Self::LibraryReadingError(x)
+impl From<TargetReadingError> for TimsSeekError {
+    fn from(x: TargetReadingError) -> Self {
+        Self::TargetReadingError(x)
     }
 }
 

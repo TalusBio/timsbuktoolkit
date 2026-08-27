@@ -1,6 +1,6 @@
 use crate::IonAnnot;
 use crate::data_sources::reference_library::ReferenceLibrary;
-use crate::errors::LibraryReadingError;
+use crate::errors::TargetReadingError;
 use crate::fragment_mass::{
     IsotopeSource,
     isotope_dist_or_averagine,
@@ -332,20 +332,20 @@ impl SpeclibFormat {
 /// `Speclib::from_file_with_format`), so the reader stays at the serializable
 /// element and does not eagerly build per-row scoring items.
 pub struct SpeclibReader<'a> {
-    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send + 'a>,
+    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send + 'a>,
 }
 
 impl<'a> SpeclibReader<'a> {
     pub fn new<R: Read + Send + 'a>(
         reader: R,
         format: SpeclibFormat,
-    ) -> Result<Self, LibraryReadingError> {
-        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send> =
+    ) -> Result<Self, TargetReadingError> {
+        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send> =
             match format {
                 SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
                 SpeclibFormat::NdJsonZstd => {
                     let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
+                        TargetReadingError::SpeclibParsingError {
                             source: serde_json::Error::io(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 e,
@@ -358,7 +358,7 @@ impl<'a> SpeclibReader<'a> {
                 SpeclibFormat::MessagePack => Box::new(MessagePackReader::new(reader)),
                 SpeclibFormat::MessagePackZstd => {
                     let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
+                        TargetReadingError::SpeclibParsingError {
                             source: serde_json::Error::io(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 e,
@@ -375,7 +375,7 @@ impl<'a> SpeclibReader<'a> {
 }
 
 impl Iterator for SpeclibReader<'_> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -393,7 +393,7 @@ impl<R: BufRead> NdJsonReader<R> {
 }
 
 impl<R: BufRead> Iterator for NdJsonReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
@@ -407,7 +407,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                 let elem: SerSpeclibElement = match serde_json::from_str(&line) {
                     Ok(x) => x,
                     Err(e) => {
-                        return Some(Err(LibraryReadingError::SpeclibParsingError {
+                        return Some(Err(TargetReadingError::SpeclibParsingError {
                             source: e,
                             context: "Error parsing NDJSON line",
                         }));
@@ -416,7 +416,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
 
                 Some(Ok(elem))
             }
-            Err(e) => Some(Err(LibraryReadingError::FileReadingError {
+            Err(e) => Some(Err(TargetReadingError::FileReadingError {
                 source: e,
                 context: "Error reading line",
                 path: PathBuf::new(),
@@ -438,7 +438,7 @@ impl<R: Read> MessagePackReader<R> {
 }
 
 impl<R: Read> Iterator for MessagePackReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use serde::Deserialize;
@@ -455,7 +455,7 @@ impl<R: Read> Iterator for MessagePackReader<R> {
             {
                 None
             } // EOF
-            Err(e) => Some(Err(LibraryReadingError::SpeclibParsingError {
+            Err(e) => Some(Err(TargetReadingError::SpeclibParsingError {
                 source: serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
@@ -488,7 +488,7 @@ impl Speclib {
     pub fn from_file(
         path: &Path,
         decoy_policy: crate::models::DecoyPolicy,
-    ) -> Result<Self, LibraryReadingError> {
+    ) -> Result<Self, TargetReadingError> {
         // Native timsseek formats are matched by EXTENSION ONLY: a native
         // extension commits to the native reader and surfaces its error. A
         // `.speclib` matches no native extension and falls through to the
@@ -527,13 +527,12 @@ impl Speclib {
         path: &Path,
         format: SpeclibFormat,
         decoy_policy: crate::models::DecoyPolicy,
-    ) -> Result<Self, LibraryReadingError> {
-        let file =
-            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
-                source: e,
-                context: "Error opening speclib file",
-                path: PathBuf::from(path),
-            })?;
+    ) -> Result<Self, TargetReadingError> {
+        let file = std::fs::File::open(path).map_err(|e| TargetReadingError::FileReadingError {
+            source: e,
+            context: "Error opening speclib file",
+            path: PathBuf::from(path),
+        })?;
 
         let reader = SpeclibReader::new(file, format)?;
 
@@ -553,7 +552,7 @@ impl Speclib {
             if eg.fragment_labels.len() != eg.fragment_mzs.len()
                 || eg.fragment_labels.len() != eg.fragment_intensities.len()
             {
-                return Err(LibraryReadingError::UnsupportedFormat {
+                return Err(TargetReadingError::UnsupportedFormat {
                     message: format!(
                         "speclib element {:?}: fragment labels ({}), mzs ({}) and intensities ({}) must be parallel",
                         elem.precursor.sequence,
@@ -623,11 +622,11 @@ impl<W: std::io::Write> SpeclibWriter<W> {
         })
     }
 
-    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), LibraryReadingError> {
+    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), TargetReadingError> {
         match &mut self.inner {
             SpeclibWriterInner::MsgpackZstd(encoder) => {
                 rmp_serde::encode::write(encoder, elem).map_err(|e| {
-                    LibraryReadingError::SpeclibParsingError {
+                    TargetReadingError::SpeclibParsingError {
                         source: serde_json::Error::io(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             e,

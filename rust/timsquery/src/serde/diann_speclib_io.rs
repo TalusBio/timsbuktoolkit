@@ -27,7 +27,7 @@
 
 use super::library_file::{
     LibraryArena,
-    LibraryReadingError,
+    TargetReadingError,
 };
 use crate::ion::IonAnnot;
 use crate::models::{
@@ -68,7 +68,7 @@ fn le_f32(buf: &[u8], offset: usize) -> f32 {
 
 /// Little-endian cursor over the whole file in memory. Each accessor advances the
 /// position and bounds-checks against the buffer end (a short read is a truncated
-/// library, reported as [`LibraryReadingError::SpeclibParse`]).
+/// library, reported as [`TargetReadingError::SpeclibParse`]).
 struct Cursor<'a> {
     data: &'a [u8],
     pos: usize,
@@ -80,7 +80,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// Borrow the next `n` bytes and advance.
-    fn take(&mut self, n: usize) -> Result<&'a [u8], LibraryReadingError> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], TargetReadingError> {
         let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len());
         match end {
             Some(end) => {
@@ -88,7 +88,7 @@ impl<'a> Cursor<'a> {
                 self.pos = end;
                 Ok(slice)
             }
-            None => Err(LibraryReadingError::SpeclibParse(format!(
+            None => Err(TargetReadingError::SpeclibParse(format!(
                 "unexpected end of file: wanted {n} bytes at offset {} of {}",
                 self.pos,
                 self.data.len()
@@ -109,19 +109,19 @@ impl<'a> Cursor<'a> {
         self.data.len().saturating_sub(self.pos)
     }
 
-    fn read_i32(&mut self) -> Result<i32, LibraryReadingError> {
+    fn read_i32(&mut self) -> Result<i32, TargetReadingError> {
         Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
 
-    fn read_f64(&mut self) -> Result<f64, LibraryReadingError> {
+    fn read_f64(&mut self) -> Result<f64, TargetReadingError> {
         Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     /// `i32 count` that must be non-negative (a length/count prefix).
-    fn read_count(&mut self) -> Result<usize, LibraryReadingError> {
+    fn read_count(&mut self) -> Result<usize, TargetReadingError> {
         let n = self.read_i32()?;
         if n < 0 {
-            return Err(LibraryReadingError::SpeclibParse(format!(
+            return Err(TargetReadingError::SpeclibParse(format!(
                 "negative count/length prefix: {n}"
             )));
         }
@@ -131,18 +131,18 @@ impl<'a> Cursor<'a> {
     /// `i32 length` + `length` raw bytes decoded as latin-1 (1 byte per char), no
     /// terminator. Latin-1 (not UTF-8) because high bytes appear in Windows paths
     /// and accented protein names.
-    fn read_str(&mut self) -> Result<String, LibraryReadingError> {
+    fn read_str(&mut self) -> Result<String, TargetReadingError> {
         let n = self.read_count()?;
         Ok(self.take(n)?.iter().map(|&b| b as char).collect())
     }
 
     /// Skip `n` bytes.
-    fn skip_bytes(&mut self, n: usize) -> Result<(), LibraryReadingError> {
+    fn skip_bytes(&mut self, n: usize) -> Result<(), TargetReadingError> {
         self.take(n).map(|_| ())
     }
 
     /// `vec<i32>`: `i32 count` + `count` contiguous i32 — skip.
-    fn skip_vec_i32(&mut self) -> Result<(), LibraryReadingError> {
+    fn skip_vec_i32(&mut self) -> Result<(), TargetReadingError> {
         let n = self.read_count()?;
         self.skip_bytes(n * 4)
     }
@@ -236,7 +236,7 @@ impl<'a> Peptide<'a> {
 
 /// `Peptide::read` — consume one peptide from `c` and return a view over its
 /// span. Works for both the target and (when `dc != 0`) the embedded decoy.
-fn read_peptide<'a>(c: &mut Cursor<'a>, version: i32) -> Result<Peptide<'a>, LibraryReadingError> {
+fn read_peptide<'a>(c: &mut Cursor<'a>, version: i32) -> Result<Peptide<'a>, TargetReadingError> {
     let start = c.mark();
     c.skip_bytes(Peptide::header_len(version))?;
     let nfrag = c.read_count()?;
@@ -263,7 +263,7 @@ fn read_entry<'a>(
     c: &mut Cursor<'a>,
     version: i32,
     pg_ids: &[String],
-) -> Result<EntryView<'a>, LibraryReadingError> {
+) -> Result<EntryView<'a>, TargetReadingError> {
     let peptide = read_peptide(c, version)?;
 
     let dc = c.read_i32()?;
@@ -302,7 +302,7 @@ fn read_entry<'a>(
 /// Advance `c` past exactly one entry without allocating. Mirrors [`read_entry`]'s
 /// cursor walk (skipping the name rather than decoding it) so the serial offset
 /// scan stays cheap before the parallel map re-parses each entry from its offset.
-fn skip_entry(c: &mut Cursor, version: i32) -> Result<(), LibraryReadingError> {
+fn skip_entry(c: &mut Cursor, version: i32) -> Result<(), TargetReadingError> {
     let _ = read_peptide(c, version)?; // target peptide
     if c.read_i32()? != 0 {
         let _ = read_peptide(c, version)?; // embedded decoy, kept only to stay synced
@@ -352,26 +352,26 @@ pub(crate) struct SpecLib {
 impl SpecLib {
     /// Read a whole stream into an owned buffer, then parse the header. Kept for
     /// streams and tests; the path-based file reader prefers [`SpecLib::open_mmap`].
-    pub(crate) fn open<R: Read>(mut reader: R) -> Result<Self, LibraryReadingError> {
+    pub(crate) fn open<R: Read>(mut reader: R) -> Result<Self, TargetReadingError> {
         let mut data = Vec::new();
         reader
             .read_to_end(&mut data)
-            .map_err(LibraryReadingError::IoError)?;
+            .map_err(TargetReadingError::IoError)?;
         Self::from_backing(Backing::Owned(data))
     }
 
     /// Memory-map a `.speclib` file, then parse the header. Avoids a ~file-sized
     /// resident buffer — pages fault in on demand and are OS-reclaimable.
-    pub(crate) fn open_mmap(path: &Path) -> Result<Self, LibraryReadingError> {
-        let file = File::open(path).map_err(LibraryReadingError::IoError)?;
+    pub(crate) fn open_mmap(path: &Path) -> Result<Self, TargetReadingError> {
+        let file = File::open(path).map_err(TargetReadingError::IoError)?;
         // SAFETY: read-only ingest. The library file is not written during load;
         // an mmap of a file mutated/truncated concurrently would be UB.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(LibraryReadingError::IoError)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(TargetReadingError::IoError)?;
         Self::from_backing(Backing::Mapped(mmap))
     }
 
     /// Parse everything up to (not including) the entries section from `data`.
-    fn from_backing(data: Backing) -> Result<Self, LibraryReadingError> {
+    fn from_backing(data: Backing) -> Result<Self, TargetReadingError> {
         let mut c = Cursor::new(data.bytes());
 
         // --- Section 0: header ---
@@ -385,7 +385,7 @@ impl SpecLib {
             first
         };
         if version < LATEST_SUPPORTED_VERSION {
-            return Err(LibraryReadingError::UnsupportedSpeclibVersion(version));
+            return Err(TargetReadingError::UnsupportedSpeclibVersion(version));
         }
         let _gen_charges = c.read_i32()?;
         let _infer_proteotypicity = c.read_i32()?;
@@ -451,7 +451,7 @@ impl SpecLib {
     ///
     /// Returns the mapped entries in file order, merged drop stats, and whether
     /// parsing landed exactly on EOF (a `false` signals a structural desync).
-    pub(crate) fn parse_parallel(&self) -> Result<ParsedSpeclib, LibraryReadingError> {
+    pub(crate) fn parse_parallel(&self) -> Result<ParsedSpeclib, TargetReadingError> {
         use rayon::prelude::*;
 
         // Phase A: serial offset scan, then the trailing section 8 / EOF check.
@@ -491,7 +491,7 @@ impl SpecLib {
                 },
                 |(mut geom, mut frag_intens, mut stats, mut scratch),
                  &off|
-                 -> Result<_, LibraryReadingError> {
+                 -> Result<_, TargetReadingError> {
                     let mut cur = Cursor::new(self.data.bytes());
                     cur.pos = off;
                     let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
@@ -524,7 +524,7 @@ impl SpecLib {
 }
 
 /// `Isoform::read` — read & discard.
-fn skip_isoform(c: &mut Cursor) -> Result<(), LibraryReadingError> {
+fn skip_isoform(c: &mut Cursor) -> Result<(), TargetReadingError> {
     let _sp = c.read_i32()?;
     let size = c.read_count()?;
     let _id = c.read_str()?;
@@ -536,7 +536,7 @@ fn skip_isoform(c: &mut Cursor) -> Result<(), LibraryReadingError> {
 }
 
 /// `PG::read` — keep only the `;`-joined `ids` string.
-fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, LibraryReadingError> {
+fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, TargetReadingError> {
     let size_p = c.read_count()?;
     let ids = c.read_str()?;
     let _names = c.read_str()?;
@@ -549,7 +549,7 @@ fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, LibraryReadingError> {
 }
 
 /// `read_strings` — read & discard.
-fn skip_strings(c: &mut Cursor) -> Result<(), LibraryReadingError> {
+fn skip_strings(c: &mut Cursor) -> Result<(), TargetReadingError> {
     let n = c.read_count()?;
     for _ in 0..n {
         let _ = c.read_str()?;
@@ -688,7 +688,7 @@ fn map_entry(
     frag_intens: &mut Vec<f32>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
-) -> Result<(), LibraryReadingError> {
+) -> Result<(), TargetReadingError> {
     let pep = &entry.peptide;
     let name = entry.name;
     if entry.had_file_decoy {
@@ -700,7 +700,7 @@ fn map_entry(
     // C-terminal mod ending in a digit is left intact.
     let charge = pep.charge();
     if charge < 1 || charge > u8::MAX as i32 {
-        return Err(LibraryReadingError::SpeclibParse(format!(
+        return Err(TargetReadingError::SpeclibParse(format!(
             "entry {name:?}: precursor charge {charge} out of range 1..=255 (corrupt record?)"
         )));
     }
@@ -850,7 +850,7 @@ type ParsedSpeclib = (
 ///
 /// Reads the file, parses the header, then parses+maps entries in parallel
 /// ([`SpecLib::open`] + [`SpecLib::parse_parallel`]).
-pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, LibraryReadingError> {
+pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, TargetReadingError> {
     SpecLib::open(reader)?.parse_parallel()
 }
 
@@ -885,7 +885,7 @@ pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
 /// returning [`LibraryArena::Mzpaf`] with the reference-intensity sidecar.
 pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
-) -> Result<LibraryArena, LibraryReadingError> {
+) -> Result<LibraryArena, TargetReadingError> {
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
@@ -897,7 +897,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         // A parse that doesn't land on EOF means the entries were misaligned
         // (wrong field sizes / version gating) — the decoded library would be
         // silently corrupt. Fail loudly rather than return garbage.
-        return Err(LibraryReadingError::SpeclibParse(format!(
+        return Err(TargetReadingError::SpeclibParse(format!(
             "parse did not land on EOF for {} — structural desync",
             path.display()
         )));

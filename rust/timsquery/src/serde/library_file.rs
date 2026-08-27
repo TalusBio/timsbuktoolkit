@@ -43,7 +43,7 @@ use tracing::{
 };
 
 #[derive(Debug)]
-pub enum LibraryReadingError {
+pub enum TargetReadingError {
     IoError(std::io::Error),
     SerdeJsonError(serde_json::Error),
     ElutionGroupInputError(ElutionGroupInputError),
@@ -58,14 +58,14 @@ pub enum LibraryReadingError {
     SpeclibParse(String),
 }
 
-impl From<serde_json::Error> for LibraryReadingError {
+impl From<serde_json::Error> for TargetReadingError {
     fn from(err: serde_json::Error) -> Self {
-        LibraryReadingError::SerdeJsonError(err)
+        TargetReadingError::SerdeJsonError(err)
     }
 }
-impl From<ElutionGroupInputError> for LibraryReadingError {
+impl From<ElutionGroupInputError> for TargetReadingError {
     fn from(err: ElutionGroupInputError) -> Self {
-        LibraryReadingError::ElutionGroupInputError(err)
+        TargetReadingError::ElutionGroupInputError(err)
     }
 }
 
@@ -94,8 +94,8 @@ impl ElutionGroupCollection {
         }
     }
 
-    fn try_read_json(path: &Path) -> Result<Self, LibraryReadingError> {
-        let file_content = std::fs::read_to_string(path).map_err(LibraryReadingError::IoError)?;
+    fn try_read_json(path: &Path) -> Result<Self, TargetReadingError> {
+        let file_content = std::fs::read_to_string(path).map_err(TargetReadingError::IoError)?;
         info!("Read file content from {}", path.display());
         // First try direct deserialization
         if let Ok(egs) = Self::try_deser_direct(&file_content) {
@@ -108,11 +108,11 @@ impl ElutionGroupCollection {
                 info!("Successfully deserialized elution groups via inputed format");
                 Ok(egs)
             }
-            Err(_) => Err(LibraryReadingError::UnableToParseElutionGroups),
+            Err(_) => Err(TargetReadingError::UnableToParseElutionGroups),
         }
     }
 
-    fn try_deser_inputed(content: &str) -> Result<Self, LibraryReadingError> {
+    fn try_deser_inputed(content: &str) -> Result<Self, TargetReadingError> {
         // We can try from smallest to largest overhead
         // Here we try to do the deser into ElutionGroupInput variants first
         debug!("Attempting deserialization of elution group inputs");
@@ -153,10 +153,10 @@ impl ElutionGroupCollection {
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::StringLabels(out?, None));
         }
-        Err(LibraryReadingError::UnableToParseElutionGroups)
+        Err(TargetReadingError::UnableToParseElutionGroups)
     }
 
-    fn try_deser_direct(content: &str) -> Result<Self, LibraryReadingError> {
+    fn try_deser_direct(content: &str) -> Result<Self, TargetReadingError> {
         // We can try from smallest to largest overhead
         // Here we try to do the direct deser into ElutionGroupCollection variants
         // u8 -> u32 -> IonAnnot -> String
@@ -177,7 +177,7 @@ impl ElutionGroupCollection {
         if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<String>>>(content) {
             return Ok(ElutionGroupCollection::StringLabels(egs, None));
         }
-        Err(LibraryReadingError::UnableToParseElutionGroups)
+        Err(TargetReadingError::UnableToParseElutionGroups)
     }
 }
 
@@ -262,7 +262,7 @@ impl LibraryArena {
     fn mzpaf_with_intensities(
         egs: Vec<TimsElutionGroup<IonAnnot>>,
         extras: FileReadingExtras,
-    ) -> Result<Self, LibraryReadingError> {
+    ) -> Result<Self, TargetReadingError> {
         let rows: Vec<PrecursorExtrasRow> = match extras {
             FileReadingExtras::Diann(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
             FileReadingExtras::Skyline(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
@@ -272,7 +272,7 @@ impl LibraryArena {
         };
 
         if egs.len() != rows.len() {
-            return Err(LibraryReadingError::SpeclibParse(format!(
+            return Err(TargetReadingError::SpeclibParse(format!(
                 "elution groups ({}) and reader extras ({}) length mismatch",
                 egs.len(),
                 rows.len()
@@ -290,7 +290,7 @@ impl LibraryArena {
             let frags: Vec<(IonAnnot, f64)> = eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
             for (label, _) in &frags {
                 let intensity = lookup.get(label).ok_or_else(|| {
-                    LibraryReadingError::SpeclibParse(format!(
+                    TargetReadingError::SpeclibParse(format!(
                         "fragment {label:?} of precursor {:?} has no reference intensity",
                         row.modified
                     ))
@@ -311,7 +311,7 @@ impl LibraryArena {
         }
 
         if frag_intens.len() != geom.frag_labels.len() {
-            return Err(LibraryReadingError::SpeclibParse(format!(
+            return Err(TargetReadingError::SpeclibParse(format!(
                 "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
                 frag_intens.len(),
                 geom.frag_labels.len(),
@@ -339,7 +339,7 @@ impl LibraryArena {
     /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
     /// the extraction/geometry path), `frag_intens` stays `None` — matching the
     /// historical behavior where timsseek rejected that shape.
-    fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, LibraryReadingError> {
+    fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, TargetReadingError> {
         match egc {
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)) => {
                 Self::mzpaf_with_intensities(egs, extras)
@@ -396,7 +396,7 @@ impl LibraryArena {
             }
             ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
                 warn!("integer-labelled libraries have no LibraryArena variant; rejecting");
-                Err(LibraryReadingError::UnableToParseElutionGroups)
+                Err(TargetReadingError::UnableToParseElutionGroups)
             }
         }
     }
@@ -409,10 +409,10 @@ impl LibraryArena {
 fn set_source_ids_from<L: KeyLike, T: KeyLike>(
     geom: &mut QueryCollection<L>,
     egs: &[TimsElutionGroup<T>],
-) -> Result<(), LibraryReadingError> {
+) -> Result<(), TargetReadingError> {
     let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();
     geom.set_source_ids(ids)
-        .map_err(LibraryReadingError::SourceId)
+        .map_err(TargetReadingError::SourceId)
 }
 
 /// A single spectral-library format reader. Adding a format = one struct + one
@@ -423,7 +423,7 @@ pub trait LibraryReader: Send + Sync {
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError>;
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError>;
 }
 
 struct DiannParquetReader;
@@ -441,10 +441,10 @@ impl LibraryReader for DiannParquetReader {
         sniff_diann_parquet_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
         let egs = read_diann_parquet(path).map_err(|e| {
             warn!("Failed to read DIA-NN parquet library file: {:?}", e);
-            LibraryReadingError::UnableToParseElutionGroups
+            TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         Ok(ElutionGroupCollection::MzpafLabels(
@@ -463,10 +463,10 @@ impl LibraryReader for DiannTsvReader {
         sniff_diann_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
         let egs = read_diann_tsv(path).map_err(|e| {
             warn!("Failed to read DIA-NN TSV library file: {:?}", e);
-            LibraryReadingError::UnableToParseElutionGroups
+            TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         Ok(ElutionGroupCollection::MzpafLabels(
@@ -485,10 +485,10 @@ impl LibraryReader for SpectronautReader {
         sniff_spectronaut_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
         let egs = read_spectronaut_tsv(path).map_err(|e| {
             warn!("Failed to read Spectronaut TSV library file: {:?}", e);
-            LibraryReadingError::UnableToParseElutionGroups
+            TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         Ok(ElutionGroupCollection::MzpafLabels(
@@ -507,10 +507,10 @@ impl LibraryReader for SkylineReader {
         sniff_skyline_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
         let egs = read_skyline_csv(path).map_err(|e| {
             warn!("Failed to read Skyline transition list: {:?}", e);
-            LibraryReadingError::UnableToParseElutionGroups
+            TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         Ok(ElutionGroupCollection::MzpafLabels(
@@ -531,7 +531,7 @@ impl LibraryReader for JsonReader {
         true
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
         ElutionGroupCollection::try_read_json(path)
     }
 }
@@ -546,7 +546,7 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
     ]
 }
 
-pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, LibraryReadingError> {
+pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, TargetReadingError> {
     let path = path.as_ref();
     // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
     // reference-intensity sidecar); every other format still produces the legacy
@@ -579,5 +579,5 @@ pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, Librar
     }
     // Dead default in practice (JsonReader always sniffs true) — a harmless
     // defensive fallback.
-    Err(last_err.unwrap_or(LibraryReadingError::UnableToParseElutionGroups))
+    Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
 }

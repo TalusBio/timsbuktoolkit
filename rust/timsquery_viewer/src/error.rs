@@ -16,24 +16,24 @@ pub enum ViewerError {
     General(String),
 }
 
-impl From<timsquery::serde::LibraryReadingError> for ViewerError {
-    fn from(err: timsquery::serde::LibraryReadingError) -> Self {
+impl From<timsquery::serde::TargetReadingError> for ViewerError {
+    fn from(err: timsquery::serde::TargetReadingError) -> Self {
         match err {
-            timsquery::serde::LibraryReadingError::IoError(e) => ViewerError::Io(e),
-            timsquery::serde::LibraryReadingError::SerdeJsonError(e) => ViewerError::Json(e),
-            timsquery::serde::LibraryReadingError::ElutionGroupInputError(e) => {
+            timsquery::serde::TargetReadingError::IoError(e) => ViewerError::Io(e),
+            timsquery::serde::TargetReadingError::SerdeJsonError(e) => ViewerError::Json(e),
+            timsquery::serde::TargetReadingError::ElutionGroupInputError(e) => {
                 ViewerError::General(format!("Elution group input error: {:?}", e))
             }
-            timsquery::serde::LibraryReadingError::UnableToParseElutionGroups => {
+            timsquery::serde::TargetReadingError::UnableToParseElutionGroups => {
                 ViewerError::General("Unable to parse elution groups".to_string())
             }
-            timsquery::serde::LibraryReadingError::UnsupportedSpeclibVersion(v) => {
+            timsquery::serde::TargetReadingError::UnsupportedSpeclibVersion(v) => {
                 ViewerError::General(format!("Unsupported .speclib version: {v}"))
             }
-            timsquery::serde::LibraryReadingError::SpeclibParse(msg) => {
+            timsquery::serde::TargetReadingError::SpeclibParse(msg) => {
                 ViewerError::General(format!(".speclib parse error: {msg}"))
             }
-            timsquery::serde::LibraryReadingError::SourceId(e) => {
+            timsquery::serde::TargetReadingError::SourceId(e) => {
                 ViewerError::General(format!("source id error: {e}"))
             }
         }

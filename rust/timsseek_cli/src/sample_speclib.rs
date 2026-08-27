@@ -43,7 +43,7 @@ enum SubCommands {
 //     println!("{}", to_string_pretty(&speclib).unwrap());
 // }
 
-fn parse_speclib(speclib_file: &str) -> Result<(), timsseek::errors::LibraryReadingError> {
+fn parse_speclib(speclib_file: &str) -> Result<(), timsseek::errors::TargetReadingError> {
     // This function parses a speclib file and prints the parsed content to stdout.
     let speclib = Speclib::from_file(
         std::path::Path::new(speclib_file),
@@ -85,7 +85,7 @@ fn setup_logger(verbose: u8, quiet: u8) {
     subscriber.init();
 }
 
-fn main() -> Result<(), timsseek::errors::LibraryReadingError> {
+fn main() -> Result<(), timsseek::errors::TargetReadingError> {
     let cli = Cli::parse();
     setup_logger(cli.verbose, cli.quiet);
 
