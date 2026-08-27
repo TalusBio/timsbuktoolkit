@@ -1,5 +1,6 @@
 use crate::IonAnnot;
 use crate::traits::KeyLike;
+use micromzpaf::Series;
 use std::sync::Arc;
 
 /// Capability to apply a decoy m/z shift to a fragment label's m/z.
@@ -20,11 +21,12 @@ pub trait DecoyShift {
 /// `FragmentLabel`. NOTE: decoy m/z shifting is gated on `DecoyShift`, not this
 /// trait — a decoy variant computes its shift through `DecoyShift::decoy_shift_mz`,
 /// which every label implements.
-// TODO(fragment-features): add series() accessor once a standalone series
-// enum exists (today series and ordinal are fused in `IonSeriesOrdinal`), and
-// wire this bound into the score that consumes it.
+// TODO(fragment-features): wire this bound into the score that consumes it.
 pub trait FragmentLabel: KeyLike + DecoyShift {
     fn try_get_ordinal(&self) -> Option<u8>;
+    /// The backbone series, or `None` for ions that sit on no ladder
+    /// (precursor, unknown, internal, immonium).
+    fn try_get_series(&self) -> Option<Series>;
     fn get_charge(&self) -> i8;
 }
 
@@ -43,6 +45,10 @@ impl DecoyShift for IonAnnot {
 impl FragmentLabel for IonAnnot {
     fn try_get_ordinal(&self) -> Option<u8> {
         IonAnnot::try_get_ordinal(self)
+    }
+
+    fn try_get_series(&self) -> Option<Series> {
+        IonAnnot::try_get_series(self)
     }
 
     fn get_charge(&self) -> i8 {

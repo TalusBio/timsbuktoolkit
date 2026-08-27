@@ -25,6 +25,11 @@
 //! | immonium | residue index 5b |
 //! | precursor | unused |
 //!
+//! `unknown` is discriminant 0 and `charge` is stored biased by one, so the
+//! all-zero word is the valid annotation `?0` at charge 1. That matters
+//! because `IonAnnot: Default` is forced by `tinyvec::Array` and a default can
+//! reach any serde path.
+//!
 //! `charge` and `isotope` are zigzag-encoded so they stay signed in 4 bits.
 //! Their ranges (±7) are far wider than anything observed: the HUPO-PSI corpus
 //! tops out at charge 3 and isotope 3, with no negative charges at all. Because
@@ -87,8 +92,12 @@ pub const CHARGE_MAX: i8 = 7;
 /// Widest isotope offset the 4-bit zigzag field holds. Observed maximum is 3.
 pub const ISOTOPE_MIN: i8 = -7;
 pub const ISOTOPE_MAX: i8 = 7;
-/// Widest residue index an internal fragment endpoint holds (6 bits).
-pub(crate) const INTERNAL_POS_MAX: u8 = 63;
+/// Width of each internal-fragment endpoint inside `payload`.
+const INTERNAL_POS_BITS: u32 = 6;
+/// Width of the immonium residue index inside `payload`.
+const IMMONIUM_BITS: u32 = 5;
+/// Widest residue index an internal fragment endpoint holds.
+pub(crate) const INTERNAL_POS_MAX: u8 = mask(INTERNAL_POS_BITS) as u8;
 
 #[inline]
 const fn mask(bits: u32) -> u32 {
@@ -103,6 +112,21 @@ const fn zigzag(v: i8) -> u32 {
 #[inline]
 const fn unzigzag(u: u32) -> i8 {
     (((u >> 1) as i32) ^ -((u & 1) as i32)) as i8
+}
+
+/// Charge is stored biased by one, so the zero field decodes to charge 1.
+///
+/// Charge 0 is rejected by every constructor, so it is not a value the field
+/// needs to represent — and spending the zero word on it would make
+/// `IonAnnot::default()` render an annotation that cannot be parsed back.
+/// `CHARGE_MIN..=CHARGE_MAX` minus one still zigzags inside 4 bits.
+#[inline]
+const fn zigzag_charge(charge: i8) -> u32 {
+    zigzag(charge - 1)
+}
+#[inline]
+const fn unzigzag_charge(u: u32) -> i8 {
+    unzigzag(u) + 1
 }
 
 /// Compact representation of fragment annotations.
@@ -241,7 +265,7 @@ impl IonAnnot {
         debug_assert!(payload <= mask(PAYLOAD_BITS), "payload overflows its field");
         Ok(IonAnnot(
             (kind << KIND_SHIFT)
-                | ((zigzag(charge) & mask(CHARGE_BITS)) << CHARGE_SHIFT)
+                | ((zigzag_charge(charge) & mask(CHARGE_BITS)) << CHARGE_SHIFT)
                 | ((zigzag(isotope) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT)
                 | ((loss as u32 & mask(LOSS_BITS)) << LOSS_SHIFT)
                 | ((payload & mask(PAYLOAD_BITS)) << PAYLOAD_SHIFT),
@@ -255,7 +279,7 @@ impl IonAnnot {
 
     #[inline]
     pub fn get_charge(&self) -> i8 {
-        unzigzag((self.0 >> CHARGE_SHIFT) & mask(CHARGE_BITS))
+        unzigzag_charge((self.0 >> CHARGE_SHIFT) & mask(CHARGE_BITS))
     }
 
     #[inline]
@@ -297,20 +321,19 @@ impl IonAnnot {
     pub fn try_get_ordinal(&self) -> Option<u8> {
         use IonSeriesOrdinal as S;
         match self.series_ordinal() {
-            S::a { ordinal }
-            | S::b { ordinal }
-            | S::c { ordinal }
-            | S::d { ordinal }
-            | S::v { ordinal }
-            | S::w { ordinal }
-            | S::x { ordinal }
-            | S::y { ordinal }
-            | S::z { ordinal } => Some(ordinal),
-            S::unknown { .. }
-            | S::precursor
-            | S::internal { .. }
-            | S::immonium { .. }
-            | S::None => None,
+            S::backbone { ordinal, .. } => Some(ordinal),
+            S::unknown { .. } | S::precursor | S::internal { .. } | S::immonium { .. } => None,
+        }
+    }
+
+    /// The backbone series this annotation belongs to, if any.
+    ///
+    /// `None` for precursor, unknown, internal and immonium ions, none of
+    /// which sit on a backbone ladder.
+    pub fn try_get_series(&self) -> Option<Series> {
+        match self.series_ordinal() {
+            IonSeriesOrdinal::backbone { series, .. } => Some(series),
+            _ => None,
         }
     }
 
@@ -567,40 +590,74 @@ impl UnknownIonCounter {
     }
 }
 
+/// A backbone fragment ion series.
+///
+/// The nine mzPAF backbone series differ only by their letter, so they are one
+/// enum with one letter table rather than nine variants repeated across every
+/// match in this module.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+pub enum Series {
+    a = 1,
+    b,
+    c,
+    d,
+    v,
+    w,
+    x,
+    y,
+    z,
+}
+
+impl Series {
+    /// Every series, in discriminant order. Parallel to [`Self::CHARS`].
+    pub const ALL: [Self; 9] = [
+        Self::a,
+        Self::b,
+        Self::c,
+        Self::d,
+        Self::v,
+        Self::w,
+        Self::x,
+        Self::y,
+        Self::z,
+    ];
+    /// The mzPAF letters, in discriminant order. The single place the
+    /// letter↔discriminant pairing lives.
+    const CHARS: &'static [u8; 9] = b"abcdvwxyz";
+
+    /// The mzPAF letter for this series.
+    pub const fn as_char(self) -> char {
+        Self::CHARS[self as usize - 1] as char
+    }
+
+    /// The series for an mzPAF letter, or `None` if it names no backbone series.
+    fn from_char(c: char) -> Option<Self> {
+        let idx = Self::CHARS.iter().position(|&b| b as char == c)?;
+        Some(Self::ALL[idx])
+    }
+}
+
+impl Display for Series {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_char())
+    }
+}
+
 /// The logical series-and-payload view of an [`IonAnnot`].
 ///
 /// This is a *view*: `IonAnnot` stores a packed word and reconstructs this on
 /// demand. Constructing one directly does not allocate an annotation.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy, Default)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Copy)]
 #[allow(non_camel_case_types)]
 pub enum IonSeriesOrdinal {
-    a {
+    /// One of the nine backbone series, at position `ordinal` in the ladder.
+    backbone {
+        series: Series,
         ordinal: u8,
     },
-    b {
-        ordinal: u8,
-    },
-    c {
-        ordinal: u8,
-    },
-    d {
-        ordinal: u8,
-    },
-    v {
-        ordinal: u8,
-    },
-    w {
-        ordinal: u8,
-    },
-    x {
-        ordinal: u8,
-    },
-    y {
-        ordinal: u8,
-    },
-    z {
-        ordinal: u8,
-    },
+    /// An unannotated peak. `ordinal` is a uniqueness counter, not a position.
     unknown {
         ordinal: u8,
     },
@@ -614,10 +671,6 @@ pub enum IonSeriesOrdinal {
     immonium {
         residue: char,
     },
-
-    /// This variant should not be used directly ... its mainly added to satisfy trait constraints by TinyVec
-    #[default]
-    None,
 }
 
 impl IonSeriesOrdinal {
@@ -625,52 +678,43 @@ impl IonSeriesOrdinal {
     /// [`IonAnnot`] packs.
     ///
     /// This and [`Self::from_parts`] are the only place the numbering lives.
-    /// Both are exhaustive over this enum, so adding a variant is a compile
-    /// error here rather than a silently mislabelled ion series.
+    /// The nine backbone series share one arm, so their discriminants come
+    /// from [`Series`] itself and cannot drift out of step with their letters.
     const fn to_parts(self) -> (u32, u32) {
         match self {
-            Self::a { ordinal } => (1, ordinal as u32),
-            Self::b { ordinal } => (2, ordinal as u32),
-            Self::c { ordinal } => (3, ordinal as u32),
-            Self::d { ordinal } => (4, ordinal as u32),
-            Self::v { ordinal } => (5, ordinal as u32),
-            Self::w { ordinal } => (6, ordinal as u32),
-            Self::x { ordinal } => (7, ordinal as u32),
-            Self::y { ordinal } => (8, ordinal as u32),
-            Self::z { ordinal } => (9, ordinal as u32),
+            Self::backbone { series, ordinal } => (series as u32, ordinal as u32),
+            // Discriminant 0, so the all-zero word — `IonAnnot::default()` —
+            // is the unknown ion `?0` rather than an undecodable value.
+            Self::unknown { ordinal } => (0, ordinal as u32),
             Self::precursor => (10, 0),
-            Self::unknown { ordinal } => (11, ordinal as u32),
-            Self::internal { start, end } => (12, (start as u32) | ((end as u32) << 6)),
+            Self::internal { start, end } => {
+                (12, (start as u32) | ((end as u32) << INTERNAL_POS_BITS))
+            }
             Self::immonium { residue } => (13, (residue as u8 - b'A') as u32),
-            Self::None => (0, 0),
         }
     }
 
-    /// Inverse of [`Self::to_parts`]. An unrecognised discriminant decodes to
-    /// [`Self::None`] rather than panicking: it can only come from a
-    /// corrupted word, and the render path must stay total.
+    /// Inverse of [`Self::to_parts`]. Total by construction: `unknown` is the
+    /// catch-all discriminant, so a value this build does not recognise — only
+    /// reachable from a corrupted word — decodes as an unknown ion instead of
+    /// panicking on a path `Display` (and therefore `Serialize`) reaches.
     const fn from_parts(kind: u32, payload: u32) -> Self {
         let ordinal = payload as u8;
         match kind {
-            1 => Self::a { ordinal },
-            2 => Self::b { ordinal },
-            3 => Self::c { ordinal },
-            4 => Self::d { ordinal },
-            5 => Self::v { ordinal },
-            6 => Self::w { ordinal },
-            7 => Self::x { ordinal },
-            8 => Self::y { ordinal },
-            9 => Self::z { ordinal },
+            1..=9 => Self::backbone {
+                // `kind` is in range, so this is the inverse of `series as u32`.
+                series: Series::ALL[kind as usize - 1],
+                ordinal,
+            },
             10 => Self::precursor,
-            11 => Self::unknown { ordinal },
             12 => Self::internal {
-                start: (payload & mask(6)) as u8,
-                end: ((payload >> 6) & mask(6)) as u8,
+                start: (payload & mask(INTERNAL_POS_BITS)) as u8,
+                end: ((payload >> INTERNAL_POS_BITS) & mask(INTERNAL_POS_BITS)) as u8,
             },
             13 => Self::immonium {
-                residue: (b'A' + (payload & mask(5)) as u8) as char,
+                residue: (b'A' + (payload & mask(IMMONIUM_BITS)) as u8) as char,
             },
-            _ => Self::None,
+            _ => Self::unknown { ordinal },
         }
     }
 
@@ -687,51 +731,26 @@ impl IonSeriesOrdinal {
             };
         }
         let ordinal = ordinal.ok_or(IonParsingError::MissingOrdinal { series: c })?;
-        Ok(match c {
-            'a' => Self::a { ordinal },
-            'b' => Self::b { ordinal },
-            'c' => Self::c { ordinal },
-            'd' => Self::d { ordinal },
-            'v' => Self::v { ordinal },
-            'w' => Self::w { ordinal },
-            'x' => Self::x { ordinal },
-            'y' => Self::y { ordinal },
-            'z' => Self::z { ordinal },
-            '?' => Self::unknown { ordinal },
-            _ => {
-                return Err(IonParsingError::UnsupportedFragmentType { fragment_type: c });
-            }
-        })
+        if c == '?' {
+            return Ok(Self::unknown { ordinal });
+        }
+        Series::from_char(c)
+            .map(|series| Self::backbone { series, ordinal })
+            .ok_or(IonParsingError::UnsupportedFragmentType { fragment_type: c })
     }
 }
 
 impl Display for IonSeriesOrdinal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IonSeriesOrdinal::a { ordinal } => write!(f, "a{}", ordinal),
-            IonSeriesOrdinal::b { ordinal } => write!(f, "b{}", ordinal),
-            IonSeriesOrdinal::c { ordinal } => write!(f, "c{}", ordinal),
-            IonSeriesOrdinal::d { ordinal } => write!(f, "d{}", ordinal),
-            IonSeriesOrdinal::v { ordinal } => write!(f, "v{}", ordinal),
-            IonSeriesOrdinal::w { ordinal } => write!(f, "w{}", ordinal),
-            IonSeriesOrdinal::x { ordinal } => write!(f, "x{}", ordinal),
-            IonSeriesOrdinal::y { ordinal } => write!(f, "y{}", ordinal),
-            IonSeriesOrdinal::z { ordinal } => write!(f, "z{}", ordinal),
-            IonSeriesOrdinal::unknown { ordinal } => write!(f, "?{}", ordinal),
-            IonSeriesOrdinal::precursor => write!(f, "p"),
-            IonSeriesOrdinal::internal { start, end } => write!(f, "m{}:{}", start, end),
-            IonSeriesOrdinal::immonium { residue } => write!(f, "I{}", residue),
-            // Reached only via `IonAnnot::default()`, which packs to zero.
-            // That `Default` is not optional: `tinyvec::Array` requires
-            // `Item: Default`, `TimsElutionGroup` stores labels in a
-            // `TinyVec<[T; 13]>`, and timsquery's `KeyLike` propagates the
-            // bound. Since `Serialize` renders through `format!`, panicking
-            // here is reachable from any serde path — so render inertly.
-            IonSeriesOrdinal::None => write!(f, "?0"),
+            Self::backbone { series, ordinal } => write!(f, "{}{}", series.as_char(), ordinal),
+            Self::unknown { ordinal } => write!(f, "?{}", ordinal),
+            Self::precursor => write!(f, "p"),
+            Self::internal { start, end } => write!(f, "m{}:{}", start, end),
+            Self::immonium { residue } => write!(f, "I{}", residue),
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,31 +768,22 @@ mod tests {
         assert_eq!(size_of::<(IonAnnot, f32)>(), 8);
     }
 
-    #[test]
-    fn series_ordinal_is_a_view_of_the_packed_word() {
-        assert_eq!(
-            ion("b12").series_ordinal(),
-            IonSeriesOrdinal::b { ordinal: 12 }
-        );
-    }
-
-    /// `IonAnnot: Default` packs to zero, which decodes to `IonSeriesOrdinal::None` and a
-    /// charge of 0. `Serialize` renders through `format!`, so a panicking
-    /// `Display` arm is reachable from any serde path — `TinyVec` alone can
-    /// hand out a default.
+    /// `IonAnnot: Default` is not optional — `tinyvec::Array` requires
+    /// `Item: Default`, `TimsElutionGroup` stores labels in a `TinyVec`, and
+    /// timsquery's `KeyLike` propagates the bound. So a default can reach any
+    /// serde path, and the zero word has to mean something.
     ///
-    /// The rendered value is degenerate and deliberately does NOT round-trip:
-    /// charge 0 is rejected by every constructor. Not panicking is the
-    /// property being pinned.
+    /// It means `?0`: charge is stored as `zigzag(charge - 1)`, so the zero
+    /// field is charge 1 rather than the impossible charge 0. The default is
+    /// therefore a real annotation and `Serialize`/`Deserialize` are inverses
+    /// on it, instead of rendering a value no constructor accepts.
     #[test]
-    fn default_annotation_renders_instead_of_panicking() {
+    fn the_default_annotation_is_a_real_annotation() {
         let d = IonAnnot::default();
-        assert_eq!(d.to_string(), "?0^0");
-        assert_eq!(serde_json::to_string(&d).unwrap(), "\"?0^0\"");
-        assert!(
-            IonAnnot::try_from("?0^0").is_err(),
-            "the default is not a valid annotation, only a printable one"
-        );
+        assert_eq!(d.to_string(), "?0");
+        assert_eq!(d.get_charge(), 1);
+        assert_eq!(serde_json::to_string(&d).unwrap(), "\"?0\"");
+        assert_eq!(IonAnnot::try_from("?0").expect("the default parses"), d);
     }
 
     #[test]
@@ -928,32 +938,42 @@ mod tests {
         assert_eq!(IonAnnot::try_from("y1/-0.0005").unwrap(), ion("y1"));
     }
 
-    /// One representative of every `IonSeriesOrdinal` variant, each with a
-    /// distinct payload so a transposition in `to_parts`/`from_parts` cannot
-    /// cancel out.
-    const ALL_SERIES: &[IonSeriesOrdinal] = &[
-        IonSeriesOrdinal::a { ordinal: 1 },
-        IonSeriesOrdinal::b { ordinal: 2 },
-        IonSeriesOrdinal::c { ordinal: 3 },
-        IonSeriesOrdinal::d { ordinal: 4 },
-        IonSeriesOrdinal::v { ordinal: 5 },
-        IonSeriesOrdinal::w { ordinal: 6 },
-        IonSeriesOrdinal::x { ordinal: 7 },
-        IonSeriesOrdinal::y { ordinal: 8 },
-        IonSeriesOrdinal::z { ordinal: 9 },
-        IonSeriesOrdinal::precursor,
-        IonSeriesOrdinal::unknown { ordinal: 10 },
-        IonSeriesOrdinal::internal { start: 2, end: 11 },
-        IonSeriesOrdinal::immonium { residue: 'W' },
-        IonSeriesOrdinal::None,
-    ];
+    /// One representative of every `IonSeriesOrdinal` case: all nine backbone
+    /// series (each with a distinct ordinal, so a transposition in
+    /// `to_parts`/`from_parts` cannot cancel out) plus the four others, at
+    /// their field boundaries.
+    fn all_series() -> Vec<IonSeriesOrdinal> {
+        let mut out: Vec<IonSeriesOrdinal> = Series::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, &series)| IonSeriesOrdinal::backbone {
+                series,
+                ordinal: i as u8 + 1,
+            })
+            .collect();
+        out.extend([
+            IonSeriesOrdinal::precursor,
+            IonSeriesOrdinal::unknown { ordinal: 10 },
+            IonSeriesOrdinal::internal { start: 2, end: 11 },
+            // Both endpoints at their 6-bit ceiling: the widest payload the
+            // 12 bits hold, and the case a narrowed field would silently clip.
+            IonSeriesOrdinal::internal {
+                start: INTERNAL_POS_MAX,
+                end: INTERNAL_POS_MAX,
+            },
+            IonSeriesOrdinal::immonium { residue: 'A' },
+            // Highest residue index the 5-bit immonium field must hold.
+            IonSeriesOrdinal::immonium { residue: 'Z' },
+        ]);
+        out
+    }
 
     /// `to_parts` and `from_parts` are hand-written inverses. Without this,
     /// swapping two arms (`v` encoding as `w`) mislabels a whole ion series
     /// and every other test still passes.
     #[test]
     fn every_series_variant_round_trips_through_the_packed_word() {
-        for &series in ALL_SERIES {
+        for series in all_series() {
             let (kind, payload) = series.to_parts();
             assert_eq!(IonSeriesOrdinal::from_parts(kind, payload), series);
             assert!(kind <= mask(KIND_BITS), "{series:?} kind overflows");
@@ -963,31 +983,43 @@ mod tests {
             );
         }
 
-        let mut kinds: Vec<u32> = ALL_SERIES.iter().map(|s| s.to_parts().0).collect();
+        // Every backbone series must land on its own discriminant; the other
+        // four are singletons and are covered by the round trip above.
+        let mut kinds: Vec<u32> = Series::ALL
+            .iter()
+            .map(|&series| {
+                IonSeriesOrdinal::backbone { series, ordinal: 1 }
+                    .to_parts()
+                    .0
+            })
+            .collect();
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(
-            kinds.len(),
-            ALL_SERIES.len(),
-            "two series share a discriminant"
-        );
+        assert_eq!(kinds.len(), Series::ALL.len(), "two series share a kind");
     }
 
-    /// The other three tables — `Display`, `from_series_char` and the parser —
-    /// must agree with the packing for every variant, not just the handful the
-    /// other tests happen to spell out.
+    /// `Display`, `from_series_char` and the parser must agree with the
+    /// packing for every case, not just the handful the other tests spell out.
     #[test]
     fn every_series_variant_round_trips_through_its_mzpaf_spelling() {
-        for &series in ALL_SERIES {
-            // `None` is the `Default` filler; it renders inertly but is not a
-            // real annotation, so it has no spelling to parse back.
-            if series == IonSeriesOrdinal::None {
-                continue;
-            }
+        for series in all_series() {
             let annot = IonAnnot::pack(series, NeutralLoss::None, 1, 0).expect("valid");
             assert_eq!(annot.series_ordinal(), series);
             let text = annot.to_string();
             assert_eq!(ion(&text).series_ordinal(), series, "{text}");
+        }
+    }
+
+    /// The letters are the mzPAF spelling of the discriminants, and
+    /// `from_char`/`as_char` are hand-written inverses of each other.
+    #[test]
+    fn series_letters_and_discriminants_agree() {
+        assert_eq!(Series::ALL.len(), Series::CHARS.len());
+        for &series in &Series::ALL {
+            assert_eq!(Series::from_char(series.as_char()), Some(series));
+        }
+        for c in ['p', '?', 'm', 'I', 'q', 'A'] {
+            assert_eq!(Series::from_char(c), None, "{c} is not a backbone series");
         }
     }
 
