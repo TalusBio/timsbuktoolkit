@@ -37,6 +37,12 @@ use crate::error::CliError;
 use crate::processing::AggregatorContainer;
 use timsquery::serde::LibraryArena;
 
+/// Basename Carafe looks for inside the `-o` directory. Invariant 5 of the
+/// contract in `rust/timsquery/tests/carafe_contract/`, so it is named rather
+/// than inlined — a renamed output file is a silent failure on Carafe's side.
+/// Despite the extension, the contents are ndjson.
+pub const CARAFE_RESULTS_BASENAME: &str = "results.json";
+
 /// Main function for the 'query-index' subcommand.
 #[instrument]
 pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
@@ -71,7 +77,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     let batch_size = args.batch_size;
 
     std::fs::create_dir_all(&output_path)?;
-    let put_path = output_path.join("results.json");
+    let put_path = output_path.join(CARAFE_RESULTS_BASENAME);
 
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
@@ -514,5 +520,192 @@ mod tests {
             assert_eq!(point.fragment_mzs.len(), q.fragment_count());
             let _spectrum: SpectralCollector<_, f32> = SpectralCollector::new(&q);
         }
+    }
+}
+
+/// The OUTPUT half of the contract in `rust/timsquery/tests/carafe_contract/`,
+/// whose `main.rs` pins the input direction.
+///
+/// These live here rather than alongside it because `timsquery_cli` has no
+/// library target, and they assert on the boundary types Carafe parses with
+/// fastjson:
+/// no remap, no schema negotiation, so a renamed field is a null on their side
+/// and an NPE somewhere unrelated.
+#[cfg(test)]
+mod carafe_output_contract {
+    use super::*;
+    use crate::cli::{
+        PossibleAggregator,
+        SerializationFormat,
+    };
+    use crate::processing::SpectrumOutput;
+    use clap::ValueEnum;
+    use timsquery::serde::chromatogram_output::ChromatogramOutput;
+
+    /// Verbatim from the contract's "spectrum-aggregator -> PSMQueryResult".
+    const CARAFE_SPECTRUM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5, "precursor_mz":650.32,
+      "precursor_charge":2, "precursor_intensities":[1200,800,300], "precursor_labels":[0,1,2],
+      "fragment_mzs":[175.1,288.2], "fragment_intensities":[500,0]
+    }"#;
+
+    /// Verbatim from the contract's "chromatogram-aggregator -> XICQueryResult".
+    const CARAFE_CHROMATOGRAM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5,
+      "precursor_mzs":[650.32,650.82], "precursor_intensities":[[1.0],[2.0]],
+      "fragment_mzs":[175.1,288.2], "fragment_labels":["y1","b2"],
+      "fragment_intensities":[[3.0],[4.0]], "retention_time_results_seconds":[1230,1231]
+    }"#;
+
+    /// Parse a contract payload into the real boundary type.
+    ///
+    /// Deserializing (rather than constructing) is what lets these tests exist
+    /// at all: both types are only ever built from an aggregator, which needs a
+    /// real `.d`. A renamed or dropped field fails here.
+    fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
+        serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("the contract's payload must deserialize: {e}"))
+    }
+
+    /// Write records through the SAME serializer `stream_process_batches` uses,
+    /// and hand back the exact bytes Carafe would read out of `results.json`.
+    fn write_results<T: Serialize>(records: &[T], format: SerializationFormat) -> String {
+        let mut buf = Vec::new();
+        let mut seq = JsonStreamSerializer::new(&mut buf, format);
+        for r in records {
+            seq.serialize(r).expect("serialize");
+        }
+        seq.finish().expect("finish");
+        String::from_utf8(buf).expect("utf-8")
+    }
+
+    fn keys_of(line: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(line).expect("one object per line");
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object, not an array or scalar")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Contract invariants 2 and 3, asserted on the bytes rather than on the
+    /// type: ndjson means one complete object per line, no array wrapper and no
+    /// pretty-print, and the field names are exact (fastjson, no remap).
+    ///
+    /// Note the deliberate singular/plural split between the two modes
+    /// (`precursor_mz` vs `precursor_mzs`): they are two schemas, and
+    /// "unifying" them would break Carafe without failing anything else.
+    #[test]
+    fn spectrum_results_are_ndjson_with_the_contract_field_names() {
+        let records: Vec<SpectrumOutput> =
+            vec![parse(CARAFE_SPECTRUM_RESULT), parse(CARAFE_SPECTRUM_RESULT)];
+        let out = write_results(&records, SerializationFormat::Ndjson);
+
+        assert!(!out.starts_with('['), "no array wrapper: {out}");
+        assert!(out.ends_with('\n'), "every record is newline-terminated");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per record");
+        assert!(
+            !out.contains("\n  "),
+            "ndjson must not be pretty-printed: {out}"
+        );
+
+        for line in lines {
+            assert_eq!(
+                keys_of(line),
+                [
+                    "fragment_intensities",
+                    "fragment_mzs",
+                    "id",
+                    "mobility_ook0",
+                    "precursor_charge",
+                    "precursor_intensities",
+                    "precursor_labels",
+                    "precursor_mz",
+                    "rt_seconds",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn chromatogram_results_are_ndjson_with_the_contract_field_names() {
+        let records: Vec<ChromatogramOutput> = vec![parse(CARAFE_CHROMATOGRAM_RESULT)];
+        let out = write_results(&records, SerializationFormat::Ndjson);
+
+        assert!(!out.starts_with('['), "no array wrapper: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            keys_of(lines[0]),
+            [
+                "fragment_intensities",
+                "fragment_labels",
+                "fragment_mzs",
+                "id",
+                "mobility_ook0",
+                "precursor_intensities",
+                "precursor_mzs",
+                "retention_time_results_seconds",
+                "rt_seconds",
+            ]
+        );
+    }
+
+    /// The ndjson/array distinction is real, not an accident of the writer
+    /// happening to emit one object. Carafe parses line-by-line, so an array
+    /// wrapper is a parse failure on their side — this pins that the OTHER
+    /// formats are the ones that wrap, and therefore that `-f ndjson` matters.
+    #[test]
+    fn the_non_ndjson_formats_do_wrap_in_an_array() {
+        let records: Vec<SpectrumOutput> = vec![parse(CARAFE_SPECTRUM_RESULT)];
+        for format in [SerializationFormat::Json, SerializationFormat::PrettyJson] {
+            let out = write_results(&records, format);
+            assert!(
+                out.starts_with('[') && out.ends_with(']'),
+                "{format:?} must wrap, else `-f ndjson` is not load-bearing: {out}"
+            );
+        }
+        // And the default is NOT ndjson, so Carafe passing `-f` is required.
+        assert_ne!(SerializationFormat::default(), SerializationFormat::Ndjson);
+    }
+
+    /// An empty result set must still be one parseable file, not a truncated
+    /// one. Carafe reads every line; zero lines is a valid empty result.
+    #[test]
+    fn an_empty_ndjson_result_is_empty_not_malformed() {
+        let out = write_results::<SpectrumOutput>(&[], SerializationFormat::Ndjson);
+        assert_eq!(out, "", "no records means no lines, and no array wrapper");
+    }
+
+    /// The `-a` and `-f` values Carafe passes on the command line. clap derives
+    /// these from the variant names, so a rename silently changes the CLI.
+    #[test]
+    fn aggregator_and_format_flag_values_match_the_contract() {
+        fn name<T: ValueEnum>(v: T) -> String {
+            v.to_possible_value()
+                .expect("not skipped")
+                .get_name()
+                .to_string()
+        }
+
+        assert_eq!(
+            name(PossibleAggregator::SpectrumAggregator),
+            "spectrum-aggregator"
+        );
+        assert_eq!(
+            name(PossibleAggregator::ChromatogramAggregator),
+            "chromatogram-aggregator"
+        );
+        assert_eq!(name(SerializationFormat::Ndjson), "ndjson");
+    }
+
+    /// Contract invariant 5.
+    #[test]
+    fn the_results_basename_is_what_carafe_looks_for() {
+        assert_eq!(CARAFE_RESULTS_BASENAME, "results.json");
     }
 }
