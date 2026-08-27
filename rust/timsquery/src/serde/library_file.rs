@@ -77,8 +77,6 @@ pub enum FileReadingExtras {
 pub enum ElutionGroupCollection {
     StringLabels(Vec<TimsElutionGroup<String>>, Option<FileReadingExtras>),
     MzpafLabels(Vec<TimsElutionGroup<IonAnnot>>, Option<FileReadingExtras>),
-    TinyIntLabels(Vec<TimsElutionGroup<u8>>, Option<FileReadingExtras>),
-    IntLabels(Vec<TimsElutionGroup<u32>>, Option<FileReadingExtras>),
 }
 
 impl ElutionGroupCollection {
@@ -86,8 +84,6 @@ impl ElutionGroupCollection {
         match self {
             ElutionGroupCollection::StringLabels(egs, _) => egs.len(),
             ElutionGroupCollection::MzpafLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::TinyIntLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::IntLabels(egs, _) => egs.len(),
         }
     }
 
@@ -99,45 +95,18 @@ impl ElutionGroupCollection {
             info!("Successfully deserialized elution groups directly");
             return Ok(egs);
         }
-        // Next try deserialization via inputed format
-        match Self::try_deser_inputed(&file_content) {
-            Ok(egs) => {
-                info!("Successfully deserialized elution groups via inputed format");
-                Ok(egs)
-            }
-            Err(_) => Err(LibraryReadingError::UnableToParseElutionGroups),
-        }
+        // Next try deserialization via inputed format. Its error is returned
+        // as-is: it names the field that is wrong, which
+        // `UnableToParseElutionGroups` does not.
+        let egs = Self::try_deser_inputed(&file_content)?;
+        info!("Successfully deserialized elution groups via inputed format");
+        Ok(egs)
     }
 
     fn try_deser_inputed(content: &str) -> Result<Self, LibraryReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the deser into ElutionGroupInput variants first
+        // mzpaf before string: `"y1"` deserializes as either, and only the
+        // mzpaf form carries ion chemistry.
         debug!("Attempting deserialization of elution group inputs");
-        debug!("Attempting to deserialize elution group inputs with tiny int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u8>>>(content) {
-            // Here we can handle filling the inputs if they are needed...
-            let eg_inputs = if eg_inputs.first().is_some_and(|x| x.needs_fragment_labels()) {
-                debug!("Filling missing fragment labels with tiny int labels");
-                eg_inputs
-                    .into_iter()
-                    .map(|x| x.try_fill_labels_u8())
-                    .collect::<Result<_, _>>()
-            } else {
-                Ok(eg_inputs)
-            };
-
-            let out: Result<Vec<TimsElutionGroup<u8>>, ElutionGroupInputError> = eg_inputs?
-                .into_iter()
-                .map(<ElutionGroupInput<u8> as TryInto<TimsElutionGroup<u8>>>::try_into)
-                .collect();
-            return Ok(ElutionGroupCollection::TinyIntLabels(out?, None));
-        }
-        debug!("Attempting to deserialize elution group inputs with int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u32>>>(content) {
-            let out: Result<Vec<TimsElutionGroup<u32>>, ElutionGroupInputError> =
-                eg_inputs.into_iter().map(|x| x.try_into()).collect();
-            return Ok(ElutionGroupCollection::IntLabels(out?, None));
-        }
         debug!("Attempting to deserialize elution group inputs with mzpaf labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<IonAnnot>>>(content) {
             let out: Result<Vec<TimsElutionGroup<IonAnnot>>, ElutionGroupInputError> =
@@ -154,18 +123,8 @@ impl ElutionGroupCollection {
     }
 
     fn try_deser_direct(content: &str) -> Result<Self, LibraryReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the direct deser into ElutionGroupCollection variants
-        // u8 -> u32 -> IonAnnot -> String
+        // mzpaf before string, for the same reason as `try_deser_inputed`.
         debug!("Attempting direct deserialization of elution groups");
-        debug!("Attempting to deserialize elution groups with tiny int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u8>>>(content) {
-            return Ok(ElutionGroupCollection::TinyIntLabels(egs, None));
-        }
-        debug!("Attempting to deserialize elution groups with int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<u32>>>(content) {
-            return Ok(ElutionGroupCollection::IntLabels(egs, None));
-        }
         debug!("Attempting to deserialize elution groups with mzpaf labels");
         if let Ok(egs) = serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(content) {
             return Ok(ElutionGroupCollection::MzpafLabels(egs, None));
@@ -375,10 +334,6 @@ impl LibraryArena {
                 }
                 geom.seal();
                 Ok(LibraryArena::Str { geom })
-            }
-            ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
-                warn!("integer-labelled libraries have no LibraryArena variant; rejecting");
-                Err(LibraryReadingError::UnableToParseElutionGroups)
             }
         }
     }

@@ -64,10 +64,8 @@ fn carafe_target_payload_loads_through_the_public_reader() {
     let f = write_targets(CARAFE_TARGETS);
     let arena = read_library_file(f.path()).expect("Carafe's target JSON must load");
 
-    // String fragment labels must resolve to ion annotations. If Carafe ever
-    // omitted `fragment_labels` the try-chain would silently fall through to
-    // the integer-labelled variant and synthesize positional labels — a wrong
-    // answer rather than an error.
+    // String fragment labels must resolve to ion annotations, not to the
+    // string-labelled arena, which carries no ion chemistry.
     let LibraryArena::Mzpaf { geom, .. } = arena else {
         panic!("labelled targets must land in the ion-annotated arena");
     };
