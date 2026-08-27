@@ -1,0 +1,765 @@
+//! Reader for the mzSpecLib text format (HUPO-PSI).
+//!
+//! # Why every field needs a fallback ladder
+//!
+//! mzSpecLib says *how* to write a controlled-vocabulary term, not *which*
+//! term a writer must use. The two reference exports disagree on nearly
+//! everything this reader needs:
+//!
+//! | field | DIA-NN writes | Spectronaut writes |
+//! |---|---|---|
+//! | precursor m/z | `MS:1000744` selected ion m/z | `MS:1003208` experimental precursor monoisotopic m/z |
+//! | retention time | *nothing at all* | `MS:1000896` normalized retention time, in minutes |
+//! | ion mobility | `MS:1002476` (written as `0.0`) | `MS:1002476` |
+//!
+//! So each field is resolved by trying terms in priority order, and RT carries
+//! a unit that must be honoured rather than assumed.
+//!
+//! # Peak resolution
+//!
+//! An mzSpecLib peak list carries *observed* m/z; the annotation's mass-error
+//! suffix is what recovers the theoretical value the arena wants
+//! (`theoretical = observed - error`). Two properties follow, and they drive
+//! the whole policy:
+//!
+//! 1. A theoretical m/z only exists once a single ion identity is pinned down.
+//!    A peak with no annotation (`?`) or an unresolvable ambiguity has no
+//!    error to subtract, so it is **skipped** rather than stored at its
+//!    observed m/z. Mixing observed and theoretical masses in one arena would
+//!    be invisible downstream.
+//! 2. "Identity known" and "identity representable" are different. `y1-HCOOH`
+//!    has a known identity and therefore a computable theoretical mass, even
+//!    though [`IonAnnot`] cannot spell the loss. Those peaks are **kept** with
+//!    an unknown label: the mass stays exact, only the label is erased.
+//!
+//! Ambiguous (comma-separated) annotations resolve to the alternative with the
+//! smallest absolute mass error. If that alternative is not representable the
+//! peak takes an unknown label — it is deliberately NOT downgraded to a
+//! worse-matching but representable alternative, which would assign a wrong
+//! chemical identity *and* a wrong theoretical mass. An exact tie pins no
+//! identity at all, so it is skipped.
+
+use crate::ion::IonAnnot;
+use crate::models::{
+    LibCapabilities,
+    QueryCollection,
+};
+use crate::serde::library_file::{
+    LibraryArena,
+    LibraryReadingError,
+};
+use micromzpaf::{
+    MassError,
+    split_mass_error,
+};
+use std::io::{
+    BufRead,
+    BufReader,
+};
+use std::path::Path;
+use tracing::{
+    info,
+    warn,
+};
+
+/// First non-empty line of an mzSpecLib text file.
+const MAGIC: &str = "<mzSpecLib>";
+
+// ── CV term ladders ──────────────────────────────────────────────────────────
+//
+// Ordered most- to least-specific. The first term present wins.
+
+/// Precursor m/z. Experimental monoisotopic is preferred over `selected ion
+/// m/z`, which on a quadrupole instrument is the isolation-window centre and
+/// need not be the monoisotopic peak.
+const PRECURSOR_MZ_TERMS: &[&str] = &[
+    "MS:1003208", // experimental precursor monoisotopic m/z
+    "MS:1003053", // theoretical monoisotopic m/z
+    "MS:1000744", // selected ion m/z
+];
+/// Retention time. `normalized retention time` is an iRT-style index rather
+/// than a clock reading, but it is what Spectronaut exports and the only RT
+/// signal available in those files.
+const RT_TERMS: &[&str] = &[
+    "MS:1000894", // retention time
+    "MS:1000896", // normalized retention time
+];
+/// Ion mobility. Note these are different quantities, not spellings of one:
+/// `MS:1002815` is inverse reduced ion mobility (1/K0), which is what the
+/// arena wants, while `MS:1002476` is a drift time. They are tried in that
+/// order and a drift-time-only library is counted, since treating a drift time
+/// as 1/K0 is only valid for instruments that report it that way.
+const MOBILITY_INVERSE_REDUCED: &str = "MS:1002815";
+const MOBILITY_DRIFT_TIME: &str = "MS:1002476";
+
+const CHARGE_TERM: &str = "MS:1000041";
+const STRIPPED_SEQ_TERM: &str = "MS:1000888";
+const PROFORMA_TERM: &str = "MS:1003270";
+const UNIT_TERM: &str = "UO:0000000";
+
+const UNIT_MINUTE: &str = "UO:0000031";
+const UNIT_SECOND: &str = "UO:0000010";
+
+/// Per-library tally of everything that did not land verbatim in the arena.
+///
+/// Reported once at the end of a load rather than per row: a consensus library
+/// can carry thousands of unannotated peaks, and a line each would bury the
+/// signal.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MzSpecLibStats {
+    /// Peaks stored with their parsed annotation.
+    pub kept_annotated: usize,
+    /// Identity known but not representable (a loss outside the table, a
+    /// modified immonium). Stored with an unknown label and an exact mass.
+    pub kept_unknown_label: usize,
+    /// `?` — no annotation, so no mass error, so no theoretical m/z.
+    pub skipped_unannotated: usize,
+    /// Comma-separated alternatives that tied on absolute mass error.
+    pub skipped_ambiguous: usize,
+    /// Peaks dropped because their label collided with one already in the
+    /// precursor after the unknown-label rewrite.
+    pub dropped_duplicate_label: usize,
+    /// Spectra with no retention-time term at all.
+    pub spectra_without_rt: usize,
+    /// Spectra whose mobility came from a drift time rather than 1/K0.
+    pub spectra_with_drift_time_mobility: usize,
+    /// Precursors dropped for having no usable peak left.
+    pub dropped_empty_precursors: usize,
+}
+
+impl MzSpecLibStats {
+    fn anything_to_report(&self) -> bool {
+        self.kept_unknown_label > 0
+            || self.skipped_unannotated > 0
+            || self.skipped_ambiguous > 0
+            || self.dropped_duplicate_label > 0
+            || self.spectra_without_rt > 0
+            || self.spectra_with_drift_time_mobility > 0
+            || self.dropped_empty_precursors > 0
+    }
+
+    fn report(&self, path: &Path) {
+        if !self.anything_to_report() {
+            info!(
+                "mzSpecLib {}: {} peaks, all annotated and representable",
+                path.display(),
+                self.kept_annotated
+            );
+            return;
+        }
+        warn!(
+            "mzSpecLib {}: kept {} annotated + {} with unknown labels; \
+             skipped {} unannotated, {} ambiguous, {} duplicate-label; \
+             {} spectra without RT, {} using drift time as mobility, \
+             {} precursors dropped as empty",
+            path.display(),
+            self.kept_annotated,
+            self.kept_unknown_label,
+            self.skipped_unannotated,
+            self.skipped_ambiguous,
+            self.dropped_duplicate_label,
+            self.spectra_without_rt,
+            self.spectra_with_drift_time_mobility,
+            self.dropped_empty_precursors,
+        );
+    }
+}
+
+/// One `ACC|name=value` attribute, with its optional `[n]` group tag.
+#[derive(Debug, Clone)]
+struct Attr {
+    group: Option<u32>,
+    accession: String,
+    value: String,
+}
+
+impl Attr {
+    fn parse(line: &str) -> Option<Attr> {
+        let (group, rest) = match line.strip_prefix('[') {
+            Some(r) => {
+                let (g, r) = r.split_once(']')?;
+                (Some(g.parse().ok()?), r)
+            }
+            None => (None, line),
+        };
+        let (key, value) = rest.split_once('=')?;
+        let accession = key.split('|').next()?.to_string();
+        Some(Attr {
+            group,
+            accession,
+            value: value.to_string(),
+        })
+    }
+
+    /// The accession out of a `ACC|name` *value* (as opposed to a key), for
+    /// terms whose value is itself a CV term — e.g. `unit=UO:0000031|minute`.
+    fn value_accession(&self) -> &str {
+        self.value.split('|').next().unwrap_or(&self.value)
+    }
+}
+
+/// Attributes collected for one spectrum (its own plus its analyte's).
+#[derive(Debug, Default)]
+struct AttrBag(Vec<Attr>);
+
+impl AttrBag {
+    fn find(&self, accession: &str) -> Option<&Attr> {
+        self.0.iter().find(|a| a.accession == accession)
+    }
+
+    fn first_of(&self, accessions: &[&str]) -> Option<&Attr> {
+        accessions.iter().find_map(|a| self.find(a))
+    }
+
+    fn f64_of(&self, accessions: &[&str]) -> Option<f64> {
+        self.first_of(accessions)?.value.parse().ok()
+    }
+
+    /// The unit term attached to `attr` via its `[n]` group, if any.
+    fn unit_for(&self, attr: &Attr) -> Option<&str> {
+        let group = attr.group?;
+        self.0
+            .iter()
+            .find(|a| a.group == Some(group) && a.accession == UNIT_TERM)
+            .map(|a| a.value_accession())
+    }
+}
+
+/// A spectrum accumulated from the text stream, before conversion.
+#[derive(Debug, Default)]
+struct RawSpectrum {
+    attrs: AttrBag,
+    /// `(observed mz, intensity, annotation)`
+    peaks: Vec<(f64, f32, String)>,
+}
+
+/// What resolving one peak's annotation produced.
+enum Resolved {
+    /// Parsed cleanly; store with this label.
+    Annotated(IonAnnot),
+    /// Identity known, not representable. Store with an unknown label, exact
+    /// mass.
+    UnknownLabel,
+    /// No single identity, so no theoretical mass. Skip.
+    SkipUnannotated,
+    SkipAmbiguous,
+}
+
+/// Resolve one annotation string into a storage decision plus the mass error
+/// needed to recover theoretical m/z.
+fn resolve_annotation(annotation: &str) -> (Resolved, Option<MassError>) {
+    let annotation = annotation.trim();
+    if annotation.is_empty() || annotation == "?" {
+        return (Resolved::SkipUnannotated, None);
+    }
+
+    let alternatives: Vec<&str> = annotation.split(',').map(str::trim).collect();
+
+    // Split the mass error off every alternative first. This works even when
+    // the ion itself will not parse, which is exactly the case that still
+    // needs an exact mass.
+    let split: Vec<(&str, Option<MassError>)> = alternatives
+        .iter()
+        .filter_map(|a| split_mass_error(a).ok())
+        .collect();
+    if split.is_empty() {
+        return (Resolved::SkipUnannotated, None);
+    }
+
+    let chosen = if split.len() == 1 {
+        split[0]
+    } else {
+        // Ambiguous: the alternative whose observed mass sits closest to its
+        // own theoretical. A tie pins no identity, so nothing can be stored.
+        let magnitude = |m: &Option<MassError>| match m {
+            Some(MassError::Da(d)) => d.abs(),
+            Some(MassError::Ppm(p)) => p.abs(),
+            None => f64::INFINITY,
+        };
+        let best = split
+            .iter()
+            .map(|(_, e)| magnitude(e))
+            .fold(f64::INFINITY, f64::min);
+        let tied = split
+            .iter()
+            .filter(|(_, e)| (magnitude(e) - best).abs() <= f64::EPSILON)
+            .count();
+        if tied != 1 || !best.is_finite() {
+            return (Resolved::SkipAmbiguous, None);
+        }
+        *split
+            .iter()
+            .find(|(_, e)| (magnitude(e) - best).abs() <= f64::EPSILON)
+            .expect("a unique minimum was just counted")
+    };
+
+    let (ion_str, mass_error) = chosen;
+    match IonAnnot::try_from(ion_str) {
+        Ok(ion) => (Resolved::Annotated(ion), mass_error),
+        // Known identity, unrepresentable spelling: keep the peak and its exact
+        // mass, lose only the label.
+        Err(_) => (Resolved::UnknownLabel, mass_error),
+    }
+}
+
+/// Convert one accumulated spectrum into arena rows.
+///
+/// Returns `None` when the spectrum lacks something structural (precursor m/z,
+/// charge, sequence) or ends up with no usable peak.
+fn convert_spectrum(
+    raw: &RawSpectrum,
+    stats: &mut MzSpecLibStats,
+) -> Option<(
+    f64,
+    u8,
+    f32,
+    f32,
+    Vec<(IonAnnot, f64)>,
+    Vec<f32>,
+    String,
+    String,
+)> {
+    let precursor_mz = raw.attrs.f64_of(PRECURSOR_MZ_TERMS)?;
+    let charge: u8 = raw.attrs.find(CHARGE_TERM)?.value.parse().ok()?;
+
+    let rt_seconds = match raw.attrs.first_of(RT_TERMS) {
+        Some(attr) => {
+            let v: f64 = attr.value.parse().ok()?;
+            // Honour the unit rather than assuming: Spectronaut writes minutes.
+            match raw.attrs.unit_for(attr) {
+                Some(UNIT_SECOND) => v,
+                Some(UNIT_MINUTE) | None => v * 60.0,
+                Some(_) => v * 60.0,
+            }
+        }
+        None => {
+            stats.spectra_without_rt += 1;
+            0.0
+        }
+    };
+
+    let mobility = match raw.attrs.find(MOBILITY_INVERSE_REDUCED) {
+        Some(a) => a.value.parse().unwrap_or(0.0),
+        None => match raw.attrs.find(MOBILITY_DRIFT_TIME) {
+            Some(a) => {
+                stats.spectra_with_drift_time_mobility += 1;
+                a.value.parse().unwrap_or(0.0)
+            }
+            None => 0.0,
+        },
+    };
+
+    let stripped = raw
+        .attrs
+        .find(STRIPPED_SEQ_TERM)
+        .map(|a| a.value.clone())
+        .unwrap_or_default();
+    // The proforma term carries a trailing `/charge` that is not part of the
+    // peptidoform.
+    let modified = raw
+        .attrs
+        .find(PROFORMA_TERM)
+        .map(|a| {
+            a.value
+                .rsplit_once('/')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_else(|| a.value.clone())
+        })
+        .unwrap_or_else(|| stripped.clone());
+    if stripped.is_empty() && modified.is_empty() {
+        return None;
+    }
+
+    let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(raw.peaks.len());
+    let mut intens: Vec<f32> = Vec::with_capacity(raw.peaks.len());
+    let mut unknown_counter: u8 = 0;
+
+    for (observed_mz, intensity, annotation) in &raw.peaks {
+        let (resolved, mass_error) = resolve_annotation(annotation);
+        let label = match resolved {
+            Resolved::Annotated(ion) => {
+                stats.kept_annotated += 1;
+                ion
+            }
+            Resolved::UnknownLabel => {
+                // The ordinal is a per-precursor uniqueness counter. Past 255
+                // there is no way to keep labels distinct, so drop rather than
+                // reuse one.
+                let Some(next) = unknown_counter.checked_add(1) else {
+                    stats.dropped_duplicate_label += 1;
+                    continue;
+                };
+                unknown_counter = next;
+                match IonAnnot::try_new('?', Some(unknown_counter), 1, 0) {
+                    Ok(i) => {
+                        stats.kept_unknown_label += 1;
+                        i
+                    }
+                    Err(_) => {
+                        stats.dropped_duplicate_label += 1;
+                        continue;
+                    }
+                }
+            }
+            Resolved::SkipUnannotated => {
+                stats.skipped_unannotated += 1;
+                continue;
+            }
+            Resolved::SkipAmbiguous => {
+                stats.skipped_ambiguous += 1;
+                continue;
+            }
+        };
+
+        // Peak lists carry observed m/z; the arena wants theoretical.
+        let mz = match mass_error {
+            Some(e) => e.theoretical_from_observed(*observed_mz),
+            None => *observed_mz,
+        };
+
+        // Labels must stay unique within the precursor (`linear_get` is
+        // first-match), so a collision drops the later peak.
+        if frags.iter().any(|(l, _)| *l == label) {
+            stats.dropped_duplicate_label += 1;
+            continue;
+        }
+        frags.push((label, mz));
+        intens.push(*intensity);
+    }
+
+    if frags.is_empty() {
+        stats.dropped_empty_precursors += 1;
+        return None;
+    }
+
+    Some((
+        precursor_mz,
+        charge,
+        rt_seconds as f32,
+        mobility,
+        frags,
+        intens,
+        stripped,
+        modified,
+    ))
+}
+
+/// Cheap probe: the format's magic first line.
+pub fn sniff_mzspeclib_library_file<T: AsRef<Path>>(path: T) -> bool {
+    let Ok(file) = std::fs::File::open(path.as_ref()) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    // Only the first non-empty line is inspected, so this stays O(1) on a
+    // multi-gigabyte library.
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return false,
+            Ok(_) => {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                return t == MAGIC;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Read an mzSpecLib text file into the columnar arena.
+pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
+    path: T,
+) -> Result<LibraryArena, LibraryReadingError> {
+    let path = path.as_ref();
+    let file = std::fs::File::open(path).map_err(LibraryReadingError::IoError)?;
+    let reader = BufReader::new(file);
+
+    let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann_no_decoys());
+    let mut frag_intens: Vec<f32> = Vec::new();
+    let mut stats = MzSpecLibStats::default();
+
+    let mut current: Option<RawSpectrum> = None;
+    let mut in_peaks = false;
+
+    let flush = |cur: Option<RawSpectrum>,
+                 geom: &mut QueryCollection<IonAnnot>,
+                 frag_intens: &mut Vec<f32>,
+                 stats: &mut MzSpecLibStats| {
+        let Some(raw) = cur else { return };
+        let Some((mz, charge, rt, mobility, frags, intens, stripped, modified)) =
+            convert_spectrum(&raw, stats)
+        else {
+            return;
+        };
+        frag_intens.extend_from_slice(&intens);
+        geom.push_row(
+            mz,
+            charge,
+            rt,
+            mobility,
+            &frags,
+            &stripped,
+            &modified,
+            &[],
+            false,
+        );
+    };
+
+    for line in reader.lines() {
+        let line = line.map_err(LibraryReadingError::IoError)?;
+        let trimmed = line.trim_end();
+
+        if trimmed.starts_with("<Spectrum=") {
+            flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
+            current = Some(RawSpectrum::default());
+            in_peaks = false;
+            continue;
+        }
+        if trimmed == "<Peaks>" {
+            in_peaks = true;
+            continue;
+        }
+        // `<Analyte=n>` and `<Interpretation=n>` attributes are folded into the
+        // spectrum's bag: this reader wants the union, not the hierarchy.
+        if trimmed.starts_with('<') {
+            in_peaks = false;
+            continue;
+        }
+        if trimmed.is_empty() {
+            in_peaks = false;
+            continue;
+        }
+
+        let Some(spec) = current.as_mut() else {
+            continue; // library-level header
+        };
+
+        if in_peaks {
+            let mut cols = trimmed.split('\t');
+            let (Some(mz), Some(intensity)) = (cols.next(), cols.next()) else {
+                continue;
+            };
+            let (Ok(mz), Ok(intensity)) =
+                (mz.trim().parse::<f64>(), intensity.trim().parse::<f32>())
+            else {
+                continue;
+            };
+            let annotation = cols.next().unwrap_or("?").to_string();
+            spec.peaks.push((mz, intensity, annotation));
+        } else if let Some(attr) = Attr::parse(trimmed) {
+            spec.attrs.0.push(attr);
+        }
+    }
+    flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
+
+    stats.report(path);
+
+    if geom.n_rows() == 0 {
+        return Err(LibraryReadingError::SpeclibParse(format!(
+            "mzSpecLib {} yielded no usable precursors",
+            path.display()
+        )));
+    }
+    if frag_intens.len() != geom.frag_labels.len() {
+        return Err(LibraryReadingError::SpeclibParse(format!(
+            "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
+            frag_intens.len(),
+            geom.frag_labels.len(),
+        )));
+    }
+
+    geom.seal();
+    Ok(LibraryArena::Mzpaf {
+        geom,
+        frag_intens: Some(frag_intens),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/mzspeclib_io_files")
+            .join(name)
+    }
+
+    #[test]
+    fn sniffs_only_mzspeclib() {
+        assert!(sniff_mzspeclib_library_file(fixture("diann.mzSpecLib.txt")));
+        assert!(sniff_mzspeclib_library_file(fixture(
+            "spectronaut.mzSpecLib.txt"
+        )));
+        // A DIA-NN TSV must not be claimed.
+        let tsv = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/diann_io_files/sample_lib.tsv");
+        assert!(!sniff_mzspeclib_library_file(tsv));
+    }
+
+    #[test]
+    fn reads_diann_export() {
+        let arena = read_mzspeclib_library_file(fixture("diann.mzSpecLib.txt")).unwrap();
+        let LibraryArena::Mzpaf { geom, frag_intens } = arena else {
+            panic!("mzSpecLib must build an mzpaf arena");
+        };
+        assert!(geom.n_rows() > 0);
+        let intens = frag_intens.expect("reference intensities are populated");
+        assert_eq!(intens.len(), geom.frag_labels.len());
+    }
+
+    /// DIA-NN's export writes every mass error as exactly `0.0`, so observed
+    /// and theoretical coincide and the m/z must pass through untouched.
+    #[test]
+    fn zero_mass_error_leaves_mz_unchanged() {
+        let arena = read_mzspeclib_library_file(fixture("diann.mzSpecLib.txt")).unwrap();
+        let LibraryArena::Mzpaf { geom, .. } = arena else {
+            unreachable!()
+        };
+        // First spectrum's first peak in the fixture: 427.22995, annotated b6/0.0
+        let first = geom.frag_mzs[0];
+        assert!(
+            (first - 427.22995).abs() < 1e-6,
+            "expected the observed m/z verbatim, got {first}"
+        );
+    }
+
+    /// Spectronaut's export carries `-H2O`/`-NH3` losses, which the packed
+    /// `IonAnnot` now represents, so they keep their real labels rather than
+    /// falling back to unknown.
+    #[test]
+    fn spectronaut_losses_keep_real_labels() {
+        let arena = read_mzspeclib_library_file(fixture("spectronaut.mzSpecLib.txt")).unwrap();
+        let LibraryArena::Mzpaf { geom, .. } = arena else {
+            unreachable!()
+        };
+        let has_loss = geom
+            .frag_labels
+            .iter()
+            .any(|l| l.loss() != micromzpaf::NeutralLoss::None);
+        assert!(has_loss, "expected at least one loss-bearing label");
+        let unknowns = geom
+            .frag_labels
+            .iter()
+            .filter(|l| l.try_get_ordinal().is_none() && l.loss() == micromzpaf::NeutralLoss::None)
+            .count();
+        assert_eq!(unknowns, 0, "no peak should need an unknown label here");
+    }
+
+    /// RT is unit-tagged; Spectronaut writes minutes and the arena wants
+    /// seconds. Getting this wrong is a silent 60x error.
+    #[test]
+    fn retention_time_honours_its_unit() {
+        let arena = read_mzspeclib_library_file(fixture("spectronaut.mzSpecLib.txt")).unwrap();
+        let LibraryArena::Mzpaf { geom, .. } = arena else {
+            unreachable!()
+        };
+        // Fixture's first spectrum: normalized retention time = 28.658491 min.
+        let rt = geom.rt_seconds[0];
+        assert!(
+            (rt - 28.658491 * 60.0).abs() < 0.01,
+            "expected minutes converted to seconds, got {rt}"
+        );
+    }
+
+    #[test]
+    fn resolves_unambiguous_representable() {
+        let (r, e) = resolve_annotation("y5/-0.0005");
+        assert!(matches!(r, Resolved::Annotated(_)));
+        assert_eq!(e, Some(MassError::Da(-0.0005)));
+    }
+
+    /// Known identity, unrepresentable spelling: keep the peak and the exact
+    /// mass, erase only the label.
+    #[test]
+    fn unrepresentable_loss_keeps_peak_with_unknown_label() {
+        let (r, e) = resolve_annotation("y1-HCOOH/0.0003");
+        assert!(matches!(r, Resolved::UnknownLabel));
+        assert_eq!(
+            e,
+            Some(MassError::Da(0.0003)),
+            "the mass error must survive so theoretical m/z stays exact"
+        );
+    }
+
+    #[test]
+    fn unannotated_peak_is_skipped() {
+        assert!(matches!(
+            resolve_annotation("?").0,
+            Resolved::SkipUnannotated
+        ));
+    }
+
+    /// Closest-by-error wins; if that alternative is unrepresentable the peak
+    /// takes an unknown label rather than falling back to the representable
+    /// one, which would assign a wrong identity and a wrong mass.
+    #[test]
+    fn ambiguity_resolves_to_the_closest_not_the_representable() {
+        // a2 is representable and further; y2-CO2-NH3 is closer and is not.
+        let (r, e) = resolve_annotation("a2/-0.0040,y2-CO2-NH3/-0.0001");
+        assert!(
+            matches!(r, Resolved::UnknownLabel),
+            "the closest alternative wins even when unrepresentable"
+        );
+        assert_eq!(e, Some(MassError::Da(-0.0001)));
+
+        // When the closest one IS representable, it is used.
+        let (r, _) = resolve_annotation("a2/-0.0001,y2-CO2-NH3/-0.0040");
+        assert!(matches!(r, Resolved::Annotated(_)));
+    }
+
+    /// An exact tie pins no identity, so no theoretical m/z exists and the peak
+    /// cannot be stored without mixing observed and theoretical masses.
+    #[test]
+    fn tied_ambiguity_is_skipped() {
+        let (r, _) = resolve_annotation("a2/-0.0004,y2-CO2-NH3/-0.0004");
+        assert!(matches!(r, Resolved::SkipAmbiguous));
+    }
+
+    #[test]
+    fn mass_error_recovers_theoretical() {
+        // Real SpectraST peak: y1 for C-terminal R, observed 175.1184.
+        let e = MassError::Da(-0.0005);
+        assert!((e.theoretical_from_observed(175.1184) - 175.1189).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::tests_support::fixture;
+    use crate::serde::{
+        LibraryArena,
+        read_library_file,
+    };
+
+    /// The public entry point must dispatch mzSpecLib itself. It is sniffed
+    /// before the registry, so a regression here would silently fall through
+    /// to the always-true JSON reader and fail with a generic parse error.
+    #[test]
+    fn public_read_library_file_dispatches_mzspeclib() {
+        for name in ["diann.mzSpecLib.txt", "spectronaut.mzSpecLib.txt"] {
+            let arena = read_library_file(fixture(name))
+                .unwrap_or_else(|e| panic!("{name} must load through the registry: {e:?}"));
+            let LibraryArena::Mzpaf { geom, frag_intens } = arena else {
+                panic!("{name} must land in the mzpaf arena");
+            };
+            assert!(geom.n_rows() > 0, "{name} produced no precursors");
+            assert!(
+                frag_intens.is_some(),
+                "{name} must populate the reference-intensity sidecar"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_support {
+    pub fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/mzspeclib_io_files")
+            .join(name)
+    }
+}

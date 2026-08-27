@@ -13,6 +13,10 @@ use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
 };
+use super::mzspeclib_io::{
+    read_mzspeclib_library_file,
+    sniff_mzspeclib_library_file,
+};
 pub use super::skyline_io::SkylinePrecursorExtras;
 use super::skyline_io::{
     read_library_file as read_skyline_csv,
@@ -525,6 +529,15 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
 
 pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, LibraryReadingError> {
     let path = path.as_ref();
+    // mzSpecLib is sniffed alongside `.speclib` rather than through the
+    // registry: like the DIA-NN binary reader it builds the arena directly
+    // (with the reference-intensity sidecar) instead of going through the
+    // legacy `ElutionGroupCollection`. Its magic first line makes the probe
+    // exact, so an early check cannot steal another format's file.
+    if sniff_mzspeclib_library_file(path) {
+        info!("Dispatching library read to mzspeclib (direct arena build)");
+        return read_mzspeclib_library_file(path);
+    }
     // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
     // reference-intensity sidecar); every other format still produces the legacy
     // `ElutionGroupCollection`, adapted into the arena here. `.speclib` is
