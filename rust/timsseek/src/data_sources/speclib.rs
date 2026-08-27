@@ -24,7 +24,7 @@ use std::path::{
 };
 use timsquery::models::QueryCollection;
 use timsquery::models::capabilities::SeqFeatureState;
-use timsquery::serde::read_library_file as read_timsquery_library;
+use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
 /// The serializable, on-disk form of a native speclib element. Kept backwards

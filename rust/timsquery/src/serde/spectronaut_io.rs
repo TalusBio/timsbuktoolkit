@@ -192,7 +192,7 @@ struct ParsingBuffers {
     fragment_labels: Vec<IonAnnot>,
 }
 
-pub fn read_library_file<T: AsRef<Path>>(
+pub fn read_targets<T: AsRef<Path>>(
     file: T,
 ) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautReadingError>
 {
@@ -415,14 +415,14 @@ mod tests {
     }
 
     #[test]
-    fn test_read_library_file() {
+    fn test_read_targets() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let file_path = PathBuf::from(manifest_dir)
             .join("tests")
             .join("spectronaut_io_files")
             .join("sample_lib.tsv");
 
-        let result = read_library_file(&file_path);
+        let result = read_targets(&file_path);
         assert!(
             result.is_ok(),
             "Failed to read library file: {:?}",
@@ -444,7 +444,7 @@ mod tests {
             .join("spectronaut_io_files")
             .join("sample_lib.tsv");
 
-        let mut elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let mut elution_groups = read_targets(file_path).expect("Failed to read library");
         elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
 
         // First precursor (KTVTAMDVVYALKR) has iRT=44.467922 -> rt_seconds ~ 2668
@@ -482,7 +482,7 @@ mod tests {
             .join("spectronaut_io_files")
             .join("sample_lib.tsv");
 
-        let elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let elution_groups = read_targets(file_path).expect("Failed to read library");
 
         // Find the KTVTAMDVVYALKR precursor (first one)
         let (eg, extras) = &elution_groups[0];
@@ -519,7 +519,7 @@ mod tests {
             .join("spectronaut_io_files")
             .join("sample_lib.tsv");
 
-        let elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let elution_groups = read_targets(file_path).expect("Failed to read library");
 
         for (_, extras) in &elution_groups {
             // All Spectronaut library entries should be targets (not decoys)

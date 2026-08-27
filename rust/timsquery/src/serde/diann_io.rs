@@ -264,7 +264,7 @@ struct ParquetColumnData<'a> {
     decoys: &'a [i64],
 }
 
-pub fn read_library_file<T: AsRef<Path>>(
+pub fn read_targets<T: AsRef<Path>>(
     file: T,
 ) -> Result<Vec<(TimsElutionGroup<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
@@ -768,14 +768,14 @@ mod tests {
     }
 
     #[test]
-    fn test_read_library_file() {
+    fn test_read_targets() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let file_path = PathBuf::from(manifest_dir)
             .join("tests")
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let result = read_library_file(file_path);
+        let result = read_targets(file_path);
         assert!(
             result.is_ok(),
             "Failed to read library file: {:?}",
@@ -817,7 +817,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let mut elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let mut elution_groups = read_targets(file_path).expect("Failed to read library");
         elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
 
         // More specific assertions if we can identify groups by ID or other means:
@@ -857,7 +857,7 @@ mod tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let _elution_groups = read_targets(file_path).expect("Failed to read library");
         // TODO ... implement the actual assertions
     }
 
@@ -877,7 +877,7 @@ mod tests {
         );
 
         // This test mainly checks that the name aliases wotk correctly
-        let _elution_groups = read_library_file(file_path).expect("Failed to read library");
+        let _elution_groups = read_targets(file_path).expect("Failed to read library");
     }
 
     #[test]

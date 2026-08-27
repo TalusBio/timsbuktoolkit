@@ -17,7 +17,7 @@ use timsquery::models::tolerance::{
 };
 use timsquery::serde::{
     LibraryArena,
-    read_library_file,
+    read_targets,
 };
 use timsquery::traits::QueryGeom;
 
@@ -51,7 +51,7 @@ fn write_targets(json: &str) -> tempfile::NamedTempFile {
 #[test]
 fn carafe_target_payload_loads_through_the_public_reader() {
     let f = write_targets(CARAFE_TARGETS);
-    let arena = read_library_file(f.path()).expect("Carafe's target JSON must load");
+    let arena = read_targets(f.path()).expect("Carafe's target JSON must load");
 
     // Labels must resolve to ion annotations, not to the string arena.
     let LibraryArena::Mzpaf { geom, .. } = arena else {
@@ -86,7 +86,7 @@ fn non_sequential_ids_survive_the_reader() {
         "fragments": [200.0], "fragment_labels": ["y2"] }
     ]"#,
     );
-    let arena = read_library_file(f.path()).expect("loads");
+    let arena = read_targets(f.path()).expect("loads");
     let LibraryArena::Mzpaf { geom, .. } = arena else {
         panic!("mzpaf labels")
     };
@@ -109,7 +109,7 @@ fn duplicate_ids_are_rejected_by_the_reader() {
         "fragments": [200.0], "fragment_labels": ["y2"] }
     ]"#,
     );
-    assert!(read_library_file(f.path()).is_err());
+    assert!(read_targets(f.path()).is_err());
 }
 
 /// `id` is Carafe's map key; defaulting it NPEs downstream instead of erroring.
@@ -123,7 +123,7 @@ fn carafe_id_field_is_required() {
     ]"#;
     let f = write_targets(without_id);
     assert!(
-        read_library_file(f.path()).is_err(),
+        read_targets(f.path()).is_err(),
         "a target without `id` must fail rather than default it"
     );
 }

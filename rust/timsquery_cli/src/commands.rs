@@ -110,7 +110,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 /// Reads a spectral library from a given path, funnelling every supported
 /// format into the label-typed columnar [`LibraryArena`].
 pub fn read_query_elution_groups(path: &Path) -> Result<LibraryArena, CliError> {
-    match timsquery::serde::read_library_file(path) {
+    match timsquery::serde::read_targets(path) {
         Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
             "Failed to read elution groups from {}: {:?}",
@@ -402,7 +402,7 @@ mod tests {
     }
 
     /// Regression: extraction readers must NOT expand decoys. An `IonAnnot`/
-    /// mzpaf-labelled library is loaded through the same `read_library_file`
+    /// mzpaf-labelled library is loaded through the same `read_targets`
     /// path the cli uses, and its flat extraction length must equal the number
     /// of stored rows (targets only). Before the reader default was changed to
     /// `DecoyStrategy::None`, the arena carried `LazyMassShift { n_decoys: 2 }`,

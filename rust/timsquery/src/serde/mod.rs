@@ -17,6 +17,6 @@ pub use library_file::{
     SkylinePrecursorExtras,
     SpectronautPrecursorExtras,
     TargetReadingError,
-    read_library_file,
+    read_targets,
 };
 pub use spectronaut_io::LibrarySniffError;

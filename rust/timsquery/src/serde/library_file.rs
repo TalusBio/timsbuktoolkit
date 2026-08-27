@@ -1,7 +1,7 @@
 pub use super::diann_io::DiannPrecursorExtras;
 use super::diann_io::{
-    read_library_file as read_diann_tsv,
     read_parquet_library_file as read_diann_parquet,
+    read_targets as read_diann_tsv,
     sniff_diann_library_file,
     sniff_diann_parquet_library_file,
 };
@@ -15,12 +15,12 @@ use super::elution_group_inputs::{
 };
 pub use super::skyline_io::SkylinePrecursorExtras;
 use super::skyline_io::{
-    read_library_file as read_skyline_csv,
+    read_targets as read_skyline_csv,
     sniff_skyline_library_file,
 };
 pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::spectronaut_io::{
-    read_library_file as read_spectronaut_tsv,
+    read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
 use crate::ion::IonAnnot;
@@ -181,7 +181,7 @@ impl ElutionGroupCollection {
     }
 }
 
-/// The label-typed columnar library store returned by [`read_library_file`].
+/// The label-typed columnar library store returned by [`read_targets`].
 ///
 /// One funnel: every format lands in exactly one variant. DIA-NN family formats
 /// (`.speclib`/TSV/parquet) carry ion-chemistry (`IonAnnot`) labels and land in
@@ -546,7 +546,7 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
     ]
 }
 
-pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, TargetReadingError> {
+pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<LibraryArena, TargetReadingError> {
     let path = path.as_ref();
     // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
     // reference-intensity sidecar); every other format still produces the legacy

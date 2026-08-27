@@ -219,7 +219,7 @@ struct ParsingBuffers {
     fragment_labels: Vec<IonAnnot>,
 }
 
-pub fn read_library_file<T: AsRef<Path>>(
+pub fn read_targets<T: AsRef<Path>>(
     file: T,
 ) -> Result<Vec<(TimsElutionGroup<IonAnnot>, SkylinePrecursorExtras)>, SkylineReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
@@ -445,9 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn test_read_library_file() {
-        let elution_groups =
-            read_library_file(fixture_path()).expect("Failed to read Skyline library");
+    fn test_read_targets() {
+        let elution_groups = read_targets(fixture_path()).expect("Failed to read Skyline library");
 
         // Fixture has 14 distinct PRTC peptides
         assert_eq!(elution_groups.len(), 14, "Expected 14 elution groups");
@@ -470,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_precursor_isotope_rows_are_skipped() {
-        let elution_groups = read_library_file(fixture_path()).expect("Failed to read library");
+        let elution_groups = read_targets(fixture_path()).expect("Failed to read library");
 
         // SSAAPPPPPR has 3 precursor rows + 4 y fragments in the fixture
         let ssaa = elution_groups
@@ -487,7 +486,7 @@ mod tests {
     #[test]
     fn test_library_intensity_na_handling() {
         // All intensities in the fixture are #N/A -> default to 1.0
-        let elution_groups = read_library_file(fixture_path()).expect("Failed to read library");
+        let elution_groups = read_targets(fixture_path()).expect("Failed to read library");
         for (_, extras) in &elution_groups {
             for (_lab, intensity) in &extras.relative_intensities {
                 assert!(

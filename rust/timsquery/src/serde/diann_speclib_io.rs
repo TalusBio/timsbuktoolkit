@@ -1053,9 +1053,9 @@ mod tests {
     }
 
     #[test]
-    fn test_read_library_file_yields_mzpaf_arena_with_parallel_intensities() {
-        use crate::serde::read_library_file;
-        let arena = read_library_file(fixture_path()).expect("read .speclib as a LibraryArena");
+    fn test_read_targets_yields_mzpaf_arena_with_parallel_intensities() {
+        use crate::serde::read_targets;
+        let arena = read_targets(fixture_path()).expect("read .speclib as a LibraryArena");
         match arena {
             LibraryArena::Mzpaf { geom, frag_intens } => {
                 assert!(geom.n_rows() > 0, "arena must hold precursors");
