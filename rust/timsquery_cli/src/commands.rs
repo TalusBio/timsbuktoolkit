@@ -544,12 +544,13 @@ mod carafe_output_contract {
       "fragment_mzs":[175.1,288.2], "fragment_intensities":[500,0]
     }"#;
 
-    /// README, "chromatogram-aggregator -> XICQueryResult".
+    /// README, "chromatogram-aggregator -> XICQueryResult". Matrices are
+    /// `[ion][rt_point]`, so every row is as long as the RT array.
     const CARAFE_CHROMATOGRAM_RESULT: &str = r#"{
       "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5,
-      "precursor_mzs":[650.32,650.82], "precursor_intensities":[[1.0],[2.0]],
+      "precursor_mzs":[650.32,650.82], "precursor_intensities":[[1.0,2.0],[3.0,4.0]],
       "fragment_mzs":[175.1,288.2], "fragment_labels":["y1","b2"],
-      "fragment_intensities":[[3.0],[4.0]], "retention_time_results_seconds":[1230,1231]
+      "fragment_intensities":[[5.0,6.0],[7.0,8.0]], "retention_time_results_seconds":[1230,1231]
     }"#;
 
     /// Deserialized rather than constructed: both types are otherwise only
@@ -589,8 +590,10 @@ mod carafe_output_contract {
     /// `precursor_mzs`) is deliberate — two schemas, not a typo.
     #[test]
     fn spectrum_results_are_ndjson_with_the_contract_field_names() {
-        let records: Vec<SpectrumOutput> =
-            vec![parse(CARAFE_SPECTRUM_RESULT), parse(CARAFE_SPECTRUM_RESULT)];
+        // Two records with distinct ids: framing must not depend on there
+        // being exactly one, and `id` must survive the round trip.
+        let second = CARAFE_SPECTRUM_RESULT.replace("\"id\":0", "\"id\":1");
+        let records: Vec<SpectrumOutput> = vec![parse(CARAFE_SPECTRUM_RESULT), parse(&second)];
         let out = write_results(&records, SerializationFormat::Ndjson);
 
         assert!(!out.starts_with('['), "no array wrapper: {out}");
@@ -602,7 +605,7 @@ mod carafe_output_contract {
             "ndjson must not be pretty-printed: {out}"
         );
 
-        for line in lines {
+        for (i, line) in lines.iter().enumerate() {
             assert_eq!(
                 keys_of(line),
                 [
@@ -617,6 +620,11 @@ mod carafe_output_contract {
                     "rt_seconds",
                 ]
             );
+            let value: serde_json::Value = serde_json::from_str(line).expect("one object");
+            assert_eq!(
+                value["id"], i,
+                "invariant 1: `id` is echoed, not renumbered"
+            );
         }
     }
 
@@ -628,6 +636,34 @@ mod carafe_output_contract {
         assert!(!out.starts_with('['), "no array wrapper: {out}");
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 1);
+
+        // Invariant 4: matrices are `[ion][rt_point]`, one row per m/z, every
+        // row as long as the RT array. A transposed writer still round-trips
+        // the field names, so this is the only thing that catches it.
+        let value: serde_json::Value = serde_json::from_str(lines[0]).expect("one object");
+        let n_rt = value["retention_time_results_seconds"]
+            .as_array()
+            .expect("rt array")
+            .len();
+        for (mzs, intensities) in [
+            ("precursor_mzs", "precursor_intensities"),
+            ("fragment_mzs", "fragment_intensities"),
+        ] {
+            let rows = value[intensities].as_array().expect(intensities);
+            assert_eq!(
+                rows.len(),
+                value[mzs].as_array().expect(mzs).len(),
+                "{intensities} needs one row per {mzs}"
+            );
+            for row in rows {
+                assert_eq!(
+                    row.as_array().expect("a row").len(),
+                    n_rt,
+                    "{intensities} rows must be as long as the RT array"
+                );
+            }
+        }
+
         assert_eq!(
             keys_of(lines[0]),
             [
