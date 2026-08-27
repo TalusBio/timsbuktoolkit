@@ -37,6 +37,12 @@ use crate::error::CliError;
 use crate::processing::AggregatorContainer;
 use timsquery::serde::LibraryArena;
 
+/// Basename Carafe looks for inside the `-o` directory. Part of the contract
+/// (`docs/CARAFE_CONTRACT.md`, invariant 5), so it is named rather than
+/// inlined — a renamed output file is a silent failure on Carafe's side.
+/// Despite the extension, the contents are ndjson.
+pub const CARAFE_RESULTS_BASENAME: &str = "results.json";
+
 /// Main function for the 'query-index' subcommand.
 #[instrument]
 pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
@@ -71,7 +77,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     let batch_size = args.batch_size;
 
     std::fs::create_dir_all(&output_path)?;
-    let put_path = output_path.join("results.json");
+    let put_path = output_path.join(CARAFE_RESULTS_BASENAME);
 
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
@@ -514,5 +520,123 @@ mod tests {
             assert_eq!(point.fragment_mzs.len(), q.fragment_count());
             let _spectrum: SpectralCollector<_, f32> = SpectralCollector::new(&q);
         }
+    }
+}
+
+/// The OUTPUT half of `docs/CARAFE_CONTRACT.md`.
+///
+/// `rust/timsquery/tests/carafe_contract.rs` pins the input direction. These
+/// live here rather than in `tests/` because `timsquery_cli` has no library
+/// target, and they assert on the boundary types Carafe parses with fastjson:
+/// no remap, no schema negotiation, so a renamed field is a null on their side
+/// and an NPE somewhere unrelated.
+#[cfg(test)]
+mod carafe_output_contract {
+    use super::*;
+    use crate::cli::{
+        PossibleAggregator,
+        SerializationFormat,
+    };
+    use crate::processing::SpectrumOutput;
+    use clap::ValueEnum;
+    use timsquery::serde::chromatogram_output::ChromatogramOutput;
+
+    /// Round-trip a contract payload through the real type and hand back the
+    /// key set it serializes to. Deserializing first means a renamed field
+    /// fails here without needing a constructor for these types.
+    fn key_set<T: serde::Serialize + serde::de::DeserializeOwned>(json: &str) -> Vec<String> {
+        let parsed: T = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("the contract's payload must deserialize: {e}"));
+        let value = serde_json::to_value(&parsed).expect("serializable");
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Verbatim from the contract's "spectrum-aggregator -> PSMQueryResult".
+    const CARAFE_SPECTRUM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5, "precursor_mz":650.32,
+      "precursor_charge":2, "precursor_intensities":[1200,800,300], "precursor_labels":[0,1,2],
+      "fragment_mzs":[175.1,288.2], "fragment_intensities":[500,0]
+    }"#;
+
+    /// Verbatim from the contract's "chromatogram-aggregator -> XICQueryResult".
+    const CARAFE_CHROMATOGRAM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5,
+      "precursor_mzs":[650.32,650.82], "precursor_intensities":[[1.0],[2.0]],
+      "fragment_mzs":[175.1,288.2], "fragment_labels":["y1","b2"],
+      "fragment_intensities":[[3.0],[4.0]], "retention_time_results_seconds":[1230,1231]
+    }"#;
+
+    /// Contract invariant 3. Note the deliberate singular/plural split between
+    /// the two modes (`precursor_mz` vs `precursor_mzs`): they are two schemas,
+    /// and "unifying" them would break Carafe without failing anything else.
+    #[test]
+    fn spectrum_output_emits_exactly_the_contract_field_names() {
+        assert_eq!(
+            key_set::<SpectrumOutput>(CARAFE_SPECTRUM_RESULT),
+            [
+                "fragment_intensities",
+                "fragment_mzs",
+                "id",
+                "mobility_ook0",
+                "precursor_charge",
+                "precursor_intensities",
+                "precursor_labels",
+                "precursor_mz",
+                "rt_seconds",
+            ]
+        );
+    }
+
+    #[test]
+    fn chromatogram_output_emits_exactly_the_contract_field_names() {
+        assert_eq!(
+            key_set::<ChromatogramOutput>(CARAFE_CHROMATOGRAM_RESULT),
+            [
+                "fragment_intensities",
+                "fragment_labels",
+                "fragment_mzs",
+                "id",
+                "mobility_ook0",
+                "precursor_intensities",
+                "precursor_mzs",
+                "retention_time_results_seconds",
+                "rt_seconds",
+            ]
+        );
+    }
+
+    /// The `-a` and `-f` values Carafe passes on the command line. clap derives
+    /// these from the variant names, so a rename silently changes the CLI.
+    #[test]
+    fn aggregator_and_format_flag_values_match_the_contract() {
+        fn name<T: ValueEnum>(v: T) -> String {
+            v.to_possible_value()
+                .expect("not skipped")
+                .get_name()
+                .to_string()
+        }
+
+        assert_eq!(
+            name(PossibleAggregator::SpectrumAggregator),
+            "spectrum-aggregator"
+        );
+        assert_eq!(
+            name(PossibleAggregator::ChromatogramAggregator),
+            "chromatogram-aggregator"
+        );
+        assert_eq!(name(SerializationFormat::Ndjson), "ndjson");
+    }
+
+    /// Contract invariant 5.
+    #[test]
+    fn the_results_basename_is_what_carafe_looks_for() {
+        assert_eq!(CARAFE_RESULTS_BASENAME, "results.json");
     }
 }

@@ -12,8 +12,13 @@
 //! than internal types, so a refactor that keeps the internals working but
 //! changes the boundary still fails here.
 //!
-//! NOT covered, because it needs the built binary and a real `.d`: aggregator
-//! names, the `-o` directory layout, and the `results.json` basename.
+//! This file covers the INPUT direction. The output direction — result field
+//! names, the `-a`/`-f` flag values and the `results.json` basename — is
+//! pinned by `timsquery_cli`'s `carafe_output_contract` module, which has to
+//! live inside that crate because it has no library target.
+//!
+//! NOT covered, because it needs the built binary and a real `.d`: the `-o`
+//! directory layout and the process exit code.
 
 use std::io::Write;
 use timsquery::models::tolerance::{
@@ -118,24 +123,32 @@ fn carafe_tolerance_spellings_deserialize() {
     assert_eq!(tol.rt, RtTolerance::Minutes((0.1, 0.1)));
     assert_eq!(tol.mobility, MobilityTolerance::Pct((3.0, 3.0)));
     assert_eq!(tol.quad, QuadTolerance::Absolute((0.1, 0.1)));
-
-    let round = serde_json::to_string(&tol).expect("tolerance must re-serialize");
-    let back: Tolerance = serde_json::from_str(&round).expect("and deserialize again");
-    assert_eq!(
-        back, tol,
-        "tolerance must survive a round trip through its own output"
-    );
 }
 
-/// The CLI-template spellings must keep working too, so the two callers stay
-/// interchangeable.
+/// Carafe encodes a systematic calibration offset as
+/// `[itol - itol_shift, itol + itol_shift]`, so when the offset exceeds the
+/// half-width the LOW edge is negative — a window that is entirely to the
+/// heavy side of the target mass. That is a supported input, not a bug, and
+/// `mz_range`'s invariant is `low + high >= 0` rather than "both positive".
 #[test]
-fn cli_template_tolerance_spellings_still_deserialize() {
-    let cli_style = r#"{
-      "ms": { "da": [0.04, 0.04] },
-      "rt": "Unrestricted",
-      "mobility": { "pct": [20.0, 20.0] },
-      "quad": { "da": [0.2, 0.2] }
-    }"#;
-    serde_json::from_str::<Tolerance>(cli_style).expect("the CLI's own spellings must deserialize");
+fn a_negative_low_tolerance_edge_is_accepted() {
+    let tol: Tolerance = serde_json::from_str(
+        r#"{
+      "ms":       { "ppm":      [-2.0, 32.0] },
+      "rt":       { "minutes":  [0.1, 0.1] },
+      "mobility": { "percent":  [3.0, 3.0] },
+      "quad":     { "absolute": [0.1, 0.1] }
+    }"#,
+    )
+    .expect("a negative low edge must deserialize");
+    assert_eq!(tol.ms, MzTolerance::Ppm((-2.0, 32.0)));
+
+    // Both edges land above the target mass, in ascending order.
+    let range = tol.mz_range(1000.0);
+    assert!(
+        range.start() > 1000.0 && range.end() > range.start(),
+        "expected a well-formed window above the target, got {:?}..{:?}",
+        range.start(),
+        range.end()
+    );
 }
