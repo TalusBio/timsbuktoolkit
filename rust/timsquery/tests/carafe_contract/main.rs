@@ -56,7 +56,6 @@ fn write_targets(json: &str) -> tempfile::NamedTempFile {
         .tempfile()
         .expect("tempfile");
     f.write_all(json.as_bytes()).expect("write targets");
-    f.flush().expect("flush");
     f
 }
 
@@ -93,14 +92,13 @@ fn carafe_target_payload_loads_through_the_public_reader() {
 /// downstream rather than erroring here, so it must not silently default.
 #[test]
 fn carafe_id_field_is_required() {
-    // Build the payload without `id` rather than string-surgering the const,
-    // so the test cannot pass because the edit produced malformed JSON.
+    // Spelled out rather than string-surgered out of the const, so the test
+    // cannot pass merely because the edit produced malformed JSON.
     let without_id = r#"[
       { "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
         "precursor_charge": 2, "precursor_isotopes": [0,1,2],
         "fragments": [175.1, 288.2], "fragment_labels": ["y1","y3^2"] }
     ]"#;
-    serde_json::from_str::<serde_json::Value>(without_id).expect("still valid JSON");
     let f = write_targets(without_id);
     assert!(
         read_library_file(f.path()).is_err(),

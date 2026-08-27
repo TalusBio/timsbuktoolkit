@@ -528,9 +528,8 @@ mod tests {
 ///
 /// These live here rather than alongside it because `timsquery_cli` has no
 /// library target, and they assert on the boundary types Carafe parses with
-/// fastjson:
-/// no remap, no schema negotiation, so a renamed field is a null on their side
-/// and an NPE somewhere unrelated.
+/// fastjson: no remap, no schema negotiation, so a renamed field is a null on
+/// their side and an NPE somewhere unrelated.
 #[cfg(test)]
 mod carafe_output_contract {
     use super::*;
