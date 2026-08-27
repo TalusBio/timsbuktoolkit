@@ -393,7 +393,7 @@ impl ElutionGroupData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use timsquery::models::QueryCollection;
+    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::TargetCapabilities;
     use timsquery::utils::constants::PROTON_MASS;
     use timsseek::fragment_mass::isotope_dist_or_averagine;
@@ -402,7 +402,7 @@ mod tests {
     /// uncountable composition (`B` is not a real residue), forcing the
     /// averagine isotope path.
     fn uncountable_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             600.0,
             1,

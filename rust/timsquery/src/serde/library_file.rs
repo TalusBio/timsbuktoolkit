@@ -26,9 +26,9 @@ use super::spectronaut_io::{
 use crate::ion::IonAnnot;
 use crate::models::{
     LibraryId,
-    QueryCollection,
     SourceIdError,
     TargetCapabilities,
+    TargetColumns,
 };
 use crate::{
     KeyLike,
@@ -196,11 +196,11 @@ impl ElutionGroupCollection {
 /// ignores it.
 pub enum TargetTable {
     Mzpaf {
-        geom: QueryCollection<IonAnnot>,
+        geom: TargetColumns<IonAnnot>,
         frag_intens: Option<Vec<f32>>,
     },
     Str {
-        geom: QueryCollection<Arc<str>>,
+        geom: TargetColumns<Arc<str>>,
     },
 }
 
@@ -280,7 +280,7 @@ impl TargetTable {
         }
 
         let mut geom =
-            QueryCollection::with_capabilities(TargetCapabilities::default_diann_no_decoys());
+            TargetColumns::with_capabilities(TargetCapabilities::default_diann_no_decoys());
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
@@ -345,9 +345,8 @@ impl TargetTable {
                 Self::mzpaf_with_intensities(egs, extras)
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
-                let mut geom = QueryCollection::with_capabilities(
-                    TargetCapabilities::default_diann_no_decoys(),
-                );
+                let mut geom =
+                    TargetColumns::with_capabilities(TargetCapabilities::default_diann_no_decoys());
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
@@ -373,7 +372,7 @@ impl TargetTable {
                 // String-labelled arenas carry no ion chemistry and ship no
                 // decoys: sequence/fragment features unavailable, decoys off.
                 let mut geom =
-                    QueryCollection::with_capabilities(TargetCapabilities::default_unlabeled());
+                    TargetColumns::with_capabilities(TargetCapabilities::default_unlabeled());
                 for eg in &egs {
                     let frags: Vec<(Arc<str>, f64)> = eg
                         .iter_fragments()
@@ -407,7 +406,7 @@ impl TargetTable {
 /// Only this path has one: the tabular readers identify precursors by string
 /// (DIA-NN's `transition_group_id`) or not at all, and neither is stored yet.
 fn set_source_ids_from<L: KeyLike, T: KeyLike>(
-    geom: &mut QueryCollection<L>,
+    geom: &mut TargetColumns<L>,
     egs: &[TimsElutionGroup<T>],
 ) -> Result<(), TargetReadingError> {
     let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();

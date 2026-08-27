@@ -14,7 +14,7 @@
 //!   2. Emit ([`SpecLib`] + [`EntryIter`]): a pull parser that walks the
 //!      variable-length envelope and yields one [`EntryView`] per precursor.
 //!   3. Map ([`map_entry`]): [`EntryView`] -> rows pushed directly into a
-//!      columnar `QueryCollection<IonAnnot>` (plus a parallel reference-intensity
+//!      columnar `TargetColumns<IonAnnot>` (plus a parallel reference-intensity
 //!      sidecar). This is where the ion-type table, dedup, and drop stats live.
 //!
 //! The `Fragment`/`Peptide` split falls out of the layout: a `Product` is a
@@ -31,8 +31,8 @@ use super::library_file::{
 };
 use crate::ion::IonAnnot;
 use crate::models::{
-    QueryCollection,
     TargetCapabilities,
+    TargetColumns,
 };
 use std::fs::File;
 use std::io::Read;
@@ -470,7 +470,7 @@ impl SpecLib {
         // Phase B: parallel parse + map straight into per-worker arena shards,
         // concatenated back into file order. `try_fold`/`try_reduce`
         // short-circuit on the first error and, on an indexed iterator, preserve
-        // file order. Each worker owns a `(QueryCollection, frag_intens)` shard
+        // file order. Each worker owns a `(TargetColumns, frag_intens)` shard
         // it pushes rows into; the reduce step concatenates shards with
         // `append_arena` (which rebases every CSR offset). The 4th accumulator
         // slot is a per-worker dedup scratch buffer reused across every entry
@@ -481,7 +481,7 @@ impl SpecLib {
             .try_fold(
                 || {
                     (
-                        QueryCollection::with_capabilities(
+                        TargetColumns::with_capabilities(
                             TargetCapabilities::default_diann_no_decoys(),
                         ),
                         Vec::<f32>::new(),
@@ -502,7 +502,7 @@ impl SpecLib {
             .try_reduce(
                 || {
                     (
-                        QueryCollection::with_capabilities(
+                        TargetColumns::with_capabilities(
                             TargetCapabilities::default_diann_no_decoys(),
                         ),
                         Vec::<f32>::new(),
@@ -629,7 +629,7 @@ fn residue_count(stripped: &str) -> usize {
 ///
 /// `dst.caps` is preserved (all shards share `default_diann_no_decoys`), so merging an
 /// empty identity in either position is a no-op on capabilities.
-fn append_arena(dst: &mut QueryCollection<IonAnnot>, mut src: QueryCollection<IonAnnot>) {
+fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnnot>) {
     // Bases captured BEFORE the backing arenas are appended.
     let frag_base = dst.frag_labels.len();
     let strip_base = dst.seq_strip_blob.len();
@@ -656,7 +656,7 @@ fn append_arena(dst: &mut QueryCollection<IonAnnot>, mut src: QueryCollection<Io
 
     // CSR offset arrays carry a leading 0; skip it and rebase the remainder onto
     // the running arena length. `try_from` mirrors the checked pushes in
-    // `QueryCollection` — an overflow fails loud rather than wrapping an offset.
+    // `TargetColumns` — an overflow fails loud rather than wrapping an offset.
     dst.frag_off.extend(src.frag_off[1..].iter().map(|&o| {
         u32::try_from(o as usize + frag_base).expect("fragment arena exceeds u32 offset range")
     }));
@@ -684,7 +684,7 @@ fn append_arena(dst: &mut QueryCollection<IonAnnot>, mut src: QueryCollection<Io
 /// worker) so the per-entry dedup pass allocates nothing; it is cleared on entry.
 fn map_entry(
     entry: EntryView,
-    geom: &mut QueryCollection<IonAnnot>,
+    geom: &mut TargetColumns<IonAnnot>,
     frag_intens: &mut Vec<f32>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
@@ -838,12 +838,7 @@ fn map_entry(
 
 /// The built arena, its parallel reference-intensity sidecar, drop statistics,
 /// and whether parsing landed exactly on EOF.
-type ParsedSpeclib = (
-    QueryCollection<IonAnnot>,
-    Vec<f32>,
-    SpeclibDecodeStats,
-    bool,
-);
+type ParsedSpeclib = (TargetColumns<IonAnnot>, Vec<f32>, SpeclibDecodeStats, bool);
 
 /// Parse a whole `.speclib`. A `false` in the returned EOF flag signals a
 /// structural desync.

@@ -22,7 +22,7 @@ use std::path::{
     Path,
     PathBuf,
 };
-use timsquery::models::QueryCollection;
+use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
 use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
@@ -175,7 +175,7 @@ fn strip_mods(s: &str) -> String {
 /// Summary of a [`finalize_reference_library`] call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
-    /// Physical stored rows (pre decoy expansion), i.e. `QueryCollection::n_rows`.
+    /// Physical stored rows (pre decoy expansion), i.e. `TargetColumns::n_rows`.
     pub n_rows: usize,
     pub n_averagine_fallback: usize,
     pub sequence_features: SeqFeatureState,
@@ -197,7 +197,7 @@ pub struct LoadReport {
 /// disables sequence-derived features library-wide. The same pass counts
 /// averagine isotope fallbacks for the returned `LoadReport`.
 fn finalize_reference_library(
-    mut geom: QueryCollection<IonAnnot>,
+    mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
     policy: crate::models::DecoyPolicy,
 ) -> (ReferenceLibrary, LoadReport) {
@@ -541,7 +541,7 @@ impl Speclib {
         // scoring items into an intermediate Vec. Each element's fragment labels/mzs/
         // intensities are parallel vectors in the native format, so the
         // reference-intensity sidecar is filled in fragment-push order.
-        let mut geom = QueryCollection::with_capabilities(
+        let mut geom = TargetColumns::with_capabilities(
             timsquery::models::TargetCapabilities::default_diann(),
         );
         let mut frag_intens: Vec<f32> = Vec::new();
@@ -1271,11 +1271,11 @@ mod tests {
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
-        use timsquery::models::QueryCollection;
+        use timsquery::models::TargetColumns;
         use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::TargetTable;
 
-        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,

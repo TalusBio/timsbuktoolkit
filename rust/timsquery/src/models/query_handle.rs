@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-use crate::models::QueryCollection;
+use crate::models::TargetColumns;
 use crate::models::capabilities::{
     DecoyStrategy,
     IsotopeStrategy,
@@ -13,7 +13,7 @@ use crate::traits::{
 };
 use crate::utils::constants::C13_C12_MASS_DIFF;
 
-/// Flyweight handle over a `QueryCollection` arena: `lib` borrows (or owns via
+/// Flyweight handle over a `TargetColumns` arena: `lib` borrows (or owns via
 /// `Arc`) the arena, `handle` packs the target index and decoy variant. No
 /// decoy geometry is stored anywhere; variants 1/2 compute a ±CH2 mass shift
 /// on the fly from `TargetCapabilities::decoys`.
@@ -24,7 +24,7 @@ pub struct Query<Lib, L> {
     _label: PhantomData<L>,
 }
 
-pub type QueryRef<'a, L> = Query<&'a QueryCollection<L>, L>;
+pub type QueryRef<'a, L> = Query<&'a TargetColumns<L>, L>;
 
 impl<Lib, L> Query<Lib, L> {
     pub const VARIANT_BITS: u32 = 2;
@@ -48,8 +48,8 @@ impl<Lib, L> Query<Lib, L> {
     }
 }
 
-impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> Query<Lib, L> {
-    pub fn geom(&self) -> &QueryCollection<L> {
+impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, L> {
+    pub fn geom(&self) -> &TargetColumns<L> {
         &self.lib
     }
 
@@ -82,7 +82,7 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> Query<Lib
     }
 }
 
-impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
+impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
     type Label = L;
 
     fn source_id(&self) -> Option<crate::models::LibraryId> {
@@ -154,12 +154,12 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom
 mod tests {
     use super::*;
     use crate::IonAnnot;
-    use crate::models::QueryCollection;
+    use crate::models::TargetColumns;
     use crate::models::capabilities::*;
     use crate::traits::QueryGeom;
 
-    fn one_target_lib() -> QueryCollection<IonAnnot> {
-        let mut c = QueryCollection::with_capabilities(TargetCapabilities {
+    fn one_target_lib() -> TargetColumns<IonAnnot> {
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities {
             sequence_features: SeqFeatureState::Available,
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
@@ -238,13 +238,12 @@ mod tests {
     #[test]
     fn string_flyweight_never_shifts() {
         use std::sync::Arc;
-        let mut c: QueryCollection<Arc<str>> =
-            QueryCollection::with_capabilities(TargetCapabilities {
-                sequence_features: SeqFeatureState::Available,
-                fragment_features: FragmentFeatureState::Available,
-                isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-                decoys: DecoyStrategy::None,
-            });
+        let mut c: TargetColumns<Arc<str>> = TargetColumns::with_capabilities(TargetCapabilities {
+            sequence_features: SeqFeatureState::Available,
+            fragment_features: FragmentFeatureState::Available,
+            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
+            decoys: DecoyStrategy::None,
+        });
         c.push_row(
             500.0,
             2,

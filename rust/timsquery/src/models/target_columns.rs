@@ -43,7 +43,7 @@ pub struct ModDefinition {
 }
 
 #[derive(Debug, Clone)]
-pub struct QueryCollection<L: KeyLike> {
+pub struct TargetColumns<L: KeyLike> {
     pub caps: TargetCapabilities,
     // per-target scalars, len = n_rows (the arena position IS the row index;
     // any caller-supplied id lives in `source_ids`)
@@ -72,7 +72,7 @@ pub struct QueryCollection<L: KeyLike> {
     pub mod_registry: Vec<ModDefinition>,
 }
 
-impl<L: KeyLike> QueryCollection<L> {
+impl<L: KeyLike> TargetColumns<L> {
     pub fn with_capabilities(caps: TargetCapabilities) -> Self {
         Self {
             caps,
@@ -265,7 +265,7 @@ pub fn variants_per_row_for(decoys: DecoyStrategy) -> usize {
     }
 }
 
-impl<L: KeyLike + DecoyShift> QueryCollection<L> {
+impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// Variants each stored row expands into (see [`variants_per_row_for`]).
     pub fn variants_per_row(&self) -> usize {
         variants_per_row_for(self.caps.decoys)
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
-        let mut c = QueryCollection::with_capabilities(TargetCapabilities::default_diann()); // LazyMassShift n=2
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann()); // LazyMassShift n=2
         c.push_target(
             500.0,
             2,
@@ -341,7 +341,7 @@ mod tests {
     fn passthrough_is_one_variant_per_row_honoring_is_decoy() {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = DecoyStrategy::Passthrough;
-        let mut c = QueryCollection::with_capabilities(caps);
+        let mut c = TargetColumns::with_capabilities(caps);
         c.push_row(
             500.0,
             2,
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn csr_ranges_recover_per_target_fragments() {
-        let mut c = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         // target 0: 2 frags; target 1: 3 frags
         c.push_target(
             // precursor_mz
@@ -422,8 +422,8 @@ mod tests {
     #[test]
     fn string_labeled_collection_and_is_decoy() {
         use std::sync::Arc;
-        let mut c: QueryCollection<Arc<str>> =
-            QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut c: TargetColumns<Arc<str>> =
+            TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(
             500.0,
             2,

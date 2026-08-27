@@ -16,8 +16,8 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::models::{
-    QueryCollection,
     QueryRef,
+    TargetColumns,
 };
 use timsquery::serde::load_index_auto;
 use timsquery::traits::DecoyShift;
@@ -245,7 +245,7 @@ impl<W: Write> JsonStreamSerializer<W> {
 /// share one path.
 #[instrument(skip_all)]
 pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
-    geom: &QueryCollection<L>,
+    geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
@@ -317,7 +317,7 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
 /// data is copied) and feeds them to the extraction collectors.
 #[instrument(skip_all)]
 pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
-    geom: &QueryCollection<L>,
+    geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,

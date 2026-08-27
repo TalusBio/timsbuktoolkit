@@ -10,7 +10,7 @@ use timsquery::models::capabilities::{
 };
 use timsquery::models::{
     Query,
-    QueryCollection,
+    TargetColumns,
 };
 use timsquery::traits::QueryGeom;
 use timsquery::utils::constants::PROTON_MASS;
@@ -21,7 +21,7 @@ use crate::models::sequence::Peptide;
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
-    pub geom: QueryCollection<IonAnnot>,
+    pub geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     pub frag_intens: Vec<f32>,
 }
@@ -36,7 +36,7 @@ pub trait ExpectedIntensity {
 #[derive(Clone, Copy)]
 pub struct RefQuery<'a> {
     lib: &'a ReferenceLibrary,
-    geom: Query<&'a QueryCollection<IonAnnot>, IonAnnot>,
+    geom: Query<&'a TargetColumns<IonAnnot>, IonAnnot>,
 }
 
 impl ReferenceLibrary {
@@ -102,7 +102,7 @@ impl<'a> RefQuery<'a> {
         }
     }
 
-    pub fn geom(&self) -> &Query<&'a QueryCollection<IonAnnot>, IonAnnot> {
+    pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
         &self.geom
     }
 
@@ -252,11 +252,11 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
-    use timsquery::models::QueryCollection;
+    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -279,10 +279,10 @@ mod tests {
 
     #[test]
     fn target_table_narrows_to_reference_library() {
-        use timsquery::models::QueryCollection;
+        use timsquery::models::TargetColumns;
         use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::TargetTable;
-        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -301,8 +301,8 @@ mod tests {
         let lib: ReferenceLibrary = arena.try_into().unwrap();
         assert_eq!(lib.frag_intens.len(), 1);
 
-        let mut sgeom: QueryCollection<std::sync::Arc<str>> =
-            QueryCollection::with_capabilities(TargetCapabilities::default_diann());
+        let mut sgeom: TargetColumns<std::sync::Arc<str>> =
+            TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         sgeom.seal();
         let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
