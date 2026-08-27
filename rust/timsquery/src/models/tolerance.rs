@@ -94,15 +94,10 @@ impl Tolerance {
     // M/Z Tolerance Methods
     // ============================================================================
 
-    /// Panic message for an inverted m/z window.
-    ///
     /// The range is `(mz - low, mz + high)`, so it is well-formed whenever
-    /// `low + high >= 0` — not only when both are positive. A negative `low` is
-    /// a supported input: Carafe encodes a systematic calibration offset as
-    /// `[itol - itol_shift, itol + itol_shift]` and emits e.g.
-    /// `{"ppm": [-2.0, 32.0]}` when the offset exceeds the half-width. Their
-    /// sum is `2 * itol`, so the window stays valid for any positive tolerance.
-    /// See `rust/timsquery/tests/carafe_contract/README.md`.
+    /// `low + high >= 0`, not only when both are positive. Carafe sends a
+    /// negative `low` to encode a calibration offset; see
+    /// `rust/timsquery/tests/carafe_contract/README.md`.
     const MZ_RANGE_INVARIANT: &str =
         "m/z tolerance produced an inverted range: low + high must be >= 0";
 
