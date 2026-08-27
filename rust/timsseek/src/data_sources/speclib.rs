@@ -542,8 +542,9 @@ impl Speclib {
         // scoring items into an intermediate Vec. Each element's fragment labels/mzs/
         // intensities are parallel vectors in the native format, so the
         // reference-intensity sidecar is filled in fragment-push order.
-        let mut geom =
-            QueryCollection::with_capabilities(timsquery::models::LibCapabilities::default_diann());
+        let mut geom = QueryCollection::with_capabilities(
+            timsquery::models::TargetCapabilities::default_diann(),
+        );
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for elem in reader {
@@ -1272,10 +1273,10 @@ mod tests {
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
         use timsquery::models::QueryCollection;
-        use timsquery::models::capabilities::LibCapabilities;
+        use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::LibraryArena;
 
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,

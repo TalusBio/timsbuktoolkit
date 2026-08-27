@@ -16,7 +16,7 @@ use crate::utils::constants::C13_C12_MASS_DIFF;
 /// Flyweight handle over a `QueryCollection` arena: `lib` borrows (or owns via
 /// `Arc`) the arena, `handle` packs the target index and decoy variant. No
 /// decoy geometry is stored anywhere; variants 1/2 compute a ±CH2 mass shift
-/// on the fly from `LibCapabilities::decoys`.
+/// on the fly from `TargetCapabilities::decoys`.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<Lib, L> {
     lib: Lib,
@@ -159,7 +159,7 @@ mod tests {
     use crate::traits::QueryGeom;
 
     fn one_target_lib() -> QueryCollection<IonAnnot> {
-        let mut c = QueryCollection::with_capabilities(LibCapabilities {
+        let mut c = QueryCollection::with_capabilities(TargetCapabilities {
             sequence_features: SeqFeatureState::Available,
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
@@ -239,7 +239,7 @@ mod tests {
     fn string_flyweight_never_shifts() {
         use std::sync::Arc;
         let mut c: QueryCollection<Arc<str>> =
-            QueryCollection::with_capabilities(LibCapabilities {
+            QueryCollection::with_capabilities(TargetCapabilities {
                 sequence_features: SeqFeatureState::Available,
                 fragment_features: FragmentFeatureState::Available,
                 isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },

@@ -19,8 +19,8 @@ pub use capabilities::{
     DecoyStrategy,
     FragmentFeatureState,
     IsotopeStrategy,
-    LibCapabilities,
     SeqFeatureState,
+    TargetCapabilities,
 };
 pub use query_collection::{
     ModDefinition,

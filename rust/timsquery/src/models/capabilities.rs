@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, PartialEq)]
-pub struct LibCapabilities {
+pub struct TargetCapabilities {
     pub sequence_features: SeqFeatureState,
     pub fragment_features: FragmentFeatureState,
     pub isotopes: IsotopeStrategy,
@@ -36,13 +36,13 @@ pub enum DecoyStrategy {
 }
 
 /// The unified ±CH2 mass-shift offset (Da) and variant count for lazily-generated
-/// decoys. Single source of truth: `LibCapabilities::default_diann` and
+/// decoys. Single source of truth: `TargetCapabilities::default_diann` and
 /// timsseek's `map_decoy_strategy` both reference these, so an offset change
 /// cannot drift between the reader default and the consumer mapping.
 pub const DECOY_CH2_OFFSET_DA: f64 = 14.0;
 pub const DECOY_N_DECOYS: u8 = 2;
 
-impl LibCapabilities {
+impl TargetCapabilities {
     /// The default DIA-NN `.speclib` profile: sequence features assumed
     /// available (re-gated at load), 3-isotope composition envelopes, and
     /// lazily-generated ±CH2 decoys.
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn default_diann_declares_fragment_features_available() {
         assert_eq!(
-            LibCapabilities::default_diann().fragment_features,
+            TargetCapabilities::default_diann().fragment_features,
             FragmentFeatureState::Available
         );
     }

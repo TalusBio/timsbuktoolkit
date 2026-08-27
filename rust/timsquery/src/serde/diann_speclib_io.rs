@@ -31,8 +31,8 @@ use super::library_file::{
 };
 use crate::ion::IonAnnot;
 use crate::models::{
-    LibCapabilities,
     QueryCollection,
+    TargetCapabilities,
 };
 use std::fs::File;
 use std::io::Read;
@@ -482,7 +482,7 @@ impl SpecLib {
                 || {
                     (
                         QueryCollection::with_capabilities(
-                            LibCapabilities::default_diann_no_decoys(),
+                            TargetCapabilities::default_diann_no_decoys(),
                         ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
@@ -503,7 +503,7 @@ impl SpecLib {
                 || {
                     (
                         QueryCollection::with_capabilities(
-                            LibCapabilities::default_diann_no_decoys(),
+                            TargetCapabilities::default_diann_no_decoys(),
                         ),
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),

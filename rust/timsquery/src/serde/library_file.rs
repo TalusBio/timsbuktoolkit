@@ -25,10 +25,10 @@ use super::spectronaut_io::{
 };
 use crate::ion::IonAnnot;
 use crate::models::{
-    LibCapabilities,
     LibraryId,
     QueryCollection,
     SourceIdError,
+    TargetCapabilities,
 };
 use crate::{
     KeyLike,
@@ -280,7 +280,7 @@ impl LibraryArena {
         }
 
         let mut geom =
-            QueryCollection::with_capabilities(LibCapabilities::default_diann_no_decoys());
+            QueryCollection::with_capabilities(TargetCapabilities::default_diann_no_decoys());
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
@@ -345,8 +345,9 @@ impl LibraryArena {
                 Self::mzpaf_with_intensities(egs, extras)
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
-                let mut geom =
-                    QueryCollection::with_capabilities(LibCapabilities::default_diann_no_decoys());
+                let mut geom = QueryCollection::with_capabilities(
+                    TargetCapabilities::default_diann_no_decoys(),
+                );
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
@@ -372,7 +373,7 @@ impl LibraryArena {
                 // String-labelled arenas carry no ion chemistry and ship no
                 // decoys: sequence/fragment features unavailable, decoys off.
                 let mut geom =
-                    QueryCollection::with_capabilities(LibCapabilities::default_unlabeled());
+                    QueryCollection::with_capabilities(TargetCapabilities::default_unlabeled());
                 for eg in &egs {
                     let frags: Vec<(Arc<str>, f64)> = eg
                         .iter_fragments()

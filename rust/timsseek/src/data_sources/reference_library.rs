@@ -256,7 +256,7 @@ mod tests {
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -280,9 +280,9 @@ mod tests {
     #[test]
     fn library_arena_narrows_to_reference_library() {
         use timsquery::models::QueryCollection;
-        use timsquery::models::capabilities::LibCapabilities;
+        use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::LibraryArena;
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(lib.frag_intens.len(), 1);
 
         let mut sgeom: QueryCollection<std::sync::Arc<str>> =
-            QueryCollection::with_capabilities(LibCapabilities::default_diann());
+            QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         sgeom.seal();
         let s = LibraryArena::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());

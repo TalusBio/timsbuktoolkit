@@ -56,7 +56,7 @@ impl std::str::FromStr for DecoyPolicy {
 /// strategy, given whether the source library already ships its own decoys.
 /// The ±CH2 offset and variant count come from timsquery's
 /// [`DECOY_CH2_OFFSET_DA`]/[`DECOY_N_DECOYS`] (shared with
-/// `LibCapabilities::default_diann`), so `Force` and the reader default can
+/// `TargetCapabilities::default_diann`), so `Force` and the reader default can
 /// never drift apart.
 ///
 /// - `Force`: always (re)generate lazy mass-shift decoys, ignoring any

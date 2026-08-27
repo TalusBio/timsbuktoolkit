@@ -1,7 +1,7 @@
 use crate::KeyLike;
 use crate::models::capabilities::{
     DecoyStrategy,
-    LibCapabilities,
+    TargetCapabilities,
 };
 use crate::models::query_handle::QueryRef;
 use crate::models::source_id::{
@@ -44,7 +44,7 @@ pub struct ModDefinition {
 
 #[derive(Debug, Clone)]
 pub struct QueryCollection<L: KeyLike> {
-    pub caps: LibCapabilities,
+    pub caps: TargetCapabilities,
     // per-target scalars, len = n_rows (the arena position IS the row index;
     // any caller-supplied id lives in `source_ids`)
     pub precursor_mz: Vec<f64>,
@@ -73,7 +73,7 @@ pub struct QueryCollection<L: KeyLike> {
 }
 
 impl<L: KeyLike> QueryCollection<L> {
-    pub fn with_capabilities(caps: LibCapabilities) -> Self {
+    pub fn with_capabilities(caps: TargetCapabilities) -> Self {
         Self {
             caps,
             precursor_mz: Vec::new(),
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
-        let mut c = QueryCollection::with_capabilities(LibCapabilities::default_diann()); // LazyMassShift n=2
+        let mut c = QueryCollection::with_capabilities(TargetCapabilities::default_diann()); // LazyMassShift n=2
         c.push_target(
             500.0,
             2,
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn passthrough_is_one_variant_per_row_honoring_is_decoy() {
-        let mut caps = LibCapabilities::default_diann();
+        let mut caps = TargetCapabilities::default_diann();
         caps.decoys = DecoyStrategy::Passthrough;
         let mut c = QueryCollection::with_capabilities(caps);
         c.push_row(
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn csr_ranges_recover_per_target_fragments() {
-        let mut c = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut c = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         // target 0: 2 frags; target 1: 3 frags
         c.push_target(
             // precursor_mz
@@ -423,7 +423,7 @@ mod tests {
     fn string_labeled_collection_and_is_decoy() {
         use std::sync::Arc;
         let mut c: QueryCollection<Arc<str>> =
-            QueryCollection::with_capabilities(LibCapabilities::default_diann());
+            QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(
             500.0,
             2,

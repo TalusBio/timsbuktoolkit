@@ -949,10 +949,10 @@ mod tests {
     };
     use timsquery::TimsElutionGroup;
     use timsquery::models::QueryCollection;
-    use timsquery::models::capabilities::LibCapabilities;
+    use timsquery::models::capabilities::TargetCapabilities;
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
