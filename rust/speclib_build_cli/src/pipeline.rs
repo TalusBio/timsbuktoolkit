@@ -271,7 +271,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         let ext = std::path::Path::new(output_uri.trim_end_matches('/'))
             .extension()
             .and_then(|s| s.to_str())
-            .unwrap_or("msgpack.zst");
+            .unwrap_or("mzSpecLib.txt");
         let tf = tempfile::Builder::new()
             .prefix("speclib-out-")
             .suffix(&format!(".{ext}"))

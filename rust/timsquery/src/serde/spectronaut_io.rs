@@ -3,6 +3,7 @@ use crate::ion::{
     IonAnnot,
     IonParsingError,
 };
+use crate::serde::unknown_ordinal::next_unknown_ordinal;
 use serde::Deserialize;
 use std::path::Path;
 use tinyvec::tiny_vec;
@@ -57,23 +58,6 @@ impl From<IonParsingError> for SpectronautPrecursorParsingError {
         error!("Ion parsing error: {:?}", err);
         SpectronautPrecursorParsingError::IonParsingError
     }
-}
-
-/// Advance the per-precursor `?`-ordinal counter, refusing to wrap.
-///
-/// `IonAnnot` ordinals are `u8`, so a precursor can carry at most
-/// [`u8::MAX`] distinguishable unknown ions. Past that there is no way to keep
-/// labels unique, and a silently reused ordinal corrupts scoring
-/// (`linear_get` is first-match). Fail here, where the row index is still in
-/// hand, rather than downstream in `try_from_pairs`.
-fn next_unknown_ordinal(current: u8) -> Result<u8, SpectronautPrecursorParsingError> {
-    current.checked_add(1).ok_or_else(|| {
-        error!(
-            "More than {} unknown-ion fragments in a single precursor; cannot assign unique labels",
-            u8::MAX
-        );
-        SpectronautPrecursorParsingError::IonOverCapacity
-    })
 }
 
 impl From<SpectronautPrecursorParsingError> for SpectronautReadingError {
@@ -324,7 +308,8 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            num_unknown_losses = next_unknown_ordinal(num_unknown_losses)?;
+            num_unknown_losses = next_unknown_ordinal(num_unknown_losses)
+                .ok_or(SpectronautPrecursorParsingError::IonOverCapacity)?;
             let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);

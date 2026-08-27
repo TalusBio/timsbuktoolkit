@@ -404,14 +404,57 @@ pub trait LibraryReader: Send + Sync {
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError>;
+    /// Read into the arena.
+    ///
+    /// Most formats produce an [`ElutionGroupCollection`] and let
+    /// [`LibraryArena::from_elution_groups`] adapt it; implement
+    /// [`Self::read`] for those. The binary `.speclib` and mzSpecLib readers
+    /// build the arena directly (with the reference-intensity sidecar) and
+    /// override this instead.
+    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+        LibraryArena::from_elution_groups(self.read(path)?)
+    }
+    /// The legacy path. Direct-arena readers leave this unimplemented.
+    fn read(&self, _path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+        unreachable!("a reader must implement either `read` or `read_arena`")
+    }
 }
 
+struct MzSpecLibReader;
+struct DiannSpeclibReader;
 struct DiannParquetReader;
 struct DiannTsvReader;
 struct SpectronautReader;
 struct SkylineReader;
 struct JsonReader;
+
+impl LibraryReader for MzSpecLibReader {
+    fn name(&self) -> &'static str {
+        "mzspeclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_mzspeclib_library_file(path)
+    }
+
+    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+        read_mzspeclib_library_file(path)
+    }
+}
+
+impl LibraryReader for DiannSpeclibReader {
+    fn name(&self) -> &'static str {
+        "diann-speclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_speclib_library_file(path)
+    }
+
+    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+        read_diann_speclib_library_file(path)
+    }
+}
 
 impl LibraryReader for DiannParquetReader {
     fn name(&self) -> &'static str {
@@ -517,8 +560,17 @@ impl LibraryReader for JsonReader {
     }
 }
 
+/// Readers in dispatch order: most specific first, ending with the
+/// always-sniffs-true JSON fallback.
+///
+/// mzSpecLib and `.speclib` lead because their probes are exact (a magic first
+/// line and a version-gated header), so they cannot steal another format's
+/// file — and `.speclib`'s read is the only one that surfaces an
+/// `UnsupportedSpeclibVersion` diagnostic, which a later reader would mask.
 fn registry() -> &'static [&'static dyn LibraryReader] {
     &[
+        &MzSpecLibReader,
+        &DiannSpeclibReader,
         &DiannParquetReader,
         &DiannTsvReader,
         &SpectronautReader,
@@ -529,30 +581,12 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
 
 pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, LibraryReadingError> {
     let path = path.as_ref();
-    // mzSpecLib is sniffed alongside `.speclib` rather than through the
-    // registry: like the DIA-NN binary reader it builds the arena directly
-    // (with the reference-intensity sidecar) instead of going through the
-    // legacy `ElutionGroupCollection`. Its magic first line makes the probe
-    // exact, so an early check cannot steal another format's file.
-    if sniff_mzspeclib_library_file(path) {
-        info!("Dispatching library read to mzspeclib (direct arena build)");
-        return read_mzspeclib_library_file(path);
-    }
-    // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
-    // reference-intensity sidecar); every other format still produces the legacy
-    // `ElutionGroupCollection`, adapted into the arena here. `.speclib` is
-    // sniffed first because its `read` path is the only one that can surface an
-    // `UnsupportedSpeclibVersion` diagnostic (the sniff has no version gate).
-    if sniff_diann_speclib_library_file(path) {
-        info!("Dispatching library read to diann-speclib (direct arena build)");
-        return read_diann_speclib_library_file(path);
-    }
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
-            match reader.read(path) {
-                Ok(egs) => return LibraryArena::from_elution_groups(egs),
+            match reader.read_arena(path) {
+                Ok(arena) => return Ok(arena),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST

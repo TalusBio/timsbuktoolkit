@@ -16,7 +16,13 @@
 //! names, the `-o` directory layout, and the `results.json` basename.
 
 use std::io::Write;
-use timsquery::models::Tolerance;
+use timsquery::models::tolerance::{
+    MobilityTolerance,
+    MzTolerance,
+    QuadTolerance,
+    RtTolerance,
+    Tolerance,
+};
 use timsquery::serde::{
     LibraryArena,
     read_library_file,
@@ -80,12 +86,19 @@ fn carafe_target_payload_loads_through_the_public_reader() {
     assert_eq!(labels, vec!["y1".to_string(), "y3^2".to_string()]);
 }
 
-/// `id` is echoed back and used as Carafe's map key. A missing or renamed
-/// `id` NPEs downstream rather than erroring here.
+/// `id` is echoed back and used as Carafe's map key. A missing `id` NPEs
+/// downstream rather than erroring here, so it must not silently default.
 #[test]
 fn carafe_id_field_is_required() {
-    let without_id = CARAFE_TARGETS.replace("\"id\": 0,", "");
-    let f = write_targets(&without_id);
+    // Build the payload without `id` rather than string-surgering the const,
+    // so the test cannot pass because the edit produced malformed JSON.
+    let without_id = r#"[
+      { "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0,1,2],
+        "fragments": [175.1, 288.2], "fragment_labels": ["y1","y3^2"] }
+    ]"#;
+    serde_json::from_str::<serde_json::Value>(without_id).expect("still valid JSON");
+    let f = write_targets(without_id);
     assert!(
         read_library_file(f.path()).is_err(),
         "a target without `id` must fail rather than default it"
@@ -103,17 +116,15 @@ fn carafe_tolerance_spellings_deserialize() {
     // window recentred on a measured calibration offset, read as "13 ppm light
     // to 17 ppm heavy". Both edges must stay distinct — collapsing them to a
     // symmetric tolerance would quietly recentre every extraction window.
-    let rendered = format!("{tol:?}");
-    assert!(
-        rendered.contains("13.0") && rendered.contains("17.0"),
-        "both m/z window edges must be preserved distinctly, got {rendered}"
-    );
+    assert_eq!(tol.ms, MzTolerance::Ppm((13.0, 17.0)));
+    assert_eq!(tol.rt, RtTolerance::Minutes((0.1, 0.1)));
+    assert_eq!(tol.mobility, MobilityTolerance::Pct((3.0, 3.0)));
+    assert_eq!(tol.quad, QuadTolerance::Absolute((0.1, 0.1)));
 
     let round = serde_json::to_string(&tol).expect("tolerance must re-serialize");
     let back: Tolerance = serde_json::from_str(&round).expect("and deserialize again");
     assert_eq!(
-        format!("{back:?}"),
-        rendered,
+        back, tol,
         "tolerance must survive a round trip through its own output"
     );
 }

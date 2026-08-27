@@ -1,4 +1,3 @@
-use crate::ion::IonAnnot;
 use crate::tinyvec::{
     TinyVec,
     tiny_vec,
@@ -81,34 +80,6 @@ impl<T: KeyLike> ElutionGroupInput<T> {
             fragment_labels: Some(fragment_labels),
         })
     }
-
-    pub fn try_fill_labels_annot(
-        self,
-    ) -> Result<ElutionGroupInput<IonAnnot>, ElutionGroupInputError> {
-        let tmp = self.try_fill_labels_u8()?;
-        let new_frags = tmp
-            .fragment_labels
-            .unwrap()
-            .into_iter()
-            // isotope 0 — these are monoisotopic placeholders. Every other `?`
-            // construction in the readers uses 0; the previous `1` here would
-            // have labelled every synthesized fragment as the M+1 peak.
-            .map(|lbl| IonAnnot::try_new('?', Some(lbl), 1, 0))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ElutionGroupInputError::IonConversionError {
-                inner: format!("{e:?}"),
-            })?;
-        Ok(ElutionGroupInput {
-            id: tmp.id,
-            mobility: tmp.mobility,
-            rt_seconds: tmp.rt_seconds,
-            precursor: tmp.precursor,
-            precursor_charge: tmp.precursor_charge,
-            precursor_isotopes: tmp.precursor_isotopes,
-            fragments: tmp.fragments,
-            fragment_labels: Some(new_frags),
-        })
-    }
 }
 
 impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for TimsElutionGroup<T> {
@@ -186,8 +157,8 @@ mod tests {
         assert_eq!(unique.len(), 256, "synthesized labels must all be distinct");
     }
 
-    /// One past capacity previously wrapped (`i as u8`), silently emitting a
-    /// second `0` label and corrupting scoring downstream. It must now fail.
+    /// One past capacity must fail rather than wrap: a second `0` label would
+    /// collide with the first and corrupt scoring downstream.
     #[test]
     fn fill_labels_u8_rejects_overflow_instead_of_wrapping() {
         let err = input_with_n_fragments(257)
@@ -200,24 +171,5 @@ mod tests {
             ),
             "expected TooManyFragmentsToLabel, got {err:?}"
         );
-    }
-
-    /// Synthesized `?` annotations are monoisotopic placeholders; a nonzero
-    /// isotope would mislabel every fragment as the M+1 peak.
-    #[test]
-    fn fill_labels_annot_uses_monoisotopic_placeholders() {
-        let filled = input_with_n_fragments(3)
-            .try_fill_labels_annot()
-            .expect("3 fragments label fine");
-        let labels = filled.fragment_labels.unwrap();
-        let expected: Vec<IonAnnot> = (0u8..3)
-            .map(|i| IonAnnot::try_new('?', Some(i), 1, 0).unwrap())
-            .collect();
-        assert_eq!(
-            labels, expected,
-            "synthesized placeholders must be `?` at isotope 0, not M+1"
-        );
-        let unique: std::collections::HashSet<_> = labels.iter().copied().collect();
-        assert_eq!(unique.len(), 3, "synthesized labels must all be distinct");
     }
 }

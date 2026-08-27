@@ -29,7 +29,7 @@ use crate::IonParsingError;
 /// from C/H/N/O/S/P, and keeping it to six `u8`s makes equality a single
 /// 6-byte compare during the parse-time table lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Composition {
+pub(crate) struct Composition {
     pub c: u8,
     pub h: u8,
     pub n: u8,
@@ -39,7 +39,7 @@ pub struct Composition {
 }
 
 impl Composition {
-    pub const fn new(c: u8, h: u8, n: u8, o: u8, s: u8, p: u8) -> Self {
+    pub(crate) const fn new(c: u8, h: u8, n: u8, o: u8, s: u8, p: u8) -> Self {
         Self { c, h, n, o, s, p }
     }
 
@@ -122,7 +122,7 @@ impl Composition {
     ///
     /// Because terms are summed, ordering and multiplier spelling collapse for
     /// free: `H2O-NH3` == `NH3-H2O`, and `2H2O` == `H2O-H2O`.
-    pub fn parse_expression(s: &str) -> Result<Self, IonParsingError> {
+    pub(crate) fn parse_expression(s: &str) -> Result<Self, IonParsingError> {
         let mut total = Composition::default();
         for term in s.split('-') {
             let term = term.trim();
@@ -287,7 +287,7 @@ impl NeutralLoss {
     /// distinct from `Err`, which means the text was not a loss expression at
     /// all. Callers route the former to an unknown label and the latter to a
     /// parse failure.
-    pub fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
+    pub(crate) fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
         let comp = Composition::parse_expression(s)?;
         Ok(TABLE
             .iter()
@@ -296,7 +296,8 @@ impl NeutralLoss {
     }
 
     /// The composition this loss removes.
-    pub fn composition(self) -> Composition {
+    #[cfg(test)]
+    pub(crate) fn composition(self) -> Composition {
         if self == NeutralLoss::None {
             return Composition::default();
         }
@@ -308,7 +309,7 @@ impl NeutralLoss {
     }
 
     /// Canonical spelling, without the leading `-`. Empty for [`Self::None`].
-    pub fn canonical(self) -> &'static str {
+    pub(crate) fn canonical(self) -> &'static str {
         if self == NeutralLoss::None {
             return "";
         }
@@ -417,7 +418,10 @@ mod tests {
         assert!(NeutralLoss::from_expression("H2O-").is_err());
     }
 
-    /// Every table entry must survive canonical -> composition -> discriminant.
+    /// Every table entry must survive canonical -> composition -> discriminant,
+    /// and back out through the bit field. `from_discriminant` hand-mirrors the
+    /// `#[repr(u8)]` values, so adding a loss without updating it would
+    /// silently decode as [`NeutralLoss::None`] — this is what catches that.
     #[test]
     fn table_round_trips_through_canonical_spelling() {
         for (comp, loss, canon) in TABLE {
@@ -426,9 +430,24 @@ mod tests {
                 Some(*loss),
                 "canonical spelling {canon} must resolve to its own loss"
             );
-            assert_eq!(loss.composition(), *comp);
             assert_eq!(loss.canonical(), *canon);
+            assert_eq!(loss.composition(), *comp);
+            assert_eq!(
+                NeutralLoss::from_discriminant(*loss as u8),
+                *loss,
+                "{canon} does not survive the discriminant round trip"
+            );
         }
+        assert_eq!(NeutralLoss::from_discriminant(0), NeutralLoss::None);
+        // Every non-None variant must be in TABLE, or it has no spelling and no
+        // composition and could never be produced by parsing.
+        assert_eq!(
+            TABLE.len(),
+            (1..=u8::MAX)
+                .filter(|d| NeutralLoss::from_discriminant(*d) != NeutralLoss::None)
+                .count(),
+            "a variant is decodable but missing from TABLE"
+        );
     }
 
     /// Compositions must be unique: two entries sharing one would make the

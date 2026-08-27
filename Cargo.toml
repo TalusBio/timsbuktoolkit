@@ -33,7 +33,9 @@ default-members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/apex_sim",
-    "rust/speclib_build_cli",
+    # speclib_build_cli is temporarily NOT here: its only writer was the msgpack
+    # `SpeclibWriter`, removed with that format. It does not compile until the
+    # mzSpecLib writer lands. Put it back then.
     "rust/tims_stage",
     "rust/timsseek_macros"
 ]

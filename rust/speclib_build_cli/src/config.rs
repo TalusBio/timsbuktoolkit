@@ -62,7 +62,7 @@ fn default_min_ions() -> usize {
     3
 }
 fn default_output() -> String {
-    "library.msgpack.zst".to_string()
+    "library.mzSpecLib.txt".to_string()
 }
 
 // ── Sub-structs ──────────────────────────────────────────────────────────────

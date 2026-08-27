@@ -12,8 +12,7 @@ use std::sync::{
 
 /// Process-wide modification ontologies, built on first use.
 ///
-/// mzcore requires an explicit `Ontologies` value at every `pro_forma` call
-/// (rustyms, its predecessor, used global lazy statics and took `None`).
+/// mzcore requires an explicit `Ontologies` value at every `pro_forma` call.
 /// Building it costs ~210 ms and ~200 MB, so it is deliberately behind a
 /// `OnceLock` reached ONLY from [`parse_sequence_mzcore`] — the fallback past
 /// the byte-walk fast path. A library whose sequences all match the fast
@@ -25,6 +24,19 @@ pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
         tracing::debug!("initializing mzcore ontologies (first non-fast-path sequence)");
         mzcore::ontology::Ontologies::init_static()
     })
+}
+
+/// Parse a ProForma string against the shared [`ontologies`].
+///
+/// mzcore returns non-fatal parse warnings alongside the peptidoform; none of
+/// the callers can act on them, so they are dropped in one place instead of
+/// each site carrying its own `(pep, _warnings)` destructure.
+pub fn parse_proforma(
+    sequence: &str,
+) -> Option<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>> {
+    let (peptidoform, _warnings) =
+        mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies()).ok()?;
+    Some(peptidoform)
 }
 
 /// Amino acid stored as alphabet offset `c - b'A'` (0..=25). `u8::MAX`
@@ -278,9 +290,8 @@ fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
 /// this function's contract is a binary parsed/not-parsed verdict.
 fn parse_sequence_mzcore(normalized: &str) -> Option<ParsedSequence> {
     use mzcore::prelude::IsAminoAcid;
-    use mzcore::sequence::Peptidoform;
 
-    let (pf, _warnings) = Peptidoform::pro_forma(normalized, ontologies()).ok()?;
+    let pf = parse_proforma(normalized)?;
     let linear = pf.into_linear()?;
 
     let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();

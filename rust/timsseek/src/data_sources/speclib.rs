@@ -43,54 +43,6 @@ impl SerSpeclibElement {
             elution_group,
         }
     }
-
-    pub fn sample() -> Self {
-        SerSpeclibElement {
-            precursor: PrecursorEntry {
-                sequence: "PEPTIDESEK".into(),
-                charge: 2,
-                decoy: false,
-                decoy_group: 32,
-            },
-            elution_group: ReferenceEG {
-                id: 32,
-                precursor_mz: 512.2,
-                precursor_labels: vec![0, 2],
-                fragment_mzs: vec![312.2, 675.7],
-                fragment_labels: vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                precursor_intensities: vec![1.0, 0.5],
-                fragment_intensities: vec![0.8, 0.3],
-                mobility_ook0: 0.75,
-                rt_seconds: 120.0,
-            },
-        }
-    }
-
-    pub fn sample_json() -> &'static str {
-        r#"{
-            "precursor": {
-                "sequence": "PEPTIDEPINK",
-                "charge": 2,
-                "decoy": false,
-                "decoy_group": 0
-            },
-            "elution_group": {
-                "id": 0,
-                "precursor_mz": 876.5432,
-                "precursor_labels": [ 0, 1 ],
-                "fragment_mzs": [ 123.0, 123.0, 123.0 ],
-                "fragment_labels": ["a1", "b1", "c1^2"],
-                "precursor_intensities": [1.0, 1.0],
-                "fragment_intensities": [1.0, 1.0, 1.0],
-                "precursor_charge": 2,
-                "mobility_ook0": 0.8,
-                "rt_seconds": 0.0
-            }
-        }"#
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,9 +256,8 @@ impl SpeclibFormat {
     /// anything else (including `.speclib` and `.mzSpecLib.txt`), which routes
     /// to the timsquery bridge.
     ///
-    /// Extension-only is a leftover from the msgpack era, where a content
-    /// sniff would have misclaimed raw binaries. ndjson could be sniffed, but
-    /// the bridge already handles anything this returns `None` for.
+    /// Matched by extension rather than content; anything unmatched routes to
+    /// the timsquery bridge, which sniffs properly.
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 

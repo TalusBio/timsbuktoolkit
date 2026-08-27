@@ -7,6 +7,7 @@ mod library_file;
 pub mod mzspeclib_io;
 mod skyline_io;
 mod spectronaut_io;
+mod unknown_ordinal;
 
 pub use chromatogram_output::*;
 pub use index_serde::*;

@@ -5,8 +5,8 @@
 # All fields are optional — omit a section or key to use the compiled-in default.
 
 # ── Output ────────────────────────────────────────────────────────────────────
-# Path for the output spectral library (msgpack + zstd).
-output = "library.msgpack.zst"
+# Path for the output spectral library (mzSpecLib text).
+output = "library.mzSpecLib.txt"
 
 # ── Digestion ─────────────────────────────────────────────────────────────────
 [digestion]

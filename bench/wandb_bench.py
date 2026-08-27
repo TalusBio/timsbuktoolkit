@@ -225,7 +225,7 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
 def main(wandb_kwargs: dict | None = None, koina_url: str | None = None):
 
     fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
-    speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
+    speclib_path = Path.home() / "fasta/asdad.mzSpecLib.txt"
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [

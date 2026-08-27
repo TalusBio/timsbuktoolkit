@@ -34,6 +34,5 @@ pub use scoring::{
 pub use timsquery::ion::{
     IonAnnot,
     IonParsingError,
-    IonSeriesTerminality,
 };
 pub use traits::ScorerQueriable;

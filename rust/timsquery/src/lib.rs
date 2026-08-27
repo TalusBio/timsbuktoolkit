@@ -58,7 +58,6 @@ pub mod ion {
         IonAnnot,
         IonParsingError,
         IonSeriesOrdinal,
-        IonSeriesTerminality,
     };
 }
 

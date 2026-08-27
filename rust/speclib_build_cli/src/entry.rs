@@ -54,8 +54,7 @@ use timsseek::models::sequence::normalize_to_proforma;
 fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
     use mzcore::prelude::*;
     let proforma = normalize_to_proforma(modified_seq);
-    // `pro_forma` also returns non-fatal warnings; only the peptidoform matters.
-    let (peptide, _warnings) = Peptidoform::pro_forma(&proforma, timsseek::ontologies()).ok()?;
+    let peptide = timsseek::models::sequence::parse_proforma(&proforma)?;
     let linear = peptide.as_linear()?;
     let formulas = linear.formulas();
     if formulas.is_empty() {

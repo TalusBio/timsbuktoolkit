@@ -21,7 +21,7 @@ pub struct Cli {
 
     // ── Output ─────────────────────────────────────────────────────────────
     /// Output URI for the spectral library (local path or s3://...; default:
-    /// library.msgpack.zst).
+    /// library.mzSpecLib.txt).
     #[arg(long, short = 'o')]
     pub output: Option<String>,
 

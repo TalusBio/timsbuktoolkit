@@ -3,7 +3,6 @@ use mzcore::prelude::{
     AmbiguousMolecule,
     Element,
     MolecularFormula,
-    Peptidoform,
 };
 
 /// Super simple 1/k0 prediction.
@@ -119,16 +118,8 @@ pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), St
 }
 
 fn count_carbon_sulphur_in_sequence_mzcore(sequence: &str) -> Result<(u16, u16), String> {
-    let peptide = match Peptidoform::pro_forma(sequence, crate::models::sequence::ontologies()) {
-        // `pro_forma` also yields non-fatal warnings; the formula is all we need.
-        Ok((pep, _warnings)) => pep,
-        Err(e) => {
-            return Err(format!(
-                "Error parsing peptide sequence {}: {:?}",
-                sequence, e
-            ));
-        }
-    };
+    let peptide = crate::models::sequence::parse_proforma(sequence)
+        .ok_or_else(|| format!("Error parsing peptide sequence {sequence}"))?;
     let peptide = match peptide.as_linear() {
         Some(pep) => pep,
         None => return Err("Peptide is not linear.".to_string()),

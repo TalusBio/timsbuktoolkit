@@ -1,4 +1,6 @@
-//! Reader for the mzSpecLib text format (HUPO-PSI).
+            || self.spectra_with_drift_time_mobility > 0
+            || self.spectra_with_unknown_rt_unit > 0
+            || self.dropped_empty_precursors > 0//! Reader for the mzSpecLib text format (HUPO-PSI).
 //!
 //! # Why every field needs a fallback ladder
 //!
@@ -146,7 +148,6 @@ impl MzSpecLibStats {
             || self.dropped_duplicate_label > 0
             || self.spectra_without_rt > 0
             || self.spectra_with_drift_time_mobility > 0
-            || self.spectra_with_unknown_rt_unit > 0
             || self.dropped_empty_precursors > 0
     }
 
