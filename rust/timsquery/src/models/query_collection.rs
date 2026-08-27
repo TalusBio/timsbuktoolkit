@@ -4,6 +4,11 @@ use crate::models::capabilities::{
     LibCapabilities,
 };
 use crate::models::query_handle::QueryRef;
+use crate::models::source_id::{
+    LibraryId,
+    SourceIdError,
+    SourceIds,
+};
 use crate::traits::DecoyShift;
 
 #[derive(Debug, Clone)]
@@ -16,13 +21,17 @@ pub struct ModDefinition {
 #[derive(Debug, Clone)]
 pub struct QueryCollection<L: KeyLike> {
     pub caps: LibCapabilities,
-    // per-target scalars, len = n_rows (no `id` column - library_id = target index)
+    // per-target scalars, len = n_rows (the arena position IS the row index;
+    // any caller-supplied id lives in `source_ids`)
     pub precursor_mz: Vec<f64>,
     pub charge: Vec<u8>,
     pub rt_seconds: Vec<f32>,
     pub mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
     pub is_decoy: Vec<bool>,
+    /// What the source file called each row, when it said. Parallel to the row
+    /// columns; NOT the arena position, which is what `Query::id()` returns.
+    pub source_ids: SourceIds,
     // CSR prefix offsets (n+1)
     pub frag_off: Vec<u32>,
     pub seq_strip_off: Vec<u32>,
@@ -48,6 +57,7 @@ impl<L: KeyLike> QueryCollection<L> {
             rt_seconds: Vec::new(),
             mobility: Vec::new(),
             is_decoy: Vec::new(),
+            source_ids: SourceIds::default(),
             frag_off: vec![0],
             seq_strip_off: vec![0],
             seq_mod_off: vec![0],
@@ -138,6 +148,16 @@ impl<L: KeyLike> QueryCollection<L> {
     /// This is the base for `expanded_len` (the logical, iterator-length count).
     pub fn n_rows(&self) -> usize {
         self.charge.len()
+    }
+
+    /// Attach caller-supplied ids. Call after every `push_row`, before `seal`.
+    pub fn set_source_ids(&mut self, ids: Vec<LibraryId>) -> Result<(), SourceIdError> {
+        self.source_ids = SourceIds::numeric(ids, self.n_rows())?;
+        Ok(())
+    }
+
+    pub fn source_id(&self, tgt: usize) -> Option<LibraryId> {
+        self.source_ids.get(tgt)
     }
 
     pub fn frag_range(&self, tgt: usize) -> std::ops::Range<usize> {

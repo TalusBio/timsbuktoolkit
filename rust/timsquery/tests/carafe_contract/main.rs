@@ -19,6 +19,7 @@ use timsquery::serde::{
     LibraryArena,
     read_library_file,
 };
+use timsquery::traits::QueryGeom;
 
 /// README, "Targets (`-e`, `psm_query.json`)".
 const CARAFE_TARGETS: &str = r#"[
@@ -68,6 +69,47 @@ fn carafe_target_payload_loads_through_the_public_reader() {
     assert_eq!(geom.frag_mzs[1], 288.2);
     let labels: Vec<String> = geom.frag_labels.iter().map(|l| l.to_string()).collect();
     assert_eq!(labels, vec!["y1".to_string(), "y3^2".to_string()]);
+}
+
+/// Invariant 1: `id` is echoed, not renumbered. Ids that are not `0..n-1` in
+/// file order used to come back as the arena position, silently relabelling
+/// every row.
+#[test]
+fn non_sequential_ids_survive_the_reader() {
+    let f = write_targets(
+        r#"[
+      { "id": 7, "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [175.1], "fragment_labels": ["y1"] },
+      { "id": 42, "mobility": 0.80, "rt_seconds": 999.0, "precursor": 500.0,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [200.0], "fragment_labels": ["y2"] }
+    ]"#,
+    );
+    let arena = read_library_file(f.path()).expect("loads");
+    let LibraryArena::Mzpaf { geom, .. } = arena else {
+        panic!("mzpaf labels")
+    };
+    let ids: Vec<u64> = (0..geom.n_rows())
+        .map(|r| geom.item_at(r).output_id())
+        .collect();
+    assert_eq!(ids, vec![7, 42], "the caller's ids, not 0..n-1");
+}
+
+/// Carafe keys results by `id`, so a repeat makes one row unreachable.
+#[test]
+fn duplicate_ids_are_rejected_by_the_reader() {
+    let f = write_targets(
+        r#"[
+      { "id": 7, "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [175.1], "fragment_labels": ["y1"] },
+      { "id": 7, "mobility": 0.80, "rt_seconds": 999.0, "precursor": 500.0,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [200.0], "fragment_labels": ["y2"] }
+    ]"#,
+    );
+    assert!(read_library_file(f.path()).is_err());
 }
 
 /// `id` is Carafe's map key; defaulting it NPEs downstream instead of erroring.

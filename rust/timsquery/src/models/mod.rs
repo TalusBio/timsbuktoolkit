@@ -6,6 +6,7 @@ pub mod indexed_data;
 mod lazy;
 pub mod query_collection;
 pub mod query_handle;
+pub mod source_id;
 pub mod tolerance;
 
 pub use crate::traits::PeakAddable;
@@ -28,5 +29,10 @@ pub use query_collection::{
 pub use query_handle::{
     Query,
     QueryRef,
+};
+pub use source_id::{
+    LibraryId,
+    SourceIdError,
+    SourceIds,
 };
 pub use tolerance::Tolerance;

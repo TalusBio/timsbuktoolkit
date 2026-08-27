@@ -42,7 +42,7 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
             fragment_mzs.push(mz);
         }
         Self {
-            id: eg.id() as u64,
+            id: eg.output_id(),
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),

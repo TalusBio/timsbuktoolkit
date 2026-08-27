@@ -7,9 +7,24 @@ use crate::traits::KeyLike;
 pub trait QueryGeom {
     type Label: KeyLike;
 
-    /// Positional library id (`library_id`). For `TimsElutionGroup` this is the
-    /// assigned `id` cast to u32; for the arena flyweight it is the target index.
+    /// Position in the arena. Feeds decoy grouping and the q-value determinism
+    /// key, so it is never caller-supplied. For what the source file called the
+    /// row, see [`QueryGeom::source_id`].
     fn id(&self) -> u32;
+
+    /// What the source file called this row, when it said. `None` for formats
+    /// that carry no id.
+    fn source_id(&self) -> Option<crate::models::LibraryId> {
+        None
+    }
+
+    /// The id a result carries: the source id, falling back to the arena
+    /// position. Carafe requires `id` to be present and keys results by it, so
+    /// an absent source id becomes the position rather than a null — which is
+    /// what was emitted before source ids existed.
+    fn output_id(&self) -> u64 {
+        self.source_id().map_or(self.id() as u64, |id| id.get())
+    }
     fn mono_precursor_mz(&self) -> f64;
     fn precursor_charge(&self) -> u8;
     fn rt_seconds(&self) -> f32;
@@ -25,6 +40,10 @@ pub trait QueryGeom {
 
 impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
     type Label = T;
+
+    fn source_id(&self) -> Option<crate::models::LibraryId> {
+        Some(crate::models::LibraryId::new(self.id()))
+    }
 
     fn id(&self) -> u32 {
         // Fail loud rather than silently truncate: the library_id column and the

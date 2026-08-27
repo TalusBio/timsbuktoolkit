@@ -23,11 +23,16 @@ use super::spectronaut_io::{
     read_library_file as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
-use crate::TimsElutionGroup;
 use crate::ion::IonAnnot;
 use crate::models::{
     LibCapabilities,
+    LibraryId,
     QueryCollection,
+    SourceIdError,
+};
+use crate::{
+    KeyLike,
+    TimsElutionGroup,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -43,6 +48,8 @@ pub enum LibraryReadingError {
     SerdeJsonError(serde_json::Error),
     ElutionGroupInputError(ElutionGroupInputError),
     UnableToParseElutionGroups,
+    /// Caller-supplied ids that cannot serve as a result key.
+    SourceId(SourceIdError),
     /// A `.speclib` whose version is newer (more negative) than this reader
     /// supports.
     UnsupportedSpeclibVersion(i32),
@@ -354,6 +361,7 @@ impl LibraryArena {
                         &[],
                     );
                 }
+                set_source_ids_from(&mut geom, &egs)?;
                 geom.seal();
                 Ok(LibraryArena::Mzpaf {
                     geom,
@@ -381,6 +389,7 @@ impl LibraryArena {
                         &[],
                     );
                 }
+                set_source_ids_from(&mut geom, &egs)?;
                 geom.seal();
                 Ok(LibraryArena::Str { geom })
             }
@@ -390,6 +399,19 @@ impl LibraryArena {
             }
         }
     }
+}
+
+/// Carry the caller's `id` from the JSON payload into the arena.
+///
+/// Only this path has one: the tabular readers identify precursors by string
+/// (DIA-NN's `transition_group_id`) or not at all, and neither is stored yet.
+fn set_source_ids_from<L: KeyLike, T: KeyLike>(
+    geom: &mut QueryCollection<L>,
+    egs: &[TimsElutionGroup<T>],
+) -> Result<(), LibraryReadingError> {
+    let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();
+    geom.set_source_ids(ids)
+        .map_err(LibraryReadingError::SourceId)
 }
 
 /// A single spectral-library format reader. Adding a format = one struct + one

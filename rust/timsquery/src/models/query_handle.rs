@@ -89,6 +89,10 @@ impl<Lib: Deref<Target = QueryCollection<L>>, L: KeyLike + DecoyShift> QueryGeom
         self.target_idx() as u32 // positional library_id
     }
 
+    fn source_id(&self) -> Option<crate::models::LibraryId> {
+        self.geom().source_id(self.target_idx())
+    }
+
     fn mono_precursor_mz(&self) -> f64 {
         let tgt = self.target_idx();
         let charge = self.geom().charge[tgt] as f64;

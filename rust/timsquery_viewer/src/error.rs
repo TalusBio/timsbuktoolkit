@@ -33,6 +33,9 @@ impl From<timsquery::serde::LibraryReadingError> for ViewerError {
             timsquery::serde::LibraryReadingError::SpeclibParse(msg) => {
                 ViewerError::General(format!(".speclib parse error: {msg}"))
             }
+            timsquery::serde::LibraryReadingError::SourceId(e) => {
+                ViewerError::General(format!("source id error: {e}"))
+            }
         }
     }
 }
