@@ -5,23 +5,49 @@
 use crate::models::decoy::DecoyMarking;
 use serde::Serialize;
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    OnceLock,
+};
 
-/// Parse a ProForma string against mzcore's shared ontologies.
+/// Modification ontologies for ProForma parsing: everything mzcore ships
+/// except GNOme.
 ///
-/// mzcore requires an explicit `Ontologies` value at every `pro_forma` call and
-/// ships `STATIC_ONTOLOGIES` for exactly this; it is a `LazyLock`, so the
-/// ~210 ms / ~200 MB build happens on first use and only on a path that gets
-/// here. That matters: this is the fallback *past* the byte-walk fast path in
-/// [`parse_sequence`], so a library whose sequences all match the fast grammar
-/// never pays it (a real DIA-NN `.speclib` load peaks at ~10 MB and never
-/// touches this). The two other callers — `count_carbon_sulphur_in_sequence`'s
-/// mzcore fallback and `speclib_build_cli` — do pay it.
+/// mzcore's own `STATIC_ONTOLOGIES` loads all six, and GNOme is 191_529 entries
+/// / 26.4 MB of the 27.8 MB total. Skipping it takes the build from ~2.6 s to
+/// ~48 ms.
 ///
-/// Most of that footprint is GNOme glycan data that [`modification_to_mod`]
-/// discards, and mzcore can build a Unimod-only index. Not done here: dropping
-/// an ontology also drops the sequences that reference it, turning a mod this
-/// code already ignores into a peptide it cannot parse at all.
+/// Dropping an ontology normally costs you the sequences that reference it, but
+/// not here. A GNO-accession glycopeptide is already unusable: every mod goes
+/// through [`modification_to_mod`], which returns `None` for anything
+/// non-Unimod, and [`parse_sequence_mzcore`] propagates that `None` for the
+/// whole peptide. So GNOme's only effect was to make such a peptide parse and
+/// then be discarded one step later.
+///
+/// The single behavioural difference is
+/// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence):
+/// a `[GNO:...]` sequence no longer yields a composition, so its isotope
+/// envelope comes from averagine instead — the documented fallback, already
+/// tallied as `n_averagine_fallback`. PSI-MOD, XL-MOD and RESID stay loaded
+/// (~1.4 MB combined) so that path is unchanged for them.
+fn ontologies() -> &'static mzcore::ontology::Ontologies {
+    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
+    ONTOLOGIES.get_or_init(|| {
+        let mut ontologies = mzcore::ontology::Ontologies::empty();
+        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
+        ontologies
+    })
+}
+
+/// Parse a ProForma string against [`ontologies`].
+///
+/// Built on first use, and this is the fallback *past* the byte-walk fast path
+/// in [`parse_sequence`] — so a library whose sequences all match the fast
+/// grammar never pays for it at all. A real DIA-NN `.speclib` load peaks at
+/// ~10 MB and never gets here.
 ///
 /// mzcore also returns non-fatal parse warnings alongside the peptidoform; none
 /// of the callers can act on them, so they are dropped in one place rather than
@@ -29,7 +55,7 @@ use std::sync::Arc;
 pub fn parse_proforma(
     sequence: &str,
 ) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {
-    mzcore::sequence::Peptidoform::pro_forma(sequence, &mzcore::ontology::STATIC_ONTOLOGIES)
+    mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies())
         .map(|(peptidoform, _warnings)| peptidoform)
         .map_err(|errors| {
             errors
@@ -694,11 +720,58 @@ mod tests {
         }
     }
 
+    /// [`ontologies`] omits GNOme, which is 95% of what mzcore's own
+    /// `STATIC_ONTOLOGIES` loads. This pins the reasoning: every non-Unimod
+    /// mod already yields no parsed sequence, because `modification_to_mod`
+    /// returns `None` and `parse_sequence_mzcore` propagates it for the whole
+    /// peptide. Dropping GNOme moves where a `[GNO:...]` sequence fails, not
+    /// whether it fails.
+    #[test]
+    fn dropping_gnome_costs_no_sequence_that_was_usable() {
+        // Unimod, by name and by id, plus a bare mass: all still resolve.
+        for usable in [
+            "PEPTIDEK",
+            "PEPTC[UNIMOD:4]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            "PEPT[+79.966]IDEK",
+        ] {
+            assert!(
+                parse_sequence(usable).is_some(),
+                "{usable:?} must still parse"
+            );
+        }
+
+        // Ontologies still loaded: these reach mzcore, and are then rejected
+        // by `modification_to_mod` for not being Unimod. Kept loaded so the
+        // formula path (`count_carbon_sulphur_in_sequence`) still sees them.
+        for non_unimod in [
+            "PEPTK[MOD:00046]IDEK",
+            "PEPTK[XLMOD:02001]IDEK",
+            "PEPTK[RESID:AA0038]IDEK",
+        ] {
+            assert!(
+                parse_proforma(non_unimod).is_ok(),
+                "{non_unimod:?} must still reach mzcore"
+            );
+            assert!(
+                parse_sequence(non_unimod).is_none(),
+                "{non_unimod:?} yields no usable sequence either way"
+            );
+        }
+
+        // The one casualty. It failed before this change too, just later.
+        assert!(
+            parse_sequence("PEPTN[GNO:G59626AS]IDEK").is_none(),
+            "a GNO glycopeptide was never usable"
+        );
+        // A glycan *composition* needs no index, so it is unaffected.
+        assert!(parse_proforma("PEPTN[Glycan:HexNAc]IDEK").is_ok());
+    }
+
     /// The fallback must not just accept a named mod — it must resolve it
     /// through the UNIMOD ontology to the same numeric id the `[UNIMOD:n]`
     /// spelling yields. This is the one behavior that has no fast-path
-    /// equivalent, so nothing else covers it; it is also the only test that
-    /// forces mzcore's `STATIC_ONTOLOGIES` to actually initialize.
+    /// equivalent, so nothing else covers it.
     #[test]
     fn mzcore_fallback_resolves_named_mods_via_ontology() {
         for (named, expected) in [
