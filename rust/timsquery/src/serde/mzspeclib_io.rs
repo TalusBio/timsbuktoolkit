@@ -125,7 +125,7 @@ const UNIT_SECOND: &str = "UO:0000010";
 ///
 /// Spelled as a macro because the alternative — a struct plus a hand-written
 /// `||` chain plus a hand-written `warn!` — is three places to update per
-/// counter and the compiler checks none of them. That already went wrong once.
+/// counter and the compiler checks none of them.
 macro_rules! anomaly_counters {
     ($( $(#[$doc:meta])* $field:ident => $label:literal, )+) => {
         /// Per-library tally of everything that did not land verbatim in the
@@ -430,7 +430,7 @@ fn resolve_annotation(annotation: &str) -> Resolved {
 /// The counting lives here rather than inside [`spectrum_row`] so that every
 /// `?` in there lands on a tally. Without it a library that dropped half its
 /// spectra for a missing charge still reports "all annotated and
-/// representable", which is the one thing this module exists to prevent.
+/// representable".
 fn convert_spectrum(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRow> {
     // A malformed spectrum bails out of `spectrum_row` via `?`, possibly after
     // incrementing RT/mobility counters on the way. Those are held aside and

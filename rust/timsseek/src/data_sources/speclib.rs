@@ -116,14 +116,13 @@ pub struct LoadReport {
 /// Finalize a freshly-narrowed lazy `ReferenceLibrary` arena: apply the decoy
 /// strategy, seal, run the whole-library parse gate + averagine tally, and set
 /// `caps.sequence_features`. This is the single shared tail of the DEFAULT
-/// `.speclib` load (see `speclib_data_flow.md`) — the memory-optimized path
-/// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
-/// expansion.
+/// `.speclib` load — the memory-optimized path that avoids the 9 GB peak RSS
+/// of a fully-materialized target+2-decoy expansion.
 ///
 /// `policy` is the raw CLI decoy policy: this is the single place it is resolved
 /// (via `map_decoy_strategy`, keyed on whether the arena already ships decoys)
 /// and stamped onto `caps.decoys` BEFORE `seal()`, so the seal's
-/// `LazyMassShift -> Passthrough` downgrade (the Task-4 gate) sees it. The parse
+/// `LazyMassShift -> Passthrough` downgrade sees it. The parse
 /// gate walks the MODIFIED sequence blob (the form
 /// `RefQuery::materialize_peptide_in_group` parses) and, if any row fails,
 /// disables sequence-derived features library-wide. The same pass counts
@@ -230,7 +229,7 @@ fn finalize_reference_library(
 
 /// The spectral library store. Collapsed to the single columnar
 /// `ReferenceLibrary` arena representation (the materialized AOS path was
-/// deleted in Task 9): both load paths produce a lazy arena, and scoring
+/// since deleted): both load paths produce a lazy arena, and scoring
 /// iterates `RefQuery` flyweights via [`ReferenceLibrary::item_at`].
 pub type Speclib = ReferenceLibrary;
 
@@ -657,7 +656,7 @@ mod tests {
         }
     }
 
-    /// `Speclib` is now a type alias for `ReferenceLibrary` (Task 9 collapsed
+    /// `Speclib` is now a type alias for `ReferenceLibrary` (which collapsed
     /// the enum), so a loaded library is already the lazy arena. This identity
     /// helper is kept so the fixture assertions below read as
     /// "get the arena" without churning every call site.
@@ -1078,7 +1077,7 @@ mod tests {
 
     /// Native `SerSpeclibElement` reader (ndjson) builds the lazy arena
     /// directly. The fixture ships one target + one stored decoy, so the
-    /// Task-4 seal gate downgrades `LazyMassShift -> Passthrough`: the arena is
+    /// seal gate downgrades `LazyMassShift -> Passthrough`: the arena is
     /// 1:1 with the stored rows (no synthetic mass-shift expansion). Proves the
     /// native path produces a lazy `ReferenceLibrary` with the right length, target/
     /// decoy flags, and per-fragment reference intensities.
@@ -1128,7 +1127,7 @@ mod tests {
     /// rejected by both the fast byte-walk parser and the mzcore fallback), so
     /// the gate must report `!parsable_sequences()`. This is the inverse of
     /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
-    /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
+    /// the materialized `test_parse_gate_off_on_poisoned_row` was removed.
     #[test]
     fn from_file_native_ndjson_poisoned_row_disables_sequence_features() {
         let good = element("PEPTIDEK", false, 500.0, &["y1", "y2"], &[0.8, 0.3]);

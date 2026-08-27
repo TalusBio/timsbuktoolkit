@@ -811,9 +811,7 @@ mod tests {
         }
     }
 
-    /// Every field must survive the pack/unpack at its extremes. The bit
-    /// fields truncate rather than wrap, so a missing range check corrupts
-    /// silently — this is the test that catches it.
+    /// Every field must survive the pack/unpack at its extremes.
     #[test]
     fn every_field_round_trips_at_its_extremes() {
         for charge in CHARGE_MIN..=CHARGE_MAX {
@@ -873,7 +871,7 @@ mod tests {
 
         // Non-canonical spelling resolves to the same annotation, and renders
         // canonically -- so this pair is equal, which is the property that
-        // keeps per-precursor label uniqueness honest.
+        // upholds per-precursor label uniqueness.
         assert_eq!(ion("y5-CH3SOH"), ion("y5-CH4OS"));
         assert_eq!(format!("{}", ion("y5-CH3SOH")), "y5-CH4OS");
 
@@ -999,7 +997,7 @@ mod tests {
     }
 
     /// `Display`, `from_series_char` and the parser must agree with the
-    /// packing for every case, not just the handful the other tests spell out.
+    /// packing for every case.
     #[test]
     fn every_series_variant_round_trips_through_its_mzpaf_spelling() {
         for series in all_series() {

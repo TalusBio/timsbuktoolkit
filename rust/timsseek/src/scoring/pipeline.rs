@@ -256,7 +256,7 @@ fn gate_expected_fragments(expected: &ExpectedIntensities<IonAnnot>) -> Result<(
 }
 
 /// Fill the per-worker scratch elution group in place from a `RefQuery`
-/// flyweight (Task 9). `reset_from` copies the per-variant geometry — for a
+/// flyweight. `reset_from` copies the per-variant geometry — for a
 /// decoy the fragment m/z values are ALREADY shifted by value, so no extra
 /// work is needed. It also sets the precursor labels to the isotope-envelope
 /// indices via the flyweight's `iter_precursors` (`0..n_isotopes`), which match
@@ -692,7 +692,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         flat_range: std::ops::Range<usize>,
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        // Single columnar store (Task 9 deleted the materialized arm): the
+        // Single columnar store: the
         // flyweight is always a `RefQuery` from the arena, so the loop is
         // monomorphized over one concrete type — statically dispatched, no
         // per-item heap allocation on the scoring hot path.
@@ -839,7 +839,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
-        // Single columnar store (Task 9): iterate `RefQuery` flyweights from
+        // Single columnar store: iterate `RefQuery` flyweights from
         // the arena directly — monomorphized, no per-item heap alloc on the
         // prescore hot path (see `score_calibrated_batch`).
         self.prescore_batch_impl(|f| lib.item_at(f), flat_range, config, timings)

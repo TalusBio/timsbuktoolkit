@@ -267,8 +267,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     let output_tempfile: Option<tempfile::NamedTempFile> = if remote_output {
         // Fixed rather than derived from the destination URI: the writer only
         // emits zstd-wrapped NDJSON, and the upload below carries the caller's
-        // own name anyway. (`Path::extension` would have yielded `zst` for
-        // `lib.ndjson.zst`, losing the part that identifies the format.)
+        // own name anyway.
         let tf = tempfile::Builder::new()
             .prefix("speclib-out-")
             .suffix(".ndjson.zst")

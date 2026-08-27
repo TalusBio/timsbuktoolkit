@@ -7,15 +7,12 @@ use serde::Serialize;
 use smallvec::SmallVec;
 use std::sync::{
     Arc,
-    OnceLock,
+    LazyLock,
 };
 
 /// Modification ontologies for ProForma parsing: everything mzcore ships
-/// except GNOme.
-///
-/// mzcore's own `STATIC_ONTOLOGIES` loads all six, and GNOme is 191_529 entries
-/// / 26.4 MB of the 27.8 MB total. Skipping it takes the build from ~2.6 s to
-/// ~48 ms.
+/// except GNOme, which is 26.4 MB of the 27.8 MB total and is decoded on first
+/// use.
 ///
 /// Dropping an ontology normally costs you the sequences that reference it, but
 /// not here. A GNO-accession glycopeptide is already unusable: every mod goes
@@ -28,34 +25,38 @@ use std::sync::{
 /// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence):
 /// a `[GNO:...]` sequence no longer yields a composition, so its isotope
 /// envelope comes from averagine instead — the documented fallback, already
-/// tallied as `n_averagine_fallback`. PSI-MOD, XL-MOD and RESID stay loaded
-/// (~1.4 MB combined) so that path is unchanged for them.
-fn ontologies() -> &'static mzcore::ontology::Ontologies {
-    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
-    ONTOLOGIES.get_or_init(|| {
-        let mut ontologies = mzcore::ontology::Ontologies::empty();
-        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
-        ontologies
-    })
-}
+/// tallied as `n_averagine_fallback`. PSI-MOD, XL-MOD and RESID stay loaded so
+/// that path is unchanged for them.
+static ONTOLOGIES: LazyLock<mzcore::ontology::Ontologies> = LazyLock::new(|| {
+    let mut ontologies = mzcore::ontology::Ontologies::empty();
+    *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
+    *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
+    *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
+    *ontologies.resid_mut() = mzcv::CVIndex::init_static();
+    ontologies
+});
 
-/// Parse a ProForma string against [`ontologies`].
+/// Parse a ProForma string against [`ONTOLOGIES`].
 ///
-/// Built on first use, and this is the fallback *past* the byte-walk fast path
-/// in [`parse_sequence`] — so a library whose sequences all match the fast
-/// grammar never pays for it at all. A real DIA-NN `.speclib` load peaks at
-/// ~10 MB and never gets here.
+/// This is the fallback *past* the byte-walk fast path in [`parse_sequence`],
+/// so a library whose sequences all match the fast grammar never decodes an
+/// ontology at all.
 ///
 /// mzcore also returns non-fatal parse warnings alongside the peptidoform; none
 /// of the callers can act on them, so they are dropped in one place rather than
 /// at each site.
+///
+/// The error is a rendered `String` rather than mzcore's own
+/// `Vec<BoxedError<'_, BasicKind>>`. Returning the latter would be cheaper on
+/// the path that discards it, but `BoxedError` comes from `context_error`,
+/// which mzcore does not re-export — naming it means a second direct
+/// dependency version-coupled to mzcore's, the same hazard documented on
+/// `mzcv` in the workspace manifest. Not worth one allocation on an error
+/// path.
 pub fn parse_proforma(
     sequence: &str,
 ) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {
-    mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies())
+    mzcore::sequence::Peptidoform::pro_forma(sequence, &ONTOLOGIES)
         .map(|(peptidoform, _warnings)| peptidoform)
         .map_err(|errors| {
             errors
@@ -766,7 +767,8 @@ mod tests {
             );
         }
 
-        // The one casualty. It failed before this change too, just later.
+        // The only sequence whose parse verdict GNOme affected, and it was
+        // unusable either way.
         assert!(
             parse_sequence("PEPTN[GNO:G59626AS]IDEK").is_none(),
             "a GNO glycopeptide was never usable"

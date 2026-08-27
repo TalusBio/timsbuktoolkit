@@ -4162,7 +4162,6 @@ checksum = "bca74d59b7c73d9c705a25622c73a186a1bcbf62c0faaf2b97fac8968b4b8d45"
 dependencies = [
  "bincode",
  "context_error",
- "flate2",
  "itertools 0.14.0",
  "mzcv",
  "ordered-float 5.3.0",

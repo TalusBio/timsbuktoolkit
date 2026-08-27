@@ -83,7 +83,17 @@ insta = { version = "1.34.0" }
 bon = "3.8.1"
 tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
 smallvec = { version = "1.13", features = ["const_generics", "union"] }
-mzcore = { version = "0.2.0" }
+# `default = ["flate2"]` is only reachable through `CVIndex::init()`, which
+# downloads and inflates ontologies at runtime. We use `init_static`
+# exclusively (see `timsseek::models::sequence::ontologies`), so the default
+# feature is dead weight. The `rustyms` entry this replaced was also
+# `default-features = false`.
+mzcore = { version = "0.2.0", default-features = false }
+# Direct dependency only because mzcore does not re-export mzcv, yet its API
+# takes mzcv types (`CVIndex`, `AccessionCode`). They interoperate only because
+# this resolves to the SAME mzcv instance mzcore 0.2 depends on — bumping
+# mzcore without checking can silently yield two mzcv versions and a type
+# mismatch that reads as an unrelated trait error. `cargo tree -d` catches it.
 mzcv = { version = "0.3.0" }
 csv = "1.3"
 

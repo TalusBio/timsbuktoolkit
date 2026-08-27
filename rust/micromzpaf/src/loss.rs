@@ -286,19 +286,6 @@ impl NeutralLoss {
             .map(|(_, l, _)| *l))
     }
 
-    /// The composition this loss removes.
-    #[cfg(test)]
-    pub(crate) fn composition(self) -> Composition {
-        if self == NeutralLoss::None {
-            return Composition::default();
-        }
-        TABLE
-            .iter()
-            .find(|(_, l, _)| *l == self)
-            .map(|(c, _, _)| *c)
-            .unwrap_or_default()
-    }
-
     /// Canonical spelling, without the leading `-`. Empty for [`Self::None`].
     pub(crate) fn canonical(self) -> &'static str {
         if self == NeutralLoss::None {
@@ -325,19 +312,28 @@ impl Display for NeutralLoss {
 mod tests {
     use super::*;
 
+    /// The count parser: implicit 1, multi-digit counts, and a count past the
+    /// `u8` slot. Single-digit cases are covered by every TABLE row.
     #[test]
-    fn formula_parses_counts_and_implicit_ones() {
+    fn atom_counts_parse_and_reject_out_of_range() {
         assert_eq!(
             Composition::parse_expression("H2O").unwrap(),
-            Composition::new(0, 2, 0, 1, 0, 0)
+            Composition::new(0, 2, 0, 1, 0, 0),
+            "an element with no digits is one atom"
         );
         assert_eq!(
-            Composition::parse_expression("NH3").unwrap(),
-            Composition::new(0, 3, 1, 0, 0, 0)
+            Composition::parse_expression("C10H12").unwrap(),
+            Composition::new(10, 12, 0, 0, 0, 0),
+            "counts are multi-digit, not one digit per element"
         );
         assert_eq!(
-            Composition::parse_expression("C2H5NOS").unwrap(),
-            Composition::new(2, 5, 1, 1, 1, 0)
+            Composition::parse_expression("C255").unwrap(),
+            Composition::new(255, 0, 0, 0, 0, 0),
+            "the u8 slot is full at 255"
+        );
+        assert!(
+            Composition::parse_expression("C256").is_err(),
+            "one past the slot must be an error, not a wrap to 0"
         );
     }
 
@@ -381,22 +377,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn phospho_losses_resolve() {
-        assert_eq!(
-            NeutralLoss::from_expression("H3PO4").unwrap(),
-            Some(NeutralLoss::PhosphoricAcid)
-        );
-        assert_eq!(
-            NeutralLoss::from_expression("HPO3").unwrap(),
-            Some(NeutralLoss::Metaphosphoric)
-        );
-        assert_eq!(
-            NeutralLoss::from_expression("H3PO4-H2O").unwrap(),
-            Some(NeutralLoss::PhosphoricAcidWater)
-        );
-    }
-
     /// A well-formed composition outside the table is `Ok(None)` — "valid but
     /// not representable" — while malformed text is `Err`. Callers need to
     /// tell those apart to route one to an unknown label and the other to a
@@ -415,14 +395,13 @@ mod tests {
     /// silently decode as [`NeutralLoss::None`] — this is what catches that.
     #[test]
     fn table_round_trips_through_canonical_spelling() {
-        for (comp, loss, canon) in TABLE {
+        for (_comp, loss, canon) in TABLE {
             assert_eq!(
                 NeutralLoss::from_expression(canon).unwrap(),
                 Some(*loss),
                 "canonical spelling {canon} must resolve to its own loss"
             );
             assert_eq!(loss.canonical(), *canon);
-            assert_eq!(loss.composition(), *comp);
             assert_eq!(
                 NeutralLoss::from_discriminant(*loss as u8),
                 *loss,
@@ -452,13 +431,11 @@ mod tests {
         }
     }
 
+    /// The two things the TABLE round trip cannot see: the `-` prefix Display
+    /// adds, and that `None` renders as nothing at all rather than "-".
     #[test]
-    fn display_uses_canonical_spelling() {
+    fn display_adds_the_prefix_and_none_renders_empty() {
         assert_eq!(NeutralLoss::None.to_string(), "");
         assert_eq!(NeutralLoss::Water.to_string(), "-H2O");
-        // Non-canonical input renders canonically; byte-identical round-trip
-        // is intentionally not a property of this type.
-        let parsed = NeutralLoss::from_expression("CH3SOH").unwrap().unwrap();
-        assert_eq!(parsed.to_string(), "-CH4OS");
     }
 }

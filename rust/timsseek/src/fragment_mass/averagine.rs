@@ -74,11 +74,10 @@ mod tests {
 
     #[test]
     fn or_averagine_falls_back_on_nonstandard() {
-        // `B` (Asx) is genuinely ambiguous between Asp/Asn in mzcore and
-        // resolves to more than one formula, which is the real trigger for
-        // the mzcore-backed count path to error today. (`X` was tried first
-        // but mzcore resolves it to a defined zero-C/S formula rather than
-        // erroring, so it does not exercise the fallback.)
+        // `B` (Asx) is ambiguous between Asp/Asn in mzcore and resolves to
+        // more than one formula, which is what makes the mzcore-backed count
+        // path error. `X` does NOT work here: mzcore gives it a defined
+        // zero-C/S formula, so it never reaches the fallback.
         let (src, env) = isotope_dist_or_averagine("PEPBK", 600.0);
         assert_eq!(src, IsotopeSource::Averagine);
         let max = env.iter().copied().fold(f32::MIN, f32::max);
