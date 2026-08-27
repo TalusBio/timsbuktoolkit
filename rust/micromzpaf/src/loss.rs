@@ -23,47 +23,36 @@ use std::fmt::Display;
 
 use crate::IonParsingError;
 
+/// Slots in [`Composition`], in the order [`Composition::new`] takes them.
+const C: usize = 0;
+const H: usize = 1;
+const N: usize = 2;
+const O: usize = 3;
+const S: usize = 4;
+const P: usize = 5;
+
 /// Atom counts for the elements that appear in peptide neutral losses.
 ///
 /// Deliberately not a general chemical formula: these losses only ever draw
 /// from C/H/N/O/S/P, and keeping it to six `u8`s makes equality a single
 /// 6-byte compare during the parse-time table lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Composition {
-    pub c: u8,
-    pub h: u8,
-    pub n: u8,
-    pub o: u8,
-    pub s: u8,
-    pub p: u8,
-}
+pub(crate) struct Composition([u8; 6]);
 
 impl Composition {
     pub(crate) const fn new(c: u8, h: u8, n: u8, o: u8, s: u8, p: u8) -> Self {
-        Self { c, h, n, o, s, p }
+        Self([c, h, n, o, s, p])
     }
 
     /// Multiply every count, saturating. Used for the `2H2O` multiplier form.
     fn scaled(self, k: u8) -> Self {
-        Self {
-            c: self.c.saturating_mul(k),
-            h: self.h.saturating_mul(k),
-            n: self.n.saturating_mul(k),
-            o: self.o.saturating_mul(k),
-            s: self.s.saturating_mul(k),
-            p: self.p.saturating_mul(k),
-        }
+        Self(self.0.map(|n| n.saturating_mul(k)))
     }
 
-    fn plus(self, o: Self) -> Self {
-        Self {
-            c: self.c.saturating_add(o.c),
-            h: self.h.saturating_add(o.h),
-            n: self.n.saturating_add(o.n),
-            o: self.o.saturating_add(o.o),
-            s: self.s.saturating_add(o.s),
-            p: self.p.saturating_add(o.p),
-        }
+    fn plus(self, other: Self) -> Self {
+        Self(std::array::from_fn(|i| {
+            self.0[i].saturating_add(other.0[i])
+        }))
     }
 
     /// Parse a bare formula like `H2O`, `CH4OS`, `C2H5NOS`.
@@ -99,12 +88,12 @@ impl Composition {
                     })?
             };
             let slot = match elem {
-                b'C' => &mut out.c,
-                b'H' => &mut out.h,
-                b'N' => &mut out.n,
-                b'O' => &mut out.o,
-                b'S' => &mut out.s,
-                b'P' => &mut out.p,
+                b'C' => C,
+                b'H' => H,
+                b'N' => N,
+                b'O' => O,
+                b'S' => S,
+                b'P' => P,
                 _ => {
                     return Err(IonParsingError::ParsingError {
                         error: s.to_string(),
@@ -112,7 +101,7 @@ impl Composition {
                     });
                 }
             };
-            *slot = slot.saturating_add(count);
+            out.0[slot] = out.0[slot].saturating_add(count);
         }
         Ok(out)
     }
@@ -133,7 +122,9 @@ impl Composition {
                 });
             }
             // Leading digits are a repeat count for the whole term.
-            let digits = term.len() - term.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            let digits = term
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(term.len());
             let (mult, formula) = if digits > 0 {
                 let m: u8 = term[..digits]
                     .parse()

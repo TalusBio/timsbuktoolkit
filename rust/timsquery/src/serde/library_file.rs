@@ -396,6 +396,31 @@ impl LibraryArena {
     }
 }
 
+/// Seal a directly-built mzpaf arena together with its reference-intensity
+/// sidecar.
+///
+/// The sidecar is indexed by the same offsets as `frag_labels`, so a length
+/// mismatch means some path pushed a label without an intensity (or the
+/// reverse) and every downstream fragment lookup is off by that much. Returned
+/// as an error rather than asserted: it is a property of the file being read.
+pub(super) fn finish_mzpaf_arena(
+    mut geom: QueryCollection<IonAnnot>,
+    frag_intens: Vec<f32>,
+) -> Result<LibraryArena, LibraryReadingError> {
+    if frag_intens.len() != geom.frag_labels.len() {
+        return Err(LibraryReadingError::SpeclibParse(format!(
+            "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
+            frag_intens.len(),
+            geom.frag_labels.len(),
+        )));
+    }
+    geom.seal();
+    Ok(LibraryArena::Mzpaf {
+        geom,
+        frag_intens: Some(frag_intens),
+    })
+}
+
 /// A single spectral-library format reader. Adding a format = one struct + one
 /// line in [`registry`], instead of editing an enum, a method, and an ordered
 /// try-chain.
@@ -404,20 +429,13 @@ pub trait LibraryReader: Send + Sync {
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    /// Read into the arena.
+    /// Read the whole library into the arena.
     ///
-    /// Most formats produce an [`ElutionGroupCollection`] and let
-    /// [`LibraryArena::from_elution_groups`] adapt it; implement
-    /// [`Self::read`] for those. The binary `.speclib` and mzSpecLib readers
-    /// build the arena directly (with the reference-intensity sidecar) and
-    /// override this instead.
-    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
-        LibraryArena::from_elution_groups(self.read(path)?)
-    }
-    /// The legacy path. Direct-arena readers leave this unimplemented.
-    fn read(&self, _path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
-        unreachable!("a reader must implement either `read` or `read_arena`")
-    }
+    /// Formats that go through [`ElutionGroupCollection`] adapt it with
+    /// [`LibraryArena::from_elution_groups`]; the binary `.speclib` and
+    /// mzSpecLib readers build the arena directly, because only that path
+    /// carries the reference-intensity sidecar.
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError>;
 }
 
 struct MzSpecLibReader;
@@ -437,7 +455,7 @@ impl LibraryReader for MzSpecLibReader {
         sniff_mzspeclib_library_file(path)
     }
 
-    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         read_mzspeclib_library_file(path)
     }
 }
@@ -451,7 +469,7 @@ impl LibraryReader for DiannSpeclibReader {
         sniff_diann_speclib_library_file(path)
     }
 
-    fn read_arena(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         read_diann_speclib_library_file(path)
     }
 }
@@ -465,13 +483,13 @@ impl LibraryReader for DiannParquetReader {
         sniff_diann_parquet_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         let egs = read_diann_parquet(path).map_err(|e| {
             warn!("Failed to read DIA-NN parquet library file: {:?}", e);
             LibraryReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
+        LibraryArena::from_elution_groups(ElutionGroupCollection::MzpafLabels(
             egs,
             Some(FileReadingExtras::Diann(extras)),
         ))
@@ -487,13 +505,13 @@ impl LibraryReader for DiannTsvReader {
         sniff_diann_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         let egs = read_diann_tsv(path).map_err(|e| {
             warn!("Failed to read DIA-NN TSV library file: {:?}", e);
             LibraryReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
+        LibraryArena::from_elution_groups(ElutionGroupCollection::MzpafLabels(
             egs,
             Some(FileReadingExtras::Diann(extras)),
         ))
@@ -509,13 +527,13 @@ impl LibraryReader for SpectronautReader {
         sniff_spectronaut_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         let egs = read_spectronaut_tsv(path).map_err(|e| {
             warn!("Failed to read Spectronaut TSV library file: {:?}", e);
             LibraryReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
+        LibraryArena::from_elution_groups(ElutionGroupCollection::MzpafLabels(
             egs,
             Some(FileReadingExtras::Spectronaut(extras)),
         ))
@@ -531,13 +549,13 @@ impl LibraryReader for SkylineReader {
         sniff_skyline_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
         let egs = read_skyline_csv(path).map_err(|e| {
             warn!("Failed to read Skyline transition list: {:?}", e);
             LibraryReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
+        LibraryArena::from_elution_groups(ElutionGroupCollection::MzpafLabels(
             egs,
             Some(FileReadingExtras::Skyline(extras)),
         ))
@@ -555,8 +573,8 @@ impl LibraryReader for JsonReader {
         true
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, LibraryReadingError> {
-        ElutionGroupCollection::try_read_json(path)
+    fn read(&self, path: &Path) -> Result<LibraryArena, LibraryReadingError> {
+        LibraryArena::from_elution_groups(ElutionGroupCollection::try_read_json(path)?)
     }
 }
 
@@ -585,7 +603,7 @@ pub fn read_library_file<T: AsRef<Path>>(path: T) -> Result<LibraryArena, Librar
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
-            match reader.read_arena(path) {
+            match reader.read(path) {
                 Ok(arena) => return Ok(arena),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate

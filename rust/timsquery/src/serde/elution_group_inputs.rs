@@ -59,15 +59,12 @@ impl<T: KeyLike> ElutionGroupInput<T> {
         if self.fragment_labels.is_some() {
             return Err(ElutionGroupInputError::AlreadyHasFragmentLabels);
         }
-        if num_fragments > u8::MAX as usize + 1 {
-            return Err(ElutionGroupInputError::TooManyFragmentsToLabel {
+        let fragment_labels: Vec<u8> = (0..num_fragments)
+            .map(u8::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|_| ElutionGroupInputError::TooManyFragmentsToLabel {
                 count: num_fragments,
-            });
-        }
-        // Iterate in `usize` and narrow per element: `0..(num_fragments as u8)`
-        // would be an EMPTY range at exactly 256, since `256 as u8` is 0. The
-        // guard above is what makes the narrowing lossless.
-        let fragment_labels: Vec<u8> = (0..num_fragments).map(|i| i as u8).collect();
+            })?;
 
         Ok(ElutionGroupInput {
             id: self.id,

@@ -38,7 +38,10 @@
 //! unknown label rather than falling back to a worse-matching representable
 //! alternative, which would assign both a wrong identity and a wrong mass.
 
-use crate::ion::IonAnnot;
+use crate::ion::{
+    IonAnnot,
+    UnknownIonCounter,
+};
 use crate::models::{
     LibCapabilities,
     QueryCollection,
@@ -46,6 +49,7 @@ use crate::models::{
 use crate::serde::library_file::{
     LibraryArena,
     LibraryReadingError,
+    finish_mzpaf_arena,
 };
 use micromzpaf::{
     MassError,
@@ -97,33 +101,62 @@ const UNIT_TERM: &str = "UO:0000000";
 const UNIT_MINUTE: &str = "UO:0000031";
 const UNIT_SECOND: &str = "UO:0000010";
 
-/// Per-library tally of everything that did not land verbatim in the arena.
+/// Declare the per-library tally so that the counters, the "is anything
+/// wrong?" test and the log line all come from one list.
 ///
-/// Reported once at the end of a load rather than per row: a consensus library
-/// can carry thousands of unannotated peaks, and a line each would bury the
-/// signal.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct MzSpecLibStats {
-    /// Peaks stored with their parsed annotation.
-    pub kept_annotated: usize,
+/// Spelled as a macro because the alternative — a struct plus a hand-written
+/// `||` chain plus a hand-written `warn!` — is three places to update per
+/// counter and the compiler checks none of them. That already went wrong once.
+macro_rules! anomaly_counters {
+    ($( $(#[$doc:meta])* $field:ident => $label:literal, )+) => {
+        /// Per-library tally of everything that did not land verbatim in the
+        /// arena.
+        ///
+        /// Reported once at the end of a load rather than per row: a consensus
+        /// library can carry thousands of unannotated peaks, and a line each
+        /// would bury the signal.
+        #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+        pub(crate) struct MzSpecLibStats {
+            /// Peaks stored with their parsed annotation. The only counter
+            /// here that is not an anomaly.
+            pub kept_annotated: usize,
+            $( $(#[$doc])* pub $field: usize, )+
+        }
+
+        impl MzSpecLibStats {
+            /// Every anomaly counter paired with how to say it.
+            fn anomalies(&self) -> impl Iterator<Item = (&'static str, usize)> {
+                [ $( ($label, self.$field), )+ ].into_iter()
+            }
+        }
+    };
+}
+
+anomaly_counters! {
     /// Identity known but not representable (a loss outside the table, a
     /// modified immonium). Stored with an unknown label and an exact mass.
-    pub kept_unknown_label: usize,
+    kept_unknown_label => "kept with an unknown label",
     /// `?` — no annotation, so no mass error, so no theoretical m/z.
-    pub skipped_unannotated: usize,
+    skipped_unannotated => "skipped as unannotated",
     /// Comma-separated alternatives that tied on absolute mass error.
-    pub skipped_ambiguous: usize,
+    skipped_ambiguous => "skipped as ambiguous",
     /// Peaks dropped because their label collided with one already in the
-    /// precursor after the unknown-label rewrite.
-    pub dropped_duplicate_label: usize,
+    /// precursor.
+    dropped_duplicate_label => "dropped for a duplicate label",
+    /// Peaks dropped because the precursor had already spent all 255 unknown
+    /// labels, so no distinct one was left.
+    dropped_unknown_over_capacity => "dropped with the unknown labels exhausted",
     /// Spectra with no retention-time term at all.
-    pub spectra_without_rt: usize,
+    spectra_without_rt => "spectra without an RT",
     /// Spectra whose mobility came from a drift time rather than 1/K0.
-    pub spectra_with_drift_time_mobility: usize,
+    spectra_with_drift_time_mobility => "spectra using a drift time as mobility",
     /// Spectra whose retention time carried a unit this reader does not know.
-    pub spectra_with_unknown_rt_unit: usize,
+    spectra_with_unknown_rt_unit => "spectra with an unknown RT unit",
+    /// Spectra dropped for missing or unparseable precursor m/z, charge or
+    /// sequence.
+    dropped_malformed_spectrum => "spectra dropped as malformed",
     /// Precursors dropped for having no usable peak left.
-    pub dropped_empty_precursors: usize,
+    dropped_empty_precursors => "precursors dropped as empty",
 }
 
 /// One spectrum converted into the shape [`QueryCollection::push_row`] takes.
@@ -139,42 +172,26 @@ struct ArenaRow {
 }
 
 impl MzSpecLibStats {
-    fn anything_to_report(&self) -> bool {
-        self.kept_unknown_label > 0
-            || self.skipped_unannotated > 0
-            || self.skipped_ambiguous > 0
-            || self.dropped_duplicate_label > 0
-            || self.spectra_without_rt > 0
-            || self.spectra_with_drift_time_mobility > 0
-            || self.spectra_with_unknown_rt_unit > 0
-            || self.dropped_empty_precursors > 0
-    }
-
     fn report(&self, path: &Path) {
-        if !self.anything_to_report() {
+        let flagged: Vec<String> = self
+            .anomalies()
+            .filter(|(_, n)| *n > 0)
+            .map(|(label, n)| format!("{n} {label}"))
+            .collect();
+        if flagged.is_empty() {
             info!(
                 "mzSpecLib {}: {} peaks, all annotated and representable",
                 path.display(),
                 self.kept_annotated
             );
-            return;
+        } else {
+            warn!(
+                "mzSpecLib {}: kept {} annotated peaks; {}",
+                path.display(),
+                self.kept_annotated,
+                flagged.join(", "),
+            );
         }
-        warn!(
-            "mzSpecLib {}: kept {} annotated + {} with unknown labels; \
-             skipped {} unannotated, {} ambiguous, {} duplicate-label; \
-             {} spectra without RT, {} using drift time as mobility, \
-             {} with an unknown RT unit, {} precursors dropped as empty",
-            path.display(),
-            self.kept_annotated,
-            self.kept_unknown_label,
-            self.skipped_unannotated,
-            self.skipped_ambiguous,
-            self.dropped_duplicate_label,
-            self.spectra_without_rt,
-            self.spectra_with_drift_time_mobility,
-            self.spectra_with_unknown_rt_unit,
-            self.dropped_empty_precursors,
-        );
     }
 }
 
@@ -246,24 +263,35 @@ struct RawSpectrum {
     peaks: Vec<(f64, f32, String)>,
 }
 
-/// What resolving one peak's annotation produced.
-enum Resolved {
-    /// Parsed cleanly; store with this label.
-    Annotated(IonAnnot),
-    /// Identity known, not representable. Store with an unknown label, exact
-    /// mass.
-    UnknownLabel,
-    /// No single identity, so no theoretical mass. Skip.
-    SkipUnannotated,
-    SkipAmbiguous,
+/// Why a peak cannot be stored at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// No annotation, so no mass error, so no theoretical m/z.
+    Unannotated,
+    /// Alternatives that pin no single identity, so likewise no theoretical
+    /// m/z. Storing the observed one would mix the two.
+    Ambiguous,
 }
 
-/// Resolve one annotation string into a storage decision plus the mass error
-/// needed to recover theoretical m/z.
-fn resolve_annotation(annotation: &str) -> (Resolved, Option<MassError>) {
+/// What resolving one peak's annotation produced.
+///
+/// The mass error rides along on the two variants that keep the peak, because
+/// it is what recovers theoretical m/z from the observed value in the file. It
+/// is absent from `Skip` because a skipped peak has no mass to recover.
+enum Resolved {
+    /// Parsed cleanly; store with this label.
+    Annotated(IonAnnot, Option<MassError>),
+    /// Identity known, not representable. Store with an unknown label and the
+    /// exact mass.
+    UnknownLabel(Option<MassError>),
+    Skip(SkipReason),
+}
+
+/// Resolve one annotation string into a storage decision.
+fn resolve_annotation(annotation: &str) -> Resolved {
     let annotation = annotation.trim();
     if annotation.is_empty() || annotation == "?" {
-        return (Resolved::SkipUnannotated, None);
+        return Resolved::Skip(SkipReason::Unannotated);
     }
 
     // Splitting the error off comes first: it works even when the ion will not
@@ -274,7 +302,7 @@ fn resolve_annotation(annotation: &str) -> (Resolved, Option<MassError>) {
     let mut alternatives = Vec::new();
     for alt in annotation.split(',') {
         let Ok(parsed) = split_mass_error(alt.trim()) else {
-            return (Resolved::SkipAmbiguous, None);
+            return Resolved::Skip(SkipReason::Ambiguous);
         };
         alternatives.push(parsed);
     }
@@ -295,27 +323,44 @@ fn resolve_annotation(annotation: &str) -> (Resolved, Option<MassError>) {
             .map(|(_, e)| magnitude(e))
             .fold(f64::INFINITY, f64::min);
         if !best.is_finite() {
-            return (Resolved::SkipAmbiguous, None);
+            return Resolved::Skip(SkipReason::Ambiguous);
         }
         let mut winners = alternatives.iter().filter(|(_, e)| magnitude(e) == best);
         let winner = *winners.next().expect("the minimum came from this iterator");
         if winners.next().is_some() {
-            return (Resolved::SkipAmbiguous, None);
+            return Resolved::Skip(SkipReason::Ambiguous);
         }
         winner
     };
     match IonAnnot::try_from(ion_str) {
-        Ok(ion) => (Resolved::Annotated(ion), mass_error),
+        Ok(ion) => Resolved::Annotated(ion, mass_error),
         // Keep the peak and its exact mass, lose only the label.
-        Err(_) => (Resolved::UnknownLabel, mass_error),
+        Err(_) => Resolved::UnknownLabel(mass_error),
     }
 }
 
-/// Convert one accumulated spectrum into arena rows.
+/// Convert one accumulated spectrum into an arena row, counting whichever way
+/// it failed.
 ///
-/// Returns `None` when the spectrum lacks something structural (precursor m/z,
-/// charge, sequence) or ends up with no usable peak.
+/// The counting lives here rather than inside [`spectrum_row`] so that every
+/// `?` in there lands on a tally. Without it a library that dropped half its
+/// spectra for a missing charge still reports "all annotated and
+/// representable", which is the one thing this module exists to prevent.
 fn convert_spectrum(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRow> {
+    let Some(row) = spectrum_row(raw, stats) else {
+        stats.dropped_malformed_spectrum += 1;
+        return None;
+    };
+    if row.frags.is_empty() {
+        stats.dropped_empty_precursors += 1;
+        return None;
+    }
+    Some(row)
+}
+
+/// The conversion proper: `None` means the spectrum lacked something
+/// structural (precursor m/z, charge, a parseable RT or mobility, a sequence).
+fn spectrum_row(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<ArenaRow> {
     let precursor_mz = raw.attrs.f64_of(PRECURSOR_MZ_TERMS)?;
     let charge: u8 = raw.attrs.find(CHARGE_TERM)?.value.parse().ok()?;
 
@@ -377,40 +422,29 @@ fn convert_spectrum(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<Are
 
     let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(raw.peaks.len());
     let mut intens: Vec<f32> = Vec::with_capacity(raw.peaks.len());
-    let mut unknown_counter: u8 = 0;
+    let mut unknown_ions = UnknownIonCounter::new();
 
     for (observed_mz, intensity, annotation) in &raw.peaks {
-        let (resolved, mass_error) = resolve_annotation(annotation);
-        let label = match resolved {
-            Resolved::Annotated(ion) => {
+        let (label, mass_error) = match resolve_annotation(annotation) {
+            Resolved::Annotated(ion, error) => {
                 stats.kept_annotated += 1;
-                ion
+                (ion, error)
             }
-            Resolved::UnknownLabel => {
-                // The ordinal is a per-precursor uniqueness counter. Past 255
-                // there is no way to keep labels distinct, so drop rather than
-                // reuse one.
-                let Some(next) = unknown_counter.checked_add(1) else {
-                    stats.dropped_duplicate_label += 1;
-                    continue;
-                };
-                unknown_counter = next;
-                match IonAnnot::try_new('?', Some(unknown_counter), 1, 0) {
-                    Ok(i) => {
-                        stats.kept_unknown_label += 1;
-                        i
-                    }
-                    Err(_) => {
-                        stats.dropped_duplicate_label += 1;
-                        continue;
-                    }
+            Resolved::UnknownLabel(error) => match unknown_ions.next(1) {
+                Ok(ion) => {
+                    stats.kept_unknown_label += 1;
+                    (ion, error)
                 }
-            }
-            Resolved::SkipUnannotated => {
+                Err(_) => {
+                    stats.dropped_unknown_over_capacity += 1;
+                    continue;
+                }
+            },
+            Resolved::Skip(SkipReason::Unannotated) => {
                 stats.skipped_unannotated += 1;
                 continue;
             }
-            Resolved::SkipAmbiguous => {
+            Resolved::Skip(SkipReason::Ambiguous) => {
                 stats.skipped_ambiguous += 1;
                 continue;
             }
@@ -422,18 +456,15 @@ fn convert_spectrum(raw: &RawSpectrum, stats: &mut MzSpecLibStats) -> Option<Are
         };
 
         // Labels must stay unique within the precursor (`linear_get` is
-        // first-match), so a collision drops the later peak.
+        // first-match), so a collision drops the later peak. Unknown labels
+        // come off a monotonic counter and cannot collide; this only ever
+        // fires for annotated ones.
         if frags.iter().any(|(l, _)| *l == label) {
             stats.dropped_duplicate_label += 1;
             continue;
         }
         frags.push((label, mz));
         intens.push(*intensity);
-    }
-
-    if frags.is_empty() {
-        stats.dropped_empty_precursors += 1;
-        return None;
     }
 
     Some(ArenaRow {
@@ -453,24 +484,44 @@ pub fn sniff_mzspeclib_library_file<T: AsRef<Path>>(path: T) -> bool {
     let Ok(file) = std::fs::File::open(path.as_ref()) else {
         return false;
     };
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    // Only the first non-empty line is inspected, so this stays O(1) on a
+    // Lazy, so only the first non-empty line is read: this stays O(1) on a
     // multi-gigabyte library.
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return false,
-            Ok(_) => {
-                let t = line.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                return t == MAGIC;
-            }
-            Err(_) => return false,
-        }
-    }
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim() == MAGIC)
+}
+
+/// Which part of a spectrum block the line loop is inside.
+enum Section {
+    Attributes,
+    Peaks,
+}
+
+/// Convert an accumulated spectrum and append it to the arena.
+fn flush(
+    current: Option<RawSpectrum>,
+    geom: &mut QueryCollection<IonAnnot>,
+    frag_intens: &mut Vec<f32>,
+    stats: &mut MzSpecLibStats,
+) {
+    let Some(raw) = current else { return };
+    let Some(row) = convert_spectrum(&raw, stats) else {
+        return;
+    };
+    frag_intens.extend_from_slice(&row.intensities);
+    geom.push_row(
+        row.precursor_mz,
+        row.charge,
+        row.rt_seconds,
+        row.mobility,
+        &row.frags,
+        &row.stripped,
+        &row.modified,
+        &[],
+        false,
+    );
 }
 
 /// Read an mzSpecLib text file into the columnar arena.
@@ -486,52 +537,29 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
     let mut stats = MzSpecLibStats::default();
 
     let mut current: Option<RawSpectrum> = None;
-    let mut in_peaks = false;
-
-    let flush = |cur: Option<RawSpectrum>,
-                 geom: &mut QueryCollection<IonAnnot>,
-                 frag_intens: &mut Vec<f32>,
-                 stats: &mut MzSpecLibStats| {
-        let Some(raw) = cur else { return };
-        let Some(row) = convert_spectrum(&raw, stats) else {
-            return;
-        };
-        frag_intens.extend_from_slice(&row.intensities);
-        geom.push_row(
-            row.precursor_mz,
-            row.charge,
-            row.rt_seconds,
-            row.mobility,
-            &row.frags,
-            &row.stripped,
-            &row.modified,
-            &[],
-            false,
-        );
-    };
+    let mut section = Section::Attributes;
 
     for line in reader.lines() {
         let line = line.map_err(LibraryReadingError::IoError)?;
         let trimmed = line.trim_end();
 
-        if trimmed.starts_with("<Spectrum=") {
-            flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
-            current = Some(RawSpectrum::default());
-            in_peaks = false;
-            continue;
-        }
-        if trimmed == "<Peaks>" {
-            in_peaks = true;
-            continue;
-        }
-        // `<Analyte=n>` and `<Interpretation=n>` attributes are folded into the
-        // spectrum's bag: this reader wants the union, not the hierarchy.
+        // Any `<...>` header ends the peak list; only `<Peaks>` opens one.
+        // `<Analyte=n>` and `<Interpretation=n>` attributes are folded into
+        // the spectrum's bag: this reader wants the union, not the hierarchy.
         if trimmed.starts_with('<') {
-            in_peaks = false;
+            if trimmed.starts_with("<Spectrum=") {
+                flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
+                current = Some(RawSpectrum::default());
+            }
+            section = if trimmed == "<Peaks>" {
+                Section::Peaks
+            } else {
+                Section::Attributes
+            };
             continue;
         }
         if trimmed.is_empty() {
-            in_peaks = false;
+            section = Section::Attributes;
             continue;
         }
 
@@ -539,20 +567,25 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
             continue; // library-level header
         };
 
-        if in_peaks {
-            let mut cols = trimmed.split('\t');
-            let (Some(mz), Some(intensity)) = (cols.next(), cols.next()) else {
-                continue;
-            };
-            let (Ok(mz), Ok(intensity)) =
-                (mz.trim().parse::<f64>(), intensity.trim().parse::<f32>())
-            else {
-                continue;
-            };
-            let annotation = cols.next().unwrap_or("?").to_string();
-            spec.peaks.push((mz, intensity, annotation));
-        } else if let Some(attr) = Attr::parse(trimmed) {
-            spec.attrs.0.push(attr);
+        match section {
+            Section::Peaks => {
+                let mut cols = trimmed.split('\t');
+                let (Some(mz), Some(intensity)) = (cols.next(), cols.next()) else {
+                    continue;
+                };
+                let (Ok(mz), Ok(intensity)) =
+                    (mz.trim().parse::<f64>(), intensity.trim().parse::<f32>())
+                else {
+                    continue;
+                };
+                let annotation = cols.next().unwrap_or("?").to_string();
+                spec.peaks.push((mz, intensity, annotation));
+            }
+            Section::Attributes => {
+                if let Some(attr) = Attr::parse(trimmed) {
+                    spec.attrs.0.push(attr);
+                }
+            }
         }
     }
     flush(current.take(), &mut geom, &mut frag_intens, &mut stats);
@@ -565,19 +598,7 @@ pub fn read_mzspeclib_library_file<T: AsRef<Path>>(
             path.display()
         )));
     }
-    if frag_intens.len() != geom.frag_labels.len() {
-        return Err(LibraryReadingError::SpeclibParse(format!(
-            "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
-            frag_intens.len(),
-            geom.frag_labels.len(),
-        )));
-    }
-
-    geom.seal();
-    Ok(LibraryArena::Mzpaf {
-        geom,
-        frag_intens: Some(frag_intens),
-    })
+    finish_mzpaf_arena(geom, frag_intens)
 }
 
 #[cfg(test)]
@@ -667,31 +688,70 @@ mod tests {
         );
     }
 
+    /// A spectrum missing a structural field is dropped by `?` deep inside
+    /// `spectrum_row`. Nothing there increments a counter, so this is what
+    /// stops the load from reporting "all annotated and representable" while
+    /// having silently lost half the library.
+    #[test]
+    fn structurally_broken_spectra_are_counted_not_swallowed() {
+        let attr = |accession: &str, value: &str| Attr {
+            group: None,
+            accession: accession.to_string(),
+            value: value.to_string(),
+        };
+        let good = |charge: &str| RawSpectrum {
+            attrs: AttrBag(vec![
+                attr(PRECURSOR_MZ_TERMS[0], "500.25"),
+                attr(CHARGE_TERM, charge),
+                attr(STRIPPED_SEQ_TERM, "PEPTIDEK"),
+                attr(RT_TERMS[0], "10.0"),
+            ]),
+            peaks: vec![(175.1, 1.0, "y1/0.0".to_string())],
+        };
+
+        let mut stats = MzSpecLibStats::default();
+        assert!(convert_spectrum(&good("2"), &mut stats).is_some());
+        // Unparseable charge — the `?` that used to vanish.
+        assert!(convert_spectrum(&good("not-a-number"), &mut stats).is_none());
+        // No peak survives resolution, which is a different failure.
+        let mut empty = good("2");
+        empty.peaks = vec![(175.1, 1.0, "?".to_string())];
+        assert!(convert_spectrum(&empty, &mut stats).is_none());
+
+        assert_eq!(stats.kept_annotated, 1);
+        assert_eq!(stats.dropped_malformed_spectrum, 1);
+        assert_eq!(stats.dropped_empty_precursors, 1);
+        assert_eq!(stats.skipped_unannotated, 1);
+        assert!(
+            stats.anomalies().any(|(_, n)| n > 0),
+            "the report must not claim a clean load"
+        );
+    }
+
     #[test]
     fn resolves_unambiguous_representable() {
-        let (r, e) = resolve_annotation("y5/-0.0005");
-        assert!(matches!(r, Resolved::Annotated(_)));
-        assert_eq!(e, Some(MassError::Da(-0.0005)));
+        assert!(matches!(
+            resolve_annotation("y5/-0.0005"),
+            Resolved::Annotated(_, Some(MassError::Da(-0.0005)))
+        ));
     }
 
     /// Known identity, unrepresentable spelling: keep the peak and the exact
-    /// mass, erase only the label.
+    /// mass, erase only the label. The mass error must survive so theoretical
+    /// m/z stays exact.
     #[test]
     fn unrepresentable_loss_keeps_peak_with_unknown_label() {
-        let (r, e) = resolve_annotation("y1-HCOOH/0.0003");
-        assert!(matches!(r, Resolved::UnknownLabel));
-        assert_eq!(
-            e,
-            Some(MassError::Da(0.0003)),
-            "the mass error must survive so theoretical m/z stays exact"
-        );
+        assert!(matches!(
+            resolve_annotation("y1-HCOOH/0.0003"),
+            Resolved::UnknownLabel(Some(MassError::Da(0.0003)))
+        ));
     }
 
     #[test]
     fn unannotated_peak_is_skipped() {
         assert!(matches!(
-            resolve_annotation("?").0,
-            Resolved::SkipUnannotated
+            resolve_annotation("?"),
+            Resolved::Skip(SkipReason::Unannotated)
         ));
     }
 
@@ -701,24 +761,29 @@ mod tests {
     #[test]
     fn ambiguity_resolves_to_the_closest_not_the_representable() {
         // a2 is representable and further; y2-CO2-NH3 is closer and is not.
-        let (r, e) = resolve_annotation("a2/-0.0040,y2-CO2-NH3/-0.0001");
         assert!(
-            matches!(r, Resolved::UnknownLabel),
+            matches!(
+                resolve_annotation("a2/-0.0040,y2-CO2-NH3/-0.0001"),
+                Resolved::UnknownLabel(Some(MassError::Da(-0.0001)))
+            ),
             "the closest alternative wins even when unrepresentable"
         );
-        assert_eq!(e, Some(MassError::Da(-0.0001)));
 
         // When the closest one IS representable, it is used.
-        let (r, _) = resolve_annotation("a2/-0.0001,y2-CO2-NH3/-0.0040");
-        assert!(matches!(r, Resolved::Annotated(_)));
+        assert!(matches!(
+            resolve_annotation("a2/-0.0001,y2-CO2-NH3/-0.0040"),
+            Resolved::Annotated(..)
+        ));
     }
 
     /// An exact tie pins no identity, so no theoretical m/z exists and the peak
     /// cannot be stored without mixing observed and theoretical masses.
     #[test]
     fn tied_ambiguity_is_skipped() {
-        let (r, _) = resolve_annotation("a2/-0.0004,y2-CO2-NH3/-0.0004");
-        assert!(matches!(r, Resolved::SkipAmbiguous));
+        assert!(matches!(
+            resolve_annotation("a2/-0.0004,y2-CO2-NH3/-0.0004"),
+            Resolved::Skip(SkipReason::Ambiguous)
+        ));
     }
 
     #[test]
@@ -728,9 +793,10 @@ mod tests {
         assert!((e.theoretical_from_observed(175.1184) - 175.1189).abs() < 1e-9);
     }
 
-    /// The public entry point must dispatch mzSpecLib itself. It is sniffed
-    /// before the registry, so a regression here falls through to the
-    /// always-true JSON reader and fails with a generic parse error.
+    /// The public entry point must dispatch mzSpecLib itself. It is the
+    /// registry's first entry precisely because the JSON reader at the end
+    /// accepts anything, so a regression in the sniff falls through to it and
+    /// surfaces as a generic parse error rather than as "wrong reader".
     #[test]
     fn public_read_library_file_dispatches_mzspeclib() {
         use crate::serde::read_library_file;

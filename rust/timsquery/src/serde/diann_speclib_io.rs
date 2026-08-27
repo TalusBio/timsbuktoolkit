@@ -28,6 +28,7 @@
 use super::library_file::{
     LibraryArena,
     LibraryReadingError,
+    finish_mzpaf_arena,
 };
 use crate::ion::IonAnnot;
 use crate::models::{
@@ -891,7 +892,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
 
     // mmap the file (not an owned read) — pages fault in on demand, no
     // file-sized resident buffer.
-    let (mut geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
+    let (geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
         // A parse that doesn't land on EOF means the entries were misaligned
@@ -925,16 +926,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         path.display()
     );
 
-    assert_eq!(
-        frag_intens.len(),
-        geom.frag_labels.len(),
-        "reference-intensity sidecar must stay parallel to the fragment-label arena"
-    );
-    geom.seal();
-    Ok(LibraryArena::Mzpaf {
-        geom,
-        frag_intens: Some(frag_intens),
-    })
+    finish_mzpaf_arena(geom, frag_intens)
 }
 
 #[cfg(test)]

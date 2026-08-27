@@ -5,7 +5,7 @@ Verbatim from [HUPO-PSI/mzSpecLib](https://github.com/HUPO-PSI/mzSpecLib)
 
 | file | why |
 |---|---|
-| `diann.mzSpecLib.txt` | the shape `speclib_build` will emit; all peaks annotated, every mass error exactly `0.0` |
+| `diann.mzSpecLib.txt` | a DIA-NN export: all peaks annotated, every mass error exactly `0.0` |
 | `spectronaut.mzSpecLib.txt` | carries `-H2O`/`-NH3` losses and a unit-tagged retention time in minutes |
 
 Both are fully representable, so neither exercises the unknown-label or

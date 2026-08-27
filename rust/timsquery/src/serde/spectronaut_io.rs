@@ -2,8 +2,8 @@ use crate::TimsElutionGroup;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
+    UnknownIonCounter,
 };
-use crate::serde::unknown_ordinal::next_unknown_ordinal;
 use serde::Deserialize;
 use std::path::Path;
 use tinyvec::tiny_vec;
@@ -287,8 +287,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(included_rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(included_rows.len());
-    // Per-precursor `?` counter — see `next_unknown_ordinal`.
-    let mut num_unknown_losses: u8 = 0;
+    let mut unknown_ions = UnknownIonCounter::new();
 
     for (i, row) in included_rows.iter().enumerate() {
         let fragment_mz = row.fragment_mz;
@@ -308,9 +307,7 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            num_unknown_losses = next_unknown_ordinal(num_unknown_losses)
-                .ok_or(SpectronautPrecursorParsingError::IonOverCapacity)?;
-            let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
+            let ion_annot = unknown_ions.next(frag_charge as i8)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
