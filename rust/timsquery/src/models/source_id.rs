@@ -64,6 +64,14 @@ impl SourceIds {
         Ok(Self::Numeric(ids))
     }
 
+    /// Self-incremental ids for a format that carries none, so results still
+    /// have something to be keyed by. Numerically equal to the row positions
+    /// they are minted from, but they are ids from here on: stored in the
+    /// column, reported in output, and no longer tied to where the row sits.
+    pub fn minted(n_rows: usize) -> Self {
+        Self::Numeric((0..n_rows as u64).map(LibraryId::new).collect())
+    }
+
     pub fn get(&self, row: usize) -> Option<LibraryId> {
         match self {
             Self::Absent => None,

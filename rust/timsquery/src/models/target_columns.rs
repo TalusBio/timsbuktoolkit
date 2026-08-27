@@ -11,30 +11,6 @@ use crate::models::source_id::{
 };
 use crate::traits::DecoyShift;
 
-/// The arena's own row addressing. Not exported: outside the arena a position
-/// is not an identifier, and every consumer that wants to name a row wants
-/// [`LibraryId`] instead.
-mod index {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub(super) struct ArenaIndex(u32);
-
-    impl ArenaIndex {
-        /// Narrows here rather than at the call site: the downstream columns
-        /// (`library_id`, decoy group) are u32, so a wider position is a bug we
-        /// want surfaced instead of wrapped.
-        pub(super) fn new(row: usize) -> Self {
-            Self(u32::try_from(row).expect("arena row exceeds u32::MAX"))
-        }
-
-        /// The one way a position leaves the arena: as the `id` of a result
-        /// whose source carried none. See `QueryGeom::output_id`.
-        pub(super) fn as_output_id(self) -> u64 {
-            self.0 as u64
-        }
-    }
-}
-use index::ArenaIndex;
-
 #[derive(Debug, Clone)]
 pub struct ModDefinition {
     pub token: String, // verbatim, e.g. "[UNIMOD:4]"
@@ -184,12 +160,13 @@ impl<L: KeyLike> TargetColumns<L> {
         self.source_ids.get(tgt)
     }
 
-    /// The id a result for row `tgt` carries: its source id, or the arena
-    /// position when the format carried none. Resolved here so the position is
-    /// converted where it is still known to be one, never handed out as an id.
+    /// The id a result for row `tgt` carries. Always a source id: [`Self::seal`]
+    /// mints them for formats that carry none, so a row position has no route
+    /// into output.
     pub fn output_id(&self, tgt: usize) -> u64 {
         self.source_id(tgt)
-            .map_or_else(|| ArenaIndex::new(tgt).as_output_id(), |id| id.get())
+            .expect("sealed targets have source ids; seal() mints any that are missing")
+            .get()
     }
 
     pub fn frag_range(&self, tgt: usize) -> std::ops::Range<usize> {
@@ -216,6 +193,14 @@ impl<L: KeyLike> TargetColumns<L> {
     /// materialized decoys, downgrade to `Passthrough` so the stored rows are
     /// honored 1:1 instead of being silently re-decoyed.
     pub fn seal(&mut self) {
+        if matches!(self.source_ids, SourceIds::Absent) {
+            let n = self.n_rows();
+            tracing::warn!(
+                "input carries no per-target id; minting {n} self-incremental ids (0..{n}). \
+                 Result ids are ours, not the input file's."
+            );
+            self.source_ids = SourceIds::minted(n);
+        }
         if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
             && self.is_decoy.iter().any(|&d| d)
         {
@@ -314,6 +299,29 @@ mod tests {
     use super::*;
     use crate::IonAnnot;
     use crate::models::capabilities::DecoyStrategy;
+
+    /// `output_id` expects a source id on every row; this is what makes that
+    /// safe for the formats that carry none.
+    #[test]
+    fn seal_mints_ids_when_the_input_carried_none() {
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for _ in 0..2 {
+            c.push_target(
+                500.0,
+                2,
+                1.0,
+                0.8,
+                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                "PEP",
+                "PEP",
+                &[],
+            );
+        }
+        assert_eq!(c.source_id(0), None);
+        c.seal();
+        assert_eq!(c.output_id(0), 0);
+        assert_eq!(c.output_id(1), 1);
+    }
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
