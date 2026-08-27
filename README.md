@@ -59,7 +59,7 @@ integrate other sources of predictions for it.)
 ```bash
 DOTD_FILE="$HOME/data/my_data.d"
 FASTA_FILE="$HOME/fasta/VIMENTIN.fasta"
-SPECLIB_NAME="vimentin.ndjson"
+SPECLIB_NAME="vimentin.ndjson.zst"
 RESULTS_DIR="vimentin_search_results"
 
 # Build the spectral lib using Koina (Prosit) for fragment/RT prediction.

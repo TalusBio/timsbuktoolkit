@@ -307,19 +307,7 @@ impl LibraryArena {
             );
         }
 
-        if frag_intens.len() != geom.frag_labels.len() {
-            return Err(LibraryReadingError::SpeclibParse(format!(
-                "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
-                frag_intens.len(),
-                geom.frag_labels.len(),
-            )));
-        }
-
-        geom.seal();
-        Ok(LibraryArena::Mzpaf {
-            geom,
-            frag_intens: Some(frag_intens),
-        })
+        finish_mzpaf_arena(geom, frag_intens)
     }
 
     /// Adapt the legacy [`ElutionGroupCollection`] (produced by the non-speclib

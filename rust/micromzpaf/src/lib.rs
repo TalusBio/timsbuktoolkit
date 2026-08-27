@@ -757,7 +757,7 @@ mod tests {
         );
     }
 
-    /// `IonAnnot: Default` packs to zero, which decodes to `Kind::None` and a
+    /// `IonAnnot: Default` packs to zero, which decodes to `IonSeriesOrdinal::None` and a
     /// charge of 0. `Serialize` renders through `format!`, so a panicking
     /// `Display` arm is reachable from any serde path — `TinyVec` alone can
     /// hand out a default.
