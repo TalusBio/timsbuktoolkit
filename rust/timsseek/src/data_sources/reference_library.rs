@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 use std::sync::Arc;
 use timsquery::IonAnnot;
-use timsquery::serde::LibraryArena;
+use timsquery::serde::TargetTable;
 
 use crate::errors::TargetReadingError;
 use timsquery::models::capabilities::{
@@ -59,7 +59,7 @@ impl ReferenceLibrary {
         (0..self.len()).map(move |i| self.item_at(i))
     }
 
-    /// Narrow a label-generic [`LibraryArena`] (timsquery's one library funnel)
+    /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
     /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
     ///
     /// Only the `Mzpaf` arena carries the ion chemistry (`IonAnnot`) AND the
@@ -69,16 +69,16 @@ impl ReferenceLibrary {
     ///   TSV/parquet bridge output. Scoring is intensity-driven, so a lib with
     ///   no reference intensities is unusable; the `.speclib` reader (the
     ///   workload) always populates `Some`.
-    pub fn from_arena(arena: LibraryArena) -> Result<Self, TargetReadingError> {
+    pub fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         match arena {
-            LibraryArena::Mzpaf { geom, frag_intens } => {
+            TargetTable::Mzpaf { geom, frag_intens } => {
                 let frag_intens =
                     frag_intens.ok_or_else(|| TargetReadingError::UnsupportedFormat {
                         message: "DIA-NN library has no fragment intensities".to_string(),
                     })?;
                 Ok(ReferenceLibrary { geom, frag_intens })
             }
-            LibraryArena::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
+            TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
                 message: "timsseek requires ion-annotated fragments (mzpaf); got string labels"
                     .to_string(),
             }),
@@ -86,10 +86,10 @@ impl ReferenceLibrary {
     }
 }
 
-impl TryFrom<LibraryArena> for ReferenceLibrary {
+impl TryFrom<TargetTable> for ReferenceLibrary {
     type Error = TargetReadingError;
 
-    fn try_from(arena: LibraryArena) -> Result<Self, Self::Error> {
+    fn try_from(arena: TargetTable) -> Result<Self, Self::Error> {
         Self::from_arena(arena)
     }
 }
@@ -278,10 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn library_arena_narrows_to_reference_library() {
+    fn target_table_narrows_to_reference_library() {
         use timsquery::models::QueryCollection;
         use timsquery::models::capabilities::TargetCapabilities;
-        use timsquery::serde::LibraryArena;
+        use timsquery::serde::TargetTable;
         let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
@@ -294,7 +294,7 @@ mod tests {
             &[],
         );
         geom.seal();
-        let arena = LibraryArena::Mzpaf {
+        let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: Some(vec![1.0]),
         };
@@ -304,7 +304,7 @@ mod tests {
         let mut sgeom: QueryCollection<std::sync::Arc<str>> =
             QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         sgeom.seal();
-        let s = LibraryArena::Str { geom: sgeom };
+        let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
     }
 

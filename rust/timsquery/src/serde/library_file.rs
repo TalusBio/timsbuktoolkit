@@ -185,7 +185,7 @@ impl ElutionGroupCollection {
 ///
 /// One funnel: every format lands in exactly one variant. DIA-NN family formats
 /// (`.speclib`/TSV/parquet) carry ion-chemistry (`IonAnnot`) labels and land in
-/// [`LibraryArena::Mzpaf`]; string-labelled JSON lands in [`LibraryArena::Str`].
+/// [`TargetTable::Mzpaf`]; string-labelled JSON lands in [`TargetTable::Str`].
 ///
 /// `frag_intens` is the reference-intensity sidecar, parallel to
 /// `geom.frag_labels`/`geom.frag_mzs` (same length). The columnar store itself
@@ -194,7 +194,7 @@ impl ElutionGroupCollection {
 /// timsseek bridge can zip in reference intensities, while the intensity-free
 /// mzpaf path and string-labelled JSON leave it `None`. Extraction (cli)
 /// ignores it.
-pub enum LibraryArena {
+pub enum TargetTable {
     Mzpaf {
         geom: QueryCollection<IonAnnot>,
         frag_intens: Option<Vec<f32>>,
@@ -246,7 +246,7 @@ impl From<SpectronautPrecursorExtras> for PrecursorExtrasRow {
     }
 }
 
-impl LibraryArena {
+impl TargetTable {
     /// Build an `Mzpaf` arena WITH the reference-intensity sidecar from
     /// `IonAnnot`-labelled groups plus their reader extras.
     ///
@@ -319,7 +319,7 @@ impl LibraryArena {
         }
 
         geom.seal();
-        Ok(LibraryArena::Mzpaf {
+        Ok(TargetTable::Mzpaf {
             geom,
             frag_intens: Some(frag_intens),
         })
@@ -327,8 +327,8 @@ impl LibraryArena {
 
     /// Adapt the legacy [`ElutionGroupCollection`] (produced by the non-speclib
     /// readers) into the arena. `IonAnnot`-labelled groups become
-    /// [`LibraryArena::Mzpaf`]; string-labelled groups become
-    /// [`LibraryArena::Str`]. Integer-labelled groups have no arena variant (no
+    /// [`TargetTable::Mzpaf`]; string-labelled groups become
+    /// [`TargetTable::Str`]. Integer-labelled groups have no arena variant (no
     /// live consumer) and are rejected.
     ///
     /// When the reader supplied per-precursor extras (DIA-NN/Skyline/
@@ -364,7 +364,7 @@ impl LibraryArena {
                 }
                 set_source_ids_from(&mut geom, &egs)?;
                 geom.seal();
-                Ok(LibraryArena::Mzpaf {
+                Ok(TargetTable::Mzpaf {
                     geom,
                     frag_intens: None,
                 })
@@ -392,10 +392,10 @@ impl LibraryArena {
                 }
                 set_source_ids_from(&mut geom, &egs)?;
                 geom.seal();
-                Ok(LibraryArena::Str { geom })
+                Ok(TargetTable::Str { geom })
             }
             ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
-                warn!("integer-labelled libraries have no LibraryArena variant; rejecting");
+                warn!("integer-labelled libraries have no TargetTable variant; rejecting");
                 Err(TargetReadingError::UnableToParseElutionGroups)
             }
         }
@@ -546,7 +546,7 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
     ]
 }
 
-pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<LibraryArena, TargetReadingError> {
+pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
     // reference-intensity sidecar); every other format still produces the legacy
@@ -562,7 +562,7 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<LibraryArena, TargetReadi
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
             match reader.read(path) {
-                Ok(egs) => return LibraryArena::from_elution_groups(egs),
+                Ok(egs) => return TargetTable::from_elution_groups(egs),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST

@@ -504,7 +504,7 @@ impl Speclib {
 
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
         // `.speclib`/TSV/parquet, Spectronaut, Skyline, JSON), which returns a
-        // label-generic `LibraryArena`. One path from here: narrow the arena
+        // label-generic `TargetTable`. One path from here: narrow the arena
         // to the ion-annotated `ReferenceLibrary`, apply the decoy strategy,
         // seal, gate sequence features, and hand back the lazy arena.
         tracing::info!(
@@ -1273,7 +1273,7 @@ mod tests {
     fn reference_library_rejects_mzpaf_without_intensities() {
         use timsquery::models::QueryCollection;
         use timsquery::models::capabilities::TargetCapabilities;
-        use timsquery::serde::LibraryArena;
+        use timsquery::serde::TargetTable;
 
         let mut geom = QueryCollection::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
@@ -1287,7 +1287,7 @@ mod tests {
             &[],
         );
         geom.seal();
-        let arena = LibraryArena::Mzpaf {
+        let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: None,
         };

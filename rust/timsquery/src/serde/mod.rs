@@ -13,10 +13,10 @@ pub use library_file::{
     DiannPrecursorExtras,
     ElutionGroupCollection,
     FileReadingExtras,
-    LibraryArena,
     SkylinePrecursorExtras,
     SpectronautPrecursorExtras,
     TargetReadingError,
+    TargetTable,
     read_targets,
 };
 pub use spectronaut_io::LibrarySniffError;

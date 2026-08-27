@@ -16,7 +16,7 @@ use timsquery::models::tolerance::{
     Tolerance,
 };
 use timsquery::serde::{
-    LibraryArena,
+    TargetTable,
     read_targets,
 };
 use timsquery::traits::QueryGeom;
@@ -54,7 +54,7 @@ fn carafe_target_payload_loads_through_the_public_reader() {
     let arena = read_targets(f.path()).expect("Carafe's target JSON must load");
 
     // Labels must resolve to ion annotations, not to the string arena.
-    let LibraryArena::Mzpaf { geom, .. } = arena else {
+    let TargetTable::Mzpaf { geom, .. } = arena else {
         panic!("labelled targets must land in the ion-annotated arena");
     };
     assert_eq!(geom.n_rows(), 1);
@@ -87,7 +87,7 @@ fn non_sequential_ids_survive_the_reader() {
     ]"#,
     );
     let arena = read_targets(f.path()).expect("loads");
-    let LibraryArena::Mzpaf { geom, .. } = arena else {
+    let TargetTable::Mzpaf { geom, .. } = arena else {
         panic!("mzpaf labels")
     };
     let ids: Vec<u64> = (0..geom.n_rows())

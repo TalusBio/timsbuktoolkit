@@ -35,7 +35,7 @@ use crate::cli::{
 };
 use crate::error::CliError;
 use crate::processing::AggregatorContainer;
-use timsquery::serde::LibraryArena;
+use timsquery::serde::TargetTable;
 
 /// Basename Carafe looks for inside the `-o` directory (invariant 5 of
 /// `rust/timsquery/tests/carafe_contract/`). Named rather than inlined because
@@ -57,7 +57,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let arena: LibraryArena = read_query_elution_groups(&elution_groups_path)?;
+    let arena: TargetTable = read_query_elution_groups(&elution_groups_path)?;
 
     let (handle, index_source) = load_index_auto(
         raw_file_path
@@ -85,7 +85,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     // n_rows()`): decoy generation is a scoring decision the cli never makes, so
     // a `QueryRef` (geometry only) is all the collectors need.
     match arena {
-        LibraryArena::Mzpaf { geom, .. } => stream_process_batches(
+        TargetTable::Mzpaf { geom, .. } => stream_process_batches(
             &geom,
             aggregator_use,
             &index,
@@ -94,7 +94,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
             &put_path,
             batch_size,
         ),
-        LibraryArena::Str { geom } => stream_process_batches(
+        TargetTable::Str { geom } => stream_process_batches(
             &geom,
             aggregator_use,
             &index,
@@ -108,8 +108,8 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 }
 
 /// Reads a spectral library from a given path, funnelling every supported
-/// format into the label-typed columnar [`LibraryArena`].
-pub fn read_query_elution_groups(path: &Path) -> Result<LibraryArena, CliError> {
+/// format into the label-typed columnar [`TargetTable`].
+pub fn read_query_elution_groups(path: &Path) -> Result<TargetTable, CliError> {
     match timsquery::serde::read_targets(path) {
         Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
@@ -396,8 +396,8 @@ mod tests {
         // AKA, we promised we would be compatible with that file.
         // IF you do want to change it contact the Carafe developers first.
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
-            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+            TargetTable::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
+            TargetTable::Str { .. } => panic!("data contract uses mzpaf labels"),
         }
     }
 
@@ -417,7 +417,7 @@ mod tests {
 
         let arena = read_query_elution_groups(&elution_groups_path).unwrap();
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => {
+            TargetTable::Mzpaf { geom, .. } => {
                 assert_eq!(
                     geom.expanded_len(),
                     geom.n_rows(),
@@ -425,7 +425,7 @@ mod tests {
                 );
                 assert_eq!(geom.variants_per_row(), 1, "reader default is decoys=None");
             }
-            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+            TargetTable::Str { .. } => panic!("data contract uses mzpaf labels"),
         }
     }
 
@@ -458,13 +458,13 @@ mod tests {
         let arena = read_query_elution_groups(tmp_file.path()).unwrap();
         // mzpaf-parseable labels land in the Mzpaf arena (two template rows).
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
-            LibraryArena::Str { .. } => panic!("mzpaf labels must not land in the Str arena"),
+            TargetTable::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
+            TargetTable::Str { .. } => panic!("mzpaf labels must not land in the Str arena"),
         }
     }
 
     /// A string-labelled JSON library (labels that do NOT parse as mzpaf ion
-    /// annotations) must land in [`LibraryArena::Str`], and each flyweight the
+    /// annotations) must land in [`TargetTable::Str`], and each flyweight the
     /// arena yields must feed the extraction collectors without error.
     const STRING_LABEL_TEMPLATE: &str = r#"[
         {
@@ -502,8 +502,8 @@ mod tests {
         let arena = read_query_elution_groups(tmp_file.path()).unwrap();
 
         let geom = match arena {
-            LibraryArena::Str { geom } => geom,
-            LibraryArena::Mzpaf { .. } => {
+            TargetTable::Str { geom } => geom,
+            TargetTable::Mzpaf { .. } => {
                 panic!("string labels must land in the Str arena, not Mzpaf")
             }
         };

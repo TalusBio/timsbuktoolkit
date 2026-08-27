@@ -26,8 +26,8 @@
 //! than exposed as a random-access view.
 
 use super::library_file::{
-    LibraryArena,
     TargetReadingError,
+    TargetTable,
 };
 use crate::ion::IonAnnot;
 use crate::models::{
@@ -882,10 +882,10 @@ pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
 }
 
 /// Read a DIA-NN `.speclib` binary library directly into the columnar arena,
-/// returning [`LibraryArena::Mzpaf`] with the reference-intensity sidecar.
+/// returning [`TargetTable::Mzpaf`] with the reference-intensity sidecar.
 pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
-) -> Result<LibraryArena, TargetReadingError> {
+) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
@@ -931,7 +931,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         "reference-intensity sidecar must stay parallel to the fragment-label arena"
     );
     geom.seal();
-    Ok(LibraryArena::Mzpaf {
+    Ok(TargetTable::Mzpaf {
         geom,
         frag_intens: Some(frag_intens),
     })
@@ -1055,9 +1055,9 @@ mod tests {
     #[test]
     fn test_read_targets_yields_mzpaf_arena_with_parallel_intensities() {
         use crate::serde::read_targets;
-        let arena = read_targets(fixture_path()).expect("read .speclib as a LibraryArena");
+        let arena = read_targets(fixture_path()).expect("read .speclib as a TargetTable");
         match arena {
-            LibraryArena::Mzpaf { geom, frag_intens } => {
+            TargetTable::Mzpaf { geom, frag_intens } => {
                 assert!(geom.n_rows() > 0, "arena must hold precursors");
                 assert_eq!(
                     frag_intens.as_ref().unwrap().len(),
@@ -1069,7 +1069,7 @@ mod tests {
                     "the reader stores targets only"
                 );
             }
-            LibraryArena::Str { .. } => panic!("DIA-NN .speclib must map to LibraryArena::Mzpaf"),
+            TargetTable::Str { .. } => panic!("DIA-NN .speclib must map to TargetTable::Mzpaf"),
         }
     }
 
