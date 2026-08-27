@@ -656,12 +656,29 @@ mod tests {
         }
     }
 
-    /// `Speclib` is now a type alias for `ReferenceLibrary` (which collapsed
-    /// the enum), so a loaded library is already the lazy arena. This identity
-    /// helper is kept so the fixture assertions below read as
-    /// "get the arena" without churning every call site.
-    fn expect_lazy(speclib: &Speclib) -> &ReferenceLibrary {
-        speclib
+    /// An NDJSON library written to a temp file that is removed when the
+    /// returned handle drops — including on panic, unlike an explicit
+    /// `remove_file` after the assertions.
+    fn write_ndjson_fixture(ndjson: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::Builder::new()
+            .suffix(".ndjson")
+            .tempfile()
+            .expect("tempfile");
+        f.write_all(ndjson.as_bytes()).expect("write fixture");
+        f.flush().expect("flush");
+        f
+    }
+
+    /// A reader fixture from the sibling `timsquery` crate's test data.
+    fn fixture(dir: &str, name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate dir has a parent")
+            .join("timsquery")
+            .join("tests")
+            .join(dir)
+            .join(name)
     }
 
     #[test]
@@ -671,13 +688,7 @@ mod tests {
         // Use the test file from timsquery tests
         // Note: sample_lib.tsv is in Skyline format and won't load as DIA-NN
         // So we test with sample_lib.txt which is in DIA-NN TSV format
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         assert!(
             test_file.exists(),
@@ -696,7 +707,7 @@ mod tests {
             "Expected 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
         // Verify first target entry structure (variant 0 == target)
         let first_target = lib
@@ -723,13 +734,7 @@ mod tests {
 
     #[test]
     fn test_diann_tsv_parsable_gate() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
@@ -744,13 +749,7 @@ mod tests {
     fn test_load_skyline_csv_library() {
         use timsquery::traits::QueryGeom;
 
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("skyline_io_files")
-            .join("sample_transition_list.csv");
+        let test_file = fixture("skyline_io_files", "sample_transition_list.csv");
 
         assert!(
             test_file.exists(),
@@ -772,7 +771,7 @@ mod tests {
             "Expected 42 entries (14 targets + 28 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
         assert_eq!(n_rows, 14, "Should have 14 targets");
@@ -794,13 +793,7 @@ mod tests {
 
     #[test]
     fn test_load_diann_txt_library() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         assert!(
             test_file.exists(),
@@ -819,7 +812,7 @@ mod tests {
             "Expected 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -829,13 +822,7 @@ mod tests {
 
     #[test]
     fn test_load_diann_parquet_library() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_pq_speclib.parquet");
+        let test_file = fixture("diann_io_files", "sample_pq_speclib.parquet");
 
         assert!(
             test_file.exists(),
@@ -854,7 +841,7 @@ mod tests {
             "Expected 9 entries (3 targets + 6 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -874,18 +861,12 @@ mod tests {
     #[test]
     fn test_isotope_envelope_calculation() {
         // Use the DIA-NN TSV test file
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
         // Check that isotope intensities are normalized (M0 should be 1.0),
         // for every flat entry (targets AND decoy variants — the envelope is
@@ -911,13 +892,7 @@ mod tests {
 
     #[test]
     fn test_decoy_generation_for_library_without_decoys() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
@@ -930,7 +905,7 @@ mod tests {
             "Should have 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -959,18 +934,12 @@ mod tests {
     fn test_mass_shift_decoys() {
         use timsquery::traits::QueryGeom;
 
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
         // Unified CH2 offset (see `map_decoy_strategy`), replacing the old
         // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
@@ -1019,18 +988,12 @@ mod tests {
     fn test_fragment_intensities_preserved() {
         use timsquery::traits::QueryGeom;
 
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        let test_file = fixture("diann_io_files", "sample_lib.txt");
 
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         for q in lib.iter() {
             let fragments: Vec<_> = q.iter_expected_fragments().collect();
             assert_eq!(
@@ -1061,7 +1024,7 @@ mod tests {
         let speclib = Speclib::from_file(path, crate::models::DecoyPolicy::default())
             .expect("from_file should load the .speclib fixture");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         assert!(!lib.is_empty(), "library should have entries");
 
         let first = lib.item_at(0);
@@ -1094,17 +1057,13 @@ mod tests {
         ndjson.push_str(&serde_json::to_string(&decoy).unwrap());
         ndjson.push('\n');
 
-        let path = std::env::temp_dir().join(format!(
-            "timsseek_native_fixture_{}.ndjson",
-            std::process::id()
-        ));
-        std::fs::write(&path, ndjson).unwrap();
+        let file = write_ndjson_fixture(&ndjson);
+        let path = file.path();
 
-        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
+        let speclib = Speclib::from_file(path, crate::models::DecoyPolicy::default())
             .expect("native ndjson should load");
-        std::fs::remove_file(&path).ok();
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         // Ships a decoy -> Passthrough -> 1 variant/row -> flat len == n_rows.
         assert_eq!(lib.geom.variants_per_row(), 1, "downgraded to Passthrough");
         assert_eq!(lib.len(), 2, "one target + one stored decoy, 1:1");
@@ -1141,15 +1100,11 @@ mod tests {
         ndjson.push_str(&serde_json::to_string(&poisoned).unwrap());
         ndjson.push('\n');
 
-        let path = std::env::temp_dir().join(format!(
-            "timsseek_poisoned_fixture_{}.ndjson",
-            std::process::id()
-        ));
-        std::fs::write(&path, ndjson).unwrap();
+        let file = write_ndjson_fixture(&ndjson);
+        let path = file.path();
 
-        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
+        let speclib = Speclib::from_file(path, crate::models::DecoyPolicy::default())
             .expect("native ndjson should load even with an unparseable sequence");
-        std::fs::remove_file(&path).ok();
 
         // The poisoned row flips the whole-library gate OFF.
         assert!(
