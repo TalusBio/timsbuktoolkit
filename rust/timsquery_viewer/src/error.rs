@@ -27,6 +27,9 @@ impl From<timsquery::serde::LibraryReadingError> for ViewerError {
             timsquery::serde::LibraryReadingError::UnableToParseElutionGroups => {
                 ViewerError::General("Unable to parse elution groups".to_string())
             }
+            timsquery::serde::LibraryReadingError::ReaderFailed { reader, detail } => {
+                ViewerError::General(format!("{reader} could not read this file: {detail}"))
+            }
             timsquery::serde::LibraryReadingError::UnsupportedSpeclibVersion(v) => {
                 ViewerError::General(format!("Unsupported .speclib version: {v}"))
             }
