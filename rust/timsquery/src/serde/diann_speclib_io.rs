@@ -683,6 +683,31 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     dst.mod_off.extend(src.mod_off[1..].iter().map(|&o| {
         u32::try_from(o as usize + mods_base).expect("mods arena exceeds u32 offset range")
     }));
+
+    // Exhaustive on purpose: a column added to `TargetColumns` fails to compile
+    // here instead of being silently dropped on every merge. `source_ids` and
+    // `decoy_groups` are deliberately not merged -- the caller sets them on the
+    // finished arena, so a shard never holds any.
+    let TargetColumns {
+        caps: _,
+        precursor_mz: _,
+        charge: _,
+        rt_seconds: _,
+        mobility: _,
+        is_decoy: _,
+        source_ids: _,
+        decoy_groups: _,
+        frag_off: _,
+        seq_strip_off: _,
+        seq_mod_off: _,
+        mod_off: _,
+        frag_labels: _,
+        frag_mzs: _,
+        seq_strip_blob: _,
+        seq_mod_blob: _,
+        mods: _,
+        mod_registry: _,
+    } = src;
 }
 
 /// Map a decoded target `EntryView` directly into the columnar arena, folding

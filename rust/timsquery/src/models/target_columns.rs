@@ -100,7 +100,7 @@ pub struct TargetColumns<L: KeyLike> {
     /// derived from the row position: group membership is a property of the
     /// analytes, and reading it off the arena layout only works for as long as
     /// the layout happens to encode it.
-    decoy_groups: Vec<OwnedSourceId>,
+    pub(crate) decoy_groups: Vec<OwnedSourceId>,
     // CSR prefix offsets (n+1)
     pub(crate) frag_off: Vec<u32>,
     pub(crate) seq_strip_off: Vec<u32>,
@@ -389,6 +389,7 @@ impl<L: KeyLike> TargetColumns<L> {
         self.seq_strip_blob.shrink_to_fit();
         self.seq_mod_blob.shrink_to_fit();
         self.mods.shrink_to_fit();
+        self.decoy_groups.shrink_to_fit();
         self.mod_registry.shrink_to_fit();
     }
 }
