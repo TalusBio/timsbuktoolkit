@@ -214,13 +214,9 @@ mod tests {
 
     #[test]
     fn test_compute_precursor_mz() {
-        // Hand sum of the monoisotopic residue masses. P+E+P+T+I+D+E+K is
-        // 909.44434, plus H2O is 927.45491, plus two protons over 2 is
-        // 464.73473. Those residue masses carry 5 decimals, so the tolerance
-        // covers that rounding and nothing else.
-        //
-        // The only absolute-mass assertion here. Every other chemistry test
-        // compares against mzcore, so nothing else would catch a mass drift.
+        // PEPTIDEK's residue mass is 909.44434 Da. Add H2O and two protons,
+        // then divide by 2 to get 464.73473 m/z. The absolute check catches a
+        // mass change that a broad range would miss.
         let mz = compute_precursor_mz("PEPTIDEK", 2).unwrap();
         assert!(
             (mz - 464.734_73).abs() < 1e-4,
@@ -230,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_precursor_mz_includes_mod_mass() {
-        // to_proforma converts [U:4] → [UNIMOD:4] before mzcore
+        // normalize_to_proforma changes [U:4] to [UNIMOD:4] before mzcore parses it.
         let mz_unmod = compute_precursor_mz("PEPTCIDEK", 2).unwrap();
         let mz_mod = compute_precursor_mz("PEPTC[U:4]IDEK", 2).unwrap();
         let diff = mz_mod - mz_unmod;

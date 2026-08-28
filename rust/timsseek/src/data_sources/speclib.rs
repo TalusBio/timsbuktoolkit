@@ -183,10 +183,9 @@ pub struct LoadReport {
     pub n_rows: usize,
     pub n_averagine_fallback: usize,
     /// Rows whose modified sequence neither parser could turn into a
-    /// `ParsedSequence`. Any non-zero value forces `sequence_features` off for
-    /// the whole library, which is deliberate: scores have to be computed the
-    /// same way for every analyte or the target/decoy comparison is meaningless.
-    /// Counted rather than short-circuited so the log can say how bad it is.
+    /// `ParsedSequence`. If this is nonzero, `sequence_features` is unavailable
+    /// for the whole library so target and decoy scores use the same features.
+    /// Count every failure for the load report.
     pub n_unparsable_sequences: usize,
     pub sequence_features: SeqFeatureState,
 }
@@ -279,9 +278,9 @@ fn finalize_reference_library(
         tracing::warn!(
             "{}/{} library entries have an unparsable modified sequence, so \
              sequence features are off for the whole library (first: {:?}). \
-             Libraries spelled in ProForma (`PEPTC[UNIMOD:4]IDEK`) are strongly \
-             preferred. DIA-NN's `(UniMod:n)` is converted for you; other \
-             modification spellings may not be.",
+             Use ProForma, for example `PEPTC[UNIMOD:4]IDEK`. DIA-NN's \
+             `(UniMod:n)` form is converted; other modification spellings may \
+             fail.",
             n_unparsable,
             n_rows,
             example
@@ -1243,7 +1242,7 @@ mod tests {
     /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
     /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
     /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`: the `!` bytes are
-    /// rejected by both the fast byte-walk parser and the mzcore fallback), so
+    /// The byte-walk parser and mzcore fallback both reject the `!` bytes, so
     /// the gate must report `!parsable_sequences()`. This is the inverse of
     /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
     /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
@@ -1267,7 +1266,7 @@ mod tests {
             ),
         );
         // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
-        // (`_ => return None`) and by the mzcore pro_forma fallback.
+        // Both the byte-walk parser and the mzcore ProForma parser reject `!`.
         let poisoned = SerSpeclibElement::new(
             PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
             ReferenceEG::new(
