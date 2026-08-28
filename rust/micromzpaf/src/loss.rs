@@ -23,36 +23,93 @@ use std::fmt::Display;
 
 use crate::IonParsingError;
 
-/// Slots in [`Composition`], in the order [`Composition::new`] takes them.
-const C: usize = 0;
-const H: usize = 1;
-const N: usize = 2;
-const O: usize = 3;
-const S: usize = 4;
-const P: usize = 5;
-
 /// Atom counts for the elements that appear in peptide neutral losses.
 ///
 /// Deliberately not a general chemical formula: these losses only ever draw
-/// from C/H/N/O/S/P, and keeping it to six `u8`s makes equality a single
-/// 6-byte compare during the parse-time table lookup.
+/// from C/H/N/O/S/P, and six named `u8`s make equality a 6-byte compare during
+/// the parse-time table lookup.
+///
+/// Named fields rather than `[u8; 6]` so that [`TABLE`] reads as chemistry
+/// (`H2O` is `h: 2, o: 1`) instead of six positional numbers, where a
+/// transposition would be invisible on review and would silently alias one
+/// loss onto another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Composition([u8; 6]);
+pub(crate) struct Composition {
+    c: u8,
+    h: u8,
+    n: u8,
+    o: u8,
+    s: u8,
+    p: u8,
+}
+
+/// A [`Composition`] naming only the elements it contains: `C!(h: 2, o: 1)`.
+///
+/// A plain struct literal would have to spell all six counts, which is the
+/// positional noise this struct exists to remove; functional update syntax
+/// (`..ZERO`) is not permitted in a `const` item.
+macro_rules! C {
+    ($($field:ident: $count:expr),+ $(,)?) => {
+        Composition { $($field: $count,)+ ..Composition::ZERO }
+    };
+}
 
 impl Composition {
-    pub(crate) const fn new(c: u8, h: u8, n: u8, o: u8, s: u8, p: u8) -> Self {
-        Self([c, h, n, o, s, p])
+    /// All-zero, for [`TABLE`] rows to fill in only the elements they contain.
+    const ZERO: Self = Self {
+        c: 0,
+        h: 0,
+        n: 0,
+        o: 0,
+        s: 0,
+        p: 0,
+    };
+
+    /// The count for one element symbol, or `None` if this crate does not
+    /// represent that element.
+    ///
+    /// The single place the symbol-to-field mapping lives, so the parser cannot
+    /// disagree with the struct about which letter means which count.
+    fn count_mut(&mut self, symbol: u8) -> Option<&mut u8> {
+        Some(match symbol {
+            b'C' => &mut self.c,
+            b'H' => &mut self.h,
+            b'N' => &mut self.n,
+            b'O' => &mut self.o,
+            b'S' => &mut self.s,
+            b'P' => &mut self.p,
+            _ => return None,
+        })
     }
 
-    /// Multiply every count, saturating. Used for the `2H2O` multiplier form.
+    /// The six counts, for tests that need to range over them.
+    #[cfg(test)]
+    fn counts(self) -> [u8; 6] {
+        [self.c, self.h, self.n, self.o, self.s, self.p]
+    }
+
+    /// Combine element-wise. Saturating: the only inputs that reach the ceiling
+    /// are absurd (`200H2O`), and no [`TABLE`] row holds a saturated count, so a
+    /// saturated result cannot alias onto a real loss. Pinned by
+    /// `table_compositions_are_unique`.
+    fn zip(self, other: Self, f: impl Fn(u8, u8) -> u8) -> Self {
+        Self {
+            c: f(self.c, other.c),
+            h: f(self.h, other.h),
+            n: f(self.n, other.n),
+            o: f(self.o, other.o),
+            s: f(self.s, other.s),
+            p: f(self.p, other.p),
+        }
+    }
+
+    /// Multiply every count. Used for the `2H2O` multiplier form.
     fn scaled(self, k: u8) -> Self {
-        Self(self.0.map(|n| n.saturating_mul(k)))
+        self.zip(Self::ZERO, |n, _| n.saturating_mul(k))
     }
 
     fn plus(self, other: Self) -> Self {
-        Self(std::array::from_fn(|i| {
-            self.0[i].saturating_add(other.0[i])
-        }))
+        self.zip(other, u8::saturating_add)
     }
 
     /// Parse a bare formula like `H2O`, `CH4OS`, `C2H5NOS`.
@@ -68,7 +125,7 @@ impl Composition {
         let b = s.as_bytes();
         let mut i = 0;
         while i < b.len() {
-            let elem = b[i];
+            let symbol = b[i];
             i += 1;
             let start = i;
             while i < b.len() && b[i].is_ascii_digit() {
@@ -81,21 +138,10 @@ impl Composition {
                     IonParsingError::parse(s, "Neutral-loss atom count out of range")
                 })?
             };
-            let slot = match elem {
-                b'C' => C,
-                b'H' => H,
-                b'N' => N,
-                b'O' => O,
-                b'S' => S,
-                b'P' => P,
-                _ => {
-                    return Err(IonParsingError::parse(
-                        s,
-                        "Unsupported element in neutral loss",
-                    ));
-                }
-            };
-            out.0[slot] = out.0[slot].saturating_add(count);
+            let slot = out
+                .count_mut(symbol)
+                .ok_or_else(|| IonParsingError::parse(s, "Unsupported element in neutral loss"))?;
+            *slot = slot.saturating_add(count);
         }
         Ok(out)
     }
@@ -171,69 +217,40 @@ pub enum NeutralLoss {
     PhosphoricAcidWater = 12,
 }
 
-/// `(composition, discriminant, canonical spelling)`.
+/// `(composition, discriminant, canonical spelling)`, indexed by discriminant.
+///
+/// Rows must stay in discriminant order starting at 1 --
+/// `table_is_indexed_by_discriminant` pins that, and both `from_discriminant`
+/// and `canonical` index straight into this.
 ///
 /// The canonical spelling is what `Display` emits, so a non-canonical input
 /// (`-CH3SOH`) round-trips to the canonical form (`-CH4OS`). Round-trip tests
 /// must therefore compare parsed values, not bytes.
+///
+/// Compositions name their elements, so each row can be read against its own
+/// spelling.
 const TABLE: &[(Composition, NeutralLoss, &str)] = &[
+    (C!(h: 2, o: 1), NeutralLoss::Water, "H2O"),
+    (C!(h: 3, n: 1), NeutralLoss::Ammonia, "NH3"),
+    (C!(c: 1, o: 1), NeutralLoss::CarbonMonoxide, "CO"),
+    (C!(c: 1, o: 2), NeutralLoss::CarbonDioxide, "CO2"),
+    (C!(h: 4, o: 2), NeutralLoss::WaterX2, "2H2O"),
+    (C!(h: 6, n: 2), NeutralLoss::AmmoniaX2, "2NH3"),
+    (C!(h: 5, n: 1, o: 1), NeutralLoss::WaterAmmonia, "H2O-NH3"),
     (
-        Composition::new(0, 2, 0, 1, 0, 0),
-        NeutralLoss::Water,
-        "H2O",
-    ),
-    (
-        Composition::new(0, 3, 1, 0, 0, 0),
-        NeutralLoss::Ammonia,
-        "NH3",
-    ),
-    (
-        Composition::new(1, 0, 0, 1, 0, 0),
-        NeutralLoss::CarbonMonoxide,
-        "CO",
-    ),
-    (
-        Composition::new(1, 0, 0, 2, 0, 0),
-        NeutralLoss::CarbonDioxide,
-        "CO2",
-    ),
-    (
-        Composition::new(0, 4, 0, 2, 0, 0),
-        NeutralLoss::WaterX2,
-        "2H2O",
-    ),
-    (
-        Composition::new(0, 6, 2, 0, 0, 0),
-        NeutralLoss::AmmoniaX2,
-        "2NH3",
-    ),
-    (
-        Composition::new(0, 5, 1, 1, 0, 0),
-        NeutralLoss::WaterAmmonia,
-        "H2O-NH3",
-    ),
-    (
-        Composition::new(1, 4, 0, 1, 1, 0),
+        C!(c: 1, h: 4, o: 1, s: 1),
         NeutralLoss::Methanesulfenic,
         "CH4OS",
     ),
     (
-        Composition::new(2, 5, 1, 1, 1, 0),
+        C!(c: 2, h: 5, n: 1, o: 1, s: 1),
         NeutralLoss::Carbamidomethylthiol,
         "C2H5NOS",
     ),
+    (C!(h: 3, o: 4, p: 1), NeutralLoss::PhosphoricAcid, "H3PO4"),
+    (C!(h: 1, o: 3, p: 1), NeutralLoss::Metaphosphoric, "HPO3"),
     (
-        Composition::new(0, 3, 0, 4, 0, 1),
-        NeutralLoss::PhosphoricAcid,
-        "H3PO4",
-    ),
-    (
-        Composition::new(0, 1, 0, 3, 0, 1),
-        NeutralLoss::Metaphosphoric,
-        "HPO3",
-    ),
-    (
-        Composition::new(0, 5, 0, 5, 0, 1),
+        C!(h: 5, o: 5, p: 1),
         NeutralLoss::PhosphoricAcidWater,
         "H3PO4-H2O",
     ),
@@ -303,17 +320,17 @@ mod tests {
     fn atom_counts_parse_and_reject_out_of_range() {
         assert_eq!(
             Composition::parse_expression("H2O").unwrap(),
-            Composition::new(0, 2, 0, 1, 0, 0),
+            C!(h: 2, o: 1),
             "an element with no digits is one atom"
         );
         assert_eq!(
             Composition::parse_expression("C10H12").unwrap(),
-            Composition::new(10, 12, 0, 0, 0, 0),
+            C!(c: 10, h: 12),
             "counts are multi-digit, not one digit per element"
         );
         assert_eq!(
             Composition::parse_expression("C255").unwrap(),
-            Composition::new(255, 0, 0, 0, 0, 0),
+            C!(c: 255),
             "the u8 slot is full at 255"
         );
         assert!(
@@ -429,7 +446,7 @@ mod tests {
             // unrepresentable while no table entry holds a saturated count --
             // otherwise the saturation would alias onto a real loss.
             assert!(
-                a.0.iter().all(|&n| n < u8::MAX),
+                a.counts().iter().all(|&n| n < u8::MAX),
                 "{sa} holds a saturated atom count"
             );
         }

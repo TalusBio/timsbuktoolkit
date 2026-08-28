@@ -5,13 +5,10 @@
 //! the annotations an mzSpecLib-shaped library needs -- neutral losses,
 //! internal fragments, immonium ions -- fit *without* growing the type.
 //!
-//! That is the whole argument, and it is about the alternative rather than
-//! about the previous representation. The predecessor was a 4-byte struct of
-//! `(series+ordinal, charge, isotope)`; bolting a loss field onto it would have
-//! cost three bytes, not one, because a 5-byte key paired with an `f32` pads to
-//! a 12-byte tuple. That would have grown the inline `TinyVec` storage in
-//! timsseek's `ExpectedIntensities` from 104 to 156 bytes. Packed, the tuple
-//! stays 8 bytes and the loss rides along in bits nobody was using.
+//! Bolting a loss field onto a struct of fields would have cost three bytes,
+//! not one: a 5-byte key paired with an `f32` pads to a 12-byte tuple, growing
+//! the inline `TinyVec` storage in timsseek's `ExpectedIntensities` from 104 to
+//! 156 bytes. Packed, the tuple stays 8 bytes.
 //!
 //! # Bit layout
 //!
@@ -40,38 +37,50 @@
 //! because `IonAnnot: Default` is forced by `tinyvec::Array` and a default can
 //! reach any serde path.
 //!
-//! `charge` is zigzag-encoded to stay signed in 4 bits; `isotope` is unsigned,
-//! because a negative offset has no spelling this crate can emit (see
-//! [`ISOTOPE_MIN`]). Both ranges are far wider than anything observed: the
-//! HUPO-PSI corpus tops out at charge 3 and isotope 3, with no negative charges
-//! at all. Because a bit field truncates rather than wrapping loudly, every
-//! constructor range-checks -- see [`IonAnnot::try_new`].
+//! `charge` is zigzag-encoded to stay signed in 4 bits; `isotope` is unsigned
+//! (see [`ISOTOPE_MIN`]). A bit field truncates rather than wrapping loudly, so
+//! every constructor range-checks -- see [`IonAnnot::try_new`].
 //!
-//! # mzPAF compliance
+//! # The mzPAF subset
 //!
-//! Supported: the a/b/c/d/v/w/x/y/z series, precursor (`p`), unknown (`?`),
+//! Parses: the a/b/c/d/v/w/x/y/z series, precursor (`p`), unknown (`?`),
 //! internal fragments (`m<start>:<end>`), bare immonium (`IA`), charge (`^N`),
 //! positive isotopes (`+Ni`), neutral losses from [`NeutralLoss`], and the
 //! mass-error suffix (`/-0.0003`, `/1.2ppm`).
 //!
-//! Not supported: negative isotope offsets, modified immonium
-//! (`IC[Carbamidomethyl]` carries an arbitrary mod string), and losses outside
-//! the [`NeutralLoss`] table. These are reported as errors, never coerced into
-//! a nearby representable ion -- and unrepresentable in the field too, so
-//! `Display` cannot emit a spelling the parser would reject.
+//! Rejects, rather than coercing onto a nearby representable ion: negative
+//! isotope offsets, modified immonium (`IC[Carbamidomethyl]` carries an
+//! arbitrary mod string), and losses outside the [`NeutralLoss`] table.
 //!
 //! # Examples
 //!
 //! ```
-//! use micromzpaf::IonAnnot;
+//! use micromzpaf::{IonAnnot, NeutralLoss, split_mass_error};
 //!
-//! // Parse a simple b-ion annotation
-//! let ion: IonAnnot = "b12".try_into().unwrap();
-//! assert_eq!(format!("{}", ion), "b12");
-//!
-//! // Parse with charge and isotope
+//! // A backbone ion, with charge and isotope suffixes.
 //! let ion: IonAnnot = "b12+i^3".try_into().unwrap();
-//! assert_eq!(ion.get_charge(), 3);
+//! assert_eq!(ion.try_get_ordinal(), Some(12));
+//! assert_eq!((ion.get_charge(), ion.get_isotope()), (3, 1));
+//!
+//! // A neutral loss. Two spellings of one chemical loss are one annotation,
+//! // and render canonically.
+//! let ion: IonAnnot = "y5-CH3SOH".try_into().unwrap();
+//! assert_eq!(ion.loss(), NeutralLoss::Methanesulfenic);
+//! assert_eq!(ion.to_string(), "y5-CH4OS");
+//!
+//! // An internal fragment spanning residues 2..=11, and a bare immonium ion.
+//! // Neither sits on a ladder, so neither has an ordinal.
+//! assert_eq!(IonAnnot::try_from("m2:11").unwrap().try_get_ordinal(), None);
+//! assert_eq!(IonAnnot::try_from("IA").unwrap().to_string(), "IA");
+//!
+//! // mzSpecLib peaks carry observed m/z; the suffix recovers theoretical.
+//! let (ion, err) = split_mass_error("y1/-0.0005").unwrap();
+//! assert_eq!(ion, "y1");
+//! assert!((err.unwrap().theoretical_from_observed(175.1184) - 175.1189).abs() < 1e-4);
+//!
+//! // Unrepresentable annotations fail rather than losing the detail.
+//! assert!(IonAnnot::try_from("y1-HCOOH").is_err());
+//! assert!(IonAnnot::try_from("IC[Carbamidomethyl]").is_err());
 //! ```
 
 pub mod loss;
