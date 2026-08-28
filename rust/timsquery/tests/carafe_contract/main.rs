@@ -19,7 +19,6 @@ use timsquery::serde::{
     TargetTable,
     read_targets,
 };
-use timsquery::traits::QueryGeom;
 
 /// README, "Targets (`-e`, `psm_query.json`)".
 const CARAFE_TARGETS: &str = r#"[
@@ -90,9 +89,7 @@ fn non_sequential_ids_survive_the_reader() {
     let TargetTable::Mzpaf { geom, .. } = arena else {
         panic!("mzpaf labels")
     };
-    let ids: Vec<u64> = (0..geom.n_rows())
-        .map(|r| geom.item_at(r).output_id())
-        .collect();
+    let ids: Vec<u64> = geom.rows().map(|r| geom.output_id(r)).collect();
     assert_eq!(ids, vec![7, 42], "the caller's ids, not 0..n-1");
 }
 

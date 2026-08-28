@@ -19,6 +19,15 @@ use super::blocks::{
 };
 use super::results::FinalResult;
 
+/// Bumped when a column's meaning or type changes, so a reader can tell a new
+/// file from an old one rather than silently misreading it.
+///
+/// - 2: `library_id` and `decoy_group_id` widened to UInt64. `library_id` was
+///   already the caller's id but was truncated to 32 bits; `decoy_group_id`
+///   used to be the arena row position and is now an id declared by the input
+///   or minted at load.
+pub const RESULTS_FORMAT_VERSION: u32 = 2;
+
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
 // ---------------------------------------------------------------------------
@@ -95,10 +104,16 @@ impl ResultParquetWriter {
         let empty_batch = build_record_batch(&[])?;
         let schema = empty_batch.schema();
 
-        let kv = vec![KeyValue {
-            key: "parsable_sequences".to_string(),
-            value: Some(parsable_sequences.to_string()),
-        }];
+        let kv = vec![
+            KeyValue {
+                key: "parsable_sequences".to_string(),
+                value: Some(parsable_sequences.to_string()),
+            },
+            KeyValue {
+                key: "results_format_version".to_string(),
+                value: Some(RESULTS_FORMAT_VERSION.to_string()),
+            },
+        ];
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .set_key_value_metadata(Some(kv))
@@ -160,8 +175,8 @@ mod tests {
     /// keeping it stable.
     const GOLDEN_SCHEMA: &[(&str, &str, bool)] = &[
         ("sequence", "Utf8", false),
-        ("library_id", "UInt32", false),
-        ("decoy_group_id", "UInt32", false),
+        ("library_id", "UInt64", false),
+        ("decoy_group_id", "UInt64", false),
         ("is_target", "Boolean", false),
         ("precursor_mz", "Float64", false),
         ("precursor_charge", "UInt8", false),

@@ -197,12 +197,7 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 /// labels are positional. Building a frame first would misalign its rows after
 /// the shuffle without changing its shape.
 fn canonicalize_and_shuffle(data: &mut [CompetedCandidate]) {
-    data.sort_unstable_by_key(|c| {
-        (
-            c.scoring.identity.library_id,
-            c.scoring.identity.precursor_charge,
-        )
-    });
+    data.sort_unstable_by_key(|c| (c.scoring.identity.row, c.scoring.identity.precursor_charge));
 
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
@@ -1156,7 +1151,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i;
+                c.scoring.identity.library_id = i as u64;
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
                 let base: u8 = if is_target { 20 } else { 8 };
@@ -1277,8 +1272,8 @@ mod feature_tests {
             assert!((0.0..=1.0).contains(&r.qvalue));
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
+            let mut v: Vec<(u64, u32)> = out
                 .iter()
                 .map(|r| {
                     (
@@ -1464,8 +1459,8 @@ mod feature_tests {
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
-        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
+            let mut v: Vec<(u64, u32)> = out
                 .iter()
                 .map(|r| {
                     (
@@ -1572,8 +1567,8 @@ mod feature_tests {
             );
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u32, u32)> {
-            let mut v: Vec<(u32, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
+            let mut v: Vec<(u64, u32)> = out
                 .iter()
                 .map(|r| {
                     (
@@ -1724,7 +1719,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i;
+                c.scoring.identity.library_id = i as u64;
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
             })

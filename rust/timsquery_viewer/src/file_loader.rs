@@ -11,6 +11,7 @@ use std::path::{
 use std::sync::Arc;
 use timsquery::Target;
 use timsquery::ion::IonAnnot;
+use timsquery::models::FlatIdx;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 use timsquery::traits::QueryGeom;
@@ -188,8 +189,19 @@ impl ElutionGroupData {
     }
 
     /// The `RefQuery` flyweight at flat index `idx` (target/decoy expanded).
+    /// The scored slot at UI ordinal `idx`. The viewer's lists are ordinals
+    /// into its own display order; this is the one place an ordinal becomes an
+    /// arena index, and it is checked against the arena.
+    pub fn flat(&self, idx: usize) -> FlatIdx {
+        self.inner
+            .geom
+            .flats()
+            .nth(idx)
+            .expect("row ordinal past the end of the library")
+    }
+
     fn item_at(&self, idx: usize) -> RefQuery<'_> {
-        self.inner.item_at(idx)
+        self.inner.item_at(self.flat(idx))
     }
 
     /// Returns indices of all elution groups matching the ID filter.

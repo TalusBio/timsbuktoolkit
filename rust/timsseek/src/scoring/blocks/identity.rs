@@ -3,6 +3,7 @@
 //! never add a *score* here.
 
 use std::sync::Arc;
+use timsquery::models::RowIdx;
 
 use crate::models::DecoyMarking;
 use crate::models::sequence::Peptide;
@@ -17,8 +18,13 @@ use crate::scoring::blocks::{
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Identity {
     pub peptide: Peptide,
-    pub library_id: u32,
-    pub decoy_group_id: u32,
+    pub library_id: u64,
+    pub decoy_group_id: u64,
+    /// The arena row this result came from. Opaque and unserializable, so it
+    /// can order the q-value tie-break without a caller-supplied id reaching
+    /// the sort (`library_id` is caller-supplied whenever the file had one).
+    #[serde(skip)]
+    pub row: RowIdx,
     pub precursor_mz: f64,
     pub precursor_charge: u8,
     pub precursor_mobility: f32,
@@ -39,6 +45,7 @@ impl Identity {
             peptide: metadata.digest.clone(),
             library_id: metadata.library_id,
             decoy_group_id: metadata.digest.decoy_group,
+            row: metadata.row,
             precursor_mz: metadata.ref_precursor_mz,
             precursor_charge: metadata.charge,
             precursor_mobility: metadata.ref_mobility_ook0,
@@ -75,6 +82,7 @@ impl Identity {
             },
             library_id: 1,
             decoy_group_id: 0,
+            row: RowIdx::default(),
             precursor_mz: 500.0,
             precursor_charge: 2,
             precursor_mobility: 0.9,
@@ -86,8 +94,8 @@ impl Identity {
 impl ScoreBlock for Identity {
     fn columns(&self, o: &mut ColSink) {
         o.str("sequence", self.peptide.as_str());
-        o.u32("library_id", self.library_id);
-        o.u32("decoy_group_id", self.decoy_group_id);
+        o.u64("library_id", self.library_id);
+        o.u64("decoy_group_id", self.decoy_group_id);
         o.f64("precursor_mz", self.precursor_mz);
         o.u8("precursor_charge", self.precursor_charge);
         o.f32("precursor_mobility", self.precursor_mobility);
@@ -96,8 +104,8 @@ impl ScoreBlock for Identity {
 
     fn column_schema(o: &mut SchemaSink) {
         o.str("sequence");
-        o.u32("library_id");
-        o.u32("decoy_group_id");
+        o.u64("library_id");
+        o.u64("decoy_group_id");
         o.f64("precursor_mz");
         o.u8("precursor_charge");
         o.f32("precursor_mobility");

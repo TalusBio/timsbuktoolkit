@@ -6,6 +6,7 @@ use crate::models::capabilities::{
     DecoyStrategy,
     IsotopeStrategy,
 };
+use crate::models::target_columns::RowIdx;
 use crate::traits::{
     DecoyShift,
     KeyLike,
@@ -30,17 +31,18 @@ impl<Lib, L> Query<Lib, L> {
     pub const VARIANT_BITS: u32 = 2;
     const VARIANT_MASK: u64 = 0b11;
 
-    pub fn new(lib: Lib, tgt: u32, variant: u8) -> Self {
+    pub fn new(lib: Lib, tgt: RowIdx, variant: u8) -> Self {
         debug_assert!(u64::from(variant) <= Self::VARIANT_MASK);
         Self {
             lib,
-            handle: (u64::from(tgt) << Self::VARIANT_BITS) | u64::from(variant),
+            handle: ((tgt.get() as u64) << Self::VARIANT_BITS) | u64::from(variant),
             _label: PhantomData,
         }
     }
 
-    pub fn target_idx(&self) -> usize {
-        (self.handle >> Self::VARIANT_BITS) as usize
+    /// The stored row this handle points at.
+    pub fn row(&self) -> RowIdx {
+        RowIdx::new((self.handle >> Self::VARIANT_BITS) as u32)
     }
 
     pub fn variant(&self) -> u8 {
@@ -77,7 +79,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, 
 
     /// Spacing between adjacent isotope peaks in m/z for this precursor's charge.
     fn isotope_step(&self) -> f64 {
-        let charge = self.geom().charge[self.target_idx()] as f64;
+        let charge = self.geom().charge(self.row()) as f64;
         C13_C12_MASS_DIFF / charge
     }
 }
@@ -86,29 +88,29 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
     type Label = L;
 
     fn source_id(&self) -> Option<crate::models::LibraryId> {
-        self.geom().source_id(self.target_idx())
+        self.geom().source_id(self.row())
     }
 
     fn output_id(&self) -> u64 {
-        self.geom().output_id(self.target_idx())
+        self.geom().output_id(self.row())
     }
 
     fn mono_precursor_mz(&self) -> f64 {
-        let tgt = self.target_idx();
-        let charge = self.geom().charge[tgt] as f64;
-        self.geom().precursor_mz[tgt] + self.variant_shift() / charge
+        let tgt = self.row();
+        let charge = self.geom().charge(tgt) as f64;
+        self.geom().precursor_mz(tgt) + self.variant_shift() / charge
     }
 
     fn precursor_charge(&self) -> u8 {
-        self.geom().charge[self.target_idx()]
+        self.geom().charge(self.row())
     }
 
     fn rt_seconds(&self) -> f32 {
-        self.geom().rt_seconds[self.target_idx()]
+        self.geom().rt_seconds(self.row())
     }
 
     fn mobility_ook0(&self) -> f32 {
-        self.geom().mobility[self.target_idx()]
+        self.geom().mobility(self.row())
     }
 
     fn precursor_mz_limits(&self) -> (f64, f64) {
@@ -125,7 +127,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
     }
 
     fn fragment_count(&self) -> usize {
-        self.geom().frag_range(self.target_idx()).len()
+        self.geom().frag_range(self.row()).len()
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> {
@@ -140,7 +142,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
     /// Returned BY VALUE, so the computed shift needs no backing storage.
     fn iter_fragments_refs(&self) -> impl Iterator<Item = (&L, f64)> {
         let shift = self.variant_shift();
-        let r = self.geom().frag_range(self.target_idx());
+        let r = self.geom().frag_range(self.row());
         let labels = &self.geom().frag_labels[r.clone()];
         let mzs = &self.geom().frag_mzs[r];
         labels
@@ -188,7 +190,7 @@ mod tests {
     #[test]
     fn target_variant_is_unshifted() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, 0, 0);
+        let q = Query::new(&lib, RowIdx::new(0), 0);
         assert_eq!(q.output_id(), 0);
         assert!((q.mono_precursor_mz() - 654.855).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
@@ -198,7 +200,7 @@ mod tests {
     #[test]
     fn plus_decoy_shifts_precursor_and_high_ordinal_only() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, 0, 1); // +shift
+        let q = Query::new(&lib, RowIdx::new(0), 1); // +shift
         // precursor: +14.0/2
         assert!((q.mono_precursor_mz() - (654.855 + 14.0 / 2.0)).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
@@ -211,7 +213,7 @@ mod tests {
     #[test]
     fn minus_decoy_shifts_negative() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, 0, 2); // -shift
+        let q = Query::new(&lib, RowIdx::new(0), 2); // -shift
         assert!((q.mono_precursor_mz() - (654.855 - 14.0 / 2.0)).abs() < 1e-9);
     }
 
@@ -220,7 +222,7 @@ mod tests {
         // n_isotopes=3, charge 2, mono 654.855 -> limits span isotopes 0..3,
         // i.e. (mono, mono + 2*C13_C12_MASS_DIFF/2).
         let lib = one_target_lib();
-        let q = Query::new(&lib, 0, 0);
+        let q = Query::new(&lib, RowIdx::new(0), 0);
         let step = C13_C12_MASS_DIFF / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - 654.855).abs() < 1e-9);
@@ -256,7 +258,7 @@ mod tests {
             false,
         );
         c.seal();
-        let q = Query::new(&c, 0, 0);
+        let q = Query::new(&c, RowIdx::new(0), 0);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }
@@ -266,7 +268,7 @@ mod tests {
         // +decoy (variant 1) shifts the mono by offset/charge; the envelope
         // limits shift by the same amount and keep the same width.
         let lib = one_target_lib();
-        let q = Query::new(&lib, 0, 1);
+        let q = Query::new(&lib, RowIdx::new(0), 1);
         let step = C13_C12_MASS_DIFF / 2.0;
         let mono = 654.855 + 14.0 / 2.0;
         let (lo, hi) = q.precursor_mz_limits();

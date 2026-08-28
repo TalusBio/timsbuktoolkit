@@ -330,23 +330,18 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
-    let total = geom.expanded_len();
-    let mut batch_start = 0;
-    let mut batch_idx = 0;
-    while batch_start < total {
-        let batch_end = (batch_start + batch_size).min(total);
+    for (batch_idx, batch) in geom.chunks(batch_size).enumerate() {
         if last_progress.elapsed() >= progress_interval {
             info!(
                 "Processing batch {}/{} ({} groups)",
                 batch_idx + 1,
                 total_batches,
-                batch_end - batch_start,
+                batch.len(),
             );
             last_progress = Instant::now();
         }
 
-        let queries: Vec<QueryRef<'_, L>> =
-            (batch_start..batch_end).map(|f| geom.item_at(f)).collect();
+        let queries: Vec<QueryRef<'_, L>> = batch.iter().map(|&f| geom.item_at(f)).collect();
 
         let mut container = AggregatorContainer::new(
             &queries,
@@ -357,9 +352,6 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 
         container.add_query(index, tolerance);
         container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping())?;
-
-        batch_start = batch_end;
-        batch_idx += 1;
     }
 
     ser.finish()?;
@@ -512,7 +504,7 @@ mod tests {
         assert_eq!(geom.expanded_len(), 2);
 
         // The read -> item_at -> collector path builds without error for every row.
-        for flat in 0..geom.expanded_len() {
+        for flat in geom.flats() {
             let q = geom.item_at(flat);
             let point = PointIntensityAggregator::new(&q);
             assert_eq!(point.fragment_mzs.len(), q.fragment_count());

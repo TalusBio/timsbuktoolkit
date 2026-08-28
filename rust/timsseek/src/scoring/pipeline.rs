@@ -40,6 +40,10 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
+use timsquery::models::{
+    FlatIdx,
+    RowIdx,
+};
 use timsquery::traits::QueryGeom;
 use timsquery::utils::TupleRange;
 use timsquery::{
@@ -115,7 +119,7 @@ impl ScoringWorker {
 pub struct CalibrantCandidate {
     pub score: f32,
     pub apex_rt: ObservedRTSeconds<f32>,
-    pub speclib_index: usize,
+    pub speclib_index: FlatIdx,
     pub library_rt: LibraryRT<f32>,
 }
 
@@ -559,6 +563,9 @@ impl<I: ScorerQueriable> Scorer<I> {
     fn build_calibrated_extraction_into(
         &self,
         query: &Target<IonAnnot>,
+        // The flyweight's row: the scratch `Target` is a reused buffer and
+        // cannot carry one.
+        row: RowIdx,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -589,7 +596,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         Ok(super::apex_finding::PeptideMetadata {
             digest,
             charge: query.precursor_charge(),
-            library_id: extr.chromatograms.id as u32,
+            library_id: extr.chromatograms.id,
+            row,
             library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: query.mobility_ook0(),
@@ -603,9 +611,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn score_calibrated_extraction(
         &self,
         query: &Target<IonAnnot>,
+        row: RowIdx,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -617,7 +627,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         let metadata = timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| self
-                .build_calibrated_extraction_into(query, expected, digest, calibration, worker))
+                .build_calibrated_extraction_into(
+                    query,
+                    row,
+                    expected,
+                    digest,
+                    calibration,
+                    worker
+                ))
         )?;
 
         let scoring_ctx = worker
@@ -686,30 +703,28 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn score_calibrated_batch(
         &self,
         lib: &Speclib,
-        flat_range: std::ops::Range<usize>,
+        flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         // Single columnar store (Task 9 deleted the materialized arm): the
         // flyweight is always a `RefQuery` from the arena, so the loop is
         // monomorphized over one concrete type — statically dispatched, no
         // per-item heap allocation on the scoring hot path.
-        self.score_calibrated_batch_impl(|f| lib.item_at(f), flat_range, calibration)
+        self.score_calibrated_batch_impl(|f| lib.item_at(f), flats, calibration)
     }
 
     fn score_calibrated_batch_impl<Q>(
         &self,
-        get_item: impl Fn(usize) -> Q + Sync,
-        flat_range: std::ops::Range<usize>,
+        get_item: impl Fn(FlatIdx) -> Q + Sync,
+        flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts)
     where
         Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
     {
         let num_cycles = self.num_cycles();
-        // Materialize the flat index list so `fold_reduce` (which parallelizes
-        // over a slice) can drive the flyweight by index. Each item is a
-        // `usize`; the flyweight itself is never stored.
-        let flats: Vec<usize> = flat_range.collect();
+        // `fold_reduce` parallelizes over the slice, driving the flyweight by
+        // index; the flyweight itself is never stored.
         // Precursor-range gate over the flyweight geometry.
         let filter_fn = |q: &Q| {
             let tmp = q.precursor_mz_limits();
@@ -730,7 +745,7 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         let (_worker, _scratch, mut results): (ScoringWorker, ScratchBufs, IonSearchAccumulator) =
             crate::utils::maybe_par::fold_reduce(
-                &flats,
+                flats,
                 || {
                     tracing::debug!(
                         target: "alloc_track",
@@ -757,6 +772,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     let digest = q.materialize_peptide();
                     let result = self.score_calibrated_extraction(
                         &scratch.eg,
+                        q.row(),
                         &scratch.expected,
                         digest,
                         calibration,
@@ -832,20 +848,20 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn prescore_batch(
         &self,
         lib: &Speclib,
-        flat_range: std::ops::Range<usize>,
+        flats: &[FlatIdx],
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
         // Single columnar store (Task 9): iterate `RefQuery` flyweights from
         // the arena directly — monomorphized, no per-item heap alloc on the
         // prescore hot path (see `score_calibrated_batch`).
-        self.prescore_batch_impl(|f| lib.item_at(f), flat_range, config, timings)
+        self.prescore_batch_impl(|f| lib.item_at(f), flats, config, timings)
     }
 
     fn prescore_batch_impl<Q>(
         &self,
-        get_item: impl Fn(usize) -> Q + Sync,
-        flat_range: std::ops::Range<usize>,
+        get_item: impl Fn(FlatIdx) -> Q + Sync,
+        flats: &[FlatIdx],
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap
@@ -855,7 +871,6 @@ impl<I: ScorerQueriable> Scorer<I> {
         // The flat index IS the global speclib index (see `Speclib::item_at`),
         // so it doubles as `CalibrantCandidate::speclib_index` — no separate
         // chunk offset needed.
-        let flats: Vec<usize> = flat_range.collect();
         let filter_fn = |q: &Q| {
             let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
@@ -876,7 +891,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .unwrap_or(0);
 
         let (_worker, _scratch, heap, par_timings) = crate::utils::maybe_par::fold_reduce(
-            &flats,
+            flats,
             || {
                 tracing::debug!(
                     target: "alloc_track",
@@ -975,7 +990,7 @@ mod tests {
         let lib = tiny_lazy_lib();
         // Variant 1 (+decoy): geometry is mass-shifted, so this exercises the
         // by-value shifted-fragment path through reset_from.
-        let q = lib.item_at(1);
+        let q = lib.item_at(lib.geom.flats().nth(1).unwrap());
         let mut scratch = Target::<IonAnnot>::empty_like();
         fill_scratch_from(&mut scratch, &q);
 

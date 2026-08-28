@@ -241,7 +241,7 @@ fn finalize_reference_library(
     }
     let mut all_parsable = true;
     let mut n_averagine_fallback = 0usize;
-    for tgt in 0..n_rows {
+    for tgt in geom.rows() {
         if all_parsable {
             let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
             let normalized = normalize_to_proforma(modified);
@@ -250,8 +250,8 @@ fn finalize_reference_library(
             }
         }
         let stripped = &geom.seq_strip_blob[geom.seq_strip_range(tgt)];
-        let charge = geom.charge[tgt] as f64;
-        let neutral_mass = geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
+        let charge = geom.charge(tgt) as f64;
+        let neutral_mass = geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
         if isotope_src == IsotopeSource::Averagine {
             n_averagine_fallback += 1;
@@ -970,14 +970,14 @@ mod tests {
         // packing, so assert it directly rather than re-deriving groups.
         let n_target_indices = lib.geom.n_rows();
         assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
-        for tgt in 0..n_target_indices as u32 {
+        for tgt in lib.geom.rows() {
             let variants: Vec<u8> = (0..3)
                 .map(|v| RefQuery::new(lib, tgt, v).geom().variant())
                 .collect();
             assert_eq!(
                 variants,
                 vec![0, 1, 2],
-                "target {tgt} should have exactly 1 target + 2 decoy variants"
+                "each row should have exactly 1 target + 2 decoy variants"
             );
         }
     }
@@ -1003,7 +1003,7 @@ mod tests {
         // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
-        for tgt in 0..lib.geom.n_rows() as u32 {
+        for tgt in lib.geom.rows() {
             let target = RefQuery::new(lib, tgt, 0);
             let plus = RefQuery::new(lib, tgt, 1);
             let minus = RefQuery::new(lib, tgt, 2);
@@ -1107,7 +1107,7 @@ mod tests {
         let lib = expect_lazy(&speclib);
         assert!(!lib.is_empty(), "library should have entries");
 
-        let first = lib.item_at(0);
+        let first = lib.item_at(lib.geom.flats().next().unwrap());
         assert!(first.is_target(), "flat index 0 must be a target variant");
 
         let frags: Vec<_> = first.iter_expected_fragments().collect();
@@ -1184,10 +1184,19 @@ mod tests {
         assert_eq!(lib.geom.variants_per_row(), 1, "downgraded to Passthrough");
         assert_eq!(lib.len(), 2, "one target + one stored decoy, 1:1");
 
-        assert!(lib.item_at(0).is_target(), "row 0 is the target");
-        assert!(!lib.item_at(1).is_target(), "row 1 is the stored decoy");
+        assert!(
+            lib.item_at(lib.geom.flats().next().unwrap()).is_target(),
+            "row 0 is the target"
+        );
+        assert!(
+            !lib.item_at(lib.geom.flats().nth(1).unwrap()).is_target(),
+            "row 1 is the stored decoy"
+        );
 
-        let frags: Vec<_> = lib.item_at(0).iter_expected_fragments().collect();
+        let frags: Vec<_> = lib
+            .item_at(lib.geom.flats().next().unwrap())
+            .iter_expected_fragments()
+            .collect();
         assert_eq!(frags.len(), 2, "target ships two reference fragments");
         for (_label, intensity) in frags {
             assert!(intensity > 0.0, "reference intensities are positive");

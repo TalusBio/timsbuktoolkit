@@ -32,7 +32,9 @@ pub use source_id::{
     SourceIds,
 };
 pub use target_columns::{
+    FlatIdx,
     ModDefinition,
+    RowIdx,
     TargetColumns,
 };
 pub use tolerance::Tolerance;

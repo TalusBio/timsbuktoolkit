@@ -11,6 +11,51 @@ use crate::models::source_id::{
 };
 use crate::traits::DecoyShift;
 
+pub use index::{
+    FlatIdx,
+    RowIdx,
+};
+
+/// How the arena reaches its own memory.
+///
+/// Both types are opaque outside this crate: no constructor from an integer,
+/// no accessor yielding one, no `Display` and no `Serialize`. A position can
+/// therefore not be invented by a caller, confused with an id, or written to
+/// an output file — it can only be obtained from the arena that owns the rows
+/// and handed straight back to it.
+mod index {
+    /// A stored row: `0..n_rows()`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub struct RowIdx(u32);
+
+    /// A scored slot after decoy expansion: `0..expanded_len()`. Distinct from
+    /// [`RowIdx`] because `variants_per_row` slots map onto one row, so using
+    /// one where the other is meant reads a real but wrong row — in range, no
+    /// panic, plausible data. The type is what stops that.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub struct FlatIdx(u32);
+
+    impl RowIdx {
+        pub(crate) fn new(row: u32) -> Self {
+            Self(row)
+        }
+
+        pub(crate) fn get(self) -> usize {
+            self.0 as usize
+        }
+    }
+
+    impl FlatIdx {
+        pub(crate) fn new(flat: u32) -> Self {
+            Self(flat)
+        }
+
+        pub(crate) fn get(self) -> usize {
+            self.0 as usize
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModDefinition {
     pub token: String, // verbatim, e.g. "[UNIMOD:4]"
@@ -21,8 +66,8 @@ pub struct ModDefinition {
 #[derive(Debug, Clone)]
 pub struct TargetColumns<L: KeyLike> {
     pub caps: TargetCapabilities,
-    // per-target scalars, len = n_rows (the arena position IS the row index;
-    // any caller-supplied id lives in `source_ids`)
+    // per-target scalars, len = n_rows; addressed by `RowIdx`, never by a
+    // caller-supplied id (those live in `source_ids`)
     pub precursor_mz: Vec<f64>,
     pub charge: Vec<u8>,
     pub rt_seconds: Vec<f32>,
@@ -30,8 +75,15 @@ pub struct TargetColumns<L: KeyLike> {
     // per-row decoy flag (len = n_rows)
     pub is_decoy: Vec<bool>,
     /// What the source file called each row, when it said. Parallel to the row
-    /// columns; NOT the arena position, which is what `Query::id()` returns.
+    /// columns. Minted at [`Self::seal`] for formats that carry no ids, so a
+    /// sealed arena always has one per row.
     pub source_ids: SourceIds,
+    /// Which competition group each row belongs to, one entry per row. Empty
+    /// until [`Self::seal`], which mints it when the input did not say. Not
+    /// derived from the row position: group membership is a property of the
+    /// analytes, and reading it off the arena layout only works for as long as
+    /// the layout happens to encode it.
+    decoy_groups: Vec<u64>,
     // CSR prefix offsets (n+1)
     pub frag_off: Vec<u32>,
     pub seq_strip_off: Vec<u32>,
@@ -58,6 +110,7 @@ impl<L: KeyLike> TargetColumns<L> {
             mobility: Vec::new(),
             is_decoy: Vec::new(),
             source_ids: SourceIds::default(),
+            decoy_groups: Vec::new(),
             frag_off: vec![0],
             seq_strip_off: vec![0],
             seq_mod_off: vec![0],
@@ -156,32 +209,75 @@ impl<L: KeyLike> TargetColumns<L> {
         Ok(())
     }
 
-    pub fn source_id(&self, tgt: usize) -> Option<LibraryId> {
-        self.source_ids.get(tgt)
+    /// The rows of this arena, in storage order.
+    pub fn rows(&self) -> impl Iterator<Item = RowIdx> + use<L> {
+        (0..self.n_rows() as u32).map(RowIdx::new)
+    }
+
+    /// Attach the competition groups a file declared. Call before `seal`,
+    /// which otherwise mints one group per row. Rows sharing a value compete,
+    /// so unlike source ids these are not required to be unique.
+    pub fn set_decoy_groups(&mut self, groups: Vec<u64>) -> Result<(), SourceIdError> {
+        if groups.len() != self.n_rows() {
+            return Err(SourceIdError::LengthMismatch {
+                ids: groups.len(),
+                rows: self.n_rows(),
+            });
+        }
+        self.decoy_groups = groups;
+        Ok(())
+    }
+
+    pub fn source_id(&self, tgt: RowIdx) -> Option<LibraryId> {
+        self.source_ids.get(tgt.get())
     }
 
     /// The id a result for row `tgt` carries. Always a source id: [`Self::seal`]
     /// mints them for formats that carry none, so a row position has no route
     /// into output.
-    pub fn output_id(&self, tgt: usize) -> u64 {
+    pub fn output_id(&self, tgt: RowIdx) -> u64 {
         self.source_id(tgt)
             .expect("sealed targets have source ids; seal() mints any that are missing")
             .get()
     }
 
-    pub fn frag_range(&self, tgt: usize) -> std::ops::Range<usize> {
+    pub fn charge(&self, tgt: RowIdx) -> u8 {
+        self.charge[tgt.get()]
+    }
+
+    pub fn precursor_mz(&self, tgt: RowIdx) -> f64 {
+        self.precursor_mz[tgt.get()]
+    }
+
+    pub fn rt_seconds(&self, tgt: RowIdx) -> f32 {
+        self.rt_seconds[tgt.get()]
+    }
+
+    pub fn mobility(&self, tgt: RowIdx) -> f32 {
+        self.mobility[tgt.get()]
+    }
+
+    pub fn is_decoy(&self, tgt: RowIdx) -> bool {
+        self.is_decoy[tgt.get()]
+    }
+
+    pub fn frag_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
+        let tgt = tgt.get();
         self.frag_off[tgt] as usize..self.frag_off[tgt + 1] as usize
     }
 
-    pub fn seq_strip_range(&self, tgt: usize) -> std::ops::Range<usize> {
+    pub fn seq_strip_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
+        let tgt = tgt.get();
         self.seq_strip_off[tgt] as usize..self.seq_strip_off[tgt + 1] as usize
     }
 
-    pub fn seq_mod_range(&self, tgt: usize) -> std::ops::Range<usize> {
+    pub fn seq_mod_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
+        let tgt = tgt.get();
         self.seq_mod_off[tgt] as usize..self.seq_mod_off[tgt + 1] as usize
     }
 
-    pub fn mod_range(&self, tgt: usize) -> std::ops::Range<usize> {
+    pub fn mod_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
+        let tgt = tgt.get();
         self.mod_off[tgt] as usize..self.mod_off[tgt + 1] as usize
     }
 
@@ -200,6 +296,13 @@ impl<L: KeyLike> TargetColumns<L> {
                  Result ids are ours, not the input file's."
             );
             self.source_ids = SourceIds::minted(n);
+        }
+        if self.decoy_groups.is_empty() {
+            tracing::warn!(
+                "input declares no decoy groups; minting one per row, named by the row's \
+                 own id. Stored decoys therefore compete alone, not against their target."
+            );
+            self.decoy_groups = self.rows().map(|r| self.output_id(r)).collect();
         }
         if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
             && self.is_decoy.iter().any(|&d| d)
@@ -263,34 +366,53 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
         self.n_rows() * self.variants_per_row()
     }
 
-    /// Decompose a flat `0..expanded_len()` index into its stored `(row,
-    /// variant)`. The single authority for the decoy index-transform encoding;
-    /// every flat-indexed accessor (here and `ReferenceLibrary::item_at`) goes
-    /// through it. `row` is fail-loud on `u32` overflow because `library_id` /
-    /// `decoy_group` are `u32`.
-    pub fn split_flat(&self, flat: usize) -> (u32, u8) {
-        let vpr = self.variants_per_row();
-        let row = u32::try_from(flat / vpr)
-            .expect("row index exceeds u32::MAX (library_id/decoy_group are u32)");
-        (row, (flat % vpr) as u8)
+    /// Every scored slot, in flat order.
+    pub fn flats(&self) -> impl Iterator<Item = FlatIdx> + use<L> {
+        (0..self.expanded_len() as u32).map(FlatIdx::new)
     }
 
-    /// Flat `0..expanded_len()` index -> `(row, variant)` flyweight.
-    pub fn item_at(&self, flat: usize) -> QueryRef<'_, L> {
+    /// The scored slots in batches of at most `n`. The arena owns the split,
+    /// so a caller batches work by stating a size rather than by computing
+    /// positions — no integer names a slot outside this crate.
+    pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<L> {
+        assert!(n > 0, "chunk size must be non-zero");
+        let len = self.expanded_len();
+        (0..len).step_by(n).map(move |start| {
+            (start as u32..(start + n).min(len) as u32)
+                .map(FlatIdx::new)
+                .collect()
+        })
+    }
+
+    /// Decompose a scored slot into its stored row and decoy variant. The
+    /// single authority for the decoy index-transform encoding, and the only
+    /// route from a [`FlatIdx`] to a [`RowIdx`] — which is what keeps the two
+    /// index spaces from being used interchangeably.
+    pub fn split_flat(&self, flat: FlatIdx) -> (RowIdx, u8) {
+        let vpr = self.variants_per_row();
+        let flat = flat.get();
+        let row = u32::try_from(flat / vpr).expect("row index exceeds u32::MAX");
+        (RowIdx::new(row), (flat % vpr) as u8)
+    }
+
+    /// Scored slot -> `(row, variant)` flyweight.
+    pub fn item_at(&self, flat: FlatIdx) -> QueryRef<'_, L> {
         let (row, variant) = self.split_flat(flat);
         QueryRef::new(self, row, variant)
     }
 
-    /// A flat index is a target iff its stored row is a target AND it is the
+    /// A slot is a target iff its stored row is a target AND it is the
     /// variant-0 (unshifted) slot.
-    pub fn is_target(&self, flat: usize) -> bool {
+    pub fn is_target(&self, flat: FlatIdx) -> bool {
         let (row, variant) = self.split_flat(flat);
-        !self.is_decoy[row as usize] && variant == 0
+        !self.is_decoy[row.get()] && variant == 0
     }
 
-    /// Target-decoy competition group id: the stored row index.
-    pub fn decoy_group(&self, flat: usize) -> u32 {
-        self.split_flat(flat).0
+    /// The competition group this row belongs to, as an id — not a position.
+    /// A row's decoy variants share its group, so exactly one member survives
+    /// competition.
+    pub fn decoy_group(&self, tgt: RowIdx) -> u64 {
+        self.decoy_groups[tgt.get()]
     }
 }
 
@@ -317,10 +439,10 @@ mod tests {
                 &[],
             );
         }
-        assert_eq!(c.source_id(0), None);
+        assert_eq!(c.source_id(RowIdx::new(0)), None);
         c.seal();
-        assert_eq!(c.output_id(0), 0);
-        assert_eq!(c.output_id(1), 1);
+        assert_eq!(c.output_id(RowIdx::new(0)), 0);
+        assert_eq!(c.output_id(RowIdx::new(1)), 1);
     }
 
     #[test]
@@ -339,10 +461,10 @@ mod tests {
         c.seal();
         assert_eq!(c.variants_per_row(), 3);
         assert_eq!(c.expanded_len(), 3);
-        assert!(c.is_target(0)); // variant 0
-        assert!(!c.is_target(1)); // +decoy
-        assert!(!c.is_target(2)); // -decoy
-        assert_eq!(c.decoy_group(1), 0);
+        assert!(c.is_target(FlatIdx::new(0))); // variant 0
+        assert!(!c.is_target(FlatIdx::new(1))); // +decoy
+        assert!(!c.is_target(FlatIdx::new(2))); // -decoy
+        assert_eq!(c.decoy_group(RowIdx::new(0)), 0);
     }
 
     #[test]
@@ -375,8 +497,8 @@ mod tests {
         c.seal();
         assert_eq!(c.variants_per_row(), 1);
         assert_eq!(c.expanded_len(), 2);
-        assert!(c.is_target(0));
-        assert!(!c.is_target(1)); // stored decoy row
+        assert!(c.is_target(FlatIdx::new(0)));
+        assert!(!c.is_target(FlatIdx::new(1))); // stored decoy row
     }
 
     #[test]
@@ -420,11 +542,17 @@ mod tests {
         );
         c.seal();
         assert_eq!(c.n_rows(), 2);
-        assert_eq!(c.frag_range(0), 0..2);
-        assert_eq!(c.frag_range(1), 2..5);
-        assert_eq!(c.frag_mzs[c.frag_range(1)][2], 600.0);
-        assert_eq!(&c.seq_strip_blob[c.seq_strip_range(0)], "PEPTIDEK");
-        assert_eq!(&c.seq_strip_blob[c.seq_strip_range(1)], "SAMPLERK");
+        assert_eq!(c.frag_range(RowIdx::new(0)), 0..2);
+        assert_eq!(c.frag_range(RowIdx::new(1)), 2..5);
+        assert_eq!(c.frag_mzs[c.frag_range(RowIdx::new(1))][2], 600.0);
+        assert_eq!(
+            &c.seq_strip_blob[c.seq_strip_range(RowIdx::new(0))],
+            "PEPTIDEK"
+        );
+        assert_eq!(
+            &c.seq_strip_blob[c.seq_strip_range(RowIdx::new(1))],
+            "SAMPLERK"
+        );
     }
 
     #[test]
@@ -460,7 +588,7 @@ mod tests {
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.is_decoy, vec![false, true]);
         assert_eq!(
-            c.frag_labels[c.frag_range(1)][0],
+            c.frag_labels[c.frag_range(RowIdx::new(1))][0],
             Arc::<str>::from("frag_b")
         );
     }

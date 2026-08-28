@@ -9,7 +9,9 @@ use timsquery::models::capabilities::{
     SeqFeatureState,
 };
 use timsquery::models::{
+    FlatIdx,
     Query,
+    RowIdx,
     TargetColumns,
 };
 use timsquery::traits::QueryGeom;
@@ -50,13 +52,18 @@ impl ReferenceLibrary {
 
     /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
     /// the flat->(row,variant) math to the arena's `split_flat` transform.
-    pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
-        let (row, variant) = self.geom.split_flat(flat_idx);
+    pub fn item_at(&self, flat: FlatIdx) -> RefQuery<'_> {
+        let (row, variant) = self.geom.split_flat(flat);
         RefQuery::new(self, row, variant)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
-        (0..self.len()).map(move |i| self.item_at(i))
+        self.geom.flats().map(move |f| self.item_at(f))
+    }
+
+    /// Scored slots in batches of at most `n`; see `TargetColumns::chunks`.
+    pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<> {
+        self.geom.chunks(n)
     }
 
     /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
@@ -95,7 +102,7 @@ impl TryFrom<TargetTable> for ReferenceLibrary {
 }
 
 impl<'a> RefQuery<'a> {
-    pub fn new(lib: &'a ReferenceLibrary, tgt: u32, variant: u8) -> Self {
+    pub fn new(lib: &'a ReferenceLibrary, tgt: RowIdx, variant: u8) -> Self {
         Self {
             lib,
             geom: Query::new(&lib.geom, tgt, variant),
@@ -114,8 +121,8 @@ impl<'a> RefQuery<'a> {
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
     /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide_in_group(&self, decoy_group: u32) -> Peptide {
-        let tgt = self.geom.target_idx();
+    pub fn materialize_peptide_in_group(&self, decoy_group: u64) -> Peptide {
+        let tgt = self.geom.row();
         let coll = &self.lib.geom;
         let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
         let decoy = if self.geom.variant() == 0 {
@@ -134,7 +141,7 @@ impl<'a> RefQuery<'a> {
 
 impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        let tgt = self.geom.target_idx();
+        let tgt = self.geom.row();
         let r = self.lib.geom.frag_range(tgt);
         let labels = &self.lib.geom.frag_labels[r.clone()];
         let intens = &self.lib.frag_intens[r];
@@ -147,11 +154,11 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     }
 
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
-        let tgt = self.geom.target_idx();
+        let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.caps.isotopes;
         let seq = &self.lib.geom.seq_strip_blob[self.lib.geom.seq_strip_range(tgt)];
-        let charge = self.lib.geom.charge[tgt] as f64;
-        let neutral = self.lib.geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
+        let charge = self.lib.geom.charge(tgt) as f64;
+        let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (_src, env) = isotope_dist_or_averagine(seq, neutral);
         (0..n_isotopes as usize)
             .map(|i| (i as i8, env[i]))
@@ -213,33 +220,40 @@ impl<'a> QueryGeom for RefQuery<'a> {
 /// zero-heap) over the concrete type — see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
-    /// Positional library id: the row's position, never a caller-supplied id.
-    /// It anchors decoy grouping and the q-value determinism sort.
-    fn library_id(&self) -> u32;
+    /// The id this result carries, so a caller can map it onto the row they
+    /// asked about: the source id where the file gave one, otherwise the id
+    /// minted for it at load.
+    fn library_id(&self) -> u64;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
-    /// Target-decoy competition group id.
-    fn decoy_group(&self) -> u32;
+    /// Competition group id. Declared by the file when it says, minted at load
+    /// otherwise — never the row's position.
+    fn decoy_group(&self) -> u64;
+    /// The row this result came from. Opaque and unprintable, so it can order
+    /// the q-value tie-break without any caller-supplied value reaching it.
+    fn row(&self) -> RowIdx;
     /// Materialize the output identity `Peptide`.
     fn materialize_peptide(&self) -> Peptide;
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
-    fn library_id(&self) -> u32 {
-        u32::try_from(self.geom().target_idx())
-            .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)")
+    fn library_id(&self) -> u64 {
+        self.geom().output_id()
+    }
+
+    fn row(&self) -> RowIdx {
+        self.geom().row()
     }
 
     fn is_target(&self) -> bool {
         // Honor stored decoys uniformly (correct under Passthrough): a row is a
         // target only when it is not a stored decoy AND is the variant-0 slot.
-        let tgt = self.geom().target_idx();
-        !self.lib.geom.is_decoy[tgt] && self.geom().variant() == 0
+        let tgt = self.geom().row();
+        !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
-    fn decoy_group(&self) -> u32 {
-        // One stored row competes as one group, so the group is the row position.
-        self.library_id()
+    fn decoy_group(&self) -> u64 {
+        self.lib.geom.decoy_group(self.geom().row())
     }
 
     fn materialize_peptide(&self) -> Peptide {
@@ -252,6 +266,16 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
+
+    /// Indices come from the arena; there is no constructor from an integer.
+    fn row(lib: &ReferenceLibrary, i: usize) -> RowIdx {
+        lib.geom.rows().nth(i).unwrap()
+    }
+
+    fn flat(lib: &ReferenceLibrary, i: usize) -> FlatIdx {
+        lib.geom.flats().nth(i).unwrap()
+    }
+
     use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::*;
 
@@ -311,7 +335,7 @@ mod tests {
     #[test]
     fn expected_fragments_pair_labels_with_intensities() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, 0, 0);
+        let q = RefQuery::new(&lib, row(&lib, 0), 0);
         let pairs: Vec<_> = q.iter_expected_fragments().collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, IonAnnot::try_from("y3").unwrap());
@@ -322,7 +346,7 @@ mod tests {
     #[test]
     fn precursor_envelope_is_max_normalized_three_peaks() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, 0, 0);
+        let q = RefQuery::new(&lib, row(&lib, 0), 0);
         let env = q.expected_precursor_envelope();
         assert_eq!(env.len(), 3);
         // Envelopes are MAX-normalized (base peak = 1.0), matching the
@@ -340,10 +364,10 @@ mod tests {
     #[test]
     fn decoy_variant_reuses_target_intensities() {
         let lib = tiny_ref_lib();
-        let t: Vec<_> = RefQuery::new(&lib, 0, 0)
+        let t: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 0)
             .iter_expected_fragments()
             .collect();
-        let d: Vec<_> = RefQuery::new(&lib, 0, 1)
+        let d: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 1)
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");
@@ -355,7 +379,7 @@ mod tests {
         // scoring reads `RefQuery` flyweights via `item_at` (no materialized
         // arm). Variant 0 is the target.
         let lib = tiny_ref_lib();
-        let scored = lib.item_at(0);
+        let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
         assert_eq!(scored.library_id(), 0); // flat index 0 -> target 0
         assert_eq!(scored.decoy_group(), 0);
@@ -369,10 +393,10 @@ mod tests {
     fn flat_index_maps_to_target_and_variant_in_tpm_order() {
         let lib = tiny_ref_lib(); // 1 target, n_decoys=2 -> len 3
         assert_eq!(lib.len(), 3);
-        assert_eq!(lib.item_at(0).geom().variant(), 0);
-        assert_eq!(lib.item_at(1).geom().variant(), 1);
-        assert_eq!(lib.item_at(2).geom().variant(), 2);
-        assert_eq!(lib.item_at(1).geom().target_idx(), 0);
+        assert_eq!(lib.item_at(flat(&lib, 0)).geom().variant(), 0);
+        assert_eq!(lib.item_at(flat(&lib, 1)).geom().variant(), 1);
+        assert_eq!(lib.item_at(flat(&lib, 2)).geom().variant(), 2);
+        assert_eq!(lib.item_at(flat(&lib, 1)).geom().row(), row(&lib, 0));
         let all: Vec<_> = lib.iter().map(|q| q.geom().variant()).collect();
         assert_eq!(all, vec![0, 1, 2]);
     }
