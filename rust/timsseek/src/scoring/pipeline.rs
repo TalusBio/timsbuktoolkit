@@ -286,15 +286,13 @@ impl ScratchBufs {
     }
 
     /// Refill both buffers from the flyweight: geometry into `eg`, and the
-    /// expected fragment/precursor intensities into `expected` (deduped by
-    /// key via `try_from_pairs` -- library keys are unique by construction).
+    /// expected fragment/precursor intensities into `expected` (deduped by key
+    /// via `refill_from_pairs` -- library keys are unique by construction).
     fn fill_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(&mut self, q: &Q) {
         fill_scratch_from(&mut self.eg, q);
-        self.expected = ExpectedIntensities::try_from_pairs(
-            q.iter_expected_fragments(),
-            q.expected_precursor_envelope(),
-        )
-        .expect("library flyweight yields unique fragment/precursor keys");
+        self.expected
+            .refill_from_pairs(q.iter_expected_fragments(), q.expected_precursor_envelope())
+            .expect("library flyweight yields unique fragment/precursor keys");
     }
 }
 

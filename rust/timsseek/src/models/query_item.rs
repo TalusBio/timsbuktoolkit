@@ -3,21 +3,15 @@ use serde::{
     Serialize,
 };
 use timsquery::KeyLike;
-use timsquery::tinyvec::TinyVec;
 
-/// Inline capacity for fragment and precursor intensity pairs. Mirrors the
-/// `fragment_labels`/`precursor_labels` capacity used by `Target`
-/// so typical peptides stay fully stack-resident and no heap allocation
-/// happens on clone/mutate.
-pub const INLINE_FRAG_CAPACITY: usize = 13;
-pub const INLINE_PREC_CAPACITY: usize = 13;
-
-pub type FragmentIntensityVec<T> = TinyVec<[(T, f32); INLINE_FRAG_CAPACITY]>;
-pub type PrecursorIntensityVec = TinyVec<[(i8, f32); INLINE_PREC_CAPACITY]>;
+/// Fragment and precursor intensity pairs. Reused in place on the scoring hot
+/// path, so the buffer is allocated once per worker rather than per item.
+pub type FragmentIntensityVec<T> = Vec<(T, f32)>;
+pub type PrecursorIntensityVec = Vec<(i8, f32)>;
 
 /// Linear lookup for a `(key, value)` slice. Used throughout scoring for
-/// `ExpectedIntensities`-shaped arrays whose length is bounded by
-/// [`INLINE_FRAG_CAPACITY`] / [`INLINE_PREC_CAPACITY`].
+/// `ExpectedIntensities`-shaped arrays, which hold a dozen entries in a
+/// typical library, so a scan beats any index.
 #[inline]
 pub fn linear_get<K: PartialEq, V: Copy>(entries: &[(K, V)], key: &K) -> Option<V> {
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
@@ -44,11 +38,14 @@ impl std::error::Error for DuplicateKeyError {}
 /// Expected (theoretical / predicted) precursor and fragment intensities for
 /// a peptide query.
 ///
-/// Stored as `TinyVec<[(K, f32); 13]>` per field: each entry keeps its key
-/// alongside the intensity for diagnostics and by-key lookup. For typical
-/// peptides (<=13 fragments / <=13 precursors) the backing storage is inline,
-/// so `clone()` is a stack memcpy and mutation is in-place swap-remove --
-/// zero heap allocations on the hot path.
+/// A `Vec` per field, each entry keeping its key alongside the intensity for
+/// diagnostics and by-key lookup.
+///
+/// These were `TinyVec`s with 13 inline slots. Inline storage only paid off
+/// because the scoring hot path rebuilt the whole value per item; now that
+/// [`refill_from_pairs`](Self::refill_from_pairs) reuses the buffer, a `Vec`
+/// is allocation-free after the first item too, and it is 48 bytes against
+/// 224. `examples/expected_intensities_bench.rs` has the numbers.
 ///
 /// # Invariants
 ///
@@ -67,8 +64,8 @@ pub struct ExpectedIntensities<T: KeyLike + Default> {
 impl<T: KeyLike + Default> Default for ExpectedIntensities<T> {
     fn default() -> Self {
         Self {
-            fragment_intensities: TinyVec::new(),
-            precursor_intensities: TinyVec::new(),
+            fragment_intensities: Vec::new(),
+            precursor_intensities: Vec::new(),
         }
     }
 }
@@ -83,25 +80,53 @@ impl<T: KeyLike + Default + std::fmt::Debug> ExpectedIntensities<T> {
         PI: IntoIterator<Item = (i8, f32)>,
     {
         let mut out = Self::default();
+        out.refill_from_pairs(frags, precs)?;
+        Ok(out)
+    }
+
+    /// [`try_from_pairs`](Self::try_from_pairs) in place, reusing whichever
+    /// backing each `TinyVec` already holds. Same uniqueness check.
+    ///
+    /// Use this on the scoring hot path. Assigning a fresh value moves 224
+    /// bytes per item and drops the old buffer; this reuses it.
+    ///
+    /// On a duplicate key both fields are left empty, so a rejected refill
+    /// never leaves a partially filled set behind.
+    pub fn refill_from_pairs<FI, PI>(
+        &mut self,
+        frags: FI,
+        precs: PI,
+    ) -> Result<(), DuplicateKeyError>
+    where
+        FI: IntoIterator<Item = (T, f32)>,
+        PI: IntoIterator<Item = (i8, f32)>,
+    {
+        self.fragment_intensities.clear();
+        self.precursor_intensities.clear();
         for (k, v) in frags {
-            if out.get_fragment(&k).is_some() {
+            if self.get_fragment(&k).is_some() {
+                let key = format!("{:?}", k);
+                self.fragment_intensities.clear();
                 return Err(DuplicateKeyError {
                     which: "fragment",
-                    key: format!("{:?}", k),
+                    key,
                 });
             }
-            out.fragment_intensities.push((k, v));
+            self.fragment_intensities.push((k, v));
         }
         for (k, v) in precs {
-            if out.get_precursor(k).is_some() {
+            if self.get_precursor(k).is_some() {
+                let key = k.to_string();
+                self.fragment_intensities.clear();
+                self.precursor_intensities.clear();
                 return Err(DuplicateKeyError {
                     which: "precursor",
-                    key: k.to_string(),
+                    key,
                 });
             }
-            out.precursor_intensities.push((k, v));
+            self.precursor_intensities.push((k, v));
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -152,11 +177,9 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
         Some(self.precursor_intensities.swap_remove(idx).1)
     }
 
-    /// In-place copy from `other` reusing each TinyVec's current backing.
-    /// For ≤13 entries this stays fully inline. For spilled buffers the
-    /// heap allocation is reused when `other.len() <= self.capacity()`.
-    /// Prefer this over `*self = other.clone()` on the scoring hot path --
-    /// the default `Clone::clone_from` drops the destination buffer
+    /// In-place copy from `other`, reusing each buffer when it is already big
+    /// enough. Prefer this over `*self = other.clone()` on the scoring hot
+    /// path: the default `Clone::clone_from` drops the destination buffer
     /// before reallocating.
     pub fn clone_from_ref(&mut self, other: &Self)
     where
@@ -251,6 +274,76 @@ mod tests {
         // y2 (0.9) and y3 (0.5) must both be present
         assert!(ei.get_fragment(&yi("y2")).is_some());
         assert!(ei.get_fragment(&yi("y3")).is_some());
+    }
+
+    #[test]
+    fn refill_matches_try_from_pairs() {
+        let frags = [(yi("y1"), 1.0), (yi("y2"), 2.0)];
+        let precs = [(0i8, 0.5), (1, 0.3)];
+        let built = ExpectedIntensities::try_from_pairs(frags, precs).unwrap();
+        let mut refilled = ExpectedIntensities::<IonAnnot>::default();
+        refilled.refill_from_pairs(frags, precs).unwrap();
+        assert_eq!(
+            built.fragment_intensities, refilled.fragment_intensities,
+            "fragments must match"
+        );
+        assert_eq!(
+            built.precursor_intensities, refilled.precursor_intensities,
+            "precursors must match"
+        );
+    }
+
+    #[test]
+    fn refill_replaces_previous_contents() {
+        let mut ei = ExpectedIntensities::try_from_pairs(
+            [(yi("y1"), 1.0), (yi("y2"), 2.0), (yi("y3"), 3.0)],
+            [(0i8, 0.5)],
+        )
+        .unwrap();
+        ei.refill_from_pairs([(yi("b1"), 9.0)], [(2i8, 0.1)])
+            .unwrap();
+        assert_eq!(ei.fragment_len(), 1);
+        assert_eq!(ei.precursor_len(), 1);
+        assert_eq!(ei.get_fragment(&yi("b1")), Some(9.0));
+        assert_eq!(ei.get_fragment(&yi("y1")), None, "stale key must be gone");
+        assert_eq!(ei.get_precursor(2), Some(0.1));
+        assert_eq!(ei.get_precursor(0), None, "stale isotope must be gone");
+    }
+
+    #[test]
+    fn refill_leaves_nothing_behind_on_duplicate() {
+        let mut ei = ExpectedIntensities::try_from_pairs([(yi("y1"), 1.0)], [(0i8, 0.5)]).unwrap();
+        let err = ei
+            .refill_from_pairs([(yi("b1"), 1.0), (yi("b1"), 2.0)], [(0i8, 0.5)])
+            .unwrap_err();
+        assert_eq!(err.which, "fragment");
+        assert_eq!(ei.fragment_len(), 0, "a rejected refill must not half-fill");
+        assert_eq!(ei.precursor_len(), 0);
+
+        let err = ei
+            .refill_from_pairs([(yi("b1"), 1.0)], [(0i8, 0.5), (0i8, 0.6)])
+            .unwrap_err();
+        assert_eq!(err.which, "precursor");
+        assert_eq!(ei.fragment_len(), 0);
+        assert_eq!(ei.precursor_len(), 0);
+    }
+
+    /// The point of the method: a spilled buffer is reused rather than freed
+    /// and reallocated. Assigning a fresh value would drop this capacity.
+    #[test]
+    fn refill_reuses_the_buffer() {
+        let many: Vec<_> = (1..=18).map(|i| (yi(&format!("y{i}")), i as f32)).collect();
+        let mut ei = ExpectedIntensities::<IonAnnot>::default();
+        ei.refill_from_pairs(many.iter().copied(), []).unwrap();
+        let cap = ei.fragment_intensities.capacity();
+        assert!(cap >= many.len());
+
+        ei.refill_from_pairs([(yi("y1"), 1.0)], []).unwrap();
+        assert_eq!(
+            ei.fragment_intensities.capacity(),
+            cap,
+            "refill must keep the buffer it already had"
+        );
     }
 
     #[test]
