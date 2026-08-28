@@ -10,11 +10,6 @@ use crate::{
 };
 
 /// Why an annotation could not be parsed or represented.
-///
-/// Never matched outside this crate today, so the variants exist for the message
-/// a user sees when a library fails to load. Each one names the offending value
-/// and, where there is one, the bound it missed -- a reader surfaces this with
-/// no other context.
 #[derive(Debug, Error)]
 pub enum IonParsingError {
     #[error("Ordinal {ordinal} out of range for series '{series}'")]
@@ -41,16 +36,13 @@ pub enum IonParsingError {
     UnknownIonsExhausted,
     #[error("Could not parse '{annotation}': {context}")]
     ParsingError {
-        /// The whole annotation, not the fragment of it that failed: a reader
-        /// reports this with no row index, so the full text is the only handle
-        /// the user gets on which row broke.
         annotation: String,
         context: &'static str,
     },
 }
 
 impl IonParsingError {
-    /// Shorthand for [`Self::ParsingError`], which is built at a dozen sites.
+    /// Create a parsing error with context.
     pub(crate) fn parse(annotation: &str, context: &'static str) -> Self {
         Self::ParsingError {
             annotation: annotation.to_string(),

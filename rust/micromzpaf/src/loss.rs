@@ -1,7 +1,6 @@
 //! Neutral losses, keyed by atomic composition rather than by spelling.
 //!
-//! Libraries write the same chemical loss different ways. Two real examples
-//! from the HUPO-PSI mzSpecLib corpus:
+//! Libraries may write the same chemical loss in different ways:
 //!
 //! | written | library | composition |
 //! |---|---|---|
@@ -10,14 +9,8 @@
 //! | `-NH2-CO-CH2SH` | NIST | C2H5N1O1S1 |
 //! | `-C2H5NOS` | SpectraST | C2H5N1O1S1 |
 //!
-//! Keying on the string would make `y5-CH4OS` and `y5-CH3SOH` distinct labels
-//! for one ion. Since fragment labels must be unique within a precursor (see
-//! `ExpectedIntensities::try_from_pairs` in timsseek), that is exactly the
-//! wrong direction: it hides a genuine duplicate behind two spellings.
-//!
-//! So parsing goes `text -> composition -> discriminant`, and the composition
-//! is a *parse-time* concept only. What gets stored on an `IonAnnot` is the
-//! discriminant, so there is no per-annotation cost at runtime.
+//! Parsing goes `text -> composition -> discriminant`; the packed annotation
+//! stores only the discriminant.
 
 use std::fmt::Display;
 
@@ -25,14 +18,7 @@ use crate::IonParsingError;
 
 /// Atom counts for the elements that appear in peptide neutral losses.
 ///
-/// Deliberately not a general chemical formula: these losses only ever draw
-/// from C/H/N/O/S/P, and six named `u8`s make equality a 6-byte compare during
-/// the parse-time table lookup.
-///
-/// Named fields rather than `[u8; 6]` so that [`TABLE`] reads as chemistry
-/// (`H2O` is `h: 2, o: 1`) instead of six positional numbers, where a
-/// transposition would be invisible on review and would silently alias one
-/// loss onto another.
+/// These losses use only C/H/N/O/S/P.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Composition {
     c: u8,
@@ -44,10 +30,6 @@ pub(crate) struct Composition {
 }
 
 /// A [`Composition`] naming only the elements it contains: `C!(h: 2, o: 1)`.
-///
-/// A plain struct literal would have to spell all six counts, which is the
-/// positional noise this struct exists to remove; functional update syntax
-/// (`..ZERO`) is not permitted in a `const` item.
 macro_rules! C {
     ($($field:ident: $count:expr),+ $(,)?) => {
         Composition { $($field: $count,)+ ..Composition::ZERO }
@@ -68,8 +50,6 @@ impl Composition {
     /// The count for one element symbol, or `None` if this crate does not
     /// represent that element.
     ///
-    /// The single place the symbol-to-field mapping lives, so the parser cannot
-    /// disagree with the struct about which letter means which count.
     fn count_mut(&mut self, symbol: u8) -> Option<&mut u8> {
         Some(match symbol {
             b'C' => &mut self.c,
@@ -88,10 +68,7 @@ impl Composition {
         [self.c, self.h, self.n, self.o, self.s, self.p]
     }
 
-    /// Combine element-wise. Saturating: the only inputs that reach the ceiling
-    /// are absurd (`200H2O`), and no [`TABLE`] row holds a saturated count, so a
-    /// saturated result cannot alias onto a real loss. Pinned by
-    /// `table_compositions_are_unique`.
+    /// Combine element-wise, saturating each count.
     fn zip(self, other: Self, f: impl Fn(u8, u8) -> u8) -> Self {
         Self {
             c: f(self.c, other.c),
@@ -114,9 +91,7 @@ impl Composition {
 
     /// Parse a bare formula like `H2O`, `CH4OS`, `C2H5NOS`.
     ///
-    /// Only single-letter C/H/N/O/S/P are recognized; anything else is an
-    /// error rather than a silent skip, so an unsupported loss surfaces as
-    /// "not representable" instead of being mistaken for a smaller one.
+    /// Only single-letter C/H/N/O/S/P elements are recognized.
     fn parse_formula(s: &str) -> Result<Self, IonParsingError> {
         if s.is_empty() {
             return Err(IonParsingError::parse(s, "Empty neutral-loss formula"));
@@ -149,8 +124,7 @@ impl Composition {
     /// Parse a full loss expression: `-` separated terms, each optionally
     /// prefixed by a repeat count. `2H2O`, `H2O-NH3`, `NH2-CO-CH2SH`.
     ///
-    /// Because terms are summed, ordering and multiplier spelling collapse for
-    /// free: `H2O-NH3` == `NH3-H2O`, and `2H2O` == `H2O-H2O`.
+    /// Terms are summed, so ordering and multiplier spelling are normalized.
     pub(crate) fn parse_expression(s: &str) -> Result<Self, IonParsingError> {
         let mut total = Composition::default();
         for term in s.split('-') {
@@ -181,11 +155,7 @@ impl Composition {
 
 /// The neutral losses this crate can represent, as a packed discriminant.
 ///
-/// Scoped deliberately: DIA-NN emits none, Spectronaut two (`-H2O`, `-NH3`),
-/// NIST eight, plus the phospho losses that no non-phospho corpus can show.
-/// SpectraST's wider combinatorics are NOT here -- an unlisted loss parses to a
-/// composition that misses the table and is reported as unrepresentable, which
-/// routes the peak to an unknown label rather than silently mislabelling it.
+/// Inputs outside this table are reported as unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(u8)]
 pub enum NeutralLoss {
@@ -218,17 +188,8 @@ pub enum NeutralLoss {
 }
 
 /// `(composition, discriminant, canonical spelling)`, indexed by discriminant.
-///
-/// Rows must stay in discriminant order starting at 1 --
-/// `table_is_indexed_by_discriminant` pins that, and both `from_discriminant`
-/// and `canonical` index straight into this.
-///
-/// The canonical spelling is what `Display` emits, so a non-canonical input
-/// (`-CH3SOH`) round-trips to the canonical form (`-CH4OS`). Round-trip tests
-/// must therefore compare parsed values, not bytes.
-///
-/// Compositions name their elements, so each row can be read against its own
-/// spelling.
+/// Entries are ordered by discriminant; canonical spelling is emitted by
+/// [`Display`].
 const TABLE: &[(Composition, NeutralLoss, &str)] = &[
     (C!(h: 2, o: 1), NeutralLoss::Water, "H2O"),
     (C!(h: 3, n: 1), NeutralLoss::Ammonia, "NH3"),
@@ -257,15 +218,10 @@ const TABLE: &[(Composition, NeutralLoss, &str)] = &[
 ];
 
 impl NeutralLoss {
-    /// How many losses the table names, so the width of the packed field can be
-    /// checked against it rather than assumed to be roomy.
+    /// Number of loss entries in the table.
     pub(crate) const COUNT: u8 = TABLE.len() as u8;
 
-    /// Inverse of the `#[repr(u8)]` discriminant, for unpacking out of a bit
-    /// field. Lives next to the enum so the two cannot drift apart.
-    ///
-    /// An unrecognized value maps to [`Self::None`]: the only way to produce
-    /// one is a reserved discriminant, which no constructor emits.
+    /// Decode a packed loss discriminant.
     pub(crate) fn from_discriminant(d: u8) -> Self {
         Self::at(d).map_or(Self::None, |(_, loss, _)| *loss)
     }
@@ -273,20 +229,13 @@ impl NeutralLoss {
     /// The [`TABLE`] row a discriminant names, or `None` for [`Self::None`] and
     /// for the reserved values above the table.
     ///
-    /// `TABLE` is in discriminant order starting at 1, which
-    /// `table_is_indexed_by_discriminant` pins. Indexing it rather than
-    /// re-listing the variants is what keeps the discriminant, the composition
-    /// and the spelling from drifting apart.
     fn at(d: u8) -> Option<&'static (Composition, NeutralLoss, &'static str)> {
         TABLE.get((d as usize).checked_sub(1)?)
     }
 
     /// Resolve a loss expression (without the leading `-`) to a discriminant.
     ///
-    /// `None` means "parsed as a valid composition, but not one we represent" --
-    /// distinct from `Err`, which means the text was not a loss expression at
-    /// all. Callers route the former to an unknown label and the latter to a
-    /// parse failure.
+    /// `None` means the composition is valid but not in the supported table.
     pub(crate) fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
         let comp = Composition::parse_expression(s)?;
         Ok(TABLE
@@ -314,8 +263,6 @@ impl Display for NeutralLoss {
 mod tests {
     use super::*;
 
-    /// The count parser: implicit 1, multi-digit counts, and a count past the
-    /// `u8` slot. Single-digit cases are covered by every TABLE row.
     #[test]
     fn atom_counts_parse_and_reject_out_of_range() {
         assert_eq!(
@@ -339,10 +286,8 @@ mod tests {
         );
     }
 
-    /// The two cross-library spelling collisions this module exists for.
     #[test]
     fn different_spellings_resolve_to_one_loss() {
-        // NIST vs SpectraST, methanesulfenic acid.
         assert_eq!(
             NeutralLoss::from_expression("CH3SOH").unwrap(),
             Some(NeutralLoss::Methanesulfenic)
@@ -351,7 +296,6 @@ mod tests {
             NeutralLoss::from_expression("CH4OS").unwrap(),
             Some(NeutralLoss::Methanesulfenic)
         );
-        // NIST structural notation vs SpectraST molecular notation.
         assert_eq!(
             NeutralLoss::from_expression("NH2-CO-CH2SH").unwrap(),
             Some(NeutralLoss::Carbamidomethylthiol)
@@ -362,7 +306,6 @@ mod tests {
         );
     }
 
-    /// Summing terms collapses ordering and multiplier spelling for free.
     #[test]
     fn ordering_and_multipliers_normalize() {
         assert_eq!(
@@ -379,10 +322,6 @@ mod tests {
         );
     }
 
-    /// A well-formed composition outside the table is `Ok(None)` -- "valid but
-    /// not representable" -- while malformed text is `Err`. Callers need to
-    /// tell those apart to route one to an unknown label and the other to a
-    /// parse failure.
     #[test]
     fn unrepresentable_is_distinct_from_malformed() {
         assert_eq!(NeutralLoss::from_expression("HCOOH").unwrap(), None);
@@ -391,10 +330,6 @@ mod tests {
         assert!(NeutralLoss::from_expression("H2O-").is_err());
     }
 
-    /// `from_discriminant` and `canonical` both index [`TABLE`] by discriminant,
-    /// so a row sitting at the wrong offset would decode as its neighbour. This
-    /// is the one invariant that keeps the enum, the composition and the
-    /// spelling in step.
     #[test]
     fn table_is_indexed_by_discriminant() {
         for (i, (_comp, loss, canon)) in TABLE.iter().enumerate() {
@@ -414,8 +349,6 @@ mod tests {
         assert_eq!(NeutralLoss::None.canonical(), "");
     }
 
-    /// Every table entry must survive canonical -> composition -> discriminant,
-    /// and back out through the bit field.
     #[test]
     fn table_round_trips_through_canonical_spelling() {
         for (_comp, loss, canon) in TABLE {
@@ -433,18 +366,12 @@ mod tests {
         }
     }
 
-    /// Compositions must be unique: two entries sharing one would make the
-    /// table lookup order-dependent.
     #[test]
     fn table_compositions_are_unique() {
         for (i, (a, _, sa)) in TABLE.iter().enumerate() {
             for (b, _, sb) in TABLE.iter().skip(i + 1) {
                 assert_ne!(a, b, "{sa} and {sb} share a composition");
             }
-            // `scaled` and `plus` saturate, so an absurd input like `200H2O`
-            // lands on 255 in some slot. That is only safe to report as
-            // unrepresentable while no table entry holds a saturated count --
-            // otherwise the saturation would alias onto a real loss.
             assert!(
                 a.counts().iter().all(|&n| n < u8::MAX),
                 "{sa} holds a saturated atom count"
@@ -452,8 +379,6 @@ mod tests {
         }
     }
 
-    /// The two things the TABLE round trip cannot see: the `-` prefix Display
-    /// adds, and that `None` renders as nothing at all rather than "-".
     #[test]
     fn display_adds_the_prefix_and_none_renders_empty() {
         assert_eq!(NeutralLoss::None.to_string(), "");

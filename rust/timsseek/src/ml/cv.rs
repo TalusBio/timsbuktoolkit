@@ -354,24 +354,15 @@ impl<T: FeatureLike + Sync> FoldDataset for StreamingDataset<'_, T> {
 /// A model [`CrossValidatedScorer`] can cross-fit: fit on a row-index slice,
 /// score another, and report per-column importance.
 ///
-/// `fit` receives BOTH the training rows and an early-stopping (`val`) slice.
-/// A model without early stopping is expected to ignore `val`; only the
-/// scorer's guarantee matters, namely that neither slice is ever scored by the
-/// model fitted from it.
+/// `fit` receives training rows and an optional early-stopping slice. Neither
+/// slice is scored by the model fitted from it.
 pub(crate) trait FoldModel: Sized {
     type Config;
     type Error;
     /// Fit one fold's model.
     ///
-    /// `fold` is the identity of the fold being fitted, and it is a PARAMETER
-    /// rather than config state because the caller is the only thing that knows
-    /// it: a config is shared across every fold, and deriving the fold from
-    /// `train[0]` breaks on an empty slice and is meaningless for a partition
-    /// that trains on several folds at once (`qvalues::crossfit_lda` trains on
-    /// all folds but one). Models with a stochastic initialization mix it into
-    /// their seed, so that folds differ from each other while a rerun of the
-    /// same fold does not. Deterministic models ignore it, the same way a model
-    /// without early stopping ignores `val`.
+    /// `fold` identifies the fold being fitted. Models may use it to derive a
+    /// fold-specific random seed.
     fn fit<D: FoldDataset>(
         cfg: &Self::Config,
         data: &D,
@@ -419,9 +410,6 @@ pub(crate) trait FoldModel: Sized {
 /// Dataset over an already-materialized row-major matrix. `get_values` is a
 /// `copy_from_slice` out of the existing slab.
 ///
-/// `pub(crate)`, matching [`PrecomputedFeatures`]: the only constructor is
-/// `pub(crate)` and there is no other public inherent method, so `pub` made the
-/// name visible outside the crate while leaving it unconstructable there.
 pub(crate) struct RowMajorDataset {
     features: PrecomputedFeatures,
     names: Vec<Arc<str>>,
@@ -544,12 +532,8 @@ impl DataBuffer {
     /// Gather the FEATURES of `rows` (in the given order) out of `data` into
     /// feature-major layout: `fold_buffer[feature_idx * nrows + sample_idx]`.
     ///
-    /// Deliberately does NOT read [`FoldDataset::is_decoy`]. The scoring path has
-    /// no use for the labels, and this module is where leak-freedom is enforced,
-    /// so "the labels are not even read here" is worth being structurally true
-    /// rather than true by inspection of a discarded binding. `response_buffer`
-    /// is cleared, so [`Self::as_matrix`] cannot hand out a stale label slice
-    /// from a previous gather; use [`Self::features_as_matrix`] after this.
+    /// Does not read labels. Clears the response buffer so a features-only gather
+    /// cannot expose labels from a previous gather.
     fn fill_features_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
         self.fold_buffer.clear();
         self.response_buffer.clear();
@@ -583,15 +567,7 @@ impl DataBuffer {
 
     /// Features + labels. Only valid after [`Self::fill_from`].
     ///
-    /// The assertion catches a features-only gather OF A NON-EMPTY ROW SET --
-    /// [`Self::fill_features_from`] clears `response_buffer`, so the labels are
-    /// missing while `nrows` is not, and this panics instead of handing out an
-    /// empty response slice. It does NOT catch the zero-row case: with
-    /// `nrows == 0` both sides are `0` and the two fills are indistinguishable
-    /// here, so an empty gather returns an empty view either way. That is the
-    /// shape `crossfit` produces (it passes `val = &[]`), and it is harmless
-    /// because that path uses [`Self::fill_from`] anyway -- but the assertion is
-    /// not what makes it safe.
+    /// Panics unless the label buffer matches the row count.
     fn as_matrix(&self) -> FoldView<'_> {
         let mat = self.features_as_matrix();
         assert_eq!(self.response_buffer.len(), self.nrows);
@@ -610,10 +586,8 @@ pub(crate) fn fold_weights<D: FoldDataset>(data: &D, rows: &[usize]) -> Vec<f64>
         .collect()
 }
 
-/// [`FoldModel`] adapter for `forust`'s [`GradientBooster`]. A newtype only
-/// because `GradientBooster` is a foreign type; it also carries the lane width
-/// so `FoldModel::importance` can return a full-width, lane-indexed vector
-/// (forust reports only the columns it split on).
+/// [`FoldModel`] adapter for `forust`'s [`GradientBooster`]. It carries the lane
+/// width so importance can be returned in full feature order.
 pub(crate) struct GbmFoldModel {
     booster: GradientBooster,
     ncols: usize,
@@ -623,10 +597,7 @@ impl FoldModel for GbmFoldModel {
     type Config = GBMConfig;
     type Error = ForustError;
 
-    /// `fold` is DELIBERATELY IGNORED: forust seeds itself from
-    /// `GBMConfig::seed`, so mixing the fold in here would fight the one seed
-    /// the booster already has. Folds still differ, because they are fitted on
-    /// different rows.
+    /// The booster owns its seed; fold identity is not mixed into it.
     fn fit<D: FoldDataset>(
         cfg: &GBMConfig,
         data: &D,
@@ -720,10 +691,8 @@ impl PrecomputedFeatures {
     }
 
     /// Build from an already-materialized row-major matrix
-    /// (`features[i*ncols + j]`) + responses, instead of walking
-    /// Rows MUST align with the `data` the scorer is constructed from (same
-    /// order). This is how the lane-matrix consumer trains GBM on a prebuilt
-    /// lane feature set.
+    /// (`features[i*ncols + j]`) and responses. Rows must align with the
+    /// scorer's data order.
     pub(crate) fn from_row_major(features: Vec<f64>, ncols: usize, responses: Vec<f64>) -> Self {
         assert_eq!(
             features.len(),
@@ -752,18 +721,8 @@ pub struct FeatureStat {
     pub nan_ratio: f32,
 }
 
-/// Per-fold feature statistics.
-///
-/// `feature_stats` is in the dataset's own column order
-/// (`FoldDataset::column_names`, i.e. the matrix's column order), one entry per
-/// column. `feature_importance` is sorted by importance DESCENDING (top features
-/// first), and carries only the columns the model reported a finite value for --
-/// see `FoldModel::importance` -- so it is generally shorter than
-/// `feature_stats` and in a different order.
-///
-/// Descending because the two TSV sidecars `timsseek_cli` writes
-/// (`results.feature_stats.tsv` / `results.feature_importance.tsv`) emit these
-/// vectors in order, one row per entry, and the importance one is read top-down.
+/// Per-fold feature statistics in dataset column order. Feature importance is
+/// sorted descending and includes only finite reported values.
 #[derive(Debug, Serialize)]
 pub struct FoldStats {
     pub fold: u8,
@@ -773,20 +732,9 @@ pub struct FoldStats {
 
 pub type RescoreFeatureStats = Vec<FoldStats>;
 
-/// Per-fold feature means/NaN ratios + model importance, for ANY fold
-/// partition.
-///
-/// Partition-agnostic on purpose: `fold_rows[f]` is simply "the rows summarized
-/// under fold `f`" and `models[f]` is "the model whose importance is reported
-/// there". The two rescoring partitions in this crate disagree on both -- the
-/// [`CrossValidatedScorer`] fits on fold `f` and scores the others, while
-/// `qvalues::crossfit_lda` fits on everything BUT fold `f` and scores only fold
-/// `f` -- and both are leak-free. Keeping this function ignorant of which one it
-/// is handed is what lets the sidecar have one implementation without the two
-/// partitions being forced to converge.
-///
-/// Column names (and therefore the row width) come from `data`, so the stats
-/// align with the matrix the model saw by construction.
+/// Per-fold feature means, NaN ratios and model importance. `fold_rows[f]`
+/// contains the rows summarized for fold `f`, and `models[f]` supplies that
+/// fold's importance values.
 pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
     data: &D,
     fold_rows: &[Vec<usize>],
@@ -796,16 +744,7 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
     let mut out: RescoreFeatureStats = Vec::with_capacity(fold_rows.len());
     let mut row_buf = vec![0.0f64; names.len()];
     for (fold, rows) in fold_rows.iter().enumerate() {
-        // --- Importance, back to the (name, gain) sidecar shape ---
-        // UNREPORTED (`NAN`) columns are dropped; every REPORTED column is
-        // emitted, `0.0` included. See the `FoldModel::importance` contract
-        // for why those are different things. The drop matters because the
-        // sidecar and the dashboard's fold-averaged gain both treat a feature
-        // as "reported by this fold" simply by being present, so a model's
-        // unmeasured columns would otherwise pad the averaging divisor with
-        // values it never produced.
-        //
-        // Retain finite zeroes: they are reported measurements.
+        // Keep finite importances, including zero; NaN means unreported.
         let importance: Vec<(Arc<str>, f32)> = match models.get(fold).copied().flatten() {
             Some(model) => {
                 let raw_imp = model.importance();
@@ -1472,17 +1411,7 @@ mod test {
         }
     }
 
-    /// THE `FoldModel::importance` sentinel contract, at the sidecar boundary:
-    /// `NAN` means "this model reports nothing for this column" and is dropped;
-    /// every FINITE value reaches the sidecar, `0.0` included.
-    ///
-    /// Regression guard. The boundary used to filter `!= 0.0`, which was right
-    /// for a tree model (where 0.0 did mean "never split on") and wrong for
-    /// every other model: an LDA's `|coef|` of exactly 0.0 is a measurement of a
-    /// dead or constant column, and silently deleting those rows removes
-    /// exactly what an operator reads the sidecar to find. Both halves are
-    /// asserted -- dropping the NAN alone would also pass if 0.0 were dropped
-    /// too, so the surviving zero is the load-bearing assertion.
+    /// NaN importances are omitted; finite values, including zero, are retained.
     #[test]
     fn importance_nan_is_unreported_but_zero_is_a_value() {
         let dataset = RowMajorDataset::new(
@@ -1514,9 +1443,7 @@ mod test {
         assert_eq!(stats[0].feature_stats.len(), 3);
     }
 
-    /// The GBM side of the same contract: forust reports only the columns it
-    /// split on, and the ones it did not must come back as `NAN` (absent from
-    /// the sidecar), NOT as a 0.0 gain it never measured.
+    /// Forust reports only columns it split on; other columns are NaN.
     ///
     /// `feature_4` is constant, so no tree can split on it. The other four are
     /// the usual separable draws, so their presence keeps the absence

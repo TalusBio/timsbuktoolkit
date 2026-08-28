@@ -47,8 +47,7 @@ impl std::error::Error for SpectronautReadingError {}
 
 #[derive(Debug)]
 pub enum SpectronautPrecursorParsingError {
-    /// Which fragment row failed, and why. One failure aborts the whole library
-    /// load, and nothing upstream knows where it happened.
+    /// Ion parsing failed at this fragment row.
     IonParsing {
         row: usize,
         source: IonParsingError,
@@ -70,8 +69,6 @@ impl std::fmt::Display for SpectronautPrecursorParsingError {
 }
 
 impl SpectronautPrecursorParsingError {
-    /// `map_err` adaptor that stamps the fragment row onto an ion-parsing
-    /// failure. Replaces a `From` impl, which had no way to see the row.
     fn ion(row: usize) -> impl Fn(IonParsingError) -> Self {
         move |source| Self::IonParsing { row, source }
     }

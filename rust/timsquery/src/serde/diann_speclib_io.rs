@@ -8,8 +8,7 @@
 //! (little-endian, no padding, no section table); it must be parsed strictly in
 //! order, so there is no random access across sections.
 //!
-//! The reader is three layers. The types named here are private to this module,
-//! so they are spelled rather than linked:
+//! The reader is three layers:
 //!   1. Decode (`Cursor`, `Fragment`, `Peptide`): typed, zero-copy views
 //!      over byte ranges of the in-memory file. No domain knowledge.
 //!   2. Emit (`SpecLib` + `EntryIter`): a pull parser that walks the
@@ -707,19 +706,8 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     } = src;
 }
 
-/// DIA-NN's neutral-loss code (`Product` byte 11) as a [`NeutralLoss`].
-///
-/// The numbering is not documented anywhere I could find, so it was measured off
-/// a real library: for fragments that differ *only* in this byte,
-/// `(no_loss_mz - lossy_mz) * charge` is the neutral mass. On
-/// `diann-hela-diapasef-lib.speclib` code 1 gives 18.011 across 47 pairs and
-/// code 2 gives 17.027 across 37, which are water and ammonia and nothing else
-/// within half a dalton. `loss_codes_are_water_and_ammonia` re-derives that from
-/// the fixture rather than trusting this comment.
-///
-/// `None` for any other code -- the caller drops and counts it. Guessing would
-/// be worse than dropping: a wrong loss puts a real m/z on a label that
-/// collides with a different real fragment.
+/// Map DIA-NN's neutral-loss code (`Product` byte 11) to a supported loss.
+/// Unknown codes are dropped by the caller.
 fn loss_from_code(code: u8) -> Option<NeutralLoss> {
     match code {
         0 => Some(NeutralLoss::None),
@@ -843,11 +831,7 @@ fn map_entry(
             continue;
         }
 
-        // `charge` is a raw wire byte. `as i8` would reinterpret anything above
-        // 127 as negative and hand a plausible-looking charge to the
-        // constructor, so it is range-checked instead. Note the sibling `typ()`
-        // is masked `& 0x7F` because DIA-NN sets a flag bit there; if this byte
-        // carries flags too, this is where it will surface (see #105).
+        // The wire value is unsigned; reject values that do not fit IonAnnot.
         let charge = match i8::try_from(f.charge()) {
             Ok(charge) => charge,
             Err(_) => {
@@ -1190,15 +1174,9 @@ mod tests {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (geom, _intens, stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
-        // Reference parser: 8384 ExcludeFromAssay-flagged (kept, counted only),
-        // no dc != 0 entries.
         assert_eq!(stats.exclude_flagged, 8384);
         assert_eq!(stats.decoys_dropped, 0);
-        // Every neutral loss in this fixture is water or ammonia, both of which
-        // `loss_from_code` maps, so nothing is dropped for its loss. This was
-        // 152 before that mapping existed.
         assert_eq!(stats.loss_dropped, 0);
-        // And they arrive as labelled losses rather than as bare ions.
         let with_loss = geom
             .frag_labels
             .iter()
@@ -1215,18 +1193,6 @@ mod tests {
         );
     }
 
-    /// Re-derives [`loss_from_code`] from the fixture instead of trusting it.
-    ///
-    /// DIA-NN's loss numbering is undocumented, so the mapping was measured: a
-    /// lossy fragment and its no-loss sibling differ by exactly the loss, so
-    /// `(base_mz - lossy_mz) * charge` is the neutral mass. If a future fixture
-    /// or DIA-NN version renumbers the codes, this fails here rather than
-    /// silently relabelling peaks.
-    ///
-    /// The tolerance is 3 mDa: the m/z values on disk are `f32`, and DIA-NN's
-    /// own loss constants are a shade off the monoisotopic masses (water reads
-    /// 18.011 against 18.0106). That is far tighter than the gap to any other
-    /// candidate loss, which is what makes the identification safe.
     #[test]
     fn loss_codes_are_water_and_ammonia() {
         use std::collections::BTreeMap;
@@ -1272,15 +1238,12 @@ mod tests {
                 }
             }
         }
-        // Only codes this build maps appear. A new one must be measured, not
-        // guessed, so it fails here rather than being dropped in silence.
         for &code in hist.keys() {
             assert!(
                 loss_from_code(code).is_some(),
                 "unmapped loss code {code} in the fixture: measure it before mapping it"
             );
         }
-        // The codes carrying a loss, and the neutral mass each one measures at.
         let expected = [
             (1u8, NeutralLoss::Water, 18.0106_f64),
             (2, NeutralLoss::Ammonia, 17.0265),

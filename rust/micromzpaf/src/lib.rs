@@ -1,14 +1,7 @@
 //! Compact representation of fragment ion annotations for mass spectrometry.
 //!
-//! A spectral library carries one annotation per fragment, so this type is
-//! replicated millions of times in a loaded arena. It is a packed `u32` so that
-//! the annotations an mzSpecLib-shaped library needs -- neutral losses,
-//! internal fragments, immonium ions -- fit *without* growing the type.
-//!
-//! Bolting a loss field onto a struct of fields would have cost three bytes,
-//! not one: a 5-byte key paired with an `f32` pads to a 12-byte tuple, growing
-//! the inline `TinyVec` storage in timsseek's `ExpectedIntensities` from 104 to
-//! 156 bytes. Packed, the tuple stays 8 bytes.
+//! A packed `u32` representation of the fragment annotations used by spectral
+//! libraries, including neutral losses, internal fragments and immonium ions.
 //!
 //! # Bit layout
 //!
@@ -20,8 +13,7 @@
 //!     └───────┴────────────────┴──────────┴────────┴────────┴───────┘
 //! ```
 //!
-//! The widths and their shifts are checked by `const` assertions next to the
-//! constants, so this diagram cannot drift away from the code.
+//! The widths and shifts are checked by `const` assertions.
 //!
 //! `payload` is reinterpreted per `kind` -- a tagged union inside the word:
 //!
@@ -33,13 +25,10 @@
 //! | precursor | unused |
 //!
 //! `unknown` is discriminant 0 and `charge` is stored biased by one, so the
-//! all-zero word is the valid annotation `?0` at charge 1. That matters
-//! because `IonAnnot: Default` is forced by `tinyvec::Array` and a default can
-//! reach any serde path.
+//! all-zero word is the valid annotation `?0` at charge 1.
 //!
-//! `charge` is zigzag-encoded to stay signed in 4 bits; `isotope` is unsigned
-//! (see [`ISOTOPE_MIN`]). A bit field truncates rather than wrapping loudly, so
-//! every constructor range-checks -- see [`IonAnnot::try_new`].
+//! `charge` is zigzag-encoded to stay signed in 4 bits; `isotope` is unsigned.
+//! Constructors validate both before packing.
 //!
 //! # The mzPAF subset
 //!
@@ -111,11 +100,6 @@ use series::{
 use std::fmt::Display;
 use std::hash::Hash;
 
-// ── The word ─────────────────────────────────────────────────────────────────
-//
-// `kind` and `payload` are `series`'s to define; this module only decides where
-// they sit and what surrounds them.
-
 const KIND_SHIFT: u32 = 0;
 const CHARGE_SHIFT: u32 = 4;
 const CHARGE_BITS: u32 = 4;
@@ -125,28 +109,13 @@ const LOSS_SHIFT: u32 = 12;
 const LOSS_BITS: u32 = 6;
 const PAYLOAD_SHIFT: u32 = 18;
 
-/// Charge bounds. Observed maximum in the HUPO-PSI corpus is 3.
-///
-/// Asymmetric because the field stores `charge - 1` zigzagged: that shifts the
-/// whole window up by one, so `8` fits and `-8` does not. The `const` assertion
-/// below is what holds these to the field rather than to this comment --
-/// `CHARGE_MIN = -8` would zigzag to 17 and truncate to 1, silently decoding as
-/// charge 0.
+/// Charge bounds representable by the packed field.
 pub const CHARGE_MIN: i8 = -7;
 pub const CHARGE_MAX: i8 = 8;
-/// Widest isotope offset the 4-bit field holds. Observed maximum is 3.
-///
-/// Isotope offsets are unsigned. mzPAF spells a negative offset `-Ni`, which
-/// this crate does not parse, so allowing one in the field would let `Display`
-/// emit `y5+-2i` -- text no other mzPAF reader accepts, through a type whose
-/// wire format *is* that text. Rejecting it here keeps the invalid spelling
-/// unreachable and spends the whole 4 bits on offsets that can round-trip.
+/// Isotope offset bounds representable by the packed field.
 pub const ISOTOPE_MIN: i8 = 0;
 pub const ISOTOPE_MAX: i8 = mask(ISOTOPE_BITS) as i8;
 
-// The layout is otherwise enforced by prose and a diagram. These make it
-// self-checking, so a field cannot be widened or moved without the build
-// failing. `series` asserts its own payload bounds.
 const _: () = assert!(
     KIND_BITS + CHARGE_BITS + ISOTOPE_BITS + LOSS_BITS + PAYLOAD_BITS <= 32,
     "the fields overflow the word"
@@ -162,7 +131,6 @@ const _: () = assert!(
     "fields must abut"
 );
 const _: () = assert!(PAYLOAD_SHIFT == LOSS_SHIFT + LOSS_BITS, "fields must abut");
-// The zigzag bounds are hand-derived; these are what make them checked.
 const _: () = assert!(
     zigzag_charge(CHARGE_MIN) <= mask(CHARGE_BITS)
         && zigzag_charge(CHARGE_MAX) <= mask(CHARGE_BITS),
@@ -172,8 +140,6 @@ const _: () = assert!(
     ISOTOPE_MIN >= 0 && ISOTOPE_MAX as u32 <= mask(ISOTOPE_BITS),
     "the isotope range does not fit ISOTOPE_BITS"
 );
-// `pack` masks the loss discriminant, so a table grown past the field would
-// truncate into a *different* loss rather than fail.
 const _: () = assert!(
     NeutralLoss::COUNT as u32 <= mask(LOSS_BITS),
     "the loss table has outgrown LOSS_BITS"
@@ -184,8 +150,7 @@ pub(crate) const fn mask(bits: u32) -> u32 {
     (1u32 << bits) - 1
 }
 
-/// Zigzag: map a small signed value onto an unsigned one without losing the
-/// sign bit to the field width.
+/// Map a small signed value to an unsigned value without losing its sign.
 #[inline]
 const fn zigzag(v: i8) -> u32 {
     (((v as i32) << 1) ^ ((v as i32) >> 31)) as u32
@@ -195,11 +160,7 @@ const fn unzigzag(u: u32) -> i8 {
     (((u >> 1) as i32) ^ -((u & 1) as i32)) as i8
 }
 
-/// Charge is stored biased by one, so the zero field decodes to charge 1.
-///
-/// Charge 0 is rejected by every constructor, so it is not a value the field
-/// needs to represent -- and spending the zero word on it would make
-/// `IonAnnot::default()` render an annotation that cannot be parsed back.
+/// Encode charge with a one-unit bias so zero decodes to charge 1.
 #[inline]
 const fn zigzag_charge(charge: i8) -> u32 {
     zigzag(charge - 1)
@@ -212,11 +173,6 @@ const fn unzigzag_charge(u: u32) -> i8 {
 /// Compact representation of fragment annotations.
 ///
 /// A packed `u32`; see the crate docs for the bit layout.
-///
-/// Deliberately not `Ord`. Ordering the packed word sorts by ordinal first,
-/// then loss, then isotope, then charge, then series -- an order nobody means.
-/// Nothing in the workspace sorts annotations, and `KeyLike` does not require
-/// it, so the trait is not offered rather than offered and meaningless.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 pub struct IonAnnot(u32);
 
@@ -244,13 +200,7 @@ impl<'de> Deserialize<'de> for IonAnnot {
 }
 
 impl IonAnnot {
-    /// Build an annotation from its parts.
-    ///
-    /// The one constructor. `series` has already been validated against the
-    /// payload width by [`IonSeriesOrdinal`]'s own constructors, so all this
-    /// checks is `charge` and `isotope` -- and it must, because a bit field
-    /// truncates silently, so an unchecked value would corrupt the annotation
-    /// rather than fail.
+    /// Build an annotation from its parts, validating the packed fields.
     pub fn new(
         series: IonSeriesOrdinal,
         loss: NeutralLoss,
@@ -276,12 +226,7 @@ impl IonAnnot {
         ))
     }
 
-    /// A backbone / precursor / unknown annotation from its mzPAF letter.
-    ///
-    /// The shape a file reader has: a series character straight out of a column.
-    /// Internal fragments and immonium ions are spelled differently and go
-    /// through [`IonSeriesOrdinal::try_internal`] / [`IonSeriesOrdinal::try_immonium`]
-    /// and [`Self::new`].
+    /// Build a backbone, precursor or unknown annotation from its series letter.
     pub fn try_new(
         ion_type: char,
         ordinal: Option<u8>,
@@ -323,9 +268,6 @@ impl IonAnnot {
     /// Errors when the result leaves [`ISOTOPE_MIN`]..=[`ISOTOPE_MAX`], naming
     /// that range, since the caller cannot see the field width.
     pub fn try_with_offset_neutrons(&self, offset_neutrons: i8) -> Result<Self, IonParsingError> {
-        // Saturating rather than checked: the field is far narrower than `i8`,
-        // so the range check below is the one that matters and it reports the
-        // bound that actually applies.
         let new_isotope = self.get_isotope().saturating_add(offset_neutrons);
         if !(ISOTOPE_MIN..=ISOTOPE_MAX).contains(&new_isotope) {
             return Err(IonParsingError::IsotopeOutOfRange {
@@ -373,18 +315,9 @@ static MASS_ERROR_DISCARDED: std::sync::Once = std::sync::Once::new();
 impl TryFrom<&str> for IonAnnot {
     type Error = IonParsingError;
 
-    /// Parses an annotation, **discarding any mass-error suffix**, and warns
-    /// once per process the first time it discards a real one.
+    /// Parse an annotation, ignoring any mass-error suffix.
     ///
-    /// The suffix is a property of one observed peak, not of the ion: two peaks
-    /// annotated `b12` in different spectra carry different errors, so keeping
-    /// it on the annotation would make two `b12`s unequal and break the
-    /// per-precursor label uniqueness the whole crate keys on.
-    ///
-    /// A caller that needs the error wants it for the *m/z*, not the label:
-    /// call [`split_mass_error`] first, recover the theoretical m/z with
-    /// [`MassError::theoretical_from_observed`], and store that. Nothing is
-    /// lost that way -- only the residual, which belongs to the measurement.
+    /// Use [`split_mass_error`] when the suffix is needed for m/z correction.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let (ion, mass_error) = split_mass_error(value)?;
         if mass_error.is_some() {
@@ -425,18 +358,7 @@ impl Display for IonAnnot {
     }
 }
 
-/// Hands out `?1`, `?2`, ... for peaks whose annotation this crate cannot
-/// represent.
-///
-/// Fragment labels must be unique within a precursor -- lookup is by first
-/// match, so a repeated label makes every later peak carrying it unreachable.
-/// A monotonic counter makes that uniqueness structural, and returning an
-/// error once the 8-bit ordinal is spent keeps the overflow from being
-/// something each reader has to remember to check.
-///
-/// Deliberately neither `Copy` nor `Clone`: a duplicated counter forks, and
-/// each fork reissues labels the other already handed out -- exactly the bug
-/// this type exists to prevent. Pass it by `&mut`.
+/// Generates unique unknown-ion labels within a precursor.
 #[derive(Debug, Default)]
 pub struct UnknownIonCounter(u8);
 
@@ -461,23 +383,12 @@ mod tests {
         IonAnnot::try_from(s).unwrap_or_else(|e| panic!("{s:?} must parse: {e}"))
     }
 
-    /// The size claim the design rests on: a loss, an internal-fragment span
-    /// and an immonium residue all ride along without growing the tuple that
-    /// timsseek stores inline.
-    ///
-    /// The predecessor was also 4 bytes, so `size_of` alone pins nothing --
-    /// what this asserts is that the *added* fields cost nothing, which is only
-    /// meaningful together with the round-trip tests proving they are really in
-    /// there.
+    /// Keep the annotation and annotation/intensity pair compact.
     #[test]
     fn the_added_fields_cost_no_space() {
         assert_eq!(size_of::<IonAnnot>(), 4);
-        // Paired with an intensity on the scoring hot path; padding here would
-        // grow the inline TinyVec storage in `ExpectedIntensities` from 104 to
-        // 156 bytes at the current inline capacity of 13.
         assert_eq!(size_of::<(IonAnnot, f32)>(), 8);
 
-        // All four of these are new capacity, and none of them widened the word.
         let loaded = IonAnnot::new(
             IonSeriesOrdinal::try_internal(2, 11).expect("in range"),
             NeutralLoss::PhosphoricAcidWater,
@@ -494,15 +405,7 @@ mod tests {
         assert_eq!((loaded.get_charge(), loaded.get_isotope()), (3, 2));
     }
 
-    /// `IonAnnot: Default` is not optional -- `tinyvec::Array` requires
-    /// `Item: Default`, `TimsElutionGroup` stores labels in a `TinyVec`, and
-    /// timsquery's `KeyLike` propagates the bound. So a default can reach any
-    /// serde path, and the zero word has to mean something.
-    ///
-    /// It means `?0`: charge is stored as `zigzag(charge - 1)`, so the zero
-    /// field is charge 1 rather than the impossible charge 0. The default is
-    /// therefore a real annotation and `Serialize`/`Deserialize` are inverses
-    /// on it, instead of rendering a value no constructor accepts.
+    /// The default packed word is a valid annotation and round-trips via serde.
     #[test]
     fn the_default_annotation_is_a_real_annotation() {
         let d = IonAnnot::default();
@@ -532,7 +435,6 @@ mod tests {
             assert_eq!(annot, expected, "{input}");
             assert_eq!(annot.get_charge(), charge, "{input}");
             assert_eq!(annot.get_isotope(), isotope, "{input}");
-            // Round-trips byte-identically when no loss is involved.
             assert_eq!(format!("{}", annot), input);
         }
     }
@@ -577,20 +479,12 @@ mod tests {
             Err(IonParsingError::IsotopeOutOfRange { .. })
         ));
         assert!(IonAnnot::try_new('y', Some(1), 0, 0).is_err());
-        // The payload bounds are `series`'s to enforce; see
-        // `constructors_reject_what_the_payload_cannot_hold` there. This pins
-        // that an out-of-range span cannot reach a word through the parser.
         assert!(matches!(
             IonAnnot::try_from("m64:1"),
             Err(IonParsingError::OrdinalOutOfRange { .. })
         ));
     }
 
-    /// The crate docs say negative isotope offsets are unsupported. When the
-    /// field held them, `Display` emitted `y5+-2i` -- not mzPAF, and reparsed
-    /// happily, so a library could round-trip through serde into text no other
-    /// mzPAF reader accepts. The field is unsigned so that spelling is
-    /// unreachable rather than merely undocumented.
     #[test]
     fn negative_isotopes_are_unrepresentable_not_just_unparsed() {
         assert!(matches!(
@@ -598,11 +492,8 @@ mod tests {
             Err(IonParsingError::IsotopeOutOfRange { isotope: -1 })
         ));
         assert!(ion("y5").try_with_offset_neutrons(-1).is_err());
-        // mzPAF's own spelling for a negative offset is still not parsed.
         assert!(IonAnnot::try_from("y5-2i").is_err());
-        // And the spelling that used to leak out is not accepted either.
         assert!(IonAnnot::try_from("y5+-2i").is_err());
-        // Every representable isotope renders as something that parses back.
         for isotope in ISOTOPE_MIN..=ISOTOPE_MAX {
             let a = IonAnnot::try_new('y', Some(5), 1, isotope).expect("in range");
             let text = a.to_string();
@@ -625,13 +516,9 @@ mod tests {
         assert_eq!(a.try_get_ordinal(), Some(5));
         assert_eq!(format!("{}", a), "y5-H2O");
 
-        // Non-canonical spelling resolves to the same annotation, and renders
-        // canonically -- so this pair is equal, which is the property that
-        // upholds per-precursor label uniqueness.
         assert_eq!(ion("y5-CH3SOH"), ion("y5-CH4OS"));
         assert_eq!(format!("{}", ion("y5-CH3SOH")), "y5-CH4OS");
 
-        // Loss combines with charge and isotope.
         let b = ion("y10-NH3+i^2");
         assert_eq!(b.loss(), NeutralLoss::Ammonia);
         assert_eq!(b.get_isotope(), 1);
@@ -645,7 +532,6 @@ mod tests {
             a.series_ordinal(),
             IonSeriesOrdinal::internal { start: 2, end: 11 }
         );
-        // An internal fragment has no ladder position.
         assert_eq!(a.try_get_ordinal(), None);
         assert_eq!(format!("{}", a), "m2:11");
 
@@ -663,8 +549,6 @@ mod tests {
         );
         assert_eq!(format!("{}", a), "IA");
 
-        // Carries an arbitrary mod string -- no field width represents it, so
-        // it must fail rather than silently degrade to a bare immonium.
         assert!(matches!(
             IonAnnot::try_from("IC[Carbamidomethyl]"),
             Err(IonParsingError::UnsupportedModifiedImmonium { .. })
@@ -676,8 +560,6 @@ mod tests {
         let (rest, err) = split_mass_error("y1/-0.0005").unwrap();
         assert_eq!(ion(rest), ion("y1"));
         assert_eq!(err, Some(MassError::Da(-0.0005)));
-        // theoretical = observed - error; verified against a real SpectraST
-        // peak: y1 for C-terminal R, observed 175.1184, theoretical 175.11895.
         let theo = err.unwrap().theoretical_from_observed(175.1184);
         assert!((theo - 175.1189).abs() < 1e-9, "got {theo}");
 
@@ -686,15 +568,10 @@ mod tests {
         let theo = err.unwrap().theoretical_from_observed(700.0);
         assert!((theo - 699.99916).abs() < 1e-4, "got {theo}");
 
-        // Absent suffix is not an error.
         assert_eq!(split_mass_error("y6").unwrap(), ("y6", None));
-        // TryFrom discards it rather than failing.
         assert_eq!(IonAnnot::try_from("y1/-0.0005").unwrap(), ion("y1"));
     }
 
-    /// An unrepresentable loss must fail loudly. Parsing `y1-HCOOH` as plain
-    /// `y1` would put a loss peak's m/z on the `y1` label and collide with the
-    /// real `y1`.
     #[test]
     fn unrepresentable_loss_is_rejected_not_stripped() {
         assert!(matches!(

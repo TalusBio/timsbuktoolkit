@@ -22,9 +22,7 @@ pub enum ElutionGroupInputError {
         inner: String,
     },
     MissingFragmentLabels,
-    /// More fragments than the `u8` label space holds. Wrapping instead would
-    /// mint a duplicate label, and lookup is by first match, so every later
-    /// fragment sharing it would be unreachable.
+    /// Too many fragments for the unknown-ion label space.
     TooManyFragmentsToLabel {
         found: usize,
     },
@@ -77,11 +75,7 @@ impl<T: KeyLike> ElutionGroupInput<T> {
         })
     }
 
-    /// Fill in `?1`, `?2`, ... for an input that named no fragment labels.
-    ///
-    /// Minted through [`UnknownIonCounter`] rather than an index cast, so
-    /// running past the label space is an error rather than a wrap into
-    /// duplicate labels.
+    /// Fill in unique unknown-ion labels for an input with no fragment labels.
     pub fn try_fill_labels_annot(
         self,
     ) -> Result<ElutionGroupInput<IonAnnot>, ElutionGroupInputError> {

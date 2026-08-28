@@ -1,7 +1,6 @@
 //! What kind of ion an annotation names, and how that fits in a packed payload.
 //!
-//! This module owns three things that have to agree, and only agree if they sit
-//! together:
+//! This module owns three related details:
 //!
 //! 1. the mzPAF **spelling** of each kind (`Display` and `IonSeriesOrdinal::parse`,
 //!    which are exact inverses),
@@ -9,11 +8,8 @@
 //!    and `from_parts`, also inverses),
 //! 3. the **bounds** that layout imposes, enforced by the constructors.
 //!
-//! Splitting any of those across a module boundary is what lets a `v` render as
-//! a `w`, or an internal-fragment endpoint get validated against a width it no
-//! longer has. [`IonAnnot`](crate::IonAnnot) owns the surrounding word --
-//! charge, isotope, loss, and where these two fields sit in it -- and nothing
-//! else.
+//! [`IonAnnot`](crate::IonAnnot) owns the surrounding word -- charge, isotope,
+//! loss, and their positions.
 
 use std::fmt::Display;
 
@@ -83,8 +79,7 @@ pub enum Series {
 }
 
 impl Series {
-    /// Every series, in discriminant order, and parallel to the private letter
-    /// table -- `series_letters_and_discriminants_agree` pins that pairing.
+    /// Every series, in discriminant order.
     pub const ALL: [Self; 9] = [
         Self::a,
         Self::b,
@@ -96,8 +91,7 @@ impl Series {
         Self::y,
         Self::z,
     ];
-    /// The mzPAF letters, in discriminant order. The single place the
-    /// letter-to-discriminant pairing lives.
+    /// The mzPAF letters, in discriminant order.
     const CHARS: &'static [u8; 9] = b"abcdvwxyz";
 
     /// The mzPAF letter for this series.
@@ -202,9 +196,7 @@ impl IonSeriesOrdinal {
     /// Parse the ion-kind part of an annotation: everything left of the charge,
     /// isotope and loss suffixes.
     ///
-    /// The exact inverse of this type's [`Display`], which is why the two live
-    /// side by side -- `every_series_variant_round_trips_through_its_mzpaf_spelling`
-    /// pins that.
+    /// The inverse of this type's [`Display`].
     pub(crate) fn parse(core: &str) -> Result<Self, IonParsingError> {
         // Internal fragment: `m<start>:<end>`. Checked before the single-letter
         // forms because `m` is not a backbone letter, so there is no ambiguity.
@@ -256,9 +248,7 @@ impl IonSeriesOrdinal {
     /// Split into the `kind` discriminant and its `payload`, the two fields
     /// [`IonAnnot`](crate::IonAnnot) packs.
     ///
-    /// Total: every arm masks to its own width, so a value built by hand rather
-    /// than through the constructors encodes as something decodable instead of
-    /// panicking on a path `Display` (and so `Serialize`) reaches.
+    /// Split into the fields used by the packed word.
     pub(crate) const fn to_parts(self) -> (u32, u32) {
         match self {
             Self::backbone { series, ordinal } => (series as u32, ordinal as u32),
@@ -279,9 +269,8 @@ impl IonSeriesOrdinal {
         }
     }
 
-    /// Inverse of [`Self::to_parts`]. Total by construction: `unknown` is the
-    /// catch-all discriminant, so a value this build does not recognise -- only
-    /// reachable from a corrupted word -- decodes as an unknown ion.
+    /// Inverse of [`Self::to_parts`]. Unknown discriminants decode as unknown
+    /// ions.
     pub(crate) const fn from_parts(kind: u32, payload: u32) -> Self {
         let ordinal = payload as u8;
         match kind {
@@ -319,10 +308,6 @@ impl Display for IonSeriesOrdinal {
 mod tests {
     use super::*;
 
-    /// One representative of every [`IonSeriesOrdinal`] case: all nine backbone
-    /// series (each with a distinct ordinal, so a transposition in
-    /// `to_parts`/`from_parts` cannot cancel out) plus the four others, at their
-    /// field boundaries.
     fn all_series() -> Vec<IonSeriesOrdinal> {
         let mut out: Vec<IonSeriesOrdinal> = Series::ALL
             .iter()
@@ -336,22 +321,16 @@ mod tests {
             IonSeriesOrdinal::precursor,
             IonSeriesOrdinal::unknown { ordinal: 10 },
             IonSeriesOrdinal::internal { start: 2, end: 11 },
-            // Both endpoints at their 6-bit ceiling: the widest payload the
-            // 12 bits hold, and the case a narrowed field would silently clip.
             IonSeriesOrdinal::internal {
                 start: INTERNAL_POS_MAX,
                 end: INTERNAL_POS_MAX,
             },
             IonSeriesOrdinal::immonium { residue: 'A' },
-            // Highest residue index the 5-bit immonium field must hold.
             IonSeriesOrdinal::immonium { residue: 'Z' },
         ]);
         out
     }
 
-    /// `to_parts` and `from_parts` are hand-written inverses. Without this,
-    /// swapping two arms (`v` encoding as `w`) mislabels a whole ion series and
-    /// every other test still passes.
     #[test]
     fn every_variant_round_trips_through_the_packed_parts() {
         for series in all_series() {
@@ -364,8 +343,6 @@ mod tests {
             );
         }
 
-        // Every backbone series must land on its own discriminant; the other
-        // four are singletons and are covered by the round trip above.
         let mut kinds: Vec<u32> = Series::ALL
             .iter()
             .map(|&series| {
@@ -379,23 +356,15 @@ mod tests {
         assert_eq!(kinds.len(), Series::ALL.len(), "two series share a kind");
     }
 
-    /// `from_parts` claims to be total, and three of the sixteen `kind` values
-    /// are unassigned. Renumbering the assigned ones is safe only while the
-    /// unassigned ones stay decodable, since a corrupted word reaches this on a
-    /// `Display` (and so `Serialize`) path.
     #[test]
     fn every_kind_bit_pattern_decodes_without_panicking() {
         for kind in 0..=mask(KIND_BITS) {
             for payload in [0, 1, mask(PAYLOAD_BITS)] {
-                // Also exercises `Display`, which is where a partial decode
-                // would have panicked.
                 let _ = IonSeriesOrdinal::from_parts(kind, payload).to_string();
             }
         }
     }
 
-    /// `Display` and [`IonSeriesOrdinal::parse`] are hand-written inverses, and
-    /// this module exists so they cannot drift apart.
     #[test]
     fn every_variant_round_trips_through_its_mzpaf_spelling() {
         for series in all_series() {
@@ -408,8 +377,6 @@ mod tests {
         }
     }
 
-    /// The letters are the mzPAF spelling of the discriminants, and
-    /// `from_char`/`as_char` are hand-written inverses of each other.
     #[test]
     fn series_letters_and_discriminants_agree() {
         assert_eq!(Series::ALL.len(), Series::CHARS.len());
@@ -421,8 +388,6 @@ mod tests {
         }
     }
 
-    /// The bounds this module owns, checked where they are enforced rather than
-    /// through a packed word.
     #[test]
     fn constructors_reject_what_the_payload_cannot_hold() {
         assert!(IonSeriesOrdinal::try_internal(INTERNAL_POS_MAX, INTERNAL_POS_MAX).is_ok());
@@ -432,7 +397,6 @@ mod tests {
         ));
         assert!(IonSeriesOrdinal::try_immonium('A').is_ok());
         assert!(IonSeriesOrdinal::try_immonium('Z').is_ok());
-        // Lowercase would underflow the `- b'A'` in `to_parts`.
         assert!(IonSeriesOrdinal::try_immonium('a').is_err());
 
         // A bare `I` names no residue; a modified one carries a mod string.
