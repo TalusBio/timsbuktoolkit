@@ -23,15 +23,13 @@ use super::spectronaut_io::{
     read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
+use crate::Target;
 use crate::ion::IonAnnot;
 use crate::models::{
+    Row,
     SourceIdError,
     TargetCapabilities,
     TargetColumns,
-};
-use crate::{
-    KeyLike,
-    Target,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -300,17 +298,18 @@ impl TargetTable {
                 })?;
                 frag_intens.push(*intensity);
             }
-            geom.push_row(
-                eg.precursor_mz(),
-                eg.precursor_charge(),
-                eg.rt_seconds(),
-                eg.mobility_ook0(),
-                &frags,
-                &row.stripped,
-                &row.modified,
-                &[],
-                row.is_decoy,
-            );
+            geom.push_row(Row {
+                precursor_mz: eg.precursor_mz(),
+                charge: eg.precursor_charge(),
+                rt_seconds: eg.rt_seconds(),
+                mobility: eg.mobility_ook0(),
+                frags: &frags,
+                seq_strip: &row.stripped,
+                seq_mod: &row.modified,
+                is_decoy: row.is_decoy,
+                id: Some(eg.id().to_owned_id()),
+                ..Default::default()
+            });
         }
 
         if frag_intens.len() != geom.frag_labels.len() {
@@ -321,7 +320,7 @@ impl TargetTable {
             )));
         }
 
-        seal_with_source_ids(&mut geom, &egs)?;
+        geom.seal()?;
         Ok(TargetTable::Mzpaf {
             geom,
             frag_intens: Some(frag_intens),
@@ -353,18 +352,17 @@ impl TargetTable {
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
-                    geom.push_target(
-                        eg.precursor_mz(),
-                        eg.precursor_charge(),
-                        eg.rt_seconds(),
-                        eg.mobility_ook0(),
-                        &frags,
-                        "",
-                        "",
-                        &[],
-                    );
+                    geom.push_row(Row {
+                        precursor_mz: eg.precursor_mz(),
+                        charge: eg.precursor_charge(),
+                        rt_seconds: eg.rt_seconds(),
+                        mobility: eg.mobility_ook0(),
+                        frags: &frags,
+                        id: Some(eg.id().to_owned_id()),
+                        ..Default::default()
+                    });
                 }
-                seal_with_source_ids(&mut geom, &egs)?;
+                geom.seal()?;
                 Ok(TargetTable::Mzpaf {
                     geom,
                     frag_intens: None,
@@ -380,18 +378,17 @@ impl TargetTable {
                         .iter_fragments()
                         .map(|(l, mz)| (Arc::<str>::from(l.as_str()), mz))
                         .collect();
-                    geom.push_target(
-                        eg.precursor_mz(),
-                        eg.precursor_charge(),
-                        eg.rt_seconds(),
-                        eg.mobility_ook0(),
-                        &frags,
-                        "",
-                        "",
-                        &[],
-                    );
+                    geom.push_row(Row {
+                        precursor_mz: eg.precursor_mz(),
+                        charge: eg.precursor_charge(),
+                        rt_seconds: eg.rt_seconds(),
+                        mobility: eg.mobility_ook0(),
+                        frags: &frags,
+                        id: Some(eg.id().to_owned_id()),
+                        ..Default::default()
+                    });
                 }
-                seal_with_source_ids(&mut geom, &egs)?;
+                geom.seal()?;
                 Ok(TargetTable::Str { geom })
             }
             ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
@@ -400,25 +397,6 @@ impl TargetTable {
             }
         }
     }
-}
-
-/// Carry the rows' ids into the arena, then seal it.
-///
-/// One function, not two calls: `seal` mints `0..n` for a library that arrived
-/// without ids, so sealing before attaching them silently overwrites the names
-/// the reader parsed. Every arm goes through here so that ordering cannot be
-/// got wrong.
-fn seal_with_source_ids<L: KeyLike, T: KeyLike>(
-    geom: &mut TargetColumns<L>,
-    egs: &[Target<T>],
-) -> Result<(), TargetReadingError> {
-    let ids = egs
-        .iter()
-        .map(|eg| eg.id().to_owned_id())
-        .collect::<Vec<_>>();
-    geom.set_source_ids(ids)?;
-    geom.seal();
-    Ok(())
 }
 
 /// A single spectral-library format reader. Adding a format = one struct + one

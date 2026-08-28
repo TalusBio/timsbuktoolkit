@@ -100,9 +100,20 @@ impl From<&str> for OwnedSourceId {
     }
 }
 
-impl Default for OwnedSourceId {
-    fn default() -> Self {
-        Self::Numeric(0)
+impl OwnedSourceId {
+    /// For a scratch buffer that is refilled before it is read (see
+    /// [`crate::Target::empty_like`]).
+    ///
+    /// Deliberately not `Default`, and deliberately not `Numeric(0)`: every
+    /// `u64` is a valid id, so a numeric placeholder that leaked would look
+    /// exactly like a real result keyed on 0 — the same reason
+    /// `RowIdx::default()` is `u32::MAX` rather than 0. This one is visible in
+    /// any output that would wrongly carry it.
+    ///
+    /// It is `Text` so the first [`Self::set_from`] with a text id reuses this
+    /// allocation instead of making one; a `Numeric` placeholder could not.
+    pub fn placeholder() -> Self {
+        Self::Text("<unset>".to_string())
     }
 }
 

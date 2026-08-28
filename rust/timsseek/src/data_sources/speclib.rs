@@ -22,8 +22,12 @@ use std::path::{
     Path,
     PathBuf,
 };
-use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
+use timsquery::models::{
+    OwnedSourceId,
+    Row,
+    TargetColumns,
+};
 use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
@@ -200,10 +204,10 @@ fn finalize_reference_library(
     mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
     policy: crate::models::DecoyPolicy,
-) -> (ReferenceLibrary, LoadReport) {
+) -> Result<(ReferenceLibrary, LoadReport), TargetReadingError> {
     let n_stored_decoys = geom.n_stored_decoys();
     geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
-    geom.seal();
+    geom.seal()?;
 
     let n_rows = geom.n_rows();
 
@@ -284,7 +288,7 @@ fn finalize_reference_library(
         sequence_features,
     };
 
-    (ReferenceLibrary { geom, frag_intens }, report)
+    Ok((ReferenceLibrary { geom, frag_intens }, report))
 }
 
 /// The spectral library store. Collapsed to the single columnar
@@ -518,7 +522,7 @@ impl Speclib {
         // all live in the one shared finalize path (see
         // `finalize_reference_library`); the report is logged there, so we drop
         // it here.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -545,6 +549,7 @@ impl Speclib {
             timsquery::models::TargetCapabilities::default_diann(),
         );
         let mut frag_intens: Vec<f32> = Vec::new();
+        let mut decoy_groups: Vec<u64> = Vec::new();
 
         for elem in reader {
             let elem = elem?;
@@ -575,22 +580,28 @@ impl Speclib {
             // annotations for the composition-isotope path.
             let modified = &elem.precursor.sequence;
             let stripped = strip_mods(modified);
-            geom.push_row(
-                eg.precursor_mz,
-                elem.precursor.charge,
-                eg.rt_seconds,
-                eg.mobility_ook0,
-                &frags,
-                &stripped,
-                modified,
-                &[],
-                elem.precursor.decoy,
-            );
+            geom.push_row(Row {
+                precursor_mz: eg.precursor_mz,
+                charge: elem.precursor.charge,
+                rt_seconds: eg.rt_seconds,
+                mobility: eg.mobility_ook0,
+                frags: &frags,
+                seq_strip: &stripped,
+                seq_mod: modified,
+                is_decoy: elem.precursor.decoy,
+                // The format names its own precursors and declares its own
+                // competition groups; carry both rather than minting over them.
+                id: Some(OwnedSourceId::Numeric(eg.id as u64)),
+                ..Default::default()
+            });
+            decoy_groups.push(u64::from(elem.precursor.decoy_group));
         }
+
+        geom.set_decoy_groups(decoy_groups)?;
 
         // Decoy resolution + seal happen inside the one shared finalize path,
         // exactly as the `.speclib` bridge above.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -1289,17 +1300,17 @@ mod tests {
         use timsquery::serde::TargetTable;
 
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        geom.seal();
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: None,

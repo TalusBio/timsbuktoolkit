@@ -252,6 +252,7 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
+    use timsquery::models::Row;
 
     /// Indices come from the arena; there is no constructor from an integer.
     fn row(lib: &ReferenceLibrary, i: usize) -> RowIdx {
@@ -271,20 +272,20 @@ mod tests {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
         let mut geom = TargetColumns::with_capabilities(caps);
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y8").unwrap(), 800.0),
             ],
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
-        geom.seal();
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],
@@ -297,17 +298,17 @@ mod tests {
         use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::TargetTable;
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        geom.seal();
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: Some(vec![1.0]),
@@ -317,7 +318,7 @@ mod tests {
 
         let mut sgeom: TargetColumns<std::sync::Arc<str>> =
             TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        sgeom.seal();
+        sgeom.seal().expect("an empty arena seals");
         let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
     }

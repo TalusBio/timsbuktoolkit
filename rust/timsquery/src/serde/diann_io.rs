@@ -3,10 +3,7 @@ use crate::ion::{
     IonAnnot,
     IonParsingError,
 };
-use crate::models::{
-    OwnedSourceId,
-    SourceId,
-};
+use crate::models::OwnedSourceId;
 use arrow::array::{
     Float32Array,
     Float64Array,
@@ -53,6 +50,9 @@ impl std::error::Error for DiannReadingError {}
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
     IonParsingError,
+    /// A library that names its other precursors left this one blank. See
+    /// [`Naming`].
+    UnnamedPrecursor,
     IonOverCapacity,
     EmptyIonString,
     Other,
@@ -287,6 +287,17 @@ pub fn read_targets<T: AsRef<Path>>(
 
     info!("Reading file content from {}", file.as_ref().display());
 
+    // Whether the file names its precursors is a property of the file, so read
+    // it once from the header. `headers()` caches and consumes no record, so
+    // the streaming loop below is unaffected. Asking per row cannot answer this:
+    // csv maps an empty cell to `visit_none`, so a `None` there means "blank
+    // cell" and "column absent" alike.
+    let naming = if rdr.headers()?.iter().any(|h| h == "transition_group_id") {
+        Naming::Present
+    } else {
+        Naming::Absent
+    };
+
     // Optimization: Stream rows and group adjacent ones instead of loading everything into memory
     let mut elution_groups = Vec::new();
     let mut current_group: Vec<DiannLibraryRow> = Vec::with_capacity(20);
@@ -304,7 +315,7 @@ pub fn read_targets<T: AsRef<Path>>(
             && !row.is_same_precursor(last_row)
         {
             // New group found, parse the collected group
-            let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
+            let eg = parse_precursor_group(group_id, naming, &current_group, &mut buffers)?;
             elution_groups.push(eg);
 
             // Start new group
@@ -317,61 +328,62 @@ pub fn read_targets<T: AsRef<Path>>(
 
     // Process the last group
     if !current_group.is_empty() {
-        let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
+        let eg = parse_precursor_group(group_id, naming, &current_group, &mut buffers)?;
         elution_groups.push(eg);
     }
 
-    unify_source_ids(&mut elution_groups);
     info!("Parsed {} elution groups", elution_groups.len());
     Ok(elution_groups)
 }
 
-/// A DIA-NN library names every precursor or none of them. A file that names
-/// only some is malformed (a blank `transition_group_id` cell, say), and the
-/// arena cannot hold both shapes at once, so fall the whole file back to minted
-/// ids rather than half-labelling it.
+/// Whether a DIA-NN file names its precursors at all, and what to do with a row
+/// that breaks the promise.
 ///
-/// The check is library-wide, so the warning names the precursor that triggered
-/// the fallback; without that a caller cannot act on it.
-fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
-    let named = egs.iter().filter(|(eg, _)| is_named(eg)).count();
-    if named == 0 || named == egs.len() {
-        return;
-    }
-    let total = egs.len();
-    let (index, extras) = first_unnamed(egs).expect("named < total, so some precursor is unnamed");
-    warn!(
-        "{named} of {total} DIA-NN precursors carry a name and {} do not, so the whole \
-         library falls back to minted ids: every result's `library_id` will be a row \
-         number instead of the name the file gave it. The first unnamed one is precursor \
-         {index}, {:?} — fill in its `transition_group_id` / `Precursor.Id` to keep the \
-         file's own names.",
-        total - named,
-        extras,
-    );
-    for (i, (eg, _)) in egs.iter_mut().enumerate() {
-        eg.set_id(OwnedSourceId::Numeric(i as u64));
-    }
+/// The column is per *file*, not per row: absent means the whole library is
+/// unnamed and every row is keyed by a minted counter. Present means every row
+/// must have a name — a blank cell is an error, not a row to quietly downgrade,
+/// because a half-named library cannot be stored (the arena holds one id shape)
+/// and silently renumbering the named rows loses information the file had.
+///
+/// Deciding per file is also what keeps "unnamed" from being inferred from an
+/// id's *shape*. Inferring it works only as long as DIA-NN spells
+/// `transition_group_id` as text; the day one writes integers, a named row would
+/// read as unnamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// No `transition_group_id` / `Precursor.Id` column at all.
+    Absent,
+    Present,
 }
 
-fn is_named(eg: &Target<IonAnnot>) -> bool {
-    matches!(eg.id(), SourceId::Text(_))
-}
-
-/// The first precursor the file left unnamed, as `(index, modified peptide)`.
-///
-/// Split out from the warning so what it reports is testable: the fallback
-/// rewrites every id, so by the time a caller sees the library there is nothing
-/// left to identify the row from.
-fn first_unnamed(egs: &[(Target<IonAnnot>, DiannPrecursorExtras)]) -> Option<(usize, &str)> {
-    egs.iter()
-        .enumerate()
-        .find(|(_, (eg, _))| !is_named(eg))
-        .map(|(i, (_, extras))| (i, extras.modified_peptide.as_str()))
+impl Naming {
+    /// The id for one precursor, given the cell the file had for it.
+    fn id_for(
+        self,
+        counter: u64,
+        cell: Option<&str>,
+        modified_peptide: &str,
+    ) -> Result<OwnedSourceId, DiannPrecursorParsingError> {
+        match self {
+            Self::Absent => Ok(OwnedSourceId::Numeric(counter)),
+            Self::Present => match cell.filter(|name| !name.is_empty()) {
+                Some(name) => Ok(OwnedSourceId::from(name)),
+                None => {
+                    error!(
+                        "precursor {counter} ({modified_peptide:?}) has an empty \
+                         `transition_group_id` / `Precursor.Id` in a library that names its \
+                         other precursors; a library names all its rows or none"
+                    );
+                    Err(DiannPrecursorParsingError::UnnamedPrecursor)
+                }
+            },
+        }
+    }
 }
 
 fn parse_precursor_group(
     id: u64,
+    naming: Naming,
     rows: &[DiannLibraryRow],
     buffers: &mut ParsingBuffers,
 ) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
@@ -469,15 +481,12 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    // DIA-NN names the precursor itself; carry that through so results say what
-    // the library says. Variants without the column fall back to the counter,
-    // which `seal` treats as any other minted id.
-    let name = first_row
-        .transition_group_id
-        .as_deref()
-        .filter(|name| !name.is_empty());
     let eg = Target::builder()
-        .id(name.map_or_else(|| id.into(), OwnedSourceId::from))
+        .id(naming.id_for(
+            id,
+            first_row.transition_group_id.as_deref(),
+            &first_row.modified_peptide,
+        )?)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -619,6 +628,11 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     // Optional: absent from libraries written by other tools (the Carafe
     // fixture has no such column), which then fall back to minted ids.
     let precursor_ids = get_string_column(&all_batches, "Precursor.Id").ok();
+    let naming = if precursor_ids.is_some() {
+        Naming::Present
+    } else {
+        Naming::Absent
+    };
     let decoys = get_int_column(&all_batches, "Decoy")?;
 
     let num_rows = modified_sequences.len();
@@ -667,6 +681,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             // Parse the collected group
             let eg = parse_precursor_group_from_parquet(
                 group_id,
+                naming,
                 &current_group_indices,
                 &columns,
                 &mut buffers,
@@ -684,6 +699,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     if !current_group_indices.is_empty() {
         let eg = parse_precursor_group_from_parquet(
             group_id,
+            naming,
             &current_group_indices,
             &columns,
             &mut buffers,
@@ -691,7 +707,6 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         elution_groups.push(eg);
     }
 
-    unify_source_ids(&mut elution_groups);
     info!(
         "Parsed {} elution groups from parquet file",
         elution_groups.len()
@@ -701,6 +716,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
 
 fn parse_precursor_group_from_parquet(
     id: u64,
+    naming: Naming,
     indices: &[usize],
     columns: &ParquetColumnData,
     buffers: &mut ParsingBuffers,
@@ -797,14 +813,12 @@ fn parse_precursor_group_from_parquet(
         relative_intensities: rel_intensities,
     };
 
-    // DIA-NN names the precursor in `Precursor.Id`; carry that through when the
-    // file has it, else fall back to the counter as the TSV path does.
-    let name = columns
-        .precursor_ids
-        .map(|ids| ids[first_idx].as_str())
-        .filter(|name| !name.is_empty());
     let eg = Target::builder()
-        .id(name.map_or_else(|| id.into(), OwnedSourceId::from))
+        .id(naming.id_for(
+            id,
+            columns.precursor_ids.map(|ids| ids[first_idx].as_str()),
+            &columns.modified_sequences[first_idx],
+        )?)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -820,40 +834,61 @@ fn parse_precursor_group_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SourceId;
     use std::path::PathBuf;
 
-    /// One blank `transition_group_id` costs the *whole* library its names,
-    /// because the arena holds one id shape and not two. That trade is
-    /// deliberate; what it must not be is quiet. This pins both halves: the
-    /// fallback rewrites every id, and the precursor that triggered it is
-    /// identifiable before it does.
+    /// A file with the `transition_group_id` column promises every row has one.
+    /// A blank cell breaks that promise, and the two ways to carry on are both
+    /// wrong: storing a half-named library is impossible (one id shape per
+    /// column), and renumbering every row throws away the names the file did
+    /// give. So it is an error.
     #[test]
-    fn one_unnamed_precursor_downgrades_the_library_and_is_named_first() {
-        // This fixture has no `transition_group_id` column, so both precursors
-        // come back minted. Naming one of them is the mixed library a blank cell
-        // produces.
+    fn a_blank_name_in_a_naming_library_is_an_error() {
+        let with_names = "\
+ModifiedPeptide\tStrippedPeptide\tPrecursorMz\tPrecursorCharge\tTr_recalibrated\tIonMobility\t\
+ProteinID\tDecoy\tFragmentMz\tFragmentType\tFragmentNumber\tFragmentCharge\tFragmentLossType\t\
+RelativeIntensity\ttransition_group_id
+PEPTIDEK\tPEPTIDEK\t500.0\t2\t10.0\t0.8\tP1\t0\t200.0\ty\t2\t1\tnoloss\t1.0\tPEPTIDEK2
+AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.0\t{second_id}
+";
+        let write = |content: &str| {
+            let f = tempfile::Builder::new()
+                .suffix(".tsv")
+                .tempfile()
+                .expect("tmpfile");
+            std::fs::write(f.path(), content).expect("write");
+            f
+        };
+
+        // Both named: the file's own names reach the targets.
+        let ok = write(&with_names.replace("{second_id}", "AAAAAAALQAK2"));
+        let egs = read_targets(ok.path()).expect("a fully named library loads");
+        assert_eq!(egs.len(), 2);
+        assert_eq!(egs[1].0.id(), SourceId::Text("AAAAAAALQAK2"));
+
+        // One blank: rejected, rather than silently costing row 0 its name.
+        let blank = write(&with_names.replace("{second_id}", ""));
+        assert!(
+            matches!(
+                read_targets(blank.path()),
+                Err(DiannReadingError::DiannPrecursorParsingError)
+            ),
+            "a blank name in a naming library must not load"
+        );
+    }
+
+    /// The column being absent is the other case, and is fine: the library names
+    /// nothing, so every row is keyed by a minted counter.
+    #[test]
+    fn a_library_without_the_name_column_gets_minted_ids() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("diann_io_files")
             .join("sample_lib.txt");
-        let mut egs = read_targets(path).expect("reads");
+        let egs = read_targets(path).expect("reads");
         assert_eq!(egs.len(), 2, "fixture should hold two precursors");
-        egs[0].0.set_id(OwnedSourceId::Text("MGRYSGK2".into()));
-
-        let named = egs[1].1.modified_peptide.clone();
-        assert_eq!(
-            first_unnamed(&egs),
-            Some((1, named.as_str())),
-            "the warning has to name the precursor that caused the downgrade"
-        );
-
-        unify_source_ids(&mut egs);
         for (i, (eg, _)) in egs.iter().enumerate() {
-            assert_eq!(
-                eg.id(),
-                SourceId::Numeric(i as u64),
-                "a mixed library falls back to minted ids for every row"
-            );
+            assert_eq!(eg.id(), SourceId::Numeric(i as u64));
         }
     }
 

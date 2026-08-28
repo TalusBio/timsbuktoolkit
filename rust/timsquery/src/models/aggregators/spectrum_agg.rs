@@ -53,7 +53,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
     pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
         let mut out = Self {
-            id: crate::models::OwnedSourceId::default(),
+            id: crate::models::OwnedSourceId::placeholder(),
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
             precursor_mono_mz: 0.0,

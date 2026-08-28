@@ -31,6 +31,7 @@ use super::library_file::{
 };
 use crate::ion::IonAnnot;
 use crate::models::{
+    Row,
     TargetCapabilities,
     TargetColumns,
 };
@@ -472,11 +473,12 @@ impl SpecLib {
         // short-circuit on the first error and, on an indexed iterator, preserve
         // file order. Each worker owns a `(TargetColumns, frag_intens)` shard
         // it pushes rows into; the reduce step concatenates shards with
-        // `append_arena` (which rebases every CSR offset). The 4th accumulator
+        // `append_arena` (which rebases every CSR offset, and carries each row's
+        // id along with it). The 4th accumulator
         // slot is a per-worker dedup scratch buffer reused across every entry
         // that worker maps (see `map_entry`), so the hot loop allocates only the
         // persistent output, not a fresh dedup Vec per entry.
-        let (mut geom, frag_intens, stats, _scratch, source_ids) = offsets
+        let (geom, frag_intens, stats, _scratch) = offsets
             .par_iter()
             .try_fold(
                 || {
@@ -485,24 +487,16 @@ impl SpecLib {
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
-                        Vec::<String>::new(),
                     )
                 },
-                |(mut geom, mut frag_intens, mut stats, mut scratch, mut ids),
+                |(mut geom, mut frag_intens, mut stats, mut scratch),
                  &off|
                  -> Result<_, TargetReadingError> {
                     let mut cur = Cursor::new(self.data.bytes());
                     cur.pos = off;
                     let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
-                    map_entry(
-                        view,
-                        &mut geom,
-                        &mut frag_intens,
-                        &mut ids,
-                        &mut stats,
-                        &mut scratch,
-                    )?;
-                    Ok((geom, frag_intens, stats, scratch, ids))
+                    map_entry(view, &mut geom, &mut frag_intens, &mut stats, &mut scratch)?;
+                    Ok((geom, frag_intens, stats, scratch))
                 },
             )
             .try_reduce(
@@ -512,22 +506,16 @@ impl SpecLib {
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
-                        Vec::<String>::new(),
                     )
                 },
-                |(mut a_geom, mut a_int, sa, scratch, mut a_ids), (b_geom, b_int, sb, _, b_ids)| {
+                |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
                     append_arena(&mut a_geom, b_geom);
                     a_int.extend(b_int);
-                    a_ids.extend(b_ids);
                     let mut merged = sa;
                     merged.merge(&sb);
-                    Ok((a_geom, a_int, merged, scratch, a_ids))
+                    Ok((a_geom, a_int, merged, scratch))
                 },
             )?;
-
-        // The entry name is DIA-NN's `transition_group_id`, so results name the
-        // precursor the way the library does rather than by a minted counter.
-        geom.set_source_ids(source_ids)?;
 
         Ok((geom, frag_intens, stats, at_eof))
     }
@@ -652,6 +640,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     dst.rt_seconds.append(&mut src.rt_seconds);
     dst.mobility.append(&mut src.mobility);
     dst.is_decoy.append(&mut src.is_decoy);
+    dst.pending_ids.append(&mut src.pending_ids);
     dst.frag_labels.append(&mut src.frag_labels);
     dst.frag_mzs.append(&mut src.frag_mzs);
     dst.seq_strip_blob.push_str(&src.seq_strip_blob);
@@ -686,8 +675,8 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
 
     // Exhaustive on purpose: a column added to `TargetColumns` fails to compile
     // here instead of being silently dropped on every merge. `source_ids` and
-    // `decoy_groups` are deliberately not merged -- the caller sets them on the
-    // finished arena, so a shard never holds any.
+    // `decoy_groups` are built by `seal`, which runs on the merged arena, so a
+    // shard never holds either.
     let TargetColumns {
         caps: _,
         precursor_mz: _,
@@ -695,6 +684,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
         rt_seconds: _,
         mobility: _,
         is_decoy: _,
+        pending_ids: _,
         source_ids: _,
         decoy_groups: _,
         frag_off: _,
@@ -721,9 +711,6 @@ fn map_entry(
     entry: EntryView,
     geom: &mut TargetColumns<IonAnnot>,
     frag_intens: &mut Vec<f32>,
-    // The entry name, kept so the library's own id reaches the results
-    // instead of one we minted. Parallel to the pushed rows.
-    source_ids: &mut Vec<String>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
 ) -> Result<(), TargetReadingError> {
@@ -854,19 +841,21 @@ fn map_entry(
 
     // Record charge is i32; `push_target` wants u8. Charge was range-checked to
     // 1..=255 above, so the cast is safe.
-    geom.push_target(
-        pep.mz() as f64,
-        charge as u8,
+    geom.push_row(Row {
+        precursor_mz: pep.mz() as f64,
+        charge: charge as u8,
         // Library iRT is dimensionless here; keep it raw (no minute->second
         // scaling) — Phase 1 RT tolerance is unrestricted.
-        pep.i_rt(),
-        pep.i_im(),
-        &frags,
-        &stripped_peptide,
-        &modified_peptide,
-        &[],
-    );
-    source_ids.push(name);
+        rt_seconds: pep.i_rt(),
+        mobility: pep.i_im(),
+        frags: &frags,
+        seq_strip: &stripped_peptide,
+        seq_mod: &modified_peptide,
+        // The entry name is DIA-NN's `transition_group_id`, so results name the
+        // precursor the way the library does rather than by a minted counter.
+        id: Some(name.into()),
+        ..Default::default()
+    });
     // `entry.protein_id` is intentionally dropped: the columnar arena has no
     // protein column.
     let _ = &entry.protein_id;
@@ -964,7 +953,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         geom.frag_labels.len(),
         "reference-intensity sidecar must stay parallel to the fragment-label arena"
     );
-    geom.seal();
+    geom.seal()?;
     Ok(TargetTable::Mzpaf {
         geom,
         frag_intens: Some(frag_intens),
@@ -1019,15 +1008,16 @@ mod tests {
         );
     }
 
-    /// Entries are parsed in parallel and the names ride in the same rayon
-    /// accumulator as the rows, so a permutation would mislabel every result
-    /// without failing anything else. Pin it against the property that defines
-    /// the name: it is the modified sequence plus the charge, for every row.
+    /// Entries are parsed in parallel and merged by `append_arena`, which
+    /// rebases each shard's rows. A permutation there would mislabel every
+    /// result without failing anything else. Pin it against the property that
+    /// defines the name: modified sequence plus charge, for every row.
     #[test]
     fn every_source_id_stays_paired_with_its_own_row() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (geom, _frag_intens, _stats, _eof) =
+        let (mut geom, _frag_intens, _stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        geom.seal().expect("the fixture's entry names are usable");
 
         assert!(geom.n_rows() > 1, "one row would not catch a permutation");
         for row in geom.rows() {

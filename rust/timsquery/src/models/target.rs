@@ -90,7 +90,7 @@ impl<T: KeyLike + Default> Target<T> {
     /// every query, so the zeroed initial state is never observed.
     pub fn empty_like() -> Self {
         Self {
-            id: Default::default(),
+            id: crate::models::OwnedSourceId::placeholder(),
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
             precursor_mono_mz: 0.0,
@@ -105,10 +105,6 @@ impl<T: KeyLike + Default> Target<T> {
 impl<T: KeyLike> Target<T> {
     pub fn id(&self) -> crate::models::SourceId<'_> {
         self.id.as_ref()
-    }
-
-    pub(crate) fn set_id(&mut self, id: crate::models::OwnedSourceId) {
-        self.id = id;
     }
 
     pub fn precursor_count(&self) -> usize {

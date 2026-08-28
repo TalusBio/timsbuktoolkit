@@ -953,27 +953,30 @@ mod tests {
         ReferenceLibrary,
     };
     use timsquery::Target;
-    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::TargetCapabilities;
+    use timsquery::models::{
+        Row,
+        TargetColumns,
+    };
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
         let mut geom = TargetColumns::with_capabilities(caps);
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y8").unwrap(), 800.0),
             ],
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
-        geom.seal();
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],

@@ -405,8 +405,11 @@ impl ElutionGroupData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::TargetCapabilities;
+    use timsquery::models::{
+        Row,
+        TargetColumns,
+    };
     use timsquery::utils::constants::PROTON_MASS;
     use timsseek::fragment_mass::isotope_dist_or_averagine;
 
@@ -415,20 +418,20 @@ mod tests {
     /// averagine isotope path.
     fn uncountable_lib() -> ReferenceLibrary {
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            600.0,
-            1,
-            10.0,
-            1.0,
-            &[
+        geom.push_row(Row {
+            precursor_mz: 600.0,
+            charge: 1,
+            rt_seconds: 10.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
             ],
-            "PEPBK",
-            "PEPBK",
-            &[],
-        );
-        geom.seal();
+            seq_strip: "PEPBK",
+            seq_mod: "PEPBK",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],

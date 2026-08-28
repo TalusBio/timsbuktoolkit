@@ -238,31 +238,32 @@ mod tests {
         SerializedFileReader,
     };
     use std::fs::File;
+    use timsquery::models::Row;
     use timsquery::models::capabilities::TargetCapabilities;
 
-    /// An unsealed arena holding one row per sequence, for the writer to
-    /// resolve ids against. Left unsealed so a caller can attach source ids.
-    fn arena_of(seqs: &[&str]) -> TargetColumns<IonAnnot> {
+    /// A sealed arena with one row per `(sequence, id)`, for the writer to
+    /// resolve ids against. `None` for an id leaves the row to be minted.
+    fn arena_of(rows: &[(&str, Option<&str>)]) -> TargetColumns<IonAnnot> {
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for seq in seqs {
-            geom.push_target(
-                900.4,
-                2,
-                1.0,
-                1.0,
-                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                seq,
-                seq,
-                &[],
-            );
+        for (seq, id) in rows {
+            geom.push_row(Row {
+                precursor_mz: 900.4,
+                charge: 2,
+                rt_seconds: 1.0,
+                mobility: 1.0,
+                frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq_strip: seq,
+                seq_mod: seq,
+                id: id.map(Into::into),
+                ..Default::default()
+            });
         }
+        geom.seal().expect("fixture ids are usable");
         geom
     }
 
     fn one_row_arena() -> TargetColumns<IonAnnot> {
-        let mut geom = arena_of(&["PEPTIDEK"]);
-        geom.seal();
-        geom
+        arena_of(&[("PEPTIDEK", None)])
     }
 
     /// `FinalResult::sample()` carries a placeholder row, which by design reads
@@ -316,12 +317,12 @@ mod tests {
     fn ids_resolve_from_the_arena_row() {
         use arrow::array::StringArray;
 
-        let mut geom = arena_of(&["PEPTIDEK", "AAAAAAALQAK"]);
         // The names DIA-NN would give these rows, which is the case that must
         // not come back as digits.
-        geom.set_source_ids(["PEPTIDEK2", "AAAAAAALQAK2"])
-            .expect("two ids for two rows");
-        geom.seal();
+        let geom = arena_of(&[
+            ("PEPTIDEK", Some("PEPTIDEK2")),
+            ("AAAAAAALQAK", Some("AAAAAAALQAK2")),
+        ]);
 
         let second = geom.rows().nth(1).expect("two rows");
         let mut result = FinalResult::sample();

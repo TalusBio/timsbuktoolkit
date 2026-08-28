@@ -38,6 +38,7 @@ pub use target_columns::{
     FlatIdx,
     GroupCode,
     ModDefinition,
+    Row,
     RowIdx,
     TargetColumns,
 };

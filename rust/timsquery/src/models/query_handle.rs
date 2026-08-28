@@ -174,6 +174,7 @@ mod tests {
     use crate::models::TargetColumns;
     use crate::models::capabilities::*;
     use crate::models::source_id::SourceId;
+    use crate::models::target_columns::Row;
     use crate::traits::QueryGeom;
 
     /// Rows come from the arena; there is no constructor from an integer.
@@ -205,20 +206,20 @@ mod tests {
                 n_decoys: 2,
             },
         });
-        c.push_target(
-            654.855,
-            2,
-            1.0,
-            1.0,
-            &[
+        c.push_row(Row {
+            precursor_mz: 654.855,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y1").unwrap(), 200.0), // ordinal 1 -> NOT shifted
-                (IonAnnot::try_from("y8").unwrap(), 896.5),
-            ], // ordinal 8 -> shifted
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
-        c.seal();
+                (IonAnnot::try_from("y8").unwrap(), 896.5), // ordinal 8 -> shifted
+            ],
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         c
     }
 
@@ -281,18 +282,17 @@ mod tests {
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::None,
         });
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            1.0,
-            &[(Arc::<str>::from("f"), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            false,
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(Arc::<str>::from("f"), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         let q = Query::new(&c, c.flat_for(first_row(&c), 0));
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);

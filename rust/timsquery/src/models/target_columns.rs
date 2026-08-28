@@ -135,6 +135,64 @@ pub struct DecoyGroups {
     labels: SourceIds,
 }
 
+/// One row's worth of input to [`TargetColumns::push_row`].
+///
+/// A struct rather than ten positional arguments, and it carries the row's `id`,
+/// which is the point: a row cannot be stored apart from the name its file gave
+/// it. Attaching ids afterwards, zipped on by position, is how the DIA-NN names
+/// got dropped -- `seal` minted `0..n` over them.
+///
+/// `Default` covers the optional half, so a caller names only what it has:
+///
+/// ```ignore
+/// geom.push_row(Row {
+///     precursor_mz: 900.4,
+///     charge: 2,
+///     rt_seconds: 1.0,
+///     mobility: 0.8,
+///     frags: &frags,
+///     seq_mod: "PEPTIDEK",
+///     ..Default::default()
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct Row<'a, L: KeyLike> {
+    pub precursor_mz: f64,
+    pub charge: u8,
+    pub rt_seconds: f32,
+    pub mobility: f32,
+    pub frags: &'a [(L, f64)],
+    pub seq_strip: &'a str,
+    pub seq_mod: &'a str,
+    pub mods: &'a [(u8, u16)],
+    /// A stored decoy, as opposed to one the arena derives. Default `false`:
+    /// timsquery never invents a decoy, so a row is a target unless its reader
+    /// says otherwise.
+    pub is_decoy: bool,
+    /// What the source file called this row, in the shape it used. `None` for a
+    /// format that names nothing (Spectronaut, Skyline), and for a row whose
+    /// name cell was blank. [`TargetColumns::seal`] mints ids only when *every*
+    /// row arrived `None`.
+    pub id: Option<OwnedSourceId>,
+}
+
+impl<L: KeyLike> Default for Row<'_, L> {
+    fn default() -> Self {
+        Self {
+            precursor_mz: 0.0,
+            charge: 0,
+            rt_seconds: 0.0,
+            mobility: 0.0,
+            frags: &[],
+            seq_strip: "",
+            seq_mod: "",
+            mods: &[],
+            is_decoy: false,
+            id: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModDefinition {
     pub token: String, // verbatim, e.g. "[UNIMOD:4]"
@@ -153,9 +211,16 @@ pub struct TargetColumns<L: KeyLike> {
     pub(crate) mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
     pub(crate) is_decoy: Vec<bool>,
+    /// Each row's id as it was pushed, before [`Self::seal`] decides what the
+    /// column becomes. Parallel to the row columns, and merged by
+    /// [`Self::append_arena`] like any other, so a shard cannot separate a row
+    /// from its name.
+    ///
+    /// Emptied by `seal`, which is the only reader.
+    pub(crate) pending_ids: Vec<Option<OwnedSourceId>>,
     /// What the source file called each row, when it said. Parallel to the row
-    /// columns. Minted at [`Self::seal`] for formats that carry no ids, so a
-    /// sealed arena always has one per row.
+    /// columns. Built at [`Self::seal`] from `pending_ids`, minted there for
+    /// formats that carry no ids, so a sealed arena always has one per row.
     pub(crate) source_ids: SourceIds,
     /// The competition groups the input declared, interned: a code per row,
     /// plus the labels those codes point at. Rows that compete share a code, so
@@ -191,6 +256,7 @@ impl<L: KeyLike> TargetColumns<L> {
             rt_seconds: Vec::new(),
             mobility: Vec::new(),
             is_decoy: Vec::new(),
+            pending_ids: Vec::new(),
             source_ids: SourceIds::default(),
             decoy_groups: None,
             frag_off: vec![0],
@@ -209,22 +275,24 @@ impl<L: KeyLike> TargetColumns<L> {
     /// Append one row. `mods` are (position, registry_idx) pairs; the caller
     /// is responsible for having registered the mod tokens in `mod_registry`.
     #[allow(clippy::too_many_arguments)]
-    pub fn push_row(
-        &mut self,
-        precursor_mz: f64,
-        charge: u8,
-        rt_seconds: f32,
-        mobility: f32,
-        frags: &[(L, f64)],
-        seq_strip: &str,
-        seq_mod: &str,
-        mods: &[(u8, u16)],
-        is_decoy: bool,
-    ) {
+    pub fn push_row(&mut self, row: Row<'_, L>) {
+        let Row {
+            precursor_mz,
+            charge,
+            rt_seconds,
+            mobility,
+            frags,
+            seq_strip,
+            seq_mod,
+            mods,
+            is_decoy,
+            id,
+        } = row;
         self.precursor_mz.push(precursor_mz);
         self.charge.push(charge);
         self.rt_seconds.push(rt_seconds);
         self.mobility.push(mobility);
+        self.pending_ids.push(id);
         for (lab, mz) in frags {
             self.frag_labels.push(lab.clone());
             self.frag_mzs.push(*mz);
@@ -252,49 +320,12 @@ impl<L: KeyLike> TargetColumns<L> {
     }
 
     /// Append one target (defaults `is_decoy = false`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn push_target(
-        &mut self,
-        precursor_mz: f64,
-        charge: u8,
-        rt_seconds: f32,
-        mobility: f32,
-        frags: &[(L, f64)],
-        seq_strip: &str,
-        seq_mod: &str,
-        mods: &[(u8, u16)],
-    ) {
-        self.push_row(
-            precursor_mz,
-            charge,
-            rt_seconds,
-            mobility,
-            frags,
-            seq_strip,
-            seq_mod,
-            mods,
-            false,
-        );
-    }
-
     /// Number of *physical stored rows*, i.e. how many analytes are held in
     /// memory before decoy expansion. Under `LazyMassShift` every row is a
     /// target; under `Passthrough` the count includes any stored decoy rows.
     /// This is the base for `expanded_len` (the logical, iterator-length count).
     pub fn n_rows(&self) -> usize {
         self.charge.len()
-    }
-
-    /// Attach the ids the file gave its rows, in whichever shape it used.
-    /// Call after every `push_row`, before `seal`.
-    pub fn set_source_ids<I, S>(&mut self, ids: I) -> Result<(), SourceIdError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<OwnedSourceId>,
-    {
-        let ids: Vec<OwnedSourceId> = ids.into_iter().map(Into::into).collect();
-        self.source_ids = SourceIds::owned(ids, self.n_rows())?;
-        Ok(())
     }
 
     /// The rows of this arena, in storage order.
@@ -455,15 +486,58 @@ impl<L: KeyLike> TargetColumns<L> {
     /// on-the-fly ±CH2 index transform, never stored). If the library shipped
     /// materialized decoys, downgrade to `Passthrough` so the stored rows are
     /// honored 1:1 instead of being silently re-decoyed.
-    pub fn seal(&mut self) {
+    /// Fails when the pushed ids cannot make a column: two rows sharing an id
+    /// (a caller keys results by it, so a repeat hides a row), or a library
+    /// mixing numeric and text ids (storing both would coerce the numbers to
+    /// strings, and `7` and `"7"` would become two ids in one column).
+    pub fn seal(&mut self) -> Result<(), SourceIdError> {
+        // Sealing twice is normal: a reader seals the arena it built, and
+        // timsseek seals again after stamping the decoy strategy onto `caps`.
+        // The id column is built by the first call, which drains `pending_ids`.
         if matches!(self.source_ids, SourceIds::Absent) {
-            let n = self.n_rows();
-            tracing::warn!(
-                "input carries no per-target id; minting {n} self-incremental ids (0..{n}). \
-                 Result ids are ours, not the input file's."
-            );
-            self.source_ids = SourceIds::minted(n);
+            self.build_source_ids()?;
         }
+        self.apply_decoy_downgrades();
+        self.shrink();
+        Ok(())
+    }
+
+    fn build_source_ids(&mut self) -> Result<(), SourceIdError> {
+        let n = self.n_rows();
+        debug_assert_eq!(self.pending_ids.len(), n, "an id per row, or none");
+        let named = self.pending_ids.iter().filter(|id| id.is_some()).count();
+        self.source_ids = if named == n {
+            SourceIds::owned(self.pending_ids.drain(..).map(Option::unwrap).collect(), n)?
+        } else {
+            if named > 0 {
+                // A library names all its rows or none. One blank cell costs the
+                // whole library its names, so say which row did it -- minting
+                // overwrites every id, leaving nothing to trace it from.
+                let row = self
+                    .pending_ids
+                    .iter()
+                    .position(Option::is_none)
+                    .expect("named < n, so some row is unnamed");
+                tracing::warn!(
+                    "{named} of {n} rows carry an id and {} do not, so the whole library falls \
+                     back to minted ids: results will be keyed by row number instead of the \
+                     names the file gave. First unnamed row is {row}.",
+                    n - named,
+                );
+            } else {
+                tracing::warn!(
+                    "input carries no per-target id; minting {n} self-incremental ids (0..{n}). \
+                     Result ids are ours, not the input file's."
+                );
+            }
+            self.pending_ids.clear();
+            SourceIds::minted(n)
+        };
+        self.pending_ids.shrink_to_fit();
+        Ok(())
+    }
+
+    fn apply_decoy_downgrades(&mut self) {
         // Nothing to build when no groups were declared: a row is then its own
         // group, which `decoy_group_code` derives. Only the case that actually
         // loses information is worth a word.
@@ -479,6 +553,9 @@ impl<L: KeyLike> TargetColumns<L> {
             tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
             self.caps.decoys = DecoyStrategy::Passthrough;
         }
+    }
+
+    fn shrink(&mut self) {
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
@@ -589,16 +666,16 @@ mod tests {
     fn two_rows() -> TargetColumns<IonAnnot> {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         for _ in 0..2 {
-            c.push_target(
-                500.0,
-                2,
-                1.0,
-                0.8,
-                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                "PEP",
-                "PEP",
-                &[],
-            );
+            c.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                rt_seconds: 1.0,
+                mobility: 0.8,
+                frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq_strip: "PEP",
+                seq_mod: "PEP",
+                ..Default::default()
+            });
         }
         c
     }
@@ -609,7 +686,7 @@ mod tests {
     fn rows_in_one_declared_group_share_a_code() {
         let mut c = two_rows();
         c.set_decoy_groups(["g1", "g1"]).unwrap();
-        c.seal();
+        c.seal().expect("fixture ids are usable");
 
         let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
         assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
@@ -621,7 +698,7 @@ mod tests {
     #[test]
     fn undeclared_groups_are_derived_not_stored() {
         let mut c = two_rows();
-        c.seal();
+        c.seal().expect("fixture ids are usable");
 
         let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
         assert!(c.decoy_groups.is_none(), "nothing stored for minted groups");
@@ -640,7 +717,7 @@ mod tests {
     fn seal_mints_ids_when_the_input_carried_none() {
         let mut c = two_rows();
         assert_eq!(c.source_id(RowIdx::new(0)), None);
-        c.seal();
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));
         assert_eq!(c.output_id(RowIdx::new(1)), SourceId::Numeric(1));
     }
@@ -648,17 +725,17 @@ mod tests {
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::test_lazy_decoys());
-        c.push_target(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 3);
         assert_eq!(c.expanded_len(), 3);
         assert!(c.is_target(FlatIdx::new(0))); // variant 0
@@ -672,29 +749,28 @@ mod tests {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = DecoyStrategy::Passthrough;
         let mut c = TargetColumns::with_capabilities(caps);
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            false,
-        );
-        c.push_row(
-            510.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            true,
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 510.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            is_decoy: true,
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 1);
         assert_eq!(c.expanded_len(), 2);
         assert!(c.is_target(FlatIdx::new(0)));
@@ -705,42 +781,34 @@ mod tests {
     fn csr_ranges_recover_per_target_fragments() {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         // target 0: 2 frags; target 1: 3 frags
-        c.push_target(
-            // precursor_mz
-            500.0,
-            // charge
-            2,
-            // rt
-            1.0,
-            // mob
-            0.8,
-            // frags
-            &[
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y4").unwrap(), 400.0),
             ],
-            // strip
-            "PEPTIDEK",
-            // modified
-            "PEPTIDEK",
-            // mods
-            &[],
-        );
-        c.push_target(
-            600.0,
-            3,
-            2.0,
-            0.9,
-            &[
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 600.0,
+            charge: 3,
+            rt_seconds: 2.0,
+            mobility: 0.9,
+            frags: &[
                 (IonAnnot::try_from("y2").unwrap(), 200.0),
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
                 (IonAnnot::try_from("y6").unwrap(), 600.0),
             ],
-            "SAMPLERK",
-            "SAMPLERK",
-            &[],
-        );
-        c.seal();
+            seq_strip: "SAMPLERK",
+            seq_mod: "SAMPLERK",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.frag_range(RowIdx::new(0)), 0..2);
         assert_eq!(c.frag_range(RowIdx::new(1)), 2..5);
@@ -760,31 +828,28 @@ mod tests {
         use std::sync::Arc;
         let mut c: TargetColumns<Arc<str>> =
             TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(Arc::<str>::from("frag_a"), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            // is_decoy
-            false,
-        );
-        c.push_row(
-            600.0,
-            2,
-            1.0,
-            0.8,
-            &[(Arc::<str>::from("frag_b"), 400.0)],
-            "TIDE",
-            "TIDE",
-            &[],
-            // is_decoy
-            true,
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(Arc::<str>::from("frag_a"), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 600.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(Arc::<str>::from("frag_b"), 400.0)],
+            seq_strip: "TIDE",
+            seq_mod: "TIDE",
+            is_decoy: true,
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.is_decoy, vec![false, true]);
         assert_eq!(
