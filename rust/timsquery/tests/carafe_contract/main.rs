@@ -4,8 +4,9 @@
 //! an error. Payloads are copied from the README and go in through the public
 //! entry points, so a change at the boundary fails here.
 //!
-//! Output half: `timsquery_cli`'s `carafe_output_contract`. Not covered: the
-//! `-o` directory layout and the exit code, which need the built binary.
+//! Output half: `timsquery_cli`'s `carafe_output_contract`. End-to-end,
+//! including the `-o` layout and the exit code: `timsquery_cli`'s
+//! `tests/carafe_e2e.rs`, which runs the built binary over a generated mzML.
 
 use std::io::Write;
 use timsquery::models::tolerance::{
