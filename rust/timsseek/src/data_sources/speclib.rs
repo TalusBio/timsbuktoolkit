@@ -1241,9 +1241,9 @@ mod tests {
     /// walks every target's MODIFIED sequence blob; if ANY row fails
     /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
     /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
-    /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`: the `!` bytes are
-    /// The byte-walk parser and mzcore fallback both reject the `!` bytes, so
-    /// the gate must report `!parsable_sequences()`. This is the inverse of
+    /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`). The byte-walk
+    /// parser and mzcore fallback both reject the `!` bytes, so the gate must
+    /// report `!parsable_sequences()`. This is the inverse of
     /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
     /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
     #[test]
