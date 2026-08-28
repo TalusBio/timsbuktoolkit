@@ -127,6 +127,11 @@ struct DiannLibraryRow {
     #[serde(rename = "RelativeIntensity")]
     #[serde(alias = "LibraryIntensity")]
     relative_intensity: f32,
+    /// DIA-NN's own name for the precursor. Optional: the column is absent
+    /// from some DIA-NN variants, and those rows fall back to a minted id.
+    #[serde(rename = "transition_group_id")]
+    #[serde(default)]
+    transition_group_id: Option<String>,
 }
 
 impl DiannLibraryRow {
@@ -412,8 +417,15 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
+    // DIA-NN names the precursor itself; carry that through so results say what
+    // the library says. Variants without the column fall back to the counter,
+    // which `seal` treats as any other minted id.
+    let source_id: crate::models::OwnedSourceId = match &first_row.transition_group_id {
+        Some(name) => name.as_str().into(),
+        None => id.into(),
+    };
     let eg = Target::builder()
-        .id(id)
+        .id(source_id)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -765,6 +777,27 @@ mod tests {
             !result,
             "Cargo.toml should not be detected as DIA-NN library"
         );
+    }
+
+    /// The two DIA-NN TSV variants differ in whether they name the precursor:
+    /// `sample_lib.tsv` carries `transition_group_id`, `sample_lib.txt` does
+    /// not. The named one must come through as the library spelled it; the
+    /// unnamed one must still load and fall back.
+    #[test]
+    fn transition_group_id_is_propagated_when_the_file_has_one() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("diann_io_files");
+
+        let named = read_targets(dir.join("sample_lib.tsv")).expect("named variant loads");
+        assert_eq!(
+            named[0].0.id(),
+            crate::models::SourceId::Text("AAAAAAALQAK2"),
+            "DIA-NN's own name for the precursor, not a counter"
+        );
+
+        let unnamed = read_targets(dir.join("sample_lib.txt")).expect("unnamed variant loads");
+        assert_eq!(unnamed[0].0.id(), crate::models::SourceId::Numeric(0));
     }
 
     #[test]

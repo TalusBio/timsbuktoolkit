@@ -62,6 +62,11 @@ impl From<serde_json::Error> for TargetReadingError {
         TargetReadingError::SerdeJsonError(err)
     }
 }
+impl From<SourceIdError> for TargetReadingError {
+    fn from(err: SourceIdError) -> Self {
+        TargetReadingError::SourceId(err)
+    }
+}
 impl From<ElutionGroupInputError> for TargetReadingError {
     fn from(err: ElutionGroupInputError) -> Self {
         TargetReadingError::ElutionGroupInputError(err)

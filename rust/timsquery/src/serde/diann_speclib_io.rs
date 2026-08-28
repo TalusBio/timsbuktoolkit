@@ -476,7 +476,7 @@ impl SpecLib {
         // slot is a per-worker dedup scratch buffer reused across every entry
         // that worker maps (see `map_entry`), so the hot loop allocates only the
         // persistent output, not a fresh dedup Vec per entry.
-        let (geom, frag_intens, stats, _scratch) = offsets
+        let (mut geom, frag_intens, stats, _scratch, source_ids) = offsets
             .par_iter()
             .try_fold(
                 || {
@@ -485,16 +485,24 @@ impl SpecLib {
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
+                        Vec::<String>::new(),
                     )
                 },
-                |(mut geom, mut frag_intens, mut stats, mut scratch),
+                |(mut geom, mut frag_intens, mut stats, mut scratch, mut ids),
                  &off|
                  -> Result<_, TargetReadingError> {
                     let mut cur = Cursor::new(self.data.bytes());
                     cur.pos = off;
                     let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
-                    map_entry(view, &mut geom, &mut frag_intens, &mut stats, &mut scratch)?;
-                    Ok((geom, frag_intens, stats, scratch))
+                    map_entry(
+                        view,
+                        &mut geom,
+                        &mut frag_intens,
+                        &mut ids,
+                        &mut stats,
+                        &mut scratch,
+                    )?;
+                    Ok((geom, frag_intens, stats, scratch, ids))
                 },
             )
             .try_reduce(
@@ -504,16 +512,22 @@ impl SpecLib {
                         Vec::<f32>::new(),
                         SpeclibDecodeStats::default(),
                         Vec::new(),
+                        Vec::<String>::new(),
                     )
                 },
-                |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
+                |(mut a_geom, mut a_int, sa, scratch, mut a_ids), (b_geom, b_int, sb, _, b_ids)| {
                     append_arena(&mut a_geom, b_geom);
                     a_int.extend(b_int);
+                    a_ids.extend(b_ids);
                     let mut merged = sa;
                     merged.merge(&sb);
-                    Ok((a_geom, a_int, merged, scratch))
+                    Ok((a_geom, a_int, merged, scratch, a_ids))
                 },
             )?;
+
+        // The entry name is DIA-NN's `transition_group_id`, so results name the
+        // precursor the way the library does rather than by a minted counter.
+        geom.set_source_ids_text(source_ids)?;
 
         Ok((geom, frag_intens, stats, at_eof))
     }
@@ -682,6 +696,9 @@ fn map_entry(
     entry: EntryView,
     geom: &mut TargetColumns<IonAnnot>,
     frag_intens: &mut Vec<f32>,
+    // The entry name, kept so the library's own id reaches the results
+    // instead of one we minted. Parallel to the pushed rows.
+    source_ids: &mut Vec<String>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
 ) -> Result<(), TargetReadingError> {
@@ -824,6 +841,7 @@ fn map_entry(
         &modified_peptide,
         &[],
     );
+    source_ids.push(name);
     // `entry.protein_id` is intentionally dropped: the columnar arena has no
     // protein column.
     let _ = &entry.protein_id;

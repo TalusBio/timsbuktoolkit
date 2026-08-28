@@ -78,6 +78,21 @@ impl OwnedSourceId {
     }
 }
 
+impl OwnedSourceId {
+    /// Overwrite in place, reusing the existing `String` capacity when both
+    /// sides are text. `Target::reset_from` runs per query on the scoring hot
+    /// path, so a fresh allocation there is a per-query cost.
+    pub fn set_from(&mut self, src: SourceId<'_>) {
+        match (&mut *self, src) {
+            (Self::Text(dst), SourceId::Text(s)) => {
+                dst.clear();
+                dst.push_str(s);
+            }
+            (_, other) => *self = other.to_owned_id(),
+        }
+    }
+}
+
 impl From<u64> for OwnedSourceId {
     fn from(n: u64) -> Self {
         Self::Numeric(n)

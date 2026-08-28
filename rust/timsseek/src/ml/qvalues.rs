@@ -36,7 +36,6 @@ use crate::scoring::results::{
 use crate::utils::maybe_par;
 use rand::prelude::*;
 use std::sync::Arc;
-use timsquery::models::OwnedSourceId;
 
 #[cfg(test)]
 use super::cv::RowMajorDataset;
@@ -1016,6 +1015,7 @@ mod feature_tests {
         ScoringFields,
     };
     use std::sync::Arc;
+    use timsquery::models::OwnedSourceId;
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
         ScoringFields::sample(peptide)

@@ -144,7 +144,7 @@ impl<T: KeyLike> Target<T> {
     /// flyweight), not necessarily `Self` — the body reads `src` only
     /// through trait methods.
     pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
-        self.set_id_internal(src.output_id().to_owned_id());
+        self.id.set_from(src.output_id());
         self.mobility_ook0 = src.mobility_ook0();
         self.rt_seconds = src.rt_seconds();
         self.precursor_mono_mz = src.mono_precursor_mz();
@@ -159,13 +159,6 @@ impl<T: KeyLike> Target<T> {
         self.precursor_labels.clear();
         self.precursor_labels
             .extend(src.iter_precursors().map(|(iso, _mz)| iso));
-    }
-
-    /// Private setter for the otherwise-read-only `id` field — used by
-    /// `reset_from` since a generic `G: QueryGeom` source only exposes `id()`
-    /// through the trait, not direct field access.
-    fn set_id_internal(&mut self, id: crate::models::OwnedSourceId) {
-        self.id = id;
     }
 
     pub fn mobility_ook0(&self) -> f32 {
