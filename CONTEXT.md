@@ -31,20 +31,18 @@ ion chemistry; distinct from an opaque string label, which does not.
 ### How rows are named
 
 **Arena index**:
-A row's position in the in-memory columnar store. Self-incrementing, assigned on
-insertion, meaningful only within one process. Feeds decoy grouping and q-value
-determinism, so it is never caller-supplied.
+Where a row sits in memory. Internal to the process and never an identifier: it
+addresses storage, and nothing else.
 _Avoid_: id, library_id, row id
 
 **Source id**:
 What the source file called a precursor -- the JSON target payload's `id`,
 mzSpecLib's `<Spectrum=N>` key, DIA-NN's `transition_group_id`. Opaque: carried
-through and echoed back, never used to address anything. Absent in some formats.
-_Avoid_: id, library id
+through and echoed back, never used to address anything.
 
-**Output id**:
-The identifier a result carries, so a caller can map results onto the request
-they sent. The source id where there is one, the arena index otherwise.
+Every row has one. A format that names nothing gets ids minted at load, so a
+result is never keyed by where its row happened to land.
+_Avoid_: id, library id, output id
 
 ### Decoys
 
@@ -53,12 +51,22 @@ A deliberately wrong analyte scored alongside real ones to estimate the false
 discovery rate. Either shipped by the library or generated as a mass shift.
 
 **Decoy group**:
-A target and its decoy variants, competing as a unit so exactly one survives.
+The set of analytes that compete, so that one result survives per group and
+charge. Two ways a group arises, and they differ in size:
+
+- _Declared_ by the library, which can put **several targets** in one group --
+  `PEPTIDEK/2` and its reversed partner `PEDITPEP/2` compete because the file
+  says they are alternatives for the same evidence.
+- _Derived_ when the library declares nothing, where a target competes only with
+  its own decoy variants.
+
+The declared case is the reason a group is not simply "a target and its decoys".
 
 **Variant**:
-One member of a decoy group -- the target itself, or one of its mass-shifted
-decoys. A stored row expands into several scored variants, so "one row" is not
-"one result".
+One member of a single target's decoy expansion -- the target itself, or one of
+its mass-shifted decoys. Scoped to one row, not to a group: a declared group
+holds several targets, each with its own variants. A stored row expands into
+several scored variants, so "one row" is not "one result".
 
 ### Capabilities
 
