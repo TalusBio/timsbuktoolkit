@@ -1,5 +1,8 @@
 /// Compare local vs S3 lazy loading performance
 use half::f16;
+
+/// One synthetic query: (mz range, rt range, mobility range).
+type BenchQuery = ((f32, f32), (f32, f32), (f16, f16));
 use timscentroid::StorageLocation;
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
 use timscentroid::utils::{
@@ -142,10 +145,7 @@ struct QueryResult {
     query_time: std::time::Duration,
 }
 
-fn test_querying(
-    index: &LazyIndexedTimstofPeaks,
-    queries: &[((f32, f32), (f32, f32), (f16, f16))],
-) -> QueryResult {
+fn test_querying(index: &LazyIndexedTimstofPeaks, queries: &[BenchQuery]) -> QueryResult {
     let start = std::time::Instant::now();
     let mut npeaks = 0;
 
@@ -166,7 +166,7 @@ fn test_querying(
 
 async fn test_querying_async(
     index: &LazyIndexedTimstofPeaks,
-    queries: &[((f32, f32), (f32, f32), (f16, f16))],
+    queries: &[BenchQuery],
 ) -> QueryResult {
     let start = std::time::Instant::now();
 
@@ -194,7 +194,7 @@ async fn test_querying_async(
     }
 }
 
-fn build_queries(rng: &mut impl rand::Rng) -> Vec<((f32, f32), (f32, f32), (f16, f16))> {
+fn build_queries(rng: &mut impl rand::Rng) -> Vec<BenchQuery> {
     (0..10)
         .map(|_| {
             let prec_start: f32 = rng.random_range(600.0..800.0);

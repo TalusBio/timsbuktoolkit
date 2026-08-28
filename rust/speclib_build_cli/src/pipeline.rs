@@ -238,7 +238,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
         .map(|s| Modification::parse(s))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let decoy_mode = DecoyMode::from_str(&config.decoys.strategy)?;
+    let decoy_mode: DecoyMode = config.decoys.strategy.parse()?;
 
     let filters = EntryFilters {
         max_ions: config.filters.max_ions,
@@ -309,9 +309,9 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
 
     let mut batch: Vec<BatchItem> = Vec::with_capacity(batch_size);
     let mut entry_id: u32 = 0;
-    let mut decoy_group: u32 = 0;
 
-    for digest_slice in &base_peptides {
+    for (decoy_group, digest_slice) in base_peptides.iter().enumerate() {
+        let decoy_group = decoy_group as u32;
         let base_seq = digest_slice.as_str();
 
         // Apply fixed modifications.
@@ -366,8 +366,6 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                 }
             }
         }
-
-        decoy_group += 1;
     }
 
     // Flush remaining items.

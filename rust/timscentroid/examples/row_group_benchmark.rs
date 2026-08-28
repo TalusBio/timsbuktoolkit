@@ -3,6 +3,9 @@
 /// Compares disk usage, load times, and query efficiency across different row group sizes
 /// to find the optimal balance for lazy loading from cloud storage.
 use half::f16;
+
+/// One synthetic query: (mz range, rt range, mobility range).
+type BenchQuery = ((f32, f32), (f32, f32), (f16, f16));
 use rand::SeedableRng;
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
 use timscentroid::serialization::SerializationConfig;
@@ -113,7 +116,7 @@ fn test_row_group_size(
     index: &IndexedTimstofPeaks,
     row_group_size: usize,
     label: &str,
-    queries: &[((f32, f32), (f32, f32), (f16, f16))],
+    queries: &[BenchQuery],
     fake_latency: Option<std::time::Duration>,
 ) -> BenchmarkResult {
     let output_dir = std::path::PathBuf::from(format!("./benchmark_rg_{}", label));
@@ -225,10 +228,7 @@ fn print_results(results: &[(String, usize, BenchmarkResult)]) {
     );
 }
 
-fn build_queries(
-    rng: &mut impl rand::Rng,
-    num_queries: usize,
-) -> Vec<((f32, f32), (f32, f32), (f16, f16))> {
+fn build_queries(rng: &mut impl rand::Rng, num_queries: usize) -> Vec<BenchQuery> {
     (0..num_queries)
         .map(|_| {
             let prec_start: f32 = rng.random_range(600.0..800.0);

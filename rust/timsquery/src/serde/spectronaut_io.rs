@@ -14,9 +14,9 @@ use tracing::{
 
 #[derive(Debug)]
 pub enum SpectronautReadingError {
-    IoError,
-    CsvError,
-    SpectronautPrecursorParsingError,
+    Io,
+    Csv,
+    PrecursorParsing,
 }
 
 /// Error type for library format detection (sniffing)
@@ -33,9 +33,9 @@ pub enum LibrarySniffError {
 impl std::fmt::Display for SpectronautReadingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SpectronautReadingError::IoError => write!(f, "IO error"),
-            SpectronautReadingError::CsvError => write!(f, "CSV parsing error"),
-            SpectronautReadingError::SpectronautPrecursorParsingError => {
+            SpectronautReadingError::Io => write!(f, "IO error"),
+            SpectronautReadingError::Csv => write!(f, "CSV parsing error"),
+            SpectronautReadingError::PrecursorParsing => {
                 write!(f, "Spectronaut precursor parsing error")
             }
         }
@@ -61,21 +61,21 @@ impl From<IonParsingError> for SpectronautPrecursorParsingError {
 
 impl From<SpectronautPrecursorParsingError> for SpectronautReadingError {
     fn from(_err: SpectronautPrecursorParsingError) -> Self {
-        SpectronautReadingError::SpectronautPrecursorParsingError
+        SpectronautReadingError::PrecursorParsing
     }
 }
 
 impl From<csv::Error> for SpectronautReadingError {
     fn from(err: csv::Error) -> Self {
         error!("CSV reading error: {:?}", err);
-        SpectronautReadingError::CsvError
+        SpectronautReadingError::Csv
     }
 }
 
 impl From<std::io::Error> for SpectronautReadingError {
     fn from(err: std::io::Error) -> Self {
         error!("IO error: {:?}", err);
-        SpectronautReadingError::IoError
+        SpectronautReadingError::Io
     }
 }
 

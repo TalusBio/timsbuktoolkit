@@ -18,9 +18,9 @@ use tracing::{
 
 #[derive(Debug)]
 pub enum SkylineReadingError {
-    IoError,
-    CsvError,
-    SkylinePrecursorParsingError,
+    Io,
+    Csv,
+    PrecursorParsing,
 }
 
 #[derive(Debug)]
@@ -34,9 +34,9 @@ pub enum SkylineSniffError {
 impl std::fmt::Display for SkylineReadingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SkylineReadingError::IoError => write!(f, "IO error"),
-            SkylineReadingError::CsvError => write!(f, "CSV parsing error"),
-            SkylineReadingError::SkylinePrecursorParsingError => {
+            SkylineReadingError::Io => write!(f, "IO error"),
+            SkylineReadingError::Csv => write!(f, "CSV parsing error"),
+            SkylineReadingError::PrecursorParsing => {
                 write!(f, "Skyline precursor parsing error")
             }
         }
@@ -61,21 +61,21 @@ impl From<IonParsingError> for SkylinePrecursorParsingError {
 
 impl From<SkylinePrecursorParsingError> for SkylineReadingError {
     fn from(_err: SkylinePrecursorParsingError) -> Self {
-        SkylineReadingError::SkylinePrecursorParsingError
+        SkylineReadingError::PrecursorParsing
     }
 }
 
 impl From<csv::Error> for SkylineReadingError {
     fn from(err: csv::Error) -> Self {
         error!("CSV reading error: {:?}", err);
-        SkylineReadingError::CsvError
+        SkylineReadingError::Csv
     }
 }
 
 impl From<std::io::Error> for SkylineReadingError {
     fn from(err: std::io::Error) -> Self {
         error!("IO error: {:?}", err);
-        SkylineReadingError::IoError
+        SkylineReadingError::Io
     }
 }
 

@@ -24,23 +24,23 @@ use tracing::{
 
 #[derive(Debug)]
 pub enum DiannReadingError {
-    IoError,
-    CsvError,
-    DiannPrecursorParsingError,
-    ParquetError(String),
-    ArrowError(String),
+    Io,
+    Csv,
+    PrecursorParsing,
+    Parquet(String),
+    Arrow(String),
 }
 
 impl std::fmt::Display for DiannReadingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DiannReadingError::IoError => write!(f, "IO error"),
-            DiannReadingError::CsvError => write!(f, "CSV parsing error"),
-            DiannReadingError::DiannPrecursorParsingError => {
+            DiannReadingError::Io => write!(f, "IO error"),
+            DiannReadingError::Csv => write!(f, "CSV parsing error"),
+            DiannReadingError::PrecursorParsing => {
                 write!(f, "DIA-NN precursor parsing error")
             }
-            DiannReadingError::ParquetError(msg) => write!(f, "Parquet error: {}", msg),
-            DiannReadingError::ArrowError(msg) => write!(f, "Arrow error: {}", msg),
+            DiannReadingError::Parquet(msg) => write!(f, "Parquet error: {}", msg),
+            DiannReadingError::Arrow(msg) => write!(f, "Arrow error: {}", msg),
         }
     }
 }
@@ -67,21 +67,21 @@ impl From<IonParsingError> for DiannPrecursorParsingError {
 
 impl From<DiannPrecursorParsingError> for DiannReadingError {
     fn from(_err: DiannPrecursorParsingError) -> Self {
-        DiannReadingError::DiannPrecursorParsingError
+        DiannReadingError::PrecursorParsing
     }
 }
 
 impl From<csv::Error> for DiannReadingError {
     fn from(err: csv::Error) -> Self {
         error!("CSV reading error: {:?}", err);
-        DiannReadingError::CsvError
+        DiannReadingError::Csv
     }
 }
 
 impl From<std::io::Error> for DiannReadingError {
     fn from(err: std::io::Error) -> Self {
         error!("IO error: {:?}", err);
-        DiannReadingError::IoError
+        DiannReadingError::Io
     }
 }
 
@@ -509,11 +509,11 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file_handle).map_err(|e| {
-        DiannReadingError::ParquetError(format!("Failed to create parquet reader: {}", e))
+        DiannReadingError::Parquet(format!("Failed to create parquet reader: {}", e))
     })?;
 
     let reader = builder.build().map_err(|e| {
-        DiannReadingError::ParquetError(format!("Failed to build parquet reader: {}", e))
+        DiannReadingError::Parquet(format!("Failed to build parquet reader: {}", e))
     })?;
 
     info!(
@@ -525,7 +525,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     for batch_result in reader {
         let batch = batch_result
-            .map_err(|e| DiannReadingError::ParquetError(format!("Failed to read batch: {}", e)))?;
+            .map_err(|e| DiannReadingError::Parquet(format!("Failed to read batch: {}", e)))?;
         all_batches.push(batch);
     }
 
@@ -541,7 +541,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         let mut result = Vec::new();
         for batch in batches {
             let column = batch.column_by_name(column_name).ok_or_else(|| {
-                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+                DiannReadingError::Arrow(format!("Column {} not found", column_name))
             })?;
 
             // Try LargeStringArray first (common in parquet files)
@@ -554,7 +554,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             } else if let Some(string_array) = column.as_any().downcast_ref::<StringArray>() {
                 result.extend(string_array.iter().map(|s| s.unwrap_or("").to_string()));
             } else {
-                return Err(DiannReadingError::ArrowError(format!(
+                return Err(DiannReadingError::Arrow(format!(
                     "Column {} is not a string array",
                     column_name
                 )));
@@ -570,7 +570,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         let mut result = Vec::new();
         for batch in batches {
             let column = batch.column_by_name(column_name).ok_or_else(|| {
-                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+                DiannReadingError::Arrow(format!("Column {} not found", column_name))
             })?;
             // Carafe/pandas emit float32; DIA-NN sometimes float64. Accept both.
             if let Some(float_array) = column.as_any().downcast_ref::<Float32Array>() {
@@ -578,7 +578,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             } else if let Some(float_array) = column.as_any().downcast_ref::<Float64Array>() {
                 result.extend(float_array.iter().map(|v| v.unwrap_or(0.0) as f32));
             } else {
-                return Err(DiannReadingError::ArrowError(format!(
+                return Err(DiannReadingError::Arrow(format!(
                     "Column {} is not a float array",
                     column_name
                 )));
@@ -594,7 +594,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         let mut result = Vec::new();
         for batch in batches {
             let column = batch.column_by_name(column_name).ok_or_else(|| {
-                DiannReadingError::ArrowError(format!("Column {} not found", column_name))
+                DiannReadingError::Arrow(format!("Column {} not found", column_name))
             })?;
             // Carafe/pandas emit int32; DIA-NN sometimes int64. Accept both.
             if let Some(int_array) = column.as_any().downcast_ref::<Int64Array>() {
@@ -602,7 +602,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             } else if let Some(int_array) = column.as_any().downcast_ref::<Int32Array>() {
                 result.extend(int_array.iter().map(|v| v.unwrap_or(0) as i64));
             } else {
-                return Err(DiannReadingError::ArrowError(format!(
+                return Err(DiannReadingError::Arrow(format!(
                     "Column {} is not an int array",
                     column_name
                 )));
@@ -868,7 +868,7 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
         assert!(
             matches!(
                 read_targets(blank.path()),
-                Err(DiannReadingError::DiannPrecursorParsingError)
+                Err(DiannReadingError::PrecursorParsing)
             ),
             "a blank name in a naming library must not load"
         );
