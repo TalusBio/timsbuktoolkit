@@ -57,16 +57,19 @@ fn carafe_target_payload_loads_through_the_public_reader() {
         panic!("labelled targets must land in the ion-annotated arena");
     };
     assert_eq!(geom.n_rows(), 1);
-    assert_eq!(geom.precursor_mz[0], 650.32);
-    assert_eq!(geom.charge[0], 2);
-    assert_eq!(geom.rt_seconds[0], 1234.5);
-    assert_eq!(geom.mobility[0], 0.95);
+    let row = geom.rows().next().unwrap();
+    assert_eq!(geom.precursor_mz(row), 650.32);
+    assert_eq!(geom.charge(row), 2);
+    assert_eq!(geom.rt_seconds(row), 1234.5);
+    assert_eq!(geom.mobility(row), 0.95);
 
     // Positionally paired with the m/z values; the `^N` suffix survives.
-    assert_eq!(geom.frag_mzs.len(), 2);
-    assert_eq!(geom.frag_mzs[0], 175.1);
-    assert_eq!(geom.frag_mzs[1], 288.2);
-    let labels: Vec<String> = geom.frag_labels.iter().map(|l| l.to_string()).collect();
+    assert_eq!(geom.frag_mzs(row), [175.1, 288.2]);
+    let labels: Vec<String> = geom
+        .frag_labels(row)
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
     assert_eq!(labels, vec!["y1".to_string(), "y3^2".to_string()]);
 }
 

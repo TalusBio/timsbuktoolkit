@@ -84,16 +84,16 @@ pub struct TargetColumns<L: KeyLike> {
     pub caps: TargetCapabilities,
     // per-target scalars, len = n_rows; addressed by `RowIdx`, never by a
     // caller-supplied id (those live in `source_ids`)
-    pub precursor_mz: Vec<f64>,
-    pub charge: Vec<u8>,
-    pub rt_seconds: Vec<f32>,
-    pub mobility: Vec<f32>,
+    pub(crate) precursor_mz: Vec<f64>,
+    pub(crate) charge: Vec<u8>,
+    pub(crate) rt_seconds: Vec<f32>,
+    pub(crate) mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
-    pub is_decoy: Vec<bool>,
+    pub(crate) is_decoy: Vec<bool>,
     /// What the source file called each row, when it said. Parallel to the row
     /// columns. Minted at [`Self::seal`] for formats that carry no ids, so a
     /// sealed arena always has one per row.
-    pub source_ids: SourceIds,
+    pub(crate) source_ids: SourceIds,
     /// Which competition group each row belongs to, one entry per row. Empty
     /// until [`Self::seal`], which mints it when the input did not say. Not
     /// derived from the row position: group membership is a property of the
@@ -101,19 +101,19 @@ pub struct TargetColumns<L: KeyLike> {
     /// the layout happens to encode it.
     decoy_groups: Vec<u64>,
     // CSR prefix offsets (n+1)
-    pub frag_off: Vec<u32>,
-    pub seq_strip_off: Vec<u32>,
-    pub seq_mod_off: Vec<u32>,
-    pub mod_off: Vec<u32>,
+    pub(crate) frag_off: Vec<u32>,
+    pub(crate) seq_strip_off: Vec<u32>,
+    pub(crate) seq_mod_off: Vec<u32>,
+    pub(crate) mod_off: Vec<u32>,
     // fragment arenas (len = total fragments)
-    pub frag_labels: Vec<L>,
-    pub frag_mzs: Vec<f64>,
+    pub(crate) frag_labels: Vec<L>,
+    pub(crate) frag_mzs: Vec<f64>,
     // sequences
-    pub seq_strip_blob: String,
-    pub seq_mod_blob: String,
+    pub(crate) seq_strip_blob: String,
+    pub(crate) seq_mod_blob: String,
     // structured mods
-    pub mods: Vec<(u8, u16)>,
-    pub mod_registry: Vec<ModDefinition>,
+    pub(crate) mods: Vec<(u8, u16)>,
+    pub(crate) mod_registry: Vec<ModDefinition>,
 }
 
 impl<L: KeyLike> TargetColumns<L> {
@@ -275,6 +275,36 @@ impl<L: KeyLike> TargetColumns<L> {
 
     pub fn is_decoy(&self, tgt: RowIdx) -> bool {
         self.is_decoy[tgt.get()]
+    }
+
+    /// This row's fragment labels and m/z values, positionally paired.
+    pub fn frag_labels(&self, tgt: RowIdx) -> &[L] {
+        &self.frag_labels[self.frag_range(tgt)]
+    }
+
+    pub fn frag_mzs(&self, tgt: RowIdx) -> &[f64] {
+        &self.frag_mzs[self.frag_range(tgt)]
+    }
+
+    /// This row's stripped (unmodified) sequence.
+    pub fn seq_strip(&self, tgt: RowIdx) -> &str {
+        &self.seq_strip_blob[self.seq_strip_range(tgt)]
+    }
+
+    /// This row's modified sequence, the form sequence features are parsed from.
+    pub fn seq_mod(&self, tgt: RowIdx) -> &str {
+        &self.seq_mod_blob[self.seq_mod_range(tgt)]
+    }
+
+    /// Fragments across every row, for whole-arena statistics.
+    pub fn n_fragments(&self) -> usize {
+        self.frag_labels.len()
+    }
+
+    /// Rows the input itself marked as decoys, as opposed to variants this
+    /// arena would generate.
+    pub fn n_stored_decoys(&self) -> usize {
+        self.is_decoy.iter().filter(|&&d| d).count()
     }
 
     pub fn frag_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {

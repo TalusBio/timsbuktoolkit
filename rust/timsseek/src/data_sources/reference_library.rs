@@ -124,7 +124,7 @@ impl<'a> RefQuery<'a> {
     pub fn materialize_peptide_in_group(&self, decoy_group: u64) -> Peptide {
         let tgt = self.geom.row();
         let coll = &self.lib.geom;
-        let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
+        let raw: Arc<str> = coll.seq_mod(tgt).into();
         let decoy = if self.geom.variant() == 0 {
             DecoyMarking::Target
         } else {
@@ -142,9 +142,8 @@ impl<'a> RefQuery<'a> {
 impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
         let tgt = self.geom.row();
-        let r = self.lib.geom.frag_range(tgt);
-        let labels = &self.lib.geom.frag_labels[r.clone()];
-        let intens = &self.lib.frag_intens[r];
+        let labels = self.lib.geom.frag_labels(tgt);
+        let intens = &self.lib.frag_intens[self.lib.geom.frag_range(tgt)];
         debug_assert_eq!(
             labels.len(),
             intens.len(),
@@ -156,7 +155,7 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
         let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.caps.isotopes;
-        let seq = &self.lib.geom.seq_strip_blob[self.lib.geom.seq_strip_range(tgt)];
+        let seq = self.lib.geom.seq_strip(tgt);
         let charge = self.lib.geom.charge(tgt) as f64;
         let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (_src, env) = isotope_dist_or_averagine(seq, neutral);

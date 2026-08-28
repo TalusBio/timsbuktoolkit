@@ -201,7 +201,7 @@ fn finalize_reference_library(
     frag_intens: Vec<f32>,
     policy: crate::models::DecoyPolicy,
 ) -> (ReferenceLibrary, LoadReport) {
-    let n_stored_decoys = geom.is_decoy.iter().filter(|&&d| d).count();
+    let n_stored_decoys = geom.n_stored_decoys();
     geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
     geom.seal();
 
@@ -243,13 +243,13 @@ fn finalize_reference_library(
     let mut n_averagine_fallback = 0usize;
     for tgt in geom.rows() {
         if all_parsable {
-            let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
+            let modified = geom.seq_mod(tgt);
             let normalized = normalize_to_proforma(modified);
             if parse_sequence(&normalized).is_none() {
                 all_parsable = false;
             }
         }
-        let stripped = &geom.seq_strip_blob[geom.seq_strip_range(tgt)];
+        let stripped = geom.seq_strip(tgt);
         let charge = geom.charge(tgt) as f64;
         let neutral_mass = geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
@@ -482,7 +482,7 @@ impl Speclib {
         if n_rows == 0 {
             return 0.0;
         }
-        self.geom.frag_labels.len() as f64 / n_rows as f64
+        self.geom.n_fragments() as f64 / n_rows as f64
     }
 
     pub fn from_file(
@@ -601,7 +601,7 @@ impl Speclib {
             "Speclib stats: lazy arena, {} targets ({} flat scoring entries, {} total fragment slots)",
             self.geom.n_rows(),
             self.len(),
-            self.geom.frag_labels.len(),
+            self.geom.n_fragments(),
         );
     }
 }
