@@ -3,6 +3,10 @@ use crate::ion::{
     IonAnnot,
     IonParsingError,
 };
+use crate::models::{
+    OwnedSourceId,
+    SourceId,
+};
 use arrow::array::{
     Float32Array,
     Float64Array,
@@ -329,7 +333,7 @@ pub fn read_targets<T: AsRef<Path>>(
 fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
     let named = egs
         .iter()
-        .filter(|(eg, _)| matches!(eg.id(), crate::models::SourceId::Text(_)))
+        .filter(|(eg, _)| matches!(eg.id(), SourceId::Text(_)))
         .count();
     if named == 0 || named == egs.len() {
         return;
@@ -340,7 +344,7 @@ fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
         egs.len()
     );
     for (i, (eg, _)) in egs.iter_mut().enumerate() {
-        eg.set_id(crate::models::OwnedSourceId::Numeric(i as u64));
+        eg.set_id(OwnedSourceId::Numeric(i as u64));
     }
 }
 
@@ -446,16 +450,12 @@ fn parse_precursor_group(
     // DIA-NN names the precursor itself; carry that through so results say what
     // the library says. Variants without the column fall back to the counter,
     // which `seal` treats as any other minted id.
-    let source_id: crate::models::OwnedSourceId = match first_row
+    let name = first_row
         .transition_group_id
         .as_deref()
-        .filter(|name| !name.is_empty())
-    {
-        Some(name) => name.into(),
-        None => id.into(),
-    };
+        .filter(|name| !name.is_empty());
     let eg = Target::builder()
-        .id(source_id)
+        .id(name.map_or_else(|| id.into(), OwnedSourceId::from))
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -777,16 +777,12 @@ fn parse_precursor_group_from_parquet(
 
     // DIA-NN names the precursor in `Precursor.Id`; carry that through when the
     // file has it, else fall back to the counter as the TSV path does.
-    let source_id: crate::models::OwnedSourceId = match columns
+    let name = columns
         .precursor_ids
         .map(|ids| ids[first_idx].as_str())
-        .filter(|name| !name.is_empty())
-    {
-        Some(name) => name.into(),
-        None => id.into(),
-    };
+        .filter(|name| !name.is_empty());
     let eg = Target::builder()
-        .id(source_id)
+        .id(name.map_or_else(|| id.into(), OwnedSourceId::from))
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
