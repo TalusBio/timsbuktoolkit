@@ -21,7 +21,7 @@ use timscentroid::utils::TupleRange;
 
 // TODO: rename to `ChromatogramAccumulator` — struct carries query scalars
 // (id, mobility_ook0, etc.) alongside the accumulated chromatograms, but the
-// "Collector" name dates from when it owned a full TimsElutionGroup. The query
+// "Collector" name dates from when it owned a full Target. The query
 // and accumulator roles are now structurally separated; a rename would match.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
@@ -31,7 +31,7 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `TimsElutionGroup::precursor_mz_limits()` at reset
+    /// Cached from `Target::precursor_mz_limits()` at reset
     /// (skips negative-isotope labels — do not derive from mono_mz + charge alone).
     pub precursor_mz_limits: (f64, f64),
 
@@ -90,7 +90,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let fragments =
             MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
-            id: eg.id() as u64,
+            id: eg.output_id(),
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
@@ -136,7 +136,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        self.id = eg.id() as u64;
+        self.id = eg.output_id();
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
@@ -250,12 +250,12 @@ impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TimsElutionGroup;
+    use crate::Target;
     use tinyvec::tiny_vec;
 
     #[test]
     fn test_filter_ions_with_custom_predicate() {
-        let eg = TimsElutionGroup::builder()
+        let eg = Target::builder()
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)

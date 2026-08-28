@@ -729,7 +729,6 @@ impl CalibDash {
             None => self.app.clear_scrub(),
         }
     }
-
 }
 
 /// Pauses the batch loop to render one interactive frame and block until the user's
@@ -833,12 +832,12 @@ mod tests {
             .map(|i| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: (i as f64 + 0.5) * slope,
-                speclib_index: chunk * n + i,
+                library_id: (chunk * n + i) as u64,
             })
             .collect()
     }
 
-    /// Points at explicit `speclib_index`es, so a test can choose the two sets `churn`
+    /// Points at explicit `library_id`es, so a test can choose the two sets `churn`
     /// diffs. On the identity line, so the fit succeeds.
     fn indexed_points(indices: &[usize]) -> Vec<CalibrantPoint> {
         indices
@@ -847,7 +846,7 @@ mod tests {
             .map(|(i, &idx)| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: i as f64 + 0.5,
-                speclib_index: idx,
+                library_id: idx as u64,
             })
             .collect()
     }

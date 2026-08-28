@@ -22,7 +22,7 @@ use std::ops::{
     AddAssign,
 };
 
-/// Inline-capacity target matching `TimsElutionGroup`'s precursor/fragment
+/// Inline-capacity target matching `Target`'s precursor/fragment
 /// label TinyVecs — typical peptide ≤13 fragments / ≤3 precursors stays
 /// stack-resident.
 const SPEC_INLINE_CAP: usize = 13;
@@ -38,7 +38,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `TimsElutionGroup::precursor_mz_limits()` — skips
+    /// Cached from `Target::precursor_mz_limits()` — skips
     /// negative-isotope labels, do NOT recompute from mono_mz + charge.
     pub precursor_mz_limits: (f64, f64),
     // Labels + mzs: arrays carry only intensities, so we need separate storage.
@@ -82,7 +82,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
     ) {
-        self.id = eg.id() as u64;
+        self.id = eg.output_id();
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();

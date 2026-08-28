@@ -9,8 +9,9 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
-use timsquery::TimsElutionGroup;
+use timsquery::Target;
 use timsquery::ion::IonAnnot;
+use timsquery::models::FlatIdx;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 use timsquery::traits::QueryGeom;
@@ -188,8 +189,19 @@ impl ElutionGroupData {
     }
 
     /// The `RefQuery` flyweight at flat index `idx` (target/decoy expanded).
+    /// The scored slot at UI ordinal `idx`. The viewer's lists are ordinals
+    /// into its own display order; this is the one place an ordinal becomes an
+    /// arena index, and it is checked against the arena.
+    pub fn flat(&self, idx: usize) -> FlatIdx {
+        self.inner
+            .geom
+            .flats()
+            .nth(idx)
+            .expect("row ordinal past the end of the library")
+    }
+
     fn item_at(&self, idx: usize) -> RefQuery<'_> {
-        self.inner.item_at(idx)
+        self.inner.item_at(self.flat(idx))
     }
 
     /// Returns indices of all elution groups matching the ID filter.
@@ -223,13 +235,19 @@ impl ElutionGroupData {
         buffer.clear();
         let q = self.item_at(idx);
         let peptide = ScoredIdentity::materialize_peptide(&q);
-        let _ = write!(buffer, "{}|{}|{}", q.id(), peptide.raw, !q.is_target());
+        let _ = write!(
+            buffer,
+            "{}|{}|{}",
+            q.output_id(),
+            peptide.raw,
+            !q.is_target()
+        );
     }
 
     pub fn get_elem(
         &self,
         index: usize,
-    ) -> Result<(TimsElutionGroup<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
+    ) -> Result<(Target<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
         if index >= self.len() {
             return Err(ViewerError::General(format!(
                 "Elution group index {index} out of bounds"
@@ -242,7 +260,7 @@ impl ElutionGroupData {
         // `expected_precursor_envelope()`, which routes through
         // `isotope_dist_or_averagine` — no `[1.0, 0.0, 0.0]` fallback.
         let q = self.item_at(index);
-        let mut eg = TimsElutionGroup::empty_like();
+        let mut eg = Target::empty_like();
         fill_scratch_from(&mut eg, &q);
         let expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
@@ -354,7 +372,7 @@ impl ElutionGroupData {
         };
 
         table_row.col(|ui| {
-            add_col(ui, &q.id().to_string());
+            add_col(ui, &q.output_id().to_string());
         });
         table_row.col(|ui| {
             add_col(ui, &peptide.raw);
@@ -387,8 +405,8 @@ impl ElutionGroupData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use timsquery::models::QueryCollection;
-    use timsquery::models::capabilities::LibCapabilities;
+    use timsquery::models::TargetColumns;
+    use timsquery::models::capabilities::TargetCapabilities;
     use timsquery::utils::constants::PROTON_MASS;
     use timsseek::fragment_mass::isotope_dist_or_averagine;
 
@@ -396,7 +414,7 @@ mod tests {
     /// uncountable composition (`B` is not a real residue), forcing the
     /// averagine isotope path.
     fn uncountable_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             600.0,
             1,

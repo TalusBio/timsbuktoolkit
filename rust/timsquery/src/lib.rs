@@ -17,7 +17,7 @@ pub use crate::models::base::{
     MzMajorIntensityArray,
     RTMajorIntensityArray,
 };
-pub use crate::models::elution_group::TimsElutionGroup;
+pub use crate::models::target::Target;
 
 // Re-export traits
 pub use crate::models::PeakAddable;

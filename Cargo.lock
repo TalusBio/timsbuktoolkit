@@ -6747,6 +6747,7 @@ dependencies = [
 name = "timsquery_cli"
 version = "0.33.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "half",
  "mimalloc",

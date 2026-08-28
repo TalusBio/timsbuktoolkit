@@ -6,7 +6,7 @@ use timsquery::KeyLike;
 use timsquery::tinyvec::TinyVec;
 
 /// Inline capacity for fragment and precursor intensity pairs. Mirrors the
-/// `fragment_labels`/`precursor_labels` capacity used by `TimsElutionGroup`
+/// `fragment_labels`/`precursor_labels` capacity used by `Target`
 /// so typical peptides stay fully stack-resident and no heap allocation
 /// happens on clone/mutate.
 pub const INLINE_FRAG_CAPACITY: usize = 13;

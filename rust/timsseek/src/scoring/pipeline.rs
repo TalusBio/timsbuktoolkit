@@ -40,6 +40,10 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
+use timsquery::models::{
+    FlatIdx,
+    RowIdx,
+};
 use timsquery::traits::QueryGeom;
 use timsquery::utils::TupleRange;
 use timsquery::{
@@ -47,7 +51,7 @@ use timsquery::{
     KeyLike,
     MzMobilityStatsCollector,
     SpectralCollector,
-    TimsElutionGroup,
+    Target,
     Tolerance,
 };
 
@@ -87,14 +91,14 @@ use tracing::warn;
 /// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
 /// - `inner_collector` / `isotope_collector` reused across Phase 3 secondary queries
 /// - `isotope_scratch_eg` holds the neutron-offset-applied eg; `Option<>` because
-///   `TimsElutionGroup` has no `Default` (bon builder with required fields) —
+///   `Target` has no `Default` (bon builder with required fields) —
 ///   init lazily on first peptide.
 pub struct ScoringWorker {
     pub scorer: TraceScorer,
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
     pub isotope_collector: Option<SpectralCollector<IonAnnot, f32>>,
-    pub isotope_scratch_eg: Option<timsquery::TimsElutionGroup<IonAnnot>>,
+    pub isotope_scratch_eg: Option<timsquery::Target<IonAnnot>>,
 }
 
 impl ScoringWorker {
@@ -115,7 +119,11 @@ impl ScoringWorker {
 pub struct CalibrantCandidate {
     pub score: f32,
     pub apex_rt: ObservedRTSeconds<f32>,
-    pub speclib_index: usize,
+    pub speclib_index: FlatIdx,
+    /// The id this row reports, carried alongside the position because the
+    /// calibration dashboard keys on something a human can recognise and a
+    /// position must not leave the crate.
+    pub library_id: u64,
     pub library_rt: LibraryRT<f32>,
 }
 
@@ -261,10 +269,7 @@ fn gate_expected_fragments(expected: &ExpectedIntensities<IonAnnot>) -> Result<(
 /// work is needed. It also sets the precursor labels to the isotope-envelope
 /// indices via the flyweight's `iter_precursors` (`0..n_isotopes`), which match
 /// `expected_precursor_envelope`'s indices, so no separate label pass is needed.
-pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(
-    dst: &mut TimsElutionGroup<IonAnnot>,
-    q: &Q,
-) {
+pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(dst: &mut Target<IonAnnot>, q: &Q) {
     dst.reset_from(q);
 }
 
@@ -274,14 +279,14 @@ pub fn fill_scratch_from<Q: QueryGeom<Label = IonAnnot>>(
 /// Kept OUTSIDE `ScoringWorker` so the filled scratch can be borrowed
 /// immutably while the worker is borrowed mutably by the scoring calls.
 pub struct ScratchBufs {
-    pub eg: TimsElutionGroup<IonAnnot>,
+    pub eg: Target<IonAnnot>,
     pub expected: ExpectedIntensities<IonAnnot>,
 }
 
 impl ScratchBufs {
     fn new() -> Self {
         Self {
-            eg: TimsElutionGroup::empty_like(),
+            eg: Target::empty_like(),
             expected: ExpectedIntensities::default(),
         }
     }
@@ -474,7 +479,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     fn execute_secondary_query(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         apex: &ApexBlocks,
         spectral_tol: &Tolerance,
         isotope_tol: &Tolerance,
@@ -561,7 +566,10 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Reuses the worker's backing `ChromatogramCollector` storage.
     fn build_calibrated_extraction_into(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
+        // The flyweight's row: the scratch `Target` is a reused buffer and
+        // cannot carry one.
+        row: RowIdx,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -592,7 +600,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         Ok(super::apex_finding::PeptideMetadata {
             digest,
             charge: query.precursor_charge(),
-            library_id: extr.chromatograms.id as u32,
+            library_id: extr.chromatograms.id,
+            row,
             library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: query.mobility_ook0(),
@@ -606,9 +615,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn score_calibrated_extraction(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
+        row: RowIdx,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -620,7 +631,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         let metadata = timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| self
-                .build_calibrated_extraction_into(query, expected, digest, calibration, worker))
+                .build_calibrated_extraction_into(
+                    query,
+                    row,
+                    expected,
+                    digest,
+                    calibration,
+                    worker
+                ))
         )?;
 
         let scoring_ctx = worker
@@ -689,30 +707,28 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn score_calibrated_batch(
         &self,
         lib: &Speclib,
-        flat_range: std::ops::Range<usize>,
+        flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         // Single columnar store (Task 9 deleted the materialized arm): the
         // flyweight is always a `RefQuery` from the arena, so the loop is
         // monomorphized over one concrete type — statically dispatched, no
         // per-item heap allocation on the scoring hot path.
-        self.score_calibrated_batch_impl(|f| lib.item_at(f), flat_range, calibration)
+        self.score_calibrated_batch_impl(|f| lib.item_at(f), flats, calibration)
     }
 
     fn score_calibrated_batch_impl<Q>(
         &self,
-        get_item: impl Fn(usize) -> Q + Sync,
-        flat_range: std::ops::Range<usize>,
+        get_item: impl Fn(FlatIdx) -> Q + Sync,
+        flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts)
     where
         Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
     {
         let num_cycles = self.num_cycles();
-        // Materialize the flat index list so `fold_reduce` (which parallelizes
-        // over a slice) can drive the flyweight by index. Each item is a
-        // `usize`; the flyweight itself is never stored.
-        let flats: Vec<usize> = flat_range.collect();
+        // `fold_reduce` parallelizes over the slice, driving the flyweight by
+        // index; the flyweight itself is never stored.
         // Precursor-range gate over the flyweight geometry.
         let filter_fn = |q: &Q| {
             let tmp = q.precursor_mz_limits();
@@ -733,7 +749,7 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         let (_worker, _scratch, mut results): (ScoringWorker, ScratchBufs, IonSearchAccumulator) =
             crate::utils::maybe_par::fold_reduce(
-                &flats,
+                flats,
                 || {
                     tracing::debug!(
                         target: "alloc_track",
@@ -760,6 +776,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     let digest = q.materialize_peptide();
                     let result = self.score_calibrated_extraction(
                         &scratch.eg,
+                        q.row(),
                         &scratch.expected,
                         digest,
                         calibration,
@@ -784,7 +801,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     pub fn prescore(
         &self,
-        query: &TimsElutionGroup<IonAnnot>,
+        query: &Target<IonAnnot>,
         expected: &ExpectedIntensities<IonAnnot>,
         worker: &mut ScoringWorker,
         timings: &mut PrescoreTimings,
@@ -835,20 +852,20 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn prescore_batch(
         &self,
         lib: &Speclib,
-        flat_range: std::ops::Range<usize>,
+        flats: &[FlatIdx],
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap {
         // Single columnar store (Task 9): iterate `RefQuery` flyweights from
         // the arena directly — monomorphized, no per-item heap alloc on the
         // prescore hot path (see `score_calibrated_batch`).
-        self.prescore_batch_impl(|f| lib.item_at(f), flat_range, config, timings)
+        self.prescore_batch_impl(|f| lib.item_at(f), flats, config, timings)
     }
 
     fn prescore_batch_impl<Q>(
         &self,
-        get_item: impl Fn(usize) -> Q + Sync,
-        flat_range: std::ops::Range<usize>,
+        get_item: impl Fn(FlatIdx) -> Q + Sync,
+        flats: &[FlatIdx],
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,
     ) -> CalibrantHeap
@@ -858,7 +875,6 @@ impl<I: ScorerQueriable> Scorer<I> {
         // The flat index IS the global speclib index (see `Speclib::item_at`),
         // so it doubles as `CalibrantCandidate::speclib_index` — no separate
         // chunk offset needed.
-        let flats: Vec<usize> = flat_range.collect();
         let filter_fn = |q: &Q| {
             let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
@@ -879,7 +895,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             .unwrap_or(0);
 
         let (_worker, _scratch, heap, par_timings) = crate::utils::maybe_par::fold_reduce(
-            &flats,
+            flats,
             || {
                 tracing::debug!(
                     target: "alloc_track",
@@ -909,6 +925,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: flat,
+                            library_id: q.library_id(),
                             library_rt: LibraryRT(q.rt_seconds()),
                         };
                         if let Err(reason) = heap.push(cand) {
@@ -947,12 +964,14 @@ mod tests {
         ExpectedIntensity,
         ReferenceLibrary,
     };
-    use timsquery::TimsElutionGroup;
-    use timsquery::models::QueryCollection;
-    use timsquery::models::capabilities::LibCapabilities;
+    use timsquery::Target;
+    use timsquery::models::TargetColumns;
+    use timsquery::models::capabilities::TargetCapabilities;
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut caps = TargetCapabilities::default_diann();
+        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
+        let mut geom = TargetColumns::with_capabilities(caps);
         geom.push_target(
             900.4,
             2,
@@ -978,8 +997,8 @@ mod tests {
         let lib = tiny_lazy_lib();
         // Variant 1 (+decoy): geometry is mass-shifted, so this exercises the
         // by-value shifted-fragment path through reset_from.
-        let q = lib.item_at(1);
-        let mut scratch = TimsElutionGroup::<IonAnnot>::empty_like();
+        let q = lib.item_at(lib.geom.flats().nth(1).unwrap());
+        let mut scratch = Target::<IonAnnot>::empty_like();
         fill_scratch_from(&mut scratch, &q);
 
         assert!((scratch.mono_precursor_mz() - q.mono_precursor_mz()).abs() < 1e-9);

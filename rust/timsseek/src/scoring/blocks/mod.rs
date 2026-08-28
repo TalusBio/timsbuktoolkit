@@ -100,6 +100,7 @@ enum ColData {
     F64(Vec<f64>),
     U8(Vec<u8>),
     U32(Vec<u32>),
+    U64(Vec<u64>),
     Bool(Vec<bool>),
     Str(Vec<String>),
 }
@@ -180,6 +181,13 @@ impl ColSink {
         }
     }
 
+    pub fn u64(&mut self, name: &str, v: u64) {
+        match self.slot(name, false, || ColData::U64(Vec::new())) {
+            ColData::U64(vals) => vals.push(v),
+            _ => panic!("column `{name}` dtype mismatch"),
+        }
+    }
+
     pub fn bool(&mut self, name: &str, v: bool) {
         match self.slot(name, false, || ColData::Bool(Vec::new())) {
             ColData::Bool(vals) => vals.push(v),
@@ -216,6 +224,7 @@ impl ColSink {
                 ColData::F64(v) => (DataType::Float64, Arc::new(Float64Array::from(v))),
                 ColData::U8(v) => (DataType::UInt8, Arc::new(UInt8Array::from(v))),
                 ColData::U32(v) => (DataType::UInt32, Arc::new(UInt32Array::from(v))),
+                ColData::U64(v) => (DataType::UInt64, Arc::new(UInt64Array::from(v))),
                 ColData::Bool(v) => (DataType::Boolean, Arc::new(BooleanArray::from(v))),
                 ColData::Str(v) => (
                     DataType::Utf8,
@@ -265,6 +274,10 @@ impl SchemaSink {
 
     pub fn u32(&mut self, n: &str) {
         self.scalar(n, DataType::UInt32);
+    }
+
+    pub fn u64(&mut self, n: &str) {
+        self.scalar(n, DataType::UInt64);
     }
 
     pub fn bool(&mut self, n: &str) {

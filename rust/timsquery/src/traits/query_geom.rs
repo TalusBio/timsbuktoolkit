@@ -1,15 +1,22 @@
-use crate::models::elution_group::TimsElutionGroup;
+use crate::models::target::Target;
 use crate::traits::KeyLike;
 
-/// Read-only geometry contract shared by the materialized `TimsElutionGroup`
+/// Read-only geometry contract shared by the materialized `Target`
 /// and the columnar flyweight `Query<L>`. Method names mirror the aggregator
 /// collectors' existing calls so they relax to `&impl QueryGeom` unchanged.
 pub trait QueryGeom {
     type Label: KeyLike;
 
-    /// Positional library id (`library_id`). For `TimsElutionGroup` this is the
-    /// assigned `id` cast to u32; for the arena flyweight it is the target index.
-    fn id(&self) -> u32;
+    /// What the source file called this row, when it said. `None` for formats
+    /// that carry no id.
+    fn source_id(&self) -> Option<crate::models::LibraryId> {
+        None
+    }
+
+    /// The id a result carries; always present, since callers key results by
+    /// it. Not defaulted: a default would need a position accessor on this
+    /// trait, and the position belongs to whoever stores the row.
+    fn output_id(&self) -> u64;
     fn mono_precursor_mz(&self) -> f64;
     fn precursor_charge(&self) -> u8;
     fn rt_seconds(&self) -> f32;
@@ -23,14 +30,15 @@ pub trait QueryGeom {
     fn iter_fragments_refs(&self) -> impl Iterator<Item = (&Self::Label, f64)>;
 }
 
-impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
+impl<T: KeyLike> QueryGeom for Target<T> {
     type Label = T;
 
-    fn id(&self) -> u32 {
-        // Fail loud rather than silently truncate: the library_id column and the
-        // q-value determinism anchor are u32; an id beyond u32::MAX is a bug we
-        // want surfaced, not wrapped.
-        u32::try_from(self.id()).expect("TimsElutionGroup id exceeds u32::MAX")
+    fn source_id(&self) -> Option<crate::models::LibraryId> {
+        Some(crate::models::LibraryId::new(self.id()))
+    }
+
+    fn output_id(&self) -> u64 {
+        self.id()
     }
 
     fn mono_precursor_mz(&self) -> f64 {
@@ -68,22 +76,22 @@ impl<T: KeyLike> QueryGeom for TimsElutionGroup<T> {
     fn iter_fragments_refs(&self) -> impl Iterator<Item = (&Self::Label, f64)> {
         // Inherent method resolves here (inherent-first), returns (&T, &f64);
         // map to owned m/z. No recursion.
-        TimsElutionGroup::iter_fragments_refs(self).map(|(k, v)| (k, *v))
+        Target::iter_fragments_refs(self).map(|(k, v)| (k, *v))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::elution_group::TimsElutionGroup;
+    use crate::models::target::Target;
 
-    fn geom_id<G: QueryGeom>(g: &G) -> u32 {
-        g.id()
+    fn via_trait<G: QueryGeom>(g: &G) -> u64 {
+        g.output_id()
     }
 
     #[test]
-    fn blanket_impl_exposes_id_as_u32() {
-        let eg: TimsElutionGroup<crate::IonAnnot> = TimsElutionGroup::builder()
+    fn target_output_id_is_its_source_id() {
+        let eg: Target<crate::IonAnnot> = Target::builder()
             .id(7)
             .mobility_ook0(0.75)
             .rt_seconds(1.0)
@@ -93,18 +101,18 @@ mod tests {
             .precursor(500.0, 2)
             .try_build()
             .unwrap();
-        assert_eq!(geom_id(&eg), 7u32);
+        assert_eq!(via_trait(&eg), 7);
     }
 
     #[test]
     fn reset_from_accepts_generic_geom() {
         fn reset_via_trait<G: QueryGeom<Label = crate::IonAnnot>>(
-            dst: &mut TimsElutionGroup<crate::IonAnnot>,
+            dst: &mut Target<crate::IonAnnot>,
             src: &G,
         ) {
             dst.reset_from(src);
         }
-        let src: TimsElutionGroup<crate::IonAnnot> = TimsElutionGroup::builder()
+        let src: Target<crate::IonAnnot> = Target::builder()
             .id(3)
             .mobility_ook0(0.5)
             .rt_seconds(2.0)

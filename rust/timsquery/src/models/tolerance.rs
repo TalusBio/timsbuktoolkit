@@ -94,6 +94,13 @@ impl Tolerance {
     // M/Z Tolerance Methods
     // ============================================================================
 
+    /// The range is `(mz - low, mz + high)`, so it is well-formed whenever
+    /// `low + high >= 0`, not only when both are positive. Carafe sends a
+    /// negative `low` to encode a calibration offset; see
+    /// `rust/timsquery/tests/carafe_contract/README.md`.
+    const MZ_RANGE_INVARIANT: &str =
+        "m/z tolerance produced an inverted range: low + high must be >= 0";
+
     /// Calculate m/z tolerance range (primary method, returns f64).
     ///
     /// This is the canonical m/z range method. All other m/z methods delegate to this.
@@ -129,15 +136,15 @@ impl Tolerance {
     /// ```
     pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
         match self.ms {
-            MzTolerance::Absolute((low, high)) => (mz - low, mz + high).try_into().expect(
-                "mz tolerance should never result in an invalid range, since low and high are positive",
-            ),
+            MzTolerance::Absolute((low, high)) => (mz - low, mz + high)
+                .try_into()
+                .expect(Self::MZ_RANGE_INVARIANT),
             MzTolerance::Ppm((low, high)) => {
                 let low = mz * low / 1e6;
                 let high = mz * high / 1e6;
-                (mz - low, mz + high).try_into().expect(
-                    "mz tolerance should never result in an invalid range, since low and high are positive",
-                )
+                (mz - low, mz + high)
+                    .try_into()
+                    .expect(Self::MZ_RANGE_INVARIANT)
             }
         }
     }

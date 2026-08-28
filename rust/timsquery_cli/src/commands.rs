@@ -16,8 +16,8 @@ use timscentroid::IndexedTimstofPeaks;
 use timsquery::KeyLike;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::models::{
-    QueryCollection,
     QueryRef,
+    TargetColumns,
 };
 use timsquery::serde::load_index_auto;
 use timsquery::traits::DecoyShift;
@@ -35,7 +35,12 @@ use crate::cli::{
 };
 use crate::error::CliError;
 use crate::processing::AggregatorContainer;
-use timsquery::serde::LibraryArena;
+use timsquery::serde::TargetTable;
+
+/// Basename Carafe looks for inside the `-o` directory (invariant 5 of
+/// `rust/timsquery/tests/carafe_contract/`). Named rather than inlined because
+/// renaming it fails silently on their side. The contents are ndjson.
+pub const CARAFE_RESULTS_BASENAME: &str = "results.json";
 
 /// Main function for the 'query-index' subcommand.
 #[instrument]
@@ -52,7 +57,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
         "Loading elution groups from {}",
         elution_groups_path.display()
     );
-    let arena: LibraryArena = read_query_elution_groups(&elution_groups_path)?;
+    let arena: TargetTable = read_query_elution_groups(&elution_groups_path)?;
 
     let (handle, index_source) = load_index_auto(
         raw_file_path
@@ -71,7 +76,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     let batch_size = args.batch_size;
 
     std::fs::create_dir_all(&output_path)?;
-    let put_path = output_path.join("results.json");
+    let put_path = output_path.join(CARAFE_RESULTS_BASENAME);
 
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
@@ -80,7 +85,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     // n_rows()`): decoy generation is a scoring decision the cli never makes, so
     // a `QueryRef` (geometry only) is all the collectors need.
     match arena {
-        LibraryArena::Mzpaf { geom, .. } => stream_process_batches(
+        TargetTable::Mzpaf { geom, .. } => stream_process_batches(
             &geom,
             aggregator_use,
             &index,
@@ -89,7 +94,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
             &put_path,
             batch_size,
         ),
-        LibraryArena::Str { geom } => stream_process_batches(
+        TargetTable::Str { geom } => stream_process_batches(
             &geom,
             aggregator_use,
             &index,
@@ -103,9 +108,9 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 }
 
 /// Reads a spectral library from a given path, funnelling every supported
-/// format into the label-typed columnar [`LibraryArena`].
-pub fn read_query_elution_groups(path: &Path) -> Result<LibraryArena, CliError> {
-    match timsquery::serde::read_library_file(path) {
+/// format into the label-typed columnar [`TargetTable`].
+pub fn read_query_elution_groups(path: &Path) -> Result<TargetTable, CliError> {
+    match timsquery::serde::read_targets(path) {
         Ok(egs) => Ok(egs),
         Err(e) => Err(CliError::DataReading(format!(
             "Failed to read elution groups from {}: {:?}",
@@ -240,7 +245,7 @@ impl<W: Write> JsonStreamSerializer<W> {
 /// share one path.
 #[instrument(skip_all)]
 pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
-    geom: &QueryCollection<L>,
+    geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
@@ -312,7 +317,7 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
 /// data is copied) and feeds them to the extraction collectors.
 #[instrument(skip_all)]
 pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
-    geom: &QueryCollection<L>,
+    geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
@@ -325,23 +330,18 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
-    let total = geom.expanded_len();
-    let mut batch_start = 0;
-    let mut batch_idx = 0;
-    while batch_start < total {
-        let batch_end = (batch_start + batch_size).min(total);
+    for (batch_idx, batch) in geom.chunks(batch_size).enumerate() {
         if last_progress.elapsed() >= progress_interval {
             info!(
                 "Processing batch {}/{} ({} groups)",
                 batch_idx + 1,
                 total_batches,
-                batch_end - batch_start,
+                batch.len(),
             );
             last_progress = Instant::now();
         }
 
-        let queries: Vec<QueryRef<'_, L>> =
-            (batch_start..batch_end).map(|f| geom.item_at(f)).collect();
+        let queries: Vec<QueryRef<'_, L>> = batch.iter().map(|&f| geom.item_at(f)).collect();
 
         let mut container = AggregatorContainer::new(
             &queries,
@@ -352,9 +352,6 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 
         container.add_query(index, tolerance);
         container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping())?;
-
-        batch_start = batch_end;
-        batch_idx += 1;
     }
 
     ser.finish()?;
@@ -371,7 +368,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use timsquery::models::elution_group::TimsElutionGroup;
+    use timsquery::models::target::Target;
     use timsquery::models::tolerance::{
         MobilityTolerance,
         MzTolerance,
@@ -391,13 +388,13 @@ mod tests {
         // AKA, we promised we would be compatible with that file.
         // IF you do want to change it contact the Carafe developers first.
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
-            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+            TargetTable::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 1),
+            TargetTable::Str { .. } => panic!("data contract uses mzpaf labels"),
         }
     }
 
     /// Regression: extraction readers must NOT expand decoys. An `IonAnnot`/
-    /// mzpaf-labelled library is loaded through the same `read_library_file`
+    /// mzpaf-labelled library is loaded through the same `read_targets`
     /// path the cli uses, and its flat extraction length must equal the number
     /// of stored rows (targets only). Before the reader default was changed to
     /// `DecoyStrategy::None`, the arena carried `LazyMassShift { n_decoys: 2 }`,
@@ -412,7 +409,7 @@ mod tests {
 
         let arena = read_query_elution_groups(&elution_groups_path).unwrap();
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => {
+            TargetTable::Mzpaf { geom, .. } => {
                 assert_eq!(
                     geom.expanded_len(),
                     geom.n_rows(),
@@ -420,7 +417,7 @@ mod tests {
                 );
                 assert_eq!(geom.variants_per_row(), 1, "reader default is decoys=None");
             }
-            LibraryArena::Str { .. } => panic!("data contract uses mzpaf labels"),
+            TargetTable::Str { .. } => panic!("data contract uses mzpaf labels"),
         }
     }
 
@@ -444,8 +441,7 @@ mod tests {
     fn test_elution_group_template_deserializable() {
         use timsquery::IonAnnot;
         let elution_groups =
-            serde_json::from_str::<Vec<TimsElutionGroup<IonAnnot>>>(ELUTION_GROUP_TEMPLATE)
-                .unwrap();
+            serde_json::from_str::<Vec<Target<IonAnnot>>>(ELUTION_GROUP_TEMPLATE).unwrap();
         assert!(elution_groups.len() == 2);
         // Write to a temp file ... while I implement direct reading api
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
@@ -453,13 +449,13 @@ mod tests {
         let arena = read_query_elution_groups(tmp_file.path()).unwrap();
         // mzpaf-parseable labels land in the Mzpaf arena (two template rows).
         match arena {
-            LibraryArena::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
-            LibraryArena::Str { .. } => panic!("mzpaf labels must not land in the Str arena"),
+            TargetTable::Mzpaf { geom, .. } => assert_eq!(geom.n_rows(), 2),
+            TargetTable::Str { .. } => panic!("mzpaf labels must not land in the Str arena"),
         }
     }
 
     /// A string-labelled JSON library (labels that do NOT parse as mzpaf ion
-    /// annotations) must land in [`LibraryArena::Str`], and each flyweight the
+    /// annotations) must land in [`TargetTable::Str`], and each flyweight the
     /// arena yields must feed the extraction collectors without error.
     const STRING_LABEL_TEMPLATE: &str = r#"[
         {
@@ -497,8 +493,8 @@ mod tests {
         let arena = read_query_elution_groups(tmp_file.path()).unwrap();
 
         let geom = match arena {
-            LibraryArena::Str { geom } => geom,
-            LibraryArena::Mzpaf { .. } => {
+            TargetTable::Str { geom } => geom,
+            TargetTable::Mzpaf { .. } => {
                 panic!("string labels must land in the Str arena, not Mzpaf")
             }
         };
@@ -508,11 +504,220 @@ mod tests {
         assert_eq!(geom.expanded_len(), 2);
 
         // The read -> item_at -> collector path builds without error for every row.
-        for flat in 0..geom.expanded_len() {
+        for flat in geom.flats() {
             let q = geom.item_at(flat);
             let point = PointIntensityAggregator::new(&q);
             assert_eq!(point.fragment_mzs.len(), q.fragment_count());
             let _spectrum: SpectralCollector<_, f32> = SpectralCollector::new(&q);
         }
+    }
+}
+
+/// Output half of the contract in `rust/timsquery/tests/carafe_contract/`.
+///
+/// Here rather than next to the input half because `timsquery_cli` has no
+/// library target for an integration test to reach into.
+#[cfg(test)]
+mod carafe_output_contract {
+    use super::*;
+    use crate::cli::{
+        PossibleAggregator,
+        SerializationFormat,
+    };
+    use crate::processing::SpectrumOutput;
+    use clap::ValueEnum;
+    use timsquery::serde::chromatogram_output::ChromatogramOutput;
+
+    /// README, "spectrum-aggregator -> PSMQueryResult".
+    const CARAFE_SPECTRUM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5, "precursor_mz":650.32,
+      "precursor_charge":2, "precursor_intensities":[1200,800,300], "precursor_labels":[0,1,2],
+      "fragment_mzs":[175.1,288.2], "fragment_intensities":[500,0]
+    }"#;
+
+    /// README, "chromatogram-aggregator -> XICQueryResult". Matrices are
+    /// `[ion][rt_point]`, so every row is as long as the RT array.
+    const CARAFE_CHROMATOGRAM_RESULT: &str = r#"{
+      "id":0, "mobility_ook0":0.95, "rt_seconds":1234.5,
+      "precursor_mzs":[650.32,650.82], "precursor_intensities":[[1.0,2.0],[3.0,4.0]],
+      "fragment_mzs":[175.1,288.2], "fragment_labels":["y1","b2"],
+      "fragment_intensities":[[5.0,6.0],[7.0,8.0]], "retention_time_results_seconds":[1230,1231]
+    }"#;
+
+    /// Deserialized rather than constructed: both types are otherwise only
+    /// built from an aggregator, which needs a real `.d`.
+    fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
+        serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("the contract's payload must deserialize: {e}"))
+    }
+
+    /// The same serializer `stream_process_batches` uses, so this is the exact
+    /// bytes Carafe reads out of `results.json`.
+    fn write_results<T: Serialize>(records: &[T], format: SerializationFormat) -> String {
+        let mut buf = Vec::new();
+        let mut seq = JsonStreamSerializer::new(&mut buf, format);
+        for r in records {
+            seq.serialize(r).expect("serialize");
+        }
+        seq.finish().expect("finish");
+        String::from_utf8(buf).expect("utf-8")
+    }
+
+    fn keys_of(line: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(line).expect("one object per line");
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object, not an array or scalar")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Invariants 2 and 3, on the bytes rather than the type.
+    ///
+    /// The singular/plural split across the two modes (`precursor_mz` vs
+    /// `precursor_mzs`) is deliberate — two schemas, not a typo.
+    #[test]
+    fn spectrum_results_are_ndjson_with_the_contract_field_names() {
+        // Two records with distinct ids: framing must not depend on there
+        // being exactly one, and `id` must survive the round trip.
+        let second = CARAFE_SPECTRUM_RESULT.replace("\"id\":0", "\"id\":1");
+        let records: Vec<SpectrumOutput> = vec![parse(CARAFE_SPECTRUM_RESULT), parse(&second)];
+        let out = write_results(&records, SerializationFormat::Ndjson);
+
+        assert!(!out.starts_with('['), "no array wrapper: {out}");
+        assert!(out.ends_with('\n'), "every record is newline-terminated");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per record");
+        assert!(
+            !out.contains("\n  "),
+            "ndjson must not be pretty-printed: {out}"
+        );
+
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                keys_of(line),
+                [
+                    "fragment_intensities",
+                    "fragment_mzs",
+                    "id",
+                    "mobility_ook0",
+                    "precursor_charge",
+                    "precursor_intensities",
+                    "precursor_labels",
+                    "precursor_mz",
+                    "rt_seconds",
+                ]
+            );
+            let value: serde_json::Value = serde_json::from_str(line).expect("one object");
+            assert_eq!(
+                value["id"], i,
+                "invariant 1: `id` is echoed, not renumbered"
+            );
+        }
+    }
+
+    #[test]
+    fn chromatogram_results_are_ndjson_with_the_contract_field_names() {
+        let records: Vec<ChromatogramOutput> = vec![parse(CARAFE_CHROMATOGRAM_RESULT)];
+        let out = write_results(&records, SerializationFormat::Ndjson);
+
+        assert!(!out.starts_with('['), "no array wrapper: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        // Invariant 4: matrices are `[ion][rt_point]`, one row per m/z, every
+        // row as long as the RT array. A transposed writer still round-trips
+        // the field names, so this is the only thing that catches it.
+        let value: serde_json::Value = serde_json::from_str(lines[0]).expect("one object");
+        let n_rt = value["retention_time_results_seconds"]
+            .as_array()
+            .expect("rt array")
+            .len();
+        for (mzs, intensities) in [
+            ("precursor_mzs", "precursor_intensities"),
+            ("fragment_mzs", "fragment_intensities"),
+        ] {
+            let rows = value[intensities].as_array().expect(intensities);
+            assert_eq!(
+                rows.len(),
+                value[mzs].as_array().expect(mzs).len(),
+                "{intensities} needs one row per {mzs}"
+            );
+            for row in rows {
+                assert_eq!(
+                    row.as_array().expect("a row").len(),
+                    n_rt,
+                    "{intensities} rows must be as long as the RT array"
+                );
+            }
+        }
+
+        assert_eq!(
+            keys_of(lines[0]),
+            [
+                "fragment_intensities",
+                "fragment_labels",
+                "fragment_mzs",
+                "id",
+                "mobility_ook0",
+                "precursor_intensities",
+                "precursor_mzs",
+                "retention_time_results_seconds",
+                "rt_seconds",
+            ]
+        );
+    }
+
+    /// Pins that the other formats wrap, so `-f ndjson` is load-bearing rather
+    /// than the writer happening to emit one object.
+    #[test]
+    fn the_non_ndjson_formats_do_wrap_in_an_array() {
+        let records: Vec<SpectrumOutput> = vec![parse(CARAFE_SPECTRUM_RESULT)];
+        for format in [SerializationFormat::Json, SerializationFormat::PrettyJson] {
+            let out = write_results(&records, format);
+            assert!(
+                out.starts_with('[') && out.ends_with(']'),
+                "{format:?} must wrap, else `-f ndjson` is not load-bearing: {out}"
+            );
+        }
+        // The default is not ndjson, so Carafe must keep passing `-f`.
+        assert_ne!(SerializationFormat::default(), SerializationFormat::Ndjson);
+    }
+
+    /// Zero results is an empty file, not a truncated one.
+    #[test]
+    fn an_empty_ndjson_result_is_empty_not_malformed() {
+        let out = write_results::<SpectrumOutput>(&[], SerializationFormat::Ndjson);
+        assert_eq!(out, "", "no records means no lines, and no array wrapper");
+    }
+
+    /// clap derives these from the variant names, so a rename changes the CLI.
+    #[test]
+    fn aggregator_and_format_flag_values_match_the_contract() {
+        fn name<T: ValueEnum>(v: T) -> String {
+            v.to_possible_value()
+                .expect("not skipped")
+                .get_name()
+                .to_string()
+        }
+
+        assert_eq!(
+            name(PossibleAggregator::SpectrumAggregator),
+            "spectrum-aggregator"
+        );
+        assert_eq!(
+            name(PossibleAggregator::ChromatogramAggregator),
+            "chromatogram-aggregator"
+        );
+        assert_eq!(name(SerializationFormat::Ndjson), "ndjson");
+    }
+
+    /// Contract invariant 5.
+    #[test]
+    fn the_results_basename_is_what_carafe_looks_for() {
+        assert_eq!(CARAFE_RESULTS_BASENAME, "results.json");
     }
 }

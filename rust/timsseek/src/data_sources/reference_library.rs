@@ -1,16 +1,18 @@
 use smallvec::SmallVec;
 use std::sync::Arc;
 use timsquery::IonAnnot;
-use timsquery::serde::LibraryArena;
+use timsquery::serde::TargetTable;
 
-use crate::errors::LibraryReadingError;
+use crate::errors::TargetReadingError;
 use timsquery::models::capabilities::{
     IsotopeStrategy,
     SeqFeatureState,
 };
 use timsquery::models::{
+    FlatIdx,
     Query,
-    QueryCollection,
+    RowIdx,
+    TargetColumns,
 };
 use timsquery::traits::QueryGeom;
 use timsquery::utils::constants::PROTON_MASS;
@@ -21,7 +23,7 @@ use crate::models::sequence::Peptide;
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
-    pub geom: QueryCollection<IonAnnot>,
+    pub geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     pub frag_intens: Vec<f32>,
 }
@@ -36,7 +38,7 @@ pub trait ExpectedIntensity {
 #[derive(Clone, Copy)]
 pub struct RefQuery<'a> {
     lib: &'a ReferenceLibrary,
-    geom: Query<&'a QueryCollection<IonAnnot>, IonAnnot>,
+    geom: Query<&'a TargetColumns<IonAnnot>, IonAnnot>,
 }
 
 impl ReferenceLibrary {
@@ -50,16 +52,21 @@ impl ReferenceLibrary {
 
     /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
     /// the flat->(row,variant) math to the arena's `split_flat` transform.
-    pub fn item_at(&self, flat_idx: usize) -> RefQuery<'_> {
-        let (row, variant) = self.geom.split_flat(flat_idx);
+    pub fn item_at(&self, flat: FlatIdx) -> RefQuery<'_> {
+        let (row, variant) = self.geom.split_flat(flat);
         RefQuery::new(self, row, variant)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
-        (0..self.len()).map(move |i| self.item_at(i))
+        self.geom.flats().map(move |f| self.item_at(f))
     }
 
-    /// Narrow a label-generic [`LibraryArena`] (timsquery's one library funnel)
+    /// Scored slots in batches of at most `n`; see `TargetColumns::chunks`.
+    pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<> {
+        self.geom.chunks(n)
+    }
+
+    /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
     /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
     ///
     /// Only the `Mzpaf` arena carries the ion chemistry (`IonAnnot`) AND the
@@ -69,16 +76,16 @@ impl ReferenceLibrary {
     ///   TSV/parquet bridge output. Scoring is intensity-driven, so a lib with
     ///   no reference intensities is unusable; the `.speclib` reader (the
     ///   workload) always populates `Some`.
-    pub fn from_arena(arena: LibraryArena) -> Result<Self, LibraryReadingError> {
+    pub fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         match arena {
-            LibraryArena::Mzpaf { geom, frag_intens } => {
+            TargetTable::Mzpaf { geom, frag_intens } => {
                 let frag_intens =
-                    frag_intens.ok_or_else(|| LibraryReadingError::UnsupportedFormat {
+                    frag_intens.ok_or_else(|| TargetReadingError::UnsupportedFormat {
                         message: "DIA-NN library has no fragment intensities".to_string(),
                     })?;
                 Ok(ReferenceLibrary { geom, frag_intens })
             }
-            LibraryArena::Str { .. } => Err(LibraryReadingError::UnsupportedFormat {
+            TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
                 message: "timsseek requires ion-annotated fragments (mzpaf); got string labels"
                     .to_string(),
             }),
@@ -86,23 +93,23 @@ impl ReferenceLibrary {
     }
 }
 
-impl TryFrom<LibraryArena> for ReferenceLibrary {
-    type Error = LibraryReadingError;
+impl TryFrom<TargetTable> for ReferenceLibrary {
+    type Error = TargetReadingError;
 
-    fn try_from(arena: LibraryArena) -> Result<Self, Self::Error> {
+    fn try_from(arena: TargetTable) -> Result<Self, Self::Error> {
         Self::from_arena(arena)
     }
 }
 
 impl<'a> RefQuery<'a> {
-    pub fn new(lib: &'a ReferenceLibrary, tgt: u32, variant: u8) -> Self {
+    pub fn new(lib: &'a ReferenceLibrary, tgt: RowIdx, variant: u8) -> Self {
         Self {
             lib,
             geom: Query::new(&lib.geom, tgt, variant),
         }
     }
 
-    pub fn geom(&self) -> &Query<&'a QueryCollection<IonAnnot>, IonAnnot> {
+    pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
         &self.geom
     }
 
@@ -114,10 +121,10 @@ impl<'a> RefQuery<'a> {
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
     /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide_in_group(&self, decoy_group: u32) -> Peptide {
-        let tgt = self.geom.target_idx();
+    pub fn materialize_peptide_in_group(&self, decoy_group: u64) -> Peptide {
+        let tgt = self.geom.row();
         let coll = &self.lib.geom;
-        let raw: Arc<str> = coll.seq_mod_blob[coll.seq_mod_range(tgt)].into();
+        let raw: Arc<str> = coll.seq_mod(tgt).into();
         let decoy = if self.geom.variant() == 0 {
             DecoyMarking::Target
         } else {
@@ -134,10 +141,9 @@ impl<'a> RefQuery<'a> {
 
 impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        let tgt = self.geom.target_idx();
-        let r = self.lib.geom.frag_range(tgt);
-        let labels = &self.lib.geom.frag_labels[r.clone()];
-        let intens = &self.lib.frag_intens[r];
+        let tgt = self.geom.row();
+        let labels = self.lib.geom.frag_labels(tgt);
+        let intens = &self.lib.frag_intens[self.lib.geom.frag_range(tgt)];
         debug_assert_eq!(
             labels.len(),
             intens.len(),
@@ -147,11 +153,11 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     }
 
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
-        let tgt = self.geom.target_idx();
+        let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.caps.isotopes;
-        let seq = &self.lib.geom.seq_strip_blob[self.lib.geom.seq_strip_range(tgt)];
-        let charge = self.lib.geom.charge[tgt] as f64;
-        let neutral = self.lib.geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
+        let seq = self.lib.geom.seq_strip(tgt);
+        let charge = self.lib.geom.charge(tgt) as f64;
+        let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (_src, env) = isotope_dist_or_averagine(seq, neutral);
         (0..n_isotopes as usize)
             .map(|i| (i as i8, env[i]))
@@ -162,8 +168,12 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
 impl<'a> QueryGeom for RefQuery<'a> {
     type Label = IonAnnot;
 
-    fn id(&self) -> u32 {
-        self.geom.id()
+    fn source_id(&self) -> Option<timsquery::models::LibraryId> {
+        self.geom.source_id()
+    }
+
+    fn output_id(&self) -> u64 {
+        self.geom.output_id()
     }
 
     fn mono_precursor_mz(&self) -> f64 {
@@ -209,31 +219,40 @@ impl<'a> QueryGeom for RefQuery<'a> {
 /// zero-heap) over the concrete type — see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
-    /// Positional library id: lazy target index, or the materialized eg's id.
-    fn library_id(&self) -> u32;
+    /// The id this result carries, so a caller can map it onto the row they
+    /// asked about: the source id where the file gave one, otherwise the id
+    /// minted for it at load.
+    fn library_id(&self) -> u64;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
-    /// Target-decoy competition group id.
-    fn decoy_group(&self) -> u32;
+    /// Competition group id. Declared by the file when it says, minted at load
+    /// otherwise — never the row's position.
+    fn decoy_group(&self) -> u64;
+    /// The row this result came from. Opaque and unprintable, so it can order
+    /// the q-value tie-break without any caller-supplied value reaching it.
+    fn row(&self) -> RowIdx;
     /// Materialize the output identity `Peptide`.
     fn materialize_peptide(&self) -> Peptide;
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
-    fn library_id(&self) -> u32 {
-        self.geom().id()
+    fn library_id(&self) -> u64 {
+        self.geom().output_id()
+    }
+
+    fn row(&self) -> RowIdx {
+        self.geom().row()
     }
 
     fn is_target(&self) -> bool {
         // Honor stored decoys uniformly (correct under Passthrough): a row is a
         // target only when it is not a stored decoy AND is the variant-0 slot.
-        let tgt = self.geom().target_idx();
-        !self.lib.geom.is_decoy[tgt] && self.geom().variant() == 0
+        let tgt = self.geom().row();
+        !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
-    fn decoy_group(&self) -> u32 {
-        u32::try_from(self.geom().target_idx())
-            .expect("target index exceeds u32::MAX (library_id/decoy_group are u32)")
+    fn decoy_group(&self) -> u64 {
+        self.lib.geom.decoy_group(self.geom().row())
     }
 
     fn materialize_peptide(&self) -> Peptide {
@@ -246,11 +265,25 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
-    use timsquery::models::QueryCollection;
+
+    /// Indices come from the arena; there is no constructor from an integer.
+    fn row(lib: &ReferenceLibrary, i: usize) -> RowIdx {
+        lib.geom.rows().nth(i).unwrap()
+    }
+
+    fn flat(lib: &ReferenceLibrary, i: usize) -> FlatIdx {
+        lib.geom.flats().nth(i).unwrap()
+    }
+
+    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        // Decoys are opted into here, as timsseek does in production via
+        // `finalize_reference_library`; timsquery never turns them on itself.
+        let mut caps = TargetCapabilities::default_diann();
+        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
+        let mut geom = TargetColumns::with_capabilities(caps);
         geom.push_target(
             900.4,
             2,
@@ -272,11 +305,11 @@ mod tests {
     }
 
     #[test]
-    fn library_arena_narrows_to_reference_library() {
-        use timsquery::models::QueryCollection;
-        use timsquery::models::capabilities::LibCapabilities;
-        use timsquery::serde::LibraryArena;
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+    fn target_table_narrows_to_reference_library() {
+        use timsquery::models::TargetColumns;
+        use timsquery::models::capabilities::TargetCapabilities;
+        use timsquery::serde::TargetTable;
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -288,24 +321,24 @@ mod tests {
             &[],
         );
         geom.seal();
-        let arena = LibraryArena::Mzpaf {
+        let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: Some(vec![1.0]),
         };
         let lib: ReferenceLibrary = arena.try_into().unwrap();
         assert_eq!(lib.frag_intens.len(), 1);
 
-        let mut sgeom: QueryCollection<std::sync::Arc<str>> =
-            QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut sgeom: TargetColumns<std::sync::Arc<str>> =
+            TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         sgeom.seal();
-        let s = LibraryArena::Str { geom: sgeom };
+        let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
     }
 
     #[test]
     fn expected_fragments_pair_labels_with_intensities() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, 0, 0);
+        let q = RefQuery::new(&lib, row(&lib, 0), 0);
         let pairs: Vec<_> = q.iter_expected_fragments().collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, IonAnnot::try_from("y3").unwrap());
@@ -316,7 +349,7 @@ mod tests {
     #[test]
     fn precursor_envelope_is_max_normalized_three_peaks() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, 0, 0);
+        let q = RefQuery::new(&lib, row(&lib, 0), 0);
         let env = q.expected_precursor_envelope();
         assert_eq!(env.len(), 3);
         // Envelopes are MAX-normalized (base peak = 1.0), matching the
@@ -334,10 +367,10 @@ mod tests {
     #[test]
     fn decoy_variant_reuses_target_intensities() {
         let lib = tiny_ref_lib();
-        let t: Vec<_> = RefQuery::new(&lib, 0, 0)
+        let t: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 0)
             .iter_expected_fragments()
             .collect();
-        let d: Vec<_> = RefQuery::new(&lib, 0, 1)
+        let d: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 1)
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");
@@ -349,9 +382,9 @@ mod tests {
         // scoring reads `RefQuery` flyweights via `item_at` (no materialized
         // arm). Variant 0 is the target.
         let lib = tiny_ref_lib();
-        let scored = lib.item_at(0);
+        let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
-        assert_eq!(scored.library_id(), QueryGeom::id(&scored));
+        assert_eq!(scored.library_id(), 0); // flat index 0 -> target 0
         assert_eq!(scored.decoy_group(), 0);
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
         assert_eq!(got_frags.len(), 2);
@@ -363,10 +396,10 @@ mod tests {
     fn flat_index_maps_to_target_and_variant_in_tpm_order() {
         let lib = tiny_ref_lib(); // 1 target, n_decoys=2 -> len 3
         assert_eq!(lib.len(), 3);
-        assert_eq!(lib.item_at(0).geom().variant(), 0);
-        assert_eq!(lib.item_at(1).geom().variant(), 1);
-        assert_eq!(lib.item_at(2).geom().variant(), 2);
-        assert_eq!(lib.item_at(1).geom().target_idx(), 0);
+        assert_eq!(lib.item_at(flat(&lib, 0)).geom().variant(), 0);
+        assert_eq!(lib.item_at(flat(&lib, 1)).geom().variant(), 1);
+        assert_eq!(lib.item_at(flat(&lib, 2)).geom().variant(), 2);
+        assert_eq!(lib.item_at(flat(&lib, 1)).geom().row(), row(&lib, 0));
         let all: Vec<_> = lib.iter().map(|q| q.geom().variant()).collect();
         assert_eq!(all, vec![0, 1, 2]);
     }

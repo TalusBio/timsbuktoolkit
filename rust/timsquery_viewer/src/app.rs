@@ -50,7 +50,7 @@ type ChromatogramComputeResult = Result<
         crate::chromatogram_processor::ChromatogramCollector<IonAnnot, f32>,
         timsseek::ExpectedIntensities<IonAnnot>,
         u64, // selected_idx as cache key
-        timsquery::models::elution_group::TimsElutionGroup<IonAnnot>,
+        timsquery::models::target::Target<IonAnnot>,
     ),
     String,
 >;
@@ -593,7 +593,7 @@ impl ViewerApp {
 
     /// Compute chromatogram in background thread
     fn compute_chromatogram_background(
-        elution_group: timsquery::models::elution_group::TimsElutionGroup<IonAnnot>,
+        elution_group: timsquery::models::target::Target<IonAnnot>,
         expected_intensities: timsseek::ExpectedIntensities<IonAnnot>,
         selected_idx: usize,
         index: Arc<IndexedPeaksHandle>,

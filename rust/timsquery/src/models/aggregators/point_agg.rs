@@ -1,5 +1,5 @@
 use crate::KeyLike;
-use crate::models::elution_group::TimsElutionGroup;
+use crate::models::target::Target;
 use crate::traits::QueryGeom;
 use crate::traits::queriable_data::HasQueryData;
 use serde::Serialize;
@@ -24,7 +24,7 @@ pub struct PointIntensityAggregator<T: KeyLike> {
 }
 
 impl<T: KeyLike> PointIntensityAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<TimsElutionGroup<T>>) -> Self {
+    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
         Self::new(elution_group.as_ref())
     }
 
@@ -42,7 +42,7 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
             fragment_mzs.push(mz);
         }
         Self {
-            id: eg.id() as u64,
+            id: eg.output_id(),
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
@@ -93,12 +93,12 @@ impl<T: KeyLike> HasQueryData<T> for PointIntensityAggregator<T> {
 
 #[derive(Debug, Clone)]
 pub struct RawPeakVectorAggregator<T: KeyLike> {
-    pub query: Arc<TimsElutionGroup<T>>,
+    pub query: Arc<Target<T>>,
     pub peaks: RawPeakVectorArrays,
 }
 
 impl<T: KeyLike> RawPeakVectorAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<TimsElutionGroup<T>>) -> Self {
+    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
         Self {
             query: elution_group,
             peaks: RawPeakVectorArrays::new(),

@@ -23,7 +23,7 @@ use super::skip::SkipReason;
 ///   Some(n) -> filter_zero_intensity_ions + select_top_n_fragments(n)
 ///   None    -> no filtering, all ions kept
 pub fn build_extraction<T, I>(
-    elution_group: &timsquery::TimsElutionGroup<T>,
+    elution_group: &timsquery::Target<T>,
     mut expected_intensities: ExpectedIntensities<T>,
     index: &I,
     tolerance: &Tolerance,
@@ -92,7 +92,7 @@ fn classify_post_add_query<T: KeyLike>(
 /// allocated. Subsequent calls reset the existing one in place.
 pub fn build_extraction_into<T, I>(
     scratch: &mut Option<Extraction<T>>,
-    elution_group: &timsquery::TimsElutionGroup<T>,
+    elution_group: &timsquery::Target<T>,
     rt_override: Option<f32>,
     expected_intensities: &ExpectedIntensities<T>,
     index: &I,

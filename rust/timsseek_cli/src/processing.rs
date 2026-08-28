@@ -173,7 +173,7 @@ mod calib_dash_hook {
                 calibrants.map(|c| calib_dash::CalibrantPoint {
                     library_rt: c.library_rt.0 as f64,
                     observed_rt: c.apex_rt.0 as f64,
-                    speclib_index: c.speclib_index,
+                    library_id: c.library_id,
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
@@ -242,8 +242,8 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     fn rt_range(lib: &Speclib) -> (f32, f32) {
         let mut min_rt = f32::INFINITY;
         let mut max_rt = f32::NEG_INFINITY;
-        for flat in 0..lib.len() {
-            let rt = lib.item_at(flat).rt_seconds();
+        for q in lib.iter() {
+            let rt = q.rt_seconds();
             min_rt = min_rt.min(rt);
             max_rt = max_rt.max(rt);
         }
@@ -410,8 +410,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // Matching requires same precursor (0.01 Da) + charge + at least 5 shared fragment masses.
     let main_lookup: Option<PrecursorFragmentLookup> = if calib_lib.is_some() {
         let mut map: PrecursorFragmentLookup = std::collections::HashMap::new();
-        for flat in 0..speclib.len() {
-            let item = speclib.item_at(flat);
+        for item in speclib.iter() {
             let mz_key = (item.mono_precursor_mz() * 100.0).round() as i64;
             let charge = item.precursor_charge();
             let mut frag_mzs: Vec<i64> = item
@@ -672,12 +671,11 @@ fn phase1_prescore<I: ScorerQueriable>(
 
     // Chunk the flat index space `0..len` (no materialized slice on the lazy
     // arm); each flat index is also the global speclib index.
-    for chunk_start in (0..total).step_by(chunk_size).progress_with(pb) {
-        let end = (chunk_start + chunk_size).min(total);
-        let chunk_heap = pipeline.prescore_batch(speclib, chunk_start..end, config, &mut timings);
+    for (batch_idx, batch) in speclib.chunks(chunk_size).enumerate().progress_with(pb) {
+        let chunk_heap = pipeline.prescore_batch(speclib, &batch, config, &mut timings);
         global_heap = global_heap.merge(chunk_heap);
 
-        calib_dash_hook::on_batch(&mut dash, chunk_start / chunk_size, global_heap.iter());
+        calib_dash_hook::on_batch(&mut dash, batch_idx, global_heap.iter());
     }
     calib_dash_hook::finish(&mut dash);
 
@@ -944,10 +942,9 @@ fn phase3_score<I: ScorerQueriable>(
 
     // Chunk the flat index space `0..len` and hand each range to the batch
     // scorer, which drives the lazy flyweight by index.
-    for chunk_start in (0..total_peptides).step_by(chunk_size).progress_with(pb) {
-        let end = (chunk_start + chunk_size).min(total_peptides);
+    for batch in speclib.chunks(chunk_size).progress_with(pb) {
         let (batch_results, batch_timings, batch_skips) =
-            pipeline.score_calibrated_batch(speclib, chunk_start..end, calibration);
+            pipeline.score_calibrated_batch(speclib, &batch, calibration);
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);
@@ -1083,7 +1080,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     // Results are sorted by (decoy_group_id, precursor_charge, score desc)
     // We store (group_id, charge, index, ln_1p(main_score)).
     let mut ln1p_delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
-    let mut previous: Option<(u32, u8, usize, f32)> = None;
+    let mut previous: Option<(u64, u8, usize, f32)> = None;
 
     for (i, current) in results.iter().enumerate() {
         let current_key = (
@@ -1120,7 +1117,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
     // We need indices to grab the right deltas, so collect the deduped indices first.
     let mut kept_indices: Vec<usize> = Vec::with_capacity(results.len());
     {
-        let mut last_key: Option<(u32, u8)> = None;
+        let mut last_key: Option<(u64, u8)> = None;
         for (i, result) in results.iter().enumerate() {
             let key = (
                 result.scoring.identity.decoy_group_id,
@@ -1204,7 +1201,7 @@ mod tests {
     use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;
 
-    fn candidate(seq: &str, mz: f64, is_target: bool, decoy_group: u32) -> ScoredCandidate {
+    fn candidate(seq: &str, mz: f64, is_target: bool, decoy_group: u64) -> ScoredCandidate {
         let decoy = if is_target {
             DecoyMarking::Target
         } else {

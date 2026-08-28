@@ -25,6 +25,7 @@
 //! ```
 
 use std::fmt::Display;
+use timsquery::models::RowIdx;
 
 use super::apex::ApexConfig;
 use super::{
@@ -89,7 +90,10 @@ pub struct PeptideMetadata {
 
     pub charge: u8,
 
-    pub library_id: u32,
+    pub library_id: u64,
+
+    /// The arena row scored, carried for the q-value determinism sort.
+    pub row: RowIdx,
 
     /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).
     pub library_rt: f32,

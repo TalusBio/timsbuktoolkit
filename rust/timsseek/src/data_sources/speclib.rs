@@ -1,6 +1,6 @@
 use crate::IonAnnot;
 use crate::data_sources::reference_library::ReferenceLibrary;
-use crate::errors::LibraryReadingError;
+use crate::errors::TargetReadingError;
 use crate::fragment_mass::{
     IsotopeSource,
     isotope_dist_or_averagine,
@@ -22,9 +22,9 @@ use std::path::{
     Path,
     PathBuf,
 };
-use timsquery::models::QueryCollection;
+use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
-use timsquery::serde::read_library_file as read_timsquery_library;
+use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
 /// The serializable, on-disk form of a native speclib element. Kept backwards
@@ -175,7 +175,7 @@ fn strip_mods(s: &str) -> String {
 /// Summary of a [`finalize_reference_library`] call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
-    /// Physical stored rows (pre decoy expansion), i.e. `QueryCollection::n_rows`.
+    /// Physical stored rows (pre decoy expansion), i.e. `TargetColumns::n_rows`.
     pub n_rows: usize,
     pub n_averagine_fallback: usize,
     pub sequence_features: SeqFeatureState,
@@ -197,11 +197,11 @@ pub struct LoadReport {
 /// disables sequence-derived features library-wide. The same pass counts
 /// averagine isotope fallbacks for the returned `LoadReport`.
 fn finalize_reference_library(
-    mut geom: QueryCollection<IonAnnot>,
+    mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
     policy: crate::models::DecoyPolicy,
 ) -> (ReferenceLibrary, LoadReport) {
-    let n_stored_decoys = geom.is_decoy.iter().filter(|&&d| d).count();
+    let n_stored_decoys = geom.n_stored_decoys();
     geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
     geom.seal();
 
@@ -241,17 +241,17 @@ fn finalize_reference_library(
     }
     let mut all_parsable = true;
     let mut n_averagine_fallback = 0usize;
-    for tgt in 0..n_rows {
+    for tgt in geom.rows() {
         if all_parsable {
-            let modified = &geom.seq_mod_blob[geom.seq_mod_range(tgt)];
+            let modified = geom.seq_mod(tgt);
             let normalized = normalize_to_proforma(modified);
             if parse_sequence(&normalized).is_none() {
                 all_parsable = false;
             }
         }
-        let stripped = &geom.seq_strip_blob[geom.seq_strip_range(tgt)];
-        let charge = geom.charge[tgt] as f64;
-        let neutral_mass = geom.precursor_mz[tgt] * charge - charge * PROTON_MASS;
+        let stripped = geom.seq_strip(tgt);
+        let charge = geom.charge(tgt) as f64;
+        let neutral_mass = geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
         if isotope_src == IsotopeSource::Averagine {
             n_averagine_fallback += 1;
@@ -332,20 +332,20 @@ impl SpeclibFormat {
 /// `Speclib::from_file_with_format`), so the reader stays at the serializable
 /// element and does not eagerly build per-row scoring items.
 pub struct SpeclibReader<'a> {
-    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send + 'a>,
+    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send + 'a>,
 }
 
 impl<'a> SpeclibReader<'a> {
     pub fn new<R: Read + Send + 'a>(
         reader: R,
         format: SpeclibFormat,
-    ) -> Result<Self, LibraryReadingError> {
-        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, LibraryReadingError>> + Send> =
+    ) -> Result<Self, TargetReadingError> {
+        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send> =
             match format {
                 SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
                 SpeclibFormat::NdJsonZstd => {
                     let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
+                        TargetReadingError::SpeclibParsingError {
                             source: serde_json::Error::io(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 e,
@@ -358,7 +358,7 @@ impl<'a> SpeclibReader<'a> {
                 SpeclibFormat::MessagePack => Box::new(MessagePackReader::new(reader)),
                 SpeclibFormat::MessagePackZstd => {
                     let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        LibraryReadingError::SpeclibParsingError {
+                        TargetReadingError::SpeclibParsingError {
                             source: serde_json::Error::io(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 e,
@@ -375,7 +375,7 @@ impl<'a> SpeclibReader<'a> {
 }
 
 impl Iterator for SpeclibReader<'_> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -393,7 +393,7 @@ impl<R: BufRead> NdJsonReader<R> {
 }
 
 impl<R: BufRead> Iterator for NdJsonReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
@@ -407,7 +407,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
                 let elem: SerSpeclibElement = match serde_json::from_str(&line) {
                     Ok(x) => x,
                     Err(e) => {
-                        return Some(Err(LibraryReadingError::SpeclibParsingError {
+                        return Some(Err(TargetReadingError::SpeclibParsingError {
                             source: e,
                             context: "Error parsing NDJSON line",
                         }));
@@ -416,7 +416,7 @@ impl<R: BufRead> Iterator for NdJsonReader<R> {
 
                 Some(Ok(elem))
             }
-            Err(e) => Some(Err(LibraryReadingError::FileReadingError {
+            Err(e) => Some(Err(TargetReadingError::FileReadingError {
                 source: e,
                 context: "Error reading line",
                 path: PathBuf::new(),
@@ -438,7 +438,7 @@ impl<R: Read> MessagePackReader<R> {
 }
 
 impl<R: Read> Iterator for MessagePackReader<R> {
-    type Item = Result<SerSpeclibElement, LibraryReadingError>;
+    type Item = Result<SerSpeclibElement, TargetReadingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use serde::Deserialize;
@@ -455,7 +455,7 @@ impl<R: Read> Iterator for MessagePackReader<R> {
             {
                 None
             } // EOF
-            Err(e) => Some(Err(LibraryReadingError::SpeclibParsingError {
+            Err(e) => Some(Err(TargetReadingError::SpeclibParsingError {
                 source: serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
@@ -482,13 +482,13 @@ impl Speclib {
         if n_rows == 0 {
             return 0.0;
         }
-        self.geom.frag_labels.len() as f64 / n_rows as f64
+        self.geom.n_fragments() as f64 / n_rows as f64
     }
 
     pub fn from_file(
         path: &Path,
         decoy_policy: crate::models::DecoyPolicy,
-    ) -> Result<Self, LibraryReadingError> {
+    ) -> Result<Self, TargetReadingError> {
         // Native timsseek formats are matched by EXTENSION ONLY: a native
         // extension commits to the native reader and surfaces its error. A
         // `.speclib` matches no native extension and falls through to the
@@ -504,7 +504,7 @@ impl Speclib {
 
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
         // `.speclib`/TSV/parquet, Spectronaut, Skyline, JSON), which returns a
-        // label-generic `LibraryArena`. One path from here: narrow the arena
+        // label-generic `TargetTable`. One path from here: narrow the arena
         // to the ion-annotated `ReferenceLibrary`, apply the decoy strategy,
         // seal, gate sequence features, and hand back the lazy arena.
         tracing::info!(
@@ -527,13 +527,12 @@ impl Speclib {
         path: &Path,
         format: SpeclibFormat,
         decoy_policy: crate::models::DecoyPolicy,
-    ) -> Result<Self, LibraryReadingError> {
-        let file =
-            std::fs::File::open(path).map_err(|e| LibraryReadingError::FileReadingError {
-                source: e,
-                context: "Error opening speclib file",
-                path: PathBuf::from(path),
-            })?;
+    ) -> Result<Self, TargetReadingError> {
+        let file = std::fs::File::open(path).map_err(|e| TargetReadingError::FileReadingError {
+            source: e,
+            context: "Error opening speclib file",
+            path: PathBuf::from(path),
+        })?;
 
         let reader = SpeclibReader::new(file, format)?;
 
@@ -542,8 +541,9 @@ impl Speclib {
         // scoring items into an intermediate Vec. Each element's fragment labels/mzs/
         // intensities are parallel vectors in the native format, so the
         // reference-intensity sidecar is filled in fragment-push order.
-        let mut geom =
-            QueryCollection::with_capabilities(timsquery::models::LibCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(
+            timsquery::models::TargetCapabilities::default_diann(),
+        );
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for elem in reader {
@@ -552,7 +552,7 @@ impl Speclib {
             if eg.fragment_labels.len() != eg.fragment_mzs.len()
                 || eg.fragment_labels.len() != eg.fragment_intensities.len()
             {
-                return Err(LibraryReadingError::UnsupportedFormat {
+                return Err(TargetReadingError::UnsupportedFormat {
                     message: format!(
                         "speclib element {:?}: fragment labels ({}), mzs ({}) and intensities ({}) must be parallel",
                         elem.precursor.sequence,
@@ -601,7 +601,7 @@ impl Speclib {
             "Speclib stats: lazy arena, {} targets ({} flat scoring entries, {} total fragment slots)",
             self.geom.n_rows(),
             self.len(),
-            self.geom.frag_labels.len(),
+            self.geom.n_fragments(),
         );
     }
 }
@@ -622,11 +622,11 @@ impl<W: std::io::Write> SpeclibWriter<W> {
         })
     }
 
-    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), LibraryReadingError> {
+    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), TargetReadingError> {
         match &mut self.inner {
             SpeclibWriterInner::MsgpackZstd(encoder) => {
                 rmp_serde::encode::write(encoder, elem).map_err(|e| {
-                    LibraryReadingError::SpeclibParsingError {
+                    TargetReadingError::SpeclibParsingError {
                         source: serde_json::Error::io(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             e,
@@ -970,14 +970,14 @@ mod tests {
         // packing, so assert it directly rather than re-deriving groups.
         let n_target_indices = lib.geom.n_rows();
         assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
-        for tgt in 0..n_target_indices as u32 {
+        for tgt in lib.geom.rows() {
             let variants: Vec<u8> = (0..3)
                 .map(|v| RefQuery::new(lib, tgt, v).geom().variant())
                 .collect();
             assert_eq!(
                 variants,
                 vec![0, 1, 2],
-                "target {tgt} should have exactly 1 target + 2 decoy variants"
+                "each row should have exactly 1 target + 2 decoy variants"
             );
         }
     }
@@ -1003,7 +1003,7 @@ mod tests {
         // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
-        for tgt in 0..lib.geom.n_rows() as u32 {
+        for tgt in lib.geom.rows() {
             let target = RefQuery::new(lib, tgt, 0);
             let plus = RefQuery::new(lib, tgt, 1);
             let minus = RefQuery::new(lib, tgt, 2);
@@ -1107,7 +1107,7 @@ mod tests {
         let lib = expect_lazy(&speclib);
         assert!(!lib.is_empty(), "library should have entries");
 
-        let first = lib.item_at(0);
+        let first = lib.item_at(lib.geom.flats().next().unwrap());
         assert!(first.is_target(), "flat index 0 must be a target variant");
 
         let frags: Vec<_> = first.iter_expected_fragments().collect();
@@ -1184,10 +1184,19 @@ mod tests {
         assert_eq!(lib.geom.variants_per_row(), 1, "downgraded to Passthrough");
         assert_eq!(lib.len(), 2, "one target + one stored decoy, 1:1");
 
-        assert!(lib.item_at(0).is_target(), "row 0 is the target");
-        assert!(!lib.item_at(1).is_target(), "row 1 is the stored decoy");
+        assert!(
+            lib.item_at(lib.geom.flats().next().unwrap()).is_target(),
+            "row 0 is the target"
+        );
+        assert!(
+            !lib.item_at(lib.geom.flats().nth(1).unwrap()).is_target(),
+            "row 1 is the stored decoy"
+        );
 
-        let frags: Vec<_> = lib.item_at(0).iter_expected_fragments().collect();
+        let frags: Vec<_> = lib
+            .item_at(lib.geom.flats().next().unwrap())
+            .iter_expected_fragments()
+            .collect();
         assert_eq!(frags.len(), 2, "target ships two reference fragments");
         for (_label, intensity) in frags {
             assert!(intensity > 0.0, "reference intensities are positive");
@@ -1271,11 +1280,11 @@ mod tests {
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
-        use timsquery::models::QueryCollection;
-        use timsquery::models::capabilities::LibCapabilities;
-        use timsquery::serde::LibraryArena;
+        use timsquery::models::TargetColumns;
+        use timsquery::models::capabilities::TargetCapabilities;
+        use timsquery::serde::TargetTable;
 
-        let mut geom = QueryCollection::with_capabilities(LibCapabilities::default_diann());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_target(
             900.4,
             2,
@@ -1287,7 +1296,7 @@ mod tests {
             &[],
         );
         geom.seal();
-        let arena = LibraryArena::Mzpaf {
+        let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: None,
         };

@@ -57,10 +57,10 @@ pub fn curve_delta(
     }
 }
 
-/// `(admitted, evicted)` between two heap snapshots, by `speclib_index`.
+/// `(admitted, evicted)` between two heap snapshots, by `library_id`.
 pub fn churn(prev: &[CalibrantPoint], cur: &[CalibrantPoint]) -> (usize, usize) {
-    let prev_set: HashSet<usize> = prev.iter().map(|p| p.speclib_index).collect();
-    let cur_set: HashSet<usize> = cur.iter().map(|p| p.speclib_index).collect();
+    let prev_set: HashSet<u64> = prev.iter().map(|p| p.library_id).collect();
+    let cur_set: HashSet<u64> = cur.iter().map(|p| p.library_id).collect();
     let admitted = cur_set.difference(&prev_set).count();
     let evicted = prev_set.difference(&cur_set).count();
     (admitted, evicted)
@@ -78,7 +78,7 @@ mod tests {
         CalibrantPoint {
             library_rt: 1.0,
             observed_rt: 1.0,
-            speclib_index: idx,
+            library_id: idx as u64,
         }
     }
 

@@ -1,7 +1,7 @@
 use egui::Color32;
 use std::collections::HashMap;
 use timsquery::ion::IonAnnot;
-use timsquery::models::elution_group::TimsElutionGroup;
+use timsquery::models::target::Target;
 use timsquery::models::tolerance::{
     RtTolerance,
     Tolerance,
@@ -47,7 +47,7 @@ pub(crate) struct ChromatogramComputationResult {
     pub output: ChromatogramOutput,
     pub collector: ChromatogramCollector<IonAnnot, f32>,
     pub expected_intensities: ExpectedIntensities<IonAnnot>,
-    pub elution_group: TimsElutionGroup<IonAnnot>,
+    pub elution_group: Target<IonAnnot>,
 }
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ struct ChromatogramResult {
     output: ChromatogramOutput,
     scoring: Option<ScoringResult>,
     expected_intensities: ExpectedIntensities<IonAnnot>,
-    elution_group: TimsElutionGroup<IonAnnot>,
+    elution_group: Target<IonAnnot>,
 }
 
 #[derive(Debug, Default)]
@@ -270,7 +270,7 @@ impl ComputedState {
 
     pub(crate) fn build_collector(
         index: &IndexedPeaksHandle,
-        elution_group: TimsElutionGroup<IonAnnot>,
+        elution_group: Target<IonAnnot>,
     ) -> Result<ChromatogramCollector<IonAnnot, f32>, ViewerError> {
         let max_range = index.ms1_cycle_mapping().range_milis();
         let collector = ChromatogramCollector::new(
@@ -286,7 +286,7 @@ impl ComputedState {
     #[instrument(skip_all, fields(eg_id = %elution_group.id()))]
     pub(crate) fn generate_chromatogram(
         collector: &mut ChromatogramCollector<IonAnnot, f32>,
-        elution_group: &TimsElutionGroup<IonAnnot>,
+        elution_group: &Target<IonAnnot>,
         index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,

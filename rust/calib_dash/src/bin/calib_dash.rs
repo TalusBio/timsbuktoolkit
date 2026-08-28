@@ -43,7 +43,7 @@ fn main() {
         .map(|(i, p)| CalibrantPoint {
             library_rt: p[0],
             observed_rt: p[1],
-            speclib_index: i,
+            library_id: i as u64,
         })
         .collect();
     let n_calibrants = points.len();

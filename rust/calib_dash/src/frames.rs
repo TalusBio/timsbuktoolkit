@@ -20,7 +20,7 @@ pub const DEFAULT_RUN_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 /// has to clear one frame's worth of points.
 pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 
-/// One heap entry, flattened. `speclib_index` is carried because churn diffing
+/// One heap entry, flattened. `library_id` is carried because churn diffing
 /// needs a stable identity for a calibrant: RT coordinates are not unique and
 /// cannot distinguish "same peptide, re-scored" from "different peptide, same
 /// RT".
@@ -28,7 +28,7 @@ pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 pub struct CalibrantPoint {
     pub library_rt: f64,
     pub observed_rt: f64,
-    pub speclib_index: usize,
+    pub library_id: u64,
 }
 
 struct FrameIndex {
@@ -73,7 +73,7 @@ impl FrameStore {
             CalibrantPoint {
                 library_rt: 0.0,
                 observed_rt: 0.0,
-                speclib_index: 0
+                library_id: 0
             };
             (stride_capacity + 1) * n_calibrants
         ];
@@ -148,7 +148,7 @@ mod tests {
         CalibrantPoint {
             library_rt: i as f64,
             observed_rt: i as f64 * 2.0,
-            speclib_index: i,
+            library_id: i as u64,
         }
     }
 
@@ -156,7 +156,7 @@ mod tests {
     /// pass for another's.
     fn pt_in(chunk: usize, i: usize) -> CalibrantPoint {
         CalibrantPoint {
-            speclib_index: chunk * 100 + i,
+            library_id: (chunk * 100 + i) as u64,
             ..pt(i)
         }
     }
