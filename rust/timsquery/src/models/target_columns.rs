@@ -5,7 +5,6 @@ use crate::models::capabilities::{
 };
 use crate::models::query_handle::QueryRef;
 use crate::models::source_id::{
-    LibraryId,
     OwnedSourceId,
     SourceId,
     SourceIdError,
@@ -221,14 +220,14 @@ impl<L: KeyLike> TargetColumns<L> {
         self.charge.len()
     }
 
-    /// Attach caller-supplied ids. Call after every `push_row`, before `seal`.
-    pub fn set_source_ids(&mut self, ids: Vec<LibraryId>) -> Result<(), SourceIdError> {
-        self.source_ids = SourceIds::numeric(ids, self.n_rows())?;
-        Ok(())
-    }
-
-    /// Attach ids of whichever shape the file used.
-    pub fn set_source_ids_owned(&mut self, ids: Vec<OwnedSourceId>) -> Result<(), SourceIdError> {
+    /// Attach the ids the file gave its rows, in whichever shape it used.
+    /// Call after every `push_row`, before `seal`.
+    pub fn set_source_ids<I, S>(&mut self, ids: I) -> Result<(), SourceIdError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OwnedSourceId>,
+    {
+        let ids: Vec<OwnedSourceId> = ids.into_iter().map(Into::into).collect();
         self.source_ids = SourceIds::owned(ids, self.n_rows())?;
         Ok(())
     }
@@ -262,17 +261,6 @@ impl<L: KeyLike> TargetColumns<L> {
     pub fn output_id(&self, tgt: RowIdx) -> SourceId<'_> {
         self.source_id(tgt)
             .expect("sealed targets have source ids; seal() mints any that are missing")
-    }
-
-    /// Attach ids the file spelled as text, e.g. DIA-NN's
-    /// `transition_group_id`. Call after every `push_row`, before `seal`.
-    pub fn set_source_ids_text<I, S>(&mut self, ids: I) -> Result<(), SourceIdError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.source_ids = SourceIds::text(ids, self.n_rows())?;
-        Ok(())
     }
 
     pub fn charge(&self, tgt: RowIdx) -> u8 {

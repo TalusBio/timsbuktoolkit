@@ -527,7 +527,7 @@ impl SpecLib {
 
         // The entry name is DIA-NN's `transition_group_id`, so results name the
         // precursor the way the library does rather than by a minted counter.
-        geom.set_source_ids_text(source_ids)?;
+        geom.set_source_ids(source_ids)?;
 
         Ok((geom, frag_intens, stats, at_eof))
     }

@@ -417,7 +417,7 @@ fn seal_with_source_ids<L: KeyLike, T: KeyLike>(
         .iter()
         .map(|eg| eg.id().to_owned_id())
         .collect::<Vec<_>>();
-    geom.set_source_ids_owned(ids)?;
+    geom.set_source_ids(ids)?;
     geom.seal();
     Ok(())
 }
