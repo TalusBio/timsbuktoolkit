@@ -14,16 +14,22 @@ use crate::traits::DecoyShift;
 
 pub use index::{
     FlatIdx,
+    GroupCode,
     RowIdx,
 };
 
-/// How the arena reaches its own memory.
+/// The handles the arena hands out: two ways of addressing its memory, and one
+/// way of naming a competition group.
 ///
-/// Both types are opaque outside this crate: no constructor from an integer,
-/// no accessor yielding one, no `Display` and no `Serialize`. A position can
-/// therefore not be invented by a caller, confused with an id, or written to
-/// an output file — it can only be obtained from the arena that owns the rows
-/// and handed straight back to it.
+/// All three are opaque: no constructor from an integer, no accessor yielding
+/// one, no `Display`, no `Serialize`. So none of them can be invented by a
+/// caller, confused with an id, or written to an output file — a handle can
+/// only be obtained from the arena and handed straight back to it.
+///
+/// Construction is `pub(super)`, i.e. this file, so the arena is the only thing
+/// that mints one. `RowIdx` is `pub(in crate::models)` only because the
+/// flyweight in `query_handle` packs and unpacks it; unpacking is the last
+/// place outside here that builds one.
 mod index {
     /// A stored row: `0..n_rows()`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,22 +42,43 @@ mod index {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FlatIdx(u32);
 
+    /// Which competition group a row belongs to, as a handle rather than a
+    /// value. Rows that compete share one, and that is all a consumer needs:
+    /// grouping sorts by it and compares it, and never reads it. Opaque for the
+    /// same reason as the indices above — a handle that could be printed would
+    /// end up in an output file as though it meant something.
+    ///
+    /// `Ord` because grouping works by sorting competitors adjacent; any total
+    /// order does, since only equality carries meaning.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GroupCode(u32);
+
     impl RowIdx {
-        pub(crate) fn new(row: u32) -> Self {
+        pub(in crate::models) fn new(row: u32) -> Self {
             Self(row)
         }
 
-        pub(crate) fn get(self) -> usize {
+        pub(in crate::models) fn get(self) -> usize {
+            self.0 as usize
+        }
+    }
+
+    impl GroupCode {
+        pub(super) fn new(code: u32) -> Self {
+            Self(code)
+        }
+
+        pub(super) fn get(self) -> usize {
             self.0 as usize
         }
     }
 
     impl FlatIdx {
-        pub(crate) fn new(flat: u32) -> Self {
+        pub(super) fn new(flat: u32) -> Self {
             Self(flat)
         }
 
-        pub(crate) fn get(self) -> usize {
+        pub(super) fn get(self) -> usize {
             self.0 as usize
         }
     }
@@ -71,6 +98,14 @@ mod index {
             Self(u32::MAX)
         }
     }
+}
+
+/// Interned competition groups: `codes[row]` points at `labels`, so rows that
+/// compete share one label rather than each storing a copy.
+#[derive(Debug, Clone)]
+pub struct DecoyGroups {
+    codes: Vec<GroupCode>,
+    labels: SourceIds,
 }
 
 #[derive(Debug, Clone)]
@@ -95,12 +130,15 @@ pub struct TargetColumns<L: KeyLike> {
     /// columns. Minted at [`Self::seal`] for formats that carry no ids, so a
     /// sealed arena always has one per row.
     pub(crate) source_ids: SourceIds,
-    /// Which competition group each row belongs to, one entry per row. Empty
-    /// until [`Self::seal`], which mints it when the input did not say. Not
-    /// derived from the row position: group membership is a property of the
-    /// analytes, and reading it off the arena layout only works for as long as
-    /// the layout happens to encode it.
-    pub(crate) decoy_groups: Vec<OwnedSourceId>,
+    /// The competition groups the input declared, interned: a code per row,
+    /// plus the labels those codes point at. Rows that compete share a code, so
+    /// the label is stored once per group rather than once per row.
+    ///
+    /// `None` when the input declared none, which is every format today. A
+    /// group is then a singleton -- the row competes with its own decoy
+    /// variants and nothing else -- so both the code and the label are
+    /// derivable from the row and nothing is stored.
+    pub(crate) decoy_groups: Option<DecoyGroups>,
     // CSR prefix offsets (n+1)
     pub(crate) frag_off: Vec<u32>,
     pub(crate) seq_strip_off: Vec<u32>,
@@ -127,7 +165,7 @@ impl<L: KeyLike> TargetColumns<L> {
             mobility: Vec::new(),
             is_decoy: Vec::new(),
             source_ids: SourceIds::default(),
-            decoy_groups: Vec::new(),
+            decoy_groups: None,
             frag_off: vec![0],
             seq_strip_off: vec![0],
             seq_mod_off: vec![0],
@@ -237,18 +275,68 @@ impl<L: KeyLike> TargetColumns<L> {
         (0..self.n_rows() as u32).map(RowIdx::new)
     }
 
-    /// Attach the competition groups a file declared. Call before `seal`,
-    /// which otherwise mints one group per row. Rows sharing a value compete,
-    /// so unlike source ids these are not required to be unique.
-    pub fn set_decoy_groups(&mut self, groups: Vec<OwnedSourceId>) -> Result<(), SourceIdError> {
+    /// Attach the competition groups a file declared, interning them. Rows
+    /// sharing a value compete, so unlike source ids these are expected to
+    /// repeat -- which is why they are stored as a code per row against a
+    /// deduplicated label set rather than a label per row.
+    ///
+    /// Without this, a group is a singleton and is derived from the row.
+    pub fn set_decoy_groups<I, S>(&mut self, groups: I) -> Result<(), SourceIdError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OwnedSourceId>,
+    {
+        let groups: Vec<OwnedSourceId> = groups.into_iter().map(Into::into).collect();
         if groups.len() != self.n_rows() {
             return Err(SourceIdError::LengthMismatch {
                 ids: groups.len(),
                 rows: self.n_rows(),
             });
         }
-        self.decoy_groups = groups;
+
+        let mut seen: std::collections::HashMap<OwnedSourceId, GroupCode> =
+            std::collections::HashMap::new();
+        let mut labels: Vec<OwnedSourceId> = Vec::new();
+        let mut codes = Vec::with_capacity(groups.len());
+        for group in groups {
+            let code = *seen.entry(group.clone()).or_insert_with(|| {
+                labels.push(group);
+                GroupCode::new((labels.len() - 1) as u32)
+            });
+            codes.push(code);
+        }
+
+        let n_labels = labels.len();
+        self.decoy_groups = Some(DecoyGroups {
+            codes,
+            labels: SourceIds::owned(labels, n_labels)?,
+        });
         Ok(())
+    }
+
+    /// Which competition group this row is in, as an opaque handle. Rows that
+    /// compete share one; nothing else about it is meaningful.
+    ///
+    /// Derived from the row when the input declared no groups -- a row then
+    /// competes only with its own decoy variants, so it is its own group and
+    /// there is nothing to store.
+    pub fn decoy_group_code(&self, tgt: RowIdx) -> GroupCode {
+        match &self.decoy_groups {
+            Some(g) => g.codes[tgt.get()],
+            None => GroupCode::new(tgt.get() as u32),
+        }
+    }
+
+    /// The group's id, for output. Resolved here rather than carried alongside
+    /// every result, which is the whole point of the code above.
+    pub fn decoy_group(&self, tgt: RowIdx) -> SourceId<'_> {
+        match &self.decoy_groups {
+            Some(g) => g
+                .labels
+                .get(g.codes[tgt.get()].get())
+                .expect("every code indexes a label"),
+            None => self.output_id(tgt),
+        }
     }
 
     pub fn source_id(&self, tgt: RowIdx) -> Option<SourceId<'_>> {
@@ -349,15 +437,14 @@ impl<L: KeyLike> TargetColumns<L> {
             );
             self.source_ids = SourceIds::minted(n);
         }
-        if self.decoy_groups.is_empty() {
+        // Nothing to build when no groups were declared: a row is then its own
+        // group, which `decoy_group_code` derives. Only the case that actually
+        // loses information is worth a word.
+        if self.decoy_groups.is_none() && matches!(self.caps.decoys, DecoyStrategy::Passthrough) {
             tracing::warn!(
-                "input declares no decoy groups; minting one per row, named by the row's \
-                 own id. Stored decoys therefore compete alone, not against their target."
+                "library ships its own decoys but declares no competition groups, so each \
+                 stored decoy competes alone rather than against its target"
             );
-            self.decoy_groups = self
-                .rows()
-                .map(|r| self.output_id(r).to_owned_id())
-                .collect();
         }
         if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
             && self.is_decoy.iter().any(|&d| d)
@@ -389,7 +476,6 @@ impl<L: KeyLike> TargetColumns<L> {
         self.seq_strip_blob.shrink_to_fit();
         self.seq_mod_blob.shrink_to_fit();
         self.mods.shrink_to_fit();
-        self.decoy_groups.shrink_to_fit();
         self.mod_registry.shrink_to_fit();
     }
 }
@@ -463,13 +549,6 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
         let (row, variant) = self.split_flat(flat);
         !self.is_decoy[row.get()] && variant == 0
     }
-
-    /// The competition group this row belongs to, as an id — not a position.
-    /// A row's decoy variants share its group, so exactly one member survives
-    /// competition.
-    pub fn decoy_group(&self, tgt: RowIdx) -> SourceId<'_> {
-        self.decoy_groups[tgt.get()].as_ref()
-    }
 }
 
 #[cfg(test)]
@@ -477,6 +556,53 @@ mod tests {
     use super::*;
     use crate::IonAnnot;
     use crate::models::capabilities::DecoyStrategy;
+
+    fn two_rows() -> TargetColumns<IonAnnot> {
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for _ in 0..2 {
+            c.push_target(
+                500.0,
+                2,
+                1.0,
+                0.8,
+                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                "PEP",
+                "PEP",
+                &[],
+            );
+        }
+        c
+    }
+
+    /// Declared groups are interned, so two rows in one group share a code and
+    /// the label is stored once rather than per row.
+    #[test]
+    fn rows_in_one_declared_group_share_a_code() {
+        let mut c = two_rows();
+        c.set_decoy_groups(["g1", "g1"]).unwrap();
+        c.seal();
+
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
+        assert_eq!(c.decoy_group(a), SourceId::Text("g1"));
+    }
+
+    /// Without declared groups a row is its own group, derived rather than
+    /// stored -- so nothing is allocated and the label is the row's own id.
+    #[test]
+    fn undeclared_groups_are_derived_not_stored() {
+        let mut c = two_rows();
+        c.seal();
+
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert!(c.decoy_groups.is_none(), "nothing stored for minted groups");
+        assert_ne!(
+            c.decoy_group_code(a),
+            c.decoy_group_code(b),
+            "each row competes alone"
+        );
+        assert_eq!(c.decoy_group(a), c.output_id(a));
+    }
 
     /// `output_id` expects a source id on every row; this is what makes that
     /// safe for the formats that carry none.
