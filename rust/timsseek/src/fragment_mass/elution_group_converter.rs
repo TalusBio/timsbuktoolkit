@@ -1,8 +1,8 @@
 use crate::isotopes::peptide_isotopes;
-use rustyms::prelude::{
+use mzcore::prelude::{
+    AmbiguousMolecule,
     Element,
     MolecularFormula,
-    Peptidoform,
 };
 
 /// Super simple 1/k0 prediction.
@@ -54,11 +54,11 @@ fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
 }
 
 /// In-chain (C, S) atom counts per standard residue, indexed by `byte - b'A'`.
-/// `None` = a non-standard code (B/J/O/U/X/Z) -- defer to the rustyms path.
+/// `None` means a non-standard code (B/J/O/U/X/Z); use the mzcore path.
 ///
-/// A residue contributes the same carbon/sulfur as its free amino acid: forming
-/// a peptide bond removes one water per bond and the terminal water carries
-/// neither C nor S, so a bare-sequence sum equals rustyms' formula exactly.
+/// A residue contributes the same C and S as its free amino acid. Peptide bonds
+/// remove water, and terminal water adds no C or S, so the bare-sequence sum
+/// matches mzcore's formula.
 const RESIDUE_CS: [Option<(u16, u16)>; 26] = {
     // Alphabet offset of an uppercase residue byte (as a fn so `b'A'` maps to 0
     // without a literal `b'A' - b'A'`, which clippy's eq_op denies).
@@ -90,8 +90,7 @@ const RESIDUE_CS: [Option<(u16, u16)>; 26] = {
 };
 
 /// Fast (C, S) tally over a bare amino-acid sequence via [`RESIDUE_CS`].
-/// `None` on an empty string or any non-standard residue, forcing the rustyms
-/// fallback so behavior (including the error path) is preserved.
+/// Empty input and non-standard residues return `None`, so mzcore handles them.
 fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
     if sequence.is_empty() {
         return None;
@@ -108,25 +107,18 @@ fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
 }
 
 /// (C, S) counts for `sequence` (a bare, mod-stripped peptide on the hot path).
-/// Tries the allocation-free table first; defers to the rustyms formula path for
-/// empty / non-standard input, which stays the authority.
+/// Try the allocation-free table first. Use mzcore for empty or non-standard
+/// input, where it remains the authority.
 pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), String> {
     if let Some(cs) = count_cs_fast(sequence) {
         return Ok(cs);
     }
-    count_carbon_sulphur_in_sequence_rustyms(sequence)
+    count_carbon_sulphur_in_sequence_mzcore(sequence)
 }
 
-fn count_carbon_sulphur_in_sequence_rustyms(sequence: &str) -> Result<(u16, u16), String> {
-    let peptide = match Peptidoform::pro_forma(sequence, None) {
-        Ok(pep) => pep,
-        Err(e) => {
-            return Err(format!(
-                "Error parsing peptide sequence {}: {:?}",
-                sequence, e
-            ));
-        }
-    };
+fn count_carbon_sulphur_in_sequence_mzcore(sequence: &str) -> Result<(u16, u16), String> {
+    let peptide = crate::models::sequence::parse_proforma(sequence)
+        .map_err(|e| format!("Error parsing peptide sequence {sequence}: {e}"))?;
     let peptide = match peptide.as_linear() {
         Some(pep) => pep,
         None => return Err("Peptide is not linear.".to_string()),
@@ -151,22 +143,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cs_table_matches_rustyms_per_residue() {
-        // Every standard residue: the table must equal rustyms' formula count.
+    fn cs_table_matches_mzcore_per_residue() {
+        // The table must match mzcore for every standard residue.
         for &aa in b"ACDEFGHIKLMNPQRSTVWY" {
             let seq = String::from_utf8(vec![aa, aa, aa]).unwrap(); // e.g. "AAA"
             let fast = count_cs_fast(&seq).expect("standard residue in table");
-            let slow = count_carbon_sulphur_in_sequence_rustyms(&seq)
-                .unwrap_or_else(|e| panic!("rustyms failed on {seq}: {e}"));
+            let slow = count_carbon_sulphur_in_sequence_mzcore(&seq)
+                .unwrap_or_else(|e| panic!("mzcore failed on {seq}: {e}"));
             assert_eq!(fast, slow, "C/S mismatch for {seq}");
         }
     }
 
     #[test]
-    fn cs_table_matches_rustyms_on_peptides() {
+    fn cs_table_matches_mzcore_on_peptides() {
         for seq in ["AAAGAAATHLEVAR", "LEGNSPQGSNQGVK", "MCMCMCK", "PEPTIDEK"] {
             let fast = count_cs_fast(seq).expect("standard peptide");
-            let slow = count_carbon_sulphur_in_sequence_rustyms(seq).unwrap();
+            let slow = count_carbon_sulphur_in_sequence_mzcore(seq).unwrap();
             assert_eq!(fast, slow, "C/S mismatch for {seq}");
         }
     }

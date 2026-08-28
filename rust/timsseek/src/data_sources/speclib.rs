@@ -182,6 +182,11 @@ pub struct LoadReport {
     /// Physical stored rows (pre decoy expansion), i.e. `TargetColumns::n_rows`.
     pub n_rows: usize,
     pub n_averagine_fallback: usize,
+    /// Rows whose modified sequence neither parser could turn into a
+    /// `ParsedSequence`. If this is nonzero, `sequence_features` is unavailable
+    /// for the whole library so target and decoy scores use the same features.
+    /// Count every failure for the load report.
+    pub n_unparsable_sequences: usize,
     pub sequence_features: SeqFeatureState,
 }
 
@@ -243,15 +248,15 @@ fn finalize_reference_library(
             }
         }
     }
-    let mut all_parsable = true;
+    let mut n_unparsable = 0usize;
+    let mut first_unparsable: Option<String> = None;
     let mut n_averagine_fallback = 0usize;
     for tgt in geom.rows() {
-        if all_parsable {
-            let modified = geom.seq_mod(tgt);
-            let normalized = normalize_to_proforma(modified);
-            if parse_sequence(&normalized).is_none() {
-                all_parsable = false;
-            }
+        let modified = geom.seq_mod(tgt);
+        let normalized = normalize_to_proforma(modified);
+        if parse_sequence(&normalized).is_none() {
+            n_unparsable += 1;
+            first_unparsable.get_or_insert_with(|| modified.to_string());
         }
         let stripped = geom.seq_strip(tgt);
         let charge = geom.charge(tgt) as f64;
@@ -262,12 +267,25 @@ fn finalize_reference_library(
         }
     }
 
-    let sequence_features = if all_parsable {
+    let sequence_features = if n_unparsable == 0 {
         SeqFeatureState::Available
     } else {
         SeqFeatureState::Unavailable
     };
     geom.caps.sequence_features = sequence_features;
+
+    if let Some(example) = &first_unparsable {
+        tracing::warn!(
+            "{}/{} library entries have an unparsable modified sequence, so \
+             sequence features are off for the whole library (first: {:?}). \
+             Use ProForma, for example `PEPTC[UNIMOD:4]IDEK`. DIA-NN's \
+             `(UniMod:n)` form is converted; other modification spellings may \
+             fail.",
+            n_unparsable,
+            n_rows,
+            example
+        );
+    }
 
     if n_averagine_fallback > 0 {
         tracing::warn!(
@@ -285,6 +303,7 @@ fn finalize_reference_library(
     let report = LoadReport {
         n_rows,
         n_averagine_fallback,
+        n_unparsable_sequences: n_unparsable,
         sequence_features,
     };
 
@@ -1223,7 +1242,7 @@ mod tests {
     /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
     /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
     /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`: the `!` bytes are
-    /// rejected by both the fast byte-walk parser and the rustyms fallback), so
+    /// The byte-walk parser and mzcore fallback both reject the `!` bytes, so
     /// the gate must report `!parsable_sequences()`. This is the inverse of
     /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
     /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
@@ -1247,7 +1266,7 @@ mod tests {
             ),
         );
         // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
-        // (`_ => return None`) and by the rustyms pro_forma fallback.
+        // Both the byte-walk parser and the mzcore ProForma parser reject `!`.
         let poisoned = SerSpeclibElement::new(
             PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
             ReferenceEG::new(

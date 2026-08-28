@@ -5,7 +5,57 @@
 use crate::models::decoy::DecoyMarking;
 use serde::Serialize;
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    OnceLock,
+};
+
+/// Ontologies used by the fallback ProForma parser. GNOme is omitted because
+/// it adds 191,529 entries and 26.4 MB to initialization. Loading the other four
+/// indexes takes about 48 ms instead of 2.6 s for all six.
+///
+/// A GNO modification already produces no usable `ParsedSequence`.
+/// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence)
+/// rejects it during formula counting. `isotope_dist_or_averagine` receives a
+/// mod-stripped sequence, so this change does not affect its GNO handling.
+/// PSI-MOD, XL-MOD, and RESID remain loaded for formula counts.
+///
+/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
+/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology. A
+/// hand-written `[GNO:...]` input is the case that reaches this fallback.
+fn ontologies() -> &'static mzcore::ontology::Ontologies {
+    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
+    ONTOLOGIES.get_or_init(|| {
+        let mut ontologies = mzcore::ontology::Ontologies::empty();
+        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
+        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
+        ontologies
+    })
+}
+
+/// Parse a ProForma string with this module's cached ontologies.
+///
+/// This handles input that the byte-walk parser in [`parse_sequence`] does not
+/// recognize. Build the indexes on first use. Inputs that match the fast grammar
+/// do not load them.
+///
+/// mzcore returns parse warnings with the peptidoform. Callers only need the
+/// success or failure result, so this function drops the warnings.
+pub fn parse_proforma(
+    sequence: &str,
+) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {
+    mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies())
+        .map(|(peptidoform, _warnings)| peptidoform)
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+}
 
 /// Amino acid stored as alphabet offset `c - b'A'` (0..=25). `u8::MAX`
 /// means "unrecognized / non-alpha". Unreachable slots in count buffers
@@ -154,25 +204,24 @@ impl Serialize for Peptide {
 /// Returns `None` on parse error, non-linear peptides, or mods outside the
 /// `Unimod`/`Mass` subset.
 ///
-/// A hand-rolled byte walk handles the grammar `normalize_to_proforma` actually
-/// emits (bare residues, `[UNIMOD:n]`, `[+/-mass]`, N-/C-terminal forms). It
-/// returns `Some` ONLY for inputs it fully recognizes; anything else -- named
-/// mods, cross-links, unexpected bytes -- yields `None` and defers to the rustyms
-/// parser, which stays the authority for what is valid. So the fast path can
-/// never accept something rustyms would reject, with one deliberate exception:
-/// it does not check that a `UNIMOD:n` id exists in the ontology (a
-/// syntactically valid id is accepted). Real DIA-NN output only carries real
-/// ids, so this never triggers in practice.
+/// A byte walk handles the grammar emitted by `normalize_to_proforma`, including
+/// bare residues, `[UNIMOD:n]`, signed masses, and terminal mods. It returns
+/// `Some` only for inputs it fully recognizes. Named mods, cross-links, and
+/// unexpected bytes return `None` and go to mzcore.
+///
+/// The fast path does not check whether a `UNIMOD:n` ID exists. DIA-NN emits
+/// valid IDs, so this only matters for malformed or hand-written input.
 pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
     if let Some(parsed) = parse_sequence_fast(normalized) {
         return Some(parsed);
     }
-    parse_sequence_rustyms(normalized)
+    parse_sequence_mzcore(normalized)
 }
 
 /// Classify one bracket body (`UNIMOD:n` or a signed mass like `+15.995`) into a
-/// [`Mod`]. `None` for anything else -- a named mod, an unsigned number, empty --
-/// which forces the rustyms fallback in [`parse_sequence`].
+/// [`Mod`]. Anything else returns `None` and goes to the mzcore fallback in
+/// [`parse_sequence`]. This includes named mods, unsigned numbers, and empty
+/// bodies.
 fn classify_mod(body: &str) -> Option<Mod> {
     let body = body.trim();
     if body.len() >= 7 && body[..7].eq_ignore_ascii_case("UNIMOD:") {
@@ -184,9 +233,9 @@ fn classify_mod(body: &str) -> Option<Mod> {
     }
 }
 
-/// Byte-walk parser for the `normalize_to_proforma` output grammar. `None` means
-/// "not recognized -- defer to rustyms", never "definitively invalid" (that
-/// verdict is the fallback's). See [`parse_sequence`] for the contract.
+/// Byte-walk parser for the grammar emitted by `normalize_to_proforma`. `None`
+/// means the input is outside this grammar. [`parse_sequence`] then asks mzcore
+/// whether the input is valid.
 fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
     let b = s.as_bytes();
     let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
@@ -196,8 +245,8 @@ fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
     // Optional leading N-terminal mod: `[..]-SEQ`.
     if b.first() == Some(&b'[') {
         let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
-        // A leading bracket not of the `[..]-` shape is something we do not
-        // model; let rustyms decide.
+        // A leading bracket without the `[..]-` form is outside this grammar.
+        // Let mzcore handle it.
         if b.get(close + 1) != Some(&b'-') {
             return None;
         }
@@ -239,7 +288,7 @@ fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
                 });
                 i = close + 1;
             }
-            _ => return None, // anything unexpected -> rustyms fallback
+            _ => return None, // anything unexpected -> mzcore fallback
         }
     }
 
@@ -249,14 +298,16 @@ fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
     Some(ParsedSequence { residues, mods })
 }
 
-/// The rustyms-backed parser. Authoritative fallback for [`parse_sequence`]:
-/// validates against the ontology, handles named mods, and rejects non-linear
-/// peptides. Off the hot path once the fast path covers the common grammar.
-fn parse_sequence_rustyms(normalized: &str) -> Option<ParsedSequence> {
-    use rustyms::prelude::IsAminoAcid;
-    use rustyms::sequence::Peptidoform;
+/// Fallback parser for [`parse_sequence`]. It validates with the ontology,
+/// handles named mods, and rejects non-linear peptides. The fast parser handles
+/// common inputs first.
+///
+/// `pro_forma` also returns parse warnings. This function only reports success
+/// or failure, so it ignores them.
+fn parse_sequence_mzcore(normalized: &str) -> Option<ParsedSequence> {
+    use mzcore::prelude::IsAminoAcid;
 
-    let pf = Peptidoform::pro_forma(normalized, None).ok()?;
+    let pf = parse_proforma(normalized).ok()?;
     let linear = pf.into_linear()?;
 
     let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
@@ -293,9 +344,9 @@ fn parse_sequence_rustyms(normalized: &str) -> Option<ParsedSequence> {
     Some(ParsedSequence { residues, mods })
 }
 
-fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
-    use rustyms::ontology::Ontology;
-    use rustyms::sequence::{
+fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
+    use mzcore::ontology::Ontology;
+    use mzcore::sequence::{
         Modification,
         SimpleModificationInner,
     };
@@ -304,12 +355,15 @@ fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
         _ => return None, // Cross-link / ambiguous -- out of v1 scope
     };
     match simple.as_ref() {
-        SimpleModificationInner::Mass(mass) => Some(Mod::Mass(mass.value as f32)),
+        SimpleModificationInner::Mass(_tag, mass, _digits) => Some(Mod::Mass(mass.value as f32)),
         SimpleModificationInner::Database { id, .. } => {
-            if id.ontology == Ontology::Unimod {
-                Some(Mod::Unimod(id.id? as u16))
-            } else {
-                None
+            if id.ontology != Ontology::Unimod {
+                return None;
+            }
+            // `Mod::Unimod(u16)` can store only numeric UNIMOD accessions.
+            match id.id() {
+                mzcv::AccessionCode::Numeric(n) => u16::try_from(n).ok().map(Mod::Unimod),
+                _ => None,
             }
         }
         _ => None,
@@ -384,7 +438,7 @@ fn convert_paren_unimod(s: &str) -> String {
     out
 }
 
-/// Coerce DIA-NN / short-form modified-sequence strings into rustyms-parseable
+/// Coerce DIA-NN / short-form modified-sequence strings into mzcore-parseable
 /// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
 /// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
 /// normalizes UNIMOD tag casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`).
@@ -621,8 +675,7 @@ mod tests {
 
     #[test]
     fn fast_path_takes_recognized_grammar() {
-        // Bare and numeric-UNIMOD/mass inputs must be served by the fast path
-        // (never reach rustyms), else there's no speedup.
+        // These bare, UNIMOD, and mass forms must use the fast parser.
         for s in [
             "PEPTIDEK",
             "AAC[UNIMOD:4]DEK",
@@ -640,8 +693,8 @@ mod tests {
 
     #[test]
     fn fast_path_defers_named_and_garbage() {
-        // Named mods and unexpected bytes must defer (fast returns None) so the
-        // rustyms authority decides validity + resolves the name.
+        // Named mods and unexpected bytes return None so mzcore can validate
+        // them and resolve names.
         for s in [
             "[Acetyl]-PEPTIDEK",
             "C[Carbamidomethyl (C)]PEPK",
@@ -654,11 +707,86 @@ mod tests {
         }
     }
 
+    /// GNOme is omitted from [`ontologies`]. GNO modifications already produce
+    /// no usable `ParsedSequence` because only Unimod modifications map to
+    /// [`Mod`]. This test checks that `[GNO:...]` still fails during parsing.
     #[test]
-    fn fast_matches_rustyms_on_recognized_grammar() {
-        // Differential test: wherever the fast path claims an input, it must
-        // produce the exact same ParsedSequence rustyms would. Guards against
-        // the fast path silently diverging on residue counts or mod mapping.
+    fn dropping_gnome_costs_no_sequence_that_was_usable() {
+        // Unimod names, IDs, and bare masses still parse.
+        for usable in [
+            "PEPTIDEK",
+            "PEPTC[UNIMOD:4]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            "PEPT[+79.966]IDEK",
+        ] {
+            assert!(
+                parse_sequence(usable).is_some(),
+                "{usable:?} must still parse"
+            );
+        }
+
+        // These ontologies remain loaded for the formula path. The sequence
+        // parser rejects their modifications because they are not Unimod.
+        for non_unimod in [
+            "PEPTK[MOD:00046]IDEK",
+            "PEPTK[XLMOD:02001]IDEK",
+            "PEPTK[RESID:AA0038]IDEK",
+        ] {
+            assert!(
+                parse_proforma(non_unimod).is_ok(),
+                "{non_unimod:?} must still reach mzcore"
+            );
+            assert!(
+                parse_sequence(non_unimod).is_none(),
+                "{non_unimod:?} yields no usable sequence either way"
+            );
+        }
+
+        // This input also failed before the change, but at a later step.
+        assert!(
+            parse_sequence("PEPTN[GNO:G59626AS]IDEK").is_none(),
+            "a GNO glycopeptide was never usable"
+        );
+        // A glycan composition does not need an ontology index.
+        assert!(parse_proforma("PEPTN[Glycan:HexNAc]IDEK").is_ok());
+    }
+
+    /// Named mods must resolve through UNIMOD to the same numeric IDs as their
+    /// `[UNIMOD:n]` forms. The fast parser does not cover this case.
+    #[test]
+    fn mzcore_fallback_resolves_named_mods_via_ontology() {
+        for (named, expected) in [
+            ("[Acetyl]-PEPTIDEK", Mod::Unimod(1)),
+            ("PEPTC[Carbamidomethyl]IDEK", Mod::Unimod(4)),
+            ("PEPTM[Oxidation]IDEK", Mod::Unimod(35)),
+        ] {
+            let parsed = parse_sequence(named)
+                .unwrap_or_else(|| panic!("mzcore must resolve named mod in {named:?}"));
+            assert_eq!(
+                parsed.mods.len(),
+                1,
+                "expected exactly one mod in {named:?}, got {:?}",
+                parsed.mods
+            );
+            assert_eq!(
+                parsed.mods[0].kind, expected,
+                "ontology resolved {named:?} to the wrong id"
+            );
+        }
+    }
+
+    /// Named and numeric forms must produce the same residues and modifications.
+    #[test]
+    fn named_and_numeric_mod_spellings_agree() {
+        let named = parse_sequence("PEPTC[Carbamidomethyl]IDEK").expect("named form parses");
+        let numeric = parse_sequence("PEPTC[UNIMOD:4]IDEK").expect("numeric form parses");
+        assert_eq!(named, numeric);
+    }
+
+    #[test]
+    fn fast_matches_mzcore_on_recognized_grammar() {
+        // Require both parsers to claim every sample. An optional fast-path
+        // check could stop testing if the fast grammar became narrower.
         let corpus = [
             "PEPTIDEK",
             "AACDEK",
@@ -669,21 +797,66 @@ mod tests {
             "AAAGAAATHLEVAR",
         ];
         for s in corpus {
-            if let Some(fast) = parse_sequence_fast(s) {
-                let slow = parse_sequence_rustyms(s)
-                    .unwrap_or_else(|| panic!("rustyms must also parse {s:?}"));
-                assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
-                assert_eq!(
-                    fast.mods.len(),
-                    slow.mods.len(),
-                    "n_mods mismatch for {s:?}"
-                );
-                assert_eq!(
-                    fast.aa_counts(),
-                    slow.aa_counts(),
-                    "aa_counts mismatch for {s:?}"
-                );
-            }
+            // Both parsers must accept every sample in this corpus.
+            let fast =
+                parse_sequence_fast(s).unwrap_or_else(|| panic!("fast path must claim {s:?}"));
+            let slow =
+                parse_sequence_mzcore(s).unwrap_or_else(|| panic!("mzcore must also parse {s:?}"));
+            assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
+            assert_eq!(
+                fast.aa_counts(),
+                slow.aa_counts(),
+                "aa_counts mismatch for {s:?}"
+            );
+            // Compare positions and kinds as well as the number of mods.
+            let mut fast_mods: Vec<_> = fast.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            let mut slow_mods: Vec<_> = slow.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            fast_mods.sort_by_key(|(pos, _)| *pos);
+            slow_mods.sort_by_key(|(pos, _)| *pos);
+            assert_eq!(fast_mods, slow_mods, "mods mismatch for {s:?}");
         }
+    }
+
+    /// Monoisotopic mass of a peptide with exactly one formula.
+    fn neutral_mass(seq: &str) -> f64 {
+        use mzcore::prelude::*;
+        let pf = parse_proforma(seq).unwrap_or_else(|e| panic!("{seq:?}: {e}"));
+        let linear = pf.as_linear().expect("linear").clone();
+        let formulas = linear.formulas();
+        assert_eq!(formulas.len(), 1, "{seq:?} is not a single formula");
+        formulas[0].monoisotopic_mass().value
+    }
+
+    /// Compare against atomic masses, not mzcore output. This catches an
+    /// accession mapped to the wrong chemistry.
+    ///
+    /// These four modifications cover the library inputs used here.
+    #[test]
+    fn unimod_deltas_match_their_compositions() {
+        // (bare, modified, delta, composition)
+        let cases = [
+            ("PEPTCIDEK", "PEPTC[UNIMOD:4]IDEK", 57.021_46, "C2H3NO"),
+            ("PEPTMIDEK", "PEPTM[UNIMOD:35]IDEK", 15.994_91, "O"),
+            ("PEPTSIDEK", "PEPTS[UNIMOD:21]IDEK", 79.966_33, "HPO3"),
+            ("PEPTNIDEK", "PEPTN[UNIMOD:7]IDEK", 0.984_02, "O minus NH"),
+        ];
+        for (bare, modified, delta, composition) in cases {
+            let got = neutral_mass(modified) - neutral_mass(bare);
+            assert!(
+                (got - delta).abs() < 1e-4,
+                "{modified} minus {bare} must be {delta} ({composition}), got {got}"
+            );
+        }
+    }
+
+    /// PEPTIDEK's residue sum is 909.44434 Da. Add H2O to get 927.45491 Da.
+    /// The tolerance covers the five-decimal residue masses.
+    #[test]
+    fn unmodified_peptide_mass_is_the_hand_sum() {
+        let got = neutral_mass("PEPTIDEK");
+        assert!(
+            (got - 927.454_91).abs() < 1e-4,
+            "PEPTIDEK must be 927.45491, got {got}"
+        );
     }
 }

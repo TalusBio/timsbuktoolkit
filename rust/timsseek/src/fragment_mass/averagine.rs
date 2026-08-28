@@ -74,11 +74,10 @@ mod tests {
 
     #[test]
     fn or_averagine_falls_back_on_nonstandard() {
-        // `B` (Asx) is genuinely ambiguous between Asp/Asn in rustyms and
-        // resolves to more than one formula, which is the real trigger for
-        // the rustyms-backed count path to error today. (`X` was tried first
-        // but rustyms resolves it to a defined zero-C/S formula rather than
-        // erroring, so it does not exercise the fallback.)
+        // mzcore treats `B`, also called Asx, as ambiguous between Asp and Asn.
+        // That gives the formula path multiple results and makes it return an
+        // error. `X` does not exercise this path because mzcore assigns it a
+        // zero-C/S formula.
         let (src, env) = isotope_dist_or_averagine("PEPBK", 600.0);
         assert_eq!(src, IsotopeSource::Averagine);
         let max = env.iter().copied().fold(f32::MIN, f32::max);

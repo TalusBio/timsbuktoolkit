@@ -49,12 +49,12 @@ pub fn strip_mods(seq: &str) -> String {
 
 use timsseek::models::sequence::normalize_to_proforma;
 
-/// Compute the monoisotopic precursor m/z using rustyms.
+/// Compute the monoisotopic precursor m/z using mzcore.
 /// Input should be the modified sequence (mods included in mass).
 fn compute_precursor_mz(modified_seq: &str, charge: u8) -> Option<f64> {
-    use rustyms::prelude::*;
+    use mzcore::prelude::*;
     let proforma = normalize_to_proforma(modified_seq);
-    let peptide = Peptidoform::pro_forma(&proforma, None).ok()?;
+    let peptide = timsseek::models::sequence::parse_proforma(&proforma).ok()?;
     let linear = peptide.as_linear()?;
     let formulas = linear.formulas();
     if formulas.is_empty() {
@@ -214,16 +214,19 @@ mod tests {
 
     #[test]
     fn test_compute_precursor_mz() {
+        // PEPTIDEK's residue mass is 909.44434 Da. Add H2O and two protons,
+        // then divide by 2 to get 464.73473 m/z. The absolute check catches a
+        // mass change that a broad range would miss.
         let mz = compute_precursor_mz("PEPTIDEK", 2).unwrap();
         assert!(
-            mz > 400.0 && mz < 600.0,
-            "Expected reasonable m/z, got {mz}"
+            (mz - 464.734_73).abs() < 1e-4,
+            "PEPTIDEK 2+ must be 464.73473, got {mz}"
         );
     }
 
     #[test]
     fn test_precursor_mz_includes_mod_mass() {
-        // to_proforma converts [U:4] → [UNIMOD:4] before rustyms
+        // normalize_to_proforma changes [U:4] to [UNIMOD:4] before mzcore parses it.
         let mz_unmod = compute_precursor_mz("PEPTCIDEK", 2).unwrap();
         let mz_mod = compute_precursor_mz("PEPTC[U:4]IDEK", 2).unwrap();
         let diff = mz_mod - mz_unmod;
