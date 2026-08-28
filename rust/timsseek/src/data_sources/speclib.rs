@@ -1223,7 +1223,7 @@ mod tests {
     /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
     /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
     /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`: the `!` bytes are
-    /// rejected by both the fast byte-walk parser and the rustyms fallback), so
+    /// rejected by both the fast byte-walk parser and the mzcore fallback), so
     /// the gate must report `!parsable_sequences()`. This is the inverse of
     /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
     /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
@@ -1247,7 +1247,7 @@ mod tests {
             ),
         );
         // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
-        // (`_ => return None`) and by the rustyms pro_forma fallback.
+        // (`_ => return None`) and by the mzcore pro_forma fallback.
         let poisoned = SerSpeclibElement::new(
             PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
             ReferenceEG::new(
