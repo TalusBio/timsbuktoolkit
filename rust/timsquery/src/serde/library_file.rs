@@ -23,16 +23,13 @@ use super::spectronaut_io::{
     read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
+use crate::Target;
 use crate::ion::IonAnnot;
 use crate::models::{
-    LibraryId,
+    Row,
     SourceIdError,
     TargetCapabilities,
     TargetColumns,
-};
-use crate::{
-    KeyLike,
-    Target,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -61,6 +58,11 @@ pub enum TargetReadingError {
 impl From<serde_json::Error> for TargetReadingError {
     fn from(err: serde_json::Error) -> Self {
         TargetReadingError::SerdeJsonError(err)
+    }
+}
+impl From<SourceIdError> for TargetReadingError {
+    fn from(err: SourceIdError) -> Self {
+        TargetReadingError::SourceId(err)
     }
 }
 impl From<ElutionGroupInputError> for TargetReadingError {
@@ -296,17 +298,18 @@ impl TargetTable {
                 })?;
                 frag_intens.push(*intensity);
             }
-            geom.push_row(
-                eg.precursor_mz(),
-                eg.precursor_charge(),
-                eg.rt_seconds(),
-                eg.mobility_ook0(),
-                &frags,
-                &row.stripped,
-                &row.modified,
-                &[],
-                row.is_decoy,
-            );
+            geom.push_row(Row {
+                precursor_mz: eg.precursor_mz(),
+                charge: eg.precursor_charge(),
+                rt_seconds: eg.rt_seconds(),
+                mobility: eg.mobility_ook0(),
+                frags: &frags,
+                seq_strip: &row.stripped,
+                seq_mod: &row.modified,
+                is_decoy: row.is_decoy,
+                id: Some(eg.id().to_owned_id()),
+                ..Default::default()
+            });
         }
 
         if frag_intens.len() != geom.frag_labels.len() {
@@ -317,7 +320,7 @@ impl TargetTable {
             )));
         }
 
-        geom.seal();
+        geom.seal()?;
         Ok(TargetTable::Mzpaf {
             geom,
             frag_intens: Some(frag_intens),
@@ -336,7 +339,7 @@ impl TargetTable {
     /// into the `frag_intens` sidecar so the timsseek bridge can score against
     /// them; sequences and the decoy flag are threaded into the arena too. When
     /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
-    /// the extraction/geometry path), `frag_intens` stays `None` — matching the
+    /// the extraction/geometry path), `frag_intens` stays `None` -- matching the
     /// historical behavior where timsseek rejected that shape.
     fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, TargetReadingError> {
         match egc {
@@ -349,19 +352,17 @@ impl TargetTable {
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
-                    geom.push_target(
-                        eg.precursor_mz(),
-                        eg.precursor_charge(),
-                        eg.rt_seconds(),
-                        eg.mobility_ook0(),
-                        &frags,
-                        "",
-                        "",
-                        &[],
-                    );
+                    geom.push_row(Row {
+                        precursor_mz: eg.precursor_mz(),
+                        charge: eg.precursor_charge(),
+                        rt_seconds: eg.rt_seconds(),
+                        mobility: eg.mobility_ook0(),
+                        frags: &frags,
+                        id: Some(eg.id().to_owned_id()),
+                        ..Default::default()
+                    });
                 }
-                set_source_ids_from(&mut geom, &egs)?;
-                geom.seal();
+                geom.seal()?;
                 Ok(TargetTable::Mzpaf {
                     geom,
                     frag_intens: None,
@@ -377,19 +378,17 @@ impl TargetTable {
                         .iter_fragments()
                         .map(|(l, mz)| (Arc::<str>::from(l.as_str()), mz))
                         .collect();
-                    geom.push_target(
-                        eg.precursor_mz(),
-                        eg.precursor_charge(),
-                        eg.rt_seconds(),
-                        eg.mobility_ook0(),
-                        &frags,
-                        "",
-                        "",
-                        &[],
-                    );
+                    geom.push_row(Row {
+                        precursor_mz: eg.precursor_mz(),
+                        charge: eg.precursor_charge(),
+                        rt_seconds: eg.rt_seconds(),
+                        mobility: eg.mobility_ook0(),
+                        frags: &frags,
+                        id: Some(eg.id().to_owned_id()),
+                        ..Default::default()
+                    });
                 }
-                set_source_ids_from(&mut geom, &egs)?;
-                geom.seal();
+                geom.seal()?;
                 Ok(TargetTable::Str { geom })
             }
             ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
@@ -398,19 +397,6 @@ impl TargetTable {
             }
         }
     }
-}
-
-/// Carry the caller's `id` from the JSON payload into the arena.
-///
-/// Only this path has one: the tabular readers identify precursors by string
-/// (DIA-NN's `transition_group_id`) or not at all, and neither is stored yet.
-fn set_source_ids_from<L: KeyLike, T: KeyLike>(
-    geom: &mut TargetColumns<L>,
-    egs: &[Target<T>],
-) -> Result<(), TargetReadingError> {
-    let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();
-    geom.set_source_ids(ids)
-        .map_err(TargetReadingError::SourceId)
 }
 
 /// A single spectral-library format reader. Adding a format = one struct + one
@@ -575,7 +561,58 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
             }
         }
     }
-    // Dead default in practice (JsonReader always sniffs true) — a harmless
+    // Dead default in practice (JsonReader always sniffs true) -- a harmless
     // defensive fallback.
     Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{
+        Path,
+        PathBuf,
+    };
+
+    /// What a result would actually be keyed by: the ids the sealed arena
+    /// holds, read back through the public funnel. Asserting on a `Target`
+    /// instead would pass even if sealing dropped the ids.
+    fn arena_ids(path: &Path) -> Vec<String> {
+        // Both arms read the same way; the label type is what differs.
+        fn ids<L: crate::KeyLike>(geom: &crate::models::TargetColumns<L>) -> Vec<String> {
+            geom.rows().map(|r| geom.output_id(r).to_string()).collect()
+        }
+        match super::read_targets(path).expect("fixture loads") {
+            super::TargetTable::Mzpaf { geom, .. } => ids(&geom),
+            super::TargetTable::Str { geom } => ids(&geom),
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/diann_io_files")
+            .join(name)
+    }
+
+    /// `sample_lib.tsv` carries `transition_group_id`; `sample_lib.txt` does
+    /// not, so between them they cover propagation and the minted fallback.
+    #[test]
+    fn a_diann_tsv_name_survives_into_the_arena() {
+        assert_eq!(
+            arena_ids(&fixture("sample_lib.tsv")),
+            ["AAAAAAALQAK2"],
+            "DIA-NN's own name for the precursor, not a counter"
+        );
+        assert_eq!(arena_ids(&fixture("sample_lib.txt")), ["0", "1"]);
+    }
+
+    /// Same, for the parquet variant, where DIA-NN 2.2 spells it
+    /// `Precursor.Id`. The Carafe-written fixture has no such column.
+    #[test]
+    fn a_diann_parquet_name_survives_into_the_arena() {
+        assert_eq!(
+            arena_ids(&fixture("sample_pq_speclib.parquet"))[0],
+            "GREEWESAALQNANTK3"
+        );
+        assert_eq!(arena_ids(&fixture("carafe_pq_speclib.parquet"))[0], "0");
+    }
 }

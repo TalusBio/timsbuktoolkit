@@ -89,11 +89,32 @@ mod calib_dash_hook {
             CalibrationConfig,
             CalibrationResult,
         };
+        use std::hash::{
+            DefaultHasher,
+            Hash,
+            Hasher,
+        };
         use std::io::IsTerminal;
+        use timsquery::models::FlatIdx;
+
+        /// The dashboard compares calibrant identity across batches but never
+        /// displays it, so it takes a hash of the arena handle rather than the
+        /// id that handle resolves to. That keeps its point type `Copy` and,
+        /// more importantly, keeps `size_of` the true cost of a point -- which is
+        /// what its replay memory budget is computed from. Only meaningful
+        /// within one process.
+        ///
+        /// Concrete in `FlatIdx` rather than `impl Hash`, which would also
+        /// accept `score.to_bits()` -- compiles, means nothing.
+        fn identity_hash(slot: FlatIdx) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            slot.hash(&mut hasher);
+            hasher.finish()
+        }
 
         /// The dashboard for a whole run. Stays `None` inside unless
         /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
-        /// dashboard-enabled binary allocates nothing — and neither does
+        /// dashboard-enabled binary allocates nothing -- and neither does
         /// anything else in this module that keys off it.
         pub struct Dash {
             inner: Option<calib_dash::CalibDash>,
@@ -173,7 +194,7 @@ mod calib_dash_hook {
                 calibrants.map(|c| calib_dash::CalibrantPoint {
                     library_rt: c.library_rt.0 as f64,
                     observed_rt: c.apex_rt.0 as f64,
-                    library_id: c.library_id,
+                    identity: identity_hash(c.speclib_index),
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
@@ -254,7 +275,7 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     let (calib_min, calib_max) = rt_range(calib_lib);
 
     info!(
-        "RT ranges — main speclib: [{:.1}, {:.1}]s, calib lib: [{:.1}, {:.1}]s",
+        "RT ranges -- main speclib: [{:.1}, {:.1}]s, calib lib: [{:.1}, {:.1}]s",
         main_min, main_max, calib_min, calib_max
     );
 
@@ -287,7 +308,7 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
         warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     } else if overlap_pct < 80.0 {
         warn!(
-            "RT overlap between main speclib and calib lib is {:.0}% — may affect calibration at the extremes",
+            "RT overlap between main speclib and calib lib is {:.0}% -- may affect calibration at the extremes",
             overlap_pct
         );
     }
@@ -546,7 +567,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
-    // Collect q-value threshold counts — full report to log, key result to stdout
+    // Collect q-value threshold counts -- full report to log, key result to stdout
     let qval_report = report_qvalues_at_thresholds(&data, &[0.01, 0.05, 0.1, 0.5, 1.0]);
     let mut targets_at_1pct_qval = 0usize;
     let mut targets_at_5pct_qval = 0usize;
@@ -569,7 +590,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     }
 
     // Built BEFORE Phase 6, because the writer below consumes `data`. So the
-    // precompute — including its ~1 GB feature matrix — runs while nothing is
+    // precompute -- including its ~1 GB feature matrix -- runs while nothing is
     // on disk yet; only the blocking TUI is after the write.
     #[cfg(feature = "dashboard")]
     let dashboard = crate::dashboard::build(&data, &feature_stats, &qval_report);
@@ -582,6 +603,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         &out_path_pq,
         20_000,
         speclib.parsable_sequences(),
+        &speclib.geom,
     )
     .map_err(|e| TimsSeekError::Io {
         path: out_path_pq.clone().into(),
@@ -608,7 +630,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         tracing::warn!("Failed to write feature_stats sidecar: {}", e);
     }
 
-    // After Phase 6, so a dashboard left open overnight — or killed — still has
+    // After Phase 6, so a dashboard left open overnight -- or killed -- still has
     // its results written.
     // No `snap!` around this: it blocks until the user quits, so any measurement
     // taken across it reports how long they looked at the screen.
@@ -620,7 +642,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     }
 
     // Key result to stdout. The final output URI is printed by main.rs
-    // per-file footer — out_path_pq here is the local working path (which
+    // per-file footer -- out_path_pq here is the local working path (which
     // is a tempdir for remote destinations), not the eventual location.
     println!();
     println!("{} targets at 1% FDR", targets_at_1pct_qval);
@@ -780,7 +802,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
         } else {
             0.0
         };
-        // Surface a collapsing cross-library match loudly — otherwise it silently
+        // Surface a collapsing cross-library match loudly -- otherwise it silently
         // becomes a ZeroRange grid -> identity fallback -> ~0 IDs, with no hint why.
         if matched < 2 || rate < 0.10 {
             warn!(
@@ -1149,11 +1171,15 @@ pub fn run_pipeline(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use timsquery::models::test_handles;
     use timsseek::models::DecoyMarking;
     use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;
 
-    fn candidate(seq: &str, mz: f64, is_target: bool, decoy_group: u64) -> ScoredCandidate {
+    /// `group` names the competition group: candidates sharing one compete.
+    /// Production reads it off the arena as an opaque code; a fixture only needs
+    /// the codes to differ where the test wants different groups.
+    fn candidate(seq: &str, mz: f64, is_target: bool, group: u32) -> ScoredCandidate {
         let decoy = if is_target {
             DecoyMarking::Target
         } else {
@@ -1162,13 +1188,12 @@ mod tests {
         let peptide = Peptide {
             raw: Arc::from(seq),
             decoy,
-            decoy_group,
             sequence_features: false,
         };
         let mut scoring = ScoringFields::sample(peptide);
         scoring.identity.precursor_mz = mz;
         scoring.identity.is_target = is_target;
-        scoring.identity.decoy_group_id = decoy_group;
+        scoring.identity.group = test_handles::group(group);
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
         // is what orders them.
         scoring.primary.main_score = 5.0;

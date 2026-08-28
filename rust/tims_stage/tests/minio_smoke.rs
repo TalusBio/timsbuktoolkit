@@ -13,7 +13,7 @@ use common::minio;
 ///
 /// Fixtures are seeded by the test itself (two tiny objects) so no external
 /// bucket state is assumed. A missing `MINIO_TEST_ENDPOINT` is a hard failure
-/// when the test runs — silent passes would mask CI misconfiguration.
+/// when the test runs -- silent passes would mask CI misconfiguration.
 #[test]
 #[ignore = "requires MinIO endpoint + aws feature; run explicitly with --ignored"]
 fn stage_manifest_against_minio() {

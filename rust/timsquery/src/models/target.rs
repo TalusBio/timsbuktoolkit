@@ -16,7 +16,8 @@ use tinyvec::TinyVec;
 #[derive(Debug, Serialize, Deserialize, Clone, bon::Builder)]
 #[builder(finish_fn(vis = "", name = try_build_internal))]
 pub struct Target<T: KeyLike> {
-    id: u64,
+    #[builder(into)]
+    id: crate::models::OwnedSourceId,
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
@@ -89,7 +90,7 @@ impl<T: KeyLike + Default> Target<T> {
     /// every query, so the zeroed initial state is never observed.
     pub fn empty_like() -> Self {
         Self {
-            id: 0,
+            id: crate::models::OwnedSourceId::placeholder(),
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
             precursor_mono_mz: 0.0,
@@ -102,8 +103,8 @@ impl<T: KeyLike + Default> Target<T> {
 }
 
 impl<T: KeyLike> Target<T> {
-    pub fn id(&self) -> u64 {
-        self.id
+    pub fn id(&self) -> crate::models::SourceId<'_> {
+        self.id.as_ref()
     }
 
     pub fn precursor_count(&self) -> usize {
@@ -138,12 +139,12 @@ impl<T: KeyLike> Target<T> {
 
     /// In-place copy reusing Vec/TinyVec capacity. The `clear()` + `push`
     /// pattern preserves the destination's heap buffer capacity across
-    /// resets — after warm-up, zero alloc. Used by the isotope-offset
+    /// resets -- after warm-up, zero alloc. Used by the isotope-offset
     /// scratch in timsseek. `G` is any `QueryGeom` (e.g. the columnar
-    /// flyweight), not necessarily `Self` — the body reads `src` only
+    /// flyweight), not necessarily `Self` -- the body reads `src` only
     /// through trait methods.
     pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
-        self.set_id_internal(src.output_id());
+        self.id.set_from(src.output_id());
         self.mobility_ook0 = src.mobility_ook0();
         self.rt_seconds = src.rt_seconds();
         self.precursor_mono_mz = src.mono_precursor_mz();
@@ -158,13 +159,6 @@ impl<T: KeyLike> Target<T> {
         self.precursor_labels.clear();
         self.precursor_labels
             .extend(src.iter_precursors().map(|(iso, _mz)| iso));
-    }
-
-    /// Private setter for the otherwise-read-only `id` field — used by
-    /// `reset_from` since a generic `G: QueryGeom` source only exposes `id()`
-    /// through the trait, not direct field access.
-    fn set_id_internal(&mut self, id: u64) {
-        self.id = id;
     }
 
     pub fn mobility_ook0(&self) -> f32 {
@@ -231,7 +225,7 @@ impl<T: KeyLike> Target<T> {
             self.fragment_labels.iter().map(f).collect();
 
         Target {
-            id: self.id,
+            id: self.id.clone(),
             mobility_ook0: self.mobility_ook0,
             rt_seconds: self.rt_seconds,
             precursor_mono_mz: self.precursor_mono_mz,

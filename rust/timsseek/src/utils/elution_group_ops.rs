@@ -7,7 +7,7 @@ use crate::IonAnnot;
 /// (reusing Vec/TinyVec capacity), then apply an isotope-spacing m/z shift and label
 /// rewrite to every fragment in place. Zero alloc after warm-up.
 ///
-/// `dst` and `src` must refer to distinct Target values — typical use
+/// `dst` and `src` must refer to distinct Target values -- typical use
 /// is `apply_isotope_offset_fragments_into(&mut worker.isotope_scratch_eg, &item.query, 1)`.
 pub fn apply_isotope_offset_fragments_into(
     dst: &mut Target<IonAnnot>,

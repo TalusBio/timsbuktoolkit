@@ -39,7 +39,7 @@ fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
 
     // `elements()` yields (element, isotope, count). The middle field is the
     // isotope (nucleon number, `None` for the natural/unspecified isotope), NOT
-    // the atom count — the count is the third field. `count` is i32 and can be
+    // the atom count -- the count is the third field. `count` is i32 and can be
     // negative for a loss; clamp before the u16 cast.
     for (elem, _isotope, count) in form.elements() {
         let n = (*count).max(0) as u16;
@@ -54,7 +54,7 @@ fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
 }
 
 /// In-chain (C, S) atom counts per standard residue, indexed by `byte - b'A'`.
-/// `None` = a non-standard code (B/J/O/U/X/Z) — defer to the rustyms path.
+/// `None` = a non-standard code (B/J/O/U/X/Z) -- defer to the rustyms path.
 ///
 /// A residue contributes the same carbon/sulfur as its free amino acid: forming
 /// a peptide bond removes one water per bond and the terminal water carries

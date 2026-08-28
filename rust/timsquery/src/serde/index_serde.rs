@@ -620,7 +620,7 @@ fn sniff_cached_index(location: &str) -> Result<bool, crate::errors::DataReading
     let is_cloud = location.contains("://");
 
     if !is_cloud {
-        // Local: check filesystem directly — no StorageProvider, no logging noise
+        // Local: check filesystem directly -- no StorageProvider, no logging noise
         let metadata_path = std::path::Path::new(location).join("metadata.json");
         let is_cached = metadata_path.exists();
         debug!("Local index sniff: {} -> cached={}", location, is_cached);
@@ -806,7 +806,7 @@ pub fn load_index_auto(
                 reader = reader.with_centroiding_config(centroid_cfg);
             }
 
-            // Raw always returns eager (can't lazy-load raw — needs centroiding).
+            // Raw always returns eager (can't lazy-load raw -- needs centroiding).
             let (eager, source) = reader.read_index(input)?;
             Ok((IndexedPeaksHandle::Eager(eager), source))
         }
@@ -829,7 +829,7 @@ use tims_stage::{
     sidecar_of,
 };
 
-/// How an index was obtained — surfaced so callers (CLI, viewer) can tell the
+/// How an index was obtained -- surfaced so callers (CLI, viewer) can tell the
 /// user whether a prebuilt cache was reused or the raw data was rebuilt, and by
 /// which reader. Loading is otherwise transparent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -852,14 +852,14 @@ use timscentroid::serialization::SerializationError;
 
 /// Load an eagerly-materialized index from a URI.
 ///
-/// - `uri` — local path or `s3://` URL. May point at a prebuilt `.idx`, a raw
+/// - `uri` -- local path or `s3://` URL. May point at a prebuilt `.idx`, a raw
 ///   artifact (`.d`, `.mzML`, …), or a `.tar` container.
-/// - `backend` — the staging backend used when a raw input must be fetched to
+/// - `backend` -- the staging backend used when a raw input must be fetched to
 ///   a local tempdir. Typically `&tims_stage::PerRunTempdir::new(cfg)?`.
-/// - `save_sidecar` — when true, and we built an index from a cache-capable raw
+/// - `save_sidecar` -- when true, and we built an index from a cache-capable raw
 ///   input, write a `.idx` sidecar to `sidecar_of(uri)` so the next run
 ///   short-circuits on the sidecar fast-path.
-/// - `centroid_cfg` — centroiding configuration threaded through the reader.
+/// - `centroid_cfg` -- centroiding configuration threaded through the reader.
 pub fn load_index(
     uri: &str,
     backend: &dyn StagingBackend,
@@ -911,7 +911,7 @@ pub fn load_index(
                     reader: reader_name,
                 },
             ))
-            // staged drops here (RAII) — tempdir removed.
+            // staged drops here (RAII) -- tempdir removed.
         }
     }
 }

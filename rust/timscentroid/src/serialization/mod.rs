@@ -536,7 +536,7 @@ impl IndexedTimstofPeaks {
         storage: StorageProvider,
         meta: TimscentroidMetadata,
     ) -> Result<Self, SerializationError> {
-        // Always parallel — measured 144s serial vs <expected ~20s parallel on
+        // Always parallel -- measured 144s serial vs <expected ~20s parallel on
         // a 1.1 GB / 9-shard index from S3. S3 supports thousands of concurrent
         // GETs per prefix, so the prior serial heuristic was pessimistic. Local
         // stays parallel (CPU-bound decode).
@@ -600,7 +600,7 @@ impl IndexedTimstofPeaks {
 
 // Helper function to write parquet to bytes (used by cloud storage).
 //
-// All four slices in `cols` share the same length — enforced by
+// All four slices in `cols` share the same length -- enforced by
 // `IndexedPeakGroup::columns`.
 fn write_peaks_to_parquet_bytes<T: RTIndex>(
     cols: PeakColumnsView<'_, T>,
@@ -658,7 +658,7 @@ fn write_peaks_to_parquet_bytes<T: RTIndex>(
 /// Extend SoA column buffers from a single Arrow RecordBatch.
 ///
 /// Validates schema + mobility invariants (non-negative, non-NaN) at the
-/// boundary — the inner scan loop assumes this.
+/// boundary -- the inner scan loop assumes this.
 pub(crate) fn extend_soa_from_batch<T: RTIndex>(
     dst: &mut PeakColumns<T>,
     batch: &RecordBatch,

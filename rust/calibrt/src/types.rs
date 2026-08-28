@@ -4,7 +4,7 @@ use serde::{
 };
 use std::fmt;
 
-/// Library reference retention time. Unit-agnostic — could be iRT, minutes,
+/// Library reference retention time. Unit-agnostic -- could be iRT, minutes,
 /// or arbitrary units depending on the spectral library.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]

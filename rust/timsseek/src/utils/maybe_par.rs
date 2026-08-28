@@ -3,13 +3,13 @@
 //!
 //! The shapes, and what each one promises about ordering:
 //!
-//! * [`fold_reduce`] — per-item fold with per-worker accumulators. The
+//! * [`fold_reduce`] -- per-item fold with per-worker accumulators. The
 //!   accumulator count, and so the reduce order, follows the thread pool: NOT
 //!   reproducible for a non-associative `reduce` (e.g. float addition).
-//! * [`chunked_fold_reduce`] — per-chunk accumulate over a thread-count-
+//! * [`chunked_fold_reduce`] -- per-chunk accumulate over a thread-count-
 //!   independent partition, merged in ascending chunk order: bitwise
 //!   reproducible.
-//! * [`sort_by`] — in-place STABLE sort: ties keep input order, on any thread
+//! * [`sort_by`] -- in-place STABLE sort: ties keep input order, on any thread
 //!   count. Reproducible, which matters when a later pass walks the order
 //!   positionally (see `assign_qval`).
 
@@ -21,7 +21,7 @@ use rayon::prelude::*;
 /// `init()` must be an identity for `reduce`: rayon uses it to seed both the
 /// fold and the reduce, so a non-identity init miscounts on small inputs.
 ///
-/// The accumulator count — and therefore the order `reduce` combines them —
+/// The accumulator count -- and therefore the order `reduce` combines them --
 /// follows the thread pool. Use [`chunked_fold_reduce`] when that order must
 /// be reproducible.
 pub(crate) fn fold_reduce<Item, Acc, Init, Fold, Reduce>(
@@ -109,7 +109,7 @@ where
 
 /// Sort `items` in place by `cmp`, in parallel when rayon is on.
 ///
-/// Stable, so ties keep input order on any thread count — `assign_qval` walks
+/// Stable, so ties keep input order on any thread count -- `assign_qval` walks
 /// the sorted order positionally, so that reproducibility matters. Needs
 /// scratch proportional to `items.len() * size_of::<T>()`.
 pub(crate) fn sort_by<T, F>(items: &mut [T], cmp: F)

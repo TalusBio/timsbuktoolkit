@@ -6,7 +6,10 @@ use crate::models::capabilities::{
     DecoyStrategy,
     IsotopeStrategy,
 };
-use crate::models::target_columns::RowIdx;
+use crate::models::target_columns::{
+    FlatIdx,
+    RowIdx,
+};
 use crate::traits::{
     DecoyShift,
     KeyLike,
@@ -15,42 +18,47 @@ use crate::traits::{
 use crate::utils::constants::C13_C12_MASS_DIFF;
 
 /// Flyweight handle over a `TargetColumns` arena: `lib` borrows (or owns via
-/// `Arc`) the arena, `handle` packs the target index and decoy variant. No
+/// `Arc`) the arena, and `row`/`variant` say which scored slot this is. No
 /// decoy geometry is stored anywhere; variants 1/2 compute a ±CH2 mass shift
 /// on the fly from `TargetCapabilities::decoys`.
+///
+/// Built from a [`FlatIdx`] and nothing else -- that already names a
+/// `(row, variant)` pair, and [`TargetColumns::split_flat`] owns the encoding.
+/// Split once here so the accessors stay field reads.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<Lib, L> {
     lib: Lib,
-    handle: u64,
+    row: RowIdx,
+    variant: u8,
     _label: PhantomData<L>,
 }
 
 pub type QueryRef<'a, L> = Query<&'a TargetColumns<L>, L>;
 
 impl<Lib, L> Query<Lib, L> {
-    pub const VARIANT_BITS: u32 = 2;
-    const VARIANT_MASK: u64 = 0b11;
-
-    pub fn new(lib: Lib, tgt: RowIdx, variant: u8) -> Self {
-        debug_assert!(u64::from(variant) <= Self::VARIANT_MASK);
-        Self {
-            lib,
-            handle: ((tgt.get() as u64) << Self::VARIANT_BITS) | u64::from(variant),
-            _label: PhantomData,
-        }
-    }
-
     /// The stored row this handle points at.
     pub fn row(&self) -> RowIdx {
-        RowIdx::new((self.handle >> Self::VARIANT_BITS) as u32)
+        self.row
     }
 
     pub fn variant(&self) -> u8 {
-        (self.handle & Self::VARIANT_MASK) as u8
+        self.variant
     }
 }
 
 impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, L> {
+    /// Prefer [`TargetColumns::item_at`]; this exists for the owning `Lib`
+    /// flavours, which cannot borrow the arena to call it.
+    pub fn new(lib: Lib, flat: FlatIdx) -> Self {
+        let (row, variant) = lib.split_flat(flat);
+        Self {
+            lib,
+            row,
+            variant,
+            _label: PhantomData,
+        }
+    }
+
     pub fn geom(&self) -> &TargetColumns<L> {
         &self.lib
     }
@@ -87,11 +95,11 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, 
 impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
     type Label = L;
 
-    fn source_id(&self) -> Option<crate::models::LibraryId> {
+    fn source_id(&self) -> Option<crate::models::SourceId<'_>> {
         self.geom().source_id(self.row())
     }
 
-    fn output_id(&self) -> u64 {
+    fn output_id(&self) -> crate::models::SourceId<'_> {
         self.geom().output_id(self.row())
     }
 
@@ -158,7 +166,28 @@ mod tests {
     use crate::IonAnnot;
     use crate::models::TargetColumns;
     use crate::models::capabilities::*;
+    use crate::models::source_id::SourceId;
+    use crate::models::target_columns::Row;
     use crate::traits::QueryGeom;
+
+    /// Rows come from the arena; there is no constructor from an integer.
+    fn first_row<L: KeyLike>(lib: &TargetColumns<L>) -> RowIdx {
+        lib.rows().next().expect("fixture has a row")
+    }
+
+    /// The flyweight is `Copy` and built once per scored slot, so its size is a
+    /// real cost. Two words: the arena pointer, then the row and variant inside
+    /// the pointer's alignment padding. This is what makes storing the handles
+    /// free relative to packing them into a `u64`.
+    #[test]
+    fn the_flyweight_stays_two_words() {
+        let word = size_of::<usize>();
+        assert_eq!(size_of::<QueryRef<'_, IonAnnot>>(), 2 * word);
+        assert_eq!(
+            size_of::<Query<std::sync::Arc<TargetColumns<IonAnnot>>, IonAnnot>>(),
+            2 * word
+        );
+    }
 
     fn one_target_lib() -> TargetColumns<IonAnnot> {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities {
@@ -170,28 +199,28 @@ mod tests {
                 n_decoys: 2,
             },
         });
-        c.push_target(
-            654.855,
-            2,
-            1.0,
-            1.0,
-            &[
+        c.push_row(Row {
+            precursor_mz: 654.855,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y1").unwrap(), 200.0), // ordinal 1 -> NOT shifted
-                (IonAnnot::try_from("y8").unwrap(), 896.5),
-            ], // ordinal 8 -> shifted
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
-        c.seal();
+                (IonAnnot::try_from("y8").unwrap(), 896.5), // ordinal 8 -> shifted
+            ],
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         c
     }
 
     #[test]
     fn target_variant_is_unshifted() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, RowIdx::new(0), 0);
-        assert_eq!(q.output_id(), 0);
+        let q = Query::new(&lib, lib.flat_for(first_row(&lib), 0));
+        assert_eq!(q.output_id(), SourceId::Numeric(0));
         assert!((q.mono_precursor_mz() - 654.855).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[1].1 - 896.5).abs() < 1e-9);
@@ -200,7 +229,7 @@ mod tests {
     #[test]
     fn plus_decoy_shifts_precursor_and_high_ordinal_only() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, RowIdx::new(0), 1); // +shift
+        let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1)); // +shift
         // precursor: +14.0/2
         assert!((q.mono_precursor_mz() - (654.855 + 14.0 / 2.0)).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
@@ -213,7 +242,7 @@ mod tests {
     #[test]
     fn minus_decoy_shifts_negative() {
         let lib = one_target_lib();
-        let q = Query::new(&lib, RowIdx::new(0), 2); // -shift
+        let q = Query::new(&lib, lib.flat_for(first_row(&lib), 2)); // -shift
         assert!((q.mono_precursor_mz() - (654.855 - 14.0 / 2.0)).abs() < 1e-9);
     }
 
@@ -222,7 +251,7 @@ mod tests {
         // n_isotopes=3, charge 2, mono 654.855 -> limits span isotopes 0..3,
         // i.e. (mono, mono + 2*C13_C12_MASS_DIFF/2).
         let lib = one_target_lib();
-        let q = Query::new(&lib, RowIdx::new(0), 0);
+        let q = Query::new(&lib, lib.flat_for(first_row(&lib), 0));
         let step = C13_C12_MASS_DIFF / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - 654.855).abs() < 1e-9);
@@ -246,19 +275,18 @@ mod tests {
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::None,
         });
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            1.0,
-            &[(Arc::<str>::from("f"), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            false,
-        );
-        c.seal();
-        let q = Query::new(&c, RowIdx::new(0), 0);
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(Arc::<str>::from("f"), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
+        let q = Query::new(&c, c.flat_for(first_row(&c), 0));
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }
@@ -268,7 +296,7 @@ mod tests {
         // +decoy (variant 1) shifts the mono by offset/charge; the envelope
         // limits shift by the same amount and keep the same width.
         let lib = one_target_lib();
-        let q = Query::new(&lib, RowIdx::new(0), 1);
+        let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1));
         let step = C13_C12_MASS_DIFF / 2.0;
         let mono = 654.855 + 14.0 / 2.0;
         let (lo, hi) = q.precursor_mz_limits();

@@ -123,7 +123,7 @@ impl ColumnStats {
         self.hi >= self.lo
     }
 
-    /// `|Cohen's d|` — pooled-SD standardized mean difference. NaN when either
+    /// `|Cohen's d|` -- pooled-SD standardized mean difference. NaN when either
     /// class contributed no finite value; `0.0` for a constant column, where
     /// there is no difference to standardize.
     pub(crate) fn cohens_d(&self) -> f64 {
@@ -405,7 +405,7 @@ mod tests {
     }
 
     /// Ties share the mid-rank of their run, so an all-tied column collapses to
-    /// 50 regardless of length — not to 0, and not spread across the axis.
+    /// 50 regardless of length -- not to 0, and not spread across the axis.
     #[test]
     fn mid_rank_percentiles_map_an_all_tied_column_entirely_to_fifty() {
         for len in [1, 2, 3, 4, 10, 11] {

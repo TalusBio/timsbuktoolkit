@@ -55,6 +55,17 @@ impl From<timsquery::serde::TargetReadingError> for TargetReadingError {
     }
 }
 
+/// Sealing an arena builds its id column, which fails on ids that cannot serve
+/// as a result key. Routed through timsquery's reader error so the message a
+/// caller sees is the same whichever crate did the sealing.
+impl From<timsquery::models::SourceIdError> for TargetReadingError {
+    fn from(source: timsquery::models::SourceIdError) -> Self {
+        Self::TimsQueryLibraryError {
+            source: source.into(),
+        }
+    }
+}
+
 impl From<TQDataProcessingError> for DataProcessingError {
     fn from(x: TQDataProcessingError) -> Self {
         Self::TimsQueryDataProcessingError {

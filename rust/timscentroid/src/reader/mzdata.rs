@@ -43,20 +43,20 @@ use crate::rt_mapping::{
 };
 
 /// CV accessions for the ion-mobility-type scan param.
-const ACC_INVERSE_REDUCED_IM: u32 = 1002815; // 1/K0 — searchable
+const ACC_INVERSE_REDUCED_IM: u32 = 1002815; // 1/K0 -- searchable
 const ACC_FAIMS_CV: u32 = 1001581; // FAIMS compensation voltage
 const ACC_DRIFT_TIME: u32 = 1002476; // drift time (not 1/K0)
 
 /// Bucket size for peak groups, matching the TDF path.
 const BUCKET_SIZE: usize = 4096;
 
-/// The `1.0` mobility placeholder stored on every peak of a non-`Ook0` run —
+/// The `1.0` mobility placeholder stored on every peak of a non-`Ook0` run --
 /// present only to satisfy `IndexedPeakGroup::new` (non-NaN, ≥0); never used
 /// once the mobility filter is unrestricted.
 const MOBILITY_SENTINEL: f32 = 1.0;
 
 /// Reader for open mzML. (Native Thermo `.raw` via mzdata's `thermo` feature is
-/// deferred — it needs `MZReader::open_path`, not the mzML-only `MzMLReader`
+/// deferred -- it needs `MZReader::open_path`, not the mzML-only `MzMLReader`
 /// used here, and would extend `sniff` to claim `.raw`.)
 pub struct MzdataReader;
 
@@ -103,7 +103,7 @@ impl RawReader for MzdataReader {
 /// Detect the mobility axis from a scan's `ion_mobility_type` param accession.
 /// Keys on the ACCESSION, not `has_ion_mobility()`: a real Astral file carries
 /// `FAIMS compensation voltage` (value 0), so `has_ion_mobility()` returns true
-/// and `ion_mobility()` returns 0.0 — both would mislead.
+/// and `ion_mobility()` returns 0.0 -- both would mislead.
 ///
 /// Returns `None` if the spectrum carries no scan yet (defer to a later
 /// spectrum); `Some(Absent)` when a scan exists but declares no IM-type param.
@@ -206,7 +206,7 @@ pub fn from_mzml_file(
                 }
                 continue;
             };
-            // Dedup windows by their bounds at millidalton (1e-3 m/z) precision —
+            // Dedup windows by their bounds at millidalton (1e-3 m/z) precision --
             // fine enough to keep genuinely distinct DIA windows apart, coarse
             // enough that float jitter maps a recurring window to one bin.
             let key = (
@@ -310,7 +310,7 @@ fn push_peaks<T: RTIndex>(spec: &impl SpectrumLike, cycle_index: T, out: &mut Ve
 }
 
 /// First strictly-overlapping window pair, if any. Half-open: adjacent DIA
-/// windows SHARE an edge (`upper == next.lower`), which is NOT an overlap — only
+/// windows SHARE an edge (`upper == next.lower`), which is NOT an overlap -- only
 /// a strict interior intersection (`a.lo < b.hi && b.lo < a.hi`) counts, so a
 /// normal contiguous DIA scheme does not trip it.
 fn first_overlapping_pair(windows: &[WindowAccum]) -> Option<(usize, usize)> {
@@ -329,7 +329,7 @@ fn warn_on_overlapping_windows(windows: &[WindowAccum]) {
         let (a, b) = (&windows[i], &windows[j]);
         warn!(
             "mzML: overlapping isolation windows ([{:.3},{:.3}] vs [{:.3},{:.3}]); \
-             staggered/demux acquisition is out of scope — results may be approximate",
+             staggered/demux acquisition is out of scope -- results may be approximate",
             a.mz_start, a.mz_end, b.mz_start, b.mz_end
         );
     }

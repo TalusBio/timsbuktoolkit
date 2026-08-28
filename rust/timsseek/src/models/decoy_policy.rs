@@ -62,7 +62,7 @@ impl std::str::FromStr for DecoyPolicy {
 /// - `Force`: always (re)generate lazy mass-shift decoys, ignoring any
 ///   decoys the file already carries.
 /// - `IfMissing` + no file decoys: generate lazy mass-shift decoys.
-/// - `IfMissing` + file already has decoys: `Passthrough` — use the file's
+/// - `IfMissing` + file already has decoys: `Passthrough` -- use the file's
 ///   own decoy rows as-is (no arena-side generation).
 /// - `Never`: no decoy generation; library rows are used as-is.
 pub fn map_decoy_strategy(policy: DecoyPolicy, has_file_decoys: bool) -> DecoyStrategy {

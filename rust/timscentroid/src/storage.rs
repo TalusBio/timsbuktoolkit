@@ -173,7 +173,7 @@ impl StorageProvider {
     }
 
     /// Non-creating constructor for read-only callers. Does NOT `create_dir_all`
-    /// on a local path — use `new` when you want writes (which may implicitly
+    /// on a local path -- use `new` when you want writes (which may implicitly
     /// create the parent directory).
     pub fn open(location: StorageLocation) -> Result<Self, SerializationError> {
         let (store, is_local, prefix): (Arc<dyn ObjectStore>, bool, String) = match location {
@@ -225,7 +225,7 @@ impl StorageProvider {
         })
     }
 
-    /// Fetch a specific byte range. Errors on short read — S3 returns 416 on
+    /// Fetch a specific byte range. Errors on short read -- S3 returns 416 on
     /// out-of-bounds, but `LocalFileSystem` silently truncates to EOF, so we
     /// post-check the returned length against the requested length. No
     /// pre-HEAD; the tar walker issues many small range GETs and doubling

@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Non-negative non-NaN f16 mobility, stored as raw bits.
 ///
 /// Invariant: `bits` encodes a non-negative, non-NaN f16 value.
-/// Enforced at construction via `try_new` / `from_f16` — every `MobInt`
+/// Enforced at construction via `try_new` / `from_f16` -- every `MobInt`
 /// in flight has already passed the check.
 ///
 /// For values in the valid range, `u16` bit comparison matches `f16`
@@ -14,7 +14,7 @@ use thiserror::Error;
 /// hot path SIMD-trivial.
 ///
 /// `#[repr(transparent)]` ensures `Vec<MobInt>` is byte-identical to
-/// `Vec<u16>` — zero-cost reinterpretation in either direction when
+/// `Vec<u16>` -- zero-cost reinterpretation in either direction when
 /// needed (though construction must still go through `try_new`).
 #[derive(
     Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -55,7 +55,7 @@ impl MobInt {
         Self::try_new(m.to_bits())
     }
 
-    /// Free reinterpret — same bits, same register.
+    /// Free reinterpret -- same bits, same register.
     #[inline(always)]
     pub fn to_f16(self) -> f16 {
         f16::from_bits(self.0)

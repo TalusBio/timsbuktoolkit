@@ -140,7 +140,7 @@ fn validate_inputs(
     }
     info!("✓ All {} raw input(s) validated", raw_inputs.len());
 
-    // Remote outputs skip the writability probe — the upload is the write test.
+    // Remote outputs skip the writability probe -- the upload is the write test.
     if !is_remote_uri(&output_uri) {
         let output_dir_path = std::path::Path::new(&output_uri);
 
@@ -174,7 +174,7 @@ fn validate_inputs(
     // Probe every artifact up-front so a collision fails before the heavy
     // analysis rather than after it.
     //
-    // IMPORTANT — the two artifact lists below must stay in sync with the
+    // IMPORTANT -- the two artifact lists below must stay in sync with the
     // writer sites (search for `ARTIFACT-LIST`):
     //   per-sample: processing.rs, main.rs overwrite-cleanup block
     //   run-level:  main.rs run report, OutputSink::finalize_run call site
@@ -284,14 +284,14 @@ fn sample_name_from_uri(uri: &str) -> Option<String> {
 fn get_frag_range_from_index(
     index: &IndexedTimstofPeaks,
 ) -> Result<TupleRange<f64>, errors::CliError> {
-    // `fragmented_range` panics only when there are no ms2 window groups —
+    // `fragmented_range` panics only when there are no ms2 window groups --
     // catch it and surface a readable "not a DIA run" error instead.
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| index.fragmented_range()));
     match result {
         Ok(r) => Ok(r),
         Err(_) => Err(errors::CliError::DataReading {
-            source: "Index has no MS2 window groups — is this a DIA run?".to_string(),
+            source: "Index has no MS2 window groups -- is this a DIA run?".to_string(),
         }),
     }
 }
@@ -331,10 +331,10 @@ fn process_single_file(
     match index.mobility_kind() {
         timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
         timscentroid::MobilityKind::Absent => {
-            info!("Mobility axis: none — mobility filter + score features disabled")
+            info!("Mobility axis: none -- mobility filter + score features disabled")
         }
         timscentroid::MobilityKind::Unsupported(label) => info!(
-            "Mobility axis: unsupported [{label}] — mobility filter + score features disabled"
+            "Mobility axis: unsupported [{label}] -- mobility filter + score features disabled"
         ),
     }
     alloc_track::snap!("Loading index");
@@ -519,7 +519,7 @@ impl OutputSink {
 
 /// Load a Speclib from a local path or remote URI.
 ///
-/// Remote URIs are streamed (not buffered — speclibs can be multi-GB) to a
+/// Remote URIs are streamed (not buffered -- speclibs can be multi-GB) to a
 /// tempfile keeping the original basename, because `Speclib::from_file`
 /// sniffs the format by extension.
 fn speclib_from_uri(
@@ -977,7 +977,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
                     file_start.elapsed(),
                     e
                 );
-                // I/O errors are likely systemic (disk full, permissions) —
+                // I/O errors are likely systemic (disk full, permissions) --
                 // abort the batch instead of failing every remaining file.
                 if matches!(e, errors::CliError::Io { .. }) {
                     run_report.status = timsseek::scoring::timings::RunStatus::Aborted;

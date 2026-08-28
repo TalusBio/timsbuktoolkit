@@ -5,7 +5,7 @@ use timsquery::tinyvec::tiny_vec;
 /// An elution group defines a query target: one precursor and its fragments.
 ///
 /// NOTE: Fragment labels are `usize` only in this binding. This is a deliberate
-/// simplification — the Rust side is generic over `T: KeyLike` but we monomorphize
+/// simplification -- the Rust side is generic over `T: KeyLike` but we monomorphize
 /// to `usize` here for a clean Python interface. Other key types (e.g. `IonAnnot`)
 /// may be added in future versions.
 #[pyclass(skip_from_py_object)]
@@ -60,8 +60,8 @@ impl PyElutionGroup {
     }
 
     #[getter]
-    fn id(&self) -> u64 {
-        self.inner.id()
+    fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        crate::source_id_to_py(py, &self.inner.id().to_owned_id())
     }
 
     #[getter]

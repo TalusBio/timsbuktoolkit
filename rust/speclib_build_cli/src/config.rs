@@ -196,7 +196,7 @@ impl Default for FiltersConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpeclibBuildConfig {
-    // Inputs — not directly deserialised from TOML but set after merging CLI args.
+    // Inputs -- not directly deserialised from TOML but set after merging CLI args.
     // URIs: either local paths or remote (s3://...).
     #[serde(skip)]
     pub fasta: Option<String>,

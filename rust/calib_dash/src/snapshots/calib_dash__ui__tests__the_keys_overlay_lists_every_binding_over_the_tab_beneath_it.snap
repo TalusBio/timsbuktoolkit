@@ -3,8 +3,8 @@ source: rust/calib_dash/src/ui.rs
 expression: "render(&mut app, 100, 30)"
 ---
  Fit │ Convergence │ Tolerances                                                                     
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
-    │ Showing: none — density only                                                                 │
+    ┌ Fit -- observed RT (s) ↑ vs library RT (s) → ──────────────────────────────────────────── b0 ┐
+    │ Showing: none -- density only                                                                │
     │                                                                                              │
     │                                                                                        ▄▄▄▄▄▄│
     │                                                                                        ░░░░░░│

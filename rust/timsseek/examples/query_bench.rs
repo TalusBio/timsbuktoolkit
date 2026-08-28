@@ -11,17 +11,17 @@
 //! All three go through the same `for_each_peak` / `for_each_ms1_peak`
 //! scan machinery, so time-delta between them attributes to sink cost.
 //! Total time per aggregator attributes the hot path (scan + filter +
-//! sink) at realistic peak density — library fragment m/zs cluster
+//! sink) at realistic peak density -- library fragment m/zs cluster
 //! around real peptide peaks, unlike a uniform-random mz bench.
 //!
 //! Run: cargo run -r -p timsseek --example query_bench
 //!
 //! Env overrides:
-//!   BENCH_DOTD    — .d path (default Hela)
-//!   BENCH_SPECLIB — speclib path (default asdad)
-//!   QB_N         — number of speclib entries to process (default 2000)
-//!   QB_ITERS     — outer repeat count (default 1)
-//!   QB_BUCKET    — rebucket to this size before benching (default 256,
+//!   BENCH_DOTD    -- .d path (default Hela)
+//!   BENCH_SPECLIB -- speclib path (default asdad)
+//!   QB_N         -- number of speclib entries to process (default 2000)
+//!   QB_ITERS     -- outer repeat count (default 1)
+//!   QB_BUCKET    -- rebucket to this size before benching (default 256,
 //!                  set 0 to skip rebucket and use on-disk size)
 
 use std::ops::AddAssign;
@@ -48,7 +48,7 @@ use timsseek::IonAnnot;
 use timsseek::data_sources::speclib::Speclib;
 use timsseek::models::DecoyPolicy;
 
-/// Counting peak sink — single u32 increment per peak. One dependent
+/// Counting peak sink -- single u32 increment per peak. One dependent
 /// scalar store (no fadd, no scatter, no memory fence) → cleanest
 /// "iteration + filter" cost ceiling. LLVM can't elide the counter
 /// because it's read from the aggregator after the call.
@@ -114,7 +114,7 @@ fn main() {
     let tolerance = Tolerance::default();
     eprintln!("Tolerance: {:?}", tolerance);
 
-    // Cycle-mapping range — use the index's full range so no RT filtering
+    // Cycle-mapping range -- use the index's full range so no RT filtering
     // prunes peaks away; isolates per-peak iteration cost.
     let cycle_mapping = index.ms1_cycle_mapping();
     let (min_rt, max_rt) = cycle_mapping.range_milis();

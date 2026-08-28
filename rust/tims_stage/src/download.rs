@@ -1,7 +1,7 @@
 //! Stream a URI to a local file.
 //!
 //! For URIs that may exceed RAM (speclib parquet, large FASTAs), this is the
-//! right primitive — it streams via `StorageProvider::get_to_file` for remote
+//! right primitive -- it streams via `StorageProvider::get_to_file` for remote
 //! and is a plain file copy for local. Unlike [`crate::open_reader`] it does
 //! not buffer the whole payload in memory, so no size cap is imposed.
 

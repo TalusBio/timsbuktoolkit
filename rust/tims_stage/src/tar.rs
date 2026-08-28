@@ -28,7 +28,7 @@ const PREFETCH: usize = 64 * 1024;
 /// Abstraction over "something we can pull byte ranges out of".
 ///
 /// `read_range` is for small header reads (up to a few KiB). For large
-/// payload copies (often GBs), use `copy_range_to_file` which streams — the
+/// payload copies (often GBs), use `copy_range_to_file` which streams -- the
 /// S3 impl routes that through one range-GET whose response body writes
 /// directly to disk. Never loop `read_range` for big payloads: each call
 /// is a separate HTTP GET on S3.
@@ -234,10 +234,10 @@ fn basename_of(path: &str) -> &str {
 /// Returns a map `basename -> (payload_offset, payload_size)`.
 ///
 /// Typeflag handling:
-///   - `'0'` / `0`  : regular file — record if basename is required.
-///   - `'x'` / `'g'`: pax extended header — skip payload.
-///   - `'L'` / `'K'`: GNU long-name record — hard error.
-///   - anything else: unknown — skip payload, don't record.
+///   - `'0'` / `0`  : regular file -- record if basename is required.
+///   - `'x'` / `'g'`: pax extended header -- skip payload.
+///   - `'L'` / `'K'`: GNU long-name record -- hard error.
+///   - anything else: unknown -- skip payload, don't record.
 ///
 /// Permissive-by-default; the corpus-inventory step will tell us which
 /// branches can be pruned later.
@@ -267,9 +267,9 @@ fn walk_tar_index(reader: &mut dyn TarReader) -> Result<BTreeMap<String, (u64, u
                     out.insert(bn, (payload_offset, h.size));
                 }
             }
-            b'x' | b'g' => { /* pax extended header — skip payload */ }
+            b'x' | b'g' => { /* pax extended header -- skip payload */ }
             b'L' | b'K' => return Err(StageError::UnsupportedTarFeature),
-            _ => { /* unknown typeflag — skip payload */ }
+            _ => { /* unknown typeflag -- skip payload */ }
         }
         offset = payload_offset + padded;
         if REQUIRED.iter().all(|r| out.contains_key(*r)) {

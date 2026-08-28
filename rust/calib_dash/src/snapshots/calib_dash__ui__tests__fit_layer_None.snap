@@ -2,8 +2,8 @@
 source: rust/calib_dash/src/ui.rs
 expression: out
 ---
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
-    │ Showing: none — density only                                                                 │
+    ┌ Fit -- observed RT (s) ↑ vs library RT (s) → ──────────────────────────────────────────── b0 ┐
+    │ Showing: none -- density only                                                                │
     │                                                                                              │
     │                                                                                        ▄▄▄▄▄▄│
     │                                                                                        ░░░░░░│

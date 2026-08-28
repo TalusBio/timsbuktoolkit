@@ -1,5 +1,4 @@
 use smallvec::SmallVec;
-use std::sync::Arc;
 use timsquery::IonAnnot;
 use timsquery::serde::TargetTable;
 
@@ -10,6 +9,7 @@ use timsquery::models::capabilities::{
 };
 use timsquery::models::{
     FlatIdx,
+    GroupCode,
     Query,
     RowIdx,
     TargetColumns,
@@ -50,11 +50,10 @@ impl ReferenceLibrary {
         self.len() == 0
     }
 
-    /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
-    /// the flat->(row,variant) math to the arena's `split_flat` transform.
+    /// Maps a scored slot to its `RefQuery`; the flat->(row, variant) transform
+    /// belongs to the arena.
     pub fn item_at(&self, flat: FlatIdx) -> RefQuery<'_> {
-        let (row, variant) = self.geom.split_flat(flat);
-        RefQuery::new(self, row, variant)
+        RefQuery::new(self, flat)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
@@ -102,40 +101,15 @@ impl TryFrom<TargetTable> for ReferenceLibrary {
 }
 
 impl<'a> RefQuery<'a> {
-    pub fn new(lib: &'a ReferenceLibrary, tgt: RowIdx, variant: u8) -> Self {
+    pub fn new(lib: &'a ReferenceLibrary, flat: FlatIdx) -> Self {
         Self {
             lib,
-            geom: Query::new(&lib.geom, tgt, variant),
+            geom: Query::new(&lib.geom, flat),
         }
     }
 
     pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
         &self.geom
-    }
-
-    /// Materialize the output identity `Peptide` for this flyweight.
-    ///
-    /// `raw` is the modified-sequence blob slice. `parsed` is filled by
-    /// normalizing the modified sequence to ProForma and parsing it — but ONLY when sequence
-    /// features are `Available` (the whole-library parse gate passed at build
-    /// time), else `None`. Parsing the modified (not stripped) form preserves
-    /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
-    /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide_in_group(&self, decoy_group: u64) -> Peptide {
-        let tgt = self.geom.row();
-        let coll = &self.lib.geom;
-        let raw: Arc<str> = coll.seq_mod(tgt).into();
-        let decoy = if self.geom.variant() == 0 {
-            DecoyMarking::Target
-        } else {
-            DecoyMarking::MassShiftedDecoy
-        };
-        Peptide {
-            raw,
-            decoy,
-            decoy_group,
-            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
-        }
     }
 }
 
@@ -168,11 +142,11 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
 impl<'a> QueryGeom for RefQuery<'a> {
     type Label = IonAnnot;
 
-    fn source_id(&self) -> Option<timsquery::models::LibraryId> {
+    fn source_id(&self) -> Option<timsquery::models::SourceId<'_>> {
         self.geom.source_id()
     }
 
-    fn output_id(&self) -> u64 {
+    fn output_id(&self) -> timsquery::models::SourceId<'_> {
         self.geom.output_id()
     }
 
@@ -213,35 +187,39 @@ impl<'a> QueryGeom for RefQuery<'a> {
     }
 }
 
+/// Which row a scored result came from, and which group it competes in.
+///
+/// The two travel together because the scorer holds the run's raw-data index,
+/// not the library arena, so it cannot derive one from the other. Both are
+/// opaque, so neither can reach an output file or be confused with an id -- the
+/// writer resolves them against the arena at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowHandles {
+    pub row: RowIdx,
+    pub group: GroupCode,
+}
+
 /// Arm-neutral identity accessors the scoring loop needs but that are NOT part
 /// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
 /// flyweight so the batch scoring loop stays generic (monomorphized,
-/// zero-heap) over the concrete type — see
+/// zero-heap) over the concrete type -- see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
-    /// The id this result carries, so a caller can map it onto the row they
-    /// asked about: the source id where the file gave one, otherwise the id
-    /// minted for it at load.
-    fn library_id(&self) -> u64;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
-    /// Competition group id. Declared by the file when it says, minted at load
-    /// otherwise — never the row's position.
-    fn decoy_group(&self) -> u64;
-    /// The row this result came from. Opaque and unprintable, so it can order
-    /// the q-value tie-break without any caller-supplied value reaching it.
-    fn row(&self) -> RowIdx;
+    /// The arena handles this result carries onward. See [`RowHandles`].
+    fn handles(&self) -> RowHandles;
     /// Materialize the output identity `Peptide`.
     fn materialize_peptide(&self) -> Peptide;
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
-    fn library_id(&self) -> u64 {
-        self.geom().output_id()
-    }
-
-    fn row(&self) -> RowIdx {
-        self.geom().row()
+    fn handles(&self) -> RowHandles {
+        let row = self.geom().row();
+        RowHandles {
+            row,
+            group: self.lib.geom.decoy_group_code(row),
+        }
     }
 
     fn is_target(&self) -> bool {
@@ -251,13 +229,22 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
-    fn decoy_group(&self) -> u64 {
-        self.lib.geom.decoy_group(self.geom().row())
-    }
-
+    /// `raw` is the modified-sequence blob slice; parsing is deferred to
+    /// `Peptide::parse` and gated on the whole-library parse check. The modified
+    /// (not stripped) form is what the `n_mods` feature reads. Lazy decoys are
+    /// mass-shift decoys, so any non-target variant is `MassShiftedDecoy`.
     fn materialize_peptide(&self) -> Peptide {
-        let dg = self.decoy_group();
-        RefQuery::materialize_peptide_in_group(self, dg)
+        let tgt = self.geom.row();
+        let coll = &self.lib.geom;
+        Peptide {
+            raw: coll.seq_mod(tgt).into(),
+            decoy: if self.geom.variant() == 0 {
+                DecoyMarking::Target
+            } else {
+                DecoyMarking::MassShiftedDecoy
+            },
+            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
+        }
     }
 }
 
@@ -265,6 +252,7 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
+    use timsquery::models::Row;
 
     /// Indices come from the arena; there is no constructor from an integer.
     fn row(lib: &ReferenceLibrary, i: usize) -> RowIdx {
@@ -284,20 +272,20 @@ mod tests {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
         let mut geom = TargetColumns::with_capabilities(caps);
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y8").unwrap(), 800.0),
             ],
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
-        geom.seal();
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],
@@ -310,17 +298,17 @@ mod tests {
         use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::TargetTable;
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        geom.seal();
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: Some(vec![1.0]),
@@ -330,7 +318,7 @@ mod tests {
 
         let mut sgeom: TargetColumns<std::sync::Arc<str>> =
             TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        sgeom.seal();
+        sgeom.seal().expect("an empty arena seals");
         let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
     }
@@ -338,7 +326,7 @@ mod tests {
     #[test]
     fn expected_fragments_pair_labels_with_intensities() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, row(&lib, 0), 0);
+        let q = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0));
         let pairs: Vec<_> = q.iter_expected_fragments().collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, IonAnnot::try_from("y3").unwrap());
@@ -349,7 +337,7 @@ mod tests {
     #[test]
     fn precursor_envelope_is_max_normalized_three_peaks() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, row(&lib, 0), 0);
+        let q = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0));
         let env = q.expected_precursor_envelope();
         assert_eq!(env.len(), 3);
         // Envelopes are MAX-normalized (base peak = 1.0), matching the
@@ -367,10 +355,10 @@ mod tests {
     #[test]
     fn decoy_variant_reuses_target_intensities() {
         let lib = tiny_ref_lib();
-        let t: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 0)
+        let t: Vec<_> = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0))
             .iter_expected_fragments()
             .collect();
-        let d: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 1)
+        let d: Vec<_> = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 1))
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");
@@ -384,8 +372,12 @@ mod tests {
         let lib = tiny_ref_lib();
         let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
-        assert_eq!(scored.library_id(), 0); // flat index 0 -> target 0
-        assert_eq!(scored.decoy_group(), 0);
+        // The id is not on the result; it resolves from the arena via the row
+        // the handles carry.
+        assert_eq!(
+            lib.geom.output_id(scored.handles().row),
+            timsquery::models::SourceId::Numeric(0)
+        );
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
         assert_eq!(got_frags.len(), 2);
         assert!((got_frags[0].1 - 1.0).abs() < 1e-6);

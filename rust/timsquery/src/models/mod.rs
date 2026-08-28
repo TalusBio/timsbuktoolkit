@@ -27,13 +27,18 @@ pub use query_handle::{
     QueryRef,
 };
 pub use source_id::{
-    LibraryId,
+    OwnedSourceId,
+    SourceId,
     SourceIdError,
     SourceIds,
 };
+#[cfg(feature = "test-support")]
+pub use target_columns::test_handles;
 pub use target_columns::{
     FlatIdx,
+    GroupCode,
     ModDefinition,
+    Row,
     RowIdx,
     TargetColumns,
 };

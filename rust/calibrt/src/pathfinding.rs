@@ -243,7 +243,7 @@ mod tests {
     /// declining one takes a node with no admissible in-window predecessor: with
     /// `lookback == 1` the dip at `(3.5, 0.1)` fails the monotonic edge back to
     /// the core chain, and the stray at `(4.5, 4.5)` can only look back one rank
-    /// — at the dip — so it accumulates the dip's 0.4 rather than the chain's,
+    /// -- at the dip -- so it accumulates the dip's 0.4 rather than the chain's,
     /// and the DP's best path ends at the chain. Pass 2's forward walk re-checks
     /// monotonicity against the DP's chosen *endpoint* instead, skips the dip
     /// (its observed RT is below the chain) and grafts the stray on as a suffix.

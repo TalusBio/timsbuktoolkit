@@ -8,7 +8,7 @@
 //! single buffer.
 //!
 //! **This path is only appropriate for small inputs** (speclibs, FASTAs,
-//! peptide lists — typically MBs to low-GB). The default cap is
+//! peptide lists -- typically MBs to low-GB). The default cap is
 //! [`DEFAULT_IN_MEMORY_CAP`] (4 GiB); remote payloads that exceed this abort
 //! with [`StageError::PayloadTooLarge`] *before* the full GET. For streaming
 //! reads of larger objects (e.g. raw `.d` bundles), use the tar / prefix
@@ -44,7 +44,7 @@ pub fn open_reader(uri: &str) -> Result<Box<dyn Read + Send>, StageError> {
 
 /// Cheap existence probe for a URI. Remote URIs dispatch a HEAD through the
 /// provider; local paths call `Path::exists`. Network failures surface as
-/// [`StageError::Transport`] — only `NotFound` translates to `Ok(false)`.
+/// [`StageError::Transport`] -- only `NotFound` translates to `Ok(false)`.
 pub fn uri_exists(uri: &str) -> Result<bool, StageError> {
     if is_remote_uri(uri) {
         let (loc, key) = split_uri(uri)?;

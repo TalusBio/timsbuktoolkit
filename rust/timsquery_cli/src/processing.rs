@@ -40,7 +40,7 @@ use tracing::{
 /// Represents the output format for an aggregated spectrum.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SpectrumOutput {
-    id: u64,
+    id: timsquery::models::OwnedSourceId,
     mobility_ook0: f32,
     rt_seconds: f32,
     precursor_mz: f64,
@@ -64,7 +64,7 @@ impl<T: KeyLike + Display> From<&SpectralCollector<T, f32>> for SpectrumOutput {
             .unzip();
 
         SpectrumOutput {
-            id: agg.id,
+            id: agg.id.clone(),
             mobility_ook0: agg.mobility_ook0,
             rt_seconds: agg.rt_seconds,
             precursor_mz: agg.precursor_mono_mz,
@@ -153,7 +153,6 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
                     .filter_map(|mut agg| {
-                        let agg_id = agg.id;
                         match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
@@ -161,14 +160,14 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                                     timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
                                         warn!(
                                             "Skipping chromatogram for elution group id {}: {:?}",
-                                            agg_id, e
+                                            agg.id, e
                                         );
                                         None
                                     }
                                     _ => {
                                         error!(
                                             "Error generating chromatogram for elution group id {}: {:?}",
-                                            agg_id, e
+                                            agg.id, e
                                         );
                                         panic!("Terminating due to unexpected error");
                                     }

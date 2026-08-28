@@ -21,7 +21,7 @@ impl PeptideDedup {
                 bloom.set(seq);
                 buckets.entry(key).or_default().push(slice);
             } else {
-                // Maybe seen — check bucket
+                // Maybe seen -- check bucket
                 let bucket = buckets.entry(key).or_default();
                 if !bucket
                     .iter()

@@ -56,14 +56,14 @@ impl MobilityPanel {
             .allow_drag(true);
 
         plot.show(ui, |plot_ui| {
-            // 2x (wide query) range — solid lines
+            // 2x (wide query) range -- solid lines
             let (wide_lo, wide_hi) = data.wide_mobility_range;
             plot_ui
                 .hline(HLine::new("2x range lo", wide_lo).color(Color32::from_rgb(120, 120, 120)));
             plot_ui
                 .hline(HLine::new("2x range hi", wide_hi).color(Color32::from_rgb(120, 120, 120)));
 
-            // 1x (integration) range — dashed lines
+            // 1x (integration) range -- dashed lines
             let (tol_lo, tol_hi) = data.mobility_range;
             plot_ui.hline(
                 HLine::new("1x range lo", tol_lo)
@@ -76,7 +76,7 @@ impl MobilityPanel {
                     .style(egui_plot::LineStyle::dashed_dense()),
             );
 
-            // Reference mobility — thin dashed
+            // Reference mobility -- thin dashed
             plot_ui.hline(
                 HLine::new("ref mobility", data.ref_mobility)
                     .color(Color32::from_rgb(255, 60, 60))

@@ -357,7 +357,7 @@ fn log10_positive(vals: &[f32]) -> Vec<f64> {
 /// Fraction-per-bin bars over `[lo, hi]`: heights sum to 1, so populations of
 /// different size stay comparable. Returns the bars and the tallest height.
 ///
-/// `hi` must exceed `lo` — an empty range would give zero-width bins, so
+/// `hi` must exceed `lo` -- an empty range would give zero-width bins, so
 /// callers widen degenerate (all-equal) populations first.
 fn hist_bars(logs: &[f64], lo: f64, hi: f64) -> (Vec<Bar>, f64) {
     debug_assert!(hi > lo, "empty bin range [{lo}, {hi}]");

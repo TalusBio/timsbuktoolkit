@@ -105,7 +105,7 @@ def load_spans(path: Path) -> list[Span]:
             idle = parse_duration(str(fields.get("time.idle", "0ns")))
             label_fields = {k: v for k, v in span.items() if k != "name"}
             # `step{label=...}` and `file{name=...}` are the dominant spans
-            # — show only the field value, not the wrapper `step[label=x]`.
+            # -- show only the field value, not the wrapper `step[label=x]`.
             if name == "step" and "label" in label_fields:
                 label = str(label_fields["label"])
             elif name == "file" and "name" in label_fields:
@@ -142,7 +142,7 @@ def plot(spans: list[Span], out: Path, min_ms: float) -> None:
     if not kept:
         raise SystemExit(f"no spans >= {min_ms}ms; lower --min-ms")
 
-    # One lane per (thread, depth) — avoids vertical squish when depth is high.
+    # One lane per (thread, depth) -- avoids vertical squish when depth is high.
     lane_keys = sorted({(s.thread, s.depth) for s in kept})
     lane_idx = {k: i for i, k in enumerate(lane_keys)}
 
@@ -230,7 +230,7 @@ def main() -> None:
         "--min-ms",
         type=float,
         default=50.0,
-        help="hide spans shorter than this (default 50ms) — filters out bucket-sort noise",
+        help="hide spans shorter than this (default 50ms) -- filters out bucket-sort noise",
     )
     ap.add_argument("--wandb", metavar="RUN_NAME", default=None)
     ap.add_argument("--wandb-project", default="timsseek-spans")

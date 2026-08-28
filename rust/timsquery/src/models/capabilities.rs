@@ -47,7 +47,7 @@ impl TargetCapabilities {
     /// decoys.
     ///
     /// Decoy generation is a scoring decision, so no constructor in this crate
-    /// produces it — `DecoyStrategy::LazyMassShift` has to be named outright,
+    /// produces it -- `DecoyStrategy::LazyMassShift` has to be named outright,
     /// and timsseek is the only thing that names it (`map_decoy_strategy`,
     /// resolved once in `finalize_reference_library` before `seal`). This is
     /// not a style preference: readers used to default to decoys here, and

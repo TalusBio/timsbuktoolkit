@@ -4,7 +4,7 @@ use crate::error::StageError;
 use std::path::Path;
 use timscentroid::StorageLocation;
 
-/// Where an URI points — local filesystem or remote object store.
+/// Where an URI points -- local filesystem or remote object store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocKind {
     Local,
@@ -14,9 +14,9 @@ pub(crate) enum LocKind {
 /// What kind of artifact the URI names, by suffix.
 ///
 /// Only two categories matter to staging/resolution: a prebuilt `.idx`, a
-/// `.tar` container, or `Raw` — any vendor artifact. Vendor SHAPE (`.d`,
+/// `.tar` container, or `Raw` -- any vendor artifact. Vendor SHAPE (`.d`,
 /// `.mzML`, `.wiff`) is NOT classified here; that lives in each reader's
-/// `sniff`. `Raw` never errors on an unfamiliar suffix — the reader registry
+/// `sniff`. `Raw` never errors on an unfamiliar suffix -- the reader registry
 /// rejects genuinely-unknown formats at dispatch time (loudly), not the parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NameKind {

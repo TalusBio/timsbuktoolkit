@@ -7,7 +7,7 @@
 // one index walks several parallel arrays at once (`w`/`gw`, `mean`/`var`/
 // `inv_std`) and where the inner AXPY loops are shaped for vectorization.
 // Rewriting them as iterator zips needs 3- and 4-way nests and sinks the
-// codegen — the same tradeoff `ml/lda.rs` documents at its own hot loops.
+// codegen -- the same tradeoff `ml/lda.rs` documents at its own hot loops.
 #![allow(clippy::needless_range_loop)]
 
 use matrixmultiply::sgemm;
@@ -153,7 +153,7 @@ impl Tensor {
 // ---------------------------------------------------------------- layer trait
 
 /// `(param, grad, apply_weight_decay)`. Biases and norm parameters return
-/// `false` — decaying them toward zero fights what those layers are for.
+/// `false` -- decaying them toward zero fights what those layers are for.
 type ParamSlots<'a> = Vec<(&'a mut [f32], &'a mut [f32], bool)>;
 
 pub trait Layer: Send {
@@ -196,7 +196,7 @@ impl Linear {
     /// origin, and standardized inputs are centered on the origin, so at init
     /// the whole first layer hinges on the exact center of the data. A unit
     /// that lands with all its inputs on the negative side outputs zero, and
-    /// a dead ReLU has EXACTLY zero gradient — an absorbing state that no
+    /// a dead ReLU has EXACTLY zero gradient -- an absorbing state that no
     /// learning rate, epoch count, or minibatch noise recovers from. A random
     /// bias moves those boundaries away from the shared input origin.
     pub fn new(n_in: usize, n_out: usize, rng: &mut StdRng) -> Self {
@@ -315,7 +315,7 @@ pub const LEAKY_SLOPE: f32 = 0.01;
 /// a pure ReLU's zero region is an ABSORBING state: its gradient is exactly
 /// zero, so a unit that dies contributes nothing and receives nothing, forever.
 /// That is not a slow-learning problem that a smaller learning rate or more
-/// epochs or minibatch noise can fix — there is no gradient to be noisy about.
+/// epochs or minibatch noise can fix -- there is no gradient to be noisy about.
 pub struct Relu {
     dim: usize,
     slope: f32,
@@ -560,7 +560,7 @@ impl Mlp {
     /// regardless.
     ///
     /// The sink is the persistent [`Self::eval_sink`] rather than a local, so an
-    /// every-epoch early-stopping evaluation allocates nothing in steady state —
+    /// every-epoch early-stopping evaluation allocates nothing in steady state --
     /// the claim the module header makes. Reusing it cannot change the returned
     /// number: `loss_and_grad` reshapes the sink and writes every row of it
     /// before returning, and the loss it returns never reads the gradient.
@@ -734,7 +734,7 @@ impl Mlp {
     }
 
     /// `sum_o |W1[j, o]|` over the first weight-bearing layer, per input
-    /// column. The closest analogue to LDA's `|coef|` that a net admits —
+    /// column. The closest analogue to LDA's `|coef|` that a net admits --
     /// there is no gain equivalent.
     ///
     /// Indexed by TRANSFORMED input, so callers map back through
@@ -773,7 +773,7 @@ impl MlpBatch {
 /// Result of one streaming fit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrainOutcome {
-    /// Mean training loss of the epoch whose weights the model now holds — the
+    /// Mean training loss of the epoch whose weights the model now holds -- the
     /// last epoch run, or the RESTORED epoch when early stopping rolled back.
     /// Reporting the last epoch's loss after a rollback would describe weights
     /// that were thrown away.
@@ -914,7 +914,7 @@ impl ColumnTransform {
         self.cols.len() + self.n_isna
     }
 
-    /// Lane indices dropped by the cull. Callers report these — a culled
+    /// Lane indices dropped by the cull. Callers report these -- a culled
     /// column's `0.0` importance is otherwise indistinguishable from an
     /// uninformative one's.
     pub fn culled(&self) -> &[usize] {
@@ -973,9 +973,9 @@ impl ColumnTransform {
     /// COMPANION belongs to, or `None` when `k` is a standardized feature (or
     /// past the end).
     ///
-    /// Companions have no lane of their own — they are appended after the
+    /// Companions have no lane of their own -- they are appended after the
     /// standardized block, in the lane order of the missable columns they
-    /// flag — so a caller that wants a lane-indexed vector has no way to place
+    /// flag -- so a caller that wants a lane-indexed vector has no way to place
     /// them without this. It is a lookup rather than a public field so the
     /// companion LAYOUT stays an internal detail of [`Self::apply`]; the two
     /// must agree, and this is the only other place that encodes the order.

@@ -1,8 +1,8 @@
 //! Dashboard state: which tab, which feature, which transforms, and the key
 //! bindings that move between them.
 //!
-//! [`App`] is a [`Dashboard`] — everything materialized, see
-//! [`crate::precompute`] — plus the handful of fields a keystroke can change.
+//! [`App`] is a [`Dashboard`] -- everything materialized, see
+//! [`crate::precompute`] -- plus the handful of fields a keystroke can change.
 //! Nothing here computes over the data; a key press moves an index.
 //! Rendering lives in [`crate::ui`].
 
@@ -156,8 +156,8 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Flow {
-        // Handled before anything else — including the filter-editing dispatch
-        // below — so Ctrl-C always quits rather than being typed into the filter
+        // Handled before anything else -- including the filter-editing dispatch
+        // below -- so Ctrl-C always quits rather than being typed into the filter
         // box or toggling clip.
         if is_ctrl_c(key) {
             return Flow::Quit;
@@ -260,7 +260,7 @@ impl App {
         } else {
             // `sort_desc` picks the finite-value order; NaN sorts last either
             // way. That rule has to live in the comparator itself, not in a
-            // value substitution followed by a blanket `idx.reverse()` — a
+            // value substitution followed by a blanket `idx.reverse()` -- a
             // later reverse of the whole vector would undo a NaN-last
             // placement exactly when `sort_desc` is false.
             let desc = self.sort_desc;
@@ -291,7 +291,7 @@ fn available() -> bool {
 /// Never fails the caller and never panics on setup: a non-terminal stdout or
 /// a failed `try_init` warns, restores the terminal and returns `Ok`. This is
 /// deliberately unlike `ratatui::init`, which is `try_init().expect(..)` and
-/// would unwind past the caller's warn-only `if let Err` — after the results
+/// would unwind past the caller's warn-only `if let Err` -- after the results
 /// have already been written to disk.
 ///
 /// The terminal is restored on every returning path. [`catch_panics`] covers
@@ -576,7 +576,7 @@ pub(crate) mod tests {
         assert_eq!(app.visible, &[1, 0]);
     }
 
-    /// A wholly NaN column gets a NaN AUC — a real, naturally occurring case,
+    /// A wholly NaN column gets a NaN AUC -- a real, naturally occurring case,
     /// not a synthetic key. It must sort last regardless of direction.
     #[test]
     fn nan_sort_keys_sort_last_in_both_directions() {

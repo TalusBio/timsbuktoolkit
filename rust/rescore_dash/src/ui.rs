@@ -3,7 +3,7 @@
 //! Every panel is a lookup into the precomputed [`crate::precompute::Dashboard`]:
 //! histogram bins, axis ranges, curves, threshold tables, panel titles and
 //! table cells were all computed before the TUI opened. A frame indexes arrays
-//! and draws — a keystroke costs a redraw and not a re-scan.
+//! and draws -- a keystroke costs a redraw and not a re-scan.
 
 use crate::app::{
     App,
@@ -77,7 +77,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let selected = app.tab().index();
     // Full width, which is why the run-level basis goes here and not into a
     // histogram subtitle that the panel border would truncate.
-    let banner = format!("rescore — {}", app.dash.labels.basis);
+    let banner = format!("rescore -- {}", app.dash.labels.basis);
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
@@ -368,7 +368,7 @@ mod tests {
         ))
     }
 
-    /// A smoke test over the whole lookup surface — every axis and both clip
+    /// A smoke test over the whole lookup surface -- every axis and both clip
     /// settings on every tab. It asserts only that a frame draws, and that the
     /// tab that drew it says which one it is: a slot the precompute left
     /// unplottable or an axis range it could not derive panics on index here
@@ -406,7 +406,7 @@ mod tests {
     }
 
     /// The features tab is the only one with a sort, and `S` only flips the
-    /// direction — which has to appear on screen, or the key silently changes
+    /// direction -- which has to appear on screen, or the key silently changes
     /// what the table means.
     #[test]
     fn the_features_tab_names_its_sort_key_and_direction() {

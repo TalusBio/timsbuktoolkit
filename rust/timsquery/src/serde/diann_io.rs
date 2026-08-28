@@ -3,6 +3,7 @@ use crate::ion::{
     IonAnnot,
     IonParsingError,
 };
+use crate::models::OwnedSourceId;
 use arrow::array::{
     Float32Array,
     Float64Array,
@@ -49,6 +50,9 @@ impl std::error::Error for DiannReadingError {}
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
     IonParsingError,
+    /// A library that names its other precursors left this one blank. See
+    /// [`Naming`].
+    UnnamedPrecursor,
     IonOverCapacity,
     EmptyIonString,
     Other,
@@ -127,6 +131,11 @@ struct DiannLibraryRow {
     #[serde(rename = "RelativeIntensity")]
     #[serde(alias = "LibraryIntensity")]
     relative_intensity: f32,
+    /// DIA-NN's own name for the precursor. Optional: the column is absent
+    /// from some DIA-NN variants, and those rows fall back to a minted id.
+    #[serde(rename = "transition_group_id")]
+    #[serde(default)]
+    transition_group_id: Option<String>,
 }
 
 impl DiannLibraryRow {
@@ -262,6 +271,9 @@ struct ParquetColumnData<'a> {
     fragment_loss_types: &'a [String],
     protein_groups: &'a [String],
     decoys: &'a [i64],
+    /// DIA-NN 2.2 names the precursor in `Precursor.Id`. `None` when the file
+    /// has no such column, which is the minted-id fallback.
+    precursor_ids: Option<&'a [String]>,
 }
 
 pub fn read_targets<T: AsRef<Path>>(
@@ -274,6 +286,17 @@ pub fn read_targets<T: AsRef<Path>>(
         .from_reader(file_handle);
 
     info!("Reading file content from {}", file.as_ref().display());
+
+    // Whether the file names its precursors is a property of the file, so read
+    // it once from the header. `headers()` caches and consumes no record, so
+    // the streaming loop below is unaffected. Asking per row cannot answer this:
+    // csv maps an empty cell to `visit_none`, so a `None` there means "blank
+    // cell" and "column absent" alike.
+    let naming = if rdr.headers()?.iter().any(|h| h == "transition_group_id") {
+        Naming::Present
+    } else {
+        Naming::Absent
+    };
 
     // Optimization: Stream rows and group adjacent ones instead of loading everything into memory
     let mut elution_groups = Vec::new();
@@ -292,7 +315,7 @@ pub fn read_targets<T: AsRef<Path>>(
             && !row.is_same_precursor(last_row)
         {
             // New group found, parse the collected group
-            let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
+            let eg = parse_precursor_group(group_id, naming, &current_group, &mut buffers)?;
             elution_groups.push(eg);
 
             // Start new group
@@ -305,7 +328,7 @@ pub fn read_targets<T: AsRef<Path>>(
 
     // Process the last group
     if !current_group.is_empty() {
-        let eg = parse_precursor_group(group_id, &current_group, &mut buffers)?;
+        let eg = parse_precursor_group(group_id, naming, &current_group, &mut buffers)?;
         elution_groups.push(eg);
     }
 
@@ -313,8 +336,54 @@ pub fn read_targets<T: AsRef<Path>>(
     Ok(elution_groups)
 }
 
+/// Whether a DIA-NN file names its precursors at all, and what to do with a row
+/// that breaks the promise.
+///
+/// The column is per *file*, not per row: absent means the whole library is
+/// unnamed and every row is keyed by a minted counter. Present means every row
+/// must have a name -- a blank cell is an error, not a row to quietly downgrade,
+/// because a half-named library cannot be stored (the arena holds one id shape)
+/// and silently renumbering the named rows loses information the file had.
+///
+/// Deciding per file is also what keeps "unnamed" from being inferred from an
+/// id's *shape*. Inferring it works only as long as DIA-NN spells
+/// `transition_group_id` as text; the day one writes integers, a named row would
+/// read as unnamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// No `transition_group_id` / `Precursor.Id` column at all.
+    Absent,
+    Present,
+}
+
+impl Naming {
+    /// The id for one precursor, given the cell the file had for it.
+    fn id_for(
+        self,
+        counter: u64,
+        cell: Option<&str>,
+        modified_peptide: &str,
+    ) -> Result<OwnedSourceId, DiannPrecursorParsingError> {
+        match self {
+            Self::Absent => Ok(OwnedSourceId::Numeric(counter)),
+            Self::Present => match cell.filter(|name| !name.is_empty()) {
+                Some(name) => Ok(OwnedSourceId::from(name)),
+                None => {
+                    error!(
+                        "precursor {counter} ({modified_peptide:?}) has an empty \
+                         `transition_group_id` / `Precursor.Id` in a library that names its \
+                         other precursors; a library names all its rows or none"
+                    );
+                    Err(DiannPrecursorParsingError::UnnamedPrecursor)
+                }
+            },
+        }
+    }
+}
+
 fn parse_precursor_group(
     id: u64,
+    naming: Naming,
     rows: &[DiannLibraryRow],
     buffers: &mut ParsingBuffers,
 ) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
@@ -413,7 +482,11 @@ fn parse_precursor_group(
     };
 
     let eg = Target::builder()
-        .id(id)
+        .id(naming.id_for(
+            id,
+            first_row.transition_group_id.as_deref(),
+            &first_row.modified_peptide,
+        )?)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -552,6 +625,14 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     let fragment_numbers = get_int_column(&all_batches, "Fragment.Series.Number")?;
     let fragment_loss_types = get_string_column(&all_batches, "Fragment.Loss.Type")?;
     let protein_groups = get_string_column(&all_batches, "Protein.Group")?;
+    // Optional: absent from libraries written by other tools (the Carafe
+    // fixture has no such column), which then fall back to minted ids.
+    let precursor_ids = get_string_column(&all_batches, "Precursor.Id").ok();
+    let naming = if precursor_ids.is_some() {
+        Naming::Present
+    } else {
+        Naming::Absent
+    };
     let decoys = get_int_column(&all_batches, "Decoy")?;
 
     let num_rows = modified_sequences.len();
@@ -572,6 +653,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         fragment_loss_types: &fragment_loss_types,
         protein_groups: &protein_groups,
         decoys: &decoys,
+        precursor_ids: precursor_ids.as_deref(),
     };
 
     // Group fragments by precursor (same logic as TSV reader)
@@ -599,6 +681,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
             // Parse the collected group
             let eg = parse_precursor_group_from_parquet(
                 group_id,
+                naming,
                 &current_group_indices,
                 &columns,
                 &mut buffers,
@@ -616,6 +699,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     if !current_group_indices.is_empty() {
         let eg = parse_precursor_group_from_parquet(
             group_id,
+            naming,
             &current_group_indices,
             &columns,
             &mut buffers,
@@ -632,6 +716,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
 
 fn parse_precursor_group_from_parquet(
     id: u64,
+    naming: Naming,
     indices: &[usize],
     columns: &ParquetColumnData,
     buffers: &mut ParsingBuffers,
@@ -729,7 +814,11 @@ fn parse_precursor_group_from_parquet(
     };
 
     let eg = Target::builder()
-        .id(id)
+        .id(naming.id_for(
+            id,
+            columns.precursor_ids.map(|ids| ids[first_idx].as_str()),
+            &columns.modified_sequences[first_idx],
+        )?)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -745,7 +834,60 @@ fn parse_precursor_group_from_parquet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SourceId;
     use std::path::PathBuf;
+
+    /// The column being present promises every row has a name; a blank cell is
+    /// rejected rather than costing the named rows theirs.
+    #[test]
+    fn a_blank_name_in_a_naming_library_is_an_error() {
+        let with_names = "\
+ModifiedPeptide\tStrippedPeptide\tPrecursorMz\tPrecursorCharge\tTr_recalibrated\tIonMobility\t\
+ProteinID\tDecoy\tFragmentMz\tFragmentType\tFragmentNumber\tFragmentCharge\tFragmentLossType\t\
+RelativeIntensity\ttransition_group_id
+PEPTIDEK\tPEPTIDEK\t500.0\t2\t10.0\t0.8\tP1\t0\t200.0\ty\t2\t1\tnoloss\t1.0\tPEPTIDEK2
+AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.0\t{second_id}
+";
+        let write = |content: &str| {
+            let f = tempfile::Builder::new()
+                .suffix(".tsv")
+                .tempfile()
+                .expect("tmpfile");
+            std::fs::write(f.path(), content).expect("write");
+            f
+        };
+
+        // Both named: the file's own names reach the targets.
+        let ok = write(&with_names.replace("{second_id}", "AAAAAAALQAK2"));
+        let egs = read_targets(ok.path()).expect("a fully named library loads");
+        assert_eq!(egs.len(), 2);
+        assert_eq!(egs[1].0.id(), SourceId::Text("AAAAAAALQAK2"));
+
+        // One blank: rejected, rather than silently costing row 0 its name.
+        let blank = write(&with_names.replace("{second_id}", ""));
+        assert!(
+            matches!(
+                read_targets(blank.path()),
+                Err(DiannReadingError::DiannPrecursorParsingError)
+            ),
+            "a blank name in a naming library must not load"
+        );
+    }
+
+    /// The column being absent is the other case, and is fine: the library names
+    /// nothing, so every row is keyed by a minted counter.
+    #[test]
+    fn a_library_without_the_name_column_gets_minted_ids() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+        let egs = read_targets(path).expect("reads");
+        assert_eq!(egs.len(), 2, "fixture should hold two precursors");
+        for (i, (eg, _)) in egs.iter().enumerate() {
+            assert_eq!(eg.id(), SourceId::Numeric(i as u64));
+        }
+    }
 
     #[test]
     fn test_sniff_diann_library_file() {

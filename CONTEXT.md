@@ -19,7 +19,7 @@ data; a query is the act of looking.
 
 **Library**:
 A collection of targets that also carries expected or observed fragment
-intensities. Intensities are what make it a library — without them it is targets.
+intensities. Intensities are what make it a library -- without them it is targets.
 Note this is narrower than the field's usage, where "spectral library" covers
 anything mapping analytes to m/z values.
 _Avoid_: spectral library (ambiguous), speclib
@@ -37,7 +37,7 @@ determinism, so it is never caller-supplied.
 _Avoid_: id, library_id, row id
 
 **Source id**:
-What the source file called a precursor — the JSON target payload's `id`,
+What the source file called a precursor -- the JSON target payload's `id`,
 mzSpecLib's `<Spectrum=N>` key, DIA-NN's `transition_group_id`. Opaque: carried
 through and echoed back, never used to address anything. Absent in some formats.
 _Avoid_: id, library id
@@ -56,7 +56,7 @@ discovery rate. Either shipped by the library or generated as a mass shift.
 A target and its decoy variants, competing as a unit so exactly one survives.
 
 **Variant**:
-One member of a decoy group — the target itself, or one of its mass-shifted
+One member of a decoy group -- the target itself, or one of its mass-shifted
 decoys. A stored row expands into several scored variants, so "one row" is not
 "one result".
 
@@ -68,7 +68,7 @@ contents: whether sequences are available, whether fragment labels carry ion
 chemistry, how isotopes are derived, how decoys are obtained.
 
 **Graceful degradation**:
-Proceeding with a capability absent rather than failing — skipping FDR when there
+Proceeding with a capability absent rather than failing -- skipping FDR when there
 are no decoys, skipping sequence-dependent scores when sequences are unavailable.
 The gate is per-score, not per-run; only some scores need sequences.
 

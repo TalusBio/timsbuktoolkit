@@ -1,6 +1,6 @@
 //! Retention-time family. Finalize-stage: reads library/calibrated RT from
 //! metadata and the observed apex RT (`inp.apex.retention_time_ms`), so it is
-//! cheap arithmetic on an apex scalar — not a straddle.
+//! cheap arithmetic on an apex scalar -- not a straddle.
 
 use timsseek_macros::ScoreBlock;
 

@@ -246,7 +246,7 @@ impl Grid {
 pub struct Node {
     pub center: Point,
     pub suppressed: bool,
-    // Internal accumulators — not exposed beyond crate
+    // Internal accumulators -- not exposed beyond crate
     pub(crate) sum_wx: f64,
     pub(crate) sum_wy: f64,
     pub(crate) sum_w: f64,

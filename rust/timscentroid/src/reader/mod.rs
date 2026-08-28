@@ -4,7 +4,7 @@
 //! claims ([`RawReader::sniff`]), which artifacts belong together
 //! ([`RawReader::manifest`]), and how to build the in-memory index
 //! ([`RawReader::read`]). The [`ReaderRegistry`] picks a backend for a URI by
-//! sniffing — vendor suffix/scheme knowledge lives ONLY in each reader, never
+//! sniffing -- vendor suffix/scheme knowledge lives ONLY in each reader, never
 //! in the staging/resolve layer. Adding a format is one `impl RawReader` + one
 //! registry push.
 
@@ -65,7 +65,7 @@ impl ResolvedSource {
         Self { dir, entry }
     }
 
-    /// Borrow a local artifact in place — no staging. `dir` is the artifact's
+    /// Borrow a local artifact in place -- no staging. `dir` is the artifact's
     /// parent, `entry` its own name (a `.d` dir or an `.mzML` file).
     pub fn local_in_place(path: &Path) -> Result<Self, ReadError> {
         let dir = path
@@ -132,7 +132,7 @@ pub trait RawReader: Send + Sync {
     }
 
     /// The exact artifact set (entry + required + optional). Vendor "which
-    /// files belong together" knowledge lives here, nowhere else — the staging
+    /// files belong together" knowledge lives here, nowhere else -- the staging
     /// layer fetches exactly these, by name, so transport never guesses shape.
     fn manifest(&self, uri: &Uri) -> Manifest;
 
@@ -144,7 +144,7 @@ pub trait RawReader: Send + Sync {
 
     /// Extensions this reader claims for single-FILE inputs, for building
     /// file-dialog / help filters (no leading dot, e.g. `["mzML", "mzml"]`).
-    /// Directory formats (`.d`) return `&[]` — they are picked as folders.
+    /// Directory formats (`.d`) return `&[]` -- they are picked as folders.
     fn file_extensions(&self) -> &'static [&'static str] {
         &[]
     }
@@ -172,7 +172,7 @@ impl ReaderRegistry {
         Self(v)
     }
 
-    /// The union of single-file extensions claimed by all registered readers —
+    /// The union of single-file extensions claimed by all registered readers --
     /// the single source of truth for "what raw files can we open" (dialog
     /// filters, help text). Directory formats (`.d`) are excluded.
     pub fn file_extensions(&self) -> Vec<&'static str> {
@@ -249,7 +249,7 @@ pub fn local_uri(path: &Path) -> Result<Uri, ReadError> {
         })
 }
 
-/// Bruker TDF `.d` reader — wraps [`IndexedTimstofPeaks::from_timstof_file`].
+/// Bruker TDF `.d` reader -- wraps [`IndexedTimstofPeaks::from_timstof_file`].
 ///
 /// MVP regression-safety: the manifest declares the minimal read set
 /// (`analysis.tdf` + `analysis.tdf_bin`) for documentation and future

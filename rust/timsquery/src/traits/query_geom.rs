@@ -9,14 +9,14 @@ pub trait QueryGeom {
 
     /// What the source file called this row, when it said. `None` for formats
     /// that carry no id.
-    fn source_id(&self) -> Option<crate::models::LibraryId> {
+    fn source_id(&self) -> Option<crate::models::SourceId<'_>> {
         None
     }
 
     /// The id a result carries; always present, since callers key results by
     /// it. Not defaulted: a default would need a position accessor on this
     /// trait, and the position belongs to whoever stores the row.
-    fn output_id(&self) -> u64;
+    fn output_id(&self) -> crate::models::SourceId<'_>;
     fn mono_precursor_mz(&self) -> f64;
     fn precursor_charge(&self) -> u8;
     fn rt_seconds(&self) -> f32;
@@ -33,11 +33,11 @@ pub trait QueryGeom {
 impl<T: KeyLike> QueryGeom for Target<T> {
     type Label = T;
 
-    fn source_id(&self) -> Option<crate::models::LibraryId> {
-        Some(crate::models::LibraryId::new(self.id()))
+    fn source_id(&self) -> Option<crate::models::SourceId<'_>> {
+        Some(self.id())
     }
 
-    fn output_id(&self) -> u64 {
+    fn output_id(&self) -> crate::models::SourceId<'_> {
         self.id()
     }
 
@@ -85,8 +85,8 @@ mod tests {
     use super::*;
     use crate::models::target::Target;
 
-    fn via_trait<G: QueryGeom>(g: &G) -> u64 {
-        g.output_id()
+    fn via_trait<G: QueryGeom>(g: &G) -> crate::models::OwnedSourceId {
+        g.output_id().to_owned_id()
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
             .precursor(500.0, 2)
             .try_build()
             .unwrap();
-        assert_eq!(via_trait(&eg), 7);
+        assert_eq!(via_trait(&eg), crate::models::OwnedSourceId::Numeric(7));
     }
 
     #[test]
@@ -124,6 +124,6 @@ mod tests {
             .unwrap();
         let mut dst = src.clone();
         reset_via_trait(&mut dst, &src);
-        assert_eq!(dst.id(), 3);
+        assert_eq!(dst.id(), crate::models::SourceId::Numeric(3));
     }
 }

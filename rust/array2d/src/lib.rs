@@ -74,7 +74,7 @@ impl<T: ArrayElement> Default for Array2D<T> {
 impl<T: ArrayElement> Array2D<T> {
     /// Construct a zero-dimensional `Array2D` whose backing `Vec` has enough
     /// capacity for `ncols * nrows` elements. Use this for scratch buffers
-    /// that will be populated via [`Array2D::reset_with_value`] — the first
+    /// that will be populated via [`Array2D::reset_with_value`] -- the first
     /// call won't reallocate as long as its size fits the reserved capacity.
     pub fn with_capacity(ncols: usize, nrows: usize) -> Self {
         Self {

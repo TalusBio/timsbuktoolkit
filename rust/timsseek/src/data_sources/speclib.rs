@@ -22,8 +22,12 @@ use std::path::{
     Path,
     PathBuf,
 };
-use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
+use timsquery::models::{
+    OwnedSourceId,
+    Row,
+    TargetColumns,
+};
 use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
@@ -154,7 +158,7 @@ impl ReferenceEG {
     }
 }
 
-/// Strip mod annotations — anything inside `(...)` or `[...]` — from a
+/// Strip mod annotations -- anything inside `(...)` or `[...]` -- from a
 /// sequence, leaving the bare residue string. The native format ships one
 /// (modified) sequence per precursor; the arena's composition-isotope path
 /// needs the stripped residues.
@@ -184,7 +188,7 @@ pub struct LoadReport {
 /// Finalize a freshly-narrowed lazy `ReferenceLibrary` arena: apply the decoy
 /// strategy, seal, run the whole-library parse gate + averagine tally, and set
 /// `caps.sequence_features`. This is the single shared tail of the DEFAULT
-/// `.speclib` load (see `speclib_data_flow.md`) — the memory-optimized path
+/// `.speclib` load (see `speclib_data_flow.md`) -- the memory-optimized path
 /// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
 /// expansion.
 ///
@@ -200,10 +204,10 @@ fn finalize_reference_library(
     mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
     policy: crate::models::DecoyPolicy,
-) -> (ReferenceLibrary, LoadReport) {
+) -> Result<(ReferenceLibrary, LoadReport), TargetReadingError> {
     let n_stored_decoys = geom.n_stored_decoys();
     geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
-    geom.seal();
+    geom.seal()?;
 
     let n_rows = geom.n_rows();
 
@@ -284,7 +288,7 @@ fn finalize_reference_library(
         sequence_features,
     };
 
-    (ReferenceLibrary { geom, frag_intens }, report)
+    Ok((ReferenceLibrary { geom, frag_intens }, report))
 }
 
 /// The spectral library store. Collapsed to the single columnar
@@ -311,7 +315,7 @@ impl SpeclibFormat {
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
-        // Accept both `.zst` and `.zstd` — DIA-NN/user pipelines use either.
+        // Accept both `.zst` and `.zstd` -- DIA-NN/user pipelines use either.
         if path_str.ends_with(".msgpack.zst") || path_str.ends_with(".msgpack.zstd") {
             Some(SpeclibFormat::MessagePackZstd)
         } else if path_str.ends_with(".msgpack") {
@@ -518,7 +522,7 @@ impl Speclib {
         // all live in the one shared finalize path (see
         // `finalize_reference_library`); the report is logged there, so we drop
         // it here.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -545,6 +549,7 @@ impl Speclib {
             timsquery::models::TargetCapabilities::default_diann(),
         );
         let mut frag_intens: Vec<f32> = Vec::new();
+        let mut decoy_groups: Vec<u64> = Vec::new();
 
         for elem in reader {
             let elem = elem?;
@@ -575,22 +580,28 @@ impl Speclib {
             // annotations for the composition-isotope path.
             let modified = &elem.precursor.sequence;
             let stripped = strip_mods(modified);
-            geom.push_row(
-                eg.precursor_mz,
-                elem.precursor.charge,
-                eg.rt_seconds,
-                eg.mobility_ook0,
-                &frags,
-                &stripped,
-                modified,
-                &[],
-                elem.precursor.decoy,
-            );
+            geom.push_row(Row {
+                precursor_mz: eg.precursor_mz,
+                charge: elem.precursor.charge,
+                rt_seconds: eg.rt_seconds,
+                mobility: eg.mobility_ook0,
+                frags: &frags,
+                seq_strip: &stripped,
+                seq_mod: modified,
+                is_decoy: elem.precursor.decoy,
+                // The format names its own precursors and declares its own
+                // competition groups; carry both rather than minting over them.
+                id: Some(OwnedSourceId::Numeric(eg.id as u64)),
+                ..Default::default()
+            });
+            decoy_groups.push(u64::from(elem.precursor.decoy_group));
         }
+
+        geom.set_decoy_groups(decoy_groups)?;
 
         // Decoy resolution + seal happen inside the one shared finalize path,
         // exactly as the `.speclib` bridge above.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy);
+        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -915,7 +926,7 @@ mod tests {
         let lib = expect_lazy(&speclib);
 
         // Check that isotope intensities are normalized (M0 should be 1.0),
-        // for every flat entry (targets AND decoy variants — the envelope is
+        // for every flat entry (targets AND decoy variants -- the envelope is
         // computed per-target and shared across variants, see
         // `decoy_variant_reuses_target_intensities` in reference_library.rs).
         for q in lib.iter() {
@@ -965,14 +976,18 @@ mod tests {
         assert_eq!(n_decoys, 4, "Should have 4 decoy entries (2 per target)");
 
         // Each target index (== decoy_group in the old materialized scheme)
-        // should have exactly 3 flat variants (1 target + 2 decoys) — this is
+        // should have exactly 3 flat variants (1 target + 2 decoys) -- this is
         // guaranteed structurally by `ReferenceLibrary::item_at`'s `t,+,-`
         // packing, so assert it directly rather than re-deriving groups.
         let n_target_indices = lib.geom.n_rows();
         assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
         for tgt in lib.geom.rows() {
             let variants: Vec<u8> = (0..3)
-                .map(|v| RefQuery::new(lib, tgt, v).geom().variant())
+                .map(|v| {
+                    RefQuery::new(lib, lib.geom.flat_for(tgt, v))
+                        .geom()
+                        .variant()
+                })
                 .collect();
             assert_eq!(
                 variants,
@@ -1004,9 +1019,9 @@ mod tests {
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
         for tgt in lib.geom.rows() {
-            let target = RefQuery::new(lib, tgt, 0);
-            let plus = RefQuery::new(lib, tgt, 1);
-            let minus = RefQuery::new(lib, tgt, 2);
+            let target = RefQuery::new(lib, lib.geom.flat_for(tgt, 0));
+            let plus = RefQuery::new(lib, lib.geom.flat_for(tgt, 1));
+            let minus = RefQuery::new(lib, lib.geom.flat_for(tgt, 2));
 
             let target_mz = target.mono_precursor_mz();
             let charge = target.precursor_charge();
@@ -1275,7 +1290,7 @@ mod tests {
     }
 
     /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
-    /// the TSV/parquet/Skyline bridge shape — scoring is intensity-driven, so
+    /// the TSV/parquet/Skyline bridge shape -- scoring is intensity-driven, so
     /// narrowing it to a `ReferenceLibrary` must be an `Err` (the branch that
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]
@@ -1285,17 +1300,17 @@ mod tests {
         use timsquery::serde::TargetTable;
 
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        geom.seal();
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: None,

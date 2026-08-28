@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_build_entry_skipped_too_few_ions() {
-        // Only 1 ion — min_ions = 3 → should return None.
+        // Only 1 ion -- min_ions = 3 → should return None.
         let fragment = FragmentPrediction {
             annotations: vec!["y3^1".to_string()],
             mzs: vec![400.0],

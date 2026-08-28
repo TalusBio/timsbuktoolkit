@@ -170,8 +170,8 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 
 /// Canonicalize candidate order, then apply the fixed seeded shuffle.
 ///
-/// Shared by all four rescorers so the row order — and therefore the positional
-/// fold partition `fold(i) = i % N_RESCORE_FOLDS` derived from it — has exactly
+/// Shared by all four rescorers so the row order -- and therefore the positional
+/// fold partition `fold(i) = i % N_RESCORE_FOLDS` derived from it -- has exactly
 /// one definition.
 ///
 /// Canonicalizing first matters because upstream stages can emit candidates in
@@ -179,18 +179,18 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 /// peak-bucket layouts produce identical features but different vec orderings).
 /// Without a stable sort here, the seeded shuffle sees different inputs across
 /// runs -> different fold assignment -> different q-values -> drifting target
-/// counts across equivalent configs. `(library_id, precursor_charge)` is a
-/// non-FP composite key that should be unique per candidate after target-decoy
-/// competition.
+/// counts across equivalent configs. `(row, precursor_charge)` is a non-FP
+/// composite key that should be unique per candidate after target-decoy
+/// competition: a target and its ±decoy variants share a row, but competition
+/// leaves exactly ONE candidate per (row, charge), so the key stays unique
+/// among the survivors that reach here.
 ///
-/// NOTE: `library_id` is the POSITIONAL target index (lazy arena) / materialized
-/// eg id — a target and its ±decoy variants share it, but target-decoy
-/// competition leaves exactly ONE candidate per (target, charge), so the key
-/// stays unique among survivors here.
+/// The key is the arena row rather than the id the row reports, so a
+/// caller-supplied id can never reach the sort and change the fold assignment.
 ///
 /// The shuffle is NOT cosmetic: every fold partition below is positional, so an
 /// unshuffled (library-ordered) input would make folds correlate with library
-/// layout — e.g. protein-grouped or target/decoy-blocked speclibs would give
+/// layout -- e.g. protein-grouped or target/decoy-blocked speclibs would give
 /// systematically unbalanced folds.
 ///
 /// Feature rows must be projected after this call because fold assignment and
@@ -214,7 +214,7 @@ fn canonicalize_and_shuffle(data: &mut [CompetedCandidate]) {
 ///
 /// Tied scores change the q-values they produce, so the sort is stable: ties
 /// keep the seeded-shuffle input order and the result is reproducible on any
-/// thread count. Reproducible, not correct — breaking ties on a real key is a
+/// thread count. Reproducible, not correct -- breaking ties on a real key is a
 /// separate decision, not made here.
 fn finalize(
     mut scored: Vec<CompetedCandidate>,
@@ -235,7 +235,7 @@ struct CrossFit<M: FoldModel> {
     /// Held-out score per row, row-aligned with the input matrix.
     scores: Vec<f64>,
     /// The per-fold fitted models, indexed by fold. Always
-    /// `N_RESCORE_FOLDS` long — a `CrossFit` only exists if every fold fit.
+    /// `N_RESCORE_FOLDS` long -- a `CrossFit` only exists if every fold fit.
     models: Vec<M>,
     /// `fold_rows[f]` = the rows `models[f]` SCORED (ascending), i.e. exactly
     /// fold `f`. Kept so the sidecar stats summarize exactly those rows without
@@ -276,12 +276,12 @@ impl<M: FoldModel> CrossFit<M> {
 /// The hybrid needs this even more sharply: there the held-out score is not the
 /// final score but one `lda_score` column fed to a
 /// cross-validated GBM. An in-sample column would smuggle a row's own label
-/// into a feature the GBM reads while that row is held out of its GBM fold — so
+/// into a feature the GBM reads while that row is held out of its GBM fold -- so
 /// the GBM's own CV cannot notice, and the leak surfaces only as an optimistic
 /// FDR.
 ///
 /// # Partition
-/// Fold membership comes from [`FoldDataset::get_fold`] — for the
+/// Fold membership comes from [`FoldDataset::get_fold`] -- for the
 /// production datasets, that is `i % N_RESCORE_FOLDS`. For
 /// fold `f` the model is fitted on every row with `get_fold(i) != f` and then
 /// scores only the rows with `get_fold(i) == f`, so no row contributes to the
@@ -297,7 +297,7 @@ impl<M: FoldModel> CrossFit<M> {
 ///
 /// What the two DO have to agree on is the fold ASSIGNMENT `get_fold`, or a
 /// hybrid row's cross-fit column can come from a model trained on rows the GBM
-/// is holding out — leak restored, silently. Both sides read that assignment
+/// is holding out -- leak restored, silently. Both sides read that assignment
 /// from [`FoldDataset::get_fold`], so it has one definition; the
 /// `crossfit_holds_out_exactly_the_rows_the_gbm_scorer_trains_on` test pins the
 /// two partitions against each other rather than against a re-typed modulo.
@@ -335,7 +335,7 @@ where
         // for and there is no third slice to hand over. The LDA is closed-form
         // and ignores it. `MlpFoldModel` DOES early-stop, and handles the empty
         // slice by carving a deterministic inner validation set out of `train`
-        // — see its `fit` for the rule; nothing about it reaches fold `f`.
+        // -- see its `fit` for the rule; nothing about it reaches fold `f`.
         let model = M::fit(cfg, data, f, &train, &[]).map_err(|e| RescoreError::CrossFit {
             model: what,
             fold: f,
@@ -380,7 +380,7 @@ where
     })
 }
 
-/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] — see [`crossfit`] for
+/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] -- see [`crossfit`] for
 /// the partition and the failure policy.
 ///
 /// `N_RESCORE_FOLDS` fits instead of 1 is affordable precisely because the LDA
@@ -416,7 +416,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
     canonicalize_and_shuffle(&mut data);
 
     // The ALL-lane matrix (linear ++ nonlinear), built over `data` in its
-    // post-shuffle order — see `canonicalize_and_shuffle` for why that order is
+    // post-shuffle order -- see `canonicalize_and_shuffle` for why that order is
     // load-bearing.
     let names = all_feature_name_set();
     debug_assert_eq!(names.len(), ALL_NCOLS);
@@ -447,11 +447,11 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// is generally much cheaper and less sensitive than GBM, with neither gap
 /// constant across candidate counts.
 ///
-/// The FDR machinery (`assign_qval`, target-decoy competition) is untouched —
+/// The FDR machinery (`assign_qval`, target-decoy competition) is untouched --
 /// only the discriminant score source changes.
 ///
 /// CROSS-FIT, not a single in-sample fit: every row's score comes from an LDA
-/// fitted without that row, via [`crossfit_lda`] — see [`crossfit`] for the
+/// fitted without that row, via [`crossfit_lda`] -- see [`crossfit`] for the
 /// partition and why it is mandatory.
 ///
 /// Returns PER-FOLD [`FoldStats`] (one per fold, like the GBM path): feature
@@ -462,14 +462,14 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// ([`crate::ml::RescoreModel::Lda`]).
 /// See `ml::lda` for the fit details.
 pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
-    // Canonical sort + seeded shuffle — the same helper, key and seed as every
+    // Canonical sort + seeded shuffle -- the same helper, key and seed as every
     // other rescorer.
     canonicalize_and_shuffle(&mut data);
 
     // LDA trains on the LINEAR lane only: fields that are approx-Gaussian after
     // their declared per-row transform (raw/log2/ln1p). Skew-taming is done at
     // emit time by the grammar, so there is no data-dependent normalization step
-    // here — the only remaining data-dependent op is LDA's own standardization.
+    // here -- the only remaining data-dependent op is LDA's own standardization.
     // Built after the shuffle, per `canonicalize_and_shuffle`.
     let names: Vec<Arc<str>> = linear_feature_name_set();
     let nrows = data.len();
@@ -559,7 +559,7 @@ fn hybrid_frame(
 /// `lda_score` as one extra column into the NONLINEAR lane, then train the GBM
 /// CV on `nonlinear + lda_score` instead of the full feature frame.
 ///
-/// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit`] — see there for the
+/// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit`] -- see there for the
 /// partition, why a label-aware feature fed to a CV'd GBM in particular must be
 /// leak-free, and why the fold ASSIGNMENT has to match the one
 /// `CrossValidatedScorer` derives its own partition from. ASSIGNMENT, not
@@ -575,7 +575,7 @@ fn hybrid_frame(
 pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> RescoreResult {
     let config = GBMConfig::default();
 
-    // Canonical sort + seeded shuffle — IDENTICAL to `rescore` (same helper,
+    // Canonical sort + seeded shuffle -- IDENTICAL to `rescore` (same helper,
     // same key, same seed) so fold assignment and downstream q-values are
     // reproducible.
     canonicalize_and_shuffle(&mut data);
@@ -641,7 +641,7 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
     Ok(finalize(scorer.score(), stats))
 }
 
-/// MLP rescorer over the ALL lane (linear ++ nonlinear) — the same feature set
+/// MLP rescorer over the ALL lane (linear ++ nonlinear) -- the same feature set
 /// [`rescore`] gives the GBM, so the two are directly comparable. The one
 /// [`crate::ml::RescoreModel::Mlp`] selects.
 ///
@@ -653,15 +653,15 @@ pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> RescoreResult {
 }
 
 // ---------------------------------------------------------------------------
-// Lane feature projections — shared ordering for streaming and matrix consumers
+// Lane feature projections -- shared ordering for streaming and matrix consumers
 // ---------------------------------------------------------------------------
 //
 // GBM consumers retain a flat row-major `Vec<f64>`; LDA and MLP project the same
 // rows into one-row scratch and retain no raw frame. Every contributing block's
 // width is an inherent const, so the lane widths below are compile-time constants.
 //
-// The per-row walk order is fixed — scoring blocks (composition order) ->
-// `ResultMeta` -> `Derived` -> (nonlinear only) `sequence_counts` — and the
+// The per-row walk order is fixed -- scoring blocks (composition order) ->
+// `ResultMeta` -> `Derived` -> (nonlinear only) `sequence_counts` -- and the
 // name-set walks further down repeat it exactly, which is what keeps column
 // `j` and name `j` the same feature.
 
@@ -680,7 +680,7 @@ const NONLINEAR_NCOLS: usize = ScoringFields::NONLINEAR_LEN
 const ALL_NCOLS: usize = LINEAR_NCOLS + NONLINEAR_NCOLS;
 
 // Neither lane may collapse to nothing. Now that the widths are consts this is
-// a build failure rather than a test failure — a lane that lost every feature
+// a build failure rather than a test failure -- a lane that lost every feature
 // would otherwise train a model on a zero-column matrix.
 const _: () = assert!(LINEAR_NCOLS > 0, "linear lane collapsed");
 const _: () = assert!(NONLINEAR_NCOLS > 0, "nonlinear lane collapsed");
@@ -796,7 +796,7 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     out
 }
 
-/// The ALL-lane matrix (linear then nonlinear, per row) — the GBM feature set,
+/// The ALL-lane matrix (linear then nonlinear, per row) -- the GBM feature set,
 /// `ALL_NCOLS` wide, matching [`all_feature_name_set`]'s order.
 ///
 /// ONE pass over `rows` with ONE `Derived::compute` per row: the two lanes are
@@ -843,7 +843,7 @@ pub fn linear_feature_name_set() -> Vec<Arc<str>> {
 }
 
 /// NONLINEAR-lane feature names, in [`project_nonlinear_row`]'s order. The
-/// `sequence_counts` names are unconditional — a peptide with no parsed
+/// `sequence_counts` names are unconditional -- a peptide with no parsed
 /// sequence contributes NaN values under them, not a shorter row.
 pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
     let mut n = NameSink::new();
@@ -863,7 +863,7 @@ pub fn all_feature_name_set() -> Vec<Arc<str>> {
 }
 
 // ---------------------------------------------------------------------------
-// Label / score plumbing. `FeatureLike` is the label+score half only — the
+// Label / score plumbing. `FeatureLike` is the label+score half only -- the
 // GBM/LDA feature values reach the scorer as a prebuilt lane frame
 // (`PrecomputedFeatures::from_row_major`); the MLP supplies the same projection
 // through `write_competed_all_row` one row at a time. Neither route needs
@@ -1015,19 +1015,35 @@ mod feature_tests {
         ScoringFields,
     };
     use std::sync::Arc;
+    use timsquery::models::{
+        RowIdx,
+        test_handles,
+    };
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
         ScoringFields::sample(peptide)
     }
 
-    /// A target candidate over `PEPTIDEK` — 8 residues, no mods. With
+    /// Pairs each candidate with the score it got, sorted, so two runs are
+    /// comparable regardless of output order. Keyed on the arena row because
+    /// that is what `canonicalize_and_shuffle` sorts by, so a run that assigned
+    /// the same set of scores to different candidates still fails.
+    fn determinism_key(out: &[FinalResult]) -> Vec<(RowIdx, u32)> {
+        let mut v: Vec<(RowIdx, u32)> = out
+            .iter()
+            .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// A target candidate over `PEPTIDEK` -- 8 residues, no mods. With
     /// `sequence_features` set the sequence lanes carry those counts; without it
     /// they stay NaN, which is the only difference between the two cases.
     fn sample_competed_candidate(sequence_features: bool) -> CompetedCandidate {
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
             decoy: DecoyMarking::Target,
-            decoy_group: 0,
             sequence_features,
         };
         CompetedCandidate {
@@ -1049,7 +1065,7 @@ mod feature_tests {
     ///
     /// Checked with an UNPARSED peptide as well as a parsed one: the sequence
     /// block is unconditional now, so a row must be exactly as wide either way
-    /// — the width being a compile-time const is what makes that structural.
+    /// -- the width being a compile-time const is what makes that structural.
     #[test]
     fn lane_matrix_widths_match_name_sets() {
         for data in [
@@ -1067,7 +1083,7 @@ mod feature_tests {
     }
 
     /// The all-lane matrix is exactly the linear row followed by the nonlinear
-    /// row, per row — the one-pass build must not reorder or drop anything
+    /// row, per row -- the one-pass build must not reorder or drop anything
     /// relative to the two single-lane builds.
     #[test]
     fn all_matrix_is_linear_then_nonlinear_per_row() {
@@ -1138,7 +1154,7 @@ mod feature_tests {
     }
 
     /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
-    /// target/decoy, distinct `library_id`, with the LINEAR-lane count fields
+    /// target/decoy, distinct arena rows, with the LINEAR-lane count fields
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
@@ -1151,7 +1167,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i as u64;
+                c.scoring.identity.row = test_handles::row(i);
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
                 let base: u8 = if is_target { 20 } else { 8 };
@@ -1272,20 +1288,11 @@ mod feature_tests {
             assert!((0.0..=1.0).contains(&r.qvalue));
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
-        assert_eq!(key(&out_a), key(&out_b), "lda rescore not deterministic");
+        assert_eq!(
+            determinism_key(&out_a),
+            determinism_key(&out_b),
+            "lda rescore not deterministic"
+        );
     }
 
     #[test]
@@ -1419,7 +1426,7 @@ mod feature_tests {
             let held_auc = pair_auc(&held, &fold0_is_target);
             assert!(
                 (held_auc - 0.5).abs() < 1e-12,
-                "seed {seed}: held-out fold-0 rows must not separate — the only \
+                "seed {seed}: held-out fold-0 rows must not separate -- the only \
                  column that could separate them was culled from the model that \
                  scores them. AUC={held_auc} scores={held:?}"
             );
@@ -1459,19 +1466,6 @@ mod feature_tests {
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
 
         for seed in [7u64, 13, 42, 1234] {
             let run = || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed));
@@ -1488,8 +1482,8 @@ mod feature_tests {
                 assert!((0.0..=1.0).contains(&r.qvalue));
             }
             assert_eq!(
-                key(&out_a),
-                key(&out_b),
+                determinism_key(&out_a),
+                determinism_key(&out_b),
                 "seed {seed}: mlp rescore not deterministic"
             );
 
@@ -1504,7 +1498,7 @@ mod feature_tests {
                 assert_eq!(
                     fs.feature_importance.len(),
                     ALL_NCOLS,
-                    "seed {seed}: fold {f} — the MLP measures every lane \
+                    "seed {seed}: fold {f} -- the MLP measures every lane \
                          column (0.0 for culled ones), so none may be dropped"
                 );
                 assert!(
@@ -1545,7 +1539,7 @@ mod feature_tests {
             assert!(
                 !fs.feature_importance.is_empty(),
                 "fold {}: the GBM reported no importance at all, so it built no trees and \
-                 the score is a per-fold constant — every other assertion in this test \
+                 the score is a per-fold constant -- every other assertion in this test \
                  then passes without measuring anything (this is what n = 90 did)",
                 fs.fold
             );
@@ -1567,22 +1561,9 @@ mod feature_tests {
             );
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
-                .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id,
-                        r.discriminant_score.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
         assert_eq!(
-            key(&out_a),
-            key(&out_b),
+            determinism_key(&out_a),
+            determinism_key(&out_b),
             "hybrid rescore not deterministic across runs"
         );
     }
@@ -1719,7 +1700,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i as u64;
+                c.scoring.identity.row = test_handles::row(i);
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
             })
@@ -1805,7 +1786,7 @@ mod feature_tests {
         let auc = pair_auc(&scores, &is_target);
         assert!(
             auc > 0.8,
-            "AUC {auc} — the GBM sees a constant nonlinear lane here, so anything above \
+            "AUC {auc} -- the GBM sees a constant nonlinear lane here, so anything above \
              chance has to come through lda_score, and it did not"
         );
     }
@@ -1821,7 +1802,7 @@ mod feature_tests {
         //
         // Two things are pinned, and both matter:
         //   (a) every mobility feature is NaN (or, for the `_isna` companions,
-        //       flipped to 1.0 == "missing" — an isna column is BY CONSTRUCTION
+        //       flipped to 1.0 == "missing" -- an isna column is BY CONSTRUCTION
         //       never NaN, so demanding NaN there would be wrong);
         //   (b) every non-mobility feature is bit-for-bit unchanged. Without (b)
         //       an impl that NaN'd the whole record would pass (a).
@@ -1863,7 +1844,7 @@ mod feature_tests {
         // No exact counts: adding a mobility-derived feature must not break
         // this test, since the assertions above are already per-feature. The
         // only thing worth pinning is that the `mob` name filter still matches
-        // something — otherwise the loop above would pass vacuously.
+        // something -- otherwise the loop above would pass vacuously.
         assert!(
             !nan_mob.is_empty(),
             "no mobility features matched the name filter"
@@ -1880,7 +1861,7 @@ mod feature_tests {
 
     /// Row-major layout: value `j` of row `i` lives at `matrix[i * nf + j]`.
     ///
-    /// Every consumer indexes on that contract — `rescore_dash` sweeps the
+    /// Every consumer indexes on that contract -- `rescore_dash` sweeps the
     /// matrix a row at a time with every column's accumulator live, so an
     /// interleaved or transposed write would silently mix features together
     /// rather than fail. Rows carry distinct `delta_group_ln1p_diff` values so the

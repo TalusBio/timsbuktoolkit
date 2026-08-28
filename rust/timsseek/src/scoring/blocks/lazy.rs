@@ -6,7 +6,7 @@
 //! `timsseek_macros`): the derive generates every projection
 //! (`column_schema`/`columns` plus both feature lanes' value arrays and names)
 //! from the field list. Every field here is `#[feat(..)]`-annotated without
-//! `linear = false`, so they all land in the LINEAR lane — the live path the
+//! `linear = false`, so they all land in the LINEAR lane -- the live path the
 //! ML consumer reads.
 
 use serde::Serialize;

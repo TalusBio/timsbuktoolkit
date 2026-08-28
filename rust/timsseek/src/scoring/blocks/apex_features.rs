@@ -385,7 +385,7 @@ fn compute_fragment_apex_agreement<T: KeyLike>(
 /// envelope at the apex cycle.
 ///
 /// Uses existing predicted precursor_intensities (keys 0, 1, 2) rather than
-/// re-implementing averagine — the codebase already has sequence-specific predictions.
+/// re-implementing averagine -- the codebase already has sequence-specific predictions.
 fn compute_isotope_correlation(
     precursors: &MzMajorIntensityArray<i8, f32>,
     expected_precursor: &[(i8, f32)],

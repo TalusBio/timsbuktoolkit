@@ -2,7 +2,7 @@
 //!
 //! A transform never errors. Values it cannot map (non-positives under a log,
 //! negatives under a square root, anything non-finite) are dropped, and the
-//! caller reports the drop count in the panel subtitle — a silently shrinking
+//! caller reports the drop count in the panel subtitle -- a silently shrinking
 //! histogram would misread as "these rows do not exist".
 //!
 //! [`XTransform`] is applied once, at init, over a sorted sample. (`YTransform`
@@ -96,7 +96,7 @@ impl XTransform {
         }
     }
 
-    /// Whether a *finite* `v` is inside this transform's domain — exactly the
+    /// Whether a *finite* `v` is inside this transform's domain -- exactly the
     /// condition [`Self::apply`] tests.
     pub fn accepts(self, v: f64) -> bool {
         match self {

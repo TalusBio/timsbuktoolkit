@@ -1,5 +1,5 @@
 //! Cross-field / cross-block ML features. These reference more than one field,
-//! so they are NOT `#[feat]` attrs (which are strictly unary) — instead a
+//! so they are NOT `#[feat]` attrs (which are strictly unary) -- instead a
 //! hand-written [`Derived::compute`] reads a view of the finalized
 //! [`ScoringFields`] and fills a normal `#[derive(ScoreBlock)]` struct. The
 //! block emits ML features/names through the same lane walks as every other

@@ -44,7 +44,7 @@ pub(crate) fn qvalue_curves(
 /// already covers both classes, so the curve is `(1,1)` at every point rather
 /// than starting at `(0,0)`.
 ///
-/// Empty when either class is absent — a PP plot of one class says nothing.
+/// Empty when either class is absent -- a PP plot of one class says nothing.
 pub(crate) fn pp_curve(score: &[f32], is_target: &[bool], n_points: usize) -> Vec<(f64, f64)> {
     let mut targets: Vec<f32> = Vec::new();
     let mut decoys: Vec<f32> = Vec::new();
@@ -92,7 +92,7 @@ mod tests {
     }
 
     /// A zoomed curve must spend all of its points inside its own range and
-    /// agree with the wide curve wherever they overlap — a zoom that merely
+    /// agree with the wide curve wherever they overlap -- a zoom that merely
     /// rescaled the axis without re-gridding would be the bug this guards.
     #[test]
     fn zoomed_curves_resolve_the_low_q_region() {
@@ -157,7 +157,7 @@ mod tests {
     /// Axes are `(decoy CDF, target CDF)`; the panel draws the `y = x`
     /// reference line, so a curve point where `d > tt` sits BELOW that
     /// diagonal. When targets score higher, the decoy CDF races ahead of the
-    /// target CDF in the shared middle range — the curve dips below y = x,
+    /// target CDF in the shared middle range -- the curve dips below y = x,
     /// which is what good target/decoy separation looks like on this plot.
     #[test]
     fn pp_curve_dips_below_the_diagonal_when_targets_score_higher() {

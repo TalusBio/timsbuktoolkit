@@ -23,11 +23,10 @@ pub enum ToleranceSource {
 /// Lightweight result yielded by the streaming iterator.
 ///
 /// Owns materialized numpy arrays and metadata. The iterator's internal
-/// collector pool is never exposed — it reuses Rust-side buffers across chunks.
+/// collector pool is never exposed -- it reuses Rust-side buffers across chunks.
 #[pyclass(frozen)]
 pub struct PyChromatogramArrays {
-    #[pyo3(get)]
-    id: u64,
+    id: timsquery::models::OwnedSourceId,
     precursor_intensities: Py<PyAny>,
     fragment_intensities: Py<PyAny>,
     #[pyo3(get)]
@@ -42,6 +41,11 @@ pub struct PyChromatogramArrays {
 
 #[pymethods]
 impl PyChromatogramArrays {
+    #[getter]
+    fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        crate::source_id_to_py(py, &self.id)
+    }
+
     #[getter]
     fn precursor_intensities<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         self.precursor_intensities.clone_ref(py).into_bound(py)
@@ -72,7 +76,7 @@ fn extract_arrays(
     let rt = collector.rt_range_milis();
 
     Ok(PyChromatogramArrays {
-        id: collector.id,
+        id: collector.id.clone(),
         precursor_intensities: prec_np.into_any().unbind(),
         fragment_intensities: frag_np.into_any().unbind(),
         precursor_labels: collector

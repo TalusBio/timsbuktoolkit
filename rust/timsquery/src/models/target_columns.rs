@@ -5,7 +5,8 @@ use crate::models::capabilities::{
 };
 use crate::models::query_handle::QueryRef;
 use crate::models::source_id::{
-    LibraryId,
+    OwnedSourceId,
+    SourceId,
     SourceIdError,
     SourceIds,
 };
@@ -13,16 +14,20 @@ use crate::traits::DecoyShift;
 
 pub use index::{
     FlatIdx,
+    GroupCode,
     RowIdx,
 };
 
-/// How the arena reaches its own memory.
+/// The handles the arena hands out: two ways of addressing its memory, and one
+/// way of naming a competition group.
 ///
-/// Both types are opaque outside this crate: no constructor from an integer,
-/// no accessor yielding one, no `Display` and no `Serialize`. A position can
-/// therefore not be invented by a caller, confused with an id, or written to
-/// an output file — it can only be obtained from the arena that owns the rows
-/// and handed straight back to it.
+/// All three are opaque: no constructor from an integer, no accessor yielding
+/// one, no `Display`, no `Serialize`. So none of them can be invented by a
+/// caller, confused with an id, or written to an output file -- a handle can
+/// only be obtained from the arena and handed straight back to it.
+///
+/// Construction is `pub(super)`, i.e. this file, so the arena is the only thing
+/// that mints one.
 mod index {
     /// A stored row: `0..n_rows()`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -30,44 +35,154 @@ mod index {
 
     /// A scored slot after decoy expansion: `0..expanded_len()`. Distinct from
     /// [`RowIdx`] because `variants_per_row` slots map onto one row, so using
-    /// one where the other is meant reads a real but wrong row — in range, no
+    /// one where the other is meant reads a real but wrong row -- in range, no
     /// panic, plausible data. The type is what stops that.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FlatIdx(u32);
 
+    /// Which competition group a row belongs to, as a handle rather than a
+    /// value. Rows that compete share one, and that is all a consumer needs:
+    /// grouping sorts by it and compares it, and never reads it. Opaque for the
+    /// same reason as the indices above -- a handle that could be printed would
+    /// end up in an output file as though it meant something.
+    ///
+    /// `Ord` because grouping works by sorting competitors adjacent; any total
+    /// order does, since only equality carries meaning.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GroupCode(u32);
+
     impl RowIdx {
-        pub(crate) fn new(row: u32) -> Self {
+        pub(super) fn new(row: u32) -> Self {
             Self(row)
         }
 
-        pub(crate) fn get(self) -> usize {
+        pub(super) fn get(self) -> usize {
+            self.0 as usize
+        }
+    }
+
+    impl GroupCode {
+        pub(super) fn new(code: u32) -> Self {
+            Self(code)
+        }
+
+        pub(super) fn get(self) -> usize {
             self.0 as usize
         }
     }
 
     impl FlatIdx {
-        pub(crate) fn new(flat: u32) -> Self {
+        pub(super) fn new(flat: u32) -> Self {
             Self(flat)
         }
 
-        pub(crate) fn get(self) -> usize {
+        pub(super) fn get(self) -> usize {
             self.0 as usize
         }
     }
 
-    /// `u32::MAX`, not 0. A defaulted index exists only as a placeholder — a
-    /// `#[serde(skip)]` field, a test fixture — and 0 is a valid row in every
-    /// non-empty arena, so a placeholder that leaked would read row 0 and look
-    /// right. `u32::MAX` panics on access instead.
+    /// `u32::MAX`, not 0, because 0 is a valid row in every non-empty arena: a
+    /// placeholder that leaked would read row 0 and look right, where `u32::MAX`
+    /// panics on access. A defaulted group likewise competes with the other
+    /// placeholders and with nothing real, rather than folding into the arena's
+    /// first group.
+    ///
+    /// These exist for exactly one caller: `Identity::sample_default()`, which
+    /// `#[derive(ScoreBlock)]` deliberately leaves un-gated so other crates'
+    /// tests can build a fixture. Nothing in production defaults a handle. There
+    /// is no `Default for FlatIdx` because nothing ever wanted one.
     impl Default for RowIdx {
         fn default() -> Self {
             Self(u32::MAX)
         }
     }
 
-    impl Default for FlatIdx {
+    impl Default for GroupCode {
         fn default() -> Self {
             Self(u32::MAX)
+        }
+    }
+}
+
+/// Handles for tests in downstream crates, which score against a real arena in
+/// production but assemble results directly in tests.
+///
+/// Feature-gated, and the feature is only ever enabled by a `dev-dependency`,
+/// so "only the arena mints a handle" still holds in every shipped build. The
+/// values are dense from 0 because the callers need them *distinct* (a sort key,
+/// a competition group) and never resolve them against an arena.
+#[cfg(feature = "test-support")]
+pub mod test_handles {
+    use super::index::{
+        GroupCode,
+        RowIdx,
+    };
+
+    pub fn row(i: u32) -> RowIdx {
+        RowIdx::new(i)
+    }
+
+    pub fn group(i: u32) -> GroupCode {
+        GroupCode::new(i)
+    }
+}
+
+/// Interned competition groups: `codes[row]` points at `labels`, so rows that
+/// compete share one label rather than each storing a copy.
+#[derive(Debug, Clone)]
+pub struct DecoyGroups {
+    codes: Vec<GroupCode>,
+    labels: SourceIds,
+}
+
+/// One row's worth of input to [`TargetColumns::push_row`].
+///
+/// Carries the row's `id`, so a row cannot be stored apart from the name its
+/// file gave it. `Default` covers the optional half, so a caller names only
+/// what it has:
+///
+/// ```ignore
+/// geom.push_row(Row {
+///     precursor_mz: 900.4,
+///     charge: 2,
+///     rt_seconds: 1.0,
+///     mobility: 0.8,
+///     frags: &frags,
+///     seq_mod: "PEPTIDEK",
+///     ..Default::default()
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct Row<'a, L: KeyLike> {
+    pub precursor_mz: f64,
+    pub charge: u8,
+    pub rt_seconds: f32,
+    pub mobility: f32,
+    pub frags: &'a [(L, f64)],
+    pub seq_strip: &'a str,
+    pub seq_mod: &'a str,
+    pub mods: &'a [(u8, u16)],
+    /// A decoy the library shipped, as opposed to one the arena derives.
+    pub is_decoy: bool,
+    /// What the source file called this row, in the shape it used. `None` for a
+    /// format that names nothing; [`TargetColumns::seal`] mints ids only when
+    /// *every* row arrived `None`.
+    pub id: Option<OwnedSourceId>,
+}
+
+impl<L: KeyLike> Default for Row<'_, L> {
+    fn default() -> Self {
+        Self {
+            precursor_mz: 0.0,
+            charge: 0,
+            rt_seconds: 0.0,
+            mobility: 0.0,
+            frags: &[],
+            seq_strip: "",
+            seq_mod: "",
+            mods: &[],
+            is_decoy: false,
+            id: None,
         }
     }
 }
@@ -90,16 +205,21 @@ pub struct TargetColumns<L: KeyLike> {
     pub(crate) mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
     pub(crate) is_decoy: Vec<bool>,
-    /// What the source file called each row, when it said. Parallel to the row
-    /// columns. Minted at [`Self::seal`] for formats that carry no ids, so a
-    /// sealed arena always has one per row.
+    /// Each row's id as pushed. Parallel to the row columns, so a shard merge
+    /// cannot separate a row from its name. Drained by [`Self::seal`].
+    pub(crate) pending_ids: Vec<Option<OwnedSourceId>>,
+    /// Built at [`Self::seal`], minted there for formats that carry no ids, so
+    /// a sealed arena always has one per row.
     pub(crate) source_ids: SourceIds,
-    /// Which competition group each row belongs to, one entry per row. Empty
-    /// until [`Self::seal`], which mints it when the input did not say. Not
-    /// derived from the row position: group membership is a property of the
-    /// analytes, and reading it off the arena layout only works for as long as
-    /// the layout happens to encode it.
-    decoy_groups: Vec<u64>,
+    /// The competition groups the input declared, interned: a code per row,
+    /// plus the labels those codes point at. Rows that compete share a code, so
+    /// the label is stored once per group rather than once per row.
+    ///
+    /// `None` when the input declared none, which is every format today. A
+    /// group is then a singleton -- the row competes with its own decoy
+    /// variants and nothing else -- so both the code and the label are
+    /// derivable from the row and nothing is stored.
+    pub(crate) decoy_groups: Option<DecoyGroups>,
     // CSR prefix offsets (n+1)
     pub(crate) frag_off: Vec<u32>,
     pub(crate) seq_strip_off: Vec<u32>,
@@ -125,8 +245,9 @@ impl<L: KeyLike> TargetColumns<L> {
             rt_seconds: Vec::new(),
             mobility: Vec::new(),
             is_decoy: Vec::new(),
+            pending_ids: Vec::new(),
             source_ids: SourceIds::default(),
-            decoy_groups: Vec::new(),
+            decoy_groups: None,
             frag_off: vec![0],
             seq_strip_off: vec![0],
             seq_mod_off: vec![0],
@@ -143,22 +264,24 @@ impl<L: KeyLike> TargetColumns<L> {
     /// Append one row. `mods` are (position, registry_idx) pairs; the caller
     /// is responsible for having registered the mod tokens in `mod_registry`.
     #[allow(clippy::too_many_arguments)]
-    pub fn push_row(
-        &mut self,
-        precursor_mz: f64,
-        charge: u8,
-        rt_seconds: f32,
-        mobility: f32,
-        frags: &[(L, f64)],
-        seq_strip: &str,
-        seq_mod: &str,
-        mods: &[(u8, u16)],
-        is_decoy: bool,
-    ) {
+    pub fn push_row(&mut self, row: Row<'_, L>) {
+        let Row {
+            precursor_mz,
+            charge,
+            rt_seconds,
+            mobility,
+            frags,
+            seq_strip,
+            seq_mod,
+            mods,
+            is_decoy,
+            id,
+        } = row;
         self.precursor_mz.push(precursor_mz);
         self.charge.push(charge);
         self.rt_seconds.push(rt_seconds);
         self.mobility.push(mobility);
+        self.pending_ids.push(id);
         for (lab, mz) in frags {
             self.frag_labels.push(lab.clone());
             self.frag_mzs.push(*mz);
@@ -186,31 +309,6 @@ impl<L: KeyLike> TargetColumns<L> {
     }
 
     /// Append one target (defaults `is_decoy = false`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn push_target(
-        &mut self,
-        precursor_mz: f64,
-        charge: u8,
-        rt_seconds: f32,
-        mobility: f32,
-        frags: &[(L, f64)],
-        seq_strip: &str,
-        seq_mod: &str,
-        mods: &[(u8, u16)],
-    ) {
-        self.push_row(
-            precursor_mz,
-            charge,
-            rt_seconds,
-            mobility,
-            frags,
-            seq_strip,
-            seq_mod,
-            mods,
-            false,
-        );
-    }
-
     /// Number of *physical stored rows*, i.e. how many analytes are held in
     /// memory before decoy expansion. Under `LazyMassShift` every row is a
     /// target; under `Passthrough` the count includes any stored decoy rows.
@@ -219,42 +317,85 @@ impl<L: KeyLike> TargetColumns<L> {
         self.charge.len()
     }
 
-    /// Attach caller-supplied ids. Call after every `push_row`, before `seal`.
-    pub fn set_source_ids(&mut self, ids: Vec<LibraryId>) -> Result<(), SourceIdError> {
-        self.source_ids = SourceIds::numeric(ids, self.n_rows())?;
-        Ok(())
-    }
-
     /// The rows of this arena, in storage order.
     pub fn rows(&self) -> impl Iterator<Item = RowIdx> + use<L> {
         (0..self.n_rows() as u32).map(RowIdx::new)
     }
 
-    /// Attach the competition groups a file declared. Call before `seal`,
-    /// which otherwise mints one group per row. Rows sharing a value compete,
-    /// so unlike source ids these are not required to be unique.
-    pub fn set_decoy_groups(&mut self, groups: Vec<u64>) -> Result<(), SourceIdError> {
+    /// Attach the competition groups a file declared, interning them. Rows
+    /// sharing a value compete, so unlike source ids these are expected to
+    /// repeat -- which is why they are stored as a code per row against a
+    /// deduplicated label set rather than a label per row.
+    ///
+    /// Without this, a group is a singleton and is derived from the row.
+    pub fn set_decoy_groups<I, S>(&mut self, groups: I) -> Result<(), SourceIdError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OwnedSourceId>,
+    {
+        let groups: Vec<OwnedSourceId> = groups.into_iter().map(Into::into).collect();
         if groups.len() != self.n_rows() {
-            return Err(SourceIdError::LengthMismatch {
-                ids: groups.len(),
+            return Err(SourceIdError::GroupLengthMismatch {
+                groups: groups.len(),
                 rows: self.n_rows(),
             });
         }
-        self.decoy_groups = groups;
+
+        let mut seen: std::collections::HashMap<OwnedSourceId, GroupCode> =
+            std::collections::HashMap::new();
+        let mut labels: Vec<OwnedSourceId> = Vec::new();
+        let mut codes = Vec::with_capacity(groups.len());
+        for group in groups {
+            let code = *seen.entry(group.clone()).or_insert_with(|| {
+                labels.push(group);
+                GroupCode::new((labels.len() - 1) as u32)
+            });
+            codes.push(code);
+        }
+
+        let n_labels = labels.len();
+        self.decoy_groups = Some(DecoyGroups {
+            codes,
+            labels: SourceIds::owned(labels, n_labels)?,
+        });
         Ok(())
     }
 
-    pub fn source_id(&self, tgt: RowIdx) -> Option<LibraryId> {
+    /// Which competition group this row is in, as an opaque handle. Rows that
+    /// compete share one; nothing else about it is meaningful.
+    ///
+    /// Derived from the row when the input declared no groups -- a row then
+    /// competes only with its own decoy variants, so it is its own group and
+    /// there is nothing to store.
+    pub fn decoy_group_code(&self, tgt: RowIdx) -> GroupCode {
+        match &self.decoy_groups {
+            Some(g) => g.codes[tgt.get()],
+            None => GroupCode::new(tgt.get() as u32),
+        }
+    }
+
+    /// The group's id, for output. Resolved here rather than carried alongside
+    /// every result, which is the whole point of the code above.
+    pub fn decoy_group(&self, tgt: RowIdx) -> SourceId<'_> {
+        match &self.decoy_groups {
+            Some(g) => g
+                .labels
+                .get(g.codes[tgt.get()].get())
+                .expect("every code indexes a label"),
+            None => self.output_id(tgt),
+        }
+    }
+
+    pub fn source_id(&self, tgt: RowIdx) -> Option<SourceId<'_>> {
         self.source_ids.get(tgt.get())
     }
 
     /// The id a result for row `tgt` carries. Always a source id: [`Self::seal`]
     /// mints them for formats that carry none, so a row position has no route
     /// into output.
-    pub fn output_id(&self, tgt: RowIdx) -> u64 {
+    pub fn output_id(&self, tgt: RowIdx) -> SourceId<'_> {
         self.source_id(tgt)
             .expect("sealed targets have source ids; seal() mints any that are missing")
-            .get()
     }
 
     pub fn charge(&self, tgt: RowIdx) -> u8 {
@@ -334,21 +475,66 @@ impl<L: KeyLike> TargetColumns<L> {
     /// on-the-fly ±CH2 index transform, never stored). If the library shipped
     /// materialized decoys, downgrade to `Passthrough` so the stored rows are
     /// honored 1:1 instead of being silently re-decoyed.
-    pub fn seal(&mut self) {
+    /// Fails when the pushed ids cannot make a column: two rows sharing an id
+    /// (a caller keys results by it, so a repeat hides a row), or a library
+    /// mixing numeric and text ids (storing both would coerce the numbers to
+    /// strings, and `7` and `"7"` would become two ids in one column).
+    pub fn seal(&mut self) -> Result<(), SourceIdError> {
+        // Sealing twice is normal: a reader seals the arena it built, and
+        // timsseek seals again after stamping the decoy strategy onto `caps`.
+        // The id column is built by the first call, which drains `pending_ids`.
         if matches!(self.source_ids, SourceIds::Absent) {
-            let n = self.n_rows();
-            tracing::warn!(
-                "input carries no per-target id; minting {n} self-incremental ids (0..{n}). \
-                 Result ids are ours, not the input file's."
-            );
-            self.source_ids = SourceIds::minted(n);
+            self.build_source_ids()?;
         }
-        if self.decoy_groups.is_empty() {
+        self.apply_decoy_downgrades();
+        self.shrink();
+        Ok(())
+    }
+
+    fn build_source_ids(&mut self) -> Result<(), SourceIdError> {
+        let n = self.n_rows();
+        debug_assert_eq!(self.pending_ids.len(), n, "an id per row, or none");
+        let named = self.pending_ids.iter().filter(|id| id.is_some()).count();
+        self.source_ids = if named == n {
+            SourceIds::owned(self.pending_ids.drain(..).map(Option::unwrap).collect(), n)?
+        } else {
+            if named > 0 {
+                // A library names all its rows or none. One blank cell costs the
+                // whole library its names, so say which row did it -- minting
+                // overwrites every id, leaving nothing to trace it from.
+                let row = self
+                    .pending_ids
+                    .iter()
+                    .position(Option::is_none)
+                    .expect("named < n, so some row is unnamed");
+                tracing::warn!(
+                    "{named} of {n} rows carry an id and {} do not, so the whole library falls \
+                     back to minted ids: results will be keyed by row number instead of the \
+                     names the file gave. First unnamed row is {row}.",
+                    n - named,
+                );
+            } else {
+                tracing::warn!(
+                    "input carries no per-target id; minting {n} self-incremental ids (0..{n}). \
+                     Result ids are ours, not the input file's."
+                );
+            }
+            self.pending_ids.clear();
+            SourceIds::minted(n)
+        };
+        self.pending_ids.shrink_to_fit();
+        Ok(())
+    }
+
+    fn apply_decoy_downgrades(&mut self) {
+        // Nothing to build when no groups were declared: a row is then its own
+        // group, which `decoy_group_code` derives. Only the case that actually
+        // loses information is worth a word.
+        if self.decoy_groups.is_none() && matches!(self.caps.decoys, DecoyStrategy::Passthrough) {
             tracing::warn!(
-                "input declares no decoy groups; minting one per row, named by the row's \
-                 own id. Stored decoys therefore compete alone, not against their target."
+                "library ships its own decoys but declares no competition groups, so each \
+                 stored decoy competes alone rather than against its target"
             );
-            self.decoy_groups = self.rows().map(|r| self.output_id(r)).collect();
         }
         if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
             && self.is_decoy.iter().any(|&d| d)
@@ -356,16 +542,9 @@ impl<L: KeyLike> TargetColumns<L> {
             tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
             self.caps.decoys = DecoyStrategy::Passthrough;
         }
-        // The flyweight packs the decoy variant into `VARIANT_BITS` bits. Fail
-        // loud here (where the invariant is established) rather than silently
-        // corrupting the packed handle in a release build. The free fn is used
-        // because `seal` is not bounded on `DecoyShift`.
-        let vpr = variants_per_row_for(self.caps.decoys);
-        assert!(
-            vpr <= (1usize << QueryRef::<'_, L>::VARIANT_BITS),
-            "variants_per_row {vpr} exceeds the {}-bit decoy-variant packing budget",
-            QueryRef::<'_, L>::VARIANT_BITS,
-        );
+    }
+
+    fn shrink(&mut self) {
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
@@ -388,21 +567,18 @@ impl<L: KeyLike> TargetColumns<L> {
 /// `LazyMassShift`), and expanded/flat indices fan each row out into its
 /// target + decoy variants. Bounded on `DecoyShift` so `item_at` can hand out a
 /// `QueryRef` (the flyweight that computes decoy geometry on the fly).
-/// Variants each stored row expands into, from the decoy strategy alone:
-/// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the target);
-/// `Passthrough`/`None` are 1:1. Free fn (no `DecoyShift` bound) so both the
-/// bounded `variants_per_row` and the unbounded `seal` share one definition.
-pub fn variants_per_row_for(decoys: DecoyStrategy) -> usize {
-    match decoys {
-        DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
-        DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
-    }
-}
-
 impl<L: KeyLike + DecoyShift> TargetColumns<L> {
-    /// Variants each stored row expands into (see [`variants_per_row_for`]).
+    /// Variants each stored row expands into, from the decoy strategy alone:
+    /// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the
+    /// target); `Passthrough`/`None` are 1:1.
+    ///
+    /// `n_decoys` is a `u8`, which is what keeps a variant index inside the
+    /// `u8` that [`Self::split_flat`] casts it to.
     pub fn variants_per_row(&self) -> usize {
-        variants_per_row_for(self.caps.decoys)
+        match self.caps.decoys {
+            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
+            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+        }
     }
 
     /// Logical count after decoy expansion: the flat iterator length, i.e. how
@@ -419,7 +595,7 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
 
     /// The scored slots in batches of at most `n`. The arena owns the split,
     /// so a caller batches work by stating a size rather than by computing
-    /// positions — no integer names a slot outside this crate.
+    /// positions -- no integer names a slot outside this crate.
     pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<L> {
         assert!(n > 0, "chunk size must be non-zero");
         let len = self.expanded_len();
@@ -432,7 +608,7 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
 
     /// Decompose a scored slot into its stored row and decoy variant. The
     /// single authority for the decoy index-transform encoding, and the only
-    /// route from a [`FlatIdx`] to a [`RowIdx`] — which is what keeps the two
+    /// route from a [`FlatIdx`] to a [`RowIdx`] -- which is what keeps the two
     /// index spaces from being used interchangeably.
     pub fn split_flat(&self, flat: FlatIdx) -> (RowIdx, u8) {
         let vpr = self.variants_per_row();
@@ -441,10 +617,25 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
         (RowIdx::new(row), (flat % vpr) as u8)
     }
 
+    /// The inverse of [`Self::split_flat`]: name one of a row's scored slots.
+    ///
+    /// Both directions live here so the encoding has one owner. This is also the
+    /// only way to pair a row with a variant, and it checks the pairing -- a
+    /// caller that could build the pair itself could name a variant the library
+    /// does not expand into, which would read a real but wrong slot.
+    pub fn flat_for(&self, row: RowIdx, variant: u8) -> FlatIdx {
+        let vpr = self.variants_per_row();
+        assert!(
+            (variant as usize) < vpr,
+            "variant {variant} does not exist in a library with {vpr} variants per row"
+        );
+        assert!(row.get() < self.n_rows(), "row is out of range");
+        FlatIdx::new((row.get() * vpr + variant as usize) as u32)
+    }
+
     /// Scored slot -> `(row, variant)` flyweight.
     pub fn item_at(&self, flat: FlatIdx) -> QueryRef<'_, L> {
-        let (row, variant) = self.split_flat(flat);
-        QueryRef::new(self, row, variant)
+        QueryRef::new(self, flat)
     }
 
     /// A slot is a target iff its stored row is a target AND it is the
@@ -452,13 +643,6 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     pub fn is_target(&self, flat: FlatIdx) -> bool {
         let (row, variant) = self.split_flat(flat);
         !self.is_decoy[row.get()] && variant == 0
-    }
-
-    /// The competition group this row belongs to, as an id — not a position.
-    /// A row's decoy variants share its group, so exactly one member survives
-    /// competition.
-    pub fn decoy_group(&self, tgt: RowIdx) -> u64 {
-        self.decoy_groups[tgt.get()]
     }
 }
 
@@ -468,49 +652,85 @@ mod tests {
     use crate::IonAnnot;
     use crate::models::capabilities::DecoyStrategy;
 
+    fn two_rows() -> TargetColumns<IonAnnot> {
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for _ in 0..2 {
+            c.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                rt_seconds: 1.0,
+                mobility: 0.8,
+                frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq_strip: "PEP",
+                seq_mod: "PEP",
+                ..Default::default()
+            });
+        }
+        c
+    }
+
+    /// Declared groups are interned, so two rows in one group share a code and
+    /// the label is stored once rather than per row.
+    #[test]
+    fn rows_in_one_declared_group_share_a_code() {
+        let mut c = two_rows();
+        c.set_decoy_groups(["g1", "g1"]).unwrap();
+        c.seal().expect("fixture ids are usable");
+
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
+        assert_eq!(c.decoy_group(a), SourceId::Text("g1"));
+    }
+
+    /// Without declared groups a row is its own group, derived rather than
+    /// stored -- so nothing is allocated and the label is the row's own id.
+    #[test]
+    fn undeclared_groups_are_derived_not_stored() {
+        let mut c = two_rows();
+        c.seal().expect("fixture ids are usable");
+
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert!(c.decoy_groups.is_none(), "nothing stored for minted groups");
+        assert_ne!(
+            c.decoy_group_code(a),
+            c.decoy_group_code(b),
+            "each row competes alone"
+        );
+        assert_eq!(c.decoy_group(a), SourceId::Numeric(0));
+        assert_eq!(c.decoy_group(b), SourceId::Numeric(1));
+    }
+
     /// `output_id` expects a source id on every row; this is what makes that
     /// safe for the formats that carry none.
     #[test]
     fn seal_mints_ids_when_the_input_carried_none() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for _ in 0..2 {
-            c.push_target(
-                500.0,
-                2,
-                1.0,
-                0.8,
-                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                "PEP",
-                "PEP",
-                &[],
-            );
-        }
+        let mut c = two_rows();
         assert_eq!(c.source_id(RowIdx::new(0)), None);
-        c.seal();
-        assert_eq!(c.output_id(RowIdx::new(0)), 0);
-        assert_eq!(c.output_id(RowIdx::new(1)), 1);
+        c.seal().expect("fixture ids are usable");
+        assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));
+        assert_eq!(c.output_id(RowIdx::new(1)), SourceId::Numeric(1));
     }
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::test_lazy_decoys());
-        c.push_target(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 3);
         assert_eq!(c.expanded_len(), 3);
         assert!(c.is_target(FlatIdx::new(0))); // variant 0
         assert!(!c.is_target(FlatIdx::new(1))); // +decoy
         assert!(!c.is_target(FlatIdx::new(2))); // -decoy
-        assert_eq!(c.decoy_group(RowIdx::new(0)), 0);
+        assert_eq!(c.decoy_group(RowIdx::new(0)), SourceId::Numeric(0));
     }
 
     #[test]
@@ -518,29 +738,28 @@ mod tests {
         let mut caps = TargetCapabilities::default_diann();
         caps.decoys = DecoyStrategy::Passthrough;
         let mut c = TargetColumns::with_capabilities(caps);
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            false,
-        );
-        c.push_row(
-            510.0,
-            2,
-            1.0,
-            0.8,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            true,
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 510.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            is_decoy: true,
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 1);
         assert_eq!(c.expanded_len(), 2);
         assert!(c.is_target(FlatIdx::new(0)));
@@ -551,42 +770,34 @@ mod tests {
     fn csr_ranges_recover_per_target_fragments() {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         // target 0: 2 frags; target 1: 3 frags
-        c.push_target(
-            // precursor_mz
-            500.0,
-            // charge
-            2,
-            // rt
-            1.0,
-            // mob
-            0.8,
-            // frags
-            &[
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y4").unwrap(), 400.0),
             ],
-            // strip
-            "PEPTIDEK",
-            // modified
-            "PEPTIDEK",
-            // mods
-            &[],
-        );
-        c.push_target(
-            600.0,
-            3,
-            2.0,
-            0.9,
-            &[
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 600.0,
+            charge: 3,
+            rt_seconds: 2.0,
+            mobility: 0.9,
+            frags: &[
                 (IonAnnot::try_from("y2").unwrap(), 200.0),
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
                 (IonAnnot::try_from("y6").unwrap(), 600.0),
             ],
-            "SAMPLERK",
-            "SAMPLERK",
-            &[],
-        );
-        c.seal();
+            seq_strip: "SAMPLERK",
+            seq_mod: "SAMPLERK",
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.frag_range(RowIdx::new(0)), 0..2);
         assert_eq!(c.frag_range(RowIdx::new(1)), 2..5);
@@ -606,31 +817,28 @@ mod tests {
         use std::sync::Arc;
         let mut c: TargetColumns<Arc<str>> =
             TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        c.push_row(
-            500.0,
-            2,
-            1.0,
-            0.8,
-            &[(Arc::<str>::from("frag_a"), 300.0)],
-            "PEP",
-            "PEP",
-            &[],
-            // is_decoy
-            false,
-        );
-        c.push_row(
-            600.0,
-            2,
-            1.0,
-            0.8,
-            &[(Arc::<str>::from("frag_b"), 400.0)],
-            "TIDE",
-            "TIDE",
-            &[],
-            // is_decoy
-            true,
-        );
-        c.seal();
+        c.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(Arc::<str>::from("frag_a"), 300.0)],
+            seq_strip: "PEP",
+            seq_mod: "PEP",
+            ..Default::default()
+        });
+        c.push_row(Row {
+            precursor_mz: 600.0,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 0.8,
+            frags: &[(Arc::<str>::from("frag_b"), 400.0)],
+            seq_strip: "TIDE",
+            seq_mod: "TIDE",
+            is_decoy: true,
+            ..Default::default()
+        });
+        c.seal().expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.is_decoy, vec![false, true]);
         assert_eq!(

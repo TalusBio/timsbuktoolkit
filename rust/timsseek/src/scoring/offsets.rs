@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn weighted_ms1_calibrates_mz_when_mobility_absent() {
         // mzML vs no-IM library: finite m/z error, NaN mobility error. m/z MUST
-        // still calibrate — the calibrant must not be dropped just because
+        // still calibrate -- the calibrant must not be dropped just because
         // mobility is absent (regression guard for the `w_mz && w_mob` gate).
         let mut ms1 = TopNArray::new();
         ms1.push(ion(10.0, 5.0, f32::NAN));

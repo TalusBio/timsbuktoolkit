@@ -11,8 +11,8 @@
 //! `Modifier::REVERSED` says *what mode the screen is in*: the selected tab, a
 //! scrubbed (not live) frame, an accumulating count, a marked heatmap cell.
 //! Color says *what a thing is*: the density ramp and the mark kinds. Apart,
-//! neither channel has to mean three things at once, and inversion — a swap of
-//! whatever colors are already there — survives a colorblind reader, a
+//! neither channel has to mean three things at once, and inversion -- a swap of
+//! whatever colors are already there -- survives a colorblind reader, a
 //! monochrome screenshot and any terminal theme. `Mark` is the only place that
 //! adds to this.
 //!
@@ -21,7 +21,7 @@
 //! `paint_heatmap` runs exactly one `mark_*` arm per draw (`crate::Layer`, cycled
 //! by `m`/`M`), and each layer is internally overlap-free: the DP chain and greedy
 //! tails partition the path by construction, and the other three layers only emit
-//! `Mark::Region`. So no cross-layer priority exists to resolve below — `Mark`'s
+//! `Mark::Region`. So no cross-layer priority exists to resolve below -- `Mark`'s
 //! `Ord` only arbitrates a DP node against a tail node rounded into one cell.
 //!
 //! Nothing to draw, or no room to draw it in, renders a `Paragraph` saying so
@@ -151,7 +151,7 @@ const GLOBAL_KEYS: &[Binding] = &[
 const TAB_KEYS_AT: usize = 2;
 
 /// `?` itself, listed apart from `GLOBAL_KEYS` because the status line pins it
-/// to its own right-hand column — see `fit_status_hints`.
+/// to its own right-hand column -- see `fit_status_hints`.
 const KEYS_OVERLAY_KEY: Binding = Binding::new("?", "keys", "this screen");
 
 const FIT_KEYS: &[Binding] = &[
@@ -164,7 +164,7 @@ fn tab_keys(tab: Tab) -> &'static [Binding] {
     if tab == Tab::Fit { FIT_KEYS } else { &[] }
 }
 
-/// One `key`/`action` hint per binding: the key `BOLD`, the action `DarkGray` —
+/// One `key`/`action` hint per binding: the key `BOLD`, the action `DarkGray` --
 /// weight is what makes the bound letter scannable. `actions` false renders the
 /// keys alone, which is how the degrade below sheds action words but not keys.
 fn binding_spans(bindings: &[Binding], actions: bool) -> Vec<Span<'static>> {
@@ -194,7 +194,7 @@ fn binding_spans(bindings: &[Binding], actions: bool) -> Vec<Span<'static>> {
 /// The most detailed hint line (tab-local plus global bindings, ordered as
 /// `TAB_KEYS_AT` describes) that still fits `width`, degrading in stages: full
 /// text, keys only, global keys only, nothing. `? keys` is never part of this
-/// line — it has its own pinned-right column, so it survives every stage.
+/// line -- it has its own pinned-right column, so it survives every stage.
 fn fit_status_hints(tab_local: &[Binding], width: usize) -> Line<'static> {
     let (head, tail) = GLOBAL_KEYS.split_at(TAB_KEYS_AT);
     let full: Vec<Binding> = head.iter().chain(tab_local).chain(tail).copied().collect();
@@ -212,7 +212,7 @@ fn fit_status_hints(tab_local: &[Binding], width: usize) -> Line<'static> {
 }
 
 /// The status line: batch/pending-count on the left, key hints in the middle
-/// (degrading as `fit_status_hints` describes), `? keys` pinned to the right —
+/// (degrading as `fit_status_hints` describes), `? keys` pinned to the right --
 /// one `Paragraph` per column, so the right one stays right-aligned.
 fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     let mut state_spans = vec![Span::raw(format!(" b{} ", app.batch()))];
@@ -315,7 +315,7 @@ fn draw_scrub_banner(frame: &mut Frame, area: Rect, app: &App, frame_index: usiz
         .map(|c| format!(", batch {c}"))
         .unwrap_or_default();
     let text = format!(
-        " SCRUBBED — retained frame {}/{}{batch_note} (not live; `>` returns to now)",
+        " SCRUBBED -- retained frame {}/{}{batch_note} (not live; `>` returns to now)",
         frame_index + 1,
         app.frames().retained.max(1),
     );
@@ -329,8 +329,8 @@ fn draw_scrub_banner(frame: &mut Frame, area: Rect, app: &App, frame_index: usiz
 /// What one half of a terminal cell is marked with, for whichever layer
 /// (`crate::Layer`) is active.
 ///
-/// **Invariant:** a `Region` mark keeps the density glyph — `░▒▓█▀▄`,
-/// half-occupancy intact — and is identified by inversion, so a mark and the
+/// **Invariant:** a `Region` mark keeps the density glyph -- `░▒▓█▀▄`,
+/// half-occupancy intact -- and is identified by inversion, so a mark and the
 /// distribution under it stay both visible; color (`region_accent`) is redundant
 /// reinforcement. `DpNode`/`Tail` are the exception: they *replace* the cell with
 /// `O`/`X`, a path node being a point estimate rather than a region.
@@ -341,17 +341,17 @@ fn draw_scrub_banner(frame: &mut Frame, area: Rect, app: &App, frame_index: usiz
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Mark {
     None,
-    /// Curve, ridge or suppressed layer — the density glyph (or, in place of a
-    /// space, `\u{b7}` — see `compose_marked`), reversed.
+    /// Curve, ridge or suppressed layer -- the density glyph (or, in place of a
+    /// space, `\u{b7}` -- see `compose_marked`), reversed.
     Region,
-    /// Path layer, Pass 2's greedily attached tail — `X`, the standard
+    /// Path layer, Pass 2's greedily attached tail -- `X`, the standard
     /// excluded/suspect-point convention.
     Tail,
-    /// Path layer, the DP's own chosen chain — `O`.
+    /// Path layer, the DP's own chosen chain -- `O`.
     DpNode,
 }
 
-/// The active layer's accent color for a `Region` mark — reinforcement only (see
+/// The active layer's accent color for a `Region` mark -- reinforcement only (see
 /// `Mark`), so a named ANSI constant (see `heat_color`) and never one of indices
 /// 9-15 (`Light*`/`White`, invisible on a light background).
 fn region_accent(layer: Layer) -> Color {
@@ -412,7 +412,7 @@ impl Dims {
 }
 
 /// Which half of a terminal cell a grid row landed in. Tracked per half so two
-/// grid rows sharing a terminal line stay distinct — the doubled resolution
+/// grid rows sharing a terminal line stay distinct -- the doubled resolution
 /// `heatmap_cells` promises.
 #[derive(Clone, Copy)]
 enum Half {
@@ -421,14 +421,14 @@ enum Half {
 }
 
 impl Half {
-    /// Slot offset in a cell's pair of half-rows — the layout `heatmap_cells`'s
+    /// Slot offset in a cell's pair of half-rows -- the layout `heatmap_cells`'s
     /// `out` and the mark buffer share.
     fn slot(self) -> usize {
         usize::from(matches!(self, Half::Lower))
     }
 }
 
-/// Flips a display-row index so grid row 0 — the *lowest* observed RT — lands at
+/// Flips a display-row index so grid row 0 -- the *lowest* observed RT -- lands at
 /// the *bottom* of the canvas. Every y flip in this module goes through here.
 /// Without it grid row 0 would land at display row 0, the *top* one, and a
 /// monotonically increasing calibration would render as a *descending* line.
@@ -457,8 +457,8 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let title_left = " Fit \u{2014} observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
-    // `batch` only — the active layer gets its own subtitle row below.
+    let title_left = " Fit -- observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
+    // `batch` only -- the active layer gets its own subtitle row below.
     let title_right = format!(" b{} ", app.batch());
     frame.render_widget(
         Block::bordered()
@@ -499,7 +499,7 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Where every piece of the framed heatmap goes: the block, the canvas painted
-/// inside it, and the three areas — y gutter, x label row, subtitle — that are
+/// inside it, and the three areas -- y gutter, x label row, subtitle -- that are
 /// `None` when the terminal has no room for them. `inner_width` is the canvas width
 /// the x ticks are spaced across, `y_target` the tick count the gutter holds.
 struct HeatmapLayout {
@@ -657,14 +657,14 @@ fn layer_gloss(layer: Layer) -> &'static str {
     }
 }
 
-/// The Fit heatmap's subtitle, spelled out as a label ("Showing: ridge —
+/// The Fit heatmap's subtitle, spelled out as a label ("Showing: ridge --
 /// tolerance band") rather than a key hint: a reader who does not know the active
-/// layer cannot interpret a single inverted cell. Degrades fits-or-drops — gloss
-/// first, then the label truncated — so it can never wrap or panic at `avail == 0`.
+/// layer cannot interpret a single inverted cell. Degrades fits-or-drops -- gloss
+/// first, then the label truncated -- so it can never wrap or panic at `avail == 0`.
 fn fit_subtitle(layer: Layer, avail: usize) -> String {
     let label = layer.label();
     let gloss = layer_gloss(layer);
-    let full = format!(" Showing: {label} \u{2014} {gloss} ");
+    let full = format!(" Showing: {label} -- {gloss} ");
     if full.chars().count() <= avail {
         return full;
     }
@@ -675,8 +675,8 @@ fn fit_subtitle(layer: Layer, avail: usize) -> String {
     label.chars().take(avail).collect()
 }
 
-/// Paints the half-block heatmap itself — density field plus the active mark
-/// layer — into `area`: the framed canvas's inner rect, or the whole Fit-tab body
+/// Paints the half-block heatmap itself -- density field plus the active mark
+/// layer -- into `area`: the framed canvas's inner rect, or the whole Fit-tab body
 /// on a terminal too small to frame.
 fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
     if area.is_empty() {
@@ -731,7 +731,7 @@ fn paint_heatmap(frame: &mut Frame, area: Rect, rec: &FitRecording, app: &App) {
     }
 }
 
-/// A "nice" axis step (1/2/5 x 10^k) close to `span / target` — 37s at a target of
+/// A "nice" axis step (1/2/5 x 10^k) close to `span / target` -- 37s at a target of
 /// 8 ticks rounds to a step of 5s, not an unreadable 4.625.
 fn nice_step(span: f64, target: usize) -> f64 {
     let raw = span / target.max(1) as f64;
@@ -780,7 +780,7 @@ fn axis_decimals(step: f64) -> usize {
     (-step.log10().floor()).clamp(0.0, 2.0) as usize
 }
 
-/// An axis's tick step and the precision to print its labels at — paired here
+/// An axis's tick step and the precision to print its labels at -- paired here
 /// because tick placement, labels and the gutter sized for them must agree.
 fn axis_scale(lo: f64, hi: f64, target: usize) -> (f64, usize) {
     let step = nice_step((hi - lo).abs().max(EPS), target);
@@ -822,7 +822,7 @@ fn y_gutter_width(lo: f64, hi: f64, target: usize) -> usize {
 /// Picks one terminal cell's glyph and color from its two independent half-rows.
 /// "Occupied" means a half has nonzero weight or a mark, and the occupancy *shape*
 /// (`▀` upper only, `▄` lower only, a density glyph for both, ` ` for neither) is
-/// the primary signal — the one that makes the doubled vertical resolution visible
+/// the primary signal -- the one that makes the doubled vertical resolution visible
 /// in a `.symbol()`-only snapshot. With both halves occupied one character cannot
 /// show two marks, so `Mark`'s `Ord` picks the winner.
 fn compose_cell(
@@ -849,7 +849,7 @@ fn compose_cell(
 
 /// Resolves one already-occupied half (or, from `compose_cell`'s both-occupied
 /// case, the winning mark for the whole cell) into a glyph/color/modifier.
-/// `none_glyph` is what to draw for `Mark::None` — the asymmetric `▀`/`▄` for a
+/// `none_glyph` is what to draw for `Mark::None` -- the asymmetric `▀`/`▄` for a
 /// single occupied half, or the combined density glyph when both are occupied and
 /// neither carries a mark.
 ///
@@ -858,7 +858,7 @@ fn compose_cell(
 ///
 /// A `Region` mark on a zero-weight cell must not keep `heat_glyph`'s plain space:
 /// a *reversed* space is a solid block, the highest-density glyph here, and would
-/// lie about the data — routine, since the curve is evaluated at every display
+/// lie about the data -- routine, since the curve is evaluated at every display
 /// column and the ridge band often extends past the last real observation.
 /// `\u{b7}` reversed reads instead as "mark here, nothing under it".
 fn compose_marked(
@@ -916,7 +916,7 @@ fn mark_suppressed(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 
 /// Marks the two greedily attached tails (`path[..dp_range.start]` and
 /// `path[dp_range.end..]`, `Mark::Tail`) apart from the DP's own chain
-/// (`path[dp_range]`, `Mark::DpNode`) — DP's choice, or a tail grafted on after?
+/// (`path[dp_range]`, `Mark::DpNode`) -- DP's choice, or a tail grafted on after?
 /// The one layer that draws two mark kinds, so it relies on `Mark`'s `Ord` for the
 /// rare cell downsampling rounds one of each into.
 fn mark_path(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
@@ -966,7 +966,7 @@ fn mark_curve(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
 
 /// Brackets each measured column at `curve ± half_width`. Every measurement's
 /// `library` is a path cell center, so it is one of the curve's own points and
-/// never out of bounds — the `Err` arm is unreachable in practice.
+/// never out of bounds -- the `Err` arm is unreachable in practice.
 fn mark_ridge(marks: &mut [Mark], dims: Dims, rec: &FitRecording) {
     let geom = rec.geom();
     let bins = dims.bins;
@@ -1036,7 +1036,7 @@ fn heatmap_cells(rec: &FitRecording, area_w: u16, area_h: u16) -> Vec<f32> {
 }
 
 /// The half-open range of source indices (out of `src_n`) display index `disp_i`
-/// (out of `disp_n`) covers — a partition of `0..src_n` whether downsampling or
+/// (out of `disp_n`) covers -- a partition of `0..src_n` whether downsampling or
 /// upsampling (where consecutive `disp_i` share one single-element range).
 fn bin_range(disp_i: usize, disp_n: usize, src_n: usize) -> Range<usize> {
     if disp_n == 0 || src_n == 0 {
@@ -1069,7 +1069,7 @@ fn grid_to_screen(row: usize, col: usize, dims: Dims) -> (usize, usize, Half) {
 }
 
 /// Grid-bin index of `v` within `range`, for placing an overlay mark on a value
-/// that is not itself a grid cell — a curve prediction or a ridge bound.
+/// that is not itself a grid cell -- a curve prediction or a ridge bound.
 ///
 /// Zero bins, a non-finite `v` or a zero-width range map to bin 0 rather than
 /// panicking or producing NaN: overlay placement reads geometry straight off a
@@ -1093,9 +1093,9 @@ fn bin_of(v: f64, range: (f64, f64), bins: usize) -> usize {
 // ---------------------------------------------------------------------
 
 /// One metric the Convergence tab reports, named once for both places it is
-/// labelled — the sparkline title and the batch-table header, both on screen at
+/// labelled -- the sparkline title and the batch-table header, both on screen at
 /// once. The short form wins: the table column is `TABLE_COL_WIDTH` wide.
-/// `in_table`/`sparkline` select each view's subset — the table's bookkeeping
+/// `in_table`/`sparkline` select each view's subset -- the table's bookkeeping
 /// columns have nothing worth plotting, and `mean_d` is plotted with no column.
 struct MetricColumn {
     label: &'static str,
@@ -1170,7 +1170,7 @@ fn draw_convergence_tab(frame: &mut Frame, area: Rect, app: &App) {
             frame,
             area,
             "Convergence",
-            "No batches recorded yet — metrics appear after the first Phase 1 batch.",
+            "No batches recorded yet -- metrics appear after the first Phase 1 batch.",
         );
         return;
     }
@@ -1201,7 +1201,7 @@ fn table_columns() -> impl Iterator<Item = &'static MetricColumn> {
 
 fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     // Every series is normalized to its own maximum and they share no unit, so no
-    // shape or relative height here carries a magnitude — `spark_title` puts the
+    // shape or relative height here carries a magnitude -- `spark_title` puts the
     // numbers back. `Fill(1)` spreads rounding leftovers across the panes.
     let columns: Vec<&MetricColumn> = METRIC_COLUMNS.iter().filter(|c| c.sparkline).collect();
     let spark_rows = Layout::vertical(vec![Constraint::Fill(1); columns.len()]).split(area);
@@ -1215,7 +1215,7 @@ fn draw_sparklines(frame: &mut Frame, area: Rect, metrics: &[BatchMetrics]) {
     }
 }
 
-/// `label  peak <p>  now <n>` — the y-scale and the latest sample, which is what
+/// `label  peak <p>  now <n>` -- the y-scale and the latest sample, which is what
 /// turns a self-normalized shape back into a measurement: a `wrmse` that fell
 /// 5.0 → 0.08 otherwise draws the same descent as one that fell 5.0 → 4.9. `now`
 /// is the last *finite* sample, matching what `scaled_u64`'s hold actually draws.
@@ -1234,13 +1234,13 @@ fn spark_title(label: &str, values: &[f64], nan_holds: bool) -> String {
     )
 }
 
-/// A metric as a short decimal: `—` when non-finite, no fractional part for a
+/// A metric as a short decimal: `--` when non-finite, no fractional part for a
 /// whole number (`path` is a count), scientific notation only outside `FIXED`.
 fn fmt_metric(v: f64) -> String {
     // Outside this range four decimals print `0.0000` or run past the width.
     const FIXED: Range<f64> = 0.001..100_000.0;
     if !v.is_finite() {
-        return "—".to_string();
+        return "--".to_string();
     }
     let mag = v.abs();
     if v == 0.0 || v.fract() == 0.0 && mag < FIXED.end {
@@ -1258,8 +1258,8 @@ const SPARK_SCALE: f64 = 1000.0;
 
 /// Scales a metric series into `0..=SPARK_SCALE` for `Sparkline`, which takes
 /// `u64` and so cannot mark a sample as "no data" distinctly from `0`.
-/// Non-finite samples are routine here — batch 0 has no prior curve to diff
-/// against, and a failed fit produces NaN throughout — and mapping them to `0` would
+/// Non-finite samples are routine here -- batch 0 has no prior curve to diff
+/// against, and a failed fit produces NaN throughout -- and mapping them to `0` would
 /// draw identically to "the curve stopped moving". So each holds the last finite
 /// value, and only a leading run with no finite value yet reports as `0`.
 fn scaled_u64(values: &[f64]) -> Vec<u64> {
@@ -1415,7 +1415,7 @@ mod tests {
 
     /// The height thresholds: two chrome rows come off before the body sees anything,
     /// then `area.height >= 4` (the x-tick row), `block_h < 3` and `inner.height >= 2`
-    /// (the subtitle row) — one row later again with the banner.
+    /// (the subtitle row) -- one row later again with the banner.
     const SWEEP_HEIGHTS: [u16; 7] = [0, 1, 2, 3, 4, 5, 6];
 
     /// Both dimensions inside their smallest thresholds, then where two thresholds
@@ -1435,7 +1435,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
 
-    /// Cycles to `tab` with the real `l` binding — `App` has no jump-to-tab setter.
+    /// Cycles to `tab` with the real `l` binding -- `App` has no jump-to-tab setter.
     fn goto_tab(app: &mut App, tab: Tab) {
         while app.tab() != tab {
             press(app, 'l');
@@ -1460,8 +1460,8 @@ mod tests {
         glyph_grid(&body_buffer(app, w, h))
     }
 
-    /// The tab body alone — `draw`'s middle rows, without the tab bar or status line
-    /// — rebased so row 0 is the body's first row. A tab-content snapshot has no
+    /// The tab body alone -- `draw`'s middle rows, without the tab bar or status line
+    /// -- rebased so row 0 is the body's first row. A tab-content snapshot has no
     /// business regenerating because a key hint was reworded.
     fn body_buffer(app: &mut App, w: u16, h: u16) -> Buffer {
         let buf = draw_to_buffer(app, w, h);
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     /// The tab body's glyph grid plus a trailing section naming every `REVERSED`
-    /// cell — for the snapshots where inversion *is* the payload: a region mark keeps
+    /// cell -- for the snapshots where inversion *is* the payload: a region mark keeps
     /// the density glyph under it (`Mark`), so in a `.symbol()`-only grid a layer
     /// marking the wrong cells is byte-identical to one marking the right ones.
     /// Column spans keep it to one line per affected row.
@@ -1583,7 +1583,7 @@ mod tests {
     }
 
     /// A plain diagonal ridge sized to `bins`, asymmetric in range only (`x` spans
-    /// `(0, bins)`, `y` spans `(0, 2*bins)`) — only exercises `heatmap_cells`'s
+    /// `(0, bins)`, `y` spans `(0, 2*bins)`) -- only exercises `heatmap_cells`'s
     /// down/upsampling at arbitrary bin counts.
     fn fixture_recording(bins: usize) -> FitRecording {
         let bins = bins.max(1);
@@ -1651,7 +1651,7 @@ mod tests {
         }
     }
 
-    /// The active layer's name must survive on screen — without it a single inverted
+    /// The active layer's name must survive on screen -- without it a single inverted
     /// mark is uninterpretable. Checked on the two layers no snapshot pins, so a
     /// change to the degrade order cannot drop it for only some of them.
     #[test]
@@ -1668,8 +1668,8 @@ mod tests {
     }
 
     /// `App::set_scrub_recording` is what `CalibDash::sync_scrub` calls once `<`/`>`
-    /// have moved `scrub_frame`. Pins that the Fit tab switches to that recording —
-    /// a visibly different grid — and draws the "not live" banner.
+    /// have moved `scrub_frame`. Pins that the Fit tab switches to that recording --
+    /// a visibly different grid -- and draws the "not live" banner.
     #[test]
     fn fit_tab_shows_a_banner_and_a_different_grid_when_scrubbing() {
         let mut app = fixture_app_with_ridge();
@@ -1684,7 +1684,7 @@ mod tests {
     /// A Fit-tab body exactly one row tall must still show the banner rather than
     /// spend that row on a heatmap too short to read: without it the replayed grid is
     /// indistinguishable from live. And clearing the scrub must take the banner back
-    /// off — a banner that survives the clear is the same lie inverted.
+    /// off -- a banner that survives the clear is the same lie inverted.
     #[test]
     fn the_scrub_banner_wins_the_only_body_row_and_goes_away_when_the_scrub_clears() {
         let mut app = fixture_app_with_ridge();
@@ -1733,7 +1733,7 @@ mod tests {
 
     /// A `contains`, not a snapshot: the panel is literal prose with no computed
     /// content, so a picture of it pins four wrapped lines and rows of border padding
-    /// to catch one thing — whether the explanation reaches the screen.
+    /// to catch one thing -- whether the explanation reaches the screen.
     #[test]
     fn tolerances_tab_explains_itself_during_phase_one() {
         let mut app = fixture_app_with_ridge(); // real_fit is None
@@ -1772,8 +1772,8 @@ mod tests {
     }
 
     /// The half-block parity, end to end and independently derived.
-    /// `fixture_recording(4)`'s four points land one per grid cell on the diagonal —
-    /// `(row, col)` = `(0,0) (1,1) (2,2) (3,3)` with weights 1..4 — so a 4x2 canvas
+    /// `fixture_recording(4)`'s four points land one per grid cell on the diagonal --
+    /// `(row, col)` = `(0,0) (1,1) (2,2) (3,3)` with weights 1..4 -- so a 4x2 canvas
     /// is exactly two grid rows per terminal line.
     ///
     /// Row 0 (the *lowest* observed RT) must land in the bottom line's *lower* half
@@ -1851,7 +1851,7 @@ mod tests {
     }
 
     /// A `Mark::Region` on a weighted cell changes no glyph, so neither function's
-    /// output is visible in a `.symbol()`-only snapshot — this pins what they mark, at
+    /// output is visible in a `.symbol()`-only snapshot -- this pins what they mark, at
     /// the mark-buffer level. `Layer::Ridge`'s whole payload is the sparse
     /// `center ± half_width` pair per measured column, straddling the curve, rather
     /// than the filled band between them; asserted structurally because a snapshot
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn scaled_u64_carries_the_last_finite_value_across_a_nan() {
-        // Batch 0's own delta and any failed batch's metrics are NaN — this must not
+        // Batch 0's own delta and any failed batch's metrics are NaN -- this must not
         // draw as the scale's `0`, which looks identical to "the curve stopped".
         let scaled = scaled_u64(&[10.0, f64::NAN, 10.0]);
         assert_eq!(
@@ -2027,7 +2027,7 @@ mod tests {
         );
         assert_eq!(scaled[2], scaled[0]);
 
-        // A *leading* NaN run has nothing to carry forward — the one case where `0`
+        // A *leading* NaN run has nothing to carry forward -- the one case where `0`
         // means "nothing to show yet" rather than "converged".
         let scaled = scaled_u64(&[f64::NAN, f64::NAN, 10.0]);
         assert_eq!(scaled[0], 0, "{scaled:?}");
@@ -2061,7 +2061,7 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// Inversion, not a color, is what makes a pending count unmistakable — and the
+    /// Inversion, not a color, is what makes a pending count unmistakable -- and the
     /// glyph-only `render` harness cannot see style, so this reads the buffer.
     #[test]
     fn status_line_pending_count_is_reversed() {
@@ -2173,15 +2173,15 @@ mod tests {
     }
 
     /// Reporting `-8.5 .. +9.5` as `±9.5` understates one side by two ppm and
-    /// `±8.5` overstates the other — the reason `mz_ppm` is a pair at all.
+    /// `±8.5` overstates the other -- the reason `mz_ppm` is a pair at all.
     #[test]
     fn fmt_interval_collapses_only_the_symmetric_case() {
         assert_eq!(fmt_interval((-3.0, 3.0)), "±3.0");
         assert_eq!(fmt_interval((-8.5, 9.5)), "-8.5 .. +9.5");
     }
 
-    /// `now` must report what the right edge draws — the last *finite* sample under
-    /// `scaled_u64`'s hold. Reporting `—` beside a held bar contradicts the plot.
+    /// `now` must report what the right edge draws -- the last *finite* sample under
+    /// `scaled_u64`'s hold. Reporting `--` beside a held bar contradicts the plot.
     #[test]
     fn spark_title_reports_the_value_the_right_edge_actually_draws() {
         let title = spark_title("wrmse", &[2.0, 0.5, f64::NAN], true);
@@ -2191,7 +2191,7 @@ mod tests {
         // Batch 0's `max_delta` is NaN, so the plot is flat at the floor, where
         // `peak 0  now 0` would read as "converged" rather than "not measured".
         let title = spark_title("max_delta", &[f64::NAN], true);
-        assert_eq!(title, "max_delta  peak —  now —  (NaN holds)");
+        assert_eq!(title, "max_delta  peak --  now --  (NaN holds)");
     }
 
     /// Every tab, every mark layer, a scrubbed frame, an empty app and the keys
@@ -2241,7 +2241,7 @@ mod tests {
 
         sweep_painted(&mut fixture_app_with_metrics());
 
-        // A scrubbed frame is `draw_fit_tab`'s `Length(1), Min(0)` split — the one
+        // A scrubbed frame is `draw_fit_tab`'s `Length(1), Min(0)` split -- the one
         // path that deliberately hands the heatmap zero rows.
         let mut scrubbed = fixture_app_with_ridge();
         scrubbed.set_frame_summary(RETAINED_5);
@@ -2249,7 +2249,7 @@ mod tests {
         sweep_painted(&mut scrubbed);
 
         // A mark layer changes the glyphs, never the layout, so it needs the size
-        // sweep once rather than once per layout combination above — and only on the
+        // sweep once rather than once per layout combination above -- and only on the
         // Fit tab, the only tab that reads `app.layer()`.
         for layer in Layer::ALL.into_iter().filter(|l| *l != Layer::None) {
             let mut app = fixture_app_with_metrics();

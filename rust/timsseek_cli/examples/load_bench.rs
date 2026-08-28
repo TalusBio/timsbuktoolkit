@@ -16,8 +16,8 @@
 //!     ./target/release/examples/load_bench
 //!
 //! Env:
-//!   LOAD_BENCH_URI (required) — URI of the raw input to resolve+load.
-//!   RUST_LOG (optional)       — default "info,tims_stage=info,timscentroid=info".
+//!   LOAD_BENCH_URI (required) -- URI of the raw input to resolve+load.
+//!   RUST_LOG (optional)       -- default "info,tims_stage=info,timscentroid=info".
 
 use std::time::Instant;
 

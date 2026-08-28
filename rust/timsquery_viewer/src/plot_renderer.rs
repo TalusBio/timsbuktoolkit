@@ -51,7 +51,7 @@ pub enum AutoZoomMode {
 pub struct ChromatogramLines {
     precursor_lines: Vec<ChromatogramLine>,
     fragment_lines: Vec<ChromatogramLine>,
-    pub reference_id: u64,
+    pub reference_id: timsquery::models::OwnedSourceId,
     pub reference_ook0: f64,
     pub reference_rt_seconds: f64,
     intensity_max: f64,
@@ -355,7 +355,7 @@ impl ChromatogramLines {
         Self {
             precursor_lines,
             fragment_lines,
-            reference_id: chromatogram.id,
+            reference_id: chromatogram.id.clone(),
             reference_ook0: chromatogram.mobility_ook0 as f64,
             reference_rt_seconds: chromatogram.rt_seconds as f64,
             intensity_max: global_max_intensity as f64,

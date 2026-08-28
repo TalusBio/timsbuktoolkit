@@ -9,6 +9,7 @@
 //! `tests/carafe_e2e.rs`, which runs the built binary over a generated mzML.
 
 use std::io::Write;
+use timsquery::models::SourceId;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -93,8 +94,12 @@ fn non_sequential_ids_survive_the_reader() {
     let TargetTable::Mzpaf { geom, .. } = arena else {
         panic!("mzpaf labels")
     };
-    let ids: Vec<u64> = geom.rows().map(|r| geom.output_id(r)).collect();
-    assert_eq!(ids, vec![7, 42], "the caller's ids, not 0..n-1");
+    let ids: Vec<SourceId<'_>> = geom.rows().map(|r| geom.output_id(r)).collect();
+    assert_eq!(
+        ids,
+        vec![SourceId::Numeric(7), SourceId::Numeric(42)],
+        "the caller's ids, not 0..n-1"
+    );
 }
 
 /// Carafe keys results by `id`, so a repeat makes one row unreachable.
@@ -144,7 +149,7 @@ fn carafe_tolerance_spellings_deserialize() {
 }
 
 /// When Carafe's calibration offset exceeds the half-width the low edge goes
-/// negative — a window sitting entirely above the target mass. This already
+/// negative -- a window sitting entirely above the target mass. This already
 /// worked; the test pins it so a future "both edges must be positive" check
 /// cannot be added without failing. `mz_range`'s invariant is `low + high >= 0`.
 #[test]
@@ -166,5 +171,77 @@ fn a_negative_low_tolerance_edge_is_accepted() {
         "expected a well-formed window above the target, got {:?}..{:?}",
         range.start(),
         range.end()
+    );
+}
+
+/// An `id` keeps the shape the caller sent: an integer comes back an integer,
+/// a string comes back a string. Carafe sends integers and keys results by
+/// them, so narrowing this back to a number-only `id` would be invisible here
+/// without the string half, and widening it to always-text would break Carafe.
+///
+/// The rule is per library, not per row: see
+/// [`a_library_may_not_mix_id_shapes`].
+#[test]
+fn an_id_comes_back_in_the_shape_it_arrived() {
+    let numeric = write_targets(
+        r#"[
+      { "id": 7, "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [175.1], "fragment_labels": ["y1"] }
+    ]"#,
+    );
+    let TargetTable::Mzpaf { geom, .. } = read_targets(numeric.path()).expect("loads") else {
+        panic!("mzpaf labels")
+    };
+    let row = geom.rows().next().unwrap();
+    assert_eq!(geom.output_id(row), SourceId::Numeric(7));
+    assert_eq!(
+        serde_json::to_string(&geom.output_id(row).to_owned_id()).unwrap(),
+        "7",
+        "Carafe reads `id` with fastjson and keys results by it: a number must \
+         stay a bare number, not become \"7\". Serialized as `OwnedSourceId`, \
+         which is what `ChromatogramOutput.id` holds on the real result path"
+    );
+
+    let text = write_targets(
+        r#"[
+      { "id": "PEPTIDEK2", "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [175.1], "fragment_labels": ["y1"] }
+    ]"#,
+    );
+    let TargetTable::Mzpaf { geom, .. } = read_targets(text.path()).expect("loads") else {
+        panic!("mzpaf labels")
+    };
+    let row = geom.rows().next().unwrap();
+    assert_eq!(geom.output_id(row), SourceId::Text("PEPTIDEK2"));
+    assert_eq!(
+        serde_json::to_string(&geom.output_id(row).to_owned_id()).unwrap(),
+        r#""PEPTIDEK2""#
+    );
+}
+
+/// A library names its rows one way or the other. Accepting both in one file
+/// would make `7` and `"7"` two different ids in the same column, which breaks
+/// any caller that keys results by `id`.
+#[test]
+fn a_library_may_not_mix_id_shapes() {
+    let f = write_targets(
+        r#"[
+      { "id": 7, "mobility": 0.95, "rt_seconds": 1234.5, "precursor": 650.32,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [175.1], "fragment_labels": ["y1"] },
+      { "id": "PEPTIDEK2", "mobility": 0.80, "rt_seconds": 999.0, "precursor": 500.0,
+        "precursor_charge": 2, "precursor_isotopes": [0],
+        "fragments": [200.0], "fragment_labels": ["y2"] }
+    ]"#,
+    );
+    let Err(err) = read_targets(f.path()) else {
+        panic!("a mixed library must not load")
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("row: 1") && msg.contains("PEPTIDEK2"),
+        "the error has to name the offending row and value, got: {msg}"
     );
 }

@@ -120,7 +120,7 @@ pub fn compute_apex_evidence<T: KeyLike>(
     let cos_au = area_uniqueness(cosine_profile, cos_apex, 5);
     let scr_au = area_uniqueness(scribe_profile, scr_apex, 5);
 
-    // Coelution-gradient at each apex — shares the same scratch.
+    // Coelution-gradient at each apex -- shares the same scratch.
     let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10, scratch);
     let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10, scratch);
 

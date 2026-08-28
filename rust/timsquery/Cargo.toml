@@ -31,6 +31,9 @@ thiserror = { workspace = true }
 # Forward mzML/mzdata ingest support down to timscentroid, where the reader lives.
 # Not defaulted here (see timsseek_cli) so `--no-default-features` stays lean.
 mzdata = ["timscentroid/mzdata"]
+# Constructors for the opaque arena handles (`models::test_handles`). Enabled
+# only through a `dev-dependency`, so a shipped build still cannot mint one.
+test-support = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

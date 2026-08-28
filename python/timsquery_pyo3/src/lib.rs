@@ -21,6 +21,21 @@ mod spectrum;
 mod tolerance;
 
 use pyo3::prelude::*;
+use timsquery::models::OwnedSourceId;
+
+/// A source id keeps the shape the library gave it, so Python sees an `int`
+/// for a numeric id and a `str` for a text one (DIA-NN's
+/// `transition_group_id`) rather than one coerced into the other.
+pub(crate) fn source_id_to_py<'py>(
+    py: Python<'py>,
+    id: &OwnedSourceId,
+) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3::IntoPyObject;
+    match id {
+        OwnedSourceId::Numeric(n) => Ok(n.into_pyobject(py)?.into_any()),
+        OwnedSourceId::Text(s) => Ok(s.into_pyobject(py)?.into_any()),
+    }
+}
 
 #[pymodule]
 fn timsquery_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {

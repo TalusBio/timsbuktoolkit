@@ -36,6 +36,9 @@ smallvec = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Constructors for the opaque arena handles, for tests that assemble a result
+# without an arena behind it. Dev-only, so a shipped build cannot mint one.
+timsquery = { path = "../timsquery", features = ["test-support"] }
 
 [features]
 default = ["rayon"]

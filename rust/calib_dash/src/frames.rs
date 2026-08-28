@@ -20,15 +20,16 @@ pub const DEFAULT_RUN_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 /// has to clear one frame's worth of points.
 pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 
-/// One heap entry, flattened. `library_id` is carried because churn diffing
-/// needs a stable identity for a calibrant: RT coordinates are not unique and
-/// cannot distinguish "same peptide, re-scored" from "different peptide, same
-/// RT".
+/// One heap entry, flattened.
+///
+/// `identity` tells "same calibrant, re-scored" from "different calibrant, same
+/// RT" during churn diffing; RT alone is not unique. Compared, never displayed,
+/// and only within one process -- the hash is not stable across runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalibrantPoint {
     pub library_rt: f64,
     pub observed_rt: f64,
-    pub library_id: u64,
+    pub identity: u64,
 }
 
 struct FrameIndex {
@@ -73,7 +74,7 @@ impl FrameStore {
             CalibrantPoint {
                 library_rt: 0.0,
                 observed_rt: 0.0,
-                library_id: 0
+                identity: 0
             };
             (stride_capacity + 1) * n_calibrants
         ];
@@ -148,7 +149,7 @@ mod tests {
         CalibrantPoint {
             library_rt: i as f64,
             observed_rt: i as f64 * 2.0,
-            library_id: i as u64,
+            identity: i as u64,
         }
     }
 
@@ -156,7 +157,7 @@ mod tests {
     /// pass for another's.
     fn pt_in(chunk: usize, i: usize) -> CalibrantPoint {
         CalibrantPoint {
-            library_id: (chunk * 100 + i) as u64,
+            identity: (chunk * 100 + i) as u64,
             ..pt(i)
         }
     }
@@ -184,7 +185,7 @@ mod tests {
         }
     }
 
-    /// Retained frames exceed the *stride* budget by exactly one — the reserved
+    /// Retained frames exceed the *stride* budget by exactly one -- the reserved
     /// final span, which is what makes the last chunk always replayable however
     /// the stride falls. Points are asserted per frame, and made
     /// chunk-distinguishable to do it: with the same `pt(i)` in every frame the
