@@ -22,15 +22,9 @@ pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 
 /// One heap entry, flattened.
 ///
-/// `identity` exists because churn diffing needs to tell "same calibrant,
-/// re-scored" from "different calibrant, same RT", and RT coordinates are not
-/// unique. It is an opaque hash of whatever handle the producer keys on (today
-/// the arena's `FlatIdx`), never displayed -- this is a debugging view, so it
-/// compares identity without carrying it. Keeping it a plain integer is what
-/// lets `size_of` below be the true cost of a point, and what keeps this type
-/// `Copy`.
-///
-/// Only meaningful within one process: the hash is not stable across runs.
+/// `identity` tells "same calibrant, re-scored" from "different calibrant, same
+/// RT" during churn diffing; RT alone is not unique. Compared, never displayed,
+/// and only within one process -- the hash is not stable across runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalibrantPoint {
     pub library_rt: f64,
@@ -191,7 +185,7 @@ mod tests {
         }
     }
 
-    /// Retained frames exceed the *stride* budget by exactly one — the reserved
+    /// Retained frames exceed the *stride* budget by exactly one -- the reserved
     /// final span, which is what makes the last chunk always replayable however
     /// the stride falls. Points are asserted per frame, and made
     /// chunk-distinguishable to do it: with the same `pt(i)` in every frame the

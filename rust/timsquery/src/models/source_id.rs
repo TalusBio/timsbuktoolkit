@@ -11,8 +11,8 @@
 //! The shape is preserved where a consumer distinguishes the two, which today
 //! is the JSON result path only: Carafe reads `id` with fastjson and keys
 //! results by it, so `"id": 7` must stay a bare number. The parquet writer does
-//! not distinguish — both id columns are `Utf8` and a numeric id is written as
-//! its digits — because a search result is read by column type, not by the
+//! not distinguish -- both id columns are `Utf8` and a numeric id is written as
+//! its digits -- because a search result is read by column type, not by the
 //! shape of one value.
 
 use serde::{
@@ -101,19 +101,21 @@ impl From<&str> for OwnedSourceId {
 }
 
 impl OwnedSourceId {
-    /// For a scratch buffer that is refilled before it is read (see
+    /// The id of a scratch buffer that has not been filled yet (see
     /// [`crate::Target::empty_like`]).
     ///
-    /// Deliberately not `Default`, and deliberately not `Numeric(0)`: every
-    /// `u64` is a valid id, so a numeric placeholder that leaked would look
-    /// exactly like a real result keyed on 0 — the same reason
-    /// `RowIdx::default()` is `u32::MAX` rather than 0. This one is visible in
-    /// any output that would wrongly carry it.
+    /// Allocates nothing: an empty `String` owns no buffer until something is
+    /// pushed into it, and [`Self::set_from`] then grows it once -- exactly what
+    /// a fresh `String` would cost. A named placeholder like `"<unset>"` would
+    /// allocate on every scratch buffer to store bytes nothing reads.
     ///
-    /// It is `Text` so the first [`Self::set_from`] with a text id reuses this
-    /// allocation instead of making one; a `Numeric` placeholder could not.
+    /// Deliberately not `Default`, and deliberately not `Numeric(0)`: every
+    /// `u64` is a valid id, so a numeric placeholder that leaked into a result
+    /// would look exactly like a row keyed on 0 -- the same reason
+    /// `RowIdx::default()` is `u32::MAX` rather than 0. An empty id is visibly
+    /// unset.
     pub fn placeholder() -> Self {
-        Self::Text("<unset>".to_string())
+        Self::Text(String::new())
     }
 }
 

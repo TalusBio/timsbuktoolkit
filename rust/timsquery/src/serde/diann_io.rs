@@ -341,7 +341,7 @@ pub fn read_targets<T: AsRef<Path>>(
 ///
 /// The column is per *file*, not per row: absent means the whole library is
 /// unnamed and every row is keyed by a minted counter. Present means every row
-/// must have a name — a blank cell is an error, not a row to quietly downgrade,
+/// must have a name -- a blank cell is an error, not a row to quietly downgrade,
 /// because a half-named library cannot be stored (the arena holds one id shape)
 /// and silently renumbering the named rows loses information the file had.
 ///
@@ -837,11 +837,8 @@ mod tests {
     use crate::models::SourceId;
     use std::path::PathBuf;
 
-    /// A file with the `transition_group_id` column promises every row has one.
-    /// A blank cell breaks that promise, and the two ways to carry on are both
-    /// wrong: storing a half-named library is impossible (one id shape per
-    /// column), and renumbering every row throws away the names the file did
-    /// give. So it is an error.
+    /// The column being present promises every row has a name; a blank cell is
+    /// rejected rather than costing the named rows theirs.
     #[test]
     fn a_blank_name_in_a_naming_library_is_an_error() {
         let with_names = "\

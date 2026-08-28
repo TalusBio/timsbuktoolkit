@@ -23,7 +23,7 @@ pub use index::{
 ///
 /// All three are opaque: no constructor from an integer, no accessor yielding
 /// one, no `Display`, no `Serialize`. So none of them can be invented by a
-/// caller, confused with an id, or written to an output file — a handle can
+/// caller, confused with an id, or written to an output file -- a handle can
 /// only be obtained from the arena and handed straight back to it.
 ///
 /// Construction is `pub(super)`, i.e. this file, so the arena is the only thing
@@ -35,7 +35,7 @@ mod index {
 
     /// A scored slot after decoy expansion: `0..expanded_len()`. Distinct from
     /// [`RowIdx`] because `variants_per_row` slots map onto one row, so using
-    /// one where the other is meant reads a real but wrong row — in range, no
+    /// one where the other is meant reads a real but wrong row -- in range, no
     /// panic, plausible data. The type is what stops that.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FlatIdx(u32);
@@ -43,7 +43,7 @@ mod index {
     /// Which competition group a row belongs to, as a handle rather than a
     /// value. Rows that compete share one, and that is all a consumer needs:
     /// grouping sorts by it and compares it, and never reads it. Opaque for the
-    /// same reason as the indices above — a handle that could be printed would
+    /// same reason as the indices above -- a handle that could be printed would
     /// end up in an output file as though it meant something.
     ///
     /// `Ord` because grouping works by sorting competitors adjacent; any total
@@ -137,12 +137,9 @@ pub struct DecoyGroups {
 
 /// One row's worth of input to [`TargetColumns::push_row`].
 ///
-/// A struct rather than ten positional arguments, and it carries the row's `id`,
-/// which is the point: a row cannot be stored apart from the name its file gave
-/// it. Attaching ids afterwards, zipped on by position, is how the DIA-NN names
-/// got dropped -- `seal` minted `0..n` over them.
-///
-/// `Default` covers the optional half, so a caller names only what it has:
+/// Carries the row's `id`, so a row cannot be stored apart from the name its
+/// file gave it. `Default` covers the optional half, so a caller names only
+/// what it has:
 ///
 /// ```ignore
 /// geom.push_row(Row {
@@ -165,14 +162,11 @@ pub struct Row<'a, L: KeyLike> {
     pub seq_strip: &'a str,
     pub seq_mod: &'a str,
     pub mods: &'a [(u8, u16)],
-    /// A stored decoy, as opposed to one the arena derives. Default `false`:
-    /// timsquery never invents a decoy, so a row is a target unless its reader
-    /// says otherwise.
+    /// A decoy the library shipped, as opposed to one the arena derives.
     pub is_decoy: bool,
     /// What the source file called this row, in the shape it used. `None` for a
-    /// format that names nothing (Spectronaut, Skyline), and for a row whose
-    /// name cell was blank. [`TargetColumns::seal`] mints ids only when *every*
-    /// row arrived `None`.
+    /// format that names nothing; [`TargetColumns::seal`] mints ids only when
+    /// *every* row arrived `None`.
     pub id: Option<OwnedSourceId>,
 }
 
@@ -211,16 +205,11 @@ pub struct TargetColumns<L: KeyLike> {
     pub(crate) mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
     pub(crate) is_decoy: Vec<bool>,
-    /// Each row's id as it was pushed, before [`Self::seal`] decides what the
-    /// column becomes. Parallel to the row columns, and merged by
-    /// [`Self::append_arena`] like any other, so a shard cannot separate a row
-    /// from its name.
-    ///
-    /// Emptied by `seal`, which is the only reader.
+    /// Each row's id as pushed. Parallel to the row columns, so a shard merge
+    /// cannot separate a row from its name. Drained by [`Self::seal`].
     pub(crate) pending_ids: Vec<Option<OwnedSourceId>>,
-    /// What the source file called each row, when it said. Parallel to the row
-    /// columns. Built at [`Self::seal`] from `pending_ids`, minted there for
-    /// formats that carry no ids, so a sealed arena always has one per row.
+    /// Built at [`Self::seal`], minted there for formats that carry no ids, so
+    /// a sealed arena always has one per row.
     pub(crate) source_ids: SourceIds,
     /// The competition groups the input declared, interned: a code per row,
     /// plus the labels those codes point at. Rows that compete share a code, so
@@ -606,7 +595,7 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
 
     /// The scored slots in batches of at most `n`. The arena owns the split,
     /// so a caller batches work by stating a size rather than by computing
-    /// positions — no integer names a slot outside this crate.
+    /// positions -- no integer names a slot outside this crate.
     pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<L> {
         assert!(n > 0, "chunk size must be non-zero");
         let len = self.expanded_len();
@@ -619,7 +608,7 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
 
     /// Decompose a scored slot into its stored row and decoy variant. The
     /// single authority for the decoy index-transform encoding, and the only
-    /// route from a [`FlatIdx`] to a [`RowIdx`] — which is what keeps the two
+    /// route from a [`FlatIdx`] to a [`RowIdx`] -- which is what keeps the two
     /// index spaces from being used interchangeably.
     pub fn split_flat(&self, flat: FlatIdx) -> (RowIdx, u8) {
         let vpr = self.variants_per_row();
@@ -631,7 +620,7 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// The inverse of [`Self::split_flat`]: name one of a row's scored slots.
     ///
     /// Both directions live here so the encoding has one owner. This is also the
-    /// only way to pair a row with a variant, and it checks the pairing — a
+    /// only way to pair a row with a variant, and it checks the pairing -- a
     /// caller that could build the pair itself could name a variant the library
     /// does not expand into, which would read a real but wrong slot.
     pub fn flat_for(&self, row: RowIdx, variant: u8) -> FlatIdx {

@@ -22,16 +22,9 @@ use crate::utils::constants::C13_C12_MASS_DIFF;
 /// decoy geometry is stored anywhere; variants 1/2 compute a ±CH2 mass shift
 /// on the fly from `TargetCapabilities::decoys`.
 ///
-/// A flyweight is built from a [`FlatIdx`] and nothing else, because that is
-/// already the name of a `(row, variant)` pair — see
-/// [`TargetColumns::split_flat`], the single authority for the encoding. The
-/// pair is split once at construction and stored unpacked, so the accessors
-/// every geometry method calls stay field reads rather than a division by
-/// `variants_per_row`.
-///
-/// Storing the pair costs nothing over bit-packing it: the `Lib` pointer's
-/// alignment pads the struct to two words either way, which
-/// `the_flyweight_stays_two_words` pins.
+/// Built from a [`FlatIdx`] and nothing else -- that already names a
+/// `(row, variant)` pair, and [`TargetColumns::split_flat`] owns the encoding.
+/// Split once here so the accessors stay field reads.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<Lib, L> {
     lib: Lib,
