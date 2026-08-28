@@ -153,7 +153,6 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                 let converted_results: Vec<ChromatogramOutput> = aggregators
                     .par_drain(..)
                     .filter_map(|mut agg| {
-                        let agg_id = agg.id.clone();
                         match ChromatogramOutput::try_new(&mut agg, ref_rts) {
                             Ok(output) => Some(output),
                             Err(e) => {
@@ -161,14 +160,14 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                                     timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
                                         warn!(
                                             "Skipping chromatogram for elution group id {}: {:?}",
-                                            agg_id, e
+                                            agg.id, e
                                         );
                                         None
                                     }
                                     _ => {
                                         error!(
                                             "Error generating chromatogram for elution group id {}: {:?}",
-                                            agg_id, e
+                                            agg.id, e
                                         );
                                         panic!("Terminating due to unexpected error");
                                     }

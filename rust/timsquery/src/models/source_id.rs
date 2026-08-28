@@ -149,6 +149,11 @@ pub enum SourceIdError {
     Duplicate { id: String },
     #[error("source id blob exceeds u32 offset range")]
     BlobTooLarge,
+    /// A library names its rows or it does not. Storing both shapes together
+    /// would mean rendering the numbers as strings, which is the coercion the
+    /// whole type exists to avoid.
+    #[error("source ids mix numeric and text shapes; a format carries one or the other")]
+    MixedShapes,
 }
 
 impl SourceIds {
@@ -206,7 +211,14 @@ impl SourceIds {
         }
         // All-numeric stays numeric so the common JSON path keeps its dense
         // integer column instead of paying for a blob.
-        if ids.iter().all(|id| matches!(id, OwnedSourceId::Numeric(_))) {
+        let n_numeric = ids
+            .iter()
+            .filter(|id| matches!(id, OwnedSourceId::Numeric(_)))
+            .count();
+        if n_numeric != 0 && n_numeric != ids.len() {
+            return Err(SourceIdError::MixedShapes);
+        }
+        if n_numeric == ids.len() {
             let nums = ids
                 .iter()
                 .map(|id| match id {
@@ -270,6 +282,28 @@ mod tests {
             serde_json::to_string(&SourceId::Text("AAAK2")).unwrap(),
             r#""AAAK2""#
         );
+    }
+
+    /// A library names its rows or it does not. Storing a mixed set would mean
+    /// rendering `Numeric(7)` as `"7"`, which is the coercion this type exists
+    /// to avoid -- and would then collide with a genuine name of `"7"`.
+    #[test]
+    fn mixed_shapes_are_refused_rather_than_coerced() {
+        let mixed = vec![
+            OwnedSourceId::Numeric(7),
+            OwnedSourceId::Text("AAAK2".into()),
+        ];
+        assert_eq!(SourceIds::owned(mixed, 2), Err(SourceIdError::MixedShapes));
+
+        // Either shape on its own is fine, and numeric keeps the dense column.
+        assert!(matches!(
+            SourceIds::owned(vec![OwnedSourceId::Numeric(7)], 1),
+            Ok(SourceIds::Numeric(_))
+        ));
+        assert!(matches!(
+            SourceIds::owned(vec![OwnedSourceId::Text("AAAK2".into())], 1),
+            Ok(SourceIds::Text { .. })
+        ));
     }
 
     #[test]

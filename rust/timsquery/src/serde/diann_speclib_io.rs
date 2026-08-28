@@ -987,6 +987,27 @@ mod tests {
         );
     }
 
+    /// Entries are parsed in parallel and the names ride in the same rayon
+    /// accumulator as the rows, so a permutation would mislabel every result
+    /// without failing anything else. Pin it against the property that defines
+    /// the name: it is the modified sequence plus the charge, for every row.
+    #[test]
+    fn every_source_id_stays_paired_with_its_own_row() {
+        let file = std::fs::File::open(fixture_path()).unwrap();
+        let (geom, _frag_intens, _stats, _eof) =
+            parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+
+        assert!(geom.n_rows() > 1, "one row would not catch a permutation");
+        for row in geom.rows() {
+            let expected = format!("{}{}", geom.seq_mod(row), geom.charge(row));
+            assert_eq!(
+                geom.output_id(row),
+                crate::models::SourceId::Text(&expected),
+                "source id is not the one belonging to this row"
+            );
+        }
+    }
+
     #[test]
     fn test_first_entry_fields_and_fragments() {
         let file = std::fs::File::open(fixture_path()).unwrap();

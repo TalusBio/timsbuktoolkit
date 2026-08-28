@@ -267,6 +267,9 @@ struct ParquetColumnData<'a> {
     fragment_loss_types: &'a [String],
     protein_groups: &'a [String],
     decoys: &'a [i64],
+    /// DIA-NN 2.2 names the precursor in `Precursor.Id`. `None` when the file
+    /// has no such column, which is the minted-id fallback.
+    precursor_ids: Option<&'a [String]>,
 }
 
 pub fn read_targets<T: AsRef<Path>>(
@@ -314,8 +317,31 @@ pub fn read_targets<T: AsRef<Path>>(
         elution_groups.push(eg);
     }
 
+    unify_source_ids(&mut elution_groups);
     info!("Parsed {} elution groups", elution_groups.len());
     Ok(elution_groups)
+}
+
+/// A DIA-NN library names every precursor or none of them. A file that names
+/// only some is malformed (a blank `transition_group_id` cell, say), and the
+/// arena cannot hold both shapes at once, so fall the whole file back to minted
+/// ids rather than half-labelling it.
+fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
+    let named = egs
+        .iter()
+        .filter(|(eg, _)| matches!(eg.id(), crate::models::SourceId::Text(_)))
+        .count();
+    if named == 0 || named == egs.len() {
+        return;
+    }
+    warn!(
+        "{named} of {} precursors carry a name; the rest do not. Falling back to \
+         minted ids for the whole library.",
+        egs.len()
+    );
+    for (i, (eg, _)) in egs.iter_mut().enumerate() {
+        eg.set_id(crate::models::OwnedSourceId::Numeric(i as u64));
+    }
 }
 
 fn parse_precursor_group(
@@ -420,8 +446,12 @@ fn parse_precursor_group(
     // DIA-NN names the precursor itself; carry that through so results say what
     // the library says. Variants without the column fall back to the counter,
     // which `seal` treats as any other minted id.
-    let source_id: crate::models::OwnedSourceId = match &first_row.transition_group_id {
-        Some(name) => name.as_str().into(),
+    let source_id: crate::models::OwnedSourceId = match first_row
+        .transition_group_id
+        .as_deref()
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => name.into(),
         None => id.into(),
     };
     let eg = Target::builder()
@@ -564,6 +594,9 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
     let fragment_numbers = get_int_column(&all_batches, "Fragment.Series.Number")?;
     let fragment_loss_types = get_string_column(&all_batches, "Fragment.Loss.Type")?;
     let protein_groups = get_string_column(&all_batches, "Protein.Group")?;
+    // Optional: absent from libraries written by other tools (the Carafe
+    // fixture has no such column), which then fall back to minted ids.
+    let precursor_ids = get_string_column(&all_batches, "Precursor.Id").ok();
     let decoys = get_int_column(&all_batches, "Decoy")?;
 
     let num_rows = modified_sequences.len();
@@ -584,6 +617,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         fragment_loss_types: &fragment_loss_types,
         protein_groups: &protein_groups,
         decoys: &decoys,
+        precursor_ids: precursor_ids.as_deref(),
     };
 
     // Group fragments by precursor (same logic as TSV reader)
@@ -635,6 +669,7 @@ pub fn read_parquet_library_file<T: AsRef<Path>>(
         elution_groups.push(eg);
     }
 
+    unify_source_ids(&mut elution_groups);
     info!(
         "Parsed {} elution groups from parquet file",
         elution_groups.len()
@@ -740,8 +775,18 @@ fn parse_precursor_group_from_parquet(
         relative_intensities: rel_intensities,
     };
 
+    // DIA-NN names the precursor in `Precursor.Id`; carry that through when the
+    // file has it, else fall back to the counter as the TSV path does.
+    let source_id: crate::models::OwnedSourceId = match columns
+        .precursor_ids
+        .map(|ids| ids[first_idx].as_str())
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => name.into(),
+        None => id.into(),
+    };
     let eg = Target::builder()
-        .id(id)
+        .id(source_id)
         .mobility_ook0(mobility)
         .rt_seconds(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
@@ -797,6 +842,27 @@ mod tests {
         );
 
         let unnamed = read_targets(dir.join("sample_lib.txt")).expect("unnamed variant loads");
+        assert_eq!(unnamed[0].0.id(), crate::models::SourceId::Numeric(0));
+    }
+
+    /// Same for the parquet variant, where DIA-NN 2.2 spells the name
+    /// `Precursor.Id`. The Carafe-written fixture has no such column, so it
+    /// exercises the fallback.
+    #[test]
+    fn precursor_id_is_propagated_from_parquet_when_present() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("diann_io_files");
+
+        let named = read_parquet_library_file(dir.join("sample_pq_speclib.parquet"))
+            .expect("named variant loads");
+        assert_eq!(
+            named[0].0.id(),
+            crate::models::SourceId::Text("GREEWESAALQNANTK3")
+        );
+
+        let unnamed = read_parquet_library_file(dir.join("carafe_pq_speclib.parquet"))
+            .expect("unnamed variant loads");
         assert_eq!(unnamed[0].0.id(), crate::models::SourceId::Numeric(0));
     }
 

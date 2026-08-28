@@ -136,7 +136,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        self.id = eg.output_id().to_owned_id();
+        self.id.set_from(eg.output_id());
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();

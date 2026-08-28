@@ -1,6 +1,5 @@
 use super::config::OutputConfig;
 use indicatif::ProgressIterator;
-use timsquery::models::OwnedSourceId;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -1150,6 +1149,7 @@ pub fn run_pipeline(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use timsquery::models::OwnedSourceId;
     use timsseek::models::DecoyMarking;
     use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;

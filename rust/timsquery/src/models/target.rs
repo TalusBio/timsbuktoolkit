@@ -107,6 +107,10 @@ impl<T: KeyLike> Target<T> {
         self.id.as_ref()
     }
 
+    pub(crate) fn set_id(&mut self, id: crate::models::OwnedSourceId) {
+        self.id = id;
+    }
+
     pub fn precursor_count(&self) -> usize {
         self.precursor_labels.len()
     }
