@@ -409,7 +409,6 @@ pub(crate) trait FoldModel: Sized {
 
 /// Dataset over an already-materialized row-major matrix. `get_values` is a
 /// `copy_from_slice` out of the existing slab.
-///
 pub(crate) struct RowMajorDataset {
     features: PrecomputedFeatures,
     names: Vec<Arc<str>>,

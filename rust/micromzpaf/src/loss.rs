@@ -49,7 +49,6 @@ impl Composition {
 
     /// The count for one element symbol, or `None` if this crate does not
     /// represent that element.
-    ///
     fn count_mut(&mut self, symbol: u8) -> Option<&mut u8> {
         Some(match symbol {
             b'C' => &mut self.c,
@@ -228,7 +227,6 @@ impl NeutralLoss {
 
     /// The [`TABLE`] row a discriminant names, or `None` for [`Self::None`] and
     /// for the reserved values above the table.
-    ///
     fn at(d: u8) -> Option<&'static (Composition, NeutralLoss, &'static str)> {
         TABLE.get((d as usize).checked_sub(1)?)
     }
