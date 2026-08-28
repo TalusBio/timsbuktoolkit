@@ -10,7 +10,7 @@ use timsquery::models::capabilities::{
 };
 use timsquery::models::{
     FlatIdx,
-    OwnedSourceId,
+    GroupCode,
     Query,
     RowIdx,
     TargetColumns,
@@ -122,7 +122,7 @@ impl<'a> RefQuery<'a> {
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
     /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide_in_group(&self, decoy_group: OwnedSourceId) -> Peptide {
+    pub fn materialize_peptide(&self) -> Peptide {
         let tgt = self.geom.row();
         let coll = &self.lib.geom;
         let raw: Arc<str> = coll.seq_mod(tgt).into();
@@ -134,7 +134,6 @@ impl<'a> RefQuery<'a> {
         Peptide {
             raw,
             decoy,
-            decoy_group,
             sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
         }
     }
@@ -219,30 +218,34 @@ impl<'a> QueryGeom for RefQuery<'a> {
 /// flyweight so the batch scoring loop stays generic (monomorphized,
 /// zero-heap) over the concrete type — see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
+/// Which row a scored result came from, and which group it competes in.
+///
+/// The two travel together because the scorer holds the run's raw-data index,
+/// not the library arena, so it cannot derive one from the other. Both are
+/// opaque, so neither can reach an output file or be confused with an id — the
+/// writer resolves them against the arena at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowHandles {
+    pub row: RowIdx,
+    pub group: GroupCode,
+}
+
 pub trait ScoredIdentity {
-    /// The id this result carries, so a caller can map it onto the row they
-    /// asked about: the source id where the file gave one, otherwise the id
-    /// minted for it at load.
-    fn library_id(&self) -> OwnedSourceId;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
-    /// Competition group id. Declared by the file when it says, minted at load
-    /// otherwise — never the row's position.
-    fn decoy_group(&self) -> OwnedSourceId;
-    /// The row this result came from. Opaque and unprintable, so it can order
-    /// the q-value tie-break without any caller-supplied value reaching it.
-    fn row(&self) -> RowIdx;
+    /// The arena handles this result carries onward. See [`RowHandles`].
+    fn handles(&self) -> RowHandles;
     /// Materialize the output identity `Peptide`.
     fn materialize_peptide(&self) -> Peptide;
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
-    fn library_id(&self) -> OwnedSourceId {
-        self.geom().output_id().to_owned_id()
-    }
-
-    fn row(&self) -> RowIdx {
-        self.geom().row()
+    fn handles(&self) -> RowHandles {
+        let row = self.geom().row();
+        RowHandles {
+            row,
+            group: self.lib.geom.decoy_group_code(row),
+        }
     }
 
     fn is_target(&self) -> bool {
@@ -252,13 +255,8 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
-    fn decoy_group(&self) -> OwnedSourceId {
-        self.lib.geom.decoy_group(self.geom().row()).to_owned_id()
-    }
-
     fn materialize_peptide(&self) -> Peptide {
-        let dg = self.decoy_group();
-        RefQuery::materialize_peptide_in_group(self, dg)
+        RefQuery::materialize_peptide(self)
     }
 }
 
@@ -385,8 +383,15 @@ mod tests {
         let lib = tiny_ref_lib();
         let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
-        assert_eq!(scored.library_id(), OwnedSourceId::Numeric(0)); // flat 0 -> target 0
-        assert_eq!(scored.decoy_group(), OwnedSourceId::Numeric(0));
+        // flat 0 -> row 0, and the id it reports is resolved from the arena,
+        // not carried on the result.
+        let handles = scored.handles();
+        assert_eq!(handles.row, row(&lib, 0));
+        assert_eq!(handles.group, lib.geom.decoy_group_code(row(&lib, 0)));
+        assert_eq!(
+            lib.geom.output_id(handles.row),
+            timsquery::models::SourceId::Numeric(0)
+        );
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
         assert_eq!(got_frags.len(), 2);
         assert!((got_frags[0].1 - 1.0).abs() < 1e-6);

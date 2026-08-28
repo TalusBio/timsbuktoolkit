@@ -98,6 +98,39 @@ mod index {
             Self(u32::MAX)
         }
     }
+
+    /// Same reasoning, and the same placeholder value: a defaulted group is one
+    /// nothing has assigned yet. `u32::MAX` makes such rows compete with each
+    /// other and with nothing real, which is visible; 0 would silently fold
+    /// them into the arena's first group.
+    impl Default for GroupCode {
+        fn default() -> Self {
+            Self(u32::MAX)
+        }
+    }
+}
+
+/// Handles for tests in downstream crates, which score against a real arena in
+/// production but assemble results directly in tests.
+///
+/// Feature-gated, and the feature is only ever enabled by a `dev-dependency`,
+/// so "only the arena mints a handle" still holds in every shipped build. The
+/// values are dense from 0 because the callers need them *distinct* (a sort key,
+/// a competition group) and never resolve them against an arena.
+#[cfg(feature = "test-support")]
+pub mod test_handles {
+    use super::index::{
+        GroupCode,
+        RowIdx,
+    };
+
+    pub fn row(i: u32) -> RowIdx {
+        RowIdx::new(i)
+    }
+
+    pub fn group(i: u32) -> GroupCode {
+        GroupCode::new(i)
+    }
 }
 
 /// Interned competition groups: `codes[row]` points at `labels`, so rows that

@@ -61,3 +61,9 @@ mzdata = ["timsseek/mzdata"]
 # `rescore_dash`/`ratatui`. Without this feature, `TIMSSEEK_RESCORE_DASHBOARD`
 # does nothing.
 dashboard = ["dep:rescore_dash"]
+
+[dev-dependencies]
+# Constructors for the opaque arena handles, for the competition tests, which
+# assemble candidates without an arena behind them. Dev-only, so a shipped
+# build cannot mint one.
+timsquery = { path = "../timsquery", features = ["test-support"] }

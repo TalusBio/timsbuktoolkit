@@ -11,6 +11,11 @@ use parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use timsquery::IonAnnot;
+use timsquery::models::{
+    SourceId,
+    TargetColumns,
+};
 use tracing::debug;
 
 use super::blocks::{
@@ -35,11 +40,26 @@ pub const RESULTS_FORMAT_VERSION: u32 = 3;
 // Build a RecordBatch from a slice of FinalResult
 // ---------------------------------------------------------------------------
 
+/// Write one id column, without rendering a text id through `Display` first.
+fn emit_id(sink: &mut ColSink, name: &str, id: SourceId<'_>) {
+    match id {
+        SourceId::Text(s) => sink.str(name, s),
+        SourceId::Numeric(n) => sink.str(name, &n.to_string()),
+    }
+}
+
 /// Emit one result's columns into the sink (all scoring blocks, then the
-/// post-model meta block).
-fn emit_row(r: &FinalResult, sink: &mut ColSink) {
+/// post-model meta block, then the ids resolved from the arena).
+///
+/// The ids are not on the result: a candidate carries opaque handles so nothing
+/// on the scoring path can print one or invent one, and this is the boundary
+/// where they become the values a reader joins on.
+fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink) {
     r.scoring.columns(sink);
     r.result_meta().columns(sink);
+    let row = r.scoring.identity.row;
+    emit_id(sink, "library_id", geom.output_id(row));
+    emit_id(sink, "decoy_group_id", geom.decoy_group(row));
     sink.end_row();
 }
 
@@ -64,13 +84,16 @@ fn empty_batch() -> std::io::Result<RecordBatch> {
 /// `#[derive(ScoreBlock)]` in `timsseek_macros`), so a new field cannot
 /// silently skip the Parquet projection — there is no hand-written destructure
 /// to fall out of sync.
-pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatch> {
+pub fn build_record_batch(
+    results: &[FinalResult],
+    geom: &TargetColumns<IonAnnot>,
+) -> std::io::Result<RecordBatch> {
     if results.is_empty() {
         return empty_batch();
     }
     let mut sink = ColSink::new();
     for r in results {
-        emit_row(r, &mut sink);
+        emit_row(r, geom, &mut sink);
     }
 
     let (fields, arrays) = sink.finish();
@@ -83,17 +106,22 @@ pub fn build_record_batch(results: &[FinalResult]) -> std::io::Result<RecordBatc
 // Buffered Parquet writer
 // ---------------------------------------------------------------------------
 
-pub struct ResultParquetWriter {
+/// Borrows the arena the results were scored against, because a `FinalResult`
+/// carries opaque handles rather than ids and the arena is what turns them back
+/// into the values a reader joins on.
+pub struct ResultParquetWriter<'a> {
     writer: ArrowWriter<File>,
     buffer: Vec<FinalResult>,
     row_group_size: usize,
+    geom: &'a TargetColumns<IonAnnot>,
 }
 
-impl ResultParquetWriter {
+impl<'a> ResultParquetWriter<'a> {
     pub fn new(
         path: impl AsRef<Path>,
         row_group_size: usize,
         parsable_sequences: bool,
+        geom: &'a TargetColumns<IonAnnot>,
     ) -> std::io::Result<Self> {
         let file = match File::create_new(path.as_ref()) {
             Ok(f) => f,
@@ -104,7 +132,7 @@ impl ResultParquetWriter {
         };
 
         // Build schema from a zero-row batch
-        let empty_batch = build_record_batch(&[])?;
+        let empty_batch = build_record_batch(&[], geom)?;
         let schema = empty_batch.schema();
 
         let kv = vec![
@@ -129,6 +157,7 @@ impl ResultParquetWriter {
             writer,
             buffer: Vec::with_capacity(row_group_size),
             row_group_size,
+            geom,
         })
     }
 
@@ -145,7 +174,7 @@ impl ResultParquetWriter {
             return Ok(());
         }
         debug!("Flushing {} results to parquet", self.buffer.len());
-        let batch = build_record_batch(&self.buffer)?;
+        let batch = build_record_batch(&self.buffer, self.geom)?;
         self.writer.write(&batch).map_err(std::io::Error::other)?;
         self.buffer.clear();
         Ok(())
@@ -166,6 +195,32 @@ mod tests {
         SerializedFileReader,
     };
     use std::fs::File;
+    use timsquery::models::capabilities::TargetCapabilities;
+
+    /// A one-row arena for the writer to resolve ids against.
+    fn one_row_arena() -> TargetColumns<IonAnnot> {
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        geom.push_target(
+            900.4,
+            2,
+            1.0,
+            1.0,
+            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+            "PEPTIDEK",
+            "PEPTIDEK",
+            &[],
+        );
+        geom.seal();
+        geom
+    }
+
+    /// `FinalResult::sample()` carries a placeholder row, which by design reads
+    /// no arena. Point it at a real one before writing.
+    fn sample_in(geom: &TargetColumns<IonAnnot>) -> FinalResult {
+        let mut r = FinalResult::sample();
+        r.scoring.identity.row = geom.rows().next().expect("one row");
+        r
+    }
 
     /// Golden byte-compat contract for the Parquet schema.
     ///
@@ -193,8 +248,9 @@ mod tests {
         // The writer's schema comes from the empty (SchemaSink) batch; real data
         // goes through the ColSink path. They MUST have identical schemas (name,
         // dtype, nullability, ORDER) or the writer rejects populated batches.
-        let empty = build_record_batch(&[]).expect("empty");
-        let populated = build_record_batch(&[FinalResult::sample()]).expect("populated");
+        let geom = one_row_arena();
+        let empty = build_record_batch(&[], &geom).expect("empty");
+        let populated = build_record_batch(&[sample_in(&geom)], &geom).expect("populated");
         assert_eq!(
             empty.schema(),
             populated.schema(),
@@ -202,10 +258,60 @@ mod tests {
         );
     }
 
+    /// The ids are not carried on a result any more, so this is what pins that
+    /// they still reach the file — and that the row a result points at is the
+    /// row whose id gets written.
+    #[test]
+    fn each_row_s_ids_are_resolved_from_the_arena() {
+        use arrow::array::StringArray;
+
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for seq in ["PEPTIDEK", "AAAAAAALQAK"] {
+            geom.push_target(
+                900.4,
+                2,
+                1.0,
+                1.0,
+                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq,
+                seq,
+                &[],
+            );
+        }
+        // The names DIA-NN would give these rows, which is the case that must
+        // not come back as digits.
+        geom.set_source_ids(["PEPTIDEK2", "AAAAAAALQAK2"])
+            .expect("two ids for two rows");
+        geom.seal();
+
+        let second = geom.rows().nth(1).expect("two rows");
+        let mut result = FinalResult::sample();
+        result.scoring.identity.row = second;
+
+        let batch = build_record_batch(&[result], &geom).expect("batch");
+        let ids = batch
+            .column_by_name("library_id")
+            .expect("library_id column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("library_id is Utf8");
+        assert_eq!(ids.value(0), "AAAAAAALQAK2");
+
+        // No declared groups, so the row is its own group and the group id is
+        // the id the row reports.
+        let groups = batch
+            .column_by_name("decoy_group_id")
+            .expect("decoy_group_id column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("decoy_group_id is Utf8");
+        assert_eq!(groups.value(0), "AAAAAAALQAK2");
+    }
+
     #[test]
     fn parquet_schema_contains_maintained_subset() {
         use std::collections::BTreeMap;
-        let batch = build_record_batch(&[]).expect("schema");
+        let batch = build_record_batch(&[], &one_row_arena()).expect("schema");
         let got: BTreeMap<String, (String, bool)> = batch
             .schema()
             .fields()
@@ -232,7 +338,7 @@ mod tests {
 
     #[test]
     fn delta_columns_name_their_ln1p_formulas() {
-        let batch = build_record_batch(&[]).expect("schema");
+        let batch = build_record_batch(&[], &one_row_arena()).expect("schema");
         let schema = batch.schema();
 
         assert!(schema.index_of("delta_group_ln1p_diff").is_ok());
@@ -250,7 +356,8 @@ mod tests {
         //  but NamedTempFile holds it open; drop it first).
         drop(tmp);
         {
-            let writer = ResultParquetWriter::new(&path, 1024, true).expect("create writer");
+            let geom = one_row_arena();
+            let writer = ResultParquetWriter::new(&path, 1024, true, &geom).expect("create writer");
             writer.close().expect("close");
         }
         let file = File::open(&path).expect("open");

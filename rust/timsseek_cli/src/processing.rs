@@ -95,16 +95,16 @@ mod calib_dash_hook {
             Hasher,
         };
         use std::io::IsTerminal;
-        use timsquery::models::OwnedSourceId;
 
         /// The dashboard compares calibrant identity across batches but never
-        /// displays it, so it takes a hash instead of the id. That keeps its
-        /// point type `Copy` and, more importantly, keeps `size_of` the true
-        /// cost of a point — which is what its replay memory budget is computed
-        /// from. Only meaningful within one process.
-        fn identity_hash(id: &OwnedSourceId) -> u64 {
+        /// displays it, so it takes a hash of the arena handle rather than the
+        /// id that handle resolves to. That keeps its point type `Copy` and,
+        /// more importantly, keeps `size_of` the true cost of a point — which is
+        /// what its replay memory budget is computed from. Only meaningful
+        /// within one process.
+        fn identity_hash(handle: impl Hash) -> u64 {
             let mut hasher = DefaultHasher::new();
-            id.hash(&mut hasher);
+            handle.hash(&mut hasher);
             hasher.finish()
         }
 
@@ -190,7 +190,7 @@ mod calib_dash_hook {
                 calibrants.map(|c| calib_dash::CalibrantPoint {
                     library_rt: c.library_rt.0 as f64,
                     observed_rt: c.apex_rt.0 as f64,
-                    identity: identity_hash(&c.library_id),
+                    identity: identity_hash(c.speclib_index),
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
@@ -599,6 +599,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         &out_path_pq,
         20_000,
         speclib.parsable_sequences(),
+        &speclib.geom,
     )
     .map_err(|e| TimsSeekError::Io {
         path: out_path_pq.clone().into(),
@@ -1166,17 +1167,15 @@ pub fn run_pipeline(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use timsquery::models::OwnedSourceId;
+    use timsquery::models::test_handles;
     use timsseek::models::DecoyMarking;
     use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;
 
-    fn candidate(
-        seq: &str,
-        mz: f64,
-        is_target: bool,
-        decoy_group: OwnedSourceId,
-    ) -> ScoredCandidate {
+    /// `group` names the competition group: candidates sharing one compete.
+    /// Production reads it off the arena as an opaque code; a fixture only needs
+    /// the codes to differ where the test wants different groups.
+    fn candidate(seq: &str, mz: f64, is_target: bool, group: u32) -> ScoredCandidate {
         let decoy = if is_target {
             DecoyMarking::Target
         } else {
@@ -1185,13 +1184,12 @@ mod tests {
         let peptide = Peptide {
             raw: Arc::from(seq),
             decoy,
-            decoy_group: decoy_group.clone(),
             sequence_features: false,
         };
         let mut scoring = ScoringFields::sample(peptide);
         scoring.identity.precursor_mz = mz;
         scoring.identity.is_target = is_target;
-        scoring.identity.decoy_group_id = decoy_group;
+        scoring.identity.group = test_handles::group(group);
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
         // is what orders them.
         scoring.primary.main_score = 5.0;
@@ -1218,14 +1216,14 @@ mod tests {
         // and charge, distinct precursor m/z. Two input orderings differing ONLY
         // in the tie order must produce identical (ordered) survivors.
         let order_a = vec![
-            candidate("PEPTIDEK", 501.0, true, OwnedSourceId::Numeric(0)),
-            candidate("PEPTIDEK", 500.0, false, OwnedSourceId::Numeric(0)),
-            candidate("PEPTIDEK", 502.0, false, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 501.0, true, 0),
+            candidate("PEPTIDEK", 500.0, false, 0),
+            candidate("PEPTIDEK", 502.0, false, 0),
         ];
         let order_b = vec![
-            candidate("PEPTIDEK", 502.0, false, OwnedSourceId::Numeric(0)),
-            candidate("PEPTIDEK", 500.0, false, OwnedSourceId::Numeric(0)),
-            candidate("PEPTIDEK", 501.0, true, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 502.0, false, 0),
+            candidate("PEPTIDEK", 500.0, false, 0),
+            candidate("PEPTIDEK", 501.0, true, 0),
         ];
 
         let sa = survivors(order_a);
@@ -1244,9 +1242,9 @@ mod tests {
 
     #[test]
     fn competition_features_match_their_ln1p_names() {
-        let mut best = candidate("BEST", 501.0, true, OwnedSourceId::Numeric(7));
+        let mut best = candidate("BEST", 501.0, true, 7);
         best.scoring.primary.main_score = 8.0;
-        let mut runner_up = candidate("RUNNER", 502.0, false, OwnedSourceId::Numeric(7));
+        let mut runner_up = candidate("RUNNER", 502.0, false, 7);
         runner_up.scoring.primary.main_score = 3.0;
 
         let competed = target_decoy_compete(vec![runner_up, best]);
@@ -1264,11 +1262,11 @@ mod tests {
     /// to come from the runner-up, not from the worst member.
     #[test]
     fn a_three_member_group_separates_the_winner_from_the_runner_up() {
-        let mut best = candidate("BEST", 501.0, true, OwnedSourceId::Numeric(7));
+        let mut best = candidate("BEST", 501.0, true, 7);
         best.scoring.primary.main_score = 8.0;
-        let mut middle = candidate("MIDDLE", 502.0, false, OwnedSourceId::Numeric(7));
+        let mut middle = candidate("MIDDLE", 502.0, false, 7);
         middle.scoring.primary.main_score = 3.0;
-        let mut worst = candidate("WORST", 503.0, false, OwnedSourceId::Numeric(7));
+        let mut worst = candidate("WORST", 503.0, false, 7);
         worst.scoring.primary.main_score = 1.0;
 
         let competed = target_decoy_compete(vec![worst, middle, best]);
@@ -1284,7 +1282,7 @@ mod tests {
     /// existed.
     #[test]
     fn a_lone_group_member_reports_no_separation() {
-        let mut only = candidate("ALONE", 501.0, true, OwnedSourceId::Numeric(7));
+        let mut only = candidate("ALONE", 501.0, true, 7);
         only.scoring.primary.main_score = 8.0;
 
         let competed = target_decoy_compete(vec![only]);
@@ -1298,9 +1296,9 @@ mod tests {
     /// neighbour's.
     #[test]
     fn separate_groups_do_not_bleed_into_each_other() {
-        let mut a = candidate("A", 501.0, true, OwnedSourceId::Numeric(1));
+        let mut a = candidate("A", 501.0, true, 1);
         a.scoring.primary.main_score = 8.0;
-        let mut b = candidate("B", 502.0, true, OwnedSourceId::Numeric(2));
+        let mut b = candidate("B", 502.0, true, 2);
         b.scoring.primary.main_score = 3.0;
 
         let competed = target_decoy_compete(vec![a, b]);

@@ -25,6 +25,7 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
+    RowHandles,
     ScoredIdentity,
 };
 use crate::data_sources::speclib::Speclib;
@@ -40,11 +41,7 @@ use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
 };
-use timsquery::models::{
-    FlatIdx,
-    OwnedSourceId,
-    RowIdx,
-};
+use timsquery::models::FlatIdx;
 use timsquery::traits::QueryGeom;
 use timsquery::utils::TupleRange;
 use timsquery::{
@@ -121,10 +118,6 @@ pub struct CalibrantCandidate {
     pub score: f32,
     pub apex_rt: ObservedRTSeconds<f32>,
     pub speclib_index: FlatIdx,
-    /// The id this row reports, carried alongside the position because the
-    /// calibration dashboard keys on something a human can recognise and a
-    /// position must not leave the crate.
-    pub library_id: OwnedSourceId,
     pub library_rt: LibraryRT<f32>,
 }
 
@@ -568,9 +561,9 @@ impl<I: ScorerQueriable> Scorer<I> {
     fn build_calibrated_extraction_into(
         &self,
         query: &Target<IonAnnot>,
-        // The flyweight's row: the scratch `Target` is a reused buffer and
-        // cannot carry one.
-        row: RowIdx,
+        // The flyweight's handles: the scratch `Target` is a reused buffer and
+        // cannot carry them.
+        handles: RowHandles,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -594,15 +587,10 @@ impl<I: ScorerQueriable> Scorer<I> {
             Some(TOP_N_FRAGMENTS),
         )?;
 
-        let extr = worker
-            .extraction
-            .as_ref()
-            .expect("extraction set by build_extraction_into");
         Ok(super::apex_finding::PeptideMetadata {
             digest,
             charge: query.precursor_charge(),
-            library_id: extr.chromatograms.id.clone(),
-            row,
+            handles,
             library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: query.mobility_ook0(),
@@ -620,7 +608,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     pub fn score_calibrated_extraction(
         &self,
         query: &Target<IonAnnot>,
-        row: RowIdx,
+        handles: RowHandles,
         expected: &ExpectedIntensities<IonAnnot>,
         digest: Peptide,
         calibration: &CalibrationResult,
@@ -634,7 +622,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| self
                 .build_calibrated_extraction_into(
                     query,
-                    row,
+                    handles,
                     expected,
                     digest,
                     calibration,
@@ -777,7 +765,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     let digest = q.materialize_peptide();
                     let result = self.score_calibrated_extraction(
                         &scratch.eg,
-                        q.row(),
+                        q.handles(),
                         &scratch.expected,
                         digest,
                         calibration,
@@ -926,7 +914,6 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: flat,
-                            library_id: q.library_id(),
                             library_rt: LibraryRT(q.rt_seconds()),
                         };
                         if let Err(reason) = heap.push(cand) {

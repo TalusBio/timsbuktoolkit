@@ -179,14 +179,14 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 /// peak-bucket layouts produce identical features but different vec orderings).
 /// Without a stable sort here, the seeded shuffle sees different inputs across
 /// runs -> different fold assignment -> different q-values -> drifting target
-/// counts across equivalent configs. `(library_id, precursor_charge)` is a
-/// non-FP composite key that should be unique per candidate after target-decoy
-/// competition.
+/// counts across equivalent configs. `(row, precursor_charge)` is a non-FP
+/// composite key that should be unique per candidate after target-decoy
+/// competition: a target and its ±decoy variants share a row, but competition
+/// leaves exactly ONE candidate per (row, charge), so the key stays unique
+/// among the survivors that reach here.
 ///
-/// NOTE: `library_id` is the POSITIONAL target index (lazy arena) / materialized
-/// eg id — a target and its ±decoy variants share it, but target-decoy
-/// competition leaves exactly ONE candidate per (target, charge), so the key
-/// stays unique among survivors here.
+/// The key is the arena row rather than the id the row reports, so a
+/// caller-supplied id can never reach the sort and change the fold assignment.
 ///
 /// The shuffle is NOT cosmetic: every fold partition below is positional, so an
 /// unshuffled (library-ordered) input would make folds correlate with library
@@ -1015,7 +1015,10 @@ mod feature_tests {
         ScoringFields,
     };
     use std::sync::Arc;
-    use timsquery::models::OwnedSourceId;
+    use timsquery::models::{
+        RowIdx,
+        test_handles,
+    };
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
         ScoringFields::sample(peptide)
@@ -1028,7 +1031,6 @@ mod feature_tests {
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
             decoy: DecoyMarking::Target,
-            decoy_group: OwnedSourceId::Numeric(0),
             sequence_features,
         };
         CompetedCandidate {
@@ -1152,7 +1154,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = OwnedSourceId::Numeric(i as u64);
+                c.scoring.identity.row = test_handles::row(i);
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
                 let base: u8 = if is_target { 20 } else { 8 };
@@ -1273,15 +1275,10 @@ mod feature_tests {
             assert!((0.0..=1.0).contains(&r.qvalue));
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
-            let mut v: Vec<(OwnedSourceId, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
+            let mut v: Vec<(RowIdx, u32)> = out
                 .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id.clone(),
-                        r.discriminant_score.to_bits(),
-                    )
-                })
+                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
                 .collect();
             v.sort_unstable();
             v
@@ -1460,15 +1457,10 @@ mod feature_tests {
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
-        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
-            let mut v: Vec<(OwnedSourceId, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
+            let mut v: Vec<(RowIdx, u32)> = out
                 .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id.clone(),
-                        r.discriminant_score.to_bits(),
-                    )
-                })
+                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
                 .collect();
             v.sort_unstable();
             v
@@ -1568,15 +1560,10 @@ mod feature_tests {
             );
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
-            let mut v: Vec<(OwnedSourceId, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
+            let mut v: Vec<(RowIdx, u32)> = out
                 .iter()
-                .map(|r| {
-                    (
-                        r.scoring.identity.library_id.clone(),
-                        r.discriminant_score.to_bits(),
-                    )
-                })
+                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
                 .collect();
             v.sort_unstable();
             v
@@ -1720,7 +1707,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = OwnedSourceId::Numeric(i as u64);
+                c.scoring.identity.row = test_handles::row(i);
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
             })

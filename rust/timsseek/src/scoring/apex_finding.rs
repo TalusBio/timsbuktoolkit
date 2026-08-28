@@ -25,10 +25,8 @@
 //! ```
 
 use std::fmt::Display;
-use timsquery::models::{
-    OwnedSourceId,
-    RowIdx,
-};
+
+use crate::data_sources::reference_library::RowHandles;
 
 use super::apex::ApexConfig;
 use super::{
@@ -93,10 +91,10 @@ pub struct PeptideMetadata {
 
     pub charge: u8,
 
-    pub library_id: OwnedSourceId,
-
-    /// The arena row scored, carried for the q-value determinism sort.
-    pub row: RowIdx,
+    /// The arena row scored and the group it competes in. The ids a reader
+    /// wants are resolved from these at the writer, so a scored candidate never
+    /// carries a copy.
+    pub handles: RowHandles,
 
     /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).
     pub library_rt: f32,

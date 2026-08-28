@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use timsquery::models::{
-    OwnedSourceId,
+    GroupCode,
     RowIdx,
 };
 
@@ -21,13 +21,15 @@ use crate::scoring::blocks::{
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Identity {
     pub peptide: Peptide,
-    pub library_id: OwnedSourceId,
-    pub decoy_group_id: OwnedSourceId,
-    /// The arena row this result came from. Opaque and unserializable, so it
-    /// can order the q-value tie-break without a caller-supplied id reaching
-    /// the sort (`library_id` is caller-supplied whenever the file had one).
+    /// The arena row this result came from, and the group it competes in. Both
+    /// opaque and unserializable: the row orders the q-value tie-break without
+    /// a caller-supplied id reaching the sort, and the group is only ever
+    /// compared. The ids a reader wants are resolved from the arena at the
+    /// writer — see [`crate::scoring::parquet_writer`].
     #[serde(skip)]
     pub row: RowIdx,
+    #[serde(skip)]
+    pub group: GroupCode,
     pub precursor_mz: f64,
     pub precursor_charge: u8,
     pub precursor_mobility: f32,
@@ -39,16 +41,15 @@ impl Identity {
     /// field is a linear-lane feature.
     pub const LINEAR_LEN: usize = 0;
     /// `precursor_mz_round5`, `precursor_charge`, `precursor_mobility` — the
-    /// context features. `library_id` / `decoy_group_id` / `is_target` are
-    /// Parquet-only.
+    /// context features. `is_target` is Parquet-only, as are the ids the writer
+    /// resolves from `row`.
     pub const NONLINEAR_LEN: usize = 3;
 
     pub fn compute(metadata: &PeptideMetadata) -> Self {
         Self {
             peptide: metadata.digest.clone(),
-            library_id: metadata.library_id.clone(),
-            decoy_group_id: metadata.digest.decoy_group.clone(),
-            row: metadata.row,
+            row: metadata.handles.row,
+            group: metadata.handles.group,
             precursor_mz: metadata.ref_precursor_mz,
             precursor_charge: metadata.charge,
             precursor_mobility: metadata.ref_mobility_ook0,
@@ -67,8 +68,8 @@ impl Identity {
         self.competition_key() == other.competition_key()
     }
 
-    pub fn competition_key(&self) -> (&OwnedSourceId, u8) {
-        (&self.decoy_group_id, self.precursor_charge)
+    pub fn competition_key(&self) -> (GroupCode, u8) {
+        (self.group, self.precursor_charge)
     }
 
     /// The observed mobility is a sentinel on non-scoreable axes; drop the
@@ -95,12 +96,10 @@ impl Identity {
             peptide: Peptide {
                 raw: Arc::from("PEPTIDEK"),
                 decoy: DecoyMarking::Target,
-                decoy_group: OwnedSourceId::Numeric(0),
                 sequence_features: false,
             },
-            library_id: OwnedSourceId::Numeric(1),
-            decoy_group_id: OwnedSourceId::Numeric(0),
             row: RowIdx::default(),
+            group: GroupCode::default(),
             precursor_mz: 500.0,
             precursor_charge: 2,
             precursor_mobility: 0.9,
@@ -112,8 +111,6 @@ impl Identity {
 impl ScoreBlock for Identity {
     fn columns(&self, o: &mut ColSink) {
         o.str("sequence", self.peptide.as_str());
-        o.str("library_id", &self.library_id.to_string());
-        o.str("decoy_group_id", &self.decoy_group_id.to_string());
         o.f64("precursor_mz", self.precursor_mz);
         o.u8("precursor_charge", self.precursor_charge);
         o.f32("precursor_mobility", self.precursor_mobility);
@@ -122,8 +119,6 @@ impl ScoreBlock for Identity {
 
     fn column_schema(o: &mut SchemaSink) {
         o.str("sequence");
-        o.str("library_id");
-        o.str("decoy_group_id");
         o.f64("precursor_mz");
         o.u8("precursor_charge");
         o.f32("precursor_mobility");

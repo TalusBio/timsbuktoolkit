@@ -206,11 +206,19 @@ impl FinalResult {
         }
     }
 
-    /// Value-free Parquet schema: scoring blocks (composition order) then the
-    /// post-model meta block — mirrors `emit_row`'s column order exactly.
+    /// Value-free Parquet schema: scoring blocks (composition order), the
+    /// post-model meta block, then the ids — mirrors `emit_row`'s column order
+    /// exactly, which the writer's `schema_first_matches_populated_data_path`
+    /// test pins.
+    ///
+    /// The ids are declared here rather than in the `Identity` block because
+    /// they are not on the result: `emit_row` resolves them from the arena. A
+    /// column added here needs the matching `emit_id` there, in this position.
     pub fn column_schema(o: &mut SchemaSink) {
         <ScoringFields as ScoreBlock>::column_schema(o);
         <ResultMeta as ScoreBlock>::column_schema(o);
+        o.str("library_id");
+        o.str("decoy_group_id");
     }
 }
 

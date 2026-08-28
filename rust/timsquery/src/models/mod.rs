@@ -33,8 +33,11 @@ pub use source_id::{
     SourceIdError,
     SourceIds,
 };
+#[cfg(feature = "test-support")]
+pub use target_columns::test_handles;
 pub use target_columns::{
     FlatIdx,
+    GroupCode,
     ModDefinition,
     RowIdx,
     TargetColumns,

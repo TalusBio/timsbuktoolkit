@@ -107,7 +107,6 @@ impl ParsedSequence {
 pub struct Peptide {
     pub raw: Arc<str>,
     pub decoy: DecoyMarking,
-    pub decoy_group: timsquery::models::OwnedSourceId,
     /// Whether the source library exposes sequence features. Gates [`Self::parse`]:
     /// a library without them yields no residues, so the sequence lanes stay NaN.
     pub sequence_features: bool,
