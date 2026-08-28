@@ -1050,18 +1050,12 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         glimpse_result_head(&results)
     );
 
-    // Compete target-decoy pairs at precursor level
+    // Sort competing results adjacent, best first within each competition.
     results.sort_unstable_by(|x, y| {
         x.scoring
             .identity
-            .decoy_group_id
-            .cmp(&y.scoring.identity.decoy_group_id)
-            .then_with(|| {
-                x.scoring
-                    .identity
-                    .precursor_charge
-                    .cmp(&y.scoring.identity.precursor_charge)
-            })
+            .competition_key()
+            .cmp(&y.scoring.identity.competition_key())
             .then_with(|| {
                 x.scoring
                     .primary
@@ -1076,82 +1070,40 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         results.len()
     );
 
-    // Calculate log-space delta features between the two best group members.
-    // Results are sorted by (decoy_group_id, precursor_charge, score desc)
-    // We store (group_id, charge, index, ln_1p(main_score)).
-    let mut ln1p_delta_map: Vec<(f32, f32)> = vec![(f32::NAN, f32::NAN); results.len()];
-    let mut previous: Option<(u64, u8, usize, f32)> = None;
-
-    for (i, current) in results.iter().enumerate() {
-        let current_key = (
-            current.scoring.identity.decoy_group_id,
-            current.scoring.identity.precursor_charge,
-        );
-
-        if let Some((prev_group_id, prev_charge, prev_index, ln1p_prev_score)) = previous {
-            let prev_key = (prev_group_id, prev_charge);
-
-            if current_key == prev_key {
-                // This is the second item in a target/decoy pair
-                let log_curr = current.scoring.primary.main_score.ln_1p();
-                let delta_group_ln1p_diff = ln1p_prev_score - log_curr;
-                let delta_group_ln1p_ratio = log_curr / ln1p_prev_score;
-
-                ln1p_delta_map[prev_index] = (delta_group_ln1p_diff, delta_group_ln1p_ratio);
-
-                // Skip updating previous - we only compare first two items per group
-                continue;
-            }
-        }
-
-        // Start of a new group or first item overall
-        previous = Some((
-            current.scoring.identity.decoy_group_id,
-            current.scoring.identity.precursor_charge,
-            i,
-            current.scoring.primary.main_score.ln_1p(),
-        ));
-    }
-
-    // Dedup by (decoy_group_id, charge) — keep the first (best scoring)
-    // We need indices to grab the right deltas, so collect the deduped indices first.
-    let mut kept_indices: Vec<usize> = Vec::with_capacity(results.len());
-    {
-        let mut last_key: Option<(u64, u8)> = None;
-        for (i, result) in results.iter().enumerate() {
-            let key = (
-                result.scoring.identity.decoy_group_id,
-                result.scoring.identity.precursor_charge,
-            );
-            if last_key == Some(key) {
-                continue; // duplicate in same group
-            }
-            last_key = Some(key);
-            kept_indices.push(i);
-        }
-    }
+    // Each run is one competition, best first. Only the winner survives, and
+    // its separation feature is its margin over the runner-up -- NaN when it
+    // ran alone, since there is nothing to separate from and NaN is the model's
+    // missing marker.
+    let group_lens: Vec<usize> = results
+        .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
+        .map(<[_]>::len)
+        .collect();
 
     info!(
         "Number of results after t/d competition: {}",
-        kept_indices.len()
+        group_lens.len()
     );
 
-    // Build CompetedCandidate vec from the kept indices.
-    // We need to pull elements out of `results` by index, but they are non-Copy.
-    // Convert the whole Vec into an indexed form we can drain.
-    let mut results_opt: Vec<Option<ScoredCandidate>> = results.into_iter().map(Some).collect();
-    let competed: Vec<CompetedCandidate> = kept_indices
+    let mut members = results.into_iter();
+    group_lens
         .into_iter()
-        .map(|i| {
-            let (delta_group_ln1p_diff, delta_group_ln1p_ratio) = ln1p_delta_map[i];
-            results_opt[i]
-                .take()
-                .expect("index should be unique")
-                .into_competed(delta_group_ln1p_diff, delta_group_ln1p_ratio)
+        .map(|len| {
+            let winner = members.next().expect("chunk_by yields non-empty runs");
+            let ln1p_winner = winner.scoring.primary.main_score.ln_1p();
+            // Guard on the run length before taking: a lone winner must not
+            // consume the next competition's winner as its runner-up.
+            let (diff, ratio) = if len >= 2 {
+                let runner_up = members.next().expect("a run of >=2 has a second member");
+                let ln1p_runner_up = runner_up.scoring.primary.main_score.ln_1p();
+                (ln1p_winner - ln1p_runner_up, ln1p_runner_up / ln1p_winner)
+            } else {
+                (f32::NAN, f32::NAN)
+            };
+            // Everyone below the runner-up loses and carries no feature.
+            members.by_ref().take(len.saturating_sub(2)).for_each(drop);
+            winner.into_competed(diff, ratio)
         })
-        .collect();
-
-    competed
+        .collect()
 }
 
 pub fn run_pipeline(
@@ -1282,5 +1234,54 @@ mod tests {
 
         assert!((winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6);
         assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
+    }
+
+    /// `LazyMassShift` with two decoys makes every group three members, so a
+    /// two-member test never exercised the case that mattered: the margin has
+    /// to come from the runner-up, not from the worst member.
+    #[test]
+    fn a_three_member_group_separates_the_winner_from_the_runner_up() {
+        let mut best = candidate("BEST", 501.0, true, 7);
+        best.scoring.primary.main_score = 8.0;
+        let mut middle = candidate("MIDDLE", 502.0, false, 7);
+        middle.scoring.primary.main_score = 3.0;
+        let mut worst = candidate("WORST", 503.0, false, 7);
+        worst.scoring.primary.main_score = 1.0;
+
+        let competed = target_decoy_compete(vec![worst, middle, best]);
+        assert_eq!(competed.len(), 1, "one group, one survivor");
+
+        let (b, m) = (8.0f32.ln_1p(), 3.0f32.ln_1p());
+        assert!((competed[0].delta_group_ln1p_diff - (b - m)).abs() < 1e-6);
+        assert!((competed[0].delta_group_ln1p_ratio - m / b).abs() < 1e-6);
+    }
+
+    /// Nothing to separate from, so the feature does not apply. NaN is the
+    /// model's missing marker; 0 would claim a tie with a rival that never
+    /// existed.
+    #[test]
+    fn a_lone_group_member_reports_no_separation() {
+        let mut only = candidate("ALONE", 501.0, true, 7);
+        only.scoring.primary.main_score = 8.0;
+
+        let competed = target_decoy_compete(vec![only]);
+        assert_eq!(competed.len(), 1);
+        assert!(competed[0].delta_group_ln1p_diff.is_nan());
+        assert!(competed[0].delta_group_ln1p_ratio.is_nan());
+    }
+
+    /// Groups are found by walking runs of the sort order, so a result that
+    /// belongs to a different competition must not be folded into its
+    /// neighbour's.
+    #[test]
+    fn separate_groups_do_not_bleed_into_each_other() {
+        let mut a = candidate("A", 501.0, true, 1);
+        a.scoring.primary.main_score = 8.0;
+        let mut b = candidate("B", 502.0, true, 2);
+        b.scoring.primary.main_score = 3.0;
+
+        let competed = target_decoy_compete(vec![a, b]);
+        assert_eq!(competed.len(), 2, "two groups, two survivors");
+        assert!(competed.iter().all(|c| c.delta_group_ln1p_diff.is_nan()));
     }
 }

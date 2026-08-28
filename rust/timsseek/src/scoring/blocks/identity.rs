@@ -53,6 +53,21 @@ impl Identity {
         }
     }
 
+    /// Whether two results compete: same decoy group, same charge.
+    ///
+    /// Paired with [`Self::competition_key`], which is the key this is a
+    /// comparison of, so sorting by the key leaves competing results adjacent.
+    /// Competition previously spelled the sort key and the grouping predicate
+    /// separately; if those drifted, nothing failed and the groups were simply
+    /// wrong.
+    pub fn competes_with(&self, other: &Self) -> bool {
+        self.competition_key() == other.competition_key()
+    }
+
+    pub fn competition_key(&self) -> (u64, u8) {
+        (self.decoy_group_id, self.precursor_charge)
+    }
+
     /// The observed mobility is a sentinel on non-scoreable axes; drop the
     /// precursor mobility to NaN.
     pub fn neutralize_mobility(&mut self) {
