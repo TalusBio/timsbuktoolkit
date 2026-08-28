@@ -1,20 +1,30 @@
 //! Compact representation of fragment ion annotations for mass spectrometry.
 //!
 //! A spectral library carries one annotation per fragment, so this type is
-//! replicated millions of times in a loaded arena and compared on the scoring
-//! hot path. It is therefore a packed `u32` rather than a struct of fields:
-//! equality is a single word compare, and `(IonAnnot, f32)` stays 8 bytes with
-//! no padding.
+//! replicated millions of times in a loaded arena. It is a packed `u32` so that
+//! the annotations an mzSpecLib-shaped library needs -- neutral losses,
+//! internal fragments, immonium ions -- fit *without* growing the type.
+//!
+//! That is the whole argument, and it is about the alternative rather than
+//! about the previous representation. The predecessor was a 4-byte struct of
+//! `(series+ordinal, charge, isotope)`; bolting a loss field onto it would have
+//! cost three bytes, not one, because a 5-byte key paired with an `f32` pads to
+//! a 12-byte tuple. That would have grown the inline `TinyVec` storage in
+//! timsseek's `ExpectedIntensities` from 104 to 156 bytes. Packed, the tuple
+//! stays 8 bytes and the loss rides along in bits nobody was using.
 //!
 //! # Bit layout
 //!
 //! ```text
-//! bit: 31   30 29           18 17      12 11     8 7      4 3     0
+//! bit: 31 30  29            18 17      12 11     8 7      4 3     0
 //!     ┌───────┬────────────────┬──────────┬────────┬────────┬───────┐
 //!     │ spare │    payload     │   loss   │isotope │ charge │ kind  │
-//!     │  2b   │      12b       │    6b    │ 4b zz  │ 4b zz  │  4b   │
+//!     │  2b   │      12b       │    6b    │   4b   │ 4b zz  │  4b   │
 //!     └───────┴────────────────┴──────────┴────────┴────────┴───────┘
 //! ```
+//!
+//! The widths and their shifts are checked by `const` assertions next to the
+//! constants, so this diagram cannot drift away from the code.
 //!
 //! `payload` is reinterpreted per `kind` -- a tagged union inside the word:
 //!
@@ -30,11 +40,12 @@
 //! because `IonAnnot: Default` is forced by `tinyvec::Array` and a default can
 //! reach any serde path.
 //!
-//! `charge` and `isotope` are zigzag-encoded so they stay signed in 4 bits.
-//! Their ranges (±7) are far wider than anything observed: the HUPO-PSI corpus
-//! tops out at charge 3 and isotope 3, with no negative charges at all. Because
-//! the field truncates rather than wrapping loudly, every constructor
-//! range-checks -- see [`IonAnnot::try_new`].
+//! `charge` is zigzag-encoded to stay signed in 4 bits; `isotope` is unsigned,
+//! because a negative offset has no spelling this crate can emit (see
+//! [`ISOTOPE_MIN`]). Both ranges are far wider than anything observed: the
+//! HUPO-PSI corpus tops out at charge 3 and isotope 3, with no negative charges
+//! at all. Because a bit field truncates rather than wrapping loudly, every
+//! constructor range-checks -- see [`IonAnnot::try_new`].
 //!
 //! # mzPAF compliance
 //!
@@ -46,7 +57,8 @@
 //! Not supported: negative isotope offsets, modified immonium
 //! (`IC[Carbamidomethyl]` carries an arbitrary mod string), and losses outside
 //! the [`NeutralLoss`] table. These are reported as errors, never coerced into
-//! a nearby representable ion.
+//! a nearby representable ion -- and unrepresentable in the field too, so
+//! `Display` cannot emit a spelling the parser would reject.
 //!
 //! # Examples
 //!
@@ -87,17 +99,69 @@ const PAYLOAD_SHIFT: u32 = 18;
 const PAYLOAD_BITS: u32 = 12;
 
 /// Widest charge the 4-bit zigzag field holds. Observed maximum is 3.
+///
+/// The bias applied when packing makes `-7..=8` representable, but the range is
+/// capped symmetrically: nothing has ever needed charge 8, and an asymmetric
+/// public bound invites the reader to check the arithmetic rather than trust it.
 pub const CHARGE_MIN: i8 = -7;
 pub const CHARGE_MAX: i8 = 7;
-/// Widest isotope offset the 4-bit zigzag field holds. Observed maximum is 3.
-pub const ISOTOPE_MIN: i8 = -7;
-pub const ISOTOPE_MAX: i8 = 7;
+/// Widest isotope offset the 4-bit field holds. Observed maximum is 3.
+///
+/// Isotope offsets are unsigned. mzPAF spells a negative offset `-Ni`, which
+/// this crate does not parse, so allowing one in the field would let `Display`
+/// emit `y5+-2i` -- text no other mzPAF reader accepts, through a type whose
+/// wire format *is* that text. Rejecting it here keeps the invalid spelling
+/// unreachable and spends the whole 4 bits on offsets that can round-trip.
+pub const ISOTOPE_MIN: i8 = 0;
+pub const ISOTOPE_MAX: i8 = mask(ISOTOPE_BITS) as i8;
 /// Width of each internal-fragment endpoint inside `payload`.
 const INTERNAL_POS_BITS: u32 = 6;
 /// Width of the immonium residue index inside `payload`.
 const IMMONIUM_BITS: u32 = 5;
 /// Widest residue index an internal fragment endpoint holds.
-pub(crate) const INTERNAL_POS_MAX: u8 = mask(INTERNAL_POS_BITS) as u8;
+pub const INTERNAL_POS_MAX: u8 = mask(INTERNAL_POS_BITS) as u8;
+
+// The layout is otherwise enforced by prose and a diagram. These make it
+// self-checking, so a field width cannot be widened without the build failing.
+const _: () = assert!(
+    KIND_BITS + CHARGE_BITS + ISOTOPE_BITS + LOSS_BITS + PAYLOAD_BITS <= 32,
+    "the fields overflow the word"
+);
+const _: () = assert!(KIND_SHIFT == 0);
+const _: () = assert!(CHARGE_SHIFT == KIND_SHIFT + KIND_BITS, "fields must abut");
+const _: () = assert!(
+    ISOTOPE_SHIFT == CHARGE_SHIFT + CHARGE_BITS,
+    "fields must abut"
+);
+const _: () = assert!(
+    LOSS_SHIFT == ISOTOPE_SHIFT + ISOTOPE_BITS,
+    "fields must abut"
+);
+const _: () = assert!(PAYLOAD_SHIFT == LOSS_SHIFT + LOSS_BITS, "fields must abut");
+const _: () = assert!(
+    2 * INTERNAL_POS_BITS <= PAYLOAD_BITS,
+    "two internal-fragment endpoints must fit in one payload"
+);
+const _: () = assert!(
+    mask(IMMONIUM_BITS) >= (b'Z' - b'A') as u32,
+    "the immonium field must hold every uppercase residue"
+);
+// The zigzag bounds are hand-derived; these are what make them checked.
+const _: () = assert!(
+    zigzag_charge(CHARGE_MIN) <= mask(CHARGE_BITS)
+        && zigzag_charge(CHARGE_MAX) <= mask(CHARGE_BITS),
+    "the charge range does not survive zigzag inside CHARGE_BITS"
+);
+const _: () = assert!(
+    ISOTOPE_MIN >= 0 && ISOTOPE_MAX as u32 <= mask(ISOTOPE_BITS),
+    "the isotope range does not fit ISOTOPE_BITS"
+);
+// `pack` masks the loss discriminant, so a table grown past the field would
+// truncate into a *different* loss rather than fail.
+const _: () = assert!(
+    NeutralLoss::COUNT as u32 <= mask(LOSS_BITS),
+    "the loss table has outgrown LOSS_BITS"
+);
 
 #[inline]
 const fn mask(bits: u32) -> u32 {
@@ -131,9 +195,13 @@ const fn unzigzag_charge(u: u32) -> i8 {
 
 /// Compact representation of fragment annotations.
 ///
-/// A packed `u32`; see the crate docs for the bit layout. Ordering is by the
-/// packed word, not field-by-field.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+/// A packed `u32`; see the crate docs for the bit layout.
+///
+/// Deliberately not `Ord`. Ordering the packed word sorts by ordinal first,
+/// then loss, then isotope, then charge, then series -- an order nobody means.
+/// Nothing in the workspace sorts annotations, and `KeyLike` does not require
+/// it, so the trait is not offered rather than offered and meaningless.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 pub struct IonAnnot(u32);
 
 impl Serialize for IonAnnot {
@@ -266,7 +334,7 @@ impl IonAnnot {
         Ok(IonAnnot(
             (kind << KIND_SHIFT)
                 | ((zigzag_charge(charge) & mask(CHARGE_BITS)) << CHARGE_SHIFT)
-                | ((zigzag(isotope) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT)
+                | (((isotope as u32) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT)
                 | ((loss as u32 & mask(LOSS_BITS)) << LOSS_SHIFT)
                 | ((payload & mask(PAYLOAD_BITS)) << PAYLOAD_SHIFT),
         ))
@@ -284,7 +352,7 @@ impl IonAnnot {
 
     #[inline]
     pub fn get_isotope(&self) -> i8 {
-        unzigzag((self.0 >> ISOTOPE_SHIFT) & mask(ISOTOPE_BITS))
+        ((self.0 >> ISOTOPE_SHIFT) & mask(ISOTOPE_BITS)) as i8
     }
 
     /// The neutral loss this ion carries, [`NeutralLoss::None`] if it carries
@@ -310,7 +378,7 @@ impl IonAnnot {
         }
         Ok(IonAnnot(
             (self.0 & !(mask(ISOTOPE_BITS) << ISOTOPE_SHIFT))
-                | ((zigzag(new_isotope) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT),
+                | (((new_isotope as u32) & mask(ISOTOPE_BITS)) << ISOTOPE_SHIFT),
         ))
     }
 
@@ -378,10 +446,9 @@ pub fn split_mass_error(s: &str) -> Result<(&str, Option<MassError>), IonParsing
         Some(n) => (n, true),
         None => (tail, false),
     };
-    let v: f64 = num.parse().map_err(|_| IonParsingError::ParsingError {
-        error: s.to_string(),
-        context: Some("Unable to parse the mass-error suffix"),
-    })?;
+    let v: f64 = num
+        .parse()
+        .map_err(|_| IonParsingError::parse(s, "Unable to parse the mass-error suffix"))?;
     Ok((
         head,
         Some(if is_ppm {
@@ -402,12 +469,9 @@ impl IonAnnot {
         // charge: trailing ^N
         let (rest, charge) = match value.split_once('^') {
             Some((rest, charge)) => {
-                let charge = charge
-                    .parse::<i8>()
-                    .map_err(|_| IonParsingError::ParsingError {
-                        error: value.to_string(),
-                        context: Some("Unable to parse the charge number"),
-                    })?;
+                let charge = charge.parse::<i8>().map_err(|_| {
+                    IonParsingError::parse(value, "Unable to parse the charge number")
+                })?;
                 (rest, charge)
             }
             None => (value, 1),
@@ -416,21 +480,16 @@ impl IonAnnot {
         // isotope: +Ni. Negative isotope offsets are not supported.
         let (rest, isotope) = match rest.split_once('+') {
             Some((rest, adducts)) => {
-                let adducts = adducts
-                    .strip_suffix('i')
-                    .ok_or(IonParsingError::ParsingError {
-                        error: adducts.to_string(),
-                        context: Some("Unsupported adduct found"),
-                    })?;
+                let adducts = adducts.strip_suffix('i').ok_or(IonParsingError::parse(
+                    value,
+                    "Only the isotope adduct '+Ni' is supported",
+                ))?;
                 let isotope = if adducts.is_empty() {
                     1
                 } else {
-                    adducts
-                        .parse::<i8>()
-                        .map_err(|_| IonParsingError::ParsingError {
-                            error: value.to_string(),
-                            context: Some("Unable to parse the isotope number"),
-                        })?
+                    adducts.parse::<i8>().map_err(|_| {
+                        IonParsingError::parse(value, "Unable to parse the isotope number")
+                    })?
                 };
                 (rest, isotope)
             }
@@ -456,13 +515,11 @@ impl IonAnnot {
         if let Some(spans) = core.strip_prefix('m')
             && let Some((a, b)) = spans.split_once(':')
         {
-            let start = a.parse::<u8>().map_err(|_| IonParsingError::ParsingError {
-                error: value.to_string(),
-                context: Some("Unable to parse internal-fragment start"),
+            let start = a.parse::<u8>().map_err(|_| {
+                IonParsingError::parse(value, "Unable to parse internal-fragment start")
             })?;
-            let end = b.parse::<u8>().map_err(|_| IonParsingError::ParsingError {
-                error: value.to_string(),
-                context: Some("Unable to parse internal-fragment end"),
+            let end = b.parse::<u8>().map_err(|_| {
+                IonParsingError::parse(value, "Unable to parse internal-fragment end")
             })?;
             return Self::try_new_internal(start, end, charge, isotope, loss);
         }
@@ -472,8 +529,13 @@ impl IonAnnot {
             let mut ch = res.chars();
             return match (ch.next(), ch.next()) {
                 (Some(r), None) => Self::try_new_immonium(r, charge, isotope, loss),
-                // `IC[Carbamidomethyl]` and friends carry a mod string that no
-                // fixed-width field can hold.
+                // A bare `I` names no residue at all; `IC[Carbamidomethyl]` and
+                // friends carry a mod string no fixed-width field can hold.
+                // Both are unrepresentable, and the message says which it is.
+                (None, _) => Err(IonParsingError::parse(
+                    value,
+                    "Immonium ion names no residue",
+                )),
                 _ => Err(IonParsingError::UnsupportedModifiedImmonium {
                     annotation: value.to_string(),
                 }),
@@ -482,22 +544,18 @@ impl IonAnnot {
 
         // Backbone / precursor / unknown: a series char then an ordinal.
         let mut chars = core.chars();
-        let series = chars.next().ok_or(IonParsingError::ParsingError {
-            error: value.to_string(),
-            context: Some("Empty string"),
-        })?;
+        let series = chars
+            .next()
+            .ok_or(IonParsingError::parse(value, "Empty string"))?;
         let rest = chars.as_str();
-        let ordinal = if rest.is_empty() {
-            None
-        } else {
-            Some(
-                rest.parse::<u8>()
-                    .map_err(|e| IonParsingError::ParsingError {
-                        error: format!("{rest} -> {e:?}"),
-                        context: Some("Unable to parse the ordinal number"),
-                    })?,
-            )
-        };
+        let ordinal =
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.parse::<u8>().map_err(|_| {
+                    IonParsingError::parse(value, "Ordinal is not a number in 0..=255")
+                })?)
+            };
         Self::try_new_with_loss(series, ordinal, charge, isotope, loss)
     }
 }
@@ -535,31 +593,54 @@ impl Display for IonAnnot {
     }
 }
 
+/// Why an annotation could not be parsed or represented.
+///
+/// Never matched outside this crate today, so the variants exist for the
+/// message a user sees when a library fails to load. Each one names the
+/// offending value, because the readers that surface these discard the variant
+/// and show only the rendered string.
 #[derive(Debug, Error)]
 pub enum IonParsingError {
     #[error("Ordinal {ordinal} out of range for series '{series}'")]
     OrdinalOutOfRange { ordinal: u8, series: char },
     #[error("Series '{series}' requires an ordinal")]
     MissingOrdinal { series: char },
+    #[error("Series '{series}' takes no ordinal, got {ordinal}")]
+    UnexpectedOrdinal { series: char, ordinal: u8 },
     #[error("Unsupported fragment type: '{fragment_type}'")]
     UnsupportedFragmentType { fragment_type: char },
     #[error("Charge cannot be 0")]
     ChargeCannotBeZero,
-    #[error("Charge {charge} outside the representable range")]
+    #[error("Charge {charge} outside the representable range {CHARGE_MIN}..={CHARGE_MAX}")]
     ChargeOutOfRange { charge: i8 },
-    #[error("Isotope offset {isotope} outside the representable range")]
+    #[error(
+        "Isotope offset {isotope} outside the representable range {ISOTOPE_MIN}..={ISOTOPE_MAX}"
+    )]
     IsotopeOutOfRange { isotope: i8 },
     #[error("Neutral loss '{loss}' is not representable")]
     UnsupportedNeutralLoss { loss: String },
-    #[error("Modified immonium ions are not representable: '{annotation}'")]
+    #[error("Immonium ions must be a bare uppercase residue, got '{annotation}'")]
     UnsupportedModifiedImmonium { annotation: String },
     #[error("Ran out of distinct unknown-ion labels: the 8-bit ordinal is exhausted")]
     UnknownIonsExhausted,
-    #[error("Parsing error: {error}{}", .context.map(|c| format!(" ({})", c)).unwrap_or_default())]
+    #[error("Could not parse '{annotation}': {context}")]
     ParsingError {
-        error: String,
-        context: Option<&'static str>,
+        /// The whole annotation, not the fragment of it that failed: a reader
+        /// reports this with no row index, so the full text is the only handle
+        /// the user gets on which row broke.
+        annotation: String,
+        context: &'static str,
     },
+}
+
+impl IonParsingError {
+    /// Shorthand for [`Self::ParsingError`], which is built at thirteen sites.
+    fn parse(annotation: &str, context: &'static str) -> Self {
+        Self::ParsingError {
+            annotation: annotation.to_string(),
+            context,
+        }
+    }
 }
 
 /// Hands out `?1`, `?2`, ... for peaks whose annotation this crate cannot
@@ -570,16 +651,16 @@ pub enum IonParsingError {
 /// A monotonic counter makes that uniqueness structural, and returning an
 /// error once the 8-bit ordinal is spent keeps the overflow from being
 /// something each reader has to remember to check.
-#[derive(Debug, Default, Clone, Copy)]
+///
+/// Deliberately neither `Copy` nor `Clone`: a duplicated counter forks, and
+/// each fork reissues labels the other already handed out -- exactly the bug
+/// this type exists to prevent. Pass it by `&mut`.
+#[derive(Debug, Default)]
 pub struct UnknownIonCounter(u8);
 
 impl UnknownIonCounter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// The next unused unknown label at `charge`.
-    pub fn next(&mut self, charge: i8) -> Result<IonAnnot, IonParsingError> {
+    pub fn next_unknown(&mut self, charge: i8) -> Result<IonAnnot, IonParsingError> {
         let ordinal = self
             .0
             .checked_add(1)
@@ -592,9 +673,9 @@ impl UnknownIonCounter {
 
 /// A backbone fragment ion series.
 ///
-/// The nine mzPAF backbone series differ only by their letter, so they are one
-/// enum with one letter table rather than nine variants repeated across every
-/// match in this module.
+/// The nine mzPAF backbone series differ only by their letter, so the
+/// letter-to-discriminant pairing lives in exactly one private table and every
+/// match over them is a single arm.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[allow(non_camel_case_types)]
 #[repr(u8)]
@@ -611,7 +692,8 @@ pub enum Series {
 }
 
 impl Series {
-    /// Every series, in discriminant order. Parallel to [`Self::CHARS`].
+    /// Every series, in discriminant order, and parallel to the private letter
+    /// table -- `series_letters_and_discriminants_agree` pins that pairing.
     pub const ALL: [Self; 9] = [
         Self::a,
         Self::b,
@@ -727,7 +809,7 @@ impl IonSeriesOrdinal {
         if c == 'p' {
             return match ordinal {
                 None => Ok(Self::precursor),
-                Some(ordinal) => Err(IonParsingError::OrdinalOutOfRange { ordinal, series: c }),
+                Some(ordinal) => Err(IonParsingError::UnexpectedOrdinal { series: c, ordinal }),
             };
         }
         let ordinal = ordinal.ok_or(IonParsingError::MissingOrdinal { series: c })?;
@@ -759,13 +841,32 @@ mod tests {
         IonAnnot::try_from(s).unwrap_or_else(|e| panic!("{s:?} must parse: {e}"))
     }
 
-    /// The whole point of the packed representation.
+    /// The size claim the design rests on: a loss, an internal-fragment span
+    /// and an immonium residue all ride along without growing the tuple that
+    /// timsseek stores inline.
+    ///
+    /// The predecessor was also 4 bytes, so `size_of` alone pins nothing --
+    /// what this asserts is that the *added* fields cost nothing, which is only
+    /// meaningful together with the round-trip tests proving they are really in
+    /// there.
     #[test]
-    fn packs_into_one_word() {
+    fn the_added_fields_cost_no_space() {
         assert_eq!(size_of::<IonAnnot>(), 4);
         // Paired with an intensity on the scoring hot path; padding here would
-        // grow the inline TinyVec storage in `ExpectedIntensities`.
+        // grow the inline TinyVec storage in `ExpectedIntensities` from 104 to
+        // 156 bytes at the current inline capacity of 13.
         assert_eq!(size_of::<(IonAnnot, f32)>(), 8);
+
+        // All four of these are new capacity, and none of them widened the word.
+        let loaded = IonAnnot::try_new_internal(2, 11, 3, 2, NeutralLoss::PhosphoricAcidWater)
+            .expect("every field at once");
+        assert_eq!(size_of_val(&loaded), 4);
+        assert_eq!(loaded.loss(), NeutralLoss::PhosphoricAcidWater);
+        assert_eq!(
+            loaded.series_ordinal(),
+            IonSeriesOrdinal::internal { start: 2, end: 11 }
+        );
+        assert_eq!((loaded.get_charge(), loaded.get_isotope()), (3, 2));
     }
 
     /// `IonAnnot: Default` is not optional -- `tinyvec::Array` requires
@@ -853,6 +954,31 @@ mod tests {
             IonAnnot::try_new_internal(INTERNAL_POS_MAX + 1, 1, 1, 0, NeutralLoss::None),
             Err(IonParsingError::OrdinalOutOfRange { .. })
         ));
+    }
+
+    /// The crate docs say negative isotope offsets are unsupported. When the
+    /// field held them, `Display` emitted `y5+-2i` -- not mzPAF, and reparsed
+    /// happily, so a library could round-trip through serde into text no other
+    /// mzPAF reader accepts. The field is unsigned so that spelling is
+    /// unreachable rather than merely undocumented.
+    #[test]
+    fn negative_isotopes_are_unrepresentable_not_just_unparsed() {
+        assert!(matches!(
+            IonAnnot::try_new('y', Some(5), 1, -1),
+            Err(IonParsingError::IsotopeOutOfRange { isotope: -1 })
+        ));
+        assert!(ion("y5").try_with_offset_neutrons(-1).is_err());
+        // mzPAF's own spelling for a negative offset is still not parsed.
+        assert!(IonAnnot::try_from("y5-2i").is_err());
+        // And the spelling that used to leak out is not accepted either.
+        assert!(IonAnnot::try_from("y5+-2i").is_err());
+        // Every representable isotope renders as something that parses back.
+        for isotope in ISOTOPE_MIN..=ISOTOPE_MAX {
+            let a = IonAnnot::try_new('y', Some(5), 1, isotope).expect("in range");
+            let text = a.to_string();
+            assert!(!text.contains("+-"), "{text} is not mzPAF");
+            assert_eq!(ion(&text), a, "{text}");
+        }
     }
 
     #[test]

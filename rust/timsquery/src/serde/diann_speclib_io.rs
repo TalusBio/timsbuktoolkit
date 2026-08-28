@@ -764,7 +764,9 @@ fn map_entry(
         if f.typ() & 0x80 != 0 {
             stats.exclude_flagged += 1;
         }
-        // IonAnnot cannot represent neutral loss; drop lossy fragments.
+        // `IonAnnot` can represent neutral losses, but the map from DIA-NN's
+        // loss code byte to `NeutralLoss` is not written, so these are dropped.
+        // The `loss_dropped` assertion in the tests below measures the cost. #105
         if f.loss() != 0 {
             stats.loss_dropped += 1;
             continue;

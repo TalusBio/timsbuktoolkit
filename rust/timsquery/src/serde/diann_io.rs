@@ -86,7 +86,7 @@ impl From<std::io::Error> for DiannReadingError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiannPrecursorExtras {
     pub modified_peptide: String,
     pub stripped_peptide: String,
@@ -414,7 +414,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(rows.len());
-    let mut unknown_ions = UnknownIonCounter::new();
+    let mut unknown_ions = UnknownIonCounter::default();
 
     for (i, row) in rows.iter().enumerate() {
         let fragment_mz = row.fragment_mz;
@@ -434,7 +434,7 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            let ion_annot = unknown_ions.next(frag_charge as i8)?;
+            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
@@ -743,7 +743,7 @@ fn parse_precursor_group_from_parquet(
     let mut fragment_mzs = Vec::with_capacity(indices.len());
     buffers.fragment_labels.clear();
     let mut rel_intensities = Vec::with_capacity(indices.len());
-    let mut unknown_ions = UnknownIonCounter::new();
+    let mut unknown_ions = UnknownIonCounter::default();
 
     for (i, &idx) in indices.iter().enumerate() {
         let fragment_mz = columns.product_mzs[idx] as f64;
@@ -765,7 +765,7 @@ fn parse_precursor_group_from_parquet(
                 columns.fragment_loss_types[idx], i
             );
 
-            let ion_annot = unknown_ions.next(frag_charge as i8)?;
+            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             rel_intensities.push((ion_annot, rel_intensity));
@@ -965,29 +965,28 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
         let mgrysgk = &elution_groups[1].0;
         let hgdtgrr = &elution_groups[0].0;
 
-        let mut mgrysgk_expected_labels = vec!["y6", "b6", "b3", "b5", "y4"]
-            .into_iter()
-            .map(|s| IonAnnot::try_from(s).unwrap())
-            .collect::<Vec<_>>();
-        let mut actual_labels: Vec<IonAnnot> = mgrysgk
-            .iter_fragments()
-            .map(|(label, _mz)| *label)
-            .collect();
-        mgrysgk_expected_labels.sort();
-        actual_labels.sort();
-        assert_eq!(actual_labels, mgrysgk_expected_labels);
+        // Labels as a set: the reader's fragment order is not part of the
+        // contract being tested here. Keyed on the mzPAF spelling because
+        // `IonAnnot` is deliberately not `Ord`.
+        fn label_set(eg: &Target<IonAnnot>) -> Vec<String> {
+            let mut out: Vec<String> = eg
+                .iter_fragments()
+                .map(|(label, _mz)| label.to_string())
+                .collect();
+            out.sort();
+            out
+        }
+        fn expected_set(labels: &[&str]) -> Vec<String> {
+            let mut out: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+            out.sort();
+            out
+        }
 
-        let mut hgdtgrr_expected_labels = vec!["y6", "b3", "y4", "y5"]
-            .into_iter()
-            .map(|s| IonAnnot::try_from(s).unwrap())
-            .collect::<Vec<_>>();
-        let mut actual_labels: Vec<IonAnnot> = hgdtgrr
-            .iter_fragments()
-            .map(|(label, _mz)| *label)
-            .collect();
-        hgdtgrr_expected_labels.sort();
-        actual_labels.sort();
-        assert_eq!(actual_labels, hgdtgrr_expected_labels);
+        assert_eq!(
+            label_set(mgrysgk),
+            expected_set(&["y6", "b6", "b3", "b5", "y4"])
+        );
+        assert_eq!(label_set(hgdtgrr), expected_set(&["y6", "b3", "y4", "y5"]));
     }
 
     #[test]

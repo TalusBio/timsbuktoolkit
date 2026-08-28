@@ -80,7 +80,7 @@ impl From<std::io::Error> for SpectronautReadingError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpectronautPrecursorExtras {
     pub modified_peptide: String,
     pub stripped_peptide: String,
@@ -284,7 +284,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(included_rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(included_rows.len());
-    let mut unknown_ions = UnknownIonCounter::new();
+    let mut unknown_ions = UnknownIonCounter::default();
 
     for (i, row) in included_rows.iter().enumerate() {
         let fragment_mz = row.fragment_mz;
@@ -304,7 +304,7 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            let ion_annot = unknown_ions.next(frag_charge as i8)?;
+            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));

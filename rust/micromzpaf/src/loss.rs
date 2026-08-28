@@ -62,10 +62,7 @@ impl Composition {
     /// "not representable" instead of being mistaken for a smaller one.
     fn parse_formula(s: &str) -> Result<Self, IonParsingError> {
         if s.is_empty() {
-            return Err(IonParsingError::ParsingError {
-                error: s.to_string(),
-                context: Some("Empty neutral-loss formula"),
-            });
+            return Err(IonParsingError::parse(s, "Empty neutral-loss formula"));
         }
         let mut out = Composition::default();
         let b = s.as_bytes();
@@ -80,12 +77,9 @@ impl Composition {
             let count: u8 = if start == i {
                 1
             } else {
-                s[start..i]
-                    .parse()
-                    .map_err(|_| IonParsingError::ParsingError {
-                        error: s.to_string(),
-                        context: Some("Neutral-loss atom count out of range"),
-                    })?
+                s[start..i].parse().map_err(|_| {
+                    IonParsingError::parse(s, "Neutral-loss atom count out of range")
+                })?
             };
             let slot = match elem {
                 b'C' => C,
@@ -95,10 +89,10 @@ impl Composition {
                 b'S' => S,
                 b'P' => P,
                 _ => {
-                    return Err(IonParsingError::ParsingError {
-                        error: s.to_string(),
-                        context: Some("Unsupported element in neutral loss"),
-                    });
+                    return Err(IonParsingError::parse(
+                        s,
+                        "Unsupported element in neutral loss",
+                    ));
                 }
             };
             out.0[slot] = out.0[slot].saturating_add(count);
@@ -116,22 +110,19 @@ impl Composition {
         for term in s.split('-') {
             let term = term.trim();
             if term.is_empty() {
-                return Err(IonParsingError::ParsingError {
-                    error: s.to_string(),
-                    context: Some("Empty term in neutral-loss expression"),
-                });
+                return Err(IonParsingError::parse(
+                    s,
+                    "Empty term in neutral-loss expression",
+                ));
             }
             // Leading digits are a repeat count for the whole term.
             let digits = term
                 .find(|c: char| !c.is_ascii_digit())
                 .unwrap_or(term.len());
             let (mult, formula) = if digits > 0 {
-                let m: u8 = term[..digits]
-                    .parse()
-                    .map_err(|_| IonParsingError::ParsingError {
-                        error: s.to_string(),
-                        context: Some("Neutral-loss repeat count out of range"),
-                    })?;
+                let m: u8 = term[..digits].parse().map_err(|_| {
+                    IonParsingError::parse(s, "Neutral-loss repeat count out of range")
+                })?;
                 (m, &term[digits..])
             } else {
                 (1, term)
@@ -249,27 +240,28 @@ const TABLE: &[(Composition, NeutralLoss, &str)] = &[
 ];
 
 impl NeutralLoss {
+    /// How many losses the table names, so the width of the packed field can be
+    /// checked against it rather than assumed to be roomy.
+    pub(crate) const COUNT: u8 = TABLE.len() as u8;
+
     /// Inverse of the `#[repr(u8)]` discriminant, for unpacking out of a bit
     /// field. Lives next to the enum so the two cannot drift apart.
     ///
     /// An unrecognized value maps to [`Self::None`]: the only way to produce
     /// one is a reserved discriminant, which no constructor emits.
     pub(crate) fn from_discriminant(d: u8) -> Self {
-        match d {
-            1 => Self::Water,
-            2 => Self::Ammonia,
-            3 => Self::CarbonMonoxide,
-            4 => Self::CarbonDioxide,
-            5 => Self::WaterX2,
-            6 => Self::AmmoniaX2,
-            7 => Self::WaterAmmonia,
-            8 => Self::Methanesulfenic,
-            9 => Self::Carbamidomethylthiol,
-            10 => Self::PhosphoricAcid,
-            11 => Self::Metaphosphoric,
-            12 => Self::PhosphoricAcidWater,
-            _ => Self::None,
-        }
+        Self::at(d).map_or(Self::None, |(_, loss, _)| *loss)
+    }
+
+    /// The [`TABLE`] row a discriminant names, or `None` for [`Self::None`] and
+    /// for the reserved values above the table.
+    ///
+    /// `TABLE` is in discriminant order starting at 1, which
+    /// `table_is_indexed_by_discriminant` pins. Indexing it rather than
+    /// re-listing the variants is what keeps the discriminant, the composition
+    /// and the spelling from drifting apart.
+    fn at(d: u8) -> Option<&'static (Composition, NeutralLoss, &'static str)> {
+        TABLE.get((d as usize).checked_sub(1)?)
     }
 
     /// Resolve a loss expression (without the leading `-`) to a discriminant.
@@ -288,14 +280,7 @@ impl NeutralLoss {
 
     /// Canonical spelling, without the leading `-`. Empty for [`Self::None`].
     pub(crate) fn canonical(self) -> &'static str {
-        if self == NeutralLoss::None {
-            return "";
-        }
-        TABLE
-            .iter()
-            .find(|(_, l, _)| *l == self)
-            .map(|(_, _, s)| *s)
-            .unwrap_or("")
+        Self::at(self as u8).map_or("", |(_, _, spelling)| *spelling)
     }
 }
 
@@ -389,10 +374,31 @@ mod tests {
         assert!(NeutralLoss::from_expression("H2O-").is_err());
     }
 
+    /// `from_discriminant` and `canonical` both index [`TABLE`] by discriminant,
+    /// so a row sitting at the wrong offset would decode as its neighbour. This
+    /// is the one invariant that keeps the enum, the composition and the
+    /// spelling in step.
+    #[test]
+    fn table_is_indexed_by_discriminant() {
+        for (i, (_comp, loss, canon)) in TABLE.iter().enumerate() {
+            assert_eq!(
+                *loss as usize,
+                i + 1,
+                "{canon} sits at offset {i} but its discriminant is {}",
+                *loss as u8
+            );
+        }
+        // Nothing outside the table decodes to a loss, in either direction.
+        assert_eq!(NeutralLoss::from_discriminant(0), NeutralLoss::None);
+        assert_eq!(
+            NeutralLoss::from_discriminant(TABLE.len() as u8 + 1),
+            NeutralLoss::None
+        );
+        assert_eq!(NeutralLoss::None.canonical(), "");
+    }
+
     /// Every table entry must survive canonical -> composition -> discriminant,
-    /// and back out through the bit field. `from_discriminant` hand-mirrors the
-    /// `#[repr(u8)]` values, so adding a loss without updating it would
-    /// silently decode as [`NeutralLoss::None`] -- this is what catches that.
+    /// and back out through the bit field.
     #[test]
     fn table_round_trips_through_canonical_spelling() {
         for (_comp, loss, canon) in TABLE {
@@ -408,16 +414,6 @@ mod tests {
                 "{canon} does not survive the discriminant round trip"
             );
         }
-        assert_eq!(NeutralLoss::from_discriminant(0), NeutralLoss::None);
-        // Every non-None variant must be in TABLE, or it has no spelling and no
-        // composition and could never be produced by parsing.
-        assert_eq!(
-            TABLE.len(),
-            (1..=u8::MAX)
-                .filter(|d| NeutralLoss::from_discriminant(*d) != NeutralLoss::None)
-                .count(),
-            "a variant is decodable but missing from TABLE"
-        );
     }
 
     /// Compositions must be unique: two entries sharing one would make the

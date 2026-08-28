@@ -1,4 +1,7 @@
-use crate::ion::IonAnnot;
+use crate::ion::{
+    IonAnnot,
+    UnknownIonCounter,
+};
 use crate::tinyvec::{
     TinyVec,
     tiny_vec,
@@ -10,10 +13,21 @@ use crate::{
 
 #[derive(Debug)]
 pub enum ElutionGroupInputError {
-    MismatchedFragmentLabelsLength { expected: usize, found: usize },
+    MismatchedFragmentLabelsLength {
+        expected: usize,
+        found: usize,
+    },
     AlreadyHasFragmentLabels,
-    IonConversionError { inner: String },
+    IonConversionError {
+        inner: String,
+    },
     MissingFragmentLabels,
+    /// More fragments than the `u8` label space holds. Wrapping instead would
+    /// mint a duplicate label, and lookup is by first match, so every later
+    /// fragment sharing it would be unreachable.
+    TooManyFragmentsToLabel {
+        found: usize,
+    },
 }
 
 /// User-friendly format for specifying elution groups in an input file
@@ -44,6 +58,11 @@ impl<T: KeyLike> ElutionGroupInput<T> {
         if self.fragment_labels.is_some() {
             return Err(ElutionGroupInputError::AlreadyHasFragmentLabels);
         }
+        if num_fragments > u8::MAX as usize {
+            return Err(ElutionGroupInputError::TooManyFragmentsToLabel {
+                found: num_fragments,
+            });
+        }
         let fragment_labels: Vec<u8> = (0..num_fragments).map(|i| i as u8).collect();
 
         Ok(ElutionGroupInput {
@@ -58,24 +77,34 @@ impl<T: KeyLike> ElutionGroupInput<T> {
         })
     }
 
+    /// Fill in `?1`, `?2`, ... for an input that named no fragment labels.
+    ///
+    /// Minted through [`UnknownIonCounter`] rather than an index cast, so
+    /// running past the label space is an error rather than a wrap into
+    /// duplicate labels.
     pub fn try_fill_labels_annot(
         self,
     ) -> Result<ElutionGroupInput<IonAnnot>, ElutionGroupInputError> {
-        let tmp = self.try_fill_labels_u8()?;
-        let new_frags = tmp
-            .fragment_labels
-            .unwrap()
-            .into_iter()
-            .map(|lbl| IonAnnot::try_new('?', Some(lbl), 1, 1).unwrap())
-            .collect();
+        if self.fragment_labels.is_some() {
+            return Err(ElutionGroupInputError::AlreadyHasFragmentLabels);
+        }
+        let mut unknown_ions = UnknownIonCounter::default();
+        let new_frags = self
+            .fragments
+            .iter()
+            .map(|_| unknown_ions.next_unknown(1))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ElutionGroupInputError::IonConversionError {
+                inner: e.to_string(),
+            })?;
         Ok(ElutionGroupInput {
-            id: tmp.id,
-            mobility: tmp.mobility,
-            rt_seconds: tmp.rt_seconds,
-            precursor: tmp.precursor,
-            precursor_charge: tmp.precursor_charge,
-            precursor_isotopes: tmp.precursor_isotopes,
-            fragments: tmp.fragments,
+            id: self.id,
+            mobility: self.mobility,
+            rt_seconds: self.rt_seconds,
+            precursor: self.precursor,
+            precursor_charge: self.precursor_charge,
+            precursor_isotopes: self.precursor_isotopes,
+            fragments: self.fragments,
             fragment_labels: Some(new_frags),
         })
     }

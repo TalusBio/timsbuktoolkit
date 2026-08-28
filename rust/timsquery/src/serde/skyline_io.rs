@@ -80,7 +80,7 @@ impl From<std::io::Error> for SkylineReadingError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SkylinePrecursorExtras {
     pub modified_peptide: String,
     pub stripped_peptide: String,
@@ -310,7 +310,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(fragment_rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(fragment_rows.len());
-    let mut unknown_ions = UnknownIonCounter::new();
+    let mut unknown_ions = UnknownIonCounter::default();
 
     for (i, row) in fragment_rows.iter().enumerate() {
         let fragment_mz = row.product_mz;
@@ -349,7 +349,7 @@ fn parse_precursor_group(
                      falling back to unknown ion",
                     frag_type, i
                 );
-                unknown_ions.next(frag_charge as i8)?
+                unknown_ions.next_unknown(frag_charge as i8)?
             }
         };
 
