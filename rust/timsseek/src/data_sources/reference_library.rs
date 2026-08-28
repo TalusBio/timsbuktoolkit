@@ -280,7 +280,11 @@ mod tests {
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        // Decoys are opted into here, as timsseek does in production via
+        // `finalize_reference_library`; timsquery never turns them on itself.
+        let mut caps = TargetCapabilities::default_diann();
+        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
+        let mut geom = TargetColumns::with_capabilities(caps);
         geom.push_target(
             900.4,
             2,

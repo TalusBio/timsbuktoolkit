@@ -36,52 +36,54 @@ pub enum DecoyStrategy {
 }
 
 /// The unified ±CH2 mass-shift offset (Da) and variant count for lazily-generated
-/// decoys. Single source of truth: `TargetCapabilities::default_diann` and
-/// timsseek's `map_decoy_strategy` both reference these, so an offset change
-/// cannot drift between the reader default and the consumer mapping.
+/// decoys. Single source of truth for timsseek's `map_decoy_strategy`, which
+/// is the only production caller that turns decoys on.
 pub const DECOY_CH2_OFFSET_DA: f64 = 14.0;
 pub const DECOY_N_DECOYS: u8 = 2;
 
 impl TargetCapabilities {
     /// The default DIA-NN `.speclib` profile: sequence features assumed
-    /// available (re-gated at load), 3-isotope composition envelopes, and
-    /// lazily-generated ±CH2 decoys.
+    /// available (re-gated at load), 3-isotope composition envelopes, and no
+    /// decoys.
+    ///
+    /// Decoy generation is a scoring decision, so no constructor in this crate
+    /// produces it — `DecoyStrategy::LazyMassShift` has to be named outright,
+    /// and timsseek is the only thing that names it (`map_decoy_strategy`,
+    /// resolved once in `finalize_reference_library` before `seal`). This is
+    /// not a style preference: readers used to default to decoys here, and
+    /// timsquery_cli consequently emitted two mass-shifted variants per row
+    /// into Carafe's results, which key by `id`. See the regression test in
+    /// `timsquery_cli`'s `commands.rs`.
     pub fn default_diann() -> Self {
         Self {
             sequence_features: SeqFeatureState::Available,
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::LazyMassShift {
-                offset: DECOY_CH2_OFFSET_DA,
-                n_decoys: DECOY_N_DECOYS,
-            },
+            decoys: DecoyStrategy::None,
         }
     }
 
     /// Profile for string-labelled (unannotated) arenas: no ion chemistry, so
-    /// sequence/fragment features are unavailable and no decoys are generated.
-    /// Same isotope model as [`default_diann`](Self::default_diann).
+    /// sequence/fragment features are unavailable. Same isotope model as
+    /// [`default_diann`](Self::default_diann).
     pub fn default_unlabeled() -> Self {
         Self {
             sequence_features: SeqFeatureState::Unavailable,
             fragment_features: FragmentFeatureState::Unavailable,
-            ..Self::default_diann_no_decoys()
+            ..Self::default_diann()
         }
     }
 
-    /// The DIA-NN profile for EXTRACTION readers: identical to
-    /// [`default_diann`](Self::default_diann) (3-isotope composition envelopes,
-    /// sequence/fragment features available) but with `decoys =
-    /// DecoyStrategy::None`.
-    ///
-    /// Decoy generation is a SCORING concern, decided by the consumer, not an
-    /// assertion an extraction reader should bake into its output. timsseek
-    /// stamps `caps.decoys` (via `map_decoy_strategy`) before sealing, so it is
-    /// unaffected by this reader default; timsquery_cli does not override, so it
-    /// correctly extracts target geometry only (no mass-shifted decoy variants).
-    pub fn default_diann_no_decoys() -> Self {
+    /// The lazy ±CH2 decoy profile, for exercising the index transform in this
+    /// crate's own tests. Not available to production code: turning decoys on
+    /// belongs to the searcher.
+    #[cfg(test)]
+    pub(crate) fn test_lazy_decoys() -> Self {
         Self {
-            decoys: DecoyStrategy::None,
+            decoys: DecoyStrategy::LazyMassShift {
+                offset: DECOY_CH2_OFFSET_DA,
+                n_decoys: DECOY_N_DECOYS,
+            },
             ..Self::default_diann()
         }
     }

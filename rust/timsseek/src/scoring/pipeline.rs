@@ -964,7 +964,9 @@ mod tests {
     use timsquery::models::capabilities::TargetCapabilities;
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut caps = TargetCapabilities::default_diann();
+        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
+        let mut geom = TargetColumns::with_capabilities(caps);
         geom.push_target(
             900.4,
             2,

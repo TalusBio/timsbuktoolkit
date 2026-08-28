@@ -279,8 +279,7 @@ impl TargetTable {
             )));
         }
 
-        let mut geom =
-            TargetColumns::with_capabilities(TargetCapabilities::default_diann_no_decoys());
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
@@ -346,7 +345,7 @@ impl TargetTable {
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
                 let mut geom =
-                    TargetColumns::with_capabilities(TargetCapabilities::default_diann_no_decoys());
+                    TargetColumns::with_capabilities(TargetCapabilities::default_diann());
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();

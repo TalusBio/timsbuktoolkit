@@ -25,14 +25,14 @@ pub use index::{
 /// and handed straight back to it.
 mod index {
     /// A stored row: `0..n_rows()`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct RowIdx(u32);
 
     /// A scored slot after decoy expansion: `0..expanded_len()`. Distinct from
     /// [`RowIdx`] because `variants_per_row` slots map onto one row, so using
     /// one where the other is meant reads a real but wrong row — in range, no
     /// panic, plausible data. The type is what stops that.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FlatIdx(u32);
 
     impl RowIdx {
@@ -52,6 +52,22 @@ mod index {
 
         pub(crate) fn get(self) -> usize {
             self.0 as usize
+        }
+    }
+
+    /// `u32::MAX`, not 0. A defaulted index exists only as a placeholder — a
+    /// `#[serde(skip)]` field, a test fixture — and 0 is a valid row in every
+    /// non-empty arena, so a placeholder that leaked would read row 0 and look
+    /// right. `u32::MAX` panics on access instead.
+    impl Default for RowIdx {
+        fn default() -> Self {
+            Self(u32::MAX)
+        }
+    }
+
+    impl Default for FlatIdx {
+        fn default() -> Self {
+            Self(u32::MAX)
         }
     }
 }
@@ -447,7 +463,7 @@ mod tests {
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann()); // LazyMassShift n=2
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::test_lazy_decoys());
         c.push_target(
             500.0,
             2,
